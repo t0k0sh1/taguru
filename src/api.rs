@@ -1,0 +1,333 @@
+//! HTTP surface of the retrieval service: thin JSON adapters, one per
+//! `Context` operation. The server adds transport, naming, and lifecycle
+//! around the library — never retrieval semantics of its own — so each
+//! handler is a lock, a library call, and a serialized reply.
+
+use std::time::Instant;
+
+use associative_rag::context::Context;
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde::{Deserialize, Serialize};
+
+use crate::SharedContexts;
+
+#[derive(Serialize)]
+pub struct ApiResponse<T> {
+    result: T,
+    status: &'static str,
+    time: f64,
+}
+
+impl<T> ApiResponse<T> {
+    fn ok(result: T, started_at: Instant) -> Self {
+        Self {
+            result,
+            status: "ok",
+            time: started_at.elapsed().as_secs_f64(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct ApiError {
+    status: &'static str,
+    error: String,
+    time: f64,
+}
+
+impl ApiError {
+    fn new(error: impl Into<String>, started_at: Instant) -> Self {
+        Self {
+            status: "error",
+            error: error.into(),
+            time: started_at.elapsed().as_secs_f64(),
+        }
+    }
+}
+
+fn ok<T: Serialize>(result: T, started_at: Instant) -> Response {
+    (StatusCode::OK, Json(ApiResponse::ok(result, started_at))).into_response()
+}
+
+fn error(status: StatusCode, message: impl Into<String>, started_at: Instant) -> Response {
+    (status, Json(ApiError::new(message, started_at))).into_response()
+}
+
+fn not_found(name: &str, started_at: Instant) -> Response {
+    error(
+        StatusCode::NOT_FOUND,
+        format!("context '{name}' not found"),
+        started_at,
+    )
+}
+
+/// Runs `operate` on one named context, or returns `None` for an unknown
+/// name. Clones the entry's `Arc` and releases the registry immediately,
+/// per the locking contract on [`SharedContexts`]; operations on one
+/// context serialize behind its own lock (they are microseconds to low
+/// milliseconds each), while other contexts stay untouched.
+fn with_context<T>(
+    contexts: &SharedContexts,
+    name: &str,
+    operate: impl FnOnce(&mut Context) -> T,
+) -> Option<T> {
+    let entry = contexts.read().unwrap().get(name).cloned()?;
+    let mut context = entry.write().unwrap();
+    Some(operate(&mut context))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateContextRequest {}
+
+pub async fn create_context(
+    State(contexts): State<SharedContexts>,
+    Path(name): Path<String>,
+    Json(_body): Json<CreateContextRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    let mut contexts = contexts.write().unwrap();
+
+    if contexts.contains_key(&name) {
+        return error(
+            StatusCode::CONFLICT,
+            format!("context '{name}' already exists"),
+            started_at,
+        );
+    }
+
+    contexts.insert(
+        name,
+        std::sync::Arc::new(std::sync::RwLock::new(Context::default())),
+    );
+    ok(true, started_at)
+}
+
+pub async fn delete_context(
+    State(contexts): State<SharedContexts>,
+    Path(name): Path<String>,
+) -> Response {
+    let started_at = Instant::now();
+    let mut contexts = contexts.write().unwrap();
+
+    if contexts.remove(&name).is_none() {
+        return not_found(&name, started_at);
+    }
+
+    ok(true, started_at)
+}
+
+/// One assertion in a batch: the arguments of `associate` /
+/// `associate_from` as JSON fields. A batch is the natural write unit —
+/// one document's extracted facts arrive as one request, one lock
+/// acquisition.
+#[derive(Debug, Deserialize)]
+pub struct AssociationInput {
+    pub subject: String,
+    pub label: String,
+    pub object: String,
+    pub weight: f64,
+    pub source: Option<String>,
+}
+
+pub async fn add_associations(
+    State(contexts): State<SharedContexts>,
+    Path(name): Path<String>,
+    Json(associations): Json<Vec<AssociationInput>>,
+) -> Response {
+    let started_at = Instant::now();
+    let outcome = with_context(&contexts, &name, |context| {
+        for (index, input) in associations.iter().enumerate() {
+            let result = match &input.source {
+                Some(source) => context.associate_from(
+                    input.subject.as_str(),
+                    input.label.as_str(),
+                    input.object.as_str(),
+                    input.weight,
+                    source.as_str(),
+                ),
+                None => context.associate(
+                    input.subject.as_str(),
+                    input.label.as_str(),
+                    input.object.as_str(),
+                    input.weight,
+                ),
+            };
+            if let Err(full) = result {
+                return Err((index, full));
+            }
+        }
+        Ok(associations.len())
+    });
+
+    match outcome {
+        None => not_found(&name, started_at),
+        Some(Ok(applied)) => ok(applied, started_at),
+        // Items before the failing one are applied (each item is
+        // all-or-nothing in the library); report how far the batch got.
+        Some(Err((applied, full))) => error(
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!(
+                "applied {applied} of {} associations, then: {full}",
+                associations.len()
+            ),
+            started_at,
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecallRequest {
+    pub cue: String,
+}
+
+pub async fn recall(
+    State(contexts): State<SharedContexts>,
+    Path(name): Path<String>,
+    Json(request): Json<RecallRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match with_context(&contexts, &name, |context| context.recall(&request.cue)) {
+        Some(result) => ok(result, started_at),
+        None => not_found(&name, started_at),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryRequest {
+    pub subject: Option<String>,
+    pub label: Option<String>,
+    pub object: Option<String>,
+}
+
+pub async fn query(
+    State(contexts): State<SharedContexts>,
+    Path(name): Path<String>,
+    Json(request): Json<QueryRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match with_context(&contexts, &name, |context| {
+        context.query(
+            request.subject.as_deref(),
+            request.label.as_deref(),
+            request.object.as_deref(),
+        )
+    }) {
+        Some(result) => ok(result, started_at),
+        None => not_found(&name, started_at),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExploreRequest {
+    pub origins: Vec<String>,
+    /// Omitted means [`Context::UNBOUNDED`]: the whole component.
+    pub max_depth: Option<usize>,
+}
+
+pub async fn explore(
+    State(contexts): State<SharedContexts>,
+    Path(name): Path<String>,
+    Json(request): Json<ExploreRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match with_context(&contexts, &name, |context| {
+        let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
+        context.explore(&origins, request.max_depth.unwrap_or(Context::UNBOUNDED))
+    }) {
+        Some(result) => ok(result, started_at),
+        None => not_found(&name, started_at),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ActivateRequest {
+    pub origins: Vec<String>,
+    /// Omitted means 0.5 — the halving-per-hop default the examples use.
+    pub decay: Option<f64>,
+    /// Omitted means 20 results.
+    pub limit: Option<usize>,
+}
+
+pub async fn activate(
+    State(contexts): State<SharedContexts>,
+    Path(name): Path<String>,
+    Json(request): Json<ActivateRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match with_context(&contexts, &name, |context| {
+        let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
+        context.activate(
+            &origins,
+            request.decay.unwrap_or(0.5),
+            request.limit.unwrap_or(20),
+        )
+    }) {
+        Some(result) => ok(result, started_at),
+        None => not_found(&name, started_at),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResolveRequest {
+    pub cue: String,
+}
+
+pub async fn resolve(
+    State(contexts): State<SharedContexts>,
+    Path(name): Path<String>,
+    Json(request): Json<ResolveRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match with_context(&contexts, &name, |context| context.resolve(&request.cue)) {
+        Some(result) => ok(result, started_at),
+        None => not_found(&name, started_at),
+    }
+}
+
+pub async fn resolve_label(
+    State(contexts): State<SharedContexts>,
+    Path(name): Path<String>,
+    Json(request): Json<ResolveRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match with_context(&contexts, &name, |context| {
+        context.resolve_label(&request.cue)
+    }) {
+        Some(result) => ok(result, started_at),
+        None => not_found(&name, started_at),
+    }
+}
+
+pub async fn labels(State(contexts): State<SharedContexts>, Path(name): Path<String>) -> Response {
+    let started_at = Instant::now();
+    match with_context(&contexts, &name, |context| {
+        let labels: Vec<String> = context.labels().into_iter().map(String::from).collect();
+        labels
+    }) {
+        Some(result) => ok(result, started_at),
+        None => not_found(&name, started_at),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UnreachableFromRequest {
+    pub origins: Vec<String>,
+}
+
+pub async fn unreachable_from(
+    State(contexts): State<SharedContexts>,
+    Path(name): Path<String>,
+    Json(request): Json<UnreachableFromRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match with_context(&contexts, &name, |context| {
+        let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
+        context.unreachable_from(&origins)
+    }) {
+        Some(result) => ok(result, started_at),
+        None => not_found(&name, started_at),
+    }
+}
