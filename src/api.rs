@@ -80,6 +80,20 @@ pub async fn list_contexts(State(state): State<AppState>) -> Response {
     ok(state.directory(), started_at)
 }
 
+/// The LLM-facing manual — ingest discipline, retrieval loop, API
+/// reference — served by the API itself so a client can learn the
+/// protocol at connect time, the way it would read a skill.
+pub async fn protocol() -> Response {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
+        include_str!("../docs/llm-protocol.md"),
+    )
+        .into_response()
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct CreateContextRequest {

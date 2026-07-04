@@ -152,15 +152,15 @@ fn retrieve(context: &Context, cues: &[&str]) -> Vec<(String, String, String)> {
     let mut origins: Vec<String> = Vec::new();
     let mut labels: Vec<String> = Vec::new();
     for cue in cues {
-        if let Some(top) = context.resolve(cue).into_iter().next() {
-            if !origins.contains(&top.name) {
-                origins.push(top.name);
-            }
+        if let Some(top) = context.resolve(cue).into_iter().next()
+            && !origins.contains(&top.name)
+        {
+            origins.push(top.name);
         }
-        if let Some(top) = context.resolve_label(cue).into_iter().next() {
-            if !labels.contains(&top.name) {
-                labels.push(top.name);
-            }
+        if let Some(top) = context.resolve_label(cue).into_iter().next()
+            && !labels.contains(&top.name)
+        {
+            labels.push(top.name);
         }
     }
     let origin_refs: Vec<&str> = origins.iter().map(String::as_str).collect();
