@@ -1,4 +1,4 @@
-use associative_rag::context::Context;
+use taguru::context::Context;
 
 // The consumer of a `Context` is an LLM, not a person: on the way in, an
 // LLM distills natural-language knowledge into weighted associations; on

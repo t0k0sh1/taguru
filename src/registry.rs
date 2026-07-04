@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use associative_rag::context::Context;
+use taguru::context::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::embedding::{EmbeddingProvider, VectorStore, fnv1a, similarity};
@@ -546,7 +546,7 @@ impl AppState {
             read_passages(&sources_path(&self.0.data_dir, &file_stem(name)))
         };
         let query_grams: Vec<u64> = {
-            let normalized = associative_rag::context::normalize_entry(query);
+            let normalized = taguru::context::normalize_entry(query);
             let mut seen = std::collections::HashSet::new();
             text_terms(&normalized)
                 .into_iter()
@@ -561,7 +561,7 @@ impl AppState {
         let passages: Vec<(&String, &String, HashMap<u64, f32>, f32)> = stored
             .iter()
             .map(|(source, text)| {
-                let normalized = associative_rag::context::normalize_entry(text);
+                let normalized = taguru::context::normalize_entry(text);
                 let mut frequencies: HashMap<u64, f32> = HashMap::new();
                 let mut length = 0f32;
                 for gram in text_terms(&normalized) {
@@ -620,7 +620,7 @@ impl AppState {
 
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Err(
-                "no embedding provider is configured (set ARAG_EMBED_URL and ARAG_EMBED_MODEL)"
+                "no embedding provider is configured (set TAGURU_EMBED_URL and TAGURU_EMBED_MODEL)"
                     .to_string(),
             ));
         };
@@ -1230,7 +1230,7 @@ mod tests {
     use super::*;
 
     fn scratch_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("arag-registry-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("taguru-registry-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }

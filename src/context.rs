@@ -2152,7 +2152,7 @@ impl Ord for Candidate {
 // ---------------------------------------------------------------------------
 
 /// First 8 bytes of every image.
-const IMAGE_MAGIC: [u8; 8] = *b"ARAGCTX\0";
+const IMAGE_MAGIC: [u8; 8] = *b"TAGURUC\0";
 /// Format version; bump whenever any record layout or section changes.
 /// Version history: 1 = the original six sections; 2 adds the concept
 /// and label alias tables between the sources and the arena. Version 1

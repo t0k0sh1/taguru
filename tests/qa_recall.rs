@@ -12,7 +12,7 @@
 //! whether these cues land, and this test turns that into a number.
 //! Run with `--nocapture` for the per-question table.
 
-use associative_rag::context::Context;
+use taguru::context::Context;
 
 /// The corpus: 34 assertions across five paragraphs, plus the aliases
 /// an operator registered while tuning (the 設立年/創業年 fork healed
@@ -166,7 +166,7 @@ fn retrieve(context: &Context, cues: &[&str]) -> Vec<(String, String, String)> {
     let origin_refs: Vec<&str> = origins.iter().map(String::as_str).collect();
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
-    let triple = |a: associative_rag::context::Association| (a.subject, a.label, a.object);
+    let triple = |a: taguru::context::Association| (a.subject, a.label, a.object);
     let mut facts: Vec<(String, String, String)> = Vec::new();
     facts.extend(
         context

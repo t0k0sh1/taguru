@@ -1,4 +1,4 @@
-use associative_rag::context::Context;
+use taguru::context::Context;
 
 // Three additions on the road to "knowledge itself, accurately searchable",
 // in the order they were built:

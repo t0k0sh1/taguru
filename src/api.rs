@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use associative_rag::context::{AliasError, Association, Context, Resolution};
+use taguru::context::{AliasError, Association, Context, Resolution};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -867,7 +867,7 @@ pub async fn refresh_embeddings(
     if !state.embeddings_configured() {
         return error(
             StatusCode::NOT_IMPLEMENTED,
-            "no embedding provider is configured (set ARAG_EMBED_URL and ARAG_EMBED_MODEL)",
+            "no embedding provider is configured (set TAGURU_EMBED_URL and TAGURU_EMBED_MODEL)",
             started_at,
         );
     }

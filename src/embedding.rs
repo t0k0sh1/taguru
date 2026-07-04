@@ -2,8 +2,8 @@
 //! GLOSSES — each name plus its heaviest graph facts, because a lone
 //! word carries too little signal for sentence-trained embedding
 //! models, and the graph already owns the context. Retrieval itself
-//! stays structural; only the entry needs meaning. Configured via `ARAG_EMBED_URL` /
-//! `ARAG_EMBED_MODEL` / `ARAG_EMBED_API_KEY` against any
+//! stays structural; only the entry needs meaning. Configured via `TAGURU_EMBED_URL` /
+//! `TAGURU_EMBED_MODEL` / `TAGURU_EMBED_API_KEY` against any
 //! OpenAI-compatible `/embeddings` endpoint; absent config disables the
 //! tier and resolve stays purely lexical.
 //!
@@ -36,12 +36,12 @@ pub struct HttpEmbeddings {
 
 impl HttpEmbeddings {
     pub fn from_env() -> Option<Self> {
-        let url = std::env::var("ARAG_EMBED_URL").ok()?;
-        let model = std::env::var("ARAG_EMBED_MODEL").ok()?;
+        let url = std::env::var("TAGURU_EMBED_URL").ok()?;
+        let model = std::env::var("TAGURU_EMBED_MODEL").ok()?;
         Some(Self {
             url,
             model,
-            api_key: std::env::var("ARAG_EMBED_API_KEY").ok(),
+            api_key: std::env::var("TAGURU_EMBED_API_KEY").ok(),
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(60))
                 .build(),
@@ -137,7 +137,7 @@ pub struct VectorStore {
     pub labels: HashMap<String, (u64, Vec<f32>)>,
 }
 
-const VECTOR_MAGIC: &[u8; 8] = b"ARAGVEC2";
+const VECTOR_MAGIC: &[u8; 8] = b"TAGURUV2";
 
 impl VectorStore {
     /// Reads a sidecar, returning an empty store on any problem — a

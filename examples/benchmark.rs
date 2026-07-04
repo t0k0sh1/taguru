@@ -1,7 +1,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use associative_rag::context::Context;
+use taguru::context::Context;
 
 // Latency probe over every public operation at realistic scale, on a
 // uniform random graph (average degree ~10, one giant component — the

@@ -1,8 +1,9 @@
-# AssociativeRAG
+# Taguru
 
-連想ネットワークによる RAG。知識を (主語, 関係ラベル, 目的語, 符号付き重み, 出典) の
-連想として蓄積し、検索は埋め込み類似度ではなく**構造**で行います — 質問の見た目では
-なく、質問が「何について」かを錨にして、グラフを歩いて知識を取り出します。
+記憶の糸を「手繰る」ように思い出す、LLM のための長期意味記憶。知識を
+(主語, 関係ラベル, 目的語, 符号付き重み, 出典) の連想として蓄積し、検索は
+埋め込み類似度ではなく**構造**で行います — 質問の見た目ではなく、質問が
+「何について」かを糸口にして、グラフを歩いて知識を取り出します。
 
 クライアントは LLM を想定しています。言語の理解(文書→事実への分解、文脈の選択、
 検索結果→文章への再構成)はすべて LLM 側の仕事で、このサーバーは構造の格納と走査
@@ -34,17 +35,17 @@
 ```sh
 cargo run --release
 # 環境変数:
-#   ARAG_ADDR         バインド先 (既定 127.0.0.1:3000)
-#   ARAG_DATA_DIR     データディレクトリ (既定 ./data)
-#   ARAG_CACHE_BYTES  非ピン常駐予算 (既定 512 MiB)
-#   ARAG_FLUSH_SECS   フラッシュ間隔 = クラッシュ時の消失窓 (既定 5)
-#   ARAG_EMBED_URL / ARAG_EMBED_MODEL / ARAG_EMBED_API_KEY
+#   TAGURU_ADDR         バインド先 (既定 127.0.0.1:3000)
+#   TAGURU_DATA_DIR     データディレクトリ (既定 ./data)
+#   TAGURU_CACHE_BYTES  非ピン常駐予算 (既定 512 MiB)
+#   TAGURU_FLUSH_SECS   フラッシュ間隔 = クラッシュ時の消失窓 (既定 5)
+#   TAGURU_EMBED_URL / TAGURU_EMBED_MODEL / TAGURU_EMBED_API_KEY
 #                     意味的入口 (OpenAI互換 /embeddings)。未設定なら字面のみ。
 #                     例: URL=https://api.openai.com/v1/embeddings
 #                         MODEL=text-embedding-3-large  (日本語の短い名前には
 #                         3-small では分離が足りない。既定フロア0.35は3-large+グロスで較正済み)
 #                         API_KEY=$OPENAI_API_KEY
-#   ARAG_EMBED_AUTO=1 フラッシュのたびに埋め込みを差分更新 (オプトイン。
+#   TAGURU_EMBED_AUTO=1 フラッシュのたびに埋め込みを差分更新 (オプトイン。
 #                     未設定なら手動 POST /embeddings/refresh のみ)
 ```
 
@@ -61,14 +62,14 @@ curl -X POST localhost:3000/contexts/sake/activate -H 'Content-Type: application
 
 ## LLM エージェントから使う (MCP)
 
-`arag-mcp` は稼働中の HTTP サーバーへの MCP stdio ブリッジです。エージェント
+`taguru-mcp` は稼働中の HTTP サーバーへの MCP stdio ブリッジです。エージェント
 (Claude Code / Claude Desktop など)がこれを通じて取り込みと検索を行います —
 文書→事実の分解と、検索結果→回答の合成はエージェント側の仕事で、規律は
 ツール定義と MCP instructions(`/protocol` の内容)として自動的に渡ります。
 
 ```sh
-cargo build --release                       # target/release/arag-mcp ができる
-claude mcp add arag -e ARAG_URL=http://127.0.0.1:3000 -- /path/to/target/release/arag-mcp
+cargo build --release                       # target/release/taguru-mcp ができる
+claude mcp add taguru -e TAGURU_URL=http://127.0.0.1:3000 -- /path/to/target/release/taguru-mcp
 ```
 
 これで「このフォルダの文書を sake コンテキストに取り込んで」「青嶺酒造について

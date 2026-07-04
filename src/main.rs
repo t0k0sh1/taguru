@@ -13,28 +13,28 @@ use registry::AppState;
 use tokio::net::TcpListener;
 
 /// Configuration comes from the environment:
-/// - `ARAG_DATA_DIR`: where context images and sidecars live (default
+/// - `TAGURU_DATA_DIR`: where context images and sidecars live (default
 ///   `data`). Disk is the source of truth; memory is a cache over it.
-/// - `ARAG_CACHE_BYTES`: resident budget for unpinned loaded contexts
+/// - `TAGURU_CACHE_BYTES`: resident budget for unpinned loaded contexts
 ///   (default 512 MiB). Past it, least-recently-used contexts are
 ///   flushed and dropped; pinned contexts live outside the budget.
-/// - `ARAG_FLUSH_SECS`: how often dirty contexts are persisted (default
+/// - `TAGURU_FLUSH_SECS`: how often dirty contexts are persisted (default
 ///   5). This is the crash-loss window; writes also persist on eviction
 ///   and on graceful shutdown (SIGINT/SIGTERM).
-/// - `ARAG_ADDR`: bind address (default 127.0.0.1:3000; port 0 picks a
+/// - `TAGURU_ADDR`: bind address (default 127.0.0.1:3000; port 0 picks a
 ///   free port and the resolved address is printed).
 #[tokio::main]
 async fn main() {
-    let data_dir = PathBuf::from(std::env::var("ARAG_DATA_DIR").unwrap_or_else(|_| "data".into()));
-    let cache_bytes = env_number("ARAG_CACHE_BYTES", 512 * 1024 * 1024);
-    let flush_secs = env_number("ARAG_FLUSH_SECS", 5);
+    let data_dir = PathBuf::from(std::env::var("TAGURU_DATA_DIR").unwrap_or_else(|_| "data".into()));
+    let cache_bytes = env_number("TAGURU_CACHE_BYTES", 512 * 1024 * 1024);
+    let flush_secs = env_number("TAGURU_FLUSH_SECS", 5);
 
     let embedder = embedding::HttpEmbeddings::from_env();
     if let Some(embedder) = &embedder {
         println!("semantic entry tier enabled (model {})", embedder.model());
     }
     let auto_embed = embedder.is_some()
-        && std::env::var("ARAG_EMBED_AUTO")
+        && std::env::var("TAGURU_EMBED_AUTO")
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     if auto_embed {
         println!("auto embedding refresh enabled (runs with each flush)");
@@ -133,7 +133,7 @@ async fn main() {
         )
         .with_state(state.clone());
 
-    let addr = std::env::var("ARAG_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let addr = std::env::var("TAGURU_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
     let listener = TcpListener::bind(&addr).await.unwrap();
     // Print the RESOLVED address: with port 0 the OS picks one, and
     // whoever spawned us (integration tests included) reads it here.

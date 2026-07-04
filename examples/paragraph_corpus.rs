@@ -1,4 +1,4 @@
-use associative_rag::context::Context;
+use taguru::context::Context;
 
 // A realistic-scale ingestion test: one coherent 文脈 described by five
 // paragraphs of several sentences each, with vocabulary deliberately
@@ -173,7 +173,7 @@ fn main() {
         context.query(None, None, None).len()
     );
 
-    let sources = |attributions: &[associative_rag::context::Attribution]| {
+    let sources = |attributions: &[taguru::context::Attribution]| {
         attributions
             .iter()
             .map(|a| a.source.as_str())

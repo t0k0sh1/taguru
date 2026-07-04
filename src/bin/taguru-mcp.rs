@@ -1,5 +1,5 @@
-//! arag-mcp: an MCP (Model Context Protocol) stdio server that bridges an
-//! LLM agent to a running AssociativeRAG HTTP server (`ARAG_URL`, default
+//! taguru-mcp: an MCP (Model Context Protocol) stdio server that bridges an
+//! LLM agent to a running Taguru HTTP server (`TAGURU_URL`, default
 //! http://127.0.0.1:3000).
 //!
 //! This is the reference client the retrieval service is designed around:
@@ -24,7 +24,7 @@ const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
 const FALLBACK_INSTRUCTIONS: &str = include_str!("../../docs/llm-protocol.md");
 
 fn main() {
-    let base = std::env::var("ARAG_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
+    let base = std::env::var("TAGURU_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
     let bridge = Bridge {
         base: base.trim_end_matches('/').to_string(),
         agent: ureq::AgentBuilder::new()
@@ -44,7 +44,7 @@ fn main() {
             continue;
         }
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
-            eprintln!("arag-mcp: ignoring undecodable line");
+            eprintln!("taguru-mcp: ignoring undecodable line");
             continue;
         };
         if let Some(response) = handle(&bridge, &instructions, &message) {
@@ -73,7 +73,7 @@ fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value>
             Ok(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "associative-rag", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "taguru", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": instructions,
             }))
         }

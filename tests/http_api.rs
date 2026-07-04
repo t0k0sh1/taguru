@@ -20,17 +20,17 @@ struct Server {
 
 impl Server {
     fn start(tag: &str) -> Self {
-        let data_dir = std::env::temp_dir().join(format!("arag-http-{tag}-{}", std::process::id()));
+        let data_dir = std::env::temp_dir().join(format!("taguru-http-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data_dir);
         Self::start_on(tag, data_dir)
     }
 
     fn start_on(tag: &str, data_dir: PathBuf) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_associative-rag"))
-            .env("ARAG_ADDR", "127.0.0.1:0")
-            .env("ARAG_DATA_DIR", &data_dir)
-            .env("ARAG_FLUSH_SECS", "1")
-            .env_remove("ARAG_EMBED_URL") // lexical-only, hermetic
+        let mut child = Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .env("TAGURU_ADDR", "127.0.0.1:0")
+            .env("TAGURU_DATA_DIR", &data_dir)
+            .env("TAGURU_FLUSH_SECS", "1")
+            .env_remove("TAGURU_EMBED_URL") // lexical-only, hermetic
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -122,7 +122,7 @@ fn full_retrieval_loop_over_http() {
     assert_eq!((status, health), (200, Value::String("ok".into())));
     let (status, protocol) = server.call("GET", "/protocol", None);
     assert_eq!(status, 200);
-    assert!(protocol.as_str().unwrap().contains("# AssociativeRAG"));
+    assert!(protocol.as_str().unwrap().contains("# Taguru"));
     assert_eq!(server.ok("GET", "/contexts", None), json!([]));
 
     // Create; duplicates conflict; unknown contexts 404.
