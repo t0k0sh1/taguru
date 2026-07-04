@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch/PR supersedes the running check.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      # --all-targets reaches the examples too, which cargo test never
+      # builds; -D warnings holds the tree at its current zero.
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      # Unit tests (lib + server + MCP bridge), the HTTP integration
+      # tests (spawn the real binary on a free port), and the QA recall
+      # floor all run here; --locked pins the committed Cargo.lock.
+      - name: Test
+        run: cargo test --locked
