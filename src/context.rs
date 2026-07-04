@@ -1610,15 +1610,13 @@ struct EntryIndex {
     posting_entries: usize,
 }
 
-/// One entry spelling: where its normalized form sits in the arena, the
-/// precomputed counts its scores need, and which record it resolves to.
+/// One entry spelling: where its normalized form sits in the arena, its
+/// precomputed char count, and which record it resolves to.
 #[derive(Debug, Clone, Copy)]
 struct EntrySpan {
     start: usize,
     end: usize,
     chars: usize,
-    /// Distinct bigrams in this spelling — half the Dice denominator.
-    bigram_count: u32,
     /// The record this spelling resolves to: its own id for a canonical
     /// name, the canonical's id for an alias.
     target: u32,
@@ -1647,7 +1645,6 @@ impl EntryIndex {
             start,
             end: self.arena.len(),
             chars: normalized.chars().count(),
-            bigram_count: seen.len() as u32,
             target,
         });
     }
@@ -1706,13 +1703,24 @@ impl EntryIndex {
         // cue are ever touched, via the posting lists. Bigrams carried by
         // a large share of all spellings (think a 株式会社 prefix on
         // every company name) discriminate nothing and would make every
-        // lookup scan the whole namespace, so their postings are skipped.
-        // Candidates lose those bigrams' contribution to Dice, which only
-        // suppresses fuzzy matches in namespaces whose names are
-        // near-duplicates of each other anyway.
+        // lookup scan the whole namespace, so they are stop-grams:
+        // their postings are never scanned AND they are excluded from
+        // both sides of the Dice denominator, so the score becomes an
+        // overlap over informative bigrams only. Boilerplate neither
+        // costs time nor drags scores down — a typo in the distinctive
+        // part of a name still lands however long the shared prefix is.
         let stop_gram = (self.spans.len() / 20).max(64);
+        let is_stop = |bigram: u64| {
+            self.bigrams
+                .get(&bigram)
+                .is_some_and(|postings| postings.len() > stop_gram)
+        };
         let needle_bigrams: HashSet<u64> = bigrams_of(&needle).collect();
-        if !needle_bigrams.is_empty() {
+        let informative_needle = needle_bigrams
+            .iter()
+            .filter(|&&bigram| !is_stop(bigram))
+            .count();
+        if informative_needle > 0 {
             let mut shared: HashMap<u32, u32> = HashMap::new();
             for bigram in &needle_bigrams {
                 if let Some(postings) = self.bigrams.get(bigram)
@@ -1727,8 +1735,20 @@ impl EntryIndex {
             }
             for (span_index, count) in shared {
                 let span = self.spans[span_index as usize];
-                let dice = 2.0 * f64::from(count)
-                    / (needle_bigrams.len() + span.bigram_count as usize) as f64;
+                // The candidate set is small (≥ 1 shared informative
+                // bigram), so recounting its informative bigrams here is
+                // cheap — and unlike a stored count, it cannot go stale
+                // as bigrams cross the stop threshold while the
+                // namespace grows.
+                let text = &self.arena[span.start..span.end];
+                let informative_span: HashSet<u64> = bigrams_of(text)
+                    .filter(|&bigram| !is_stop(bigram))
+                    .collect();
+                if informative_span.is_empty() {
+                    continue;
+                }
+                let dice =
+                    2.0 * f64::from(count) / (informative_needle + informative_span.len()) as f64;
                 if dice >= DICE_FLOOR {
                     record(span.target, dice, &mut best);
                 }
@@ -3085,6 +3105,35 @@ mod tests {
         let mut corrupt = with_alias.to_bytes();
         corrupt[196..200].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(Context::from_bytes(&corrupt).is_err());
+    }
+
+    #[test]
+    fn fuzzy_matching_survives_boilerplate_heavy_namespaces() {
+        let mut context = Context::default();
+        // 70 filler companies push the 株式会社 prefix bigrams past the
+        // stop-gram threshold (max(spans/20, 64)).
+        let fillers = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほ\
+                       まみむめもやゆよらりるれろわをんアイウエオカキクケコサシスセ\
+                       ソタチツテトナニヌネノハヒフヘ";
+        for ch in fillers.chars().filter(|c| !c.is_whitespace()).take(70) {
+            context
+                .associate(format!("株式会社{ch}"), "業種", "その他", 1.0)
+                .unwrap();
+        }
+        context
+            .associate("株式会社青嶺", "業種", "酒造", 1.0)
+            .unwrap();
+
+        // The typo sits in the distinctive part (峰 for 嶺). Boilerplate
+        // bigrams are stop-grams on BOTH sides of the Dice, so the one
+        // shared informative bigram is enough: 2·1/(2+2) = 0.5. With the
+        // boilerplate left in the denominator this was 2·1/(5+5) = 0.2 —
+        // below the floor, a silent miss.
+        let hits = context.resolve("株式会社青峰");
+        assert!(
+            hits.iter().any(|hit| hit.name == "株式会社青嶺"),
+            "typo in the distinctive part must land: {hits:?}"
+        );
     }
 
     #[test]
