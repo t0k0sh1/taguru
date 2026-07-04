@@ -1,52 +1,69 @@
 # Taguru
 
-記憶の糸を「手繰る」ように思い出す、LLM のための長期意味記憶。知識を
-(主語, 関係ラベル, 目的語, 符号付き重み, 出典) の連想として蓄積し、検索は
-埋め込み類似度ではなく**構造**で行います — 質問の見た目ではなく、質問が
-「何について」かを糸口にして、グラフを歩いて知識を取り出します。
+Long-term semantic memory for LLMs that recalls the way a thread is
+pulled in hand over hand (手繰る, *taguru*). Knowledge accumulates as
+(subject, relation label, object, signed weight, source) associations,
+and retrieval is **structural** rather than embedding-similarity: the
+cue is not what a question looks like but what it is *about* — the
+糸口, the end of the thread — and the graph is walked from there to
+draw the knowledge out.
 
-クライアントは LLM を想定しています。言語の理解(文書→事実への分解、文脈の選択、
-検索結果→文章への再構成)はすべて LLM 側の仕事で、このサーバーは構造の格納と走査
-だけを担います。クライアント向けの完全な手順書はサーバー自身が配布します:
-`GET /protocol`(中身は [docs/llm-protocol.md](docs/llm-protocol.md))。
+The intended client is an LLM. Everything that needs language
+understanding — decomposing documents into facts, choosing a context,
+recomposing results into prose — is the client's job; this server only
+stores and walks structure. The server distributes the complete
+playbook for clients itself: `GET /protocol` (the content of
+[docs/llm-protocol.md](docs/llm-protocol.md)).
 
-## 構成
+## Architecture
 
-- **ライブラリ** (`src/context.rs`) — 1つの `Context` = 1つの文脈。全状態は
-  「UTF-8 文字列アリーナ + 固定長 `#[repr(C)]` レコード7テーブル」の平坦なバッファに
-  収まり、隣接リストはエッジレコードに埋め込んだ侵入型チェーンです。あらゆる変更は
-  追記かフィールド更新なので、`to_bytes` / `from_bytes` で全体が1つのイメージとして
-  往復します(リトルエンディアン、ロード時全検証)。容量は u32 空間(テーブルあたり
-  約42.9億件、文字列4GiB)で、超過は panic ではなく `ContextFull` エラーです。
-  - 読み: `recall` / `query` / `query_any` / `describe` / `explore` / `activate` /
-    `resolve` / `resolve_label` / `unreachable_from`
-  - 書き: `associate` / `associate_from` / `add_concept_alias` / `add_label_alias`
-  - 検索の入口は正規化(NFKC・大小・カナ折り畳み)+ bigram 転置索引で、表記ゆれと
-    軽微な誤字を吸収します。エイリアスは入口専用の別綴りです(結果は常に正準綴り)。
-- **サーバー** (`src/main.rs`, `src/registry.rs`, `src/api.rs`) — ディスクが真実、
-  メモリはコンテキスト丸ごと単位のキャッシュです。各コンテキストは
-  `{名前}.ctx`(イメージ)+ `{名前}.meta.json`(説明・ピン留め・統計)+
-  `{名前}.sources.json`(出典原文)として保存され、起動時はコールド登録(ピン留めは
-  先読み)、初アクセスで透過ロード、予算超過で LRU 退避、書き込みは dirty マーク後に
-  定期フラッシュ・退避時・シャットダウン時に永続化されます。
+- **Library** (`src/context.rs`) — one `Context` = one 文脈 (one
+  context of meaning). All state fits in a flat buffer — a UTF-8
+  string arena plus seven tables of fixed-width `#[repr(C)]` records —
+  and the adjacency lists are intrusive chains threaded through the
+  edge records. Every mutation is an append or a field update, so the
+  whole state round-trips as one image through `to_bytes` /
+  `from_bytes` (little-endian, fully validated on load). Capacity is
+  the u32 space (~4.29 billion records per table, 4 GiB of interned
+  text); a write past it is a `ContextFull` error, not a panic.
+  - Reads: `recall` / `query` / `query_any` / `describe` / `explore` /
+    `activate` / `resolve` / `resolve_label` / `unreachable_from`
+  - Writes: `associate` / `associate_from` / `add_concept_alias` /
+    `add_label_alias`
+  - The retrieval entry is normalization (NFKC, case folding,
+    katakana → hiragana) plus a bigram inverted index, absorbing
+    spelling variation and light typos. Aliases are entry-only
+    alternative spellings (results always carry the canonical
+    spelling).
+- **Server** (`src/main.rs`, `src/registry.rs`, `src/api.rs`) — disk
+  is the source of truth; memory is a cache managed at whole-context
+  granularity. Each context is persisted as `{name}.ctx` (the image) +
+  `{name}.meta.json` (description, pinning, stats) +
+  `{name}.sources.json` (original passages). Boot registers every
+  context cold (pinned ones preload), the first access loads
+  transparently, least-recently-used contexts are evicted past the
+  cache budget, and writes mark a context dirty — persisted by the
+  periodic flusher, on eviction, and on shutdown.
 
-## 起動
+## Running
 
 ```sh
 cargo run --release
-# 環境変数:
-#   TAGURU_ADDR         バインド先 (既定 127.0.0.1:3000)
-#   TAGURU_DATA_DIR     データディレクトリ (既定 ./data)
-#   TAGURU_CACHE_BYTES  非ピン常駐予算 (既定 512 MiB)
-#   TAGURU_FLUSH_SECS   フラッシュ間隔 = クラッシュ時の消失窓 (既定 5)
+# Environment:
+#   TAGURU_ADDR         bind address (default 127.0.0.1:3000)
+#   TAGURU_DATA_DIR     data directory (default ./data)
+#   TAGURU_CACHE_BYTES  resident budget for unpinned contexts (default 512 MiB)
+#   TAGURU_FLUSH_SECS   flush interval = the crash-loss window (default 5)
 #   TAGURU_EMBED_URL / TAGURU_EMBED_MODEL / TAGURU_EMBED_API_KEY
-#                     意味的入口 (OpenAI互換 /embeddings)。未設定なら字面のみ。
-#                     例: URL=https://api.openai.com/v1/embeddings
-#                         MODEL=text-embedding-3-large  (日本語の短い名前には
-#                         3-small では分離が足りない。既定フロア0.35は3-large+グロスで較正済み)
-#                         API_KEY=$OPENAI_API_KEY
-#   TAGURU_EMBED_AUTO=1 フラッシュのたびに埋め込みを差分更新 (オプトイン。
-#                     未設定なら手動 POST /embeddings/refresh のみ)
+#                     semantic entry tier (OpenAI-compatible /embeddings).
+#                     Unset keeps the entry purely lexical.
+#                     e.g. URL=https://api.openai.com/v1/embeddings
+#                          MODEL=text-embedding-3-large  (3-small separates
+#                          short Japanese names too poorly; the default floor
+#                          0.35 is calibrated for 3-large + glosses)
+#                          API_KEY=$OPENAI_API_KEY
+#   TAGURU_EMBED_AUTO=1 refresh embeddings incrementally with each flush
+#                     (opt-in; unset means manual POST /embeddings/refresh only)
 ```
 
 ```sh
@@ -58,34 +75,40 @@ curl -X POST localhost:3000/contexts/sake/activate -H 'Content-Type: application
   -d '{"origins":["青嶺酒造"]}'
 ```
 
-エンドポイント一覧と取り込み・検索の規律は `GET /protocol` を参照してください。
+For the endpoint list and the ingest/retrieval discipline, see
+`GET /protocol`.
 
-## LLM エージェントから使う (MCP)
+## Using it from an LLM agent (MCP)
 
-`taguru-mcp` は稼働中の HTTP サーバーへの MCP stdio ブリッジです。エージェント
-(Claude Code / Claude Desktop など)がこれを通じて取り込みと検索を行います —
-文書→事実の分解と、検索結果→回答の合成はエージェント側の仕事で、規律は
-ツール定義と MCP instructions(`/protocol` の内容)として自動的に渡ります。
+`taguru-mcp` is an MCP stdio bridge to a running HTTP server. Agents
+(Claude Code / Claude Desktop, and so on) ingest and retrieve through
+it — decomposing documents into facts and composing answers out of
+results is the agent's job, and the discipline rides along
+automatically as the tool definitions and the MCP instructions (the
+content of `/protocol`).
 
 ```sh
-cargo build --release                       # target/release/taguru-mcp ができる
+cargo build --release                       # builds target/release/taguru-mcp
 claude mcp add taguru -e TAGURU_URL=http://127.0.0.1:3000 -- /path/to/target/release/taguru-mcp
 ```
 
-これで「このフォルダの文書を sake コンテキストに取り込んで」「青嶺酒造について
-知っていることを出典付きで教えて」のような依頼が、目録選択 → resolve →
-describe/query/activate → 原文逆引き → 引用付き回答、のループとしてそのまま
-動きます。取り込み時のチャンク分割・事実抽出・被覆監査(audit_coverage)も
-エージェントがツール越しに実行します。
+With that in place, requests like "ingest the documents in this folder
+into the sake context" or "tell me what you know about 青嶺酒造, with
+sources" just work, as the loop directory pick → resolve →
+describe/query/activate → passage lookup → cited answer. Chunking,
+fact extraction, and the post-ingest coverage audit (audit_coverage)
+are likewise driven by the agent through the tools.
 
-## 検証
+## Verification
 
 ```sh
-cargo test                                    # ライブラリ + レジストリ + QAゴールデン
-cargo test --test qa_recall -- --nocapture    # 質問ごとの再現率テーブル
-cargo run --release --example benchmark       # 各操作のレイテンシ (10万/100万連想)
+cargo test                                    # library + registry + QA goldens
+cargo test --test qa_recall -- --nocapture    # per-question recall table
+cargo run --release --example benchmark       # per-operation latency (100k/1M associations)
 ```
 
-`tests/qa_recall.rs` が検索品質の回帰フロアです: 架空コーパスへの11問(誤字入口・
-全角入口・エイリアス・2ホップ合成・否定・裏付けを含む)が、文書化された検索ループを
-機械的に回して全問完答であり続けることを検査します。
+`tests/qa_recall.rs` is the retrieval-quality regression floor: 11
+questions against a fictional corpus (covering typo entry, full-width
+entry, aliases, two-hop composition, negation, and corroboration) must
+keep coming back fully answered by mechanically running the documented
+retrieval loop.
