@@ -182,7 +182,8 @@ fn tool_definitions() -> Vec<Value> {
                     "name": { "type": "string" },
                     "description": { "type": "string" },
                     "pinned": { "type": "boolean", "description": "常駐させる (用語集など常に熱い文脈)" },
-                    "dice_floor": { "type": "number", "description": "ファジー入口の許容 (既定0.3)" }
+                    "dice_floor": { "type": "number", "description": "ファジー入口の許容 (既定0.3)" },
+                    "semantic_floor": { "type": "number", "description": "意味検索の許容 (既定0.35)" }
                 }),
                 &["name"],
             ),
@@ -195,7 +196,8 @@ fn tool_definitions() -> Vec<Value> {
                     "name": { "type": "string" },
                     "description": { "type": "string" },
                     "pinned": { "type": "boolean" },
-                    "dice_floor": { "type": "number" }
+                    "dice_floor": { "type": "number" },
+                    "semantic_floor": { "type": "number" }
                 }),
                 &["name"],
             ),
@@ -258,7 +260,8 @@ fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "cue": { "type": "string" },
-                    "dice_floor": { "type": "number", "description": "この1回だけのファジー許容の上書き" }
+                    "dice_floor": { "type": "number", "description": "この1回だけのファジー許容の上書き" },
+                    "semantic_floor": { "type": "number", "description": "この1回だけの意味検索許容の上書き" }
                 }),
                 &["context", "cue"],
             ),
@@ -270,7 +273,8 @@ fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "cue": { "type": "string" },
-                    "dice_floor": { "type": "number" }
+                    "dice_floor": { "type": "number" },
+                    "semantic_floor": { "type": "number" }
                 }),
                 &["context", "cue"],
             ),
@@ -418,12 +422,18 @@ fn call_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<String, S
         "create_context" => bridge.call(
             "PUT",
             &context_path("name")?,
-            Some(pick(arguments, &["description", "pinned", "dice_floor"])),
+            Some(pick(
+                arguments,
+                &["description", "pinned", "dice_floor", "semantic_floor"],
+            )),
         ),
         "update_context" => bridge.call(
             "PATCH",
             &context_path("name")?,
-            Some(pick(arguments, &["description", "pinned", "dice_floor"])),
+            Some(pick(
+                arguments,
+                &["description", "pinned", "dice_floor", "semantic_floor"],
+            )),
         ),
         "delete_context" => bridge.call("DELETE", &context_path("name")?, None),
         "add_associations" => bridge.call(
@@ -444,12 +454,12 @@ fn call_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<String, S
         "resolve" => bridge.call(
             "POST",
             &format!("{}/resolve", context_path("context")?),
-            Some(pick(arguments, &["cue", "dice_floor"])),
+            Some(pick(arguments, &["cue", "dice_floor", "semantic_floor"])),
         ),
         "resolve_label" => bridge.call(
             "POST",
             &format!("{}/resolve_label", context_path("context")?),
-            Some(pick(arguments, &["cue", "dice_floor"])),
+            Some(pick(arguments, &["cue", "dice_floor", "semantic_floor"])),
         ),
         "describe" => bridge.call(
             "POST",

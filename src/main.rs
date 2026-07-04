@@ -31,6 +31,12 @@ async fn main() {
     if let Some(embedder) = &embedder {
         println!("semantic entry tier enabled (model {})", embedder.model());
     }
+    let auto_embed = embedder.is_some()
+        && std::env::var("ARAG_EMBED_AUTO")
+            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    if auto_embed {
+        println!("auto embedding refresh enabled (runs with each flush)");
+    }
     let embedder = embedder.map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>);
 
     let state = AppState::boot(data_dir.clone(), cache_bytes, embedder)
@@ -48,7 +54,27 @@ async fn main() {
         ticker.tick().await; // the first tick fires immediately; skip it
         loop {
             ticker.tick().await;
-            flusher.flush_dirty();
+            let flushed = flusher.flush_dirty();
+            // Opt-in: a flushed context just changed on disk, so its
+            // glosses may have changed too — re-embed the difference.
+            // Best effort: a failed refresh is retried the next time a
+            // write dirties the context (the gloss diff is idempotent),
+            // and the manual endpoint always remains.
+            if auto_embed && !flushed.is_empty() {
+                tokio::task::block_in_place(|| {
+                    for name in &flushed {
+                        match flusher.refresh_embeddings(name) {
+                            None | Some(Ok((0, _))) => {}
+                            Some(Ok((embedded, _))) => {
+                                println!("auto-embedded {embedded} gloss(es) for context '{name}'");
+                            }
+                            Some(Err(error)) => {
+                                eprintln!("auto embedding refresh for '{name}' failed: {error}");
+                            }
+                        }
+                    }
+                });
+            }
         }
     });
 

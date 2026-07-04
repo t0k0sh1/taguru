@@ -41,8 +41,10 @@ cargo run --release
 #                     意味的入口 (OpenAI互換 /embeddings)。未設定なら字面のみ。
 #                     例: URL=https://api.openai.com/v1/embeddings
 #                         MODEL=text-embedding-3-large  (日本語の短い名前には
-#                         3-small では分離が足りない。フロア0.4は3-largeで較正済み)
+#                         3-small では分離が足りない。既定フロア0.35は3-large+グロスで較正済み)
 #                         API_KEY=$OPENAI_API_KEY
+#   ARAG_EMBED_AUTO=1 フラッシュのたびに埋め込みを差分更新 (オプトイン。
+#                     未設定なら手動 POST /embeddings/refresh のみ)
 ```
 
 ```sh

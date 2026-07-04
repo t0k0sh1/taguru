@@ -57,6 +57,11 @@ pub struct ContextMeta {
     /// spellings, higher keeps entry strict. Re-applied to the context
     /// on every load, since the image itself carries no config.
     pub dice_floor: Option<f64>,
+    /// Per-context floor for the semantic entry tier (cosine over
+    /// glosses); `None` means the calibrated default (0.35). Same
+    /// tuning story as `dice_floor`: config lives in the sidecar, never
+    /// in the image.
+    pub semantic_floor: Option<f32>,
 }
 
 /// Mechanically derived "what is this context about" numbers. Served by
@@ -128,6 +133,8 @@ pub struct DirectoryEntry {
     pub loaded: bool,
     /// Per-context fuzzy-entry floor; null means the default (0.3).
     pub dice_floor: Option<f64>,
+    /// Per-context semantic floor; null means the default (0.35).
+    pub semantic_floor: Option<f32>,
     pub stats: ContextStats,
 }
 
@@ -630,6 +637,7 @@ impl AppState {
         name: &str,
         cue: &str,
         labels: bool,
+        floor_override: Option<f32>,
     ) -> Option<Result<Vec<(String, f32)>, String>> {
         // Calibrated against text-embedding-3-large with GLOSSED names
         // (name + graph context): true matches land at ~0.44–0.58 —
@@ -646,6 +654,12 @@ impl AppState {
             return Some(Ok(Vec::new()));
         };
         let entry = self.lookup(name)?;
+        // One-call override beats the context setting beats the default.
+        let context_floor = entry.inner.read().unwrap().meta.semantic_floor;
+        let floor = floor_override
+            .or(context_floor)
+            .unwrap_or(SEMANTIC_FLOOR)
+            .clamp(0.0, 1.0);
         let store = self.entry_vectors(&entry, &file_stem(name));
         if store.model != embedder.model() {
             return Some(Ok(Vec::new()));
@@ -679,7 +693,7 @@ impl AppState {
         let mut scored: Vec<(String, f32)> = table
             .iter()
             .map(|(name, (_, vector))| (name.clone(), similarity(&cue_vector, vector)))
-            .filter(|&(_, score)| score >= SEMANTIC_FLOOR)
+            .filter(|&(_, score)| score >= floor)
             .collect();
         scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         scored.truncate(SEMANTIC_LIMIT);
@@ -695,6 +709,7 @@ impl AppState {
         description: Option<String>,
         pinned: Option<bool>,
         dice_floor: Option<f64>,
+        semantic_floor: Option<f32>,
     ) -> Option<io::Result<ContextMeta>> {
         let entry = self.lookup(name)?;
         let outcome = {
@@ -713,6 +728,11 @@ impl AppState {
                 if let Slot::Hot(context) = &mut inner.slot {
                     context.set_dice_floor(inner.meta.dice_floor);
                 }
+            }
+            if let Some(floor) = semantic_floor {
+                // Read at query time from the meta; nothing to push into
+                // the loaded context.
+                inner.meta.semantic_floor = Some(floor.clamp(0.0, 1.0));
             }
             if inner.meta.pinned
                 && let Err(error) = ensure_hot(&self.0.data_dir, name, inner)
@@ -750,6 +770,7 @@ impl AppState {
                     pinned: inner.meta.pinned,
                     loaded,
                     dice_floor: inner.meta.dice_floor,
+                    semantic_floor: inner.meta.semantic_floor,
                     stats,
                 }
             })
@@ -779,10 +800,12 @@ impl AppState {
         self.with_hot(name, true, operate)
     }
 
-    /// Persists every dirty context. Called by the periodic flusher and
-    /// once more on graceful shutdown; a failed save is retried on the
-    /// next tick (the entry stays dirty).
-    pub fn flush_dirty(&self) {
+    /// Persists every dirty context and returns the names it flushed —
+    /// the periodic flusher feeds those into the auto embedding refresh
+    /// when that is enabled. Called once more on graceful shutdown; a
+    /// failed save is retried on the next tick (the entry stays dirty).
+    pub fn flush_dirty(&self) -> Vec<String> {
+        let mut flushed = Vec::new();
         for (name, entry) in self.snapshot() {
             if !entry.dirty.load(Ordering::Relaxed) {
                 continue;
@@ -797,12 +820,14 @@ impl AppState {
                 Ok(()) => {
                     inner.stats = stats;
                     entry.dirty.store(false, Ordering::Relaxed);
+                    flushed.push(name);
                 }
                 Err(error) => {
                     eprintln!("flush of context '{name}' failed (will retry): {error}");
                 }
             }
         }
+        flushed
     }
 
     fn lookup(&self, name: &str) -> Option<Arc<Entry>> {
@@ -1298,11 +1323,14 @@ mod tests {
 
             // Tuning applies to the loaded context immediately.
             state
-                .update_meta("sake", None, None, Some(0.25))
+                .update_meta("sake", None, None, Some(0.25), None)
                 .unwrap()
                 .unwrap();
             assert!(lands(&state), "tuned floor must admit the cue");
-            state.flush_dirty();
+            // The flusher learns which contexts it persisted — that list
+            // feeds the auto embedding refresh.
+            assert_eq!(state.flush_dirty(), vec!["sake".to_string()]);
+            assert!(state.flush_dirty().is_empty());
         }
 
         // A cold boot re-applies the floor from the sidecar — the image
@@ -1372,6 +1400,7 @@ mod tests {
                 keys: vec![
                     ("りんご".to_string(), vec![1.0, 0.0, 0.0]),
                     ("アップル".to_string(), vec![0.96, 0.28, 0.0]),
+                    ("みかん".to_string(), vec![0.28, 0.96, 0.0]),
                 ],
                 calls: Arc::clone(calls),
             }
@@ -1424,7 +1453,7 @@ mod tests {
         assert!(lexical.is_empty());
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false)
+                .semantic_resolve("fruit", "アップル", false, None)
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -1440,7 +1469,7 @@ mod tests {
         // Now the paraphrase lands on the stored spelling by cosine, and
         // unrelated names stay under the floor.
         let hits = state
-            .semantic_resolve("fruit", "アップル", false)
+            .semantic_resolve("fruit", "アップル", false, None)
             .unwrap()
             .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
@@ -1461,7 +1490,7 @@ mod tests {
         assert_eq!(embedded, 3);
         assert_eq!(total, 5);
 
-        assert!(state.semantic_resolve("nope", "x", false).is_none());
+        assert!(state.semantic_resolve("nope", "x", false, None).is_none());
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1488,13 +1517,13 @@ mod tests {
 
         // First query embeds the cue; repeating the wording does not.
         let first = state
-            .semantic_resolve("fruit", "アップル", false)
+            .semantic_resolve("fruit", "アップル", false, None)
             .unwrap()
             .unwrap();
         assert_eq!(first[0].0, "りんご");
         assert_eq!(calls.load(Ordering::Relaxed), 3);
         state
-            .semantic_resolve("fruit", "アップル", false)
+            .semantic_resolve("fruit", "アップル", false, None)
             .unwrap()
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 3, "cue must come from cache");
@@ -1503,7 +1532,7 @@ mod tests {
         // file gone, the same query keeps answering.
         fs::remove_file(vectors_path(&dir, &file_stem("fruit"))).unwrap();
         let held = state
-            .semantic_resolve("fruit", "アップル", false)
+            .semantic_resolve("fruit", "アップル", false, None)
             .unwrap()
             .unwrap();
         assert_eq!(held[0].0, "りんご");
@@ -1522,11 +1551,52 @@ mod tests {
             .unwrap();
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false)
+                .semantic_resolve("fruit", "アップル", false, None)
                 .unwrap()
                 .unwrap()
                 .is_empty()
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn semantic_floor_is_tunable_per_context_and_per_call() {
+        let dir = scratch_dir("semfloor");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("fruit", |context| {
+                context.associate("りんご", "分類", "果物", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        state.refresh_embeddings("fruit").unwrap().unwrap();
+
+        // みかん×りんご sits at cosine 0.28 — under the 0.35 default.
+        let miss = |floor: Option<f32>| {
+            state
+                .semantic_resolve("fruit", "みかん", false, floor)
+                .unwrap()
+                .unwrap()
+        };
+        assert!(miss(None).is_empty());
+        // A one-call override admits it without changing the context ...
+        assert_eq!(miss(Some(0.2))[0].0, "りんご");
+        assert!(miss(None).is_empty());
+        // ... and the context setting changes the default, persisting
+        // in the sidecar across a reboot.
+        state
+            .update_meta("fruit", None, None, None, Some(0.2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(miss(None)[0].0, "りんご");
+        assert_eq!(state.directory()[0].semantic_floor, Some(0.2));
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -61,7 +61,9 @@
 4. `POST /contexts/{name}/unreachable_from` を文書の主要エンティティで実行し、
    到達不能の事実(取りこぼす島)がないか監査します。非空なら所属エッジの不足です。
    埋め込みが設定済みなら、最後に `POST /contexts/{name}/embeddings/refresh` で
-   新出の名前をベクトル化します(差分のみ、冪等)。
+   新出の名前をベクトル化します(差分のみ、冪等)。サーバーが自動更新
+   (`ARAG_EMBED_AUTO`)で動いている場合はフラッシュ間隔内に自動反映されるため
+   手動 refresh は不要です。
 5. 運用中にヒットしない言い回しが見つかったら `POST /contexts/{name}/aliases` で
    別綴りを登録します。エイリアスは入口専用で、結果は常に正準綴りで返ります。
    既存の2概念を後から繋ぐことはできません(それはマージであり、作り直しの領分)。
@@ -74,8 +76,8 @@
 | Method | Path | Body / 戻り |
 |---|---|---|
 | GET | `/contexts` | 目録: name, description, pinned, loaded, dice_floor, stats |
-| PUT | `/contexts/{name}` | `{description?, pinned?, dice_floor?}` → 作成 |
-| PATCH | `/contexts/{name}` | `{description?, pinned?, dice_floor?}` → メタ更新 |
+| PUT | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → 作成 |
+| PATCH | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → メタ更新 |
 | DELETE | `/contexts/{name}` | 削除(ファイルごと) |
 | POST | `/contexts/{name}/associations` | `[{subject,label,object,weight,source?}]` → 適用数 |
 | POST | `/contexts/{name}/recall` | `{cue, limit?}` → `{total, matches}` |
@@ -83,8 +85,8 @@
 | POST | `/contexts/{name}/describe` | `{concept}` → ラベル見出し(件数・役割別)/ null |
 | POST | `/contexts/{name}/explore` | `{origins, max_depth?}` → `[{distance, path, association}]` |
 | POST | `/contexts/{name}/activate` | `{origins, decay?=0.5, limit?=20}` → `[{strength, path, association}]` |
-| POST | `/contexts/{name}/resolve` | `{cue, dice_floor?}` → `[{name, score, tier}]` 概念名候補 |
-| POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?}` → `[{name, score, tier}]` 関係名候補 |
+| POST | `/contexts/{name}/resolve` | `{cue, dice_floor?, semantic_floor?}` → `[{name, score, tier}]` 概念名候補 |
+| POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?, semantic_floor?}` → `[{name, score, tier}]` 関係名候補 |
 | POST | `/contexts/{name}/embeddings/refresh` | 概念・ラベルのグロス埋め込みを差分更新(取り込み後に実行。文脈が変わった名前は自動再埋め込み) |
 | GET | `/contexts/{name}/labels` | 関係語彙(正準のみ) |
 | GET/POST | `/contexts/{name}/aliases` | エクスポート / `{concepts:{別綴:正準}, labels:{...}}` |

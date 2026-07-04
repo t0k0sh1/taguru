@@ -102,6 +102,8 @@ pub struct CreateContextRequest {
     /// Per-context fuzzy-entry floor for resolve; omitted means the
     /// default (0.3).
     pub dice_floor: Option<f64>,
+    /// Per-context semantic floor; omitted means the default (0.35).
+    pub semantic_floor: Option<f32>,
 }
 
 pub async fn create_context(
@@ -115,6 +117,7 @@ pub async fn create_context(
         description: request.description,
         pinned: request.pinned,
         dice_floor: request.dice_floor.map(|floor| floor.clamp(0.0, 1.0)),
+        semantic_floor: request.semantic_floor.map(|floor| floor.clamp(0.0, 1.0)),
     };
     match state.create(&name, meta) {
         Ok(()) => ok(true, started_at),
@@ -136,6 +139,7 @@ pub struct UpdateContextRequest {
     pub description: Option<String>,
     pub pinned: Option<bool>,
     pub dice_floor: Option<f64>,
+    pub semantic_floor: Option<f32>,
 }
 
 pub async fn update_context(
@@ -149,6 +153,7 @@ pub async fn update_context(
         request.description,
         request.pinned,
         request.dice_floor,
+        request.semantic_floor,
     ) {
         None => not_found(&name, started_at),
         Some(Ok(meta)) => ok(meta, started_at),
@@ -615,6 +620,8 @@ pub struct ResolveRequest {
     /// One-call override of the fuzzy-entry floor — the loosen-and-retry
     /// move after a miss. Omitted means the context's setting.
     pub dice_floor: Option<f64>,
+    /// One-call override of the semantic-tier floor, same story.
+    pub semantic_floor: Option<f32>,
 }
 
 /// One resolve candidate plus the tier that produced it. Lexical scores
@@ -663,7 +670,9 @@ fn resolve_with_fallback(
 
     // The provider round trip can take hundreds of milliseconds; tell
     // the runtime this thread will block so other tasks migrate off it.
-    match tokio::task::block_in_place(|| state.semantic_resolve(name, &request.cue, labels)) {
+    match tokio::task::block_in_place(|| {
+        state.semantic_resolve(name, &request.cue, labels, request.semantic_floor)
+    }) {
         None => not_found(name, started_at),
         Some(Ok(semantic)) => ok(
             semantic
