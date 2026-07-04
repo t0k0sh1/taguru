@@ -327,12 +327,12 @@ pub struct Context {
     /// into the existing edge instead of growing a parallel one. Not
     /// persisted.
     edge_ids: HashMap<(ConceptId, LabelId, ConceptId), EdgeId>,
-    /// Derived index: lowercased concept names, parallel to `concepts`,
-    /// so a `resolve` scan allocates nothing per name. Not persisted.
-    concept_lower: LowerNames,
-    /// Derived index: lowercased label names, parallel to `labels`. Not
-    /// persisted.
-    label_lower: LowerNames,
+    /// Derived entry index over concept spellings — normalized forms and
+    /// a bigram posting index behind `resolve`. Not persisted.
+    concept_index: EntryIndex,
+    /// Derived entry index over label spellings, behind `resolve_label`.
+    /// Not persisted.
+    label_index: EntryIndex,
 }
 
 impl Context {
@@ -1011,28 +1011,31 @@ impl Context {
     /// concept spelling, an ingester should ask what similar spellings
     /// already exist and reuse one — check before mint.
     ///
-    /// This tier is purely lexical: a name matches when one string
-    /// contains the other, ASCII-case-insensitively, and scores by how much
-    /// of the longer string the shorter one covers (exact match = 1.0). It
-    /// deliberately does NOT guess at semantic similarity — that belongs to
-    /// the tiers above it: an LLM normalizing its query wording, or, at
-    /// corpus scale, an embedding index over concept names (only the
-    /// *entry* needs fuzziness; the knowledge retrieval itself stays
-    /// structural). Scans every concept name, O(number of concepts); the
-    /// scan runs against a lowercased shadow of the names kept up to date
-    /// at intern time, so it allocates nothing per candidate.
+    /// This tier is lexical, in two layers sharing one score scale: names
+    /// are compared in normalized form (Unicode NFKC, case-folded,
+    /// katakana folded to hiragana — so full-width romaji and kana
+    /// variants land), containment either way scores by how much of the
+    /// longer string the shorter one covers (exact match = 1.0), and
+    /// near-miss spellings that containment cannot catch (青嶺酒蔵 for
+    /// 青嶺酒造) match by character-bigram overlap through a posting
+    /// index. It deliberately does NOT guess at semantic similarity —
+    /// that belongs to the tiers above it: an LLM normalizing its query
+    /// wording, or, at corpus scale, an embedding index over concept
+    /// names (only the *entry* needs fuzziness; the knowledge retrieval
+    /// itself stays structural). The scan is O(number of concepts) and
+    /// allocates nothing per candidate.
     pub fn resolve(&self, cue: &str) -> Vec<Resolution> {
-        lexical_resolutions(
-            cue,
-            self.concepts.iter().enumerate().map(|(index, record)| {
-                let (lower, chars) = self.concept_lower.get(index);
-                (
-                    self.arena_str(record.name_offset, record.name_len),
-                    lower,
-                    chars,
-                )
-            }),
-        )
+        let mut resolutions: Vec<Resolution> = self
+            .concept_index
+            .resolve(cue)
+            .into_iter()
+            .map(|(id, score)| Resolution {
+                name: self.concept_name(id).to_string(),
+                score,
+            })
+            .collect();
+        sort_resolutions(&mut resolutions);
+        resolutions
     }
 
     /// [`Context::resolve`] for relation labels instead of concepts — the
@@ -1043,17 +1046,17 @@ impl Context {
     /// coining a relation spelling, and reuse a close existing label
     /// instead.
     pub fn resolve_label(&self, cue: &str) -> Vec<Resolution> {
-        lexical_resolutions(
-            cue,
-            self.labels.iter().enumerate().map(|(index, record)| {
-                let (lower, chars) = self.label_lower.get(index);
-                (
-                    self.arena_str(record.name_offset, record.name_len),
-                    lower,
-                    chars,
-                )
-            }),
-        )
+        let mut resolutions: Vec<Resolution> = self
+            .label_index
+            .resolve(cue)
+            .into_iter()
+            .map(|(id, score)| Resolution {
+                name: self.label_name(id).to_string(),
+                score,
+            })
+            .collect();
+        sort_resolutions(&mut resolutions);
+        resolutions
     }
 
     /// The full relation-label vocabulary in insertion order — the
@@ -1131,10 +1134,8 @@ impl Context {
         let derived = self.arena.len() // owned keys of the name → id maps
             + name_entries * MAP_ENTRY_OVERHEAD
             + self.edges.len() * (triple_entry + MAP_ENTRY_OVERHEAD)
-            + self.concept_lower.arena.len()
-            + self.concept_lower.spans.len() * size_of::<LowerSpan>()
-            + self.label_lower.arena.len()
-            + self.label_lower.spans.len() * size_of::<LowerSpan>();
+            + self.concept_index.footprint()
+            + self.label_index.footprint();
 
         tables + derived
     }
@@ -1193,7 +1194,7 @@ impl Context {
             last_incoming: NIL,
             incoming_count: 0,
         });
-        self.concept_lower.push(&name);
+        self.concept_index.push(&name, id);
         self.concept_ids.insert(name, id);
         id
     }
@@ -1211,7 +1212,7 @@ impl Context {
             last_edge: NIL,
             edge_count: 0,
         });
-        self.label_lower.push(&name);
+        self.label_index.push(&name, id);
         self.label_ids.insert(name, id);
         id
     }
@@ -1355,87 +1356,183 @@ fn append_to_chain(
     }
 }
 
-/// One namespace's lowercased names, packed into a private arena — the
-/// derived, allocation-free side of [`Context::resolve`]'s
-/// case-insensitive scan. Kept parallel to the record table it shadows
-/// (entry i lowers name i) and extended on every intern; rebuilt from the
-/// canonical names on load, never persisted. Offsets are usize rather
-/// than u32 because lowercasing can outgrow the offset space the
-/// canonical arena is held to.
+/// One namespace's entry index — the derived, allocation-free machinery
+/// behind [`Context::resolve`]. Every entry spelling (canonical names
+/// now; aliases are designed to join the same index) is stored in
+/// normalized form in one arena, and a character-bigram posting index
+/// over those forms catches near-miss spellings that containment cannot.
+/// Extended on every intern, rebuilt from the canonical names on load,
+/// never persisted. Offsets are usize rather than u32 because
+/// normalization can outgrow the offset space the canonical arena is
+/// held to.
 #[derive(Debug, Default)]
-struct LowerNames {
+struct EntryIndex {
     arena: String,
-    spans: Vec<LowerSpan>,
+    spans: Vec<EntrySpan>,
+    /// Bigram (two chars packed) → indexes into `spans` whose normalized
+    /// form contains it, each span listed once per distinct bigram.
+    bigrams: HashMap<u64, Vec<u32>>,
+    /// Total posting-list entries, kept for O(1) footprint estimates.
+    posting_entries: usize,
 }
 
-/// Where one lowered name sits in [`LowerNames::arena`], with its char
-/// count precomputed for the coverage score.
+/// One entry spelling: where its normalized form sits in the arena, the
+/// precomputed counts its scores need, and which record it resolves to.
 #[derive(Debug, Clone, Copy)]
-struct LowerSpan {
+struct EntrySpan {
     start: usize,
     end: usize,
     chars: usize,
+    /// Distinct bigrams in this spelling — half the Dice denominator.
+    bigram_count: u32,
+    /// The record this spelling resolves to: its own id for a canonical
+    /// name, the canonical's id for an alias.
+    target: u32,
 }
 
-impl LowerNames {
-    fn push(&mut self, name: &str) {
-        // str::to_lowercase, not char-by-char: the two differ (e.g. the
-        // Greek final sigma), and the cue side lowers with the str form.
-        let lowered = name.to_lowercase();
+/// The floor for bigram-overlap matches: Dice below this is noise, not a
+/// near-miss spelling, and is dropped rather than surfacing distant
+/// concepts on every shared 2-gram.
+const DICE_FLOOR: f64 = 0.3;
+
+impl EntryIndex {
+    fn push(&mut self, spelling: &str, target: u32) {
+        let normalized = normalize(spelling);
+        let span_index = claim_id(self.spans.len(), "entry index");
         let start = self.arena.len();
-        self.arena.push_str(&lowered);
-        self.spans.push(LowerSpan {
+        self.arena.push_str(&normalized);
+
+        let mut seen: HashSet<u64> = HashSet::new();
+        for bigram in bigrams_of(&normalized) {
+            if seen.insert(bigram) {
+                self.bigrams.entry(bigram).or_default().push(span_index);
+                self.posting_entries += 1;
+            }
+        }
+        self.spans.push(EntrySpan {
             start,
             end: self.arena.len(),
-            chars: lowered.chars().count(),
+            chars: normalized.chars().count(),
+            bigram_count: seen.len() as u32,
+            target,
         });
     }
 
-    fn get(&self, index: usize) -> (&str, usize) {
-        let span = self.spans[index];
-        (&self.arena[span.start..span.end], span.chars)
+    /// Scores every spelling against `cue` and returns the best score per
+    /// target record. Two tiers share the [0, 1] scale: exact normalized
+    /// match is 1.0 and containment either way scores by character
+    /// coverage of the longer string; spellings that fail containment can
+    /// still match by bigram Dice overlap (near-misses like 青嶺酒蔵 for
+    /// 青嶺酒造), floored at [`DICE_FLOOR`]. A target keeps the best
+    /// score any of its spellings earned.
+    fn resolve(&self, cue: &str) -> HashMap<u32, f64> {
+        let needle = normalize(cue);
+        if needle.is_empty() {
+            return HashMap::new();
+        }
+        let needle_chars = needle.chars().count();
+
+        let mut best: HashMap<u32, f64> = HashMap::new();
+        let record = |target: u32, score: f64, best: &mut HashMap<u32, f64>| {
+            let slot = best.entry(target).or_insert(0.0);
+            if score > *slot {
+                *slot = score;
+            }
+        };
+
+        // Containment tier: a linear scan of the packed normalized forms.
+        // A spelling matched here keeps its coverage score — the fuzzy
+        // tier below is a fallback for spellings containment cannot
+        // catch, not a second opinion on ones it already scored.
+        let mut contained: HashSet<u32> = HashSet::new();
+        for (span_index, span) in self.spans.iter().enumerate() {
+            let haystack = &self.arena[span.start..span.end];
+            let score = if haystack == needle {
+                1.0
+            } else if haystack.contains(needle.as_str()) || needle.contains(haystack) {
+                let shorter = needle_chars.min(span.chars);
+                let longer = needle_chars.max(span.chars);
+                shorter as f64 / longer as f64
+            } else {
+                continue;
+            };
+            contained.insert(span_index as u32);
+            record(span.target, score, &mut best);
+        }
+
+        // Fuzzy tier: only spellings sharing at least one bigram with the
+        // cue are ever touched, via the posting lists.
+        let needle_bigrams: HashSet<u64> = bigrams_of(&needle).collect();
+        if !needle_bigrams.is_empty() {
+            let mut shared: HashMap<u32, u32> = HashMap::new();
+            for bigram in &needle_bigrams {
+                if let Some(postings) = self.bigrams.get(bigram) {
+                    for &span_index in postings {
+                        if !contained.contains(&span_index) {
+                            *shared.entry(span_index).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            for (span_index, count) in shared {
+                let span = self.spans[span_index as usize];
+                let dice = 2.0 * f64::from(count)
+                    / (needle_bigrams.len() + span.bigram_count as usize) as f64;
+                if dice >= DICE_FLOOR {
+                    record(span.target, dice, &mut best);
+                }
+            }
+        }
+        best
+    }
+
+    /// Rough resident bytes of this index, for cache budgeting.
+    fn footprint(&self) -> usize {
+        const MAP_ENTRY_OVERHEAD: usize = 48;
+        self.arena.len()
+            + self.spans.len() * size_of::<EntrySpan>()
+            + self.bigrams.len() * (size_of::<u64>() + MAP_ENTRY_OVERHEAD)
+            + self.posting_entries * size_of::<u32>()
     }
 }
 
-/// Shared scorer behind [`Context::resolve`] and [`Context::resolve_label`]:
-/// exact match scores 1.0, containment either way scores by character
-/// coverage of the longer string, everything else is dropped. Results come
-/// back best first, ties broken alphabetically. Takes each candidate as
-/// (original name, lowered name, lowered char count) so the scan itself
-/// allocates only for actual matches.
-fn lexical_resolutions<'a>(
-    cue: &str,
-    names: impl Iterator<Item = (&'a str, &'a str, usize)>,
-) -> Vec<Resolution> {
-    let needle = cue.to_lowercase();
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    let needle_chars = needle.chars().count();
+/// The one normalization both sides of every entry comparison go
+/// through: Unicode NFKC (folding full-width romaji, half-width kana,
+/// and compatibility forms), lowercasing, and katakana → hiragana, so
+/// "Ａｐｐｌｅ" meets "apple" and "リンゴ" meets "りんご". Applying the
+/// same function to stored spellings and cues is what makes the folds
+/// safe — neither side is ever compared raw against a folded form.
+fn normalize(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    name.nfkc()
+        .flat_map(char::to_lowercase)
+        .map(fold_kana)
+        .collect()
+}
 
-    let mut resolutions: Vec<Resolution> = Vec::new();
-    for (name, lower, lower_chars) in names {
-        let score = if lower == needle {
-            1.0
-        } else if lower.contains(needle.as_str()) || needle.contains(lower) {
-            let shorter = needle_chars.min(lower_chars);
-            let longer = needle_chars.max(lower_chars);
-            shorter as f64 / longer as f64
-        } else {
-            continue;
-        };
-        resolutions.push(Resolution {
-            name: name.to_string(),
-            score,
-        });
+/// Katakana → hiragana (U+30A1..=U+30F6 sit 0x60 above U+3041..=U+3096).
+fn fold_kana(ch: char) -> char {
+    match ch {
+        '\u{30A1}'..='\u{30F6}' => char::from_u32(ch as u32 - 0x60).unwrap_or(ch),
+        _ => ch,
     }
+}
 
+/// Adjacent character pairs of a normalized form, packed into u64 keys.
+fn bigrams_of(text: &str) -> impl Iterator<Item = u64> {
+    text.chars()
+        .zip(text.chars().skip(1))
+        .map(|(a, b)| ((a as u64) << 32) | b as u64)
+}
+
+/// Shared ordering of [`Context::resolve`] / [`Context::resolve_label`]
+/// output: best first, ties broken alphabetically.
+fn sort_resolutions(resolutions: &mut [Resolution]) {
     resolutions.sort_by(|a, b| {
         b.score
             .total_cmp(&a.score)
             .then_with(|| a.name.cmp(&b.name))
     });
-    resolutions
 }
 
 /// Heap entry for [`Context::activate`]: max-ordered by activation, ties
@@ -1575,8 +1672,8 @@ impl Context {
             label_ids: HashMap::new(),
             source_ids: HashMap::new(),
             edge_ids: HashMap::new(),
-            concept_lower: LowerNames::default(),
-            label_lower: LowerNames::default(),
+            concept_index: EntryIndex::default(),
+            label_index: EntryIndex::default(),
         };
         context.rebuild_indexes()?;
         Ok(context)
@@ -1590,7 +1687,7 @@ impl Context {
         // must be unique per namespace or lookups would be ambiguous.
         for (id, record) in self.concepts.iter().enumerate() {
             let name = checked_arena_str(&self.arena, record.name_offset, record.name_len)?;
-            self.concept_lower.push(name);
+            self.concept_index.push(name, id as u32);
             if self
                 .concept_ids
                 .insert(name.to_string(), id as u32)
@@ -1601,7 +1698,7 @@ impl Context {
         }
         for (id, record) in self.labels.iter().enumerate() {
             let name = checked_arena_str(&self.arena, record.name_offset, record.name_len)?;
-            self.label_lower.push(name);
+            self.label_index.push(name, id as u32);
             if self.label_ids.insert(name.to_string(), id as u32).is_some() {
                 return Err(CorruptImage("two label records share one name"));
             }
@@ -2520,6 +2617,44 @@ mod tests {
 
         assert!(context.resolve("ぶどう").is_empty());
         assert!(context.resolve("").is_empty());
+    }
+
+    #[test]
+    fn resolve_normalizes_width_case_and_kana() {
+        let mut context = Context::default();
+        context.associate("Apple", "分類", "果物", 1.0).unwrap();
+        context.associate("りんご", "分類", "果物", 1.0).unwrap();
+
+        // Full-width romaji folds onto the stored ASCII spelling ...
+        let fullwidth = context.resolve("Ａｐｐｌｅ");
+        assert_eq!(fullwidth[0].name, "Apple");
+        assert_eq!(fullwidth[0].score, 1.0);
+
+        // ... and katakana folds onto hiragana. The stored spelling is
+        // returned, not the cue's variant.
+        let katakana = context.resolve("リンゴ");
+        assert_eq!(katakana[0].name, "りんご");
+        assert_eq!(katakana[0].score, 1.0);
+    }
+
+    #[test]
+    fn resolve_finds_near_miss_spellings_by_bigram_overlap() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "代表銘柄", "青嶺", 1.0)
+            .unwrap();
+
+        // 蔵 for 造: containment fails both ways, but two of three
+        // bigrams survive the typo — and that fuzzy hit outranks the
+        // loose containment match on the brand name 青嶺 (0.5).
+        let hits = context.resolve("青嶺酒蔵");
+        assert_eq!(hits[0].name, "青嶺酒造");
+        assert!((hits[0].score - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(hits[1].name, "青嶺");
+
+        // Below the Dice floor nothing surfaces: an unrelated spelling
+        // sharing no bigrams stays out entirely.
+        assert!(context.resolve("辛口純米").is_empty());
     }
 
     #[test]
