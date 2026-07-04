@@ -574,6 +574,18 @@ impl AppState {
         let total = passages.len() as f32;
         let average_length =
             (passages.iter().map(|(.., length)| length).sum::<f32>() / total).max(1.0);
+        // Document frequencies once per query term, not per (term ×
+        // passage) pair — IDF only reads how many passages carry the term.
+        let document_frequencies: HashMap<u64, f32> = query_grams
+            .iter()
+            .map(|&gram| {
+                let carriers = passages
+                    .iter()
+                    .filter(|(_, _, frequencies, _)| frequencies.contains_key(&gram))
+                    .count() as f32;
+                (gram, carriers)
+            })
+            .collect();
 
         let mut scored: Vec<(String, f32, String)> = passages
             .iter()
@@ -583,10 +595,7 @@ impl AppState {
                     let Some(&frequency) = frequencies.get(gram) else {
                         continue;
                     };
-                    let document_frequency = passages
-                        .iter()
-                        .filter(|(_, _, other, _)| other.contains_key(gram))
-                        .count() as f32;
+                    let document_frequency = document_frequencies[gram];
                     let idf = (1.0
                         + (total - document_frequency + 0.5) / (document_frequency + 0.5))
                         .ln();
@@ -964,11 +973,6 @@ impl AppState {
         Ok(result)
     }
 
-    /// Evicts least-recently-used, unpinned, hot contexts until their
-    /// resident estimate fits the budget. `except` (the context just
-    /// used) is never evicted, so a single oversized context cannot
-    /// thrash. Dirty contexts are persisted before eviction; if that
-    /// save fails they stay resident rather than losing writes.
     /// The entry's vector store, loaded from its sidecar on first use
     /// and held until refresh replaces it or eviction clears it.
     fn entry_vectors(&self, entry: &Entry, stem: &str) -> Arc<VectorStore> {
@@ -983,6 +987,11 @@ impl AppState {
         }
     }
 
+    /// Evicts least-recently-used, unpinned, hot contexts until their
+    /// resident estimate fits the budget. `except` (the context just
+    /// used) is never evicted, so a single oversized context cannot
+    /// thrash. Dirty contexts are persisted before eviction; if that
+    /// save fails they stay resident rather than losing writes.
     fn enforce_budget(&self, except: &str) {
         let mut candidates: Vec<(u64, usize, String, Arc<Entry>)> = Vec::new();
         let mut total = 0usize;
@@ -1270,6 +1279,36 @@ mod tests {
         assert_eq!(name_from_stem("%zz"), None);
         // Undecodable UTF-8 is refused rather than lossily replaced.
         assert_eq!(name_from_stem("%FF%FE"), None);
+    }
+
+    #[test]
+    fn text_terms_mix_ascii_words_with_bigram_runs() {
+        let pair = |a: char, b: char| ((a as u64) << 32) | b as u64;
+
+        // An ASCII run is one whole-word term; extra separators change
+        // nothing, and different words hash apart.
+        assert_eq!(text_terms("word").len(), 1);
+        assert_eq!(text_terms("ambition must"), text_terms("ambition  must"));
+        assert_ne!(text_terms("word"), text_terms("words"));
+
+        // Undelimited text contributes adjacent pairs per run; a run of
+        // one contributes the lone character.
+        assert_eq!(
+            text_terms("仕込み"),
+            vec![pair('仕', '込'), pair('込', 'み')]
+        );
+        assert_eq!(text_terms("水"), vec!['水' as u64]);
+
+        // Punctuation breaks the run: no pair straddles the comma.
+        assert_eq!(text_terms("水、源"), vec!['水' as u64, '源' as u64]);
+
+        // A script switch breaks the run too: 第10篇 is 第 + word "10"
+        // + 篇, never a pair that straddles the digits.
+        let mixed = text_terms("第10篇");
+        assert_eq!(mixed.len(), 3);
+        assert!(mixed.contains(&('第' as u64)));
+        assert!(mixed.contains(&('篇' as u64)));
+        assert!(mixed.iter().any(|term| term & (1 << 63) != 0));
     }
 
     #[test]

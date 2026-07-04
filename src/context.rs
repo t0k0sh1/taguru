@@ -1136,17 +1136,7 @@ impl Context {
     /// Only the fuzzy tier is affected; exact and containment matches
     /// are never floored.
     pub fn resolve_with_floor(&self, cue: &str, dice_floor: f64) -> Vec<Resolution> {
-        let mut resolutions: Vec<Resolution> = self
-            .concept_index
-            .resolve(cue, dice_floor.clamp(0.0, 1.0))
-            .into_iter()
-            .map(|(id, score)| Resolution {
-                name: self.concept_name(id).to_string(),
-                score,
-            })
-            .collect();
-        sort_resolutions(&mut resolutions);
-        resolutions
+        self.scored_resolutions(&self.concept_index, Self::concept_name, cue, dice_floor)
     }
 
     /// [`Context::resolve`] for relation labels instead of concepts — the
@@ -1163,12 +1153,24 @@ impl Context {
     /// [`Context::resolve_label`] with an explicit fuzzy floor for this
     /// one call, as [`Context::resolve_with_floor`].
     pub fn resolve_label_with_floor(&self, cue: &str, dice_floor: f64) -> Vec<Resolution> {
-        let mut resolutions: Vec<Resolution> = self
-            .label_index
+        self.scored_resolutions(&self.label_index, Self::label_name, cue, dice_floor)
+    }
+
+    /// The shared scoring behind both resolve entry points: score the
+    /// cue against one namespace's entry index, materialize the winning
+    /// records as named resolutions, best first.
+    fn scored_resolutions(
+        &self,
+        index: &EntryIndex,
+        name_of: fn(&Self, u32) -> &str,
+        cue: &str,
+        dice_floor: f64,
+    ) -> Vec<Resolution> {
+        let mut resolutions: Vec<Resolution> = index
             .resolve(cue, dice_floor.clamp(0.0, 1.0))
             .into_iter()
             .map(|(id, score)| Resolution {
-                name: self.label_name(id).to_string(),
+                name: name_of(self, id).to_string(),
                 score,
             })
             .collect();
@@ -1256,29 +1258,30 @@ impl Context {
     /// (青嶺 the brand vs 青嶺酒造 the brewery). Aliases pointing at one
     /// record are intentional and never reported.
     pub fn similar_concepts(&self, dice_floor: f64) -> Vec<(String, String, f64)> {
-        self.concept_index
-            .twins(dice_floor.clamp(0.0, 1.0))
-            .into_iter()
-            .map(|(a, b, dice)| {
-                (
-                    self.concept_name(a).to_string(),
-                    self.concept_name(b).to_string(),
-                    dice,
-                )
-            })
-            .collect()
+        self.scored_twins(&self.concept_index, Self::concept_name, dice_floor)
     }
 
     /// [`Context::similar_concepts`] for relation labels — where forks
     /// hurt most, since label-pinned queries silently miss the twin.
     pub fn similar_labels(&self, dice_floor: f64) -> Vec<(String, String, f64)> {
-        self.label_index
+        self.scored_twins(&self.label_index, Self::label_name, dice_floor)
+    }
+
+    /// The shared sweep behind both twin detectors: run one namespace's
+    /// entry index name-against-name and materialize the flagged pairs.
+    fn scored_twins(
+        &self,
+        index: &EntryIndex,
+        name_of: fn(&Self, u32) -> &str,
+        dice_floor: f64,
+    ) -> Vec<(String, String, f64)> {
+        index
             .twins(dice_floor.clamp(0.0, 1.0))
             .into_iter()
             .map(|(a, b, dice)| {
                 (
-                    self.label_name(a).to_string(),
-                    self.label_name(b).to_string(),
+                    name_of(self, a).to_string(),
+                    name_of(self, b).to_string(),
                     dice,
                 )
             })
@@ -1482,36 +1485,15 @@ impl Context {
         alias: impl Into<String>,
         canonical: &str,
     ) -> Result<(), AliasError> {
-        let alias = alias.into();
-        let Some(&target) = self.concept_ids.get(canonical) else {
-            return Err(AliasError::UnknownCanonical);
-        };
-        if let Some(&existing) = self.concept_ids.get(&alias) {
-            return if existing == target {
-                Ok(())
-            } else {
-                Err(AliasError::Conflict)
-            };
-        }
-        if !ids_left(self.concept_aliases.len(), 1) {
-            return Err(AliasError::Full(ContextFull(
-                "the concept alias table is out of u32 ids",
-            )));
-        }
-        if !arena_fits(self.arena.len(), alias.len()) {
-            return Err(AliasError::Full(ContextFull(
-                "the string arena is out of offset space",
-            )));
-        }
-        let (name_offset, name_len) = intern_name(&mut self.arena, &alias);
-        self.concept_aliases.push(AliasRecord {
-            name_offset,
-            name_len,
-            target,
-        });
-        self.concept_index.push(&alias, target);
-        self.concept_ids.insert(alias, target);
-        Ok(())
+        add_alias(
+            &mut self.arena,
+            &mut self.concept_aliases,
+            &mut self.concept_index,
+            &mut self.concept_ids,
+            alias.into(),
+            canonical,
+            "the concept alias table is out of u32 ids",
+        )
     }
 
     /// [`Context::add_concept_alias`] for relation labels — the label
@@ -1528,36 +1510,15 @@ impl Context {
         alias: impl Into<String>,
         canonical: &str,
     ) -> Result<(), AliasError> {
-        let alias = alias.into();
-        let Some(&target) = self.label_ids.get(canonical) else {
-            return Err(AliasError::UnknownCanonical);
-        };
-        if let Some(&existing) = self.label_ids.get(&alias) {
-            return if existing == target {
-                Ok(())
-            } else {
-                Err(AliasError::Conflict)
-            };
-        }
-        if !ids_left(self.label_aliases.len(), 1) {
-            return Err(AliasError::Full(ContextFull(
-                "the label alias table is out of u32 ids",
-            )));
-        }
-        if !arena_fits(self.arena.len(), alias.len()) {
-            return Err(AliasError::Full(ContextFull(
-                "the string arena is out of offset space",
-            )));
-        }
-        let (name_offset, name_len) = intern_name(&mut self.arena, &alias);
-        self.label_aliases.push(AliasRecord {
-            name_offset,
-            name_len,
-            target,
-        });
-        self.label_index.push(&alias, target);
-        self.label_ids.insert(alias, target);
-        Ok(())
+        add_alias(
+            &mut self.arena,
+            &mut self.label_aliases,
+            &mut self.label_index,
+            &mut self.label_ids,
+            alias.into(),
+            canonical,
+            "the label alias table is out of u32 ids",
+        )
     }
 
     /// Withdraws one source's contributions: every attribution it made
@@ -1618,26 +1579,28 @@ impl Context {
     /// vocabulary as a unit (export names, translate, re-import) never
     /// have to walk the records.
     pub fn concept_aliases(&self) -> Vec<(&str, &str)> {
-        self.concept_aliases
-            .iter()
-            .map(|record| {
-                (
-                    self.arena_str(record.name_offset, record.name_len),
-                    self.concept_name(record.target),
-                )
-            })
-            .collect()
+        self.alias_pairs(&self.concept_aliases, Self::concept_name)
     }
 
     /// Every label alias as (alias, canonical) pairs in registration
     /// order.
     pub fn label_aliases(&self) -> Vec<(&str, &str)> {
-        self.label_aliases
+        self.alias_pairs(&self.label_aliases, Self::label_name)
+    }
+
+    /// Materializes one namespace's alias table as (alias, canonical)
+    /// name pairs in registration order.
+    fn alias_pairs(
+        &self,
+        records: &[AliasRecord],
+        name_of: fn(&Self, u32) -> &str,
+    ) -> Vec<(&str, &str)> {
+        records
             .iter()
             .map(|record| {
                 (
                     self.arena_str(record.name_offset, record.name_len),
-                    self.label_name(record.target),
+                    name_of(self, record.target),
                 )
             })
             .collect()
@@ -1797,6 +1760,53 @@ fn intern_name(arena: &mut Vec<u8>, name: &str) -> (u32, u32) {
     );
     arena.extend_from_slice(name.as_bytes());
     (offset as u32, name.len() as u32)
+}
+
+/// Registers one alternative spelling in one namespace — the shared
+/// mechanics behind [`Context::add_concept_alias`] and
+/// [`Context::add_label_alias`], which differ only in which alias
+/// table, entry index, and lookup map make up their namespace.
+/// `full_message` names the alias table in the capacity error. All
+/// alias semantics live here: resolution of `canonical` through the
+/// lookup map (so aliasing to an alias lands on the true canonical
+/// record), idempotent re-registration, conflict refusal, and the
+/// all-or-nothing capacity checks before anything mutates.
+fn add_alias(
+    arena: &mut Vec<u8>,
+    aliases: &mut Vec<AliasRecord>,
+    index: &mut EntryIndex,
+    ids: &mut HashMap<String, u32>,
+    alias: String,
+    canonical: &str,
+    full_message: &'static str,
+) -> Result<(), AliasError> {
+    let Some(&target) = ids.get(canonical) else {
+        return Err(AliasError::UnknownCanonical);
+    };
+    if let Some(&existing) = ids.get(&alias) {
+        return if existing == target {
+            Ok(())
+        } else {
+            Err(AliasError::Conflict)
+        };
+    }
+    if !ids_left(aliases.len(), 1) {
+        return Err(AliasError::Full(ContextFull(full_message)));
+    }
+    if !arena_fits(arena.len(), alias.len()) {
+        return Err(AliasError::Full(ContextFull(
+            "the string arena is out of offset space",
+        )));
+    }
+    let (name_offset, name_len) = intern_name(arena, &alias);
+    aliases.push(AliasRecord {
+        name_offset,
+        name_len,
+        target,
+    });
+    index.push(&alias, target);
+    ids.insert(alias, target);
+    Ok(())
 }
 
 /// Appends `edge_id` at the tail of one chain, updating the chain's
@@ -3371,6 +3381,81 @@ mod tests {
         assert_eq!(
             context.concept_aliases(),
             vec![("機構", "情報処理推進機構"), ("kikou", "情報処理推進機構")]
+        );
+    }
+
+    #[test]
+    fn label_alias_conflicts_and_unknowns_are_rejected() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "創業年", "1907年", 1.0)
+            .unwrap();
+        context
+            .associate("青嶺酒造", "設立地", "霧沢町", 1.0)
+            .unwrap();
+
+        assert_eq!(
+            context.add_label_alias("操業開始", "存在しないラベル"),
+            Err(AliasError::UnknownCanonical)
+        );
+        // Two spellings that both already exist as labels cannot be
+        // aliased together — that would be a merge.
+        assert_eq!(
+            context.add_label_alias("創業年", "設立地"),
+            Err(AliasError::Conflict)
+        );
+        // Re-registering the same mapping is idempotent; re-pointing the
+        // alias elsewhere is a conflict.
+        assert_eq!(context.add_label_alias("設立年", "創業年"), Ok(()));
+        assert_eq!(context.add_label_alias("設立年", "創業年"), Ok(()));
+        assert_eq!(
+            context.add_label_alias("設立年", "設立地"),
+            Err(AliasError::Conflict)
+        );
+        // Aliasing to an alias resolves to the true canonical record.
+        assert_eq!(context.add_label_alias("founded", "設立年"), Ok(()));
+        assert_eq!(
+            context.label_aliases(),
+            vec![("設立年", "創業年"), ("founded", "創業年")]
+        );
+        // The namespaces stay separate: a label spelling is not a
+        // concept spelling, so it cannot anchor a concept alias.
+        assert_eq!(
+            context.add_concept_alias("蔵の誕生", "創業年"),
+            Err(AliasError::UnknownCanonical)
+        );
+    }
+
+    #[test]
+    fn resolve_label_floor_is_tunable_per_context_and_per_call() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "仕込み水源", "雲居山", 1.0)
+            .unwrap();
+
+        // One shared informative bigram of 4+4: Dice = 0.25 — under the
+        // 0.3 default, so the fuzzy cue misses without an override.
+        let cue = "水源はどこ";
+        assert!(
+            !context
+                .resolve_label(cue)
+                .iter()
+                .any(|r| r.name == "仕込み水源")
+        );
+        assert!(
+            context
+                .resolve_label_with_floor(cue, 0.2)
+                .iter()
+                .any(|r| r.name == "仕込み水源")
+        );
+        // The context floor governs the label namespace exactly as it
+        // does concepts.
+        context.set_dice_floor(Some(0.2));
+        assert!(
+            context
+                .resolve_label(cue)
+                .iter()
+                .any(|r| r.name == "仕込み水源")
         );
     }
 

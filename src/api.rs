@@ -797,43 +797,6 @@ fn resolve_with_fallback(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn merge_keeps_lexical_first_and_deduplicates_names() {
-        let lexical = vec![
-            Resolution {
-                name: "杜氏の職".to_string(),
-                score: 0.33,
-            },
-            Resolution {
-                name: "蔵".to_string(),
-                score: 0.25,
-            },
-        ];
-        let semantic = vec![
-            ("蔵人".to_string(), 0.55_f32),
-            ("蔵".to_string(), 0.48),
-            ("杜氏の職".to_string(), 0.41),
-        ];
-        let merged = merge_tiers(lexical, semantic);
-        let view: Vec<(&str, &str)> = merged
-            .iter()
-            .map(|candidate| (candidate.name.as_str(), candidate.tier))
-            .collect();
-        assert_eq!(
-            view,
-            vec![
-                ("杜氏の職", "lexical"),
-                ("蔵", "lexical"),
-                ("蔵人", "semantic"),
-            ]
-        );
-    }
-}
-
 pub async fn resolve(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -887,8 +850,11 @@ pub async fn refresh_embeddings(
 pub async fn labels(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| {
-        let labels: Vec<String> = context.labels().into_iter().map(String::from).collect();
-        labels
+        context
+            .labels()
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>()
     }) {
         Ok(result) => ok(result, started_at),
         Err(failure) => access_error(failure, &name, started_at),
@@ -912,5 +878,74 @@ pub async fn unreachable_from(
     }) {
         Ok(result) => ok(result, started_at),
         Err(failure) => access_error(failure, &name, started_at),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assoc(object: &str, weight: f64) -> Association {
+        Association {
+            subject: "s".to_string(),
+            label: "l".to_string(),
+            object: object.to_string(),
+            weight,
+            attributions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn page_keeps_insertion_order_within_limit_and_strongest_past_it() {
+        let matches = vec![assoc("a", 1.0), assoc("b", -3.0), assoc("c", 2.0)];
+
+        // Within the limit nothing is reordered or dropped.
+        let within = page(matches.clone(), Some(3));
+        assert_eq!(within.total, 3);
+        let objects: Vec<&str> = within.matches.iter().map(|m| m.object.as_str()).collect();
+        assert_eq!(objects, vec!["a", "b", "c"]);
+
+        // Past it, magnitude ranks — the negative fact is the strongest
+        // knowledge — and total still reports the untruncated count.
+        let truncated = page(matches, Some(2));
+        assert_eq!(truncated.total, 3);
+        let objects: Vec<&str> = truncated
+            .matches
+            .iter()
+            .map(|m| m.object.as_str())
+            .collect();
+        assert_eq!(objects, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn merge_keeps_lexical_first_and_deduplicates_names() {
+        let lexical = vec![
+            Resolution {
+                name: "杜氏の職".to_string(),
+                score: 0.33,
+            },
+            Resolution {
+                name: "蔵".to_string(),
+                score: 0.25,
+            },
+        ];
+        let semantic = vec![
+            ("蔵人".to_string(), 0.55_f32),
+            ("蔵".to_string(), 0.48),
+            ("杜氏の職".to_string(), 0.41),
+        ];
+        let merged = merge_tiers(lexical, semantic);
+        let view: Vec<(&str, &str)> = merged
+            .iter()
+            .map(|candidate| (candidate.name.as_str(), candidate.tier))
+            .collect();
+        assert_eq!(
+            view,
+            vec![
+                ("杜氏の職", "lexical"),
+                ("蔵", "lexical"),
+                ("蔵人", "semantic"),
+            ]
+        );
     }
 }

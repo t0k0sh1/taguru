@@ -423,117 +423,189 @@ fn tool_definitions() -> Vec<Value> {
         .collect()
 }
 
-/// Maps one tool call onto its HTTP request.
+/// Executes one tool call: maps it onto its HTTP request, then runs it.
 fn call_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<String, String> {
+    let (method, path, body) = route_tool(name, arguments)?;
+    bridge.call(method, &path, body)
+}
+
+/// Maps one tool call onto (method, path, body) — pure, so the mapping
+/// from advertised tools to HTTP requests is testable without a server.
+fn route_tool(
+    name: &str,
+    arguments: &Value,
+) -> Result<(&'static str, String, Option<Value>), String> {
     let context_path = |key: &str| -> Result<String, String> {
         Ok(format!("/contexts/{}", segment(need(arguments, key)?)))
     };
-    match name {
-        "get_protocol" => bridge.call("GET", "/protocol", None),
-        "list_contexts" => bridge.call("GET", "/contexts", None),
-        "create_context" => bridge.call(
+    Ok(match name {
+        "get_protocol" => ("GET", "/protocol".to_string(), None),
+        "list_contexts" => ("GET", "/contexts".to_string(), None),
+        "create_context" => (
             "PUT",
-            &context_path("name")?,
+            context_path("name")?,
             Some(pick(
                 arguments,
                 &["description", "pinned", "dice_floor", "semantic_floor"],
             )),
         ),
-        "update_context" => bridge.call(
+        "update_context" => (
             "PATCH",
-            &context_path("name")?,
+            context_path("name")?,
             Some(pick(
                 arguments,
                 &["description", "pinned", "dice_floor", "semantic_floor"],
             )),
         ),
-        "delete_context" => bridge.call("DELETE", &context_path("name")?, None),
-        "add_associations" => bridge.call(
+        "delete_context" => ("DELETE", context_path("name")?, None),
+        "add_associations" => (
             "POST",
-            &format!("{}/associations", context_path("context")?),
+            format!("{}/associations", context_path("context")?),
             Some(arguments.get("associations").cloned().unwrap_or(json!([]))),
         ),
-        "store_passages" => bridge.call(
+        "store_passages" => (
             "POST",
-            &format!("{}/sources", context_path("context")?),
+            format!("{}/sources", context_path("context")?),
             Some(pick(arguments, &["passages"])),
         ),
-        "lookup_passages" => bridge.call(
+        "lookup_passages" => (
             "POST",
-            &format!("{}/sources/lookup", context_path("context")?),
+            format!("{}/sources/lookup", context_path("context")?),
             Some(pick(arguments, &["sources"])),
         ),
-        "resolve" => bridge.call(
+        "resolve" => (
             "POST",
-            &format!("{}/resolve", context_path("context")?),
+            format!("{}/resolve", context_path("context")?),
             Some(pick(arguments, &["cue", "dice_floor", "semantic_floor"])),
         ),
-        "resolve_label" => bridge.call(
+        "resolve_label" => (
             "POST",
-            &format!("{}/resolve_label", context_path("context")?),
+            format!("{}/resolve_label", context_path("context")?),
             Some(pick(arguments, &["cue", "dice_floor", "semantic_floor"])),
         ),
-        "describe" => bridge.call(
+        "describe" => (
             "POST",
-            &format!("{}/describe", context_path("context")?),
+            format!("{}/describe", context_path("context")?),
             Some(pick(arguments, &["concept"])),
         ),
-        "query" => bridge.call(
+        "query" => (
             "POST",
-            &format!("{}/query", context_path("context")?),
+            format!("{}/query", context_path("context")?),
             Some(pick(arguments, &["subject", "label", "object", "limit"])),
         ),
-        "recall" => bridge.call(
+        "recall" => (
             "POST",
-            &format!("{}/recall", context_path("context")?),
+            format!("{}/recall", context_path("context")?),
             Some(pick(arguments, &["cue", "limit"])),
         ),
-        "activate" => bridge.call(
+        "activate" => (
             "POST",
-            &format!("{}/activate", context_path("context")?),
+            format!("{}/activate", context_path("context")?),
             Some(pick(arguments, &["origins", "decay", "limit"])),
         ),
-        "explore" => bridge.call(
+        "explore" => (
             "POST",
-            &format!("{}/explore", context_path("context")?),
+            format!("{}/explore", context_path("context")?),
             Some(pick(arguments, &["origins", "max_depth"])),
         ),
-        "list_labels" => bridge.call("GET", &format!("{}/labels", context_path("context")?), None),
-        "get_aliases" => bridge.call(
-            "GET",
-            &format!("{}/aliases", context_path("context")?),
-            None,
-        ),
-        "add_aliases" => bridge.call(
+        "list_labels" => ("GET", format!("{}/labels", context_path("context")?), None),
+        "get_aliases" => ("GET", format!("{}/aliases", context_path("context")?), None),
+        "add_aliases" => (
             "POST",
-            &format!("{}/aliases", context_path("context")?),
+            format!("{}/aliases", context_path("context")?),
             Some(pick(arguments, &["concepts", "labels"])),
         ),
-        "retract_source" => bridge.call(
+        "retract_source" => (
             "POST",
-            &format!("{}/sources/retract", context_path("context")?),
+            format!("{}/sources/retract", context_path("context")?),
             Some(pick(arguments, &["source"])),
         ),
-        "search_passages" => bridge.call(
+        "search_passages" => (
             "POST",
-            &format!("{}/sources/search", context_path("context")?),
+            format!("{}/sources/search", context_path("context")?),
             Some(pick(arguments, &["query", "limit"])),
         ),
-        "refresh_embeddings" => bridge.call(
+        "refresh_embeddings" => (
             "POST",
-            &format!("{}/embeddings/refresh", context_path("context")?),
+            format!("{}/embeddings/refresh", context_path("context")?),
             Some(json!({})),
         ),
-        "audit_vocabulary" => bridge.call(
+        "audit_vocabulary" => (
             "POST",
-            &format!("{}/vocabulary/audit", context_path("context")?),
+            format!("{}/vocabulary/audit", context_path("context")?),
             Some(pick(arguments, &["dice_floor", "cosine_floor"])),
         ),
-        "audit_coverage" => bridge.call(
+        "audit_coverage" => (
             "POST",
-            &format!("{}/unreachable_from", context_path("context")?),
+            format!("{}/unreachable_from", context_path("context")?),
             Some(pick(arguments, &["origins"])),
         ),
-        _ => Err(format!("unknown tool '{name}'")),
+        _ => return Err(format!("unknown tool '{name}'")),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wiring invariant a new tool is most likely to break: every
+    /// advertised tool definition must route to an HTTP request. An
+    /// argument object carrying every required key satisfies whichever
+    /// subset each tool needs.
+    #[test]
+    fn every_advertised_tool_routes_to_a_request() {
+        let arguments = json!({
+            "name": "ctx", "context": "ctx", "cue": "x", "concept": "x",
+            "origins": ["x"], "associations": [], "passages": {},
+            "sources": ["s"], "source": "s", "query": "q",
+        });
+        for tool in tool_definitions() {
+            let name = tool["name"].as_str().expect("definitions carry names");
+            let routed = route_tool(name, &arguments);
+            assert!(routed.is_ok(), "tool '{name}' does not route: {routed:?}");
+            let (method, path, _) = routed.unwrap();
+            assert!(
+                matches!(method, "GET" | "PUT" | "PATCH" | "POST" | "DELETE"),
+                "tool '{name}' uses unknown method {method}"
+            );
+            assert!(path.starts_with('/'), "tool '{name}' path: {path}");
+        }
+    }
+
+    #[test]
+    fn unknown_tools_and_missing_arguments_are_refused() {
+        assert_eq!(
+            route_tool("no_such_tool", &json!({})),
+            Err("unknown tool 'no_such_tool'".to_string())
+        );
+        // A context-scoped tool without its context argument names what
+        // is missing instead of building a broken path.
+        assert_eq!(
+            route_tool("describe", &json!({"concept": "x"})),
+            Err("missing required argument 'context'".to_string())
+        );
+    }
+
+    /// Context names arrive as URL path segments; anything outside the
+    /// unreserved set must be percent-encoded, byte by byte.
+    #[test]
+    fn context_names_are_percent_encoded_into_one_segment() {
+        let (_, path, _) = route_tool("list_labels", &json!({"context": "日本 語/酒"})).unwrap();
+        let segment = path
+            .strip_prefix("/contexts/")
+            .and_then(|rest| rest.strip_suffix("/labels"))
+            .expect("path shape");
+        assert!(!segment.contains('/'), "slash must be encoded: {path}");
+        assert!(!segment.contains(' '), "space must be encoded: {path}");
+        assert_eq!(segment, "%E6%97%A5%E6%9C%AC%20%E8%AA%9E%2F%E9%85%92");
+    }
+
+    #[test]
+    fn pick_copies_only_present_non_null_keys() {
+        let arguments = json!({"cue": "x", "limit": null, "extra": 7});
+        assert_eq!(
+            pick(&arguments, &["cue", "limit", "absent"]),
+            json!({"cue": "x"})
+        );
     }
 }

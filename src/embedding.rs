@@ -283,4 +283,14 @@ mod tests {
         let b = vec![-a[1], a[0]];
         assert!(similarity(&a, &b).abs() < 1e-6);
     }
+
+    #[test]
+    fn fnv1a_is_pinned_to_the_published_test_vectors() {
+        // Gloss-change detection stores these hashes in the vector
+        // sidecar; any drift would silently re-embed every name. Pin
+        // the function to the official FNV-1a 64-bit vectors.
+        assert_eq!(fnv1a(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a("a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a("foobar"), 0x8594_4171_f739_67e8);
+    }
 }
