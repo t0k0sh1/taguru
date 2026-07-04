@@ -645,9 +645,38 @@ fn lexical_tier(resolutions: Vec<Resolution>) -> Vec<TieredResolution> {
         .collect()
 }
 
-/// The full entry ladder: lexical tiers first; only when they find
-/// nothing does the semantic fallback run (one embedding call for the
-/// cue against the context's vector sidecar).
+/// Lexical coverage at or above this is a confident entry — the cue is
+/// (at least half of) a stored spelling — and the semantic tier is
+/// skipped. Below it, a lexical hit is a fragment collision (蔵 inside
+/// 祭りを主催する蔵元 scores 0.11) and MUST NOT silence the semantic
+/// tier: in a dense vocabulary some substring almost always matches
+/// something, and letting it gate the entry buried 0.55-cosine answers
+/// behind 0.11-coverage noise.
+const LEXICAL_CONFIDENCE: f64 = 0.5;
+
+/// Merges the two entry tiers: lexical candidates keep the front (their
+/// scores are string evidence, best first), semantic candidates append
+/// for names not already present. Scales stay incomparable, which is
+/// what the tier field is for.
+fn merge_tiers(lexical: Vec<Resolution>, semantic: Vec<(String, f32)>) -> Vec<TieredResolution> {
+    let mut merged = lexical_tier(lexical);
+    for (name, score) in semantic {
+        if merged.iter().any(|candidate| candidate.name == name) {
+            continue;
+        }
+        merged.push(TieredResolution {
+            name,
+            score: f64::from(score),
+            tier: "semantic",
+        });
+    }
+    merged
+}
+
+/// The full entry ladder: lexical tiers first; the semantic tier runs
+/// whenever they came back empty OR merely fragment-weak (best score
+/// under [`LEXICAL_CONFIDENCE`]), and its candidates are appended after
+/// the lexical ones.
 fn resolve_with_fallback(
     state: &AppState,
     name: &str,
@@ -664,7 +693,10 @@ fn resolve_with_fallback(
         Ok(result) => result,
         Err(failure) => return access_error(failure, name, started_at),
     };
-    if !lexical.is_empty() {
+    let confident = lexical
+        .first()
+        .is_some_and(|best| best.score >= LEXICAL_CONFIDENCE);
+    if confident {
         return ok(lexical_tier(lexical), started_at);
     }
 
@@ -674,22 +706,56 @@ fn resolve_with_fallback(
         state.semantic_resolve(name, &request.cue, labels, request.semantic_floor)
     }) {
         None => not_found(name, started_at),
-        Some(Ok(semantic)) => ok(
-            semantic
-                .into_iter()
-                .map(|(name, score)| TieredResolution {
-                    name,
-                    score: f64::from(score),
-                    tier: "semantic",
-                })
-                .collect::<Vec<_>>(),
-            started_at,
-        ),
+        Some(Ok(semantic)) => ok(merge_tiers(lexical, semantic), started_at),
+        // The semantic tier is enrichment once ANY lexical candidate
+        // exists: degrade to the weak lexical results and log, rather
+        // than failing an answerable request over a provider hiccup.
+        Some(Err(message)) if !lexical.is_empty() => {
+            eprintln!("semantic entry failed (serving weak lexical results): {message}");
+            ok(lexical_tier(lexical), started_at)
+        }
         Some(Err(message)) => error(
             StatusCode::BAD_GATEWAY,
             format!("semantic entry failed: {message}"),
             started_at,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_keeps_lexical_first_and_deduplicates_names() {
+        let lexical = vec![
+            Resolution {
+                name: "杜氏の職".to_string(),
+                score: 0.33,
+            },
+            Resolution {
+                name: "蔵".to_string(),
+                score: 0.25,
+            },
+        ];
+        let semantic = vec![
+            ("蔵人".to_string(), 0.55_f32),
+            ("蔵".to_string(), 0.48),
+            ("杜氏の職".to_string(), 0.41),
+        ];
+        let merged = merge_tiers(lexical, semantic);
+        let view: Vec<(&str, &str)> = merged
+            .iter()
+            .map(|candidate| (candidate.name.as_str(), candidate.tier))
+            .collect();
+        assert_eq!(
+            view,
+            vec![
+                ("杜氏の職", "lexical"),
+                ("蔵", "lexical"),
+                ("蔵人", "semantic"),
+            ]
+        );
     }
 }
 
