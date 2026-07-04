@@ -661,7 +661,9 @@ fn resolve_with_fallback(
         return ok(lexical_tier(lexical), started_at);
     }
 
-    match state.semantic_resolve(name, &request.cue, labels) {
+    // The provider round trip can take hundreds of milliseconds; tell
+    // the runtime this thread will block so other tasks migrate off it.
+    match tokio::task::block_in_place(|| state.semantic_resolve(name, &request.cue, labels)) {
         None => not_found(name, started_at),
         Some(Ok(semantic)) => ok(
             semantic
@@ -719,7 +721,9 @@ pub async fn refresh_embeddings(
             started_at,
         );
     }
-    match state.refresh_embeddings(&name) {
+    // Refresh batches can talk to the provider for seconds; keep the
+    // runtime's workers unstarved while this one blocks.
+    match tokio::task::block_in_place(|| state.refresh_embeddings(&name)) {
         None => not_found(&name, started_at),
         Some(Ok((embedded, total))) => ok(RefreshOutcome { embedded, total }, started_at),
         Some(Err(message)) => error(

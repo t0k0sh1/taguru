@@ -159,6 +159,19 @@ impl VectorStore {
         std::fs::rename(&tmp, path)
     }
 
+    /// Rough resident bytes when this store is held in memory, so the
+    /// cache budget can account for it.
+    pub fn footprint(&self) -> usize {
+        const ENTRY_OVERHEAD: usize = 64;
+        let table = |table: &HashMap<String, (u64, Vec<f32>)>| -> usize {
+            table
+                .iter()
+                .map(|(name, (_, vector))| name.len() + vector.len() * 4 + ENTRY_OVERHEAD)
+                .sum()
+        };
+        table(&self.concepts) + table(&self.labels)
+    }
+
     fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(VECTOR_MAGIC);

@@ -28,12 +28,12 @@
 //! one context never blocks the others — and a panic poisons only the
 //! context it happened in.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use associative_rag::context::Context;
 use serde::{Deserialize, Serialize};
@@ -146,6 +146,11 @@ pub struct Entry {
     dirty: AtomicBool,
     /// Logical timestamp of the last operation, for LRU eviction.
     last_touch: AtomicU64,
+    /// The vector sidecar, held after first use so the semantic
+    /// fallback never re-reads a many-megabyte file per query. Replaced
+    /// by refresh, cleared by eviction, and counted against the cache
+    /// budget. Lock order: `inner` before `vectors`, never the reverse.
+    vectors: Mutex<Option<Arc<VectorStore>>>,
 }
 
 impl Entry {
@@ -154,6 +159,7 @@ impl Entry {
             inner: RwLock::new(EntryInner { meta, stats, slot }),
             dirty: AtomicBool::new(false),
             last_touch: AtomicU64::new(0),
+            vectors: Mutex::new(None),
         }
     }
 }
@@ -194,6 +200,41 @@ struct StateInner {
     /// The optional semantic entry tier; `None` keeps resolve purely
     /// lexical.
     embedder: Option<Arc<dyn EmbeddingProvider>>,
+    /// Process-lifetime cache of cue embeddings — an LLM client repeats
+    /// query wording, and every hit saves a provider round trip on the
+    /// fallback path. Valid for the whole process because the provider
+    /// (and so the model) is fixed at boot.
+    cue_cache: Mutex<CueCache>,
+}
+
+/// A FIFO-bounded map of cue → embedding. FIFO rather than LRU keeps it
+/// trivial; at the cap it holds ~12 MB of vectors, and evicting a warm
+/// cue merely costs one re-embed.
+#[derive(Default)]
+struct CueCache {
+    vectors: HashMap<String, Arc<Vec<f32>>>,
+    order: VecDeque<String>,
+}
+
+impl CueCache {
+    const CAP: usize = 1024;
+
+    fn get(&self, cue: &str) -> Option<Arc<Vec<f32>>> {
+        self.vectors.get(cue).cloned()
+    }
+
+    fn insert(&mut self, cue: String, vector: Arc<Vec<f32>>) {
+        if self.vectors.contains_key(&cue) {
+            return;
+        }
+        if self.vectors.len() >= Self::CAP
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.vectors.remove(&oldest);
+        }
+        self.order.push_back(cue.clone());
+        self.vectors.insert(cue, vector);
+    }
 }
 
 impl AppState {
@@ -231,6 +272,7 @@ impl AppState {
             registry: RwLock::new(registry),
             clock: AtomicU64::new(0),
             embedder,
+            cue_cache: Mutex::new(CueCache::default()),
         }));
         for (name, entry) in state.snapshot() {
             let mut inner = entry.inner.write().unwrap();
@@ -572,6 +614,8 @@ impl AppState {
         {
             return Some(Err(format!("vector store not persisted: {error}")));
         }
+        // Publish the fresh store so queries never re-read the sidecar.
+        *entry.vectors.lock().unwrap() = Some(Arc::new(store));
         Some(Ok((newly_embedded, total)))
     }
 
@@ -601,8 +645,8 @@ impl AppState {
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Ok(Vec::new()));
         };
-        self.lookup(name)?;
-        let store = VectorStore::load(&vectors_path(&self.0.data_dir, &file_stem(name)));
+        let entry = self.lookup(name)?;
+        let store = self.entry_vectors(&entry, &file_stem(name));
         if store.model != embedder.model() {
             return Some(Ok(Vec::new()));
         }
@@ -614,9 +658,23 @@ impl AppState {
         if table.is_empty() {
             return Some(Ok(Vec::new()));
         }
-        let cue_vector = match embedder.embed(&[cue]) {
-            Ok(mut vectors) => vectors.pop().unwrap_or_default(),
-            Err(error) => return Some(Err(error)),
+        // Cue vectors come from the process cache when the wording has
+        // been seen before; no lock is held across the provider call.
+        let cached = self.0.cue_cache.lock().unwrap().get(cue);
+        let cue_vector = match cached {
+            Some(vector) => vector,
+            None => {
+                let vector = match embedder.embed(&[cue]) {
+                    Ok(mut vectors) => Arc::new(vectors.pop().unwrap_or_default()),
+                    Err(error) => return Some(Err(error)),
+                };
+                self.0
+                    .cue_cache
+                    .lock()
+                    .unwrap()
+                    .insert(cue.to_string(), Arc::clone(&vector));
+                vector
+            }
         };
         let mut scored: Vec<(String, f32)> = table
             .iter()
@@ -793,27 +851,55 @@ impl AppState {
     /// used) is never evicted, so a single oversized context cannot
     /// thrash. Dirty contexts are persisted before eviction; if that
     /// save fails they stay resident rather than losing writes.
+    /// The entry's vector store, loaded from its sidecar on first use
+    /// and held until refresh replaces it or eviction clears it.
+    fn entry_vectors(&self, entry: &Entry, stem: &str) -> Arc<VectorStore> {
+        let mut cached = entry.vectors.lock().unwrap();
+        match &*cached {
+            Some(store) => Arc::clone(store),
+            None => {
+                let store = Arc::new(VectorStore::load(&vectors_path(&self.0.data_dir, stem)));
+                *cached = Some(Arc::clone(&store));
+                store
+            }
+        }
+    }
+
     fn enforce_budget(&self, except: &str) {
-        let mut hot: Vec<(u64, usize, String, Arc<Entry>)> = Vec::new();
+        let mut candidates: Vec<(u64, usize, String, Arc<Entry>)> = Vec::new();
         let mut total = 0usize;
         for (name, entry) in self.snapshot() {
             let inner = entry.inner.read().unwrap();
             if inner.meta.pinned {
                 continue;
             }
-            if let Slot::Hot(context) = &inner.slot {
-                let bytes = context.footprint();
-                total += bytes;
-                drop(inner);
-                hot.push((entry.last_touch.load(Ordering::Relaxed), bytes, name, entry));
+            let resident = match &inner.slot {
+                Slot::Hot(context) => context.footprint(),
+                Slot::Cold => 0,
+            };
+            drop(inner);
+            // Cached vector stores count too — a cold entry can hold a
+            // large one after a semantic query.
+            let vectors = entry
+                .vectors
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|store| store.footprint())
+                .unwrap_or(0);
+            let bytes = resident + vectors;
+            if bytes == 0 {
+                continue;
             }
+            total += bytes;
+            candidates.push((entry.last_touch.load(Ordering::Relaxed), bytes, name, entry));
         }
         if total <= self.0.cache_bytes {
             return;
         }
 
-        hot.sort_unstable_by_key(|&(touch, ..)| touch);
-        for (_, bytes, name, entry) in hot {
+        candidates.sort_unstable_by_key(|&(touch, ..)| touch);
+        for (_, bytes, name, entry) in candidates {
             if total <= self.0.cache_bytes {
                 break;
             }
@@ -827,23 +913,23 @@ impl AppState {
             if inner.meta.pinned {
                 continue;
             }
-            let Slot::Hot(context) = &inner.slot else {
-                continue;
-            };
-            if entry.dirty.load(Ordering::Relaxed) {
-                let stats = ContextStats::of(context);
-                if let Err(error) =
-                    save_files(&self.0.data_dir, &name, &inner.meta, &stats, context)
-                {
-                    eprintln!("context '{name}' stays resident, eviction save failed: {error}");
-                    continue;
+            if let Slot::Hot(context) = &inner.slot {
+                if entry.dirty.load(Ordering::Relaxed) {
+                    let stats = ContextStats::of(context);
+                    if let Err(error) =
+                        save_files(&self.0.data_dir, &name, &inner.meta, &stats, context)
+                    {
+                        eprintln!("context '{name}' stays resident, eviction save failed: {error}");
+                        continue;
+                    }
+                    inner.stats = stats;
+                    entry.dirty.store(false, Ordering::Relaxed);
+                } else {
+                    inner.stats = ContextStats::of(context);
                 }
-                inner.stats = stats;
-                entry.dirty.store(false, Ordering::Relaxed);
-            } else {
-                inner.stats = ContextStats::of(context);
+                inner.slot = Slot::Cold;
             }
-            inner.slot = Slot::Cold;
+            *entry.vectors.lock().unwrap() = None;
             total = total.saturating_sub(bytes);
         }
     }
@@ -1273,8 +1359,24 @@ mod tests {
 
     /// Deterministic provider: a text starting with a mapped key gets
     /// that key's unit vector (glosses start with their name), anything
-    /// else lands on an axis orthogonal to all of them.
-    struct MockEmbeddings(Vec<(String, Vec<f32>)>);
+    /// else lands on an axis orthogonal to all of them. Counts provider
+    /// round trips so cache behavior is observable.
+    struct MockEmbeddings {
+        keys: Vec<(String, Vec<f32>)>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl MockEmbeddings {
+        fn fruity(calls: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+            Self {
+                keys: vec![
+                    ("りんご".to_string(), vec![1.0, 0.0, 0.0]),
+                    ("アップル".to_string(), vec![0.96, 0.28, 0.0]),
+                ],
+                calls: Arc::clone(calls),
+            }
+        }
+    }
 
     impl EmbeddingProvider for MockEmbeddings {
         fn model(&self) -> &str {
@@ -1282,10 +1384,11 @@ mod tests {
         }
 
         fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(texts
                 .iter()
                 .map(|text| {
-                    self.0
+                    self.keys
                         .iter()
                         .find(|(key, _)| text.starts_with(key.as_str()))
                         .map(|(_, vector)| vector.clone())
@@ -1298,11 +1401,8 @@ mod tests {
     #[test]
     fn semantic_fallback_lands_paraphrases_after_refresh() {
         let dir = scratch_dir("embed");
-        let embedder = MockEmbeddings(vec![
-            ("りんご".to_string(), vec![1.0, 0.0, 0.0]),
-            ("アップル".to_string(), vec![0.96, 0.28, 0.0]),
-        ]);
-        let embedder = Some(Arc::new(embedder) as Arc<dyn EmbeddingProvider>);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
         state
             .create("fruit", ContextMeta::default())
@@ -1362,6 +1462,71 @@ mod tests {
         assert_eq!(total, 5);
 
         assert!(state.semantic_resolve("nope", "x", false).is_none());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn semantic_path_caches_cue_vectors_and_the_sidecar() {
+        let dir = scratch_dir("semcache");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), 1, embedder).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("fruit", |context| {
+                context.associate("りんご", "分類", "果物", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        state.refresh_embeddings("fruit").unwrap().unwrap();
+        // One batch per namespace: concepts, then labels.
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+        // First query embeds the cue; repeating the wording does not.
+        let first = state
+            .semantic_resolve("fruit", "アップル", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first[0].0, "りんご");
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        state
+            .semantic_resolve("fruit", "アップル", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 3, "cue must come from cache");
+
+        // The sidecar is held in memory after first use: even with the
+        // file gone, the same query keeps answering.
+        fs::remove_file(vectors_path(&dir, &file_stem("fruit"))).unwrap();
+        let held = state
+            .semantic_resolve("fruit", "アップル", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(held[0].0, "りんご");
+
+        // Eviction clears the cached store (budget is one byte, and the
+        // vector cache counts): after touching another context, the
+        // deleted sidecar means no vectors — proving the memory copy
+        // was dropped rather than leaked.
+        state
+            .create("other", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .read_context("other", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(
+            state
+                .semantic_resolve("fruit", "アップル", false)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
