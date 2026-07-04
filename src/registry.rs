@@ -527,10 +527,10 @@ impl AppState {
 
     /// Full-text search over the registered passages — the second lane
     /// beside the graph, for knowledge that does not decompose into
-    /// triples (procedures, conditions, discourse). Character-bigram
-    /// BM25 over the same normalization as the entry index, so no
-    /// tokenizer dependency and no disagreement about folding; scores
-    /// are recomputed per query, which is fine at sidecar scale.
+    /// triples (procedures, conditions, discourse). BM25 over the same
+    /// normalization as the entry index with mixed terms (ASCII words,
+    /// character bigrams elsewhere); scores are recomputed per query,
+    /// which is fine at sidecar scale.
     pub fn search_passages(
         &self,
         name: &str,
@@ -548,7 +548,8 @@ impl AppState {
         let query_grams: Vec<u64> = {
             let normalized = associative_rag::context::normalize_entry(query);
             let mut seen = std::collections::HashSet::new();
-            text_bigrams(&normalized)
+            text_terms(&normalized)
+                .into_iter()
                 .filter(|gram| seen.insert(*gram))
                 .collect()
         };
@@ -563,7 +564,7 @@ impl AppState {
                 let normalized = associative_rag::context::normalize_entry(text);
                 let mut frequencies: HashMap<u64, f32> = HashMap::new();
                 let mut length = 0f32;
-                for gram in text_bigrams(&normalized) {
+                for gram in text_terms(&normalized) {
                     *frequencies.entry(gram).or_insert(0.0) += 1.0;
                     length += 1.0;
                 }
@@ -1086,12 +1087,57 @@ fn vectors_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.vectors.bin"))
 }
 
-/// Adjacent character pairs packed into u64 keys — the "terms" of the
-/// passage search.
-fn text_bigrams(text: &str) -> impl Iterator<Item = u64> {
-    text.chars()
-        .zip(text.chars().skip(1))
-        .map(|(a, b)| ((a as u64) << 32) | b as u64)
+/// The "terms" of the passage search, as u64 keys. ASCII-alphanumeric
+/// runs count as whole words; everything else contributes adjacent
+/// character pairs within its run (a run of one contributes the lone
+/// character). Space-delimited languages need word terms — character
+/// pairs occur in every English document alike, which flattens IDF to
+/// nothing — while undelimited Japanese needs the bigrams. Runs break
+/// at spaces and punctuation, and a script switch breaks the run too,
+/// so terms never straddle "第10篇"-style boundaries.
+fn text_terms(text: &str) -> Vec<u64> {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x1_0000_01b3;
+    let mut terms = Vec::new();
+    let mut word = FNV_OFFSET; // running FNV-1a over the current ASCII word
+    let mut in_word = false;
+    let mut run: Option<char> = None; // previous char of the current non-ASCII run
+    let mut run_len = 0usize;
+    let flush_run = |terms: &mut Vec<u64>, run: &mut Option<char>, run_len: &mut usize| {
+        if let (Some(last), 1) = (*run, *run_len) {
+            terms.push(last as u64); // below the pair space: pairs always have bits 32+
+        }
+        *run = None;
+        *run_len = 0;
+    };
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            flush_run(&mut terms, &mut run, &mut run_len);
+            word ^= ch as u64;
+            word = word.wrapping_mul(FNV_PRIME);
+            in_word = true;
+        } else {
+            if in_word {
+                terms.push(word | 1 << 63); // disjoint from pair keys (chars < 2^21)
+                word = FNV_OFFSET;
+                in_word = false;
+            }
+            if ch.is_alphanumeric() {
+                if let Some(prev) = run {
+                    terms.push(((prev as u64) << 32) | ch as u64);
+                }
+                run = Some(ch);
+                run_len += 1;
+            } else {
+                flush_run(&mut terms, &mut run, &mut run_len);
+            }
+        }
+    }
+    if in_word {
+        terms.push(word | 1 << 63);
+    }
+    flush_run(&mut terms, &mut run, &mut run_len);
+    terms
 }
 
 /// Reads a passages file, treating any problem as "no passages" — a
@@ -1477,6 +1523,50 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn passage_search_discriminates_english_by_words() {
+        let dir = scratch_dir("bm25-english");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("papers", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // English prose shares nearly every character pair across
+        // documents; only word terms can tell these two apart. The
+        // real-world case: a famous quote had to be found in the essay
+        // that contains it, not in whichever essay mentions the topic.
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第51篇".to_string(),
+            "The great security against a gradual concentration of the several powers \
+             in the same department consists in giving to those who administer each \
+             department the necessary constitutional means and personal motives to \
+             resist encroachments of the others. Ambition must be made to counteract \
+             ambition."
+                .to_string(),
+        );
+        passages.insert(
+            "第70篇".to_string(),
+            "Energy in the executive is a leading character in the definition of good \
+             government. It is essential to the protection of the community against \
+             foreign attacks and to the security of liberty against the enterprises \
+             and assaults of ambition, of faction, and of anarchy."
+                .to_string(),
+        );
+        state.store_passages("papers", passages).unwrap().unwrap();
+
+        let hits = state
+            .search_passages("papers", "ambition must be made to counteract ambition", 2)
+            .unwrap();
+        assert_eq!(hits[0].0, "第51篇");
+        assert!(
+            hits.len() < 2 || hits[0].1 > hits[1].1,
+            "the containing passage must win decisively, not by tie-break"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     /// Deterministic provider: a text starting with a mapped key gets
     /// that key's unit vector (glosses start with their name), anything
     /// else lands on an axis orthogonal to all of them. Counts provider
@@ -1694,11 +1784,10 @@ mod tests {
         // Directly connected concepts (青嶺酒造 —創業年→ 1907年) are
         // related, not duplicates, and must be filtered out however
         // similar their vectors are.
+        let pairs_up = |a: &str, b: &str, x: &str, y: &str| a.contains(x) && b.contains(y);
         assert!(
-            concepts.iter().all(
-                |(a, b, _)| !(a.contains("青嶺酒造") && b.contains("1907年"))
-                    && !(a.contains("1907年") && b.contains("青嶺酒造"))
-            ),
+            concepts.iter().all(|(a, b, _)| !pairs_up(a, b, "青嶺酒造", "1907年")
+                && !pairs_up(a, b, "1907年", "青嶺酒造")),
             "{concepts:?}"
         );
         assert_eq!(labels.len(), 1, "{labels:?}");
