@@ -39,6 +39,10 @@
    `POST /contexts/{name}/sources/lookup` で原文化し、原文の言い回しに基づいて
    回答を組み立てます。負の weight は否定として、attributions の数は裏付けの強さ
    として文章に反映してください。
+6. **テキストレーンに切り替える**: 手続きの順序・条件・談話のようにトリプルに
+   落ちない知識は、グラフには最初から入っていません。グラフ検索で答えの素材が
+   揃わないときは `POST /contexts/{name}/sources/search`(原文への全文検索)でも
+   探してください。グラフが主、テキストが安全網です。
 
 ## 取り込みループ
 
@@ -81,6 +85,7 @@
 | GET/POST | `/contexts/{name}/aliases` | エクスポート / `{concepts:{別綴:正準}, labels:{...}}` |
 | GET/POST | `/contexts/{name}/sources` | 登録済み source 一覧 / `{passages:{source:原文}}` |
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
+| POST | `/contexts/{name}/sources/search` | `{query, limit?}` → `[{source, score, text}]` 原文全文検索 |
 | POST | `/contexts/{name}/unreachable_from` | `{origins}` → 到達不能な連想 |
 
 ## エラーと制約

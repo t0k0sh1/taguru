@@ -353,6 +353,82 @@ impl AppState {
         Some(stored.into_keys().collect())
     }
 
+    /// Full-text search over the registered passages — the second lane
+    /// beside the graph, for knowledge that does not decompose into
+    /// triples (procedures, conditions, discourse). Character-bigram
+    /// BM25 over the same normalization as the entry index, so no
+    /// tokenizer dependency and no disagreement about folding; scores
+    /// are recomputed per query, which is fine at sidecar scale.
+    pub fn search_passages(
+        &self,
+        name: &str,
+        query: &str,
+        limit: usize,
+    ) -> Option<Vec<(String, f32, String)>> {
+        const K1: f32 = 1.2;
+        const B: f32 = 0.75;
+
+        let entry = self.lookup(name)?;
+        let stored = {
+            let _guard = entry.inner.read().unwrap();
+            read_passages(&sources_path(&self.0.data_dir, &file_stem(name)))
+        };
+        let query_grams: Vec<u64> = {
+            let normalized = associative_rag::context::normalize_entry(query);
+            let mut seen = std::collections::HashSet::new();
+            text_bigrams(&normalized)
+                .filter(|gram| seen.insert(*gram))
+                .collect()
+        };
+        if stored.is_empty() || query_grams.is_empty() {
+            return Some(Vec::new());
+        }
+
+        // Term statistics per passage, one normalization pass each.
+        let passages: Vec<(&String, &String, HashMap<u64, f32>, f32)> = stored
+            .iter()
+            .map(|(source, text)| {
+                let normalized = associative_rag::context::normalize_entry(text);
+                let mut frequencies: HashMap<u64, f32> = HashMap::new();
+                let mut length = 0f32;
+                for gram in text_bigrams(&normalized) {
+                    *frequencies.entry(gram).or_insert(0.0) += 1.0;
+                    length += 1.0;
+                }
+                (source, text, frequencies, length)
+            })
+            .collect();
+        let total = passages.len() as f32;
+        let average_length =
+            (passages.iter().map(|(.., length)| length).sum::<f32>() / total).max(1.0);
+
+        let mut scored: Vec<(String, f32, String)> = passages
+            .iter()
+            .map(|(source, text, frequencies, length)| {
+                let mut score = 0f32;
+                for gram in &query_grams {
+                    let Some(&frequency) = frequencies.get(gram) else {
+                        continue;
+                    };
+                    let document_frequency = passages
+                        .iter()
+                        .filter(|(_, _, other, _)| other.contains_key(gram))
+                        .count() as f32;
+                    let idf = (1.0
+                        + (total - document_frequency + 0.5) / (document_frequency + 0.5))
+                        .ln();
+                    score += idf * (frequency * (K1 + 1.0))
+                        / (frequency + K1 * (1.0 - B + B * length / average_length));
+                }
+                ((*source).clone(), score, (*text).clone())
+            })
+            .filter(|&(_, score, _)| score > 0.0)
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scored.truncate(limit);
+        Some(scored)
+    }
+
     /// Embeds every canonical concept and label name that has no vector
     /// yet (all of them after a model change) and persists the vector
     /// sidecar. Explicit rather than automatic — an agent or operator
@@ -734,6 +810,14 @@ fn vectors_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.vectors.bin"))
 }
 
+/// Adjacent character pairs packed into u64 keys — the "terms" of the
+/// passage search.
+fn text_bigrams(text: &str) -> impl Iterator<Item = u64> {
+    text.chars()
+        .zip(text.chars().skip(1))
+        .map(|(a, b)| ((a as u64) << 32) | b as u64)
+}
+
 /// Reads a passages file, treating any problem as "no passages" — a
 /// corrupt sidecar must not block the graph or new registrations.
 fn read_passages(path: &Path) -> BTreeMap<String, String> {
@@ -1067,6 +1151,49 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert!(lands(&state), "floor must survive the restart");
         assert_eq!(state.directory()[0].dice_floor, Some(0.25));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn passage_search_ranks_the_answering_text_first() {
+        let dir = scratch_dir("bm25");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第2段落".to_string(),
+            "原料米には主に山田錦を使い、精米歩合は50パーセントまで磨く。".to_string(),
+        );
+        passages.insert(
+            "第3段落".to_string(),
+            "杜氏の高瀬は南部杜氏の出身で、経験は30年を超える。".to_string(),
+        );
+        passages.insert(
+            "第5段落".to_string(),
+            "蔵開きの祭りでは、雲居山の伏流水で仕込んだ新酒がふるまわれる。".to_string(),
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+
+        // The procedural question never became a triple; the text lane
+        // must still hand back the passage that answers it, first.
+        let hits = state
+            .search_passages("sake", "精米歩合はどこまで磨く?", 3)
+            .unwrap();
+        assert_eq!(hits[0].0, "第2段落");
+        assert!(hits[0].1 > 0.0);
+
+        // No shared bigrams at all → nothing, not noise.
+        assert!(
+            state
+                .search_passages("sake", "unrelated english words", 3)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(state.search_passages("nope", "x", 3).is_none());
 
         let _ = fs::remove_dir_all(dir);
     }

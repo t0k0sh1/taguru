@@ -1830,6 +1830,13 @@ fn normalize(name: &str) -> String {
         .collect()
 }
 
+/// [`normalize`] for companion text layers: a passage search over the
+/// same corpus must fold text exactly the way the entry index folds
+/// names, or the two disagree about what matches.
+pub fn normalize_entry(text: &str) -> String {
+    normalize(text)
+}
+
 /// Katakana → hiragana (U+30A1..=U+30F6 sit 0x60 above U+3041..=U+3096).
 fn fold_kana(ch: char) -> char {
     match ch {

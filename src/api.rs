@@ -425,6 +425,43 @@ pub async fn list_sources(State(state): State<AppState>, Path(name): Path<String
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SearchPassagesRequest {
+    pub query: String,
+    /// Omitted means 5.
+    pub limit: Option<usize>,
+}
+
+/// One passage matched by full-text search: the second retrieval lane,
+/// for knowledge that never decomposed into triples.
+#[derive(Serialize)]
+pub struct PassageHit {
+    pub source: String,
+    pub score: f32,
+    pub text: String,
+}
+
+pub async fn search_passages(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<SearchPassagesRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match state.search_passages(&name, &request.query, request.limit.unwrap_or(5)) {
+        None => not_found(&name, started_at),
+        Some(hits) => ok(
+            hits.into_iter()
+                .map(|(source, score, text)| PassageHit {
+                    source,
+                    score,
+                    text,
+                })
+                .collect::<Vec<_>>(),
+            started_at,
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct RecallRequest {
     pub cue: String,
     /// Omitted means 100.

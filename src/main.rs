@@ -84,6 +84,10 @@ async fn main() {
             post(api::lookup_passages),
         )
         .route(
+            "/contexts/{name}/sources/search",
+            post(api::search_passages),
+        )
+        .route(
             "/contexts/{name}/embeddings/refresh",
             post(api::refresh_embeddings),
         )
