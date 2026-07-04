@@ -153,10 +153,7 @@ impl VectorStore {
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let bytes = self.to_bytes();
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, path)
+        crate::registry::write_atomic(path, &self.to_bytes())
     }
 
     /// Rough resident bytes when this store is held in memory, so the

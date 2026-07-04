@@ -1193,12 +1193,36 @@ fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
     }
 }
 
-/// Writes via a temporary file and rename, so a crash mid-write leaves
-/// the previous version intact instead of a torn file.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Writes via a temporary file, fsync, and rename — a crash mid-write
+/// leaves the previous version intact, and power loss after return
+/// cannot tear or lose the new one. The rename itself is an entry in
+/// the parent directory's own data, so the parent is fsynced too;
+/// without that a crash can forget the rename even though the file
+/// contents reached disk.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)
+    let mut file = fs::File::create(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&tmp, path)?;
+    fsync_parent_dir(path)
+}
+
+/// Persists a rename by syncing the directory that holds the entry.
+/// Unix-only; elsewhere the rename stays atomic against a crash
+/// mid-write, just not durable against power loss — unix is what this
+/// server targets.
+fn fsync_parent_dir(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// Encodes a context name as a file stem: bytes outside [A-Za-z0-9_-]
@@ -1280,6 +1304,22 @@ mod tests {
         assert_eq!(name_from_stem("%zz"), None);
         // Undecodable UTF-8 is refused rather than lossily replaced.
         assert_eq!(name_from_stem("%FF%FE"), None);
+    }
+
+    #[test]
+    fn write_atomic_replaces_content_and_leaves_no_staging_file() {
+        let dir = scratch_dir("atomic");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file.bin");
+
+        write_atomic(&path, b"first").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        write_atomic(&path, b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        // A successful write consumes its temporary staging file.
+        assert!(!dir.join("file.tmp").exists());
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
