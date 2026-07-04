@@ -1679,9 +1679,11 @@ impl EntryIndex {
         // tier below is a fallback for spellings containment cannot
         // catch, not a second opinion on ones it already scored.
         let mut contained: HashSet<u32> = HashSet::new();
+        let mut exact = false;
         for (span_index, span) in self.spans.iter().enumerate() {
             let haystack = &self.arena[span.start..span.end];
             let score = if haystack == needle {
+                exact = true;
                 1.0
             } else if haystack.contains(needle.as_str()) || needle.contains(haystack) {
                 let shorter = needle_chars.min(span.chars);
@@ -1693,14 +1695,29 @@ impl EntryIndex {
             contained.insert(span_index as u32);
             record(span.target, score, &mut best);
         }
+        // An exact hit means the entry job is done: the cue IS a stored
+        // spelling. Near-miss hunting would only spend posting-list time
+        // widening a cue that already landed.
+        if exact {
+            return best;
+        }
 
         // Fuzzy tier: only spellings sharing at least one bigram with the
-        // cue are ever touched, via the posting lists.
+        // cue are ever touched, via the posting lists. Bigrams carried by
+        // a large share of all spellings (think a 株式会社 prefix on
+        // every company name) discriminate nothing and would make every
+        // lookup scan the whole namespace, so their postings are skipped.
+        // Candidates lose those bigrams' contribution to Dice, which only
+        // suppresses fuzzy matches in namespaces whose names are
+        // near-duplicates of each other anyway.
+        let stop_gram = (self.spans.len() / 20).max(64);
         let needle_bigrams: HashSet<u64> = bigrams_of(&needle).collect();
         if !needle_bigrams.is_empty() {
             let mut shared: HashMap<u32, u32> = HashMap::new();
             for bigram in &needle_bigrams {
-                if let Some(postings) = self.bigrams.get(bigram) {
+                if let Some(postings) = self.bigrams.get(bigram)
+                    && postings.len() <= stop_gram
+                {
                     for &span_index in postings {
                         if !contained.contains(&span_index) {
                             *shared.entry(span_index).or_insert(0) += 1;
