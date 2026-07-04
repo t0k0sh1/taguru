@@ -553,7 +553,16 @@ impl AppState {
         cue: &str,
         labels: bool,
     ) -> Option<Result<Vec<(String, f32)>, String>> {
-        const SEMANTIC_FLOOR: f32 = 0.5;
+        // Calibrated against text-embedding-3-large on short Japanese
+        // strings: synonym/translation pairs land at ~0.45–0.66
+        // (アップル×りんご 0.66, 仕込み水×雲居山の伏流水 0.445) while the
+        // unrelated noise band reaches ~0.32 (りんご×自動車 0.315), so
+        // 0.4 admits real matches with margin against the noise. Known
+        // honest limit: rare-jargon paraphrases (醸造責任者×杜氏 0.28)
+        // sit inside the noise band for these models and stay out —
+        // that gap belongs to the LLM's own rewording loop and to alias
+        // registration, not to a lower floor.
+        const SEMANTIC_FLOOR: f32 = 0.4;
         const SEMANTIC_LIMIT: usize = 5;
 
         let Some(embedder) = self.0.embedder.clone() else {

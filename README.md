@@ -38,7 +38,11 @@ cargo run --release
 #   ARAG_CACHE_BYTES  非ピン常駐予算 (既定 512 MiB)
 #   ARAG_FLUSH_SECS   フラッシュ間隔 = クラッシュ時の消失窓 (既定 5)
 #   ARAG_EMBED_URL / ARAG_EMBED_MODEL / ARAG_EMBED_API_KEY
-#                     意味的入口 (OpenAI互換 /embeddings)。未設定なら字面のみ
+#                     意味的入口 (OpenAI互換 /embeddings)。未設定なら字面のみ。
+#                     例: URL=https://api.openai.com/v1/embeddings
+#                         MODEL=text-embedding-3-large  (日本語の短い名前には
+#                         3-small では分離が足りない。フロア0.4は3-largeで較正済み)
+#                         API_KEY=$OPENAI_API_KEY
 ```
 
 ```sh
