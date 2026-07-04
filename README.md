@@ -64,7 +64,15 @@ cargo run --release
 #                          API_KEY=$OPENAI_API_KEY
 #   TAGURU_EMBED_AUTO=1 refresh embeddings incrementally with each flush
 #                     (opt-in; unset means manual POST /embeddings/refresh only)
+#   RUST_LOG            log filter (default info), EnvFilter syntax
+#   TAGURU_LOG_FORMAT   json for one JSON object per log line (default: pretty).
+#                     Logs go to stderr.
 ```
+
+Observability: every request lands in the access log, and
+`GET /metrics` serves Prometheus text — per-route request counts and
+latency histograms, cache/flush/embedding outcomes, and residency
+gauges.
 
 ```sh
 curl -X PUT localhost:3000/contexts/sake -H 'Content-Type: application/json' \
