@@ -53,7 +53,12 @@ cargo run --release
 #   TAGURU_ADDR         bind address (default 127.0.0.1:3000)
 #   TAGURU_DATA_DIR     data directory (default ./data)
 #   TAGURU_CACHE_BYTES  resident budget for unpinned contexts (default 512 MiB)
-#   TAGURU_FLUSH_SECS   flush interval = the crash-loss window (default 5)
+#   TAGURU_FLUSH_SECS   image flush interval (default 5). With the WAL on
+#                     this is freshness cadence, not a loss window.
+#   TAGURU_WAL          per-context write-ahead log: every acknowledged
+#                     graph write is fsynced before it applies, so a
+#                     crash loses nothing (default on; 0/false restores
+#                     the flush-interval loss window)
 #   TAGURU_EMBED_URL / TAGURU_EMBED_MODEL / TAGURU_EMBED_API_KEY
 #                     semantic entry tier (OpenAI-compatible /embeddings).
 #                     Unset keeps the entry purely lexical.
@@ -80,6 +85,14 @@ Observability: every request lands in the access log, and
 `GET /metrics` serves Prometheus text — per-route request counts and
 latency histograms, cache/flush/embedding outcomes, and residency
 gauges.
+
+Backups: one context is the whole file family — `{stem}.ctx`,
+`.meta.json`, `.sources.json`, `.vectors.bin`, `.wal.jsonl` — back
+them up together, never partially. Every writer is fsync + rename, so
+a filesystem-level point-in-time snapshot (ZFS/Btrfs/LVM) of the data
+directory is safe at any moment; a file-by-file copy of a *running*
+server (plain `rsync`/`cp`) is not guaranteed consistent across files
+— stop the server or use a real snapshot.
 
 ```sh
 curl -X PUT localhost:3000/contexts/sake -H 'Content-Type: application/json' \

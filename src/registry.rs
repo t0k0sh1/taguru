@@ -15,11 +15,15 @@
 //! dropped. Pinned contexts (glossaries and other always-hot 文脈)
 //! load at boot, never count against the budget, and are never evicted.
 //!
-//! Durability: writes mark a context dirty; dirty contexts are
-//! persisted by the periodic flusher, on eviction, and on graceful
-//! shutdown. A crash can therefore lose at most the writes since the
-//! last flush — the accepted window until an operation WAL is needed.
-//! Creation and metadata changes persist immediately.
+//! Durability: every acknowledged graph write is staged in the
+//! context's write-ahead log (fsynced, before it touches memory), so
+//! a crash loses nothing — loading replays whatever the log holds
+//! above the image's watermark. The periodic flusher, eviction, and
+//! graceful shutdown still persist the image; the flush interval is
+//! now just image-freshness cadence, not a loss window. Disabling the
+//! WAL (`TAGURU_WAL=0`) restores the old posture: a crash loses at
+//! most the writes since the last flush. Creation and metadata
+//! changes persist immediately either way.
 //!
 //! Locking contract: the registry lock guards only the name → entry map
 //! and is held just long enough to look up, insert, or remove; every
@@ -36,10 +40,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
-use taguru::context::Context;
+use taguru::context::{AliasError, Context};
 
 use crate::embedding::{EmbeddingProvider, VectorStore, fnv1a, similarity};
 use crate::metrics::{GaugeSnapshot, Metrics};
+use crate::wal::{self, WalOp};
 
 /// Server-side metadata for one context: the prose half of the routing
 /// directory plus the cache policy flag.
@@ -164,7 +169,12 @@ pub struct Entry {
 impl Entry {
     fn new(meta: ContextMeta, stats: ContextStats, slot: Slot) -> Self {
         Self {
-            inner: RwLock::new(EntryInner { meta, stats, slot }),
+            inner: RwLock::new(EntryInner {
+                meta,
+                stats,
+                slot,
+                wal_seq: 1,
+            }),
             dirty: AtomicBool::new(false),
             last_touch: AtomicU64::new(0),
             vectors: Mutex::new(None),
@@ -176,18 +186,54 @@ struct EntryInner {
     meta: ContextMeta,
     stats: ContextStats,
     slot: Slot,
+    /// The next WAL sequence number this context hands out. Sequences
+    /// start at 1 — watermark 0 means "nothing logged is reflected".
+    /// Plain u64, not atomic: every touch happens under this entry's
+    /// write lock (append and flush both hold it). Meaningful while
+    /// hot; a cold load recomputes it from the replay's tail.
+    wal_seq: u64,
 }
 
+#[derive(Debug)]
 pub enum CreateError {
     AlreadyExists,
     Io(io::Error),
 }
 
 /// Why an operation on a named context could not run.
+#[derive(Debug)]
 pub enum AccessError {
     NotFound,
     /// The context exists but its image could not be loaded from disk.
     Load(String),
+    /// The write-ahead log could not durably record the operation;
+    /// NOTHING was applied — the client must never hold a 200 the
+    /// disk cannot replay.
+    Unpersisted(String),
+}
+
+/// One requested association — the wire shape of the associations
+/// endpoint and the WAL payload, one struct for both so they cannot
+/// drift apart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssocOp {
+    pub subject: String,
+    pub label: String,
+    pub object: String,
+    pub weight: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// A batch write that got partway before the library rejected an
+/// item: how many ops applied, the rejection's message (the exact
+/// text each op family always reported), and whether it was a
+/// capacity error (507) rather than a conflict (409).
+#[derive(Debug)]
+pub struct PartialWrite {
+    pub applied: usize,
+    pub message: String,
+    pub full: bool,
 }
 
 /// Shared server state: the data directory, the cache budget, and the
@@ -217,6 +263,12 @@ struct StateInner {
     /// handlers, middleware, the flusher task — increments the same
     /// counters.
     metrics: Metrics,
+    /// Whether acknowledged graph writes are staged in the per-context
+    /// WAL before they apply. Off restores the pre-WAL posture:
+    /// durability bounded by the flush interval. Replay always runs
+    /// regardless — a log left behind by an earlier WAL-enabled run
+    /// must never be ignored.
+    wal_enabled: bool,
 }
 
 /// A FIFO-bounded map of cue → embedding. FIFO rather than LRU keeps it
@@ -250,15 +302,29 @@ impl CueCache {
 }
 
 impl AppState {
-    /// Opens (creating if needed) the data directory and registers every
-    /// context image found in it — cold, described by their sidecar
-    /// snapshots. Pinned contexts are loaded eagerly; a pinned image
-    /// that fails to load is left cold with a warning rather than
-    /// taking the server down.
+    /// [`AppState::boot_with`] with the WAL on — the deployment
+    /// default, and what the tests boot with (so the whole existing
+    /// suite exercises the WAL-enabled paths).
+    #[cfg(test)]
     pub fn boot(
         data_dir: PathBuf,
         cache_bytes: usize,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> io::Result<Self> {
+        Self::boot_with(data_dir, cache_bytes, embedder, true)
+    }
+
+    /// Opens (creating if needed) the data directory and registers every
+    /// context image found in it — cold, described by their sidecar
+    /// snapshots. Pinned contexts are loaded eagerly; a pinned image
+    /// that fails to load is left cold with a warning rather than
+    /// taking the server down. `wal_enabled: false` restores the
+    /// flush-interval durability window (`TAGURU_WAL=0`).
+    pub fn boot_with(
+        data_dir: PathBuf,
+        cache_bytes: usize,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
+        wal_enabled: bool,
     ) -> io::Result<Self> {
         fs::create_dir_all(&data_dir)?;
         let mut registry = HashMap::new();
@@ -286,6 +352,7 @@ impl AppState {
             embedder,
             cue_cache: Mutex::new(CueCache::default()),
             metrics: Metrics::default(),
+            wal_enabled,
         }));
         for (name, entry) in state.snapshot() {
             let mut inner = entry.inner.write().unwrap();
@@ -380,6 +447,7 @@ impl AppState {
             format!("{stem}.meta.json"),
             format!("{stem}.sources.json"),
             format!("{stem}.vectors.bin"),
+            format!("{stem}.wal.jsonl"),
         ] {
             if let Err(error) = fs::remove_file(self.0.data_dir.join(file))
                 && error.kind() != io::ErrorKind::NotFound
@@ -529,9 +597,11 @@ impl AppState {
         }) {
             Ok(()) => {}
             Err(AccessError::NotFound) => return None,
-            Err(AccessError::Load(message)) => {
+            Err(AccessError::Load(message)) | Err(AccessError::Unpersisted(message)) => {
                 // Vectors were readable but the graph was not: serve the
-                // unfiltered pairs and say why they are noisier.
+                // unfiltered pairs and say why they are noisier. (A
+                // read never yields Unpersisted; the arm is for the
+                // type, not a path.)
                 skipped = Some(format!(
                     "関連ペアの除外はスキップ (グラフ未ロード: {message})"
                 ));
@@ -546,8 +616,12 @@ impl AppState {
     /// new one, instead of rebuilding the whole context. Returns how
     /// many associations were touched and whether a passage was removed.
     pub fn retract_source(&self, name: &str, source: &str) -> Result<(usize, bool), AccessError> {
-        let touched =
-            self.write_context(name, |context| context.retract_source(source).unwrap_or(0))?;
+        let op = WalOp::RetractSource {
+            source: source.to_string(),
+        };
+        let touched = self.logged_write(name, std::slice::from_ref(&op), |context| {
+            context.retract_source(source).unwrap_or(0)
+        })?;
 
         let Some(entry) = self.lookup(name) else {
             // Raced with a delete; there is nothing left to clean up.
@@ -704,7 +778,9 @@ impl AppState {
         }) {
             Ok(glosses) => glosses,
             Err(AccessError::NotFound) => return None,
-            Err(AccessError::Load(message)) => return Some(Err(message)),
+            Err(AccessError::Load(message)) | Err(AccessError::Unpersisted(message)) => {
+                return Some(Err(message));
+            }
         };
         let (concepts, labels) = glosses;
         let entry = self.lookup(name)?;
@@ -950,8 +1026,12 @@ impl AppState {
     }
 
     /// Runs a mutating operation on one context, loading it first if
-    /// cold, and marks it dirty. The write becomes durable at the next
-    /// flush — periodic, on eviction, or on shutdown.
+    /// cold, and marks it dirty — the raw primitive under the tests.
+    /// HTTP-reachable mutations go through [`AppState::logged_write`]
+    /// instead so the WAL sees them; a test mutation was never
+    /// acknowledged to any client, so it needs no log coverage and its
+    /// durability is the flush it triggers.
+    #[cfg(test)]
     pub fn write_context<T>(
         &self,
         name: &str,
@@ -972,15 +1052,24 @@ impl AppState {
             }
             let mut guard = entry.inner.write().unwrap();
             let inner = &mut *guard;
-            let Slot::Hot(context) = &inner.slot else {
+            let watermark = inner.wal_seq - 1;
+            let Slot::Hot(context) = &mut inner.slot else {
                 continue;
             };
+            // The image about to be written reflects everything logged
+            // so far: bake that in as the watermark, and those WAL
+            // records are replay-inert even if truncation below never
+            // happens (crash, unwritable file — doesn't matter).
+            context.set_applied_seq(watermark);
             let stats = ContextStats::of(context);
             match save_files(&self.0.data_dir, &name, &inner.meta, &stats, context) {
                 Ok(()) => {
                     inner.stats = stats;
                     entry.dirty.store(false, Ordering::Relaxed);
                     self.0.metrics.record_flush(true);
+                    if let Err(error) = wal::reset(&wal_path(&self.0.data_dir, &file_stem(&name))) {
+                        tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
+                    }
                     flushed.push(name);
                 }
                 Err(error) => {
@@ -1032,6 +1121,85 @@ impl AppState {
         );
         self.enforce_budget(name);
         Ok(result)
+    }
+
+    /// The write path of the HTTP mutators: stage the whole batch in
+    /// the context's WAL — one fsync, group commit at exactly the
+    /// granularity the API already locks at — and only then run
+    /// `operate` to apply it. An append that cannot be made durable
+    /// refuses the write outright ([`AccessError::Unpersisted`],
+    /// nothing applied): the client must never hold an acknowledgment
+    /// the disk cannot replay. With the WAL disabled the staging step
+    /// is skipped and durability falls back to the flush interval.
+    fn logged_write<T>(
+        &self,
+        name: &str,
+        ops: &[WalOp],
+        operate: impl FnOnce(&mut Context) -> T,
+    ) -> Result<T, AccessError> {
+        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        let result = {
+            let mut inner = entry.inner.write().unwrap();
+            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
+                .map_err(AccessError::Load)?;
+            if self.0.wal_enabled {
+                let path = wal_path(&self.0.data_dir, &file_stem(name));
+                wal::append_batch(&path, inner.wal_seq, ops)
+                    .map_err(|error| AccessError::Unpersisted(error.to_string()))?;
+                inner.wal_seq += ops.len() as u64;
+            }
+            let Slot::Hot(context) = &mut inner.slot else {
+                unreachable!("ensure_hot leaves the slot hot");
+            };
+            let result = operate(context);
+            entry.dirty.store(true, Ordering::Relaxed);
+            result
+        };
+        entry.last_touch.store(
+            self.0.clock.fetch_add(1, Ordering::Relaxed) + 1,
+            Ordering::Relaxed,
+        );
+        self.enforce_budget(name);
+        Ok(result)
+    }
+
+    /// Applies one document's extracted facts, staging them in the WAL
+    /// first. `Ok(Err(PartialWrite))` reproduces the associations
+    /// endpoint's historic partial semantics: items before the failing
+    /// one are applied, each all-or-nothing in the library.
+    pub fn add_associations(
+        &self,
+        name: &str,
+        ops: Vec<AssocOp>,
+    ) -> Result<Result<usize, PartialWrite>, AccessError> {
+        let wal_ops: Vec<WalOp> = ops.into_iter().map(WalOp::Associate).collect();
+        self.logged_write(name, &wal_ops, |context| apply_in_order(context, &wal_ops))
+    }
+
+    /// Registers alias batches (concepts then labels, in map order),
+    /// staged in the WAL first — the same partial semantics as
+    /// associations, with the conflict/capacity distinction preserved
+    /// in [`PartialWrite::full`].
+    pub fn add_aliases(
+        &self,
+        name: &str,
+        concepts: &BTreeMap<String, String>,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<Result<usize, PartialWrite>, AccessError> {
+        let mut wal_ops = Vec::with_capacity(concepts.len() + labels.len());
+        for (alias, canonical) in concepts {
+            wal_ops.push(WalOp::AliasConcept {
+                alias: alias.clone(),
+                canonical: canonical.clone(),
+            });
+        }
+        for (alias, canonical) in labels {
+            wal_ops.push(WalOp::AliasLabel {
+                alias: alias.clone(),
+                canonical: canonical.clone(),
+            });
+        }
+        self.logged_write(name, &wal_ops, |context| apply_in_order(context, &wal_ops))
     }
 
     /// The entry's vector store, loaded from its sidecar on first use
@@ -1101,8 +1269,10 @@ impl AppState {
             if inner.meta.pinned {
                 continue;
             }
-            if let Slot::Hot(context) = &inner.slot {
+            let watermark = inner.wal_seq - 1;
+            if let Slot::Hot(context) = &mut inner.slot {
                 if entry.dirty.load(Ordering::Relaxed) {
+                    context.set_applied_seq(watermark);
                     let stats = ContextStats::of(context);
                     if let Err(error) =
                         save_files(&self.0.data_dir, &name, &inner.meta, &stats, context)
@@ -1115,6 +1285,9 @@ impl AppState {
                     }
                     inner.stats = stats;
                     entry.dirty.store(false, Ordering::Relaxed);
+                    if let Err(error) = wal::reset(&wal_path(&self.0.data_dir, &file_stem(&name))) {
+                        tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
+                    }
                 } else {
                     inner.stats = ContextStats::of(context);
                 }
@@ -1127,9 +1300,11 @@ impl AppState {
     }
 }
 
-/// Loads the image behind a cold slot; hot slots pass through. On
-/// success the slot is hot and the stats are fresh. Every call lands
-/// in the cache metrics: hot is a hit, a Cold→Hot attempt is a load.
+/// Loads the image behind a cold slot and replays whatever the WAL
+/// holds above the image's watermark; hot slots pass through. On
+/// success the slot is hot, the stats are fresh, and `wal_seq`
+/// continues from the replay's tail. Every call lands in the cache
+/// metrics: hot is a hit, a Cold→Hot attempt is a load.
 fn ensure_hot(
     data_dir: &Path,
     name: &str,
@@ -1140,14 +1315,27 @@ fn ensure_hot(
         metrics.record_cache_hit();
         return Ok(());
     }
-    let path = image_path(data_dir, &file_stem(name));
-    let loaded = fs::read(&path)
+    let stem = file_stem(name);
+    let loaded = fs::read(image_path(data_dir, &stem))
         .map_err(|e| format!("context '{name}' image unreadable: {e}"))
         .and_then(|bytes| {
             Context::from_bytes(&bytes).map_err(|e| format!("context '{name}' image corrupt: {e}"))
+        })
+        .and_then(|mut context| {
+            // Replay runs whether or not the WAL is currently enabled:
+            // a log left behind by an earlier run holds acknowledged
+            // writes and must never be ignored. A corrupt log is the
+            // image-corrupt severity, not a shrug — it holds writes
+            // that exist nowhere else.
+            let (ops, top) = wal::replay(&wal_path(data_dir, &stem), context.applied_seq())
+                .map_err(|e| format!("context '{name}' WAL unreadable: {e}"))?;
+            for op in ops {
+                replay_op(&mut context, &op);
+            }
+            Ok((context, top))
         });
-    let mut context = match loaded {
-        Ok(context) => context,
+    let (mut context, top) = match loaded {
+        Ok(loaded) => loaded,
         Err(error) => {
             metrics.record_cache_load(false);
             return Err(error);
@@ -1159,7 +1347,82 @@ fn ensure_hot(
     context.set_dice_floor(inner.meta.dice_floor);
     inner.stats = ContextStats::of(&context);
     inner.slot = Slot::Hot(Box::new(context));
+    inner.wal_seq = top + 1;
     Ok(())
+}
+
+/// Applies ops front to back, stopping at the first rejection — the
+/// batch endpoints' historic partial semantics: everything before the
+/// failing item stays applied.
+fn apply_in_order(context: &mut Context, ops: &[WalOp]) -> Result<usize, PartialWrite> {
+    let mut applied = 0usize;
+    for op in ops {
+        if let Err((message, full)) = apply_op(context, op) {
+            return Err(PartialWrite {
+                applied,
+                message,
+                full,
+            });
+        }
+        applied += 1;
+    }
+    Ok(applied)
+}
+
+/// Re-applies one replayed op. A deterministic library rejection here
+/// is the same rejection the original write already reported to its
+/// client — replay reruns the op on the exact state the original saw
+/// — so it is logged, never fatal.
+fn replay_op(context: &mut Context, op: &WalOp) {
+    if let Err((message, _)) = apply_op(context, op) {
+        tracing::warn!("WAL replay skipped an op (same rejection as the original): {message}");
+    }
+}
+
+/// Applies one op to the graph; `Err` carries the human message each
+/// op family has always reported through the API, plus whether it was
+/// a capacity error.
+fn apply_op(context: &mut Context, op: &WalOp) -> Result<(), (String, bool)> {
+    match op {
+        WalOp::Associate(op) => {
+            let result = match &op.source {
+                Some(source) => context.associate_from(
+                    op.subject.as_str(),
+                    op.label.as_str(),
+                    op.object.as_str(),
+                    op.weight,
+                    source.as_str(),
+                ),
+                None => context.associate(
+                    op.subject.as_str(),
+                    op.label.as_str(),
+                    op.object.as_str(),
+                    op.weight,
+                ),
+            };
+            result.map_err(|full| (full.to_string(), true))
+        }
+        WalOp::AliasConcept { alias, canonical } => context
+            .add_concept_alias(alias.as_str(), canonical)
+            .map_err(|error| {
+                (
+                    format!("concept alias '{alias}' → '{canonical}': {error}"),
+                    matches!(error, AliasError::Full(_)),
+                )
+            }),
+        WalOp::AliasLabel { alias, canonical } => context
+            .add_label_alias(alias.as_str(), canonical)
+            .map_err(|error| {
+                (
+                    format!("label alias '{alias}' → '{canonical}': {error}"),
+                    matches!(error, AliasError::Full(_)),
+                )
+            }),
+        WalOp::RetractSource { source } => {
+            context.retract_source(source);
+            Ok(())
+        }
+    }
 }
 
 fn image_path(dir: &Path, stem: &str) -> PathBuf {
@@ -1176,6 +1439,10 @@ fn sources_path(dir: &Path, stem: &str) -> PathBuf {
 
 fn vectors_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.vectors.bin"))
+}
+
+fn wal_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.wal.jsonl"))
 }
 
 /// The "terms" of the passage search, as u64 keys. ASCII-alphanumeric
@@ -1526,6 +1793,216 @@ mod tests {
             ),
             "{body}"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn assoc_op(
+        subject: &str,
+        label: &str,
+        object: &str,
+        weight: f64,
+        source: Option<&str>,
+    ) -> AssocOp {
+        AssocOp {
+            subject: subject.to_string(),
+            label: label.to_string(),
+            object: object.to_string(),
+            weight,
+            source: source.map(String::from),
+        }
+    }
+
+    #[test]
+    fn unflushed_writes_survive_a_process_restart_via_the_wal() {
+        let dir = scratch_dir("wal-restart");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op(
+                        "青嶺酒造",
+                        "創業年",
+                        "1907年",
+                        1.0,
+                        Some("第1段落"),
+                    )],
+                )
+                .unwrap()
+                .unwrap();
+            // NO flush_dirty: dropping the state here is the crash.
+            // The 5-second window would have eaten this write; the WAL
+            // must not.
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let recalled = state
+            .read_context("sake", |context| context.recall("青嶺酒造"))
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(recalled.len(), 1, "the acknowledged write must survive");
+        assert_eq!(recalled[0].object, "1907年");
+        assert_eq!(
+            recalled[0].attributions.len(),
+            1,
+            "attributions ride the WAL too"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn replay_does_not_double_apply_records_already_baked_into_the_image() {
+        let dir = scratch_dir("wal-noreplay");
+        let wal_file = wal_path(&dir, &file_stem("sake"));
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                )
+                .unwrap()
+                .unwrap();
+            let logged = fs::read(&wal_file).unwrap();
+            assert!(!logged.is_empty());
+
+            // The flush bakes the watermark into the image and
+            // truncates the log ...
+            assert_eq!(state.flush_dirty(), vec!["sake".to_string()]);
+            assert_eq!(fs::metadata(&wal_file).unwrap().len(), 0);
+            // ... so putting the pre-truncation bytes back simulates a
+            // crash between the image rename and the truncate (or a
+            // truncate that simply never ran).
+            fs::write(&wal_file, logged).unwrap();
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let weight = state
+            .read_context("sake", |context| {
+                context.query(Some("青嶺酒造"), Some("代表銘柄"), Some("青嶺"))[0].weight
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        // associate accumulates: a wrongly replayed record would make
+        // this 2.0 — the silent corruption the watermark exists to
+        // prevent.
+        assert_eq!(weight, 1.0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn aliases_and_retractions_ride_the_wal_across_a_restart() {
+        let dir = scratch_dir("wal-ops");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![
+                        assoc_op("青嶺酒造", "仕込み水", "伏流水", 1.0, Some("第2段落")),
+                        assoc_op("青嶺酒造", "仕込み水", "伏流水", 1.0, Some("第5段落")),
+                    ],
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .add_aliases(
+                    "sake",
+                    &BTreeMap::from([("Aomine".to_string(), "青嶺酒造".to_string())]),
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+                .unwrap();
+            let (touched, _) = state.retract_source("sake", "第5段落").unwrap();
+            assert_eq!(touched, 1);
+            // No flush — every one of those op kinds must replay.
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let matches = state
+            .read_context("sake", |context| {
+                context.query(Some("Aomine"), Some("仕込み水"), None)
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(matches.len(), 1, "the alias entry point must replay");
+        assert_eq!(matches[0].weight, 1.0, "the retraction must replay");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_wal_that_cannot_be_written_refuses_the_write() {
+        let dir = scratch_dir("wal-refuse");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // A directory sitting where the log file belongs makes the
+        // append fail deterministically.
+        fs::create_dir_all(wal_path(&dir, &file_stem("sake"))).unwrap();
+
+        let outcome = state.add_associations(
+            "sake",
+            vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+        );
+        assert!(matches!(outcome, Err(AccessError::Unpersisted(_))));
+        // Refused cleanly: nothing reached the graph.
+        let count = state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn disabling_the_wal_restores_the_flush_window() {
+        let dir = scratch_dir("wal-off");
+        {
+            let state = AppState::boot_with(dir.clone(), usize::MAX, None, false).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                )
+                .unwrap()
+                .unwrap();
+            assert!(
+                !wal_path(&dir, &file_stem("sake")).exists(),
+                "no log may be written when disabled"
+            );
+            // No flush: with the WAL off, this write is the accepted
+            // crash casualty — exactly the pre-WAL posture.
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let count = state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(count, 0);
 
         let _ = fs::remove_dir_all(dir);
     }

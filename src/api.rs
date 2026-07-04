@@ -11,9 +11,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use taguru::context::{AliasError, Association, Context, Resolution};
+use taguru::context::{Association, Context, Resolution};
 
-use crate::registry::{AccessError, AppState, ContextMeta, CreateError};
+use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 
 #[derive(Serialize)]
 pub struct ApiResponse<T> {
@@ -73,6 +73,11 @@ fn access_error(failure: AccessError, name: &str, started_at: Instant) -> Respon
     match failure {
         AccessError::NotFound => not_found(name, started_at),
         AccessError::Load(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message, started_at),
+        AccessError::Unpersisted(message) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("write not persisted (nothing was applied): {message}"),
+            started_at,
+        ),
     }
 }
 
@@ -182,24 +187,14 @@ pub async fn delete_context(State(state): State<AppState>, Path(name): Path<Stri
     }
 }
 
-/// One assertion in a batch: the arguments of `associate` /
-/// `associate_from` as JSON fields. A batch is the natural write unit —
-/// one document's extracted facts arrive as one request, one lock
-/// acquisition. The write becomes durable at the next flush (periodic,
-/// on eviction, or on shutdown).
-#[derive(Debug, Deserialize)]
-pub struct AssociationInput {
-    pub subject: String,
-    pub label: String,
-    pub object: String,
-    pub weight: f64,
-    pub source: Option<String>,
-}
-
+/// A batch of assertions — the arguments of `associate` /
+/// `associate_from` as JSON fields ([`AssocOp`], shared with the WAL).
+/// A batch is the natural write unit: one document's extracted facts,
+/// one request, one lock acquisition, one WAL fsync.
 pub async fn add_associations(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(associations): Json<Vec<AssociationInput>>,
+    Json(associations): Json<Vec<AssocOp>>,
 ) -> Response {
     let started_at = Instant::now();
     // Refused before the write lock is even taken: nothing of an
@@ -215,40 +210,17 @@ pub async fn add_associations(
             started_at,
         );
     }
-    let outcome = state.write_context(&name, |context| {
-        for (index, input) in associations.iter().enumerate() {
-            let result = match &input.source {
-                Some(source) => context.associate_from(
-                    input.subject.as_str(),
-                    input.label.as_str(),
-                    input.object.as_str(),
-                    input.weight,
-                    source.as_str(),
-                ),
-                None => context.associate(
-                    input.subject.as_str(),
-                    input.label.as_str(),
-                    input.object.as_str(),
-                    input.weight,
-                ),
-            };
-            if let Err(full) = result {
-                return Err((index, full));
-            }
-        }
-        Ok(associations.len())
-    });
-
-    match outcome {
+    let total = associations.len();
+    match state.add_associations(&name, associations) {
         Err(failure) => access_error(failure, &name, started_at),
         Ok(Ok(applied)) => ok(applied, started_at),
         // Items before the failing one are applied (each item is
         // all-or-nothing in the library); report how far the batch got.
-        Ok(Err((applied, full))) => error(
+        Ok(Err(partial)) => error(
             StatusCode::INSUFFICIENT_STORAGE,
             format!(
-                "applied {applied} of {} associations, then: {full}",
-                associations.len()
+                "applied {} of {total} associations, then: {}",
+                partial.applied, partial.message
             ),
             started_at,
         ),
@@ -346,45 +318,21 @@ pub async fn add_aliases(
     Json(request): Json<AliasRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    let outcome = state.write_context(&name, |context| {
-        let mut applied = 0usize;
-        for (alias, canonical) in &request.concepts {
-            if let Err(alias_error) = context.add_concept_alias(alias.as_str(), canonical) {
-                let full = matches!(alias_error, AliasError::Full(_));
-                return Err((
-                    applied,
-                    format!("concept alias '{alias}' → '{canonical}': {alias_error}"),
-                    full,
-                ));
-            }
-            applied += 1;
-        }
-        for (alias, canonical) in &request.labels {
-            if let Err(alias_error) = context.add_label_alias(alias.as_str(), canonical) {
-                let full = matches!(alias_error, AliasError::Full(_));
-                return Err((
-                    applied,
-                    format!("label alias '{alias}' → '{canonical}': {alias_error}"),
-                    full,
-                ));
-            }
-            applied += 1;
-        }
-        Ok(applied)
-    });
-
-    match outcome {
+    match state.add_aliases(&name, &request.concepts, &request.labels) {
         Err(failure) => access_error(failure, &name, started_at),
         Ok(Ok(applied)) => ok(applied, started_at),
-        Ok(Err((applied, message, full))) => {
-            let status = if full {
+        Ok(Err(partial)) => {
+            let status = if partial.full {
                 StatusCode::INSUFFICIENT_STORAGE
             } else {
                 StatusCode::CONFLICT
             };
             error(
                 status,
-                format!("applied {applied} aliases, then {message}"),
+                format!(
+                    "applied {} aliases, then {}",
+                    partial.applied, partial.message
+                ),
                 started_at,
             )
         }

@@ -4,6 +4,7 @@ mod embedding;
 mod limits;
 mod metrics;
 mod registry;
+mod wal;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,8 +24,11 @@ use tracing::{info, warn};
 ///   (default 512 MiB). Past it, least-recently-used contexts are
 ///   flushed and dropped; pinned contexts live outside the budget.
 /// - `TAGURU_FLUSH_SECS`: how often dirty contexts are persisted (default
-///   5). This is the crash-loss window; writes also persist on eviction
-///   and on graceful shutdown (SIGINT/SIGTERM).
+///   5). With the WAL on this is image-freshness cadence; writes also
+///   persist on eviction and on graceful shutdown (SIGINT/SIGTERM).
+/// - `TAGURU_WAL`: per-context write-ahead log for acknowledged graph
+///   writes (default on). `0`/`false` restores the flush-interval
+///   crash-loss window.
 /// - `TAGURU_ADDR`: bind address (default 127.0.0.1:3000; port 0 picks a
 ///   free port and the resolved address is printed).
 /// - `RUST_LOG`: log filter (default `info`), standard EnvFilter syntax.
@@ -64,13 +68,21 @@ async fn main() {
     }
     let embedder = embedder.map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>);
 
-    let state = AppState::boot(data_dir.clone(), cache_bytes, embedder)
+    // The WAL closes the flush-interval loss window; opting out
+    // (TAGURU_WAL=0) restores the old posture for benchmarks or
+    // explicit risk acceptance.
+    let wal_enabled = std::env::var("TAGURU_WAL")
+        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
+
+    let state = AppState::boot_with(data_dir.clone(), cache_bytes, embedder, wal_enabled)
         .expect("data directory must be usable");
     info!(
         contexts = state.context_count(),
         data_dir = %data_dir.display(),
         cache_mib = cache_bytes / (1024 * 1024),
         flush_secs,
+        wal_enabled,
         "server ready",
     );
 

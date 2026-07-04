@@ -120,10 +120,20 @@ impl Server {
     }
 
     /// Graceful stop (SIGTERM), waiting for the shutdown flush.
-    fn stop_gracefully(mut self) -> PathBuf {
+    fn stop_gracefully(self) -> PathBuf {
+        self.stop_with("-TERM")
+    }
+
+    /// Hard kill (SIGKILL): no shutdown flush, no cleanup — whatever
+    /// durability the server claims must come from the disk alone.
+    fn stop_hard(self) -> PathBuf {
+        self.stop_with("-KILL")
+    }
+
+    fn stop_with(mut self, signal: &str) -> PathBuf {
         let pid = self.child.id().to_string();
         Command::new("kill")
-            .args(["-TERM", &pid])
+            .args([signal, &pid])
             .status()
             .expect("kill must run");
         let _ = self.child.wait();
@@ -380,6 +390,31 @@ fn bearer_token_gates_every_route_except_health_and_metrics() {
     let (status, _) =
         server.call_with_token("PUT", "/contexts/sake", Some(json!({})), Some("s3cret"));
     assert_eq!(status, 200);
+}
+
+#[test]
+fn graph_writes_survive_a_hard_kill() {
+    // A one-hour flush interval: the periodic flusher provably cannot
+    // have persisted anything before the SIGKILL lands — whatever
+    // comes back after the restart came through the WAL.
+    let server = Server::start_with_env("hardkill", &[("TAGURU_FLUSH_SECS", "3600")]);
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "第1段落"},
+        ])),
+    );
+
+    let data_dir = server.stop_hard();
+    let server = Server::start_on("hardkill2", data_dir);
+    let recalled = server.ok(
+        "POST",
+        "/contexts/sake/recall",
+        Some(json!({"cue": "青嶺酒造"})),
+    );
+    assert_eq!(recalled["matches"][0]["object"], json!("1907年"));
 }
 
 #[test]
