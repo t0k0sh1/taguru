@@ -112,3 +112,7 @@ questions against a fictional corpus (covering typo entry, full-width
 entry, aliases, two-hop composition, negation, and corroboration) must
 keep coming back fully answered by mechanically running the documented
 retrieval loop.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
