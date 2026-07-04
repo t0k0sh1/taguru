@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod embedding;
+mod limits;
 mod metrics;
 mod registry;
 
@@ -40,6 +41,8 @@ async fn main() {
         PathBuf::from(std::env::var("TAGURU_DATA_DIR").unwrap_or_else(|_| "data".into()));
     let cache_bytes = env_number("TAGURU_CACHE_BYTES", 512 * 1024 * 1024);
     let flush_secs = env_number("TAGURU_FLUSH_SECS", 5);
+    let max_body_bytes = env_number("TAGURU_MAX_BODY_BYTES", 8 * 1024 * 1024);
+    let timeout_secs = env_number("TAGURU_REQUEST_TIMEOUT_SECS", 30);
 
     let api_token = Arc::new(std::env::var("TAGURU_API_TOKEN").ok());
     if api_token.is_none() {
@@ -155,11 +158,18 @@ async fn main() {
         )
         // Layers wrap only the routes registered above and nest by
         // call order — later .layer() calls sit outside earlier ones.
-        // Auth inside, metrics outermost: every response, the 401s
-        // included, lands in the access log and the RED metrics.
+        // Body limit innermost, then auth, then the timeout (its
+        // budget covers auth and body handling too), and metrics
+        // outermost: every response — 401, 408, 413 — lands in the
+        // access log and the RED metrics.
+        .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes))
         .layer(axum::middleware::from_fn_with_state(
             api_token,
             auth::require_bearer,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Duration::from_secs(timeout_secs as u64),
+            limits::enforce_timeout,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
