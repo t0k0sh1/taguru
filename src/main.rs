@@ -1,31 +1,35 @@
 mod api;
+mod registry;
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::path::PathBuf;
 
-use associative_rag::context::Context;
 use axum::Router;
 use axum::routing::{get, post, put};
+use registry::AppState;
 use tokio::net::TcpListener;
 
-/// The context registry. The outer lock guards only the name → context
-/// map and is held just long enough to look up, insert, or remove an
-/// entry; every `Context` sits behind its own lock. A handler that works
-/// on one context clones its `Arc` and releases the registry immediately,
-/// so a slow retrieval or write on one context never blocks the others —
-/// and a panic while holding a context's lock poisons only that context,
-/// not the whole registry.
-pub type SharedContexts = Arc<RwLock<HashMap<String, Arc<RwLock<Context>>>>>;
-
+/// Configuration comes from the environment:
+/// - `ARAG_DATA_DIR`: where context images and sidecars live (default
+///   `data`). Disk is the source of truth; the registry is loaded from
+///   here on boot.
 #[tokio::main]
 async fn main() {
-    let contexts: SharedContexts = Arc::new(RwLock::new(HashMap::new()));
+    let data_dir = PathBuf::from(std::env::var("ARAG_DATA_DIR").unwrap_or_else(|_| "data".into()));
+    let state = AppState::boot(data_dir.clone()).expect("data directory must be usable");
+    println!(
+        "loaded {} context(s) from {}",
+        state.context_count(),
+        data_dir.display()
+    );
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/contexts", get(api::list_contexts))
         .route(
             "/contexts/{name}",
-            put(api::create_context).delete(api::delete_context),
+            put(api::create_context)
+                .patch(api::update_context)
+                .delete(api::delete_context),
         )
         .route("/contexts/{name}/associations", post(api::add_associations))
         .route("/contexts/{name}/recall", post(api::recall))
@@ -39,7 +43,7 @@ async fn main() {
             "/contexts/{name}/unreachable_from",
             post(api::unreachable_from),
         )
-        .with_state(contexts);
+        .with_state(state);
 
     let addr = "127.0.0.1:3000";
     let listener = TcpListener::bind(addr).await.unwrap();
