@@ -28,7 +28,7 @@
 //! one context never blocks the others — and a panic poisons only the
 //! context it happened in.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -257,7 +257,11 @@ impl AppState {
         let _in_flight = entry.inner.write().unwrap();
         let stem = file_stem(name);
         let mut outcome = Ok(());
-        for file in [format!("{stem}.ctx"), format!("{stem}.meta.json")] {
+        for file in [
+            format!("{stem}.ctx"),
+            format!("{stem}.meta.json"),
+            format!("{stem}.sources.json"),
+        ] {
             if let Err(error) = fs::remove_file(self.0.data_dir.join(file))
                 && error.kind() != io::ErrorKind::NotFound
             {
@@ -265,6 +269,64 @@ impl AppState {
             }
         }
         Some(outcome)
+    }
+
+    /// Registers original text passages behind source ids, merge-upsert,
+    /// persisted immediately. This is the server-side "storage of
+    /// record" convenience the library deliberately does not have: the
+    /// graph indexes knowledge and attributions carry opaque source ids;
+    /// this store lets a client dereference those ids back to original
+    /// wording — find with the graph, answer from the text. Passages are
+    /// optional per source; nothing requires one to exist.
+    pub fn store_passages(
+        &self,
+        name: &str,
+        passages: BTreeMap<String, String>,
+    ) -> Option<io::Result<usize>> {
+        let entry = self.lookup(name)?;
+        // The entry lock only serializes read-modify-write on the
+        // passages file; the context itself is never loaded for this.
+        let _guard = entry.inner.write().unwrap();
+        let path = sources_path(&self.0.data_dir, &file_stem(name));
+        let mut stored = read_passages(&path);
+        let added = passages.len();
+        stored.extend(passages);
+        let outcome = serde_json::to_vec_pretty(&stored)
+            .map_err(io::Error::from)
+            .and_then(|bytes| write_atomic(&path, &bytes))
+            .map(|()| added);
+        Some(outcome)
+    }
+
+    /// Dereferences source ids (as found on attributions) back to their
+    /// registered passages, reporting the ids that have none.
+    pub fn lookup_passages(
+        &self,
+        name: &str,
+        sources: &[String],
+    ) -> Option<(BTreeMap<String, String>, Vec<String>)> {
+        let entry = self.lookup(name)?;
+        let _guard = entry.inner.read().unwrap();
+        let stored = read_passages(&sources_path(&self.0.data_dir, &file_stem(name)));
+        let mut passages = BTreeMap::new();
+        let mut missing = Vec::new();
+        for source in sources {
+            match stored.get(source) {
+                Some(text) => {
+                    passages.insert(source.clone(), text.clone());
+                }
+                None => missing.push(source.clone()),
+            }
+        }
+        Some((passages, missing))
+    }
+
+    /// The source ids that currently have a registered passage.
+    pub fn passage_sources(&self, name: &str) -> Option<Vec<String>> {
+        let entry = self.lookup(name)?;
+        let _guard = entry.inner.read().unwrap();
+        let stored = read_passages(&sources_path(&self.0.data_dir, &file_stem(name)));
+        Some(stored.into_keys().collect())
     }
 
     /// Updates the description and/or pin flag, persisting the sidecar
@@ -498,6 +560,22 @@ fn image_path(dir: &Path, stem: &str) -> PathBuf {
 
 fn meta_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.meta.json"))
+}
+
+fn sources_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.sources.json"))
+}
+
+/// Reads a passages file, treating any problem as "no passages" — a
+/// corrupt sidecar must not block the graph or new registrations.
+fn read_passages(path: &Path) -> BTreeMap<String, String> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            eprintln!("ignoring corrupt passages at {}: {error}", path.display());
+            BTreeMap::new()
+        }),
+        Err(_) => BTreeMap::new(),
+    }
 }
 
 fn save_files(
@@ -735,6 +813,41 @@ mod tests {
             .map_err(|_| "reload")
             .unwrap();
         assert_eq!(recalled, 1);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn passages_store_lookup_and_survive_restart() {
+        let dir = scratch_dir("passages");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert(
+                "第1段落".to_string(),
+                "青嶺酒造は、雲居県霧沢町にある日本酒の蔵元である。".to_string(),
+            );
+            assert_eq!(state.store_passages("sake", passages).unwrap().unwrap(), 1);
+        }
+
+        // A fresh boot serves the registered passage; unknown sources
+        // come back as missing rather than erroring.
+        let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+        let (passages, missing) = state
+            .lookup_passages("sake", &["第1段落".to_string(), "第9段落".to_string()])
+            .unwrap();
+        assert!(passages["第1段落"].starts_with("青嶺酒造は"));
+        assert_eq!(missing, vec!["第9段落".to_string()]);
+        assert_eq!(state.passage_sources("sake").unwrap(), vec!["第1段落"]);
+        assert!(state.lookup_passages("nope", &[]).is_none());
+
+        // Deleting the context removes its passages file with it.
+        state.delete("sake").unwrap().unwrap();
+        assert!(!sources_path(&dir, &file_stem("sake")).exists());
 
         let _ = fs::remove_dir_all(dir);
     }

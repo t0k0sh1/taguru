@@ -66,6 +66,14 @@ async fn main() {
             get(api::list_aliases).post(api::add_aliases),
         )
         .route(
+            "/contexts/{name}/sources",
+            get(api::list_sources).post(api::store_passages),
+        )
+        .route(
+            "/contexts/{name}/sources/lookup",
+            post(api::lookup_passages),
+        )
+        .route(
             "/contexts/{name}/unreachable_from",
             post(api::unreachable_from),
         )

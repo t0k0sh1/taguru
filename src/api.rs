@@ -342,6 +342,64 @@ pub async fn list_aliases(State(state): State<AppState>, Path(name): Path<String
     }
 }
 
+/// Original text passages keyed by source id — the same opaque ids that
+/// appear on attributions.
+#[derive(Debug, Deserialize)]
+pub struct StorePassagesRequest {
+    pub passages: BTreeMap<String, String>,
+}
+
+pub async fn store_passages(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<StorePassagesRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match state.store_passages(&name, request.passages) {
+        None => not_found(&name, started_at),
+        Some(Ok(stored)) => ok(stored, started_at),
+        Some(Err(io_error)) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("passages could not be persisted: {io_error}"),
+            started_at,
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LookupPassagesRequest {
+    pub sources: Vec<String>,
+}
+
+/// The dereference half of "find with the graph, answer from the text":
+/// attributions name sources, this returns the original passages behind
+/// them (and which sources have none registered).
+#[derive(Serialize)]
+pub struct PassageLookup {
+    pub passages: BTreeMap<String, String>,
+    pub missing: Vec<String>,
+}
+
+pub async fn lookup_passages(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<LookupPassagesRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match state.lookup_passages(&name, &request.sources) {
+        None => not_found(&name, started_at),
+        Some((passages, missing)) => ok(PassageLookup { passages, missing }, started_at),
+    }
+}
+
+pub async fn list_sources(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    let started_at = Instant::now();
+    match state.passage_sources(&name) {
+        None => not_found(&name, started_at),
+        Some(sources) => ok(sources, started_at),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RecallRequest {
     pub cue: String,
