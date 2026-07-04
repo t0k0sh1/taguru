@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use associative_rag::context::Context;
+use associative_rag::context::{Association, Context};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -208,9 +208,55 @@ pub async fn add_associations(
     }
 }
 
+/// Cap applied to recall/query matches when the request names no limit:
+/// a hub concept must not flood an LLM client's prompt by default.
+const DEFAULT_MATCH_LIMIT: usize = 100;
+
+/// A bounded set of matches. `total` is the full match count before the
+/// limit was applied, so a client can see that it is looking at a
+/// truncated view and narrow the query (or raise the limit).
+#[derive(Serialize)]
+pub struct MatchPage {
+    pub total: usize,
+    pub matches: Vec<Association>,
+}
+
+/// Bounds a match list: within the limit the library's insertion order
+/// is preserved; past it, the strongest knowledge (|weight|, the same
+/// magnitude-ranks philosophy as activate) survives the cut, ties in
+/// insertion order.
+fn page(mut matches: Vec<Association>, limit: Option<usize>) -> MatchPage {
+    let total = matches.len();
+    let limit = limit.unwrap_or(DEFAULT_MATCH_LIMIT);
+    if total > limit {
+        matches.sort_by(|a, b| b.weight.abs().total_cmp(&a.weight.abs()));
+        matches.truncate(limit);
+    }
+    MatchPage { total, matches }
+}
+
+/// One name or several: query positions accept `"住所"` and
+/// `["住所", "職歴"]` interchangeably.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn as_refs(position: &Option<OneOrMany>) -> Vec<&str> {
+    match position {
+        None => Vec::new(),
+        Some(OneOrMany::One(name)) => vec![name.as_str()],
+        Some(OneOrMany::Many(names)) => names.iter().map(String::as_str).collect(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RecallRequest {
     pub cue: String,
+    /// Omitted means 100.
+    pub limit: Option<usize>,
 }
 
 pub async fn recall(
@@ -220,16 +266,18 @@ pub async fn recall(
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.recall(&request.cue)) {
-        Ok(result) => ok(result, started_at),
+        Ok(result) => ok(page(result, request.limit), started_at),
         Err(failure) => access_error(failure, &name, started_at),
     }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct QueryRequest {
-    pub subject: Option<String>,
-    pub label: Option<String>,
-    pub object: Option<String>,
+    pub subject: Option<OneOrMany>,
+    pub label: Option<OneOrMany>,
+    pub object: Option<OneOrMany>,
+    /// Omitted means 100.
+    pub limit: Option<usize>,
 }
 
 pub async fn query(
@@ -239,12 +287,33 @@ pub async fn query(
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| {
-        context.query(
-            request.subject.as_deref(),
-            request.label.as_deref(),
-            request.object.as_deref(),
+        context.query_any(
+            &as_refs(&request.subject),
+            &as_refs(&request.label),
+            &as_refs(&request.object),
         )
     }) {
+        Ok(result) => ok(page(result, request.limit), started_at),
+        Err(failure) => access_error(failure, &name, started_at),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DescribeRequest {
+    pub concept: String,
+}
+
+/// The staged-read entry point: what kinds of knowledge exist about a
+/// concept (labels and counts, per role) without materializing a single
+/// association. Check the outline, then `query` just the labels that
+/// matter. An unknown concept comes back as a null result.
+pub async fn describe(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<DescribeRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match state.read_context(&name, |context| context.describe(&request.concept)) {
         Ok(result) => ok(result, started_at),
         Err(failure) => access_error(failure, &name, started_at),
     }

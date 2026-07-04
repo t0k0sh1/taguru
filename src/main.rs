@@ -55,6 +55,7 @@ async fn main() {
         .route("/contexts/{name}/associations", post(api::add_associations))
         .route("/contexts/{name}/recall", post(api::recall))
         .route("/contexts/{name}/query", post(api::query))
+        .route("/contexts/{name}/describe", post(api::describe))
         .route("/contexts/{name}/explore", post(api::explore))
         .route("/contexts/{name}/activate", post(api::activate))
         .route("/contexts/{name}/resolve", post(api::resolve))

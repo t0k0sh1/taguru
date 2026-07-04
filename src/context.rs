@@ -130,6 +130,32 @@ pub struct Resolution {
     pub score: f64,
 }
 
+/// How often one relation label appears on a concept's edges — one row of
+/// a [`ConceptDescription`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LabelUsage {
+    pub label: String,
+    pub count: usize,
+}
+
+/// The outline of one concept produced by [`Context::describe`]: which
+/// relation labels its edges carry and how often, split by role, without
+/// materializing a single association. This is the "what is known about
+/// X" overview a caller reads BEFORE fetching facts — check the outline,
+/// pick the relevant labels, then [`Context::query_any`] just those —
+/// so a hub concept never floods the caller with its whole profile.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConceptDescription {
+    /// The stored spelling of the described concept.
+    pub concept: String,
+    /// Labels on edges where the concept is the subject (what it does /
+    /// has), most frequent first.
+    pub as_subject: Vec<LabelUsage>,
+    /// Labels on edges where the concept is the object (what is said
+    /// about it), most frequent first.
+    pub as_object: Vec<LabelUsage>,
+}
+
 /// A concept node in fixed-width form: where its interned name lives in the
 /// string arena, plus the heads, tails, and lengths of the two edge chains
 /// it participates in. The chains are what make the structure a walkable
@@ -618,69 +644,159 @@ impl Context {
         label: Option<&str>,
         object: Option<&str>,
     ) -> Vec<Association> {
-        if subject.is_none() && label.is_none() && object.is_none() {
+        self.query_any(subject.as_slice(), label.as_slice(), object.as_slice())
+    }
+
+    /// [`Context::query`] with OR-sets: each non-empty list pins its
+    /// position to ANY of the given names, each empty list leaves the
+    /// position unconstrained. This is the "narrowed re-query" of the
+    /// two-step read pattern — [`Context::describe`] shows which labels a
+    /// concept carries, then `query_any(&["山田太郎"], &["住所", "職歴"],
+    /// &[])` fetches just the chosen facets instead of the whole profile.
+    ///
+    /// Names that were never interned contribute nothing; a constrained
+    /// position whose names are ALL unknown can match nothing at all.
+    /// Results come back in insertion order.
+    pub fn query_any(
+        &self,
+        subjects: &[&str],
+        labels: &[&str],
+        objects: &[&str],
+    ) -> Vec<Association> {
+        if subjects.is_empty() && labels.is_empty() && objects.is_empty() {
             return (0..self.edges.len() as u32)
                 .map(|edge_id| self.association(edge_id))
                 .collect();
         }
 
-        // Resolve every bound position to its interned id up front; a bound
-        // string that was never interned can match nothing at all.
-        let subject_id = match subject.map(|s| self.concept_ids.get(s)) {
-            None => None,
-            Some(Some(&id)) => Some(id),
-            Some(None) => return Vec::new(),
+        // Resolve every constrained position to its id set up front; a
+        // constrained position with no known names can match nothing.
+        let resolve_set = |map: &HashMap<String, u32>, names: &[&str]| -> Option<HashSet<u32>> {
+            (!names.is_empty()).then(|| {
+                names
+                    .iter()
+                    .filter_map(|name| map.get(*name).copied())
+                    .collect()
+            })
         };
-        let label_id = match label.map(|l| self.label_ids.get(l)) {
-            None => None,
-            Some(Some(&id)) => Some(id),
-            Some(None) => return Vec::new(),
-        };
-        let object_id = match object.map(|o| self.concept_ids.get(o)) {
-            None => None,
-            Some(Some(&id)) => Some(id),
-            Some(None) => return Vec::new(),
-        };
-
-        // Narrow the scan with whichever bound position anchors the
-        // shortest edge chain (each record carries its chain's length),
-        // then filter the remaining bound positions in memory; this walks
-        // one small chain instead of every edge.
-        type Follow = fn(&EdgeRecord) -> EdgeId;
-        let candidate_chains = [
-            subject_id.map(|id| {
-                let node = &self.concepts[id as usize];
-                let follow: Follow = |edge| edge.next_outgoing;
-                (node.outgoing_count, node.first_outgoing, follow)
-            }),
-            label_id.map(|id| {
-                let label = &self.labels[id as usize];
-                let follow: Follow = |edge| edge.next_labeled;
-                (label.edge_count, label.first_edge, follow)
-            }),
-            object_id.map(|id| {
-                let node = &self.concepts[id as usize];
-                let follow: Follow = |edge| edge.next_incoming;
-                (node.incoming_count, node.first_incoming, follow)
-            }),
-        ];
-        let Some((_, first, follow)) = candidate_chains
+        let subject_ids = resolve_set(&self.concept_ids, subjects);
+        let label_ids = resolve_set(&self.label_ids, labels);
+        let object_ids = resolve_set(&self.concept_ids, objects);
+        for constrained in [&subject_ids, &label_ids, &object_ids]
             .into_iter()
             .flatten()
-            .min_by_key(|&(count, _, _)| count)
-        else {
+        {
+            if constrained.is_empty() {
+                return Vec::new();
+            }
+        }
+
+        // Narrow the scan with whichever constrained position anchors the
+        // fewest chained edges in total (each record carries its chain's
+        // length), then filter the remaining constraints in memory; this
+        // walks a few small chains instead of every edge.
+        type Follow = fn(&EdgeRecord) -> EdgeId;
+        let mut narrowest: Option<(u64, Vec<EdgeId>, Follow)> = None;
+        let mut consider = |total: u64, firsts: Vec<EdgeId>, follow: Follow| {
+            if narrowest.as_ref().is_none_or(|&(best, ..)| total < best) {
+                narrowest = Some((total, firsts, follow));
+            }
+        };
+        if let Some(ids) = &subject_ids {
+            consider(
+                ids.iter()
+                    .map(|&id| u64::from(self.concepts[id as usize].outgoing_count))
+                    .sum(),
+                ids.iter()
+                    .map(|&id| self.concepts[id as usize].first_outgoing)
+                    .collect(),
+                |edge| edge.next_outgoing,
+            );
+        }
+        if let Some(ids) = &label_ids {
+            consider(
+                ids.iter()
+                    .map(|&id| u64::from(self.labels[id as usize].edge_count))
+                    .sum(),
+                ids.iter()
+                    .map(|&id| self.labels[id as usize].first_edge)
+                    .collect(),
+                |edge| edge.next_labeled,
+            );
+        }
+        if let Some(ids) = &object_ids {
+            consider(
+                ids.iter()
+                    .map(|&id| u64::from(self.concepts[id as usize].incoming_count))
+                    .sum(),
+                ids.iter()
+                    .map(|&id| self.concepts[id as usize].first_incoming)
+                    .collect(),
+                |edge| edge.next_incoming,
+            );
+        }
+        let Some((_, firsts, follow)) = narrowest else {
             return Vec::new();
         };
 
-        self.edge_chain(first, follow)
+        // Chains of one position never share an edge, but sorting restores
+        // global insertion order across the walked chains.
+        let mut edge_ids: Vec<EdgeId> = firsts
+            .into_iter()
+            .flat_map(|first| self.edge_chain(first, follow))
+            .collect();
+        edge_ids.sort_unstable();
+
+        edge_ids
+            .into_iter()
             .filter(|&edge_id| {
                 let edge = &self.edges[edge_id as usize];
-                subject_id.is_none_or(|id| edge.subject == id)
-                    && label_id.is_none_or(|id| edge.label == id)
-                    && object_id.is_none_or(|id| edge.object == id)
+                subject_ids
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&edge.subject))
+                    && label_ids
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&edge.label))
+                    && object_ids
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&edge.object))
             })
             .map(|edge_id| self.association(edge_id))
             .collect()
+    }
+
+    /// The outline of one concept: which relation labels its edges carry
+    /// and how often, split by role, most frequent first (ties in label
+    /// insertion order). Returns `None` for an unknown concept.
+    ///
+    /// This is the cheap first step of a staged read — a caller checks
+    /// what KINDS of knowledge exist about a concept (O(degree), no
+    /// association materialized), then fetches only the relevant labels
+    /// via [`Context::query_any`].
+    pub fn describe(&self, concept: &str) -> Option<ConceptDescription> {
+        let &id = self.concept_ids.get(concept)?;
+        let tally = |edges: &mut dyn Iterator<Item = EdgeId>| -> Vec<LabelUsage> {
+            let mut counts: HashMap<LabelId, usize> = HashMap::new();
+            for edge_id in edges {
+                *counts
+                    .entry(self.edges[edge_id as usize].label)
+                    .or_insert(0) += 1;
+            }
+            let mut usages: Vec<(LabelId, usize)> = counts.into_iter().collect();
+            usages.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            usages
+                .into_iter()
+                .map(|(label_id, count)| LabelUsage {
+                    label: self.label_name(label_id).to_string(),
+                    count,
+                })
+                .collect()
+        };
+        Some(ConceptDescription {
+            concept: self.concept_name(id).to_string(),
+            as_subject: tally(&mut self.outgoing(id)),
+            as_object: tally(&mut self.incoming(id)),
+        })
     }
 
     /// Walks the network outward from `origins` and returns every
@@ -2709,6 +2825,101 @@ mod tests {
         let empty = context.footprint();
         context.associate("私", "好き", "りんご", 1.0).unwrap();
         assert!(context.footprint() > empty);
+    }
+
+    /// Builds a small profile: 山田太郎 with two addresses' worth of
+    /// facts, three career entries, and one incoming recommendation.
+    fn associate_profile(context: &mut Context) {
+        context.associate("山田太郎", "住所", "東京", 1.0).unwrap();
+        context
+            .associate("山田太郎", "職歴", "営業部", 1.0)
+            .unwrap();
+        context
+            .associate("山田太郎", "職歴", "開発部", 1.0)
+            .unwrap();
+        context
+            .associate("山田太郎", "職歴", "企画部", 1.0)
+            .unwrap();
+        context
+            .associate("山田太郎", "アピールポイント", "英語", 1.0)
+            .unwrap();
+        context
+            .associate("佐藤", "推薦する", "山田太郎", 1.0)
+            .unwrap();
+    }
+
+    #[test]
+    fn describe_outlines_a_concept_without_materializing_facts() {
+        let mut context = Context::default();
+        associate_profile(&mut context);
+
+        let description = context.describe("山田太郎").unwrap();
+        assert_eq!(description.concept, "山田太郎");
+        // Most frequent first; ties (住所/アピールポイント, 1 each) in
+        // label insertion order.
+        assert_eq!(
+            description.as_subject,
+            vec![
+                LabelUsage {
+                    label: "職歴".to_string(),
+                    count: 3,
+                },
+                LabelUsage {
+                    label: "住所".to_string(),
+                    count: 1,
+                },
+                LabelUsage {
+                    label: "アピールポイント".to_string(),
+                    count: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            description.as_object,
+            vec![LabelUsage {
+                label: "推薦する".to_string(),
+                count: 1,
+            }]
+        );
+
+        assert!(context.describe("存在しない概念").is_none());
+    }
+
+    #[test]
+    fn query_any_pins_a_position_to_any_of_several_names() {
+        let mut context = Context::default();
+        associate_profile(&mut context);
+
+        // The staged read: describe showed 職歴/住所/アピールポイント;
+        // fetch just two of those facets.
+        let narrowed = context.query_any(&["山田太郎"], &["住所", "アピールポイント"], &[]);
+        assert_eq!(narrowed.len(), 2);
+        assert_eq!(narrowed[0].label, "住所"); // insertion order
+        assert_eq!(narrowed[1].label, "アピールポイント");
+
+        // Unknown names inside a set contribute nothing but do not
+        // poison the rest; an all-unknown set can match nothing.
+        assert_eq!(
+            context
+                .query_any(&["山田太郎"], &["住所", "存在しない関係"], &[])
+                .len(),
+            1
+        );
+        assert!(
+            context
+                .query_any(&["山田太郎"], &["存在しない関係"], &[])
+                .is_empty()
+        );
+
+        // Multiple subjects at once, and parity with the single-name query.
+        assert_eq!(context.query_any(&["山田太郎", "佐藤"], &[], &[]).len(), 6);
+        assert_eq!(
+            context.query_any(&["山田太郎"], &["職歴"], &[]),
+            context.query(Some("山田太郎"), Some("職歴"), None)
+        );
+
+        // All positions unconstrained returns everything.
+        assert_eq!(context.query_any(&[], &[], &[]).len(), 6);
     }
 
     #[test]
