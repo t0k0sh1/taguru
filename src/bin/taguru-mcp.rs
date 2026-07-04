@@ -25,8 +25,16 @@ const FALLBACK_INSTRUCTIONS: &str = include_str!("../../docs/llm-protocol.md");
 
 fn main() {
     let base = std::env::var("TAGURU_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
+    let token = std::env::var("TAGURU_API_TOKEN").ok();
+    if token.is_none() {
+        // Not an error — the server may run unauthenticated — but the
+        // operator who armed the server and forgot the bridge deserves
+        // an immediate stderr clue, not a 401 on the first tool call.
+        eprintln!("taguru-mcp: TAGURU_API_TOKEN not set; requests go out without credentials");
+    }
     let bridge = Bridge {
         base: base.trim_end_matches('/').to_string(),
+        token,
         agent: ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(30))
             .build(),
@@ -101,6 +109,10 @@ fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value>
 
 struct Bridge {
     base: String,
+    /// Sent as `Authorization: Bearer` on every request when set —
+    /// same env var name as the server (`TAGURU_API_TOKEN`), one
+    /// concept to configure on both ends of a deployment.
+    token: Option<String>,
     agent: ureq::Agent,
 }
 
@@ -108,7 +120,10 @@ impl Bridge {
     /// One HTTP round trip; the API's JSON error body becomes the Err
     /// text so the agent reads the server's own explanation.
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<String, String> {
-        let request = self.agent.request(method, &format!("{}{path}", self.base));
+        let mut request = self.agent.request(method, &format!("{}{path}", self.base));
+        if let Some(token) = &self.token {
+            request = request.set("Authorization", &format!("Bearer {token}"));
+        }
         let response = match body {
             Some(body) => request
                 .set("Content-Type", "application/json")

@@ -67,6 +67,13 @@ cargo run --release
 #   RUST_LOG            log filter (default info), EnvFilter syntax
 #   TAGURU_LOG_FORMAT   json for one JSON object per log line (default: pretty).
 #                     Logs go to stderr.
+#   TAGURU_API_TOKEN    bearer token required on everything but /health and
+#                     /metrics. Unset = UNAUTHENTICATED (localhost only).
+#                     The MCP bridge reads the same variable.
+#   TAGURU_MAX_BODY_BYTES      request body cap (default 8 MiB)
+#   TAGURU_REQUEST_TIMEOUT_SECS  per-request budget (default 30; raise
+#                     above 60 when TAGURU_EMBED_URL is configured — the
+#                     provider round trip cannot be preempted mid-call)
 ```
 
 Observability: every request lands in the access log, and
