@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::registry::{AppState, ContextMeta, CreateError};
+use crate::registry::{AccessError, AppState, ContextMeta, CreateError};
 
 #[derive(Serialize)]
 pub struct ApiResponse<T> {
@@ -62,6 +62,13 @@ fn not_found(name: &str, started_at: Instant) -> Response {
         format!("context '{name}' not found"),
         started_at,
     )
+}
+
+fn access_error(failure: AccessError, name: &str, started_at: Instant) -> Response {
+    match failure {
+        AccessError::NotFound => not_found(name, started_at),
+        AccessError::Load(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message, started_at),
+    }
 }
 
 /// The routing directory, skills-style: name, prose description, and
@@ -122,7 +129,7 @@ pub async fn update_context(
         Some(Ok(meta)) => ok(meta, started_at),
         Some(Err(io_error)) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("metadata updated in memory but not persisted: {io_error}"),
+            format!("metadata update not persisted: {io_error}"),
             started_at,
         ),
     }
@@ -144,7 +151,8 @@ pub async fn delete_context(State(state): State<AppState>, Path(name): Path<Stri
 /// One assertion in a batch: the arguments of `associate` /
 /// `associate_from` as JSON fields. A batch is the natural write unit —
 /// one document's extracted facts arrive as one request, one lock
-/// acquisition, one persisted image.
+/// acquisition. The write becomes durable at the next flush (periodic,
+/// on eviction, or on shutdown).
 #[derive(Debug, Deserialize)]
 pub struct AssociationInput {
     pub subject: String,
@@ -184,30 +192,19 @@ pub async fn add_associations(
         Ok(associations.len())
     });
 
-    let Some((applied, persisted)) = outcome else {
-        return not_found(&name, started_at);
-    };
-    match (applied, persisted) {
-        (Ok(count), Ok(())) => ok(count, started_at),
-        // The batch landed in memory but the image write failed: the
-        // client must know the data is not yet durable.
-        (Ok(count), Err(io_error)) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("applied {count} associations in memory, but persisting failed: {io_error}"),
-            started_at,
-        ),
+    match outcome {
+        Err(failure) => access_error(failure, &name, started_at),
+        Ok(Ok(applied)) => ok(applied, started_at),
         // Items before the failing one are applied (each item is
         // all-or-nothing in the library); report how far the batch got.
-        (Err((index, full)), persisted) => {
-            let mut message = format!(
-                "applied {index} of {} associations, then: {full}",
+        Ok(Err((applied, full))) => error(
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!(
+                "applied {applied} of {} associations, then: {full}",
                 associations.len()
-            );
-            if let Err(io_error) = persisted {
-                message.push_str(&format!("; persisting also failed: {io_error}"));
-            }
-            error(StatusCode::INSUFFICIENT_STORAGE, message, started_at)
-        }
+            ),
+            started_at,
+        ),
     }
 }
 
@@ -223,8 +220,8 @@ pub async fn recall(
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.recall(&request.cue)) {
-        Some(result) => ok(result, started_at),
-        None => not_found(&name, started_at),
+        Ok(result) => ok(result, started_at),
+        Err(failure) => access_error(failure, &name, started_at),
     }
 }
 
@@ -248,8 +245,8 @@ pub async fn query(
             request.object.as_deref(),
         )
     }) {
-        Some(result) => ok(result, started_at),
-        None => not_found(&name, started_at),
+        Ok(result) => ok(result, started_at),
+        Err(failure) => access_error(failure, &name, started_at),
     }
 }
 
@@ -270,8 +267,8 @@ pub async fn explore(
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         context.explore(&origins, request.max_depth.unwrap_or(Context::UNBOUNDED))
     }) {
-        Some(result) => ok(result, started_at),
-        None => not_found(&name, started_at),
+        Ok(result) => ok(result, started_at),
+        Err(failure) => access_error(failure, &name, started_at),
     }
 }
 
@@ -298,8 +295,8 @@ pub async fn activate(
             request.limit.unwrap_or(20),
         )
     }) {
-        Some(result) => ok(result, started_at),
-        None => not_found(&name, started_at),
+        Ok(result) => ok(result, started_at),
+        Err(failure) => access_error(failure, &name, started_at),
     }
 }
 
@@ -315,8 +312,8 @@ pub async fn resolve(
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.resolve(&request.cue)) {
-        Some(result) => ok(result, started_at),
-        None => not_found(&name, started_at),
+        Ok(result) => ok(result, started_at),
+        Err(failure) => access_error(failure, &name, started_at),
     }
 }
 
@@ -327,8 +324,8 @@ pub async fn resolve_label(
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.resolve_label(&request.cue)) {
-        Some(result) => ok(result, started_at),
-        None => not_found(&name, started_at),
+        Ok(result) => ok(result, started_at),
+        Err(failure) => access_error(failure, &name, started_at),
     }
 }
 
@@ -338,8 +335,8 @@ pub async fn labels(State(state): State<AppState>, Path(name): Path<String>) -> 
         let labels: Vec<String> = context.labels().into_iter().map(String::from).collect();
         labels
     }) {
-        Some(result) => ok(result, started_at),
-        None => not_found(&name, started_at),
+        Ok(result) => ok(result, started_at),
+        Err(failure) => access_error(failure, &name, started_at),
     }
 }
 
@@ -358,7 +355,7 @@ pub async fn unreachable_from(
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         context.unreachable_from(&origins)
     }) {
-        Some(result) => ok(result, started_at),
-        None => not_found(&name, started_at),
+        Ok(result) => ok(result, started_at),
+        Err(failure) => access_error(failure, &name, started_at),
     }
 }

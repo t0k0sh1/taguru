@@ -6,6 +6,21 @@
 //! the image on purpose: the image format remains a pure dump of the
 //! network, and server metadata can evolve without bumping it.
 //!
+//! Memory is a cache over that truth, managed at whole-context
+//! granularity — access locality is per 文脈 (a session works one
+//! context for many queries), and a whole image loads in low
+//! milliseconds. Contexts are registered cold at boot and loaded on
+//! first touch; when the resident estimate of unpinned hot contexts
+//! exceeds the cache budget, the least recently used are flushed and
+//! dropped. Pinned contexts (glossaries and other always-hot 文脈)
+//! load at boot, never count against the budget, and are never evicted.
+//!
+//! Durability: writes mark a context dirty; dirty contexts are
+//! persisted by the periodic flusher, on eviction, and on graceful
+//! shutdown. A crash can therefore lose at most the writes since the
+//! last flush — the accepted window until an operation WAL is needed.
+//! Creation and metadata changes persist immediately.
+//!
 //! Locking contract: the registry lock guards only the name → entry map
 //! and is held just long enough to look up, insert, or remove; every
 //! context sits behind its own entry lock. A caller clones the entry's
@@ -17,6 +32,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use associative_rag::context::Context;
@@ -31,8 +47,8 @@ pub struct ContextMeta {
     /// (typically the ingesting LLM). Routing quality depends on it, so
     /// the directory serves it next to stats that cannot go stale.
     pub description: String,
-    /// Pinned contexts are kept resident in memory regardless of cache
-    /// pressure — for small, always-hot contexts like glossaries.
+    /// Pinned contexts stay resident regardless of cache pressure — for
+    /// small, always-hot contexts like glossaries.
     pub pinned: bool,
 }
 
@@ -83,7 +99,7 @@ impl ContextStats {
 
 /// What `{name}.meta.json` holds: the meta inline plus the stats
 /// snapshot as of the last save, so a directory listing can describe a
-/// context without touching its image.
+/// cold context without touching its image.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct MetaFile {
@@ -95,22 +111,48 @@ struct MetaFile {
 /// One row of `GET /contexts` — the routing directory an LLM client
 /// reads to decide which context to search, skills-style: a name, the
 /// prose description, and the mechanical stats that keep it honest.
+/// Stats are live for loaded contexts and the last saved snapshot for
+/// cold ones.
 #[derive(Debug, Clone, Serialize)]
 pub struct DirectoryEntry {
     pub name: String,
     pub description: String,
     pub pinned: bool,
+    pub loaded: bool,
     pub stats: ContextStats,
+}
+
+/// Whether a context's network is resident. Cold entries keep only
+/// their metadata and stats snapshot in memory.
+enum Slot {
+    Hot(Box<Context>),
+    Cold,
 }
 
 pub struct Entry {
     inner: RwLock<EntryInner>,
+    /// Set on every write, cleared when the image is persisted. Only
+    /// ever changed while `inner` is write-locked; the atomic just lets
+    /// the flusher skip clean entries without locking them.
+    dirty: AtomicBool,
+    /// Logical timestamp of the last operation, for LRU eviction.
+    last_touch: AtomicU64,
+}
+
+impl Entry {
+    fn new(meta: ContextMeta, stats: ContextStats, slot: Slot) -> Self {
+        Self {
+            inner: RwLock::new(EntryInner { meta, stats, slot }),
+            dirty: AtomicBool::new(false),
+            last_touch: AtomicU64::new(0),
+        }
+    }
 }
 
 struct EntryInner {
     meta: ContextMeta,
     stats: ContextStats,
-    context: Context,
+    slot: Slot,
 }
 
 pub enum CreateError {
@@ -118,21 +160,37 @@ pub enum CreateError {
     Io(io::Error),
 }
 
-/// Shared server state: the data directory and the context registry.
+/// Why an operation on a named context could not run.
+pub enum AccessError {
+    NotFound,
+    /// The context exists but its image could not be loaded from disk.
+    Load(String),
+}
+
+/// Shared server state: the data directory, the cache budget, and the
+/// context registry.
 #[derive(Clone)]
 pub struct AppState(Arc<StateInner>);
 
 struct StateInner {
     data_dir: PathBuf,
+    /// Resident-bytes budget for unpinned hot contexts, enforced after
+    /// every operation by evicting least-recently-used contexts. The
+    /// most recently used context is never evicted, so one context
+    /// larger than the whole budget still works — it just stays alone.
+    cache_bytes: usize,
     registry: RwLock<HashMap<String, Arc<Entry>>>,
+    /// Logical clock behind `Entry::last_touch`.
+    clock: AtomicU64,
 }
 
 impl AppState {
-    /// Opens (creating if needed) the data directory and loads every
-    /// context image found in it. A file that fails to decode is skipped
-    /// with a warning rather than taking the whole server down — the
-    /// image stays on disk for inspection.
-    pub fn boot(data_dir: PathBuf) -> io::Result<Self> {
+    /// Opens (creating if needed) the data directory and registers every
+    /// context image found in it — cold, described by their sidecar
+    /// snapshots. Pinned contexts are loaded eagerly; a pinned image
+    /// that fails to load is left cold with a warning rather than
+    /// taking the server down.
+    pub fn boot(data_dir: PathBuf, cache_bytes: usize) -> io::Result<Self> {
         fs::create_dir_all(&data_dir)?;
         let mut registry = HashMap::new();
         for dir_entry in fs::read_dir(&data_dir)? {
@@ -147,32 +205,25 @@ impl AppState {
                 eprintln!("skipping {}: file name does not decode", path.display());
                 continue;
             };
-            let context = match fs::read(&path)
-                .and_then(|bytes| Context::from_bytes(&bytes).map_err(io::Error::other))
-            {
-                Ok(context) => context,
-                Err(error) => {
-                    eprintln!("skipping context '{name}': {error}");
-                    continue;
-                }
-            };
-            let meta = read_meta_file(&data_dir, stem).meta;
-            let stats = ContextStats::of(&context);
-            registry.insert(
-                name,
-                Arc::new(Entry {
-                    inner: RwLock::new(EntryInner {
-                        meta,
-                        stats,
-                        context,
-                    }),
-                }),
-            );
+            let MetaFile { meta, stats } = read_meta_file(&data_dir, stem);
+            registry.insert(name, Arc::new(Entry::new(meta, stats, Slot::Cold)));
         }
-        Ok(Self(Arc::new(StateInner {
+
+        let state = Self(Arc::new(StateInner {
             data_dir,
+            cache_bytes,
             registry: RwLock::new(registry),
-        })))
+            clock: AtomicU64::new(0),
+        }));
+        for (name, entry) in state.snapshot() {
+            let mut inner = entry.inner.write().unwrap();
+            if inner.meta.pinned
+                && let Err(error) = ensure_hot(&state.0.data_dir, &name, &mut inner)
+            {
+                eprintln!("pinned context '{name}' not preloaded: {error}");
+            }
+        }
+        Ok(state)
     }
 
     pub fn context_count(&self) -> usize {
@@ -187,24 +238,20 @@ impl AppState {
         if registry.contains_key(name) {
             return Err(CreateError::AlreadyExists);
         }
-        let inner = EntryInner {
-            meta,
-            stats: ContextStats::default(),
-            context: Context::default(),
-        };
-        save_files(&self.0.data_dir, name, &inner).map_err(CreateError::Io)?;
+        let context = Context::default();
+        let stats = ContextStats::of(&context);
+        save_files(&self.0.data_dir, name, &meta, &stats, &context).map_err(CreateError::Io)?;
         registry.insert(
             name.to_string(),
-            Arc::new(Entry {
-                inner: RwLock::new(inner),
-            }),
+            Arc::new(Entry::new(meta, stats, Slot::Hot(Box::new(context)))),
         );
         Ok(())
     }
 
     /// Removes a context from the registry and deletes its files. Waits
     /// for any in-flight operation on the entry (its lock is taken after
-    /// removal), so a concurrent write cannot recreate the files.
+    /// removal), so a concurrent flush cannot recreate the files. Any
+    /// unflushed writes are discarded — deletion destroys the context.
     pub fn delete(&self, name: &str) -> Option<io::Result<()>> {
         let entry = self.0.registry.write().unwrap().remove(name)?;
         let _in_flight = entry.inner.write().unwrap();
@@ -220,45 +267,60 @@ impl AppState {
         Some(outcome)
     }
 
-    /// Updates the description and/or pin flag, persisting the sidecar.
+    /// Updates the description and/or pin flag, persisting the sidecar
+    /// immediately. Pinning loads the context now (pinned means
+    /// resident); unpinning subjects it to the cache budget again.
     pub fn update_meta(
         &self,
         name: &str,
         description: Option<String>,
         pinned: Option<bool>,
     ) -> Option<io::Result<ContextMeta>> {
-        let entry = self.0.registry.read().unwrap().get(name).cloned()?;
-        let mut inner = entry.inner.write().unwrap();
-        if let Some(description) = description {
-            inner.meta.description = description;
-        }
-        if let Some(pinned) = pinned {
-            inner.meta.pinned = pinned;
-        }
-        let outcome = save_meta_file(&self.0.data_dir, name, &inner).map(|()| inner.meta.clone());
+        let entry = self.lookup(name)?;
+        let outcome = {
+            let mut inner = entry.inner.write().unwrap();
+            if let Some(description) = description {
+                inner.meta.description = description;
+            }
+            if let Some(pinned) = pinned {
+                inner.meta.pinned = pinned;
+            }
+            if inner.meta.pinned
+                && let Err(error) = ensure_hot(&self.0.data_dir, name, &mut inner)
+            {
+                return Some(Err(io::Error::other(error)));
+            }
+            let inner = &*inner;
+            write_meta(
+                &self.0.data_dir,
+                &file_stem(name),
+                &inner.meta,
+                &inner.stats,
+            )
+            .map(|()| inner.meta.clone())
+        };
+        self.enforce_budget(name);
         Some(outcome)
     }
 
     /// The routing directory: every context's name, description, policy,
-    /// and stats snapshot, in name order.
+    /// residency, and stats, in name order.
     pub fn directory(&self) -> Vec<DirectoryEntry> {
-        let entries: Vec<(String, Arc<Entry>)> = self
-            .0
-            .registry
-            .read()
-            .unwrap()
-            .iter()
-            .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
-            .collect();
-        let mut directory: Vec<DirectoryEntry> = entries
+        let mut directory: Vec<DirectoryEntry> = self
+            .snapshot()
             .into_iter()
             .map(|(name, entry)| {
                 let inner = entry.inner.read().unwrap();
+                let (loaded, stats) = match &inner.slot {
+                    Slot::Hot(context) => (true, ContextStats::of(context)),
+                    Slot::Cold => (false, inner.stats.clone()),
+                };
                 DirectoryEntry {
                     name,
                     description: inner.meta.description.clone(),
                     pinned: inner.meta.pinned,
-                    stats: inner.stats.clone(),
+                    loaded,
+                    stats,
                 }
             })
             .collect();
@@ -266,31 +328,168 @@ impl AppState {
         directory
     }
 
-    /// Runs a read-only operation on one context, or `None` for an
-    /// unknown name.
-    pub fn read_context<T>(&self, name: &str, operate: impl FnOnce(&Context) -> T) -> Option<T> {
-        let entry = self.0.registry.read().unwrap().get(name).cloned()?;
-        let inner = entry.inner.read().unwrap();
-        Some(operate(&inner.context))
+    /// Runs a read-only operation on one context, loading it first if
+    /// cold.
+    pub fn read_context<T>(
+        &self,
+        name: &str,
+        operate: impl FnOnce(&Context) -> T,
+    ) -> Result<T, AccessError> {
+        self.with_hot(name, false, |context| operate(context))
     }
 
-    /// Runs a mutating operation on one context, then refreshes its
-    /// stats and persists image and sidecar. The operation's result is
-    /// returned alongside the persistence outcome: on a persistence
-    /// failure the write is applied in memory but not yet durable, and
-    /// the caller must say so.
+    /// Runs a mutating operation on one context, loading it first if
+    /// cold, and marks it dirty. The write becomes durable at the next
+    /// flush — periodic, on eviction, or on shutdown.
     pub fn write_context<T>(
         &self,
         name: &str,
         operate: impl FnOnce(&mut Context) -> T,
-    ) -> Option<(T, io::Result<()>)> {
-        let entry = self.0.registry.read().unwrap().get(name).cloned()?;
-        let mut inner = entry.inner.write().unwrap();
-        let result = operate(&mut inner.context);
-        inner.stats = ContextStats::of(&inner.context);
-        let persisted = save_files(&self.0.data_dir, name, &inner);
-        Some((result, persisted))
+    ) -> Result<T, AccessError> {
+        self.with_hot(name, true, operate)
     }
+
+    /// Persists every dirty context. Called by the periodic flusher and
+    /// once more on graceful shutdown; a failed save is retried on the
+    /// next tick (the entry stays dirty).
+    pub fn flush_dirty(&self) {
+        for (name, entry) in self.snapshot() {
+            if !entry.dirty.load(Ordering::Relaxed) {
+                continue;
+            }
+            let mut guard = entry.inner.write().unwrap();
+            let inner = &mut *guard;
+            let Slot::Hot(context) = &inner.slot else {
+                continue;
+            };
+            let stats = ContextStats::of(context);
+            match save_files(&self.0.data_dir, &name, &inner.meta, &stats, context) {
+                Ok(()) => {
+                    inner.stats = stats;
+                    entry.dirty.store(false, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    eprintln!("flush of context '{name}' failed (will retry): {error}");
+                }
+            }
+        }
+    }
+
+    fn lookup(&self, name: &str) -> Option<Arc<Entry>> {
+        self.0.registry.read().unwrap().get(name).cloned()
+    }
+
+    fn snapshot(&self) -> Vec<(String, Arc<Entry>)> {
+        self.0
+            .registry
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
+            .collect()
+    }
+
+    fn with_hot<T>(
+        &self,
+        name: &str,
+        mark_dirty: bool,
+        operate: impl FnOnce(&mut Context) -> T,
+    ) -> Result<T, AccessError> {
+        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        let result = {
+            let mut inner = entry.inner.write().unwrap();
+            ensure_hot(&self.0.data_dir, name, &mut inner).map_err(AccessError::Load)?;
+            let Slot::Hot(context) = &mut inner.slot else {
+                unreachable!("ensure_hot leaves the slot hot");
+            };
+            let result = operate(context);
+            if mark_dirty {
+                entry.dirty.store(true, Ordering::Relaxed);
+            }
+            result
+        };
+        entry.last_touch.store(
+            self.0.clock.fetch_add(1, Ordering::Relaxed) + 1,
+            Ordering::Relaxed,
+        );
+        self.enforce_budget(name);
+        Ok(result)
+    }
+
+    /// Evicts least-recently-used, unpinned, hot contexts until their
+    /// resident estimate fits the budget. `except` (the context just
+    /// used) is never evicted, so a single oversized context cannot
+    /// thrash. Dirty contexts are persisted before eviction; if that
+    /// save fails they stay resident rather than losing writes.
+    fn enforce_budget(&self, except: &str) {
+        let mut hot: Vec<(u64, usize, String, Arc<Entry>)> = Vec::new();
+        let mut total = 0usize;
+        for (name, entry) in self.snapshot() {
+            let inner = entry.inner.read().unwrap();
+            if inner.meta.pinned {
+                continue;
+            }
+            if let Slot::Hot(context) = &inner.slot {
+                let bytes = context.footprint();
+                total += bytes;
+                drop(inner);
+                hot.push((entry.last_touch.load(Ordering::Relaxed), bytes, name, entry));
+            }
+        }
+        if total <= self.0.cache_bytes {
+            return;
+        }
+
+        hot.sort_unstable_by_key(|&(touch, ..)| touch);
+        for (_, bytes, name, entry) in hot {
+            if total <= self.0.cache_bytes {
+                break;
+            }
+            if name == except {
+                continue;
+            }
+            let mut guard = entry.inner.write().unwrap();
+            let inner = &mut *guard;
+            // Re-check under the write lock; the entry may have changed
+            // between the snapshot and now.
+            if inner.meta.pinned {
+                continue;
+            }
+            let Slot::Hot(context) = &inner.slot else {
+                continue;
+            };
+            if entry.dirty.load(Ordering::Relaxed) {
+                let stats = ContextStats::of(context);
+                if let Err(error) =
+                    save_files(&self.0.data_dir, &name, &inner.meta, &stats, context)
+                {
+                    eprintln!("context '{name}' stays resident, eviction save failed: {error}");
+                    continue;
+                }
+                inner.stats = stats;
+                entry.dirty.store(false, Ordering::Relaxed);
+            } else {
+                inner.stats = ContextStats::of(context);
+            }
+            inner.slot = Slot::Cold;
+            total = total.saturating_sub(bytes);
+        }
+    }
+}
+
+/// Loads the image behind a cold slot; hot slots pass through. On
+/// success the slot is hot and the stats are fresh.
+fn ensure_hot(data_dir: &Path, name: &str, inner: &mut EntryInner) -> Result<(), String> {
+    if matches!(inner.slot, Slot::Hot(_)) {
+        return Ok(());
+    }
+    let path = image_path(data_dir, &file_stem(name));
+    let bytes = fs::read(&path).map_err(|e| format!("context '{name}' image unreadable: {e}"))?;
+    let context =
+        Context::from_bytes(&bytes).map_err(|e| format!("context '{name}' image corrupt: {e}"))?;
+    inner.stats = ContextStats::of(&context);
+    inner.slot = Slot::Hot(Box::new(context));
+    Ok(())
 }
 
 fn image_path(dir: &Path, stem: &str) -> PathBuf {
@@ -301,20 +500,22 @@ fn meta_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.meta.json"))
 }
 
-fn save_files(dir: &Path, name: &str, inner: &EntryInner) -> io::Result<()> {
+fn save_files(
+    dir: &Path,
+    name: &str,
+    meta: &ContextMeta,
+    stats: &ContextStats,
+    context: &Context,
+) -> io::Result<()> {
     let stem = file_stem(name);
-    write_atomic(&image_path(dir, &stem), &inner.context.to_bytes())?;
-    write_meta(dir, &stem, inner)
+    write_atomic(&image_path(dir, &stem), &context.to_bytes())?;
+    write_meta(dir, &stem, meta, stats)
 }
 
-fn save_meta_file(dir: &Path, name: &str, inner: &EntryInner) -> io::Result<()> {
-    write_meta(dir, &file_stem(name), inner)
-}
-
-fn write_meta(dir: &Path, stem: &str, inner: &EntryInner) -> io::Result<()> {
+fn write_meta(dir: &Path, stem: &str, meta: &ContextMeta, stats: &ContextStats) -> io::Result<()> {
     let file = MetaFile {
-        meta: inner.meta.clone(),
-        stats: inner.stats.clone(),
+        meta: meta.clone(),
+        stats: stats.clone(),
     };
     write_atomic(&meta_path(dir, stem), &serde_json::to_vec_pretty(&file)?)
 }
@@ -376,6 +577,20 @@ fn name_from_stem(stem: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("arag-registry-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn loaded_map(state: &AppState) -> HashMap<String, bool> {
+        state
+            .directory()
+            .into_iter()
+            .map(|entry| (entry.name, entry.loaded))
+            .collect()
+    }
+
     #[test]
     fn file_stem_roundtrips_any_name() {
         for name in [
@@ -403,5 +618,124 @@ mod tests {
         assert_eq!(name_from_stem("%zz"), None);
         // Undecodable UTF-8 is refused rather than lossily replaced.
         assert_eq!(name_from_stem("%FF%FE"), None);
+    }
+
+    #[test]
+    fn budget_evicts_lru_and_reloads_transparently() {
+        let dir = scratch_dir("evict");
+        // A budget of one byte: at most the just-used context stays hot.
+        let state = AppState::boot(dir.clone(), 1).unwrap();
+        state
+            .create("a", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .create("b", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        state
+            .write_context("a", |context| {
+                context.associate("私", "好き", "りんご", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        // Touching b evicts a (least recently used, and b is protected
+        // as the context just used) — flushing a's dirty write first.
+        state
+            .read_context("b", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        let loaded = loaded_map(&state);
+        assert!(!loaded["a"], "a must be evicted");
+        assert!(loaded["b"], "the just-used context must stay");
+
+        // The evicted write must have survived the disk roundtrip.
+        let recalled = state
+            .read_context("a", |context| context.recall("私").len())
+            .map_err(|_| "reload")
+            .unwrap();
+        assert_eq!(recalled, 1);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pinned_contexts_are_never_evicted_and_preload_on_boot() {
+        let dir = scratch_dir("pin");
+        {
+            let state = AppState::boot(dir.clone(), 1).unwrap();
+            let pinned = ContextMeta {
+                description: "glossary".into(),
+                pinned: true,
+            };
+            state
+                .create("glossary", pinned)
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .create("other", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("glossary", |context| {
+                    context.associate("用語", "意味", "定義", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+
+            // Churning through the other context must not push the
+            // pinned one out.
+            state
+                .read_context("other", |context| context.association_count())
+                .map_err(|_| "read")
+                .unwrap();
+            assert!(loaded_map(&state)["glossary"]);
+            state.flush_dirty();
+        }
+
+        // A fresh boot preloads pinned contexts and leaves the rest cold.
+        let state = AppState::boot(dir.clone(), 1).unwrap();
+        let loaded = loaded_map(&state);
+        assert!(loaded["glossary"], "pinned must preload");
+        assert!(!loaded["other"], "unpinned must boot cold");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dirty_contexts_survive_flush_and_cold_boot() {
+        let dir = scratch_dir("flush");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("sake", |context| {
+                    context
+                        .associate("青嶺酒造", "代表銘柄", "青嶺", 1.0)
+                        .unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+            state.flush_dirty();
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+        // Cold entries serve directory stats from the sidecar snapshot.
+        let directory = state.directory();
+        let sake = directory.iter().find(|e| e.name == "sake").unwrap();
+        assert!(!sake.loaded);
+        assert_eq!(sake.stats.associations, 1);
+
+        let recalled = state
+            .read_context("sake", |context| context.recall("青嶺").len())
+            .map_err(|_| "reload")
+            .unwrap();
+        assert_eq!(recalled, 1);
+
+        let _ = fs::remove_dir_all(dir);
     }
 }
