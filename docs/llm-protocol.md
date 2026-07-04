@@ -25,8 +25,10 @@
    `resolve`(概念)/ `resolve_label`(関係)へ。入口は正規化済みです(全角半角・
    大文字小文字・カタカナ/ひらがな・軽微な誤字は吸収されます)。空か低スコアなら
    言い換えて再試行するか、`dice_floor` を下げて(既定 0.3 → 例えば 0.2)ファジー
-   一致の許容を一時的に広げます。それでも空なら文脈選択が誤りの可能性があります —
-   次候補のコンテキストへ。
+   一致の許容を一時的に広げます。埋め込みが設定済みのサーバーでは、字面の全層が
+   外れたときだけ意味検索が自動でフォールバックします(結果の `tier` が
+   `"semantic"`、score はコサイン類似度 — 字面スコアとは別の尺度)。それでも空なら
+   文脈選択が誤りの可能性があります — 次候補のコンテキストへ。
 3. **見出しから絞る**: ハブ概念は `describe` で「どのラベルが何件あるか」だけを先に
    確認し、`query` に label 配列(`"label": ["住所","職歴"]`)を渡して必要な面だけを
    取得します。全プロフィールをいきなり取らないでください。
@@ -52,6 +54,8 @@
 3. 原文を `POST /contexts/{name}/sources` に登録します(source id → パッセージ)。
 4. `POST /contexts/{name}/unreachable_from` を文書の主要エンティティで実行し、
    到達不能の事実(取りこぼす島)がないか監査します。非空なら所属エッジの不足です。
+   埋め込みが設定済みなら、最後に `POST /contexts/{name}/embeddings/refresh` で
+   新出の名前をベクトル化します(差分のみ、冪等)。
 5. 運用中にヒットしない言い回しが見つかったら `POST /contexts/{name}/aliases` で
    別綴りを登録します。エイリアスは入口専用で、結果は常に正準綴りで返ります。
    既存の2概念を後から繋ぐことはできません(それはマージであり、作り直しの領分)。
@@ -70,8 +74,9 @@
 | POST | `/contexts/{name}/describe` | `{concept}` → ラベル見出し(件数・役割別)/ null |
 | POST | `/contexts/{name}/explore` | `{origins, max_depth?}` → `[{distance, path, association}]` |
 | POST | `/contexts/{name}/activate` | `{origins, decay?=0.5, limit?=20}` → `[{strength, path, association}]` |
-| POST | `/contexts/{name}/resolve` | `{cue, dice_floor?}` → `[{name, score}]` 概念名候補 |
-| POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?}` → `[{name, score}]` 関係名候補 |
+| POST | `/contexts/{name}/resolve` | `{cue, dice_floor?}` → `[{name, score, tier}]` 概念名候補 |
+| POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?}` → `[{name, score, tier}]` 関係名候補 |
+| POST | `/contexts/{name}/embeddings/refresh` | 概念・ラベル名の埋め込みを差分更新(取り込み後に実行) |
 | GET | `/contexts/{name}/labels` | 関係語彙(正準のみ) |
 | GET/POST | `/contexts/{name}/aliases` | エクスポート / `{concepts:{別綴:正準}, labels:{...}}` |
 | GET/POST | `/contexts/{name}/sources` | 登録済み source 一覧 / `{passages:{source:原文}}` |

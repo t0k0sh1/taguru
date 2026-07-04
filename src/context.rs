@@ -1203,6 +1203,16 @@ impl Context {
             .collect()
     }
 
+    /// Every canonical concept spelling in insertion order — the
+    /// vocabulary an external entry tier (e.g. an embedding index over
+    /// names) enumerates to stay in sync with the network.
+    pub fn concept_names(&self) -> Vec<&str> {
+        self.concepts
+            .iter()
+            .map(|record| self.arena_str(record.name_offset, record.name_len))
+            .collect()
+    }
+
     /// How many distinct (subject, label, object) associations are stored.
     pub fn association_count(&self) -> usize {
         self.edges.len()

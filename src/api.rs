@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use associative_rag::context::{AliasError, Association, Context};
+use associative_rag::context::{AliasError, Association, Context, Resolution};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -549,19 +549,78 @@ pub struct ResolveRequest {
     pub dice_floor: Option<f64>,
 }
 
+/// One resolve candidate plus the tier that produced it. Lexical scores
+/// are coverage/Dice, semantic scores are cosine similarities — ordinal
+/// within a tier, never comparable across tiers.
+#[derive(Serialize)]
+pub struct TieredResolution {
+    pub name: String,
+    pub score: f64,
+    pub tier: &'static str,
+}
+
+fn lexical_tier(resolutions: Vec<Resolution>) -> Vec<TieredResolution> {
+    resolutions
+        .into_iter()
+        .map(|resolution| TieredResolution {
+            name: resolution.name,
+            score: resolution.score,
+            tier: "lexical",
+        })
+        .collect()
+}
+
+/// The full entry ladder: lexical tiers first; only when they find
+/// nothing does the semantic fallback run (one embedding call for the
+/// cue against the context's vector sidecar).
+fn resolve_with_fallback(
+    state: &AppState,
+    name: &str,
+    request: &ResolveRequest,
+    labels: bool,
+    started_at: Instant,
+) -> Response {
+    let lexical = match state.read_context(name, |context| match (labels, request.dice_floor) {
+        (false, Some(floor)) => context.resolve_with_floor(&request.cue, floor),
+        (false, None) => context.resolve(&request.cue),
+        (true, Some(floor)) => context.resolve_label_with_floor(&request.cue, floor),
+        (true, None) => context.resolve_label(&request.cue),
+    }) {
+        Ok(result) => result,
+        Err(failure) => return access_error(failure, name, started_at),
+    };
+    if !lexical.is_empty() {
+        return ok(lexical_tier(lexical), started_at);
+    }
+
+    match state.semantic_resolve(name, &request.cue, labels) {
+        None => not_found(name, started_at),
+        Some(Ok(semantic)) => ok(
+            semantic
+                .into_iter()
+                .map(|(name, score)| TieredResolution {
+                    name,
+                    score: f64::from(score),
+                    tier: "semantic",
+                })
+                .collect::<Vec<_>>(),
+            started_at,
+        ),
+        Some(Err(message)) => error(
+            StatusCode::BAD_GATEWAY,
+            format!("semantic entry failed: {message}"),
+            started_at,
+        ),
+    }
+}
+
 pub async fn resolve(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Json(request): Json<ResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.read_context(&name, |context| match request.dice_floor {
-        Some(floor) => context.resolve_with_floor(&request.cue, floor),
-        None => context.resolve(&request.cue),
-    }) {
-        Ok(result) => ok(result, started_at),
-        Err(failure) => access_error(failure, &name, started_at),
-    }
+    resolve_with_fallback(&state, &name, &request, false, started_at)
 }
 
 pub async fn resolve_label(
@@ -570,12 +629,36 @@ pub async fn resolve_label(
     Json(request): Json<ResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.read_context(&name, |context| match request.dice_floor {
-        Some(floor) => context.resolve_label_with_floor(&request.cue, floor),
-        None => context.resolve_label(&request.cue),
-    }) {
-        Ok(result) => ok(result, started_at),
-        Err(failure) => access_error(failure, &name, started_at),
+    resolve_with_fallback(&state, &name, &request, true, started_at)
+}
+
+/// What one embedding refresh accomplished.
+#[derive(Serialize)]
+pub struct RefreshOutcome {
+    pub embedded: usize,
+    pub total: usize,
+}
+
+pub async fn refresh_embeddings(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    let started_at = Instant::now();
+    if !state.embeddings_configured() {
+        return error(
+            StatusCode::NOT_IMPLEMENTED,
+            "no embedding provider is configured (set ARAG_EMBED_URL and ARAG_EMBED_MODEL)",
+            started_at,
+        );
+    }
+    match state.refresh_embeddings(&name) {
+        None => not_found(&name, started_at),
+        Some(Ok((embedded, total))) => ok(RefreshOutcome { embedded, total }, started_at),
+        Some(Err(message)) => error(
+            StatusCode::BAD_GATEWAY,
+            format!("embedding refresh failed: {message}"),
+            started_at,
+        ),
     }
 }
 

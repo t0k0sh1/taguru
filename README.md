@@ -37,6 +37,8 @@ cargo run --release
 #   ARAG_DATA_DIR     データディレクトリ (既定 ./data)
 #   ARAG_CACHE_BYTES  非ピン常駐予算 (既定 512 MiB)
 #   ARAG_FLUSH_SECS   フラッシュ間隔 = クラッシュ時の消失窓 (既定 5)
+#   ARAG_EMBED_URL / ARAG_EMBED_MODEL / ARAG_EMBED_API_KEY
+#                     意味的入口 (OpenAI互換 /embeddings)。未設定なら字面のみ
 ```
 
 ```sh

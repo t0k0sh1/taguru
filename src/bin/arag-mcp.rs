@@ -357,6 +357,11 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "refresh_embeddings",
+            "取り込み後に概念・ラベル名の埋め込みを差分更新する (埋め込み設定済みのサーバーのみ)。これを実行しておくと、字面で外れた言い回しが resolve の意味フォールバックで着地する。",
+            object_schema(json!({ "context": context }), &["context"]),
+        ),
+        (
             "audit_coverage",
             "取り込み監査: origins (文書の主要エンティティ) からどの走査でも到達できない連想を列挙する。非空なら所属エッジの不足 — 補ってから終える。",
             object_schema(
@@ -461,6 +466,11 @@ fn call_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<String, S
             "POST",
             &format!("{}/aliases", context_path("context")?),
             Some(pick(arguments, &["concepts", "labels"])),
+        ),
+        "refresh_embeddings" => bridge.call(
+            "POST",
+            &format!("{}/embeddings/refresh", context_path("context")?),
+            Some(json!({})),
         ),
         "audit_coverage" => bridge.call(
             "POST",

@@ -38,6 +38,8 @@ use std::sync::{Arc, RwLock};
 use associative_rag::context::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::embedding::{EmbeddingProvider, VectorStore, similarity};
+
 /// Server-side metadata for one context: the prose half of the routing
 /// directory plus the cache policy flag.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -189,6 +191,9 @@ struct StateInner {
     registry: RwLock<HashMap<String, Arc<Entry>>>,
     /// Logical clock behind `Entry::last_touch`.
     clock: AtomicU64,
+    /// The optional semantic entry tier; `None` keeps resolve purely
+    /// lexical.
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl AppState {
@@ -197,7 +202,11 @@ impl AppState {
     /// snapshots. Pinned contexts are loaded eagerly; a pinned image
     /// that fails to load is left cold with a warning rather than
     /// taking the server down.
-    pub fn boot(data_dir: PathBuf, cache_bytes: usize) -> io::Result<Self> {
+    pub fn boot(
+        data_dir: PathBuf,
+        cache_bytes: usize,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> io::Result<Self> {
         fs::create_dir_all(&data_dir)?;
         let mut registry = HashMap::new();
         for dir_entry in fs::read_dir(&data_dir)? {
@@ -221,6 +230,7 @@ impl AppState {
             cache_bytes,
             registry: RwLock::new(registry),
             clock: AtomicU64::new(0),
+            embedder,
         }));
         for (name, entry) in state.snapshot() {
             let mut inner = entry.inner.write().unwrap();
@@ -235,6 +245,11 @@ impl AppState {
 
     pub fn context_count(&self) -> usize {
         self.0.registry.read().unwrap().len()
+    }
+
+    /// Whether the semantic entry tier has a provider at all.
+    pub fn embeddings_configured(&self) -> bool {
+        self.0.embedder.is_some()
     }
 
     /// Registers an empty context and persists it immediately, so its
@@ -269,6 +284,7 @@ impl AppState {
             format!("{stem}.ctx"),
             format!("{stem}.meta.json"),
             format!("{stem}.sources.json"),
+            format!("{stem}.vectors.bin"),
         ] {
             if let Err(error) = fs::remove_file(self.0.data_dir.join(file))
                 && error.kind() != io::ErrorKind::NotFound
@@ -335,6 +351,132 @@ impl AppState {
         let _guard = entry.inner.read().unwrap();
         let stored = read_passages(&sources_path(&self.0.data_dir, &file_stem(name)));
         Some(stored.into_keys().collect())
+    }
+
+    /// Embeds every canonical concept and label name that has no vector
+    /// yet (all of them after a model change) and persists the vector
+    /// sidecar. Explicit rather than automatic — an agent or operator
+    /// calls this after ingesting, so embedding spend stays intentional.
+    /// Returns (newly embedded, total vectors), or `None` for an unknown
+    /// context.
+    pub fn refresh_embeddings(&self, name: &str) -> Option<Result<(usize, usize), String>> {
+        let Some(embedder) = self.0.embedder.clone() else {
+            return Some(Err(
+                "no embedding provider is configured (set ARAG_EMBED_URL and ARAG_EMBED_MODEL)"
+                    .to_string(),
+            ));
+        };
+        let names = match self.read_context(name, |context| {
+            let concepts: Vec<String> = context
+                .concept_names()
+                .into_iter()
+                .map(String::from)
+                .collect();
+            let labels: Vec<String> = context.labels().into_iter().map(String::from).collect();
+            (concepts, labels)
+        }) {
+            Ok(names) => names,
+            Err(AccessError::NotFound) => return None,
+            Err(AccessError::Load(message)) => return Some(Err(message)),
+        };
+        let (concepts, labels) = names;
+        let entry = self.lookup(name)?;
+        let path = vectors_path(&self.0.data_dir, &file_stem(name));
+
+        // Diff and embed without holding the entry lock — provider round
+        // trips can take seconds. Concurrent refreshes at worst re-embed
+        // the same names; the merge below stays correct.
+        let existing = VectorStore::load(&path);
+        let fresh_model = existing.model != embedder.model();
+        let missing = |table: &HashMap<String, Vec<f32>>, names: &[String]| -> Vec<String> {
+            names
+                .iter()
+                .filter(|name| fresh_model || !table.contains_key(*name))
+                .cloned()
+                .collect()
+        };
+        let missing_concepts = missing(&existing.concepts, &concepts);
+        let missing_labels = missing(&existing.labels, &labels);
+        let mut embedded_concepts = Vec::new();
+        let mut embedded_labels = Vec::new();
+        for (missing, embedded) in [
+            (&missing_concepts, &mut embedded_concepts),
+            (&missing_labels, &mut embedded_labels),
+        ] {
+            for chunk in missing.chunks(128) {
+                let texts: Vec<&str> = chunk.iter().map(String::as_str).collect();
+                match embedder.embed(&texts) {
+                    Ok(vectors) => embedded.extend(chunk.iter().cloned().zip(vectors)),
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+        }
+        let newly_embedded = embedded_concepts.len() + embedded_labels.len();
+
+        // Merge under the entry lock so concurrent refreshes serialize
+        // on the read-modify-write of the sidecar.
+        let _guard = entry.inner.write().unwrap();
+        let mut store = VectorStore::load(&path);
+        if store.model != embedder.model() {
+            store = VectorStore {
+                model: embedder.model().to_string(),
+                ..Default::default()
+            };
+        }
+        store.concepts.extend(embedded_concepts);
+        store.labels.extend(embedded_labels);
+        let total = store.concepts.len() + store.labels.len();
+        if newly_embedded > 0
+            && let Err(error) = store.save(&path)
+        {
+            return Some(Err(format!("vector store not persisted: {error}")));
+        }
+        Some(Ok((newly_embedded, total)))
+    }
+
+    /// The semantic fallback behind resolve: nearest stored names by
+    /// cosine over the vector sidecar. Meant to run only after the
+    /// lexical tiers found nothing; scores are cosine similarities — a
+    /// different scale from lexical scores, which the API marks by tier.
+    /// Empty when no provider is configured, no refresh has run, or the
+    /// sidecar belongs to another model.
+    pub fn semantic_resolve(
+        &self,
+        name: &str,
+        cue: &str,
+        labels: bool,
+    ) -> Option<Result<Vec<(String, f32)>, String>> {
+        const SEMANTIC_FLOOR: f32 = 0.5;
+        const SEMANTIC_LIMIT: usize = 5;
+
+        let Some(embedder) = self.0.embedder.clone() else {
+            return Some(Ok(Vec::new()));
+        };
+        self.lookup(name)?;
+        let store = VectorStore::load(&vectors_path(&self.0.data_dir, &file_stem(name)));
+        if store.model != embedder.model() {
+            return Some(Ok(Vec::new()));
+        }
+        let table = if labels {
+            &store.labels
+        } else {
+            &store.concepts
+        };
+        if table.is_empty() {
+            return Some(Ok(Vec::new()));
+        }
+        let cue_vector = match embedder.embed(&[cue]) {
+            Ok(mut vectors) => vectors.pop().unwrap_or_default(),
+            Err(error) => return Some(Err(error)),
+        };
+        let mut scored: Vec<(String, f32)> = table
+            .iter()
+            .map(|(name, vector)| (name.clone(), similarity(&cue_vector, vector)))
+            .filter(|&(_, score)| score >= SEMANTIC_FLOOR)
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scored.truncate(SEMANTIC_LIMIT);
+        Some(Ok(scored))
     }
 
     /// Updates the description and/or pin flag, persisting the sidecar
@@ -588,6 +730,10 @@ fn sources_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.sources.json"))
 }
 
+fn vectors_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.vectors.bin"))
+}
+
 /// Reads a passages file, treating any problem as "no passages" — a
 /// corrupt sidecar must not block the graph or new registrations.
 fn read_passages(path: &Path) -> BTreeMap<String, String> {
@@ -724,7 +870,7 @@ mod tests {
     fn budget_evicts_lru_and_reloads_transparently() {
         let dir = scratch_dir("evict");
         // A budget of one byte: at most the just-used context stays hot.
-        let state = AppState::boot(dir.clone(), 1).unwrap();
+        let state = AppState::boot(dir.clone(), 1, None).unwrap();
         state
             .create("a", ContextMeta::default())
             .map_err(|_| "create")
@@ -764,7 +910,7 @@ mod tests {
     fn pinned_contexts_are_never_evicted_and_preload_on_boot() {
         let dir = scratch_dir("pin");
         {
-            let state = AppState::boot(dir.clone(), 1).unwrap();
+            let state = AppState::boot(dir.clone(), 1, None).unwrap();
             let pinned = ContextMeta {
                 description: "glossary".into(),
                 pinned: true,
@@ -796,7 +942,7 @@ mod tests {
         }
 
         // A fresh boot preloads pinned contexts and leaves the rest cold.
-        let state = AppState::boot(dir.clone(), 1).unwrap();
+        let state = AppState::boot(dir.clone(), 1, None).unwrap();
         let loaded = loaded_map(&state);
         assert!(loaded["glossary"], "pinned must preload");
         assert!(!loaded["other"], "unpinned must boot cold");
@@ -808,7 +954,7 @@ mod tests {
     fn dirty_contexts_survive_flush_and_cold_boot() {
         let dir = scratch_dir("flush");
         {
-            let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             state
                 .create("sake", ContextMeta::default())
                 .map_err(|_| "create")
@@ -824,7 +970,7 @@ mod tests {
             state.flush_dirty();
         }
 
-        let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         // Cold entries serve directory stats from the sidecar snapshot.
         let directory = state.directory();
         let sake = directory.iter().find(|e| e.name == "sake").unwrap();
@@ -844,7 +990,7 @@ mod tests {
     fn passages_store_lookup_and_survive_restart() {
         let dir = scratch_dir("passages");
         {
-            let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             state
                 .create("sake", ContextMeta::default())
                 .map_err(|_| "create")
@@ -859,7 +1005,7 @@ mod tests {
 
         // A fresh boot serves the registered passage; unknown sources
         // come back as missing rather than erroring.
-        let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let (passages, missing) = state
             .lookup_passages("sake", &["第1段落".to_string(), "第9段落".to_string()])
             .unwrap();
@@ -893,7 +1039,7 @@ mod tests {
                 .unwrap()
         };
         {
-            let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             state
                 .create("sake", ContextMeta::default())
                 .map_err(|_| "create")
@@ -918,9 +1064,87 @@ mod tests {
 
         // A cold boot re-applies the floor from the sidecar — the image
         // itself carries no config.
-        let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert!(lands(&state), "floor must survive the restart");
         assert_eq!(state.directory()[0].dice_floor, Some(0.25));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Deterministic provider: mapped names get fixed unit vectors,
+    /// everything else lands on an axis orthogonal to all of them.
+    struct MockEmbeddings(HashMap<String, Vec<f32>>);
+
+    impl EmbeddingProvider for MockEmbeddings {
+        fn model(&self) -> &str {
+            "mock"
+        }
+
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    self.0
+                        .get(*text)
+                        .cloned()
+                        .unwrap_or_else(|| vec![0.0, 0.0, 1.0])
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn semantic_fallback_lands_paraphrases_after_refresh() {
+        let dir = scratch_dir("embed");
+        let mut vectors = HashMap::new();
+        vectors.insert("りんご".to_string(), vec![1.0, 0.0, 0.0]);
+        vectors.insert("アップル".to_string(), vec![0.96, 0.28, 0.0]);
+        let embedder = Some(Arc::new(MockEmbeddings(vectors)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("fruit", |context| {
+                context.associate("りんご", "分類", "果物", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+
+        // アップル shares no normalized characters with りんご: every
+        // lexical tier misses, and before a refresh so does semantics.
+        let lexical = state
+            .read_context("fruit", |context| context.resolve("アップル"))
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(lexical.is_empty());
+        assert!(
+            state
+                .semantic_resolve("fruit", "アップル", false)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+
+        // Refresh embeds every canonical name once; a second run is a
+        // no-op.
+        let (embedded, total) = state.refresh_embeddings("fruit").unwrap().unwrap();
+        assert_eq!(embedded, 3); // りんご, 果物 + label 分類
+        assert_eq!(total, 3);
+        assert_eq!(state.refresh_embeddings("fruit").unwrap().unwrap().0, 0);
+
+        // Now the paraphrase lands on the stored spelling by cosine, and
+        // unrelated names stay under the floor.
+        let hits = state
+            .semantic_resolve("fruit", "アップル", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].0, "りんご");
+        assert!(hits[0].1 > 0.9);
+
+        assert!(state.semantic_resolve("nope", "x", false).is_none());
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -1,11 +1,14 @@
 mod api;
+mod embedding;
 mod registry;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
 use axum::routing::{get, post, put};
+use embedding::EmbeddingProvider;
 use registry::AppState;
 use tokio::net::TcpListener;
 
@@ -24,8 +27,14 @@ async fn main() {
     let cache_bytes = env_number("ARAG_CACHE_BYTES", 512 * 1024 * 1024);
     let flush_secs = env_number("ARAG_FLUSH_SECS", 5);
 
-    let state =
-        AppState::boot(data_dir.clone(), cache_bytes).expect("data directory must be usable");
+    let embedder = embedding::HttpEmbeddings::from_env();
+    if let Some(embedder) = &embedder {
+        println!("semantic entry tier enabled (model {})", embedder.model());
+    }
+    let embedder = embedder.map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>);
+
+    let state = AppState::boot(data_dir.clone(), cache_bytes, embedder)
+        .expect("data directory must be usable");
     println!(
         "{} context(s) registered from {} (cache budget {} MiB, flush every {flush_secs}s)",
         state.context_count(),
@@ -73,6 +82,10 @@ async fn main() {
         .route(
             "/contexts/{name}/sources/lookup",
             post(api::lookup_passages),
+        )
+        .route(
+            "/contexts/{name}/embeddings/refresh",
+            post(api::refresh_embeddings),
         )
         .route(
             "/contexts/{name}/unreachable_from",
