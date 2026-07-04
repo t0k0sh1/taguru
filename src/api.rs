@@ -53,7 +53,11 @@ fn ok<T: Serialize>(result: T, started_at: Instant) -> Response {
     (StatusCode::OK, Json(ApiResponse::ok(result, started_at))).into_response()
 }
 
-fn error(status: StatusCode, message: impl Into<String>, started_at: Instant) -> Response {
+pub(crate) fn error(
+    status: StatusCode,
+    message: impl Into<String>,
+    started_at: Instant,
+) -> Response {
     (status, Json(ApiError::new(message, started_at))).into_response()
 }
 

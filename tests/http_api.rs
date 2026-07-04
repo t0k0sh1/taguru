@@ -20,18 +20,32 @@ struct Server {
 
 impl Server {
     fn start(tag: &str) -> Self {
+        Self::start_with_env(tag, &[])
+    }
+
+    fn start_with_env(tag: &str, extra_env: &[(&str, &str)]) -> Self {
         let data_dir =
             std::env::temp_dir().join(format!("taguru-http-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data_dir);
-        Self::start_on(tag, data_dir)
+        Self::spawn(tag, data_dir, extra_env)
     }
 
     fn start_on(tag: &str, data_dir: PathBuf) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        Self::spawn(tag, data_dir, &[])
+    }
+
+    fn spawn(tag: &str, data_dir: PathBuf, extra_env: &[(&str, &str)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+        command
             .env("TAGURU_ADDR", "127.0.0.1:0")
             .env("TAGURU_DATA_DIR", &data_dir)
             .env("TAGURU_FLUSH_SECS", "1")
             .env_remove("TAGURU_EMBED_URL") // lexical-only, hermetic
+            .env_remove("TAGURU_API_TOKEN"); // unauthenticated unless a test opts in
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -62,9 +76,23 @@ impl Server {
     /// One request; returns (status, parsed body). Non-JSON bodies come
     /// back as JSON strings.
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
-        let request = ureq::AgentBuilder::new()
+        self.call_with_token(method, path, body, None)
+    }
+
+    /// [`Server::call`] with an explicit bearer token attached.
+    fn call_with_token(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        token: Option<&str>,
+    ) -> (u16, Value) {
+        let mut request = ureq::AgentBuilder::new()
             .build()
             .request(method, &format!("{}{path}", self.base));
+        if let Some(token) = token {
+            request = request.set("Authorization", &format!("Bearer {token}"));
+        }
         let response = match body {
             Some(body) => request
                 .set("Content-Type", "application/json")
@@ -326,6 +354,32 @@ fn full_retrieval_loop_over_http() {
     // Deletion removes the context and its files.
     server.ok("DELETE", "/contexts/sake", None);
     assert_eq!(server.ok("GET", "/contexts", None), json!([]));
+}
+
+#[test]
+fn bearer_token_gates_every_route_except_health_and_metrics() {
+    let server = Server::start_with_env("auth", &[("TAGURU_API_TOKEN", "s3cret")]);
+
+    // Liveness and the scrape answer with zero credentials.
+    assert_eq!(server.call("GET", "/health", None).0, 200);
+    assert_eq!(server.call("GET", "/metrics", None).0, 200);
+
+    // Everything else refuses a missing or wrong token with the API's
+    // own error shape, and accepts the right one.
+    let (status, body) = server.call("GET", "/contexts", None);
+    assert_eq!(status, 401);
+    assert_eq!(body["status"], json!("error"));
+    let (status, _) = server.call_with_token("GET", "/contexts", None, Some("wrong"));
+    assert_eq!(status, 401);
+    let (status, _) = server.call_with_token("GET", "/contexts", None, Some("s3cret"));
+    assert_eq!(status, 200);
+
+    // Writes are gated the same way.
+    let (status, _) = server.call("PUT", "/contexts/sake", Some(json!({})));
+    assert_eq!(status, 401);
+    let (status, _) =
+        server.call_with_token("PUT", "/contexts/sake", Some(json!({})), Some("s3cret"));
+    assert_eq!(status, 200);
 }
 
 #[test]

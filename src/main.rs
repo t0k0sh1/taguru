@@ -1,4 +1,5 @@
 mod api;
+mod auth;
 mod embedding;
 mod metrics;
 mod registry;
@@ -39,6 +40,14 @@ async fn main() {
         PathBuf::from(std::env::var("TAGURU_DATA_DIR").unwrap_or_else(|_| "data".into()));
     let cache_bytes = env_number("TAGURU_CACHE_BYTES", 512 * 1024 * 1024);
     let flush_secs = env_number("TAGURU_FLUSH_SECS", 5);
+
+    let api_token = Arc::new(std::env::var("TAGURU_API_TOKEN").ok());
+    if api_token.is_none() {
+        warn!(
+            "TAGURU_API_TOKEN is not set: the API accepts UNAUTHENTICATED requests \
+             (fine on localhost, never on an exposed address)"
+        );
+    }
 
     let embedder = embedding::HttpEmbeddings::from_env();
     if let Some(embedder) = &embedder {
@@ -144,10 +153,14 @@ async fn main() {
             "/contexts/{name}/vocabulary/audit",
             post(api::audit_vocabulary),
         )
-        // Layers wrap only the routes registered above, so this comes
-        // last. Outermost on purpose: every response — the coming
-        // auth/timeout rejections included — lands in the access log
-        // and the RED metrics.
+        // Layers wrap only the routes registered above and nest by
+        // call order — later .layer() calls sit outside earlier ones.
+        // Auth inside, metrics outermost: every response, the 401s
+        // included, lands in the access log and the RED metrics.
+        .layer(axum::middleware::from_fn_with_state(
+            api_token,
+            auth::require_bearer,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             metrics::track_http,

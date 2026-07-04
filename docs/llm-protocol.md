@@ -161,9 +161,19 @@
 | POST | `/contexts/{name}/unreachable_from` | `{origins}` → 到達不能な連想 |
 | POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?, cosine_floor?}` → 綴り・同義の分岐候補 |
 
+## 認証
+
+- サーバーに `TAGURU_API_TOKEN` が設定されている場合、`/health` と `/metrics` を除く
+  すべてのリクエストに `Authorization: Bearer <token>` が必要です。欠落・不一致は
+  `401`(本文は下記のエラー形)で拒否されます。
+- MCP ブリッジ(taguru-mcp)は自身の環境変数 `TAGURU_API_TOKEN` を読んで全リクエスト
+  に自動で付与します — サーバー側で認証を有効にしたら、ブリッジにも同じ値を設定して
+  ください。
+- 未設定なら認証は無効です(開発モード。localhost 以外に公開してはいけません)。
+
 ## エラーと制約
 
-- `404` 未知のコンテキスト。`409` 重複作成・エイリアス衝突。
+- `401` 認証エラー(上記)。`404` 未知のコンテキスト。`409` 重複作成・エイリアス衝突。
 - `507` コンテキスト満杯(`ContextFull`)。書き込みは適用されていません。それ以上の
   知識は新しいコンテキストへ。
 - recall / query の既定 limit は 100。`total` が matches 数を超えていたら切り詰めが
