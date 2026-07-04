@@ -209,7 +209,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "add_associations",
-            "事実をバッチで書き込む (1文書=1回)。規律: 綴りは resolve/resolve_label で既存を確認してから再利用 (check before mint)。1文書内の言い換えは再主張しない。否定は肯定ラベル+負の weight。暗黙の所属関係は明示的なエッジにする。各要素に source (出典id) を付ける。",
+            "事実をバッチで書き込む (1文書=1回)。規律: 綴りは resolve/resolve_label で既存を確認してから再利用 (check before mint)。1文書内の言い換えは再主張しない。否定は肯定ラベル+負の weight。暗黙の所属関係は明示的なエッジにする。順序のある手順は 最初の工程/次の工程/工程 の3種エッジで編む (詳細は get_protocol)。各要素に source (出典id) を付ける。",
             object_schema(
                 json!({
                     "context": context,
