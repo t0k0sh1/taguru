@@ -20,7 +20,8 @@ struct Server {
 
 impl Server {
     fn start(tag: &str) -> Self {
-        let data_dir = std::env::temp_dir().join(format!("taguru-http-{tag}-{}", std::process::id()));
+        let data_dir =
+            std::env::temp_dir().join(format!("taguru-http-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data_dir);
         Self::start_on(tag, data_dir)
     }

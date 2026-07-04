@@ -25,7 +25,8 @@ use tokio::net::TcpListener;
 ///   free port and the resolved address is printed).
 #[tokio::main]
 async fn main() {
-    let data_dir = PathBuf::from(std::env::var("TAGURU_DATA_DIR").unwrap_or_else(|_| "data".into()));
+    let data_dir =
+        PathBuf::from(std::env::var("TAGURU_DATA_DIR").unwrap_or_else(|_| "data".into()));
     let cache_bytes = env_number("TAGURU_CACHE_BYTES", 512 * 1024 * 1024);
     let flush_secs = env_number("TAGURU_FLUSH_SECS", 5);
 

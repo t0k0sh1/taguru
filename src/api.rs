@@ -6,12 +6,12 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use taguru::context::{AliasError, Association, Context, Resolution};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
+use taguru::context::{AliasError, Association, Context, Resolution};
 
 use crate::registry::{AccessError, AppState, ContextMeta, CreateError};
 

@@ -35,8 +35,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use taguru::context::Context;
 use serde::{Deserialize, Serialize};
+use taguru::context::Context;
 
 use crate::embedding::{EmbeddingProvider, VectorStore, fnv1a, similarity};
 
@@ -1239,7 +1239,8 @@ mod tests {
     use super::*;
 
     fn scratch_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("taguru-registry-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("taguru-registry-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -1825,8 +1826,10 @@ mod tests {
         // similar their vectors are.
         let pairs_up = |a: &str, b: &str, x: &str, y: &str| a.contains(x) && b.contains(y);
         assert!(
-            concepts.iter().all(|(a, b, _)| !pairs_up(a, b, "青嶺酒造", "1907年")
-                && !pairs_up(a, b, "1907年", "青嶺酒造")),
+            concepts
+                .iter()
+                .all(|(a, b, _)| !pairs_up(a, b, "青嶺酒造", "1907年")
+                    && !pairs_up(a, b, "1907年", "青嶺酒造")),
             "{concepts:?}"
         );
         assert_eq!(labels.len(), 1, "{labels:?}");
