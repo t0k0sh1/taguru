@@ -50,6 +50,24 @@ curl -X POST localhost:3000/contexts/sake/activate -H 'Content-Type: application
 
 エンドポイント一覧と取り込み・検索の規律は `GET /protocol` を参照してください。
 
+## LLM エージェントから使う (MCP)
+
+`arag-mcp` は稼働中の HTTP サーバーへの MCP stdio ブリッジです。エージェント
+(Claude Code / Claude Desktop など)がこれを通じて取り込みと検索を行います —
+文書→事実の分解と、検索結果→回答の合成はエージェント側の仕事で、規律は
+ツール定義と MCP instructions(`/protocol` の内容)として自動的に渡ります。
+
+```sh
+cargo build --release                       # target/release/arag-mcp ができる
+claude mcp add arag -e ARAG_URL=http://127.0.0.1:3000 -- /path/to/target/release/arag-mcp
+```
+
+これで「このフォルダの文書を sake コンテキストに取り込んで」「青嶺酒造について
+知っていることを出典付きで教えて」のような依頼が、目録選択 → resolve →
+describe/query/activate → 原文逆引き → 引用付き回答、のループとしてそのまま
+動きます。取り込み時のチャンク分割・事実抽出・被覆監査(audit_coverage)も
+エージェントがツール越しに実行します。
+
 ## 検証
 
 ```sh
