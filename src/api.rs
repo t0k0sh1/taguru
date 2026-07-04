@@ -202,6 +202,19 @@ pub async fn add_associations(
     Json(associations): Json<Vec<AssociationInput>>,
 ) -> Response {
     let started_at = Instant::now();
+    // Refused before the write lock is even taken: nothing of an
+    // oversized batch is applied.
+    if associations.len() > MAX_ASSOCIATIONS_PER_REQUEST {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "batch of {} associations exceeds the per-request limit of \
+                 {MAX_ASSOCIATIONS_PER_REQUEST}; split the ingest",
+                associations.len()
+            ),
+            started_at,
+        );
+    }
     let outcome = state.write_context(&name, |context| {
         for (index, input) in associations.iter().enumerate() {
             let result = match &input.source {
@@ -246,6 +259,28 @@ pub async fn add_associations(
 /// a hub concept must not flood an LLM client's prompt by default.
 const DEFAULT_MATCH_LIMIT: usize = 100;
 
+/// The hard ceiling every per-request result limit is clamped to,
+/// whatever the request asks for — result sizing is a server
+/// protection, not a client entitlement.
+const MAX_MATCH_LIMIT: usize = 1000;
+
+/// Hop ceiling for explore, applied even when `max_depth` is omitted:
+/// the walk's cost is bounded by depth, so the depth is what the
+/// server caps. Ten hops of association-following covers any sane
+/// retrieval; audits that truly need the whole component use
+/// unreachable_from.
+const MAX_EXPLORE_DEPTH: usize = 10;
+
+/// Per-request association batch cap — one document's facts arrive as
+/// one request; anything past this is asked to split.
+const MAX_ASSOCIATIONS_PER_REQUEST: usize = 10_000;
+
+/// The one clamp every numeric cap in this file goes through: an
+/// omitted value takes the default, and nothing exceeds the ceiling.
+fn clamp(value: Option<usize>, default: usize, ceiling: usize) -> usize {
+    value.unwrap_or(default).min(ceiling)
+}
+
 /// A bounded set of matches. `total` is the full match count before the
 /// limit was applied, so a client can see that it is looking at a
 /// truncated view and narrow the query (or raise the limit).
@@ -261,7 +296,7 @@ pub struct MatchPage {
 /// insertion order.
 fn page(mut matches: Vec<Association>, limit: Option<usize>) -> MatchPage {
     let total = matches.len();
-    let limit = limit.unwrap_or(DEFAULT_MATCH_LIMIT);
+    let limit = clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT);
     if total > limit {
         matches.sort_by(|a, b| b.weight.abs().total_cmp(&a.weight.abs()));
         matches.truncate(limit);
@@ -561,7 +596,11 @@ pub async fn search_passages(
     Json(request): Json<SearchPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.search_passages(&name, &request.query, request.limit.unwrap_or(5)) {
+    match state.search_passages(
+        &name,
+        &request.query,
+        clamp(request.limit, 5, MAX_MATCH_LIMIT),
+    ) {
         None => not_found(&name, started_at),
         Some(hits) => ok(
             hits.into_iter()
@@ -646,7 +685,8 @@ pub async fn describe(
 #[derive(Debug, Deserialize)]
 pub struct ExploreRequest {
     pub origins: Vec<String>,
-    /// Omitted means [`Context::UNBOUNDED`]: the whole component.
+    /// Hop ceiling. Omitted — and everything above it — means the
+    /// server maximum ([`MAX_EXPLORE_DEPTH`]).
     pub max_depth: Option<usize>,
 }
 
@@ -658,7 +698,12 @@ pub async fn explore(
     let started_at = Instant::now();
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
-        context.explore(&origins, request.max_depth.unwrap_or(Context::UNBOUNDED))
+        // The clamp turns "omitted = the whole component" into
+        // "omitted = the server's hop ceiling".
+        context.explore(
+            &origins,
+            clamp(request.max_depth, Context::UNBOUNDED, MAX_EXPLORE_DEPTH),
+        )
     }) {
         Ok(result) => ok(result, started_at),
         Err(failure) => access_error(failure, &name, started_at),
@@ -685,7 +730,7 @@ pub async fn activate(
         context.activate(
             &origins,
             request.decay.unwrap_or(0.5),
-            request.limit.unwrap_or(20),
+            clamp(request.limit, 20, MAX_MATCH_LIMIT),
         )
     }) {
         Ok(result) => ok(result, started_at),
@@ -871,6 +916,9 @@ pub async fn labels(State(state): State<AppState>, Path(name): Path<String>) -> 
 #[derive(Debug, Deserialize)]
 pub struct UnreachableFromRequest {
     pub origins: Vec<String>,
+    /// Omitted means 100, capped at 1000 — the audit pages exactly
+    /// like recall and query, `total` telling the whole story.
+    pub limit: Option<usize>,
 }
 
 pub async fn unreachable_from(
@@ -883,7 +931,7 @@ pub async fn unreachable_from(
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         context.unreachable_from(&origins)
     }) {
-        Ok(result) => ok(result, started_at),
+        Ok(result) => ok(page(result, request.limit), started_at),
         Err(failure) => access_error(failure, &name, started_at),
     }
 }
@@ -900,6 +948,25 @@ mod tests {
             weight,
             attributions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn clamp_fills_the_default_and_never_exceeds_the_ceiling() {
+        assert_eq!(clamp(None, 100, 1000), 100);
+        assert_eq!(clamp(Some(5), 100, 1000), 5);
+        assert_eq!(clamp(Some(1_000_000_000), 100, 1000), 1000);
+        // explore's exact case: an UNBOUNDED default is itself capped.
+        assert_eq!(clamp(None, usize::MAX, 10), 10);
+    }
+
+    #[test]
+    fn page_clamps_an_explicit_limit_to_the_hard_ceiling() {
+        let matches: Vec<Association> = (0..MAX_MATCH_LIMIT + 5)
+            .map(|i| assoc(&format!("o{i}"), 1.0))
+            .collect();
+        let paged = page(matches, Some(1_000_000_000));
+        assert_eq!(paged.total, MAX_MATCH_LIMIT + 5);
+        assert_eq!(paged.matches.len(), MAX_MATCH_LIMIT);
     }
 
     #[test]

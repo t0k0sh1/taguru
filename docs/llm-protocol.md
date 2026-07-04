@@ -147,7 +147,7 @@
 | POST | `/contexts/{name}/recall` | `{cue, limit?}` → `{total, matches}` |
 | POST | `/contexts/{name}/query` | `{subject?, label?, object?, limit?}` 各位置は文字列or配列 → `{total, matches}` |
 | POST | `/contexts/{name}/describe` | `{concept}` → ラベル見出し(件数・役割別)/ null |
-| POST | `/contexts/{name}/explore` | `{origins, max_depth?}` → `[{distance, path, association}]` |
+| POST | `/contexts/{name}/explore` | `{origins, max_depth?}` → `[{distance, path, association}]`(ホップ上限10、省略時も適用) |
 | POST | `/contexts/{name}/activate` | `{origins, decay?=0.5, limit?=20}` → `[{strength, path, association}]` |
 | POST | `/contexts/{name}/resolve` | `{cue, dice_floor?, semantic_floor?}` → `[{name, score, tier}]` 概念名候補 |
 | POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?, semantic_floor?}` → `[{name, score, tier}]` 関係名候補 |
@@ -158,7 +158,7 @@
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
 | POST | `/contexts/{name}/sources/search` | `{query, limit?}` → `[{source, score, text}]` 原文全文検索 |
 | POST | `/contexts/{name}/sources/retract` | `{source}` → 出典の寄与を撤回(差分同期) |
-| POST | `/contexts/{name}/unreachable_from` | `{origins}` → 到達不能な連想 |
+| POST | `/contexts/{name}/unreachable_from` | `{origins, limit?}` → `{total, matches}` 到達不能な連想 |
 | POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?, cosine_floor?}` → 綴り・同義の分岐候補 |
 
 ## 認証
@@ -176,6 +176,10 @@
 - `401` 認証エラー(上記)。`404` 未知のコンテキスト。`409` 重複作成・エイリアス衝突。
 - `507` コンテキスト満杯(`ContextFull`)。書き込みは適用されていません。それ以上の
   知識は新しいコンテキストへ。
+- `400` associations バッチ上限超過(1リクエスト10,000件まで。何も適用されていません
+  — 分割して再送)。`408` タイムアウト(既定30秒。クエリを絞って再試行)。`413`
+  リクエストボディ超過(既定8MiB。本文はJSONではないプレーンテキストです)。
 - recall / query の既定 limit は 100。`total` が matches 数を超えていたら切り詰めが
-  起きています(強い |weight| 順で残ります)。絞り込むか limit を上げてください。
+  起きています(強い |weight| 順で残ります)。絞り込むか limit を上げてください —
+  ただしどのエンドポイントも limit の上限は 1000 です。
 - 書き込みの永続化はフラッシュ間隔(既定5秒)以内に行われます。

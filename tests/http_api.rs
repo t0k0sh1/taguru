@@ -305,7 +305,7 @@ fn full_retrieval_loop_over_http() {
         "/contexts/sake/unreachable_from",
         Some(json!({"origins": ["青嶺酒造"]})),
     );
-    assert_eq!(orphans, json!([]));
+    assert_eq!(orphans, json!({"total": 0, "matches": []}));
     let passages = server.ok(
         "POST",
         "/contexts/sake/sources/lookup",
@@ -380,6 +380,82 @@ fn bearer_token_gates_every_route_except_health_and_metrics() {
     let (status, _) =
         server.call_with_token("PUT", "/contexts/sake", Some(json!({})), Some("s3cret"));
     assert_eq!(status, 200);
+}
+
+#[test]
+fn an_association_batch_over_the_cap_is_rejected_before_any_write() {
+    let server = Server::start("batchcap");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+
+    let batch: Vec<Value> = (0..10_001)
+        .map(|i| json!({"subject": format!("s{i}"), "label": "l", "object": "o", "weight": 1.0}))
+        .collect();
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/associations",
+        Some(Value::Array(batch)),
+    );
+    assert_eq!(status, 400, "{body}");
+
+    // The guard ran before the write lock: nothing was applied.
+    let directory = server.ok("GET", "/contexts", None);
+    assert_eq!(directory[0]["stats"]["associations"], json!(0));
+}
+
+#[test]
+fn unreachable_from_pages_like_recall_and_query() {
+    let server = Server::start("orphanpage");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0},
+            // Three islands no walk from the origin can reach.
+            {"subject": "x1", "label": "l", "object": "y1", "weight": 1.0},
+            {"subject": "x2", "label": "l", "object": "y2", "weight": 1.0},
+            {"subject": "x3", "label": "l", "object": "y3", "weight": 1.0},
+        ])),
+    );
+
+    let audit = server.ok(
+        "POST",
+        "/contexts/sake/unreachable_from",
+        Some(json!({"origins": ["青嶺酒造"], "limit": 2})),
+    );
+    assert_eq!(audit["total"], json!(3));
+    assert_eq!(audit["matches"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn explore_without_max_depth_stops_at_the_server_ceiling() {
+    let server = Server::start("depthcap");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    // A 15-hop chain: c0 → c1 → … → c15.
+    let chain: Vec<Value> = (0..15)
+        .map(|i| {
+            json!({"subject": format!("c{i}"), "label": "next", "object": format!("c{}", i + 1), "weight": 1.0})
+        })
+        .collect();
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(Value::Array(chain)),
+    );
+
+    let walked = server.ok(
+        "POST",
+        "/contexts/sake/explore",
+        Some(json!({"origins": ["c0"]})),
+    );
+    let deepest = walked
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["distance"].as_u64().unwrap())
+        .max()
+        .unwrap();
+    assert_eq!(deepest, 10, "omitted max_depth must stop at the ceiling");
 }
 
 #[test]
