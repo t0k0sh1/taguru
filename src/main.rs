@@ -21,6 +21,8 @@ use tokio::net::TcpListener;
 /// - `ARAG_FLUSH_SECS`: how often dirty contexts are persisted (default
 ///   5). This is the crash-loss window; writes also persist on eviction
 ///   and on graceful shutdown (SIGINT/SIGTERM).
+/// - `ARAG_ADDR`: bind address (default 127.0.0.1:3000; port 0 picks a
+///   free port and the resolved address is printed).
 #[tokio::main]
 async fn main() {
     let data_dir = PathBuf::from(std::env::var("ARAG_DATA_DIR").unwrap_or_else(|_| "data".into()));
@@ -127,9 +129,11 @@ async fn main() {
         )
         .with_state(state.clone());
 
-    let addr = "127.0.0.1:3000";
-    let listener = TcpListener::bind(addr).await.unwrap();
-    println!("listening on {addr}");
+    let addr = std::env::var("ARAG_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let listener = TcpListener::bind(&addr).await.unwrap();
+    // Print the RESOLVED address: with port 0 the OS picks one, and
+    // whoever spawned us (integration tests included) reads it here.
+    println!("listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await

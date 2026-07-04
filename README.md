@@ -34,6 +34,7 @@
 ```sh
 cargo run --release
 # 環境変数:
+#   ARAG_ADDR         バインド先 (既定 127.0.0.1:3000)
 #   ARAG_DATA_DIR     データディレクトリ (既定 ./data)
 #   ARAG_CACHE_BYTES  非ピン常駐予算 (既定 512 MiB)
 #   ARAG_FLUSH_SECS   フラッシュ間隔 = クラッシュ時の消失窓 (既定 5)
