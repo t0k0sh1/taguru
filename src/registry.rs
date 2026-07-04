@@ -402,6 +402,79 @@ impl AppState {
         Some(stored.into_keys().collect())
     }
 
+    /// Name pairs whose GLOSSES sit close in embedding space — the
+    /// synonym-fork candidates (創業年 vs 設立年) that no spelling
+    /// comparison can see. Works off the stored vector sidecar alone
+    /// (no provider round trip), so it runs even when the provider is
+    /// gone, and is skipped with a note when no vectors exist or a
+    /// namespace is too large for the O(N²) sweep. Returns
+    /// (concept_pairs, label_pairs, skipped_note).
+    #[allow(clippy::type_complexity)]
+    pub fn semantic_twins(
+        &self,
+        name: &str,
+        cosine_floor: f32,
+    ) -> Option<(
+        Vec<(String, String, f32)>,
+        Vec<(String, String, f32)>,
+        Option<String>,
+    )> {
+        /// Past this many names a namespace's pairwise sweep is skipped.
+        const SWEEP_CAP: usize = 2000;
+        /// At most this many pairs per namespace come back.
+        const PAIR_CAP: usize = 100;
+
+        let entry = self.lookup(name)?;
+        let floor = cosine_floor.clamp(0.0, 1.0);
+        let store = self.entry_vectors(&entry, &file_stem(name));
+        if store.concepts.is_empty() && store.labels.is_empty() {
+            return Some((
+                Vec::new(),
+                Vec::new(),
+                Some(
+                    "ベクトル未生成のため意味的検出はスキップ (POST embeddings/refresh を実行)"
+                        .to_string(),
+                ),
+            ));
+        }
+
+        let mut skipped = None;
+        let sweep = |table: &HashMap<String, (u64, Vec<f32>)>,
+                     skipped: &mut Option<String>|
+         -> Vec<(String, String, f32)> {
+            if table.len() > SWEEP_CAP {
+                *skipped = Some(format!(
+                    "語彙が {} 名を超えるためこの名前空間の意味的検出はスキップ",
+                    SWEEP_CAP
+                ));
+                return Vec::new();
+            }
+            let entries: Vec<(&String, &Vec<f32>)> = {
+                let mut entries: Vec<_> = table.iter().map(|(name, (_, v))| (name, v)).collect();
+                entries.sort_by_key(|(name, _)| name.as_str());
+                entries
+            };
+            let mut pairs = Vec::new();
+            for (i, (name_a, vector_a)) in entries.iter().enumerate() {
+                for (name_b, vector_b) in &entries[i + 1..] {
+                    let score = similarity(vector_a, vector_b);
+                    if score >= floor {
+                        pairs.push(((*name_a).clone(), (*name_b).clone(), score));
+                    }
+                }
+            }
+            pairs.sort_by(|x, y| {
+                y.2.total_cmp(&x.2)
+                    .then_with(|| (&x.0, &x.1).cmp(&(&y.0, &y.1)))
+            });
+            pairs.truncate(PAIR_CAP);
+            pairs
+        };
+        let concepts = sweep(&store.concepts, &mut skipped);
+        let labels = sweep(&store.labels, &mut skipped);
+        Some((concepts, labels, skipped))
+    }
+
     /// Withdraws one source from a context — its graph contributions and
     /// its registered passage — the per-document differential-sync move:
     /// retract the old version of a changed document, then re-ingest the
@@ -1557,6 +1630,61 @@ mod tests {
                 .is_empty()
         );
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn semantic_twins_surface_synonym_forks_from_stored_vectors() {
+        let dir = scratch_dir("twins");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Two label glosses embed close together: a synonym fork that
+        // no spelling comparison could see.
+        let embedder = MockEmbeddings {
+            keys: vec![
+                ("創業年".to_string(), vec![1.0, 0.0, 0.0]),
+                ("設立年".to_string(), vec![0.95, 0.31, 0.0]),
+            ],
+            calls: Arc::clone(&calls),
+        };
+        let embedder = Some(Arc::new(embedder) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("sake", |context| {
+                context
+                    .associate("青嶺酒造", "創業年", "1907年", 1.0)
+                    .unwrap();
+                context
+                    .associate("別の蔵", "設立年", "1950年", 1.0)
+                    .unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+
+        // Before any vectors exist the semantic half is skipped, loudly.
+        let (concepts, labels, note) = state.semantic_twins("sake", 0.6).unwrap();
+        assert!(concepts.is_empty() && labels.is_empty());
+        assert!(note.is_some());
+
+        state.refresh_embeddings("sake").unwrap().unwrap();
+        let (_, labels, note) = state.semantic_twins("sake", 0.6).unwrap();
+        assert!(note.is_none());
+        assert_eq!(labels.len(), 1, "{labels:?}");
+        assert_eq!(
+            (labels[0].0.as_str(), labels[0].1.as_str()),
+            ("創業年", "設立年")
+        );
+        assert!(labels[0].2 > 0.9);
+
+        // No provider round trip happens for the sweep itself: the two
+        // audits above added no embed calls beyond the refresh batches
+        // (2 namespaces) — stored vectors are compared directly.
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+        assert!(state.semantic_twins("nope", 0.6).is_none());
         let _ = fs::remove_dir_all(dir);
     }
 

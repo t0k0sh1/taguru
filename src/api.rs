@@ -429,6 +429,81 @@ pub async fn list_sources(State(state): State<AppState>, Path(name): Path<String
     }
 }
 
+/// Vocabulary audit request: floors for the two fork detectors.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct VocabularyAuditRequest {
+    /// Lexical (spelling) detector floor; omitted means 0.6.
+    pub dice_floor: Option<f64>,
+    /// Semantic (gloss cosine) detector floor; omitted means 0.6.
+    pub cosine_floor: Option<f32>,
+}
+
+#[derive(Serialize)]
+pub struct TwinPair<S> {
+    pub a: String,
+    pub b: String,
+    pub score: S,
+}
+
+/// The vocabulary health report: fork CANDIDATES for review, not
+/// verdicts. Lexical twins are spelling drift (青嶺酒蔵/青嶺酒造);
+/// semantic twins are synonym drift (創業年/設立年) visible only
+/// through gloss embeddings.
+#[derive(Serialize)]
+pub struct VocabularyAudit {
+    pub lexical_concepts: Vec<TwinPair<f64>>,
+    pub lexical_labels: Vec<TwinPair<f64>>,
+    pub semantic_concepts: Vec<TwinPair<f32>>,
+    pub semantic_labels: Vec<TwinPair<f32>>,
+    /// Why the semantic half was skipped, when it was.
+    pub semantic_note: Option<String>,
+}
+
+fn twin_pairs<S>(pairs: Vec<(String, String, S)>) -> Vec<TwinPair<S>> {
+    pairs
+        .into_iter()
+        .map(|(a, b, score)| TwinPair { a, b, score })
+        .collect()
+}
+
+pub async fn audit_vocabulary(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Option<Json<VocabularyAuditRequest>>,
+) -> Response {
+    let started_at = Instant::now();
+    let Json(request) = body.unwrap_or_default();
+    let dice_floor = request.dice_floor.unwrap_or(0.6);
+    let cosine_floor = request.cosine_floor.unwrap_or(0.6);
+
+    let lexical = match state.read_context(&name, |context| {
+        (
+            context.similar_concepts(dice_floor),
+            context.similar_labels(dice_floor),
+        )
+    }) {
+        Ok(lexical) => lexical,
+        Err(failure) => return access_error(failure, &name, started_at),
+    };
+    // The pairwise sweep is CPU-bound; keep the runtime's workers free.
+    let semantic = tokio::task::block_in_place(|| state.semantic_twins(&name, cosine_floor));
+    let Some((semantic_concepts, semantic_labels, semantic_note)) = semantic else {
+        return not_found(&name, started_at);
+    };
+
+    ok(
+        VocabularyAudit {
+            lexical_concepts: twin_pairs(lexical.0),
+            lexical_labels: twin_pairs(lexical.1),
+            semantic_concepts: twin_pairs(semantic_concepts),
+            semantic_labels: twin_pairs(semantic_labels),
+            semantic_note,
+        },
+        started_at,
+    )
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RetractSourceRequest {
     pub source: String,

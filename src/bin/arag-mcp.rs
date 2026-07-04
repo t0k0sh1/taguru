@@ -386,6 +386,18 @@ fn tool_definitions() -> Vec<Value> {
             object_schema(json!({ "context": context }), &["context"]),
         ),
         (
+            "audit_vocabulary",
+            "語彙の健全性監査: 綴りの分岐候補 (字面: 青嶺酒蔵/青嶺酒造) と同義の分岐候補 (意味: 創業年/設立年、要 embeddings) を列挙する。候補であって断定ではない — 本当に同一指示対象なら aliases で綴りを寄せ、別物なら放置する。定期的に、また取り込みの節目に実行する。",
+            object_schema(
+                json!({
+                    "context": context,
+                    "dice_floor": { "type": "number", "description": "字面検出の下限 (既定0.6)" },
+                    "cosine_floor": { "type": "number", "description": "意味検出の下限 (既定0.6)" }
+                }),
+                &["context"],
+            ),
+        ),
+        (
             "audit_coverage",
             "取り込み監査: origins (文書の主要エンティティ) からどの走査でも到達できない連想を列挙する。非空なら所属エッジの不足 — 補ってから終える。",
             object_schema(
@@ -511,6 +523,11 @@ fn call_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<String, S
             "POST",
             &format!("{}/embeddings/refresh", context_path("context")?),
             Some(json!({})),
+        ),
+        "audit_vocabulary" => bridge.call(
+            "POST",
+            &format!("{}/vocabulary/audit", context_path("context")?),
+            Some(pick(arguments, &["dice_floor", "cosine_floor"])),
         ),
         "audit_coverage" => bridge.call(
             "POST",

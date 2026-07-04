@@ -127,6 +127,10 @@ async fn main() {
             "/contexts/{name}/unreachable_from",
             post(api::unreachable_from),
         )
+        .route(
+            "/contexts/{name}/vocabulary/audit",
+            post(api::audit_vocabulary),
+        )
         .with_state(state.clone());
 
     let addr = std::env::var("ARAG_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());

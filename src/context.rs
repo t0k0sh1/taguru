@@ -1213,6 +1213,44 @@ impl Context {
             .collect()
     }
 
+    /// Concept pairs whose spellings look like accidental forks of one
+    /// referent — the lexical half of a vocabulary audit. Spelling drift
+    /// fails silently in this system (two spellings = two referents =
+    /// queries see half the facts), so this surfaces (name_a, name_b,
+    /// dice) candidates, strongest first, for review. Candidates, not
+    /// verdicts: containment pairs are often legitimately distinct
+    /// (青嶺 the brand vs 青嶺酒造 the brewery). Aliases pointing at one
+    /// record are intentional and never reported.
+    pub fn similar_concepts(&self, dice_floor: f64) -> Vec<(String, String, f64)> {
+        self.concept_index
+            .twins(dice_floor.clamp(0.0, 1.0))
+            .into_iter()
+            .map(|(a, b, dice)| {
+                (
+                    self.concept_name(a).to_string(),
+                    self.concept_name(b).to_string(),
+                    dice,
+                )
+            })
+            .collect()
+    }
+
+    /// [`Context::similar_concepts`] for relation labels — where forks
+    /// hurt most, since label-pinned queries silently miss the twin.
+    pub fn similar_labels(&self, dice_floor: f64) -> Vec<(String, String, f64)> {
+        self.label_index
+            .twins(dice_floor.clamp(0.0, 1.0))
+            .into_iter()
+            .map(|(a, b, dice)| {
+                (
+                    self.label_name(a).to_string(),
+                    self.label_name(b).to_string(),
+                    dice,
+                )
+            })
+            .collect()
+    }
+
     /// A compact textual gloss of one concept: its name followed by its
     /// heaviest facts phrased as minimal sentences, most established
     /// first (|weight| descending, ties in insertion order), negatives
@@ -1917,6 +1955,77 @@ impl EntryIndex {
             }
         }
         best
+    }
+
+    /// Pairs of DIFFERENT records whose spellings overlap suspiciously —
+    /// fork candidates for a vocabulary audit. The same posting-list
+    /// machinery as resolve, turned name-against-name: stop-grams are
+    /// skipped and Dice runs over informative bigrams on both sides.
+    /// Alias spellings participate (a fork can hide behind one), but
+    /// pairs resolving to a single target are intentional duplicates
+    /// and are excluded. Returns (target_a, target_b, dice), strongest
+    /// first. Cost is O(Σ posting_len²) — an explicit-audit price, not
+    /// a query-path one.
+    fn twins(&self, dice_floor: f64) -> Vec<(u32, u32, f64)> {
+        let stop_gram = (self.spans.len() / 20).max(64);
+        let is_stop = |bigram: u64| {
+            self.bigrams
+                .get(&bigram)
+                .is_some_and(|postings| postings.len() > stop_gram)
+        };
+        let informative: Vec<usize> = self
+            .spans
+            .iter()
+            .map(|span| {
+                let text = &self.arena[span.start..span.end];
+                let unique: HashSet<u64> = bigrams_of(text).collect();
+                unique.iter().filter(|&&bigram| !is_stop(bigram)).count()
+            })
+            .collect();
+
+        let mut shared: HashMap<(u32, u32), u32> = HashMap::new();
+        for postings in self.bigrams.values() {
+            if postings.len() > stop_gram {
+                continue;
+            }
+            // Postings are appended in span order, so a < b holds.
+            for (index, &a) in postings.iter().enumerate() {
+                for &b in &postings[index + 1..] {
+                    *shared.entry((a, b)).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut best: HashMap<(u32, u32), f64> = HashMap::new();
+        for ((a, b), count) in shared {
+            let target_a = self.spans[a as usize].target;
+            let target_b = self.spans[b as usize].target;
+            if target_a == target_b {
+                continue;
+            }
+            let denominator = informative[a as usize] + informative[b as usize];
+            if denominator == 0 {
+                continue;
+            }
+            let dice = 2.0 * f64::from(count) / denominator as f64;
+            if dice < dice_floor {
+                continue;
+            }
+            let key = (target_a.min(target_b), target_a.max(target_b));
+            let slot = best.entry(key).or_insert(0.0);
+            if dice > *slot {
+                *slot = dice;
+            }
+        }
+        let mut twins: Vec<(u32, u32, f64)> = best
+            .into_iter()
+            .map(|((a, b), dice)| (a, b, dice))
+            .collect();
+        twins.sort_by(|x, y| {
+            y.2.total_cmp(&x.2)
+                .then_with(|| (x.0, x.1).cmp(&(y.0, y.1)))
+        });
+        twins
     }
 
     /// Rough resident bytes of this index, for cache budgeting.
@@ -3717,6 +3826,46 @@ mod tests {
         assert_eq!(top, vec![("私", 4), ("りんご", 2)]);
         // A limit beyond the table is just everything.
         assert_eq!(context.top_concepts(100).len(), 4);
+    }
+
+    #[test]
+    fn vocabulary_twins_surface_spelling_forks_but_not_aliases() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "代表銘柄", "青嶺", 1.0)
+            .unwrap();
+        // The fork: a typo variant minted as its own concept.
+        context
+            .associate("青嶺酒蔵", "所在地", "霧沢町", 1.0)
+            .unwrap();
+        context
+            .associate("蔵人", "住み込む場所", "蔵", 1.0)
+            .unwrap();
+        context
+            .associate("蔵人", "住み込む期間", "冬", 1.0)
+            .unwrap();
+        // An alias is an INTENTIONAL second spelling of one record.
+        context.add_concept_alias("青嶺酒屋", "青嶺酒造").unwrap();
+
+        // 青嶺酒蔵×青嶺酒造 share 2 of 3 bigrams each: dice 2/3.
+        let twins = context.similar_concepts(0.6);
+        assert_eq!(twins.len(), 1, "{twins:?}");
+        assert_eq!(
+            (twins[0].0.as_str(), twins[0].1.as_str()),
+            ("青嶺酒造", "青嶺酒蔵")
+        );
+        assert!((twins[0].2 - 2.0 / 3.0).abs() < 1e-9);
+        // The brand/brewery containment pair (dice 0.5) stays below the
+        // floor, and the alias never pairs with its own canonical.
+        assert!(context.similar_concepts(0.55).len() == 1);
+
+        // Label forks are the costliest kind; the shared 住み込む stem
+        // pushes the pair over the floor for review.
+        let labels = context.similar_labels(0.6);
+        assert_eq!(
+            (labels[0].0.as_str(), labels[0].1.as_str()),
+            ("住み込む場所", "住み込む期間")
+        );
     }
 
     #[test]
