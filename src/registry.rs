@@ -50,6 +50,11 @@ pub struct ContextMeta {
     /// Pinned contexts stay resident regardless of cache pressure — for
     /// small, always-hot contexts like glossaries.
     pub pinned: bool,
+    /// Per-context fuzzy-entry floor for resolve; `None` means the
+    /// library default (0.3). Lower admits more distant near-miss
+    /// spellings, higher keeps entry strict. Re-applied to the context
+    /// on every load, since the image itself carries no config.
+    pub dice_floor: Option<f64>,
 }
 
 /// Mechanically derived "what is this context about" numbers. Served by
@@ -119,6 +124,8 @@ pub struct DirectoryEntry {
     pub description: String,
     pub pinned: bool,
     pub loaded: bool,
+    /// Per-context fuzzy-entry floor; null means the default (0.3).
+    pub dice_floor: Option<f64>,
     pub stats: ContextStats,
 }
 
@@ -238,7 +245,8 @@ impl AppState {
         if registry.contains_key(name) {
             return Err(CreateError::AlreadyExists);
         }
-        let context = Context::default();
+        let mut context = Context::default();
+        context.set_dice_floor(meta.dice_floor);
         let stats = ContextStats::of(&context);
         save_files(&self.0.data_dir, name, &meta, &stats, &context).map_err(CreateError::Io)?;
         registry.insert(
@@ -337,18 +345,28 @@ impl AppState {
         name: &str,
         description: Option<String>,
         pinned: Option<bool>,
+        dice_floor: Option<f64>,
     ) -> Option<io::Result<ContextMeta>> {
         let entry = self.lookup(name)?;
         let outcome = {
-            let mut inner = entry.inner.write().unwrap();
+            let mut guard = entry.inner.write().unwrap();
+            let inner = &mut *guard;
             if let Some(description) = description {
                 inner.meta.description = description;
             }
             if let Some(pinned) = pinned {
                 inner.meta.pinned = pinned;
             }
+            if let Some(floor) = dice_floor {
+                inner.meta.dice_floor = Some(floor.clamp(0.0, 1.0));
+                // A loaded context picks the new floor up immediately;
+                // a cold one gets it on its next load.
+                if let Slot::Hot(context) = &mut inner.slot {
+                    context.set_dice_floor(inner.meta.dice_floor);
+                }
+            }
             if inner.meta.pinned
-                && let Err(error) = ensure_hot(&self.0.data_dir, name, &mut inner)
+                && let Err(error) = ensure_hot(&self.0.data_dir, name, inner)
             {
                 return Some(Err(io::Error::other(error)));
             }
@@ -382,6 +400,7 @@ impl AppState {
                     description: inner.meta.description.clone(),
                     pinned: inner.meta.pinned,
                     loaded,
+                    dice_floor: inner.meta.dice_floor,
                     stats,
                 }
             })
@@ -547,8 +566,11 @@ fn ensure_hot(data_dir: &Path, name: &str, inner: &mut EntryInner) -> Result<(),
     }
     let path = image_path(data_dir, &file_stem(name));
     let bytes = fs::read(&path).map_err(|e| format!("context '{name}' image unreadable: {e}"))?;
-    let context =
+    let mut context =
         Context::from_bytes(&bytes).map_err(|e| format!("context '{name}' image corrupt: {e}"))?;
+    // The image carries knowledge only; tuning config lives in the
+    // sidecar and is re-applied on every load.
+    context.set_dice_floor(inner.meta.dice_floor);
     inner.stats = ContextStats::of(&context);
     inner.slot = Slot::Hot(Box::new(context));
     Ok(())
@@ -746,6 +768,7 @@ mod tests {
             let pinned = ContextMeta {
                 description: "glossary".into(),
                 pinned: true,
+                ..ContextMeta::default()
             };
             state
                 .create("glossary", pinned)
@@ -848,6 +871,56 @@ mod tests {
         // Deleting the context removes its passages file with it.
         state.delete("sake").unwrap().unwrap();
         assert!(!sources_path(&dir, &file_stem("sake")).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dice_floor_persists_in_the_sidecar_and_reapplies_on_load() {
+        let dir = scratch_dir("floor");
+        // One shared informative bigram of 4+3: Dice ≈ 0.286 — misses
+        // the 0.3 default, lands once the context is tuned to 0.25.
+        let fuzzy_cue = "青嶺の純米";
+        let lands = |state: &AppState| {
+            state
+                .read_context("sake", |context| {
+                    context
+                        .resolve(fuzzy_cue)
+                        .iter()
+                        .any(|hit| hit.name == "青嶺酒造")
+                })
+                .map_err(|_| "read")
+                .unwrap()
+        };
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("sake", |context| {
+                    context.associate("青嶺酒造", "分類", "酒蔵", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+
+            assert!(!lands(&state), "default floor must reject the cue");
+
+            // Tuning applies to the loaded context immediately.
+            state
+                .update_meta("sake", None, None, Some(0.25))
+                .unwrap()
+                .unwrap();
+            assert!(lands(&state), "tuned floor must admit the cue");
+            state.flush_dirty();
+        }
+
+        // A cold boot re-applies the floor from the sidecar — the image
+        // itself carries no config.
+        let state = AppState::boot(dir.clone(), usize::MAX).unwrap();
+        assert!(lands(&state), "floor must survive the restart");
+        assert_eq!(state.directory()[0].dice_floor, Some(0.25));
 
         let _ = fs::remove_dir_all(dir);
     }

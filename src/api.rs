@@ -99,6 +99,9 @@ pub async fn protocol() -> Response {
 pub struct CreateContextRequest {
     pub description: String,
     pub pinned: bool,
+    /// Per-context fuzzy-entry floor for resolve; omitted means the
+    /// default (0.3).
+    pub dice_floor: Option<f64>,
 }
 
 pub async fn create_context(
@@ -111,6 +114,7 @@ pub async fn create_context(
     let meta = ContextMeta {
         description: request.description,
         pinned: request.pinned,
+        dice_floor: request.dice_floor.map(|floor| floor.clamp(0.0, 1.0)),
     };
     match state.create(&name, meta) {
         Ok(()) => ok(true, started_at),
@@ -131,6 +135,7 @@ pub async fn create_context(
 pub struct UpdateContextRequest {
     pub description: Option<String>,
     pub pinned: Option<bool>,
+    pub dice_floor: Option<f64>,
 }
 
 pub async fn update_context(
@@ -139,7 +144,12 @@ pub async fn update_context(
     Json(request): Json<UpdateContextRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.update_meta(&name, request.description, request.pinned) {
+    match state.update_meta(
+        &name,
+        request.description,
+        request.pinned,
+        request.dice_floor,
+    ) {
         None => not_found(&name, started_at),
         Some(Ok(meta)) => ok(meta, started_at),
         Some(Err(io_error)) => error(
@@ -534,6 +544,9 @@ pub async fn activate(
 #[derive(Debug, Deserialize)]
 pub struct ResolveRequest {
     pub cue: String,
+    /// One-call override of the fuzzy-entry floor — the loosen-and-retry
+    /// move after a miss. Omitted means the context's setting.
+    pub dice_floor: Option<f64>,
 }
 
 pub async fn resolve(
@@ -542,7 +555,10 @@ pub async fn resolve(
     Json(request): Json<ResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.read_context(&name, |context| context.resolve(&request.cue)) {
+    match state.read_context(&name, |context| match request.dice_floor {
+        Some(floor) => context.resolve_with_floor(&request.cue, floor),
+        None => context.resolve(&request.cue),
+    }) {
         Ok(result) => ok(result, started_at),
         Err(failure) => access_error(failure, &name, started_at),
     }
@@ -554,7 +570,10 @@ pub async fn resolve_label(
     Json(request): Json<ResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.read_context(&name, |context| context.resolve_label(&request.cue)) {
+    match state.read_context(&name, |context| match request.dice_floor {
+        Some(floor) => context.resolve_label_with_floor(&request.cue, floor),
+        None => context.resolve_label(&request.cue),
+    }) {
         Ok(result) => ok(result, started_at),
         Err(failure) => access_error(failure, &name, started_at),
     }

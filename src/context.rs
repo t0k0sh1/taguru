@@ -401,6 +401,11 @@ pub struct Context {
     /// Derived entry index over label spellings, behind `resolve_label`.
     /// Not persisted.
     label_index: EntryIndex,
+    /// Tuning override for the fuzzy-entry floor; `None` means
+    /// [`DICE_FLOOR`]. This is config, not knowledge, so it is NOT part
+    /// of the persistent image — whoever loads an image re-applies it
+    /// (the server keeps it in the context's sidecar).
+    dice_floor: Option<f64>,
 }
 
 impl Context {
@@ -1122,9 +1127,18 @@ impl Context {
     /// itself stays structural). The scan is O(number of concepts) and
     /// allocates nothing per candidate.
     pub fn resolve(&self, cue: &str) -> Vec<Resolution> {
+        self.resolve_with_floor(cue, self.dice_floor())
+    }
+
+    /// [`Context::resolve`] with an explicit fuzzy floor for this one
+    /// call, overriding the context's setting — the loosen-and-retry
+    /// move after a miss, or a tightening when a cue is known-exact.
+    /// Only the fuzzy tier is affected; exact and containment matches
+    /// are never floored.
+    pub fn resolve_with_floor(&self, cue: &str, dice_floor: f64) -> Vec<Resolution> {
         let mut resolutions: Vec<Resolution> = self
             .concept_index
-            .resolve(cue)
+            .resolve(cue, dice_floor.clamp(0.0, 1.0))
             .into_iter()
             .map(|(id, score)| Resolution {
                 name: self.concept_name(id).to_string(),
@@ -1143,9 +1157,15 @@ impl Context {
     /// coining a relation spelling, and reuse a close existing label
     /// instead.
     pub fn resolve_label(&self, cue: &str) -> Vec<Resolution> {
+        self.resolve_label_with_floor(cue, self.dice_floor())
+    }
+
+    /// [`Context::resolve_label`] with an explicit fuzzy floor for this
+    /// one call, as [`Context::resolve_with_floor`].
+    pub fn resolve_label_with_floor(&self, cue: &str, dice_floor: f64) -> Vec<Resolution> {
         let mut resolutions: Vec<Resolution> = self
             .label_index
-            .resolve(cue)
+            .resolve(cue, dice_floor.clamp(0.0, 1.0))
             .into_iter()
             .map(|(id, score)| Resolution {
                 name: self.label_name(id).to_string(),
@@ -1154,6 +1174,22 @@ impl Context {
             .collect();
         sort_resolutions(&mut resolutions);
         resolutions
+    }
+
+    /// The fuzzy-entry floor this context applies when a call does not
+    /// name one: bigram-Dice matches below it are dropped as noise.
+    pub fn dice_floor(&self) -> f64 {
+        self.dice_floor.unwrap_or(DICE_FLOOR)
+    }
+
+    /// Tunes the fuzzy-entry floor for this context — lower admits more
+    /// distant near-miss spellings (vocabularies with heavy 表記ゆれ),
+    /// higher keeps entry strict (curated glossaries). `None` returns to
+    /// the default. Clamped into [0, 1]. Config, not knowledge: the
+    /// value is not part of the persistent image, so whoever restores a
+    /// context from bytes must re-apply it.
+    pub fn set_dice_floor(&mut self, dice_floor: Option<f64>) {
+        self.dice_floor = dice_floor.map(|floor| floor.clamp(0.0, 1.0));
     }
 
     /// The full relation-label vocabulary in insertion order — the
@@ -1622,9 +1658,12 @@ struct EntrySpan {
     target: u32,
 }
 
-/// The floor for bigram-overlap matches: Dice below this is noise, not a
-/// near-miss spelling, and is dropped rather than surfacing distant
-/// concepts on every shared 2-gram.
+/// The default floor for bigram-overlap matches: Dice below this is
+/// noise, not a near-miss spelling, and is dropped rather than surfacing
+/// distant concepts on every shared 2-gram. Vocabularies differ in how
+/// much fuzz they can afford, so this is only the default — tunable per
+/// context via [`Context::set_dice_floor`] and per call via
+/// [`Context::resolve_with_floor`].
 const DICE_FLOOR: f64 = 0.3;
 
 impl EntryIndex {
@@ -1654,9 +1693,9 @@ impl EntryIndex {
     /// match is 1.0 and containment either way scores by character
     /// coverage of the longer string; spellings that fail containment can
     /// still match by bigram Dice overlap (near-misses like 青嶺酒蔵 for
-    /// 青嶺酒造), floored at [`DICE_FLOOR`]. A target keeps the best
-    /// score any of its spellings earned.
-    fn resolve(&self, cue: &str) -> HashMap<u32, f64> {
+    /// 青嶺酒造), floored at `dice_floor`. A target keeps the best score
+    /// any of its spellings earned.
+    fn resolve(&self, cue: &str, dice_floor: f64) -> HashMap<u32, f64> {
         let needle = normalize(cue);
         if needle.is_empty() {
             return HashMap::new();
@@ -1749,7 +1788,7 @@ impl EntryIndex {
                 }
                 let dice =
                     2.0 * f64::from(count) / (informative_needle + informative_span.len()) as f64;
-                if dice >= DICE_FLOOR {
+                if dice >= dice_floor {
                     record(span.target, dice, &mut best);
                 }
             }
@@ -1967,6 +2006,7 @@ impl Context {
             edge_ids: HashMap::new(),
             concept_index: EntryIndex::default(),
             label_index: EntryIndex::default(),
+            dice_floor: None,
         };
         context.rebuild_indexes()?;
         Ok(context)
@@ -3105,6 +3145,33 @@ mod tests {
         let mut corrupt = with_alias.to_bytes();
         corrupt[196..200].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(Context::from_bytes(&corrupt).is_err());
+    }
+
+    #[test]
+    fn dice_floor_is_tunable_per_context_and_per_call() {
+        let mut context = Context::default();
+        context.associate("青嶺酒造", "分類", "酒蔵", 1.0).unwrap();
+
+        // One shared informative bigram of 4+3: Dice = 2/7 ≈ 0.286 —
+        // just under the 0.3 default, so the fuzzy cue misses.
+        let cue = "青嶺の純米";
+        assert!(!context.resolve(cue).iter().any(|r| r.name == "青嶺酒造"));
+
+        // A one-call override loosens exactly that call ...
+        assert!(
+            context
+                .resolve_with_floor(cue, 0.25)
+                .iter()
+                .any(|r| r.name == "青嶺酒造")
+        );
+        assert!(!context.resolve(cue).iter().any(|r| r.name == "青嶺酒造"));
+
+        // ... and the context setting changes the default until reset.
+        context.set_dice_floor(Some(0.25));
+        assert_eq!(context.dice_floor(), 0.25);
+        assert!(context.resolve(cue).iter().any(|r| r.name == "青嶺酒造"));
+        context.set_dice_floor(None);
+        assert!(!context.resolve(cue).iter().any(|r| r.name == "青嶺酒造"));
     }
 
     #[test]

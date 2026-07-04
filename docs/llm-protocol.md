@@ -24,8 +24,9 @@
 2. **手がかり語を解決する**: 質問からエンティティ候補と関係候補を抜き出し、
    `resolve`(概念)/ `resolve_label`(関係)へ。入口は正規化済みです(全角半角・
    大文字小文字・カタカナ/ひらがな・軽微な誤字は吸収されます)。空か低スコアなら
-   言い換えて再試行し、それでも空なら文脈選択が誤りの可能性があります — 次候補の
-   コンテキストへ。
+   言い換えて再試行するか、`dice_floor` を下げて(既定 0.3 → 例えば 0.2)ファジー
+   一致の許容を一時的に広げます。それでも空なら文脈選択が誤りの可能性があります —
+   次候補のコンテキストへ。
 3. **見出しから絞る**: ハブ概念は `describe` で「どのラベルが何件あるか」だけを先に
    確認し、`query` に label 配列(`"label": ["住所","職歴"]`)を渡して必要な面だけを
    取得します。全プロフィールをいきなり取らないでください。
@@ -59,9 +60,9 @@
 
 | Method | Path | Body / 戻り |
 |---|---|---|
-| GET | `/contexts` | 目録: name, description, pinned, loaded, stats |
-| PUT | `/contexts/{name}` | `{description?, pinned?}` → 作成 |
-| PATCH | `/contexts/{name}` | `{description?, pinned?}` → メタ更新 |
+| GET | `/contexts` | 目録: name, description, pinned, loaded, dice_floor, stats |
+| PUT | `/contexts/{name}` | `{description?, pinned?, dice_floor?}` → 作成 |
+| PATCH | `/contexts/{name}` | `{description?, pinned?, dice_floor?}` → メタ更新 |
 | DELETE | `/contexts/{name}` | 削除(ファイルごと) |
 | POST | `/contexts/{name}/associations` | `[{subject,label,object,weight,source?}]` → 適用数 |
 | POST | `/contexts/{name}/recall` | `{cue, limit?}` → `{total, matches}` |
@@ -69,8 +70,8 @@
 | POST | `/contexts/{name}/describe` | `{concept}` → ラベル見出し(件数・役割別)/ null |
 | POST | `/contexts/{name}/explore` | `{origins, max_depth?}` → `[{distance, path, association}]` |
 | POST | `/contexts/{name}/activate` | `{origins, decay?=0.5, limit?=20}` → `[{strength, path, association}]` |
-| POST | `/contexts/{name}/resolve` | `{cue}` → `[{name, score}]` 概念名候補 |
-| POST | `/contexts/{name}/resolve_label` | `{cue}` → `[{name, score}]` 関係名候補 |
+| POST | `/contexts/{name}/resolve` | `{cue, dice_floor?}` → `[{name, score}]` 概念名候補 |
+| POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?}` → `[{name, score}]` 関係名候補 |
 | GET | `/contexts/{name}/labels` | 関係語彙(正準のみ) |
 | GET/POST | `/contexts/{name}/aliases` | エクスポート / `{concepts:{別綴:正準}, labels:{...}}` |
 | GET/POST | `/contexts/{name}/sources` | 登録済み source 一覧 / `{passages:{source:原文}}` |
