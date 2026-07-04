@@ -142,6 +142,12 @@ pub struct Association {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Recollection {
     pub distance: usize,
+    /// Concept names from the origin that reached this association down
+    /// to the endpoint it was reached at, origin first. This is the
+    /// connective tissue a caller needs to recompose a multi-hop answer
+    /// as prose — not just that a far fact is related, but through which
+    /// intermediate concepts the relation runs.
+    pub path: Vec<String>,
     pub association: Association,
 }
 
@@ -152,6 +158,10 @@ pub struct Recollection {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Activation {
     pub strength: f64,
+    /// Concept names from the origin down to the endpoint whose
+    /// activation scored this association, origin first — the strongest
+    /// activation path, for recomposing multi-hop answers.
+    pub path: Vec<String>,
     pub association: Association,
 }
 
@@ -876,11 +886,13 @@ impl Context {
     ///
     /// Results are ordered by distance, then by insertion order within the
     /// same distance, so output is deterministic for a given `Context`
-    /// history. Origins naming unknown concepts contribute nothing, and
-    /// `max_depth == 0` returns nothing — zero hops of association-following
-    /// reaches no associations.
+    /// history. Each result carries the concept path from its origin to
+    /// where it was reached. Origins naming unknown concepts contribute
+    /// nothing, and `max_depth == 0` returns nothing — zero hops of
+    /// association-following reaches no associations.
     pub fn explore(&self, origins: &[&str], max_depth: usize) -> Vec<Recollection> {
         let mut node_distances: HashMap<ConceptId, usize> = HashMap::new();
+        let mut parents: HashMap<ConceptId, ConceptId> = HashMap::new();
         let mut frontier: VecDeque<ConceptId> = VecDeque::new();
         for &origin in origins {
             if let Some(&id) = self.concept_ids.get(origin)
@@ -893,37 +905,59 @@ impl Context {
 
         // Breadth-first, so a node comes off the frontier with its minimal
         // distance already settled, and an edge's first sighting is from
-        // its nearer endpoint.
-        let mut reached: HashMap<EdgeId, usize> = HashMap::new();
+        // its nearer endpoint — which is the endpoint the path leads to.
+        let mut reached: HashMap<EdgeId, (usize, ConceptId)> = HashMap::new();
         while let Some(concept_id) = frontier.pop_front() {
             let hop = node_distances[&concept_id] + 1;
             if hop > max_depth {
                 continue;
             }
             for edge_id in self.outgoing(concept_id).chain(self.incoming(concept_id)) {
-                reached.entry(edge_id).or_insert(hop);
+                reached.entry(edge_id).or_insert((hop, concept_id));
                 let edge = &self.edges[edge_id as usize];
                 for neighbor in [edge.subject, edge.object] {
                     if let Entry::Vacant(entry) = node_distances.entry(neighbor) {
                         entry.insert(hop);
+                        parents.insert(neighbor, concept_id);
                         frontier.push_back(neighbor);
                     }
                 }
             }
         }
 
-        let mut ordered: Vec<(usize, EdgeId)> = reached
+        let mut ordered: Vec<(usize, EdgeId, ConceptId)> = reached
             .into_iter()
-            .map(|(edge_id, distance)| (distance, edge_id))
+            .map(|(edge_id, (distance, from))| (distance, edge_id, from))
             .collect();
         ordered.sort_unstable();
 
         ordered
             .into_iter()
-            .map(|(distance, edge_id)| Recollection {
+            .map(|(distance, edge_id, from)| Recollection {
                 distance,
+                path: self.path_from(&parents, from),
                 association: self.association(edge_id),
             })
+            .collect()
+    }
+
+    /// Reconstructs the concept-name trail from an origin down to
+    /// `concept` by following the walk's parent pointers, origin first.
+    fn path_from(
+        &self,
+        parents: &HashMap<ConceptId, ConceptId>,
+        concept: ConceptId,
+    ) -> Vec<String> {
+        let mut trail = vec![concept];
+        let mut cursor = concept;
+        while let Some(&parent) = parents.get(&cursor) {
+            trail.push(parent);
+            cursor = parent;
+        }
+        trail.reverse();
+        trail
+            .into_iter()
+            .map(|id| self.concept_name(id).to_string())
             .collect()
     }
 
@@ -974,6 +1008,7 @@ impl Context {
         let decay = decay.clamp(0.0, 1.0);
 
         let mut best: HashMap<ConceptId, f64> = HashMap::new();
+        let mut parents: HashMap<ConceptId, ConceptId> = HashMap::new();
         let mut heap: BinaryHeap<Candidate> = BinaryHeap::new();
         for &origin in origins {
             if let Some(&id) = self.concept_ids.get(origin) {
@@ -987,9 +1022,11 @@ impl Context {
 
         // Best-first (Dijkstra-style): every propagation factor is <= 1,
         // so the first time a concept is popped it carries its maximal
-        // activation and can be settled for good.
+        // activation and can be settled for good. Each strength remembers
+        // which settled endpoint scored it, so the strongest activation
+        // path can be reconstructed for the result.
         let mut settled: HashSet<ConceptId> = HashSet::new();
-        let mut strengths: HashMap<EdgeId, f64> = HashMap::new();
+        let mut strengths: HashMap<EdgeId, (f64, ConceptId)> = HashMap::new();
         while let Some(Candidate {
             activation,
             concept,
@@ -1015,9 +1052,9 @@ impl Context {
                 if score <= 0.0 {
                     continue;
                 }
-                let strength = strengths.entry(edge_id).or_insert(0.0);
-                if score > *strength {
-                    *strength = score;
+                let strength = strengths.entry(edge_id).or_insert((0.0, concept));
+                if score > strength.0 {
+                    *strength = (score, concept);
                 }
 
                 // Propagation: fan-normalized, so a busy node dilutes
@@ -1034,6 +1071,7 @@ impl Context {
                     }
                     if flow > best.get(&neighbor).copied().unwrap_or(0.0) {
                         best.insert(neighbor, flow);
+                        parents.insert(neighbor, concept);
                         heap.push(Candidate {
                             activation: flow,
                             concept: neighbor,
@@ -1043,17 +1081,18 @@ impl Context {
             }
         }
 
-        let mut ranked: Vec<(f64, EdgeId)> = strengths
+        let mut ranked: Vec<(f64, EdgeId, ConceptId)> = strengths
             .into_iter()
-            .map(|(edge_id, strength)| (strength, edge_id))
+            .map(|(edge_id, (strength, from))| (strength, edge_id, from))
             .collect();
         ranked.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         ranked.truncate(limit);
 
         ranked
             .into_iter()
-            .map(|(strength, edge_id)| Activation {
+            .map(|(strength, edge_id, from)| Activation {
                 strength,
+                path: self.path_from(&parents, from),
                 association: self.association(edge_id),
             })
             .collect()
@@ -2546,6 +2585,9 @@ mod tests {
             two_hops[1].association,
             assoc("りんご", "分類", "果物", 1.0)
         );
+        // The path names the intermediate concept the walk ran through.
+        assert_eq!(two_hops[0].path, vec!["私"]);
+        assert_eq!(two_hops[1].path, vec!["私", "りんご"]);
 
         // Depth beyond the component's diameter just returns the whole
         // connected component, no more.
@@ -2568,6 +2610,7 @@ mod tests {
         assert_eq!(from_me.len(), 2);
         assert!(from_me.contains(&Recollection {
             distance: 2,
+            path: vec!["私".to_string(), "りんご".to_string()],
             association: assoc("農家", "育てる", "りんご", 1.0),
         }));
     }
@@ -2607,6 +2650,7 @@ mod tests {
         assert_eq!(distances, vec![1, 1, 2, 2]);
         assert!(both_ends.contains(&Recollection {
             distance: 2,
+            path: vec!["a".to_string(), "b".to_string()],
             association: assoc("b", "r2", "c", 1.0),
         }));
     }
@@ -2727,6 +2771,10 @@ mod tests {
         assert_eq!(ranked[0].strength, 0.5); // 1.0 * 0.5 * |1.0|
         assert_eq!(ranked[1].association.object, "遠い");
         assert_eq!(ranked[1].strength, 0.25); // a(近い) = 0.5, then 0.5 * 0.5 * |1.0|
+
+        // Each result carries the activation path that scored it.
+        assert_eq!(ranked[0].path, vec!["起点"]);
+        assert_eq!(ranked[1].path, vec!["起点", "近い"]);
     }
 
     #[test]
