@@ -145,7 +145,7 @@ impl VectorStore {
     pub fn load(path: &Path) -> Self {
         match std::fs::read(path) {
             Ok(bytes) => Self::from_bytes(&bytes).unwrap_or_else(|| {
-                eprintln!("ignoring corrupt vector store at {}", path.display());
+                tracing::warn!("ignoring corrupt vector store at {}", path.display());
                 Self::default()
             }),
             Err(_) => Self::default(),

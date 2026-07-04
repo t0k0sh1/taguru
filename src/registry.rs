@@ -266,7 +266,7 @@ impl AppState {
                 continue;
             };
             let Some(name) = name_from_stem(stem) else {
-                eprintln!("skipping {}: file name does not decode", path.display());
+                tracing::warn!("skipping {}: file name does not decode", path.display());
                 continue;
             };
             let MetaFile { meta, stats } = read_meta_file(&data_dir, stem);
@@ -286,7 +286,7 @@ impl AppState {
             if inner.meta.pinned
                 && let Err(error) = ensure_hot(&state.0.data_dir, &name, &mut inner)
             {
-                eprintln!("pinned context '{name}' not preloaded: {error}");
+                tracing::warn!("pinned context '{name}' not preloaded: {error}");
             }
         }
         Ok(state)
@@ -518,7 +518,7 @@ impl AppState {
             {
                 Ok(()) => passage_removed = true,
                 Err(error) => {
-                    eprintln!("passage for '{source}' not removed from disk: {error}");
+                    tracing::warn!("passage for '{source}' not removed from disk: {error}");
                 }
             }
         }
@@ -925,7 +925,7 @@ impl AppState {
                     flushed.push(name);
                 }
                 Err(error) => {
-                    eprintln!("flush of context '{name}' failed (will retry): {error}");
+                    tracing::warn!("flush of context '{name}' failed (will retry): {error}");
                 }
             }
         }
@@ -1046,7 +1046,9 @@ impl AppState {
                     if let Err(error) =
                         save_files(&self.0.data_dir, &name, &inner.meta, &stats, context)
                     {
-                        eprintln!("context '{name}' stays resident, eviction save failed: {error}");
+                        tracing::warn!(
+                            "context '{name}' stays resident, eviction save failed: {error}"
+                        );
                         continue;
                     }
                     inner.stats = stats;
@@ -1154,7 +1156,7 @@ fn text_terms(text: &str) -> Vec<u64> {
 fn read_passages(path: &Path) -> BTreeMap<String, String> {
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-            eprintln!("ignoring corrupt passages at {}: {error}", path.display());
+            tracing::warn!("ignoring corrupt passages at {}: {error}", path.display());
             BTreeMap::new()
         }),
         Err(_) => BTreeMap::new(),
@@ -1186,7 +1188,7 @@ fn write_meta(dir: &Path, stem: &str, meta: &ContextMeta, stats: &ContextStats) 
 fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
     match fs::read(meta_path(dir, stem)) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-            eprintln!("ignoring corrupt sidecar for '{stem}': {error}");
+            tracing::warn!("ignoring corrupt sidecar for '{stem}': {error}");
             MetaFile::default()
         }),
         Err(_) => MetaFile::default(),

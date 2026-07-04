@@ -786,14 +786,17 @@ fn resolve_with_fallback(
         // exists: degrade to the weak lexical results and log, rather
         // than failing an answerable request over a provider hiccup.
         Some(Err(message)) if !lexical.is_empty() => {
-            eprintln!("semantic entry failed (serving weak lexical results): {message}");
+            tracing::warn!("semantic entry failed (serving weak lexical results): {message}");
             ok(lexical_tier(lexical), started_at)
         }
-        Some(Err(message)) => error(
-            StatusCode::BAD_GATEWAY,
-            format!("semantic entry failed: {message}"),
-            started_at,
-        ),
+        Some(Err(message)) => {
+            tracing::warn!("semantic entry failed with nothing lexical to fall back on: {message}");
+            error(
+                StatusCode::BAD_GATEWAY,
+                format!("semantic entry failed: {message}"),
+                started_at,
+            )
+        }
     }
 }
 

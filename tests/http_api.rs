@@ -329,6 +329,38 @@ fn full_retrieval_loop_over_http() {
 }
 
 #[test]
+fn log_output_is_structured_when_json_format_is_requested() {
+    let data_dir = std::env::temp_dir().join(format!("taguru-jsonlog-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .env("TAGURU_ADDR", "127.0.0.1:0")
+        .env("TAGURU_DATA_DIR", &data_dir)
+        .env("TAGURU_LOG_FORMAT", "json")
+        .env_remove("TAGURU_EMBED_URL")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("server binary must spawn");
+
+    // The first stderr line is already a log record (boot logging runs
+    // before the listener binds); it must be one JSON object with the
+    // standard fields, not pretty-format text.
+    let stderr = child.stderr.take().expect("stderr must be piped");
+    let line = BufReader::new(stderr)
+        .lines()
+        .next()
+        .expect("a log line must appear")
+        .expect("server stderr must be readable");
+    let parsed: Value =
+        serde_json::from_str(&line).unwrap_or_else(|_| panic!("stderr is not JSON: {line}"));
+    assert!(parsed["level"].is_string(), "{parsed}");
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[test]
 fn data_survives_a_graceful_restart() {
     let server = Server::start("restart");
     server.ok(

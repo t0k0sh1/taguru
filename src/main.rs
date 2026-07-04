@@ -11,6 +11,7 @@ use axum::routing::{get, post, put};
 use embedding::EmbeddingProvider;
 use registry::AppState;
 use tokio::net::TcpListener;
+use tracing::{info, warn};
 
 /// Configuration comes from the environment:
 /// - `TAGURU_DATA_DIR`: where context images and sidecars live (default
@@ -23,8 +24,16 @@ use tokio::net::TcpListener;
 ///   and on graceful shutdown (SIGINT/SIGTERM).
 /// - `TAGURU_ADDR`: bind address (default 127.0.0.1:3000; port 0 picks a
 ///   free port and the resolved address is printed).
+/// - `RUST_LOG`: log filter (default `info`), standard EnvFilter syntax.
+/// - `TAGURU_LOG_FORMAT`: `json` for one JSON object per log line;
+///   anything else keeps the human-readable format. Logs go to stderr.
 #[tokio::main]
 async fn main() {
+    // The subscriber must exist before anything can log — the
+    // env_number warnings just below would otherwise be dropped
+    // silently (tracing has no default subscriber and no buffering).
+    init_tracing();
+
     let data_dir =
         PathBuf::from(std::env::var("TAGURU_DATA_DIR").unwrap_or_else(|_| "data".into()));
     let cache_bytes = env_number("TAGURU_CACHE_BYTES", 512 * 1024 * 1024);
@@ -32,23 +41,24 @@ async fn main() {
 
     let embedder = embedding::HttpEmbeddings::from_env();
     if let Some(embedder) = &embedder {
-        println!("semantic entry tier enabled (model {})", embedder.model());
+        info!(model = embedder.model(), "semantic entry tier enabled");
     }
     let auto_embed = embedder.is_some()
         && std::env::var("TAGURU_EMBED_AUTO")
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     if auto_embed {
-        println!("auto embedding refresh enabled (runs with each flush)");
+        info!("auto embedding refresh enabled (runs with each flush)");
     }
     let embedder = embedder.map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>);
 
     let state = AppState::boot(data_dir.clone(), cache_bytes, embedder)
         .expect("data directory must be usable");
-    println!(
-        "{} context(s) registered from {} (cache budget {} MiB, flush every {flush_secs}s)",
-        state.context_count(),
-        data_dir.display(),
-        cache_bytes / (1024 * 1024),
+    info!(
+        contexts = state.context_count(),
+        data_dir = %data_dir.display(),
+        cache_mib = cache_bytes / (1024 * 1024),
+        flush_secs,
+        "server ready",
     );
 
     let flusher = state.clone();
@@ -69,10 +79,10 @@ async fn main() {
                         match flusher.refresh_embeddings(name) {
                             None | Some(Ok((0, _))) => {}
                             Some(Ok((embedded, _))) => {
-                                println!("auto-embedded {embedded} gloss(es) for context '{name}'");
+                                info!(context = %name, embedded, "auto-embedded glosses");
                             }
                             Some(Err(error)) => {
-                                eprintln!("auto embedding refresh for '{name}' failed: {error}");
+                                warn!(context = %name, error, "auto embedding refresh failed");
                             }
                         }
                     }
@@ -138,7 +148,9 @@ async fn main() {
     let listener = TcpListener::bind(&addr).await.unwrap();
     // Print the RESOLVED address: with port 0 the OS picks one, and
     // whoever spawned us (integration tests included) reads it here.
+    // This stdout line is a contract — logging changes must not touch it.
     println!("listening on {}", listener.local_addr().unwrap());
+    info!(addr = %listener.local_addr().unwrap(), "listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -146,7 +158,25 @@ async fn main() {
 
     // Nothing dirty may outlive the process: one final flush.
     state.flush_dirty();
-    println!("flushed dirty contexts on shutdown");
+    info!("flushed dirty contexts on shutdown");
+}
+
+/// Installs the global tracing subscriber: `RUST_LOG` filtering
+/// (default `info`), human-readable or JSON lines per
+/// `TAGURU_LOG_FORMAT`, written to stderr — stdout stays reserved for
+/// the bootstrap contract lines tests parse.
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let json = std::env::var("TAGURU_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr);
+    if json {
+        builder.json().init();
+    } else {
+        builder.init();
+    }
 }
 
 async fn shutdown_signal() {
@@ -175,7 +205,7 @@ async fn shutdown_signal() {
 fn env_number(key: &str, default: usize) -> usize {
     match std::env::var(key) {
         Ok(value) => value.parse().unwrap_or_else(|_| {
-            eprintln!("ignoring {key}={value}: not a number; using {default}");
+            warn!("ignoring {key}={value}: not a number; using {default}");
             default
         }),
         Err(_) => default,
