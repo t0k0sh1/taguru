@@ -88,6 +88,10 @@ async fn main() {
             post(api::search_passages),
         )
         .route(
+            "/contexts/{name}/sources/retract",
+            post(api::retract_source),
+        )
+        .route(
             "/contexts/{name}/embeddings/refresh",
             post(api::refresh_embeddings),
         )

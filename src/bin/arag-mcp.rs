@@ -357,6 +357,14 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "retract_source",
+            "1つの出典 (文書) の寄与をグラフと原文ストアから撤回する。文書が更新されたときの差分同期: 旧版を retract してから新版を再取り込みする。概念やエッジ自体は残る (重みが差し引かれるだけ)。",
+            object_schema(
+                json!({ "context": context, "source": { "type": "string" } }),
+                &["context", "source"],
+            ),
+        ),
+        (
             "search_passages",
             "登録済み原文への全文検索 (bigram BM25)。トリプルに落ちない知識 (手続きの順序・条件・談話) のための第2レーン: グラフ検索で見つからない質問はこちらでも探す。",
             object_schema(
@@ -478,6 +486,11 @@ fn call_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<String, S
             "POST",
             &format!("{}/aliases", context_path("context")?),
             Some(pick(arguments, &["concepts", "labels"])),
+        ),
+        "retract_source" => bridge.call(
+            "POST",
+            &format!("{}/sources/retract", context_path("context")?),
+            Some(pick(arguments, &["source"])),
         ),
         "search_passages" => bridge.call(
             "POST",

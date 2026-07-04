@@ -1428,6 +1428,59 @@ impl Context {
         Ok(())
     }
 
+    /// Withdraws one source's contributions: every attribution it made
+    /// is removed from its edge's chain and its weight subtracted from
+    /// the edge's total — the differential-sync move when a document
+    /// changes (retract the old version, re-ingest the new one), instead
+    /// of rebuilding the whole context.
+    ///
+    /// Returns how many associations were touched, or `None` for a
+    /// source this context never saw. What retraction deliberately does
+    /// NOT do: concepts, labels, and edges minted by the document stay
+    /// (the storage is append-only; an edge whose weight nets to 0.0
+    /// simply stops carrying knowledge — `activate` already skips it),
+    /// unsourced weight on shared edges stays, and the source's name
+    /// stays interned so re-asserting from it later just works. The
+    /// unlinked attribution records remain as dead space in their
+    /// append-only table.
+    pub fn retract_source(&mut self, source: &str) -> Option<usize> {
+        let &source_id = self.source_ids.get(source)?;
+        let mut touched = 0usize;
+        for edge_index in 0..self.edges.len() {
+            // Locate the source's attribution and its predecessor.
+            let mut previous = NIL;
+            let mut cursor = self.edges[edge_index].first_attribution;
+            let mut found = None;
+            while cursor != NIL {
+                let record = &self.attributions[cursor as usize];
+                if record.source == source_id {
+                    found = Some((previous, cursor, record.weight));
+                    break;
+                }
+                previous = cursor;
+                cursor = record.next;
+            }
+            let Some((previous, cursor, weight)) = found else {
+                continue;
+            };
+
+            let next = self.attributions[cursor as usize].next;
+            let edge = &mut self.edges[edge_index];
+            edge.weight -= weight;
+            if previous == NIL {
+                edge.first_attribution = next;
+            }
+            if edge.last_attribution == cursor {
+                edge.last_attribution = previous;
+            }
+            if previous != NIL {
+                self.attributions[previous as usize].next = next;
+            }
+            touched += 1;
+        }
+        Some(touched)
+    }
+
     /// Every concept alias as (alias, canonical) pairs in registration
     /// order — one coherent table, so workflows that treat the alias
     /// vocabulary as a unit (export names, translate, re-import) never
@@ -2165,7 +2218,10 @@ impl Context {
 
         // Attribution chains: in range, sources known, acyclic, ending at
         // the stored tail, and disjoint across edges — a shared record
-        // would let one edge's accumulation corrupt another's.
+        // would let one edge's accumulation corrupt another's. Records
+        // claimed by NO chain are legal: retraction unlinks records in
+        // place and leaves them behind as dead space in the append-only
+        // table.
         let mut claimed = vec![false; self.attributions.len()];
         for edge in &self.edges {
             let mut cursor = edge.first_attribution;
@@ -2187,9 +2243,6 @@ impl Context {
             if tail != edge.last_attribution {
                 return Err(CorruptImage("attribution chain does not end at its tail"));
             }
-        }
-        if claimed.iter().any(|&used| !used) {
-            return Err(CorruptImage("attribution chains do not cover their table"));
         }
         Ok(())
     }
@@ -3162,6 +3215,57 @@ mod tests {
         let mut corrupt = with_alias.to_bytes();
         corrupt[196..200].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(Context::from_bytes(&corrupt).is_err());
+    }
+
+    #[test]
+    fn retract_source_withdraws_its_contributions() {
+        let mut context = Context::default();
+        context.associate_from("a", "r", "b", 1.0, "旧版").unwrap();
+        context.associate_from("a", "r", "b", 2.0, "新版").unwrap();
+        context
+            .associate_from("a", "r", "b", 0.5, "第三者")
+            .unwrap();
+        context.associate_from("a", "r", "c", 1.0, "旧版").unwrap();
+        context.associate("a", "r", "d", 1.0).unwrap(); // unsourced stays
+
+        // 旧版 contributed to two edges; both lose exactly its share.
+        assert_eq!(context.retract_source("旧版"), Some(2));
+        assert_eq!(weight_between(&context, "a", "r", "b"), 2.5);
+        assert_eq!(
+            context.query(Some("a"), None, Some("b"))[0].attributions,
+            vec![
+                Attribution {
+                    source: "新版".to_string(),
+                    weight: 2.0,
+                },
+                Attribution {
+                    source: "第三者".to_string(),
+                    weight: 0.5,
+                },
+            ]
+        );
+        // A fully retracted edge nets to zero: still queryable, no
+        // longer knowledge activate would carry.
+        assert_eq!(weight_between(&context, "a", "r", "c"), 0.0);
+        assert!(
+            context.query(Some("a"), None, Some("c"))[0]
+                .attributions
+                .is_empty()
+        );
+        assert_eq!(weight_between(&context, "a", "r", "d"), 1.0);
+        assert_eq!(context.retract_source("存在しない出典"), None);
+
+        // Unlinking the tail keeps chains appendable, and the image —
+        // now carrying orphaned attribution records — must round-trip.
+        assert_eq!(context.retract_source("第三者"), Some(1));
+        assert_eq!(weight_between(&context, "a", "r", "b"), 2.0);
+        context.associate_from("a", "r", "b", 0.5, "旧版").unwrap();
+        assert_eq!(weight_between(&context, "a", "r", "b"), 2.5);
+        let restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
+        assert_eq!(
+            restored.query(Some("a"), None, None),
+            context.query(Some("a"), None, None)
+        );
     }
 
     #[test]

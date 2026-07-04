@@ -63,6 +63,9 @@
 5. 運用中にヒットしない言い回しが見つかったら `POST /contexts/{name}/aliases` で
    別綴りを登録します。エイリアスは入口専用で、結果は常に正準綴りで返ります。
    既存の2概念を後から繋ぐことはできません(それはマージであり、作り直しの領分)。
+6. **文書が更新されたら差分同期**: `POST /contexts/{name}/sources/retract` で
+   旧版の寄与(重みと attribution、原文)を撤回してから、新版を通常どおり
+   取り込みます。概念やエッジ自体は残り、重みだけが差し引かれます。
 
 ## API
 
@@ -86,6 +89,7 @@
 | GET/POST | `/contexts/{name}/sources` | 登録済み source 一覧 / `{passages:{source:原文}}` |
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
 | POST | `/contexts/{name}/sources/search` | `{query, limit?}` → `[{source, score, text}]` 原文全文検索 |
+| POST | `/contexts/{name}/sources/retract` | `{source}` → 出典の寄与を撤回(差分同期) |
 | POST | `/contexts/{name}/unreachable_from` | `{origins}` → 到達不能な連想 |
 
 ## エラーと制約

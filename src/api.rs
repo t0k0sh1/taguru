@@ -425,6 +425,37 @@ pub async fn list_sources(State(state): State<AppState>, Path(name): Path<String
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RetractSourceRequest {
+    pub source: String,
+}
+
+/// What one retraction accomplished: how many associations lost this
+/// source's contribution, and whether its passage went with it.
+#[derive(Serialize)]
+pub struct RetractOutcome {
+    pub associations_touched: usize,
+    pub passage_removed: bool,
+}
+
+pub async fn retract_source(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<RetractSourceRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match state.retract_source(&name, &request.source) {
+        Err(failure) => access_error(failure, &name, started_at),
+        Ok((associations_touched, passage_removed)) => ok(
+            RetractOutcome {
+                associations_touched,
+                passage_removed,
+            },
+            started_at,
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SearchPassagesRequest {
     pub query: String,
     /// Omitted means 5.

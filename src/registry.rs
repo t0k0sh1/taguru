@@ -353,6 +353,37 @@ impl AppState {
         Some(stored.into_keys().collect())
     }
 
+    /// Withdraws one source from a context — its graph contributions and
+    /// its registered passage — the per-document differential-sync move:
+    /// retract the old version of a changed document, then re-ingest the
+    /// new one, instead of rebuilding the whole context. Returns how
+    /// many associations were touched and whether a passage was removed.
+    pub fn retract_source(&self, name: &str, source: &str) -> Result<(usize, bool), AccessError> {
+        let touched =
+            self.write_context(name, |context| context.retract_source(source).unwrap_or(0))?;
+
+        let Some(entry) = self.lookup(name) else {
+            // Raced with a delete; there is nothing left to clean up.
+            return Ok((touched, false));
+        };
+        let _guard = entry.inner.write().unwrap();
+        let path = sources_path(&self.0.data_dir, &file_stem(name));
+        let mut stored = read_passages(&path);
+        let mut passage_removed = false;
+        if stored.remove(source).is_some() {
+            match serde_json::to_vec_pretty(&stored)
+                .map_err(io::Error::from)
+                .and_then(|bytes| write_atomic(&path, &bytes))
+            {
+                Ok(()) => passage_removed = true,
+                Err(error) => {
+                    eprintln!("passage for '{source}' not removed from disk: {error}");
+                }
+            }
+        }
+        Ok((touched, passage_removed))
+    }
+
     /// Full-text search over the registered passages — the second lane
     /// beside the graph, for knowledge that does not decompose into
     /// triples (procedures, conditions, discourse). Character-bigram
