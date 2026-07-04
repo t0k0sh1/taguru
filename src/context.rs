@@ -951,6 +951,78 @@ impl Context {
             .collect()
     }
 
+    /// How many distinct (subject, label, object) associations are stored.
+    pub fn association_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// How many distinct concepts are interned.
+    pub fn concept_count(&self) -> usize {
+        self.concepts.len()
+    }
+
+    /// How many distinct relation labels are interned.
+    pub fn label_count(&self) -> usize {
+        self.labels.len()
+    }
+
+    /// How many distinct sources have been named by `associate_from`.
+    pub fn source_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    /// The most connected concepts — name plus total degree, most
+    /// connected first, ties toward earlier interning. This is the
+    /// mechanical "what is this context about" signal: unlike a
+    /// hand-written summary it cannot go stale, so a routing directory
+    /// can show it next to the prose description.
+    pub fn top_concepts(&self, limit: usize) -> Vec<(&str, usize)> {
+        let mut ranked: Vec<(usize, ConceptId)> = self
+            .concepts
+            .iter()
+            .enumerate()
+            .map(|(id, record)| {
+                let degree = (record.outgoing_count + record.incoming_count) as usize;
+                (degree, id as u32)
+            })
+            .collect();
+        ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        ranked.truncate(limit);
+        ranked
+            .into_iter()
+            .map(|(degree, id)| (self.concept_name(id), degree))
+            .collect()
+    }
+
+    /// Rough resident-memory estimate: exact bytes for the arena and the
+    /// five record tables, plus estimates for the derived indexes (the
+    /// name → id maps own a second copy of every interned name, the
+    /// triple index costs its key and value, and each hash-map entry
+    /// carries bookkeeping overhead; the lowercase shadows mirror the
+    /// arena again). Intended for cache budgeting — deciding what stays
+    /// in memory — not accounting-grade measurement.
+    pub fn footprint(&self) -> usize {
+        let tables = self.arena.len()
+            + self.concepts.len() * size_of::<ConceptRecord>()
+            + self.labels.len() * size_of::<LabelRecord>()
+            + self.sources.len() * size_of::<SourceRecord>()
+            + self.edges.len() * size_of::<EdgeRecord>()
+            + self.attributions.len() * size_of::<AttributionRecord>();
+
+        const MAP_ENTRY_OVERHEAD: usize = 48;
+        let name_entries = self.concepts.len() + self.labels.len() + self.sources.len();
+        let triple_entry = size_of::<(ConceptId, LabelId, ConceptId)>() + size_of::<EdgeId>();
+        let derived = self.arena.len() // owned keys of the name → id maps
+            + name_entries * MAP_ENTRY_OVERHEAD
+            + self.edges.len() * (triple_entry + MAP_ENTRY_OVERHEAD)
+            + self.concept_lower.arena.len()
+            + self.concept_lower.spans.len() * size_of::<LowerSpan>()
+            + self.label_lower.arena.len()
+            + self.label_lower.spans.len() * size_of::<LowerSpan>();
+
+        tables + derived
+    }
+
     /// Lists every association that no walk from `origins` can ever reach
     /// — the post-ingest coverage audit. Unreachable knowledge fails
     /// silently: nothing errors, retrieval simply never returns it. Run
@@ -2609,6 +2681,34 @@ mod tests {
         assert!(!arena_fits(u32::MAX as usize - 5, 6));
         assert!(arena_fits(u32::MAX as usize, 0)); // full arena, nothing new needed
         assert!(!arena_fits(usize::MAX, 1)); // must refuse, not overflow
+    }
+
+    #[test]
+    fn counts_and_top_concepts_expose_directory_stats() {
+        let mut context = Context::default();
+        associate_examples(&mut context);
+        context
+            .associate_from("私", "食べられる", "りんご", -0.2, "文書1")
+            .unwrap();
+
+        assert_eq!(context.association_count(), 4);
+        assert_eq!(context.concept_count(), 4);
+        assert_eq!(context.label_count(), 2);
+        assert_eq!(context.source_count(), 1);
+
+        // 私 carries 4 edges, りんご 2, the rest 1 each.
+        let top = context.top_concepts(2);
+        assert_eq!(top, vec![("私", 4), ("りんご", 2)]);
+        // A limit beyond the table is just everything.
+        assert_eq!(context.top_concepts(100).len(), 4);
+    }
+
+    #[test]
+    fn footprint_grows_with_content() {
+        let mut context = Context::default();
+        let empty = context.footprint();
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        assert!(context.footprint() > empty);
     }
 
     #[test]
