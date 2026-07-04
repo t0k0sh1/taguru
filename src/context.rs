@@ -406,6 +406,15 @@ pub struct Context {
     /// of the persistent image — whoever loads an image re-applies it
     /// (the server keeps it in the context's sidecar).
     dice_floor: Option<f64>,
+    /// An opaque durability watermark, persisted in the image header
+    /// and meaningful only to the caller that set it: the sequence
+    /// number, in the caller's own write-ahead log, of the last
+    /// operation this image already reflects. It lives IN the image —
+    /// not in a sidecar — precisely so image bytes and watermark are
+    /// indivisible: written, fsynced, and renamed as one file, a crash
+    /// can never observe one updated without the other. Zero means
+    /// "nothing logged is reflected" (also what v1/v2 images load as).
+    applied_seq: u64,
 }
 
 impl Context {
@@ -1176,6 +1185,19 @@ impl Context {
             .collect();
         sort_resolutions(&mut resolutions);
         resolutions
+    }
+
+    /// The durability watermark stored in this context's image header
+    /// — see the field's documentation; the `Context` never interprets
+    /// it.
+    pub fn applied_seq(&self) -> u64 {
+        self.applied_seq
+    }
+
+    /// Sets the durability watermark the next [`Context::to_bytes`]
+    /// will persist. The caller (the server's WAL) owns the meaning.
+    pub fn set_applied_seq(&mut self, seq: u64) {
+        self.applied_seq = seq;
     }
 
     /// The fuzzy-entry floor this context applies when a call does not
@@ -2165,13 +2187,14 @@ impl Ord for Candidate {
 const IMAGE_MAGIC: [u8; 8] = *b"TAGURUC\0";
 /// Format version; bump whenever any record layout or section changes.
 /// Version history: 1 = the original six sections; 2 adds the concept
-/// and label alias tables between the sources and the arena. Version 1
-/// images still load (their alias tables are empty); writing always
-/// produces the current version.
-const IMAGE_VERSION: u32 = 2;
-/// Magic + version + 4 bytes of padding, so the first section starts
-/// 8-byte aligned.
-const IMAGE_HEADER_SIZE: usize = 16;
+/// and label alias tables between the sources and the arena; 3 adds
+/// the u64 durability watermark to the header. Older images still
+/// load (empty alias tables, watermark 0); writing always produces
+/// the current version.
+const IMAGE_VERSION: u32 = 3;
+/// Magic + version + 4 bytes of padding (so what follows is 8-byte
+/// aligned) + the u64 durability watermark.
+const IMAGE_HEADER_SIZE: usize = 24;
 /// Seven record tables plus the arena, each section prefixed by a u64
 /// length.
 const IMAGE_SECTIONS: usize = 8;
@@ -2216,6 +2239,7 @@ impl Context {
         image.extend_from_slice(&IMAGE_MAGIC);
         image.extend_from_slice(&IMAGE_VERSION.to_le_bytes());
         image.extend_from_slice(&[0; 4]);
+        image.extend_from_slice(&self.applied_seq.to_le_bytes());
         store_table(&self.edges, &mut image);
         store_table(&self.attributions, &mut image);
         store_table(&self.concepts, &mut image);
@@ -2248,10 +2272,18 @@ impl Context {
             return Err(CorruptImage("image does not start with the context magic"));
         }
         let version = reader.read_u32()?;
-        if version != 1 && version != IMAGE_VERSION {
+        // A RANGE check: every version from 1 through current loads.
+        // (The old two-value check would have started rejecting v2
+        // images the moment a third version existed.)
+        if !(1..=IMAGE_VERSION).contains(&version) {
             return Err(CorruptImage("image format version is not supported"));
         }
         reader.take(4)?; // header padding
+        // Version 3 adds the durability watermark; older images carry
+        // none, and 0 is exactly right for them — no WAL can predate
+        // the feature, so "replay everything above 0" is a no-op or
+        // correct.
+        let applied_seq = if version >= 3 { reader.read_u64()? } else { 0 };
 
         let edges = load_table::<EdgeRecord>(&mut reader)?;
         let attributions = load_table::<AttributionRecord>(&mut reader)?;
@@ -2290,6 +2322,7 @@ impl Context {
             concept_index: EntryIndex::default(),
             label_index: EntryIndex::default(),
             dice_floor: None,
+            applied_seq,
         };
         context.rebuild_indexes()?;
         Ok(context)
@@ -3476,18 +3509,21 @@ mod tests {
             context.query(Some("Aomine"), Some("設立年"), None)
         );
 
-        // A version-1 image is a version-2 image minus the two alias
-        // sections. For this aliasless context those are exactly the 16
-        // zero bytes before the arena section: header 16, edges 8+40,
-        // attributions 8, concepts 8+64, labels 8+20, sources 8 → the
-        // alias counts sit at 180..196. Set the version back to 1 and
-        // cut them; the image must load with no aliases.
+        // A version-1 image is the current image minus the watermark
+        // (8 header bytes) and the two alias sections. For this
+        // aliasless context: header 24 (magic 8, version 4, padding 4,
+        // watermark 8), edges 8+40, attributions 8, concepts 8+64,
+        // labels 8+20, sources 8 → the alias counts sit at 188..204.
+        // Keep the 16-byte v1 header, cut the watermark and the alias
+        // counts, set the version back to 1; the image must load with
+        // no aliases.
         let mut aliasless = Context::default();
         aliasless.associate("私", "好き", "りんご", 1.0).unwrap();
-        let v2 = aliasless.to_bytes();
+        let v3 = aliasless.to_bytes();
         let mut v1 = Vec::new();
-        v1.extend_from_slice(&v2[..180]);
-        v1.extend_from_slice(&v2[196..]);
+        v1.extend_from_slice(&v3[..16]);
+        v1.extend_from_slice(&v3[24..188]);
+        v1.extend_from_slice(&v3[204..]);
         v1[8..12].copy_from_slice(&1u32.to_le_bytes());
         let loaded = Context::from_bytes(&v1).expect("v1 image must still load");
         assert_eq!(loaded.recall("私").len(), 1);
@@ -3495,14 +3531,47 @@ mod tests {
 
         // An alias record pointing at a nonexistent concept is caught.
         // Same section math, plus one 12-byte alias record whose target
-        // field is its last 4 bytes: 180 + 8 → record at 188, target at
-        // 196..200.
+        // field is its last 4 bytes: 188 + 8 → record at 196, target at
+        // 204..208.
         let mut with_alias = Context::default();
         with_alias.associate("私", "好き", "りんご", 1.0).unwrap();
         with_alias.add_concept_alias("わたし", "私").unwrap();
         let mut corrupt = with_alias.to_bytes();
-        corrupt[196..200].copy_from_slice(&u32::MAX.to_le_bytes());
+        corrupt[204..208].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(Context::from_bytes(&corrupt).is_err());
+    }
+
+    #[test]
+    fn applied_seq_round_trips_through_the_image() {
+        let mut context = Context::default();
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        assert_eq!(context.applied_seq(), 0, "fresh contexts start at 0");
+        context.set_applied_seq(42);
+
+        let restored = Context::from_bytes(&context.to_bytes()).unwrap();
+        assert_eq!(restored.applied_seq(), 42);
+        assert_eq!(restored.recall("私").len(), 1);
+    }
+
+    #[test]
+    fn v2_images_load_with_a_zero_watermark() {
+        // A v2 image is the current image minus the 8 watermark bytes,
+        // with the version field set back to 2 — this pins BOTH the
+        // backward-compat read and the version RANGE check (a two-value
+        // check like `!=1 && !=current` would reject exactly this).
+        let mut context = Context::default();
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        context.add_concept_alias("わたし", "私").unwrap();
+        context.set_applied_seq(7); // must NOT survive into the v2 bytes
+        let v3 = context.to_bytes();
+        let mut v2 = Vec::new();
+        v2.extend_from_slice(&v3[..16]);
+        v2.extend_from_slice(&v3[24..]);
+        v2[8..12].copy_from_slice(&2u32.to_le_bytes());
+
+        let loaded = Context::from_bytes(&v2).expect("v2 image must load");
+        assert_eq!(loaded.applied_seq(), 0);
+        assert_eq!(loaded.concept_aliases(), vec![("わたし", "私")]);
     }
 
     #[test]
