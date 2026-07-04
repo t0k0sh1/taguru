@@ -1,6 +1,8 @@
 //! Optional semantic entry tier: embeddings over concept and label
-//! NAMES (never over knowledge — retrieval stays structural; only the
-//! entry needs meaning). Configured via `ARAG_EMBED_URL` /
+//! GLOSSES — each name plus its heaviest graph facts, because a lone
+//! word carries too little signal for sentence-trained embedding
+//! models, and the graph already owns the context. Retrieval itself
+//! stays structural; only the entry needs meaning. Configured via `ARAG_EMBED_URL` /
 //! `ARAG_EMBED_MODEL` / `ARAG_EMBED_API_KEY` against any
 //! OpenAI-compatible `/embeddings` endpoint; absent config disables the
 //! tier and resolve stays purely lexical.
@@ -95,6 +97,18 @@ impl EmbeddingProvider for HttpEmbeddings {
     }
 }
 
+/// FNV-1a: a tiny content hash for gloss-change detection. Stability
+/// across builds matters here (std's DefaultHasher promises none) — a
+/// changed hash function would silently re-embed every name.
+pub fn fnv1a(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// Scales a vector to unit length, so similarity is a plain dot product.
 pub fn normalize(vector: &mut [f32]) {
     let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
@@ -116,11 +130,14 @@ pub fn similarity(a: &[f32], b: &[f32]) -> f32 {
 #[derive(Debug, Default)]
 pub struct VectorStore {
     pub model: String,
-    pub concepts: HashMap<String, Vec<f32>>,
-    pub labels: HashMap<String, Vec<f32>>,
+    /// name → (gloss hash, unit vector). The hash is of the gloss the
+    /// vector was computed from, so a refresh re-embeds exactly the
+    /// names whose graph context changed.
+    pub concepts: HashMap<String, (u64, Vec<f32>)>,
+    pub labels: HashMap<String, (u64, Vec<f32>)>,
 }
 
-const VECTOR_MAGIC: &[u8; 8] = b"ARAGVEC1";
+const VECTOR_MAGIC: &[u8; 8] = b"ARAGVEC2";
 
 impl VectorStore {
     /// Reads a sidecar, returning an empty store on any problem — a
@@ -173,14 +190,15 @@ fn write_string(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(text.as_bytes());
 }
 
-fn write_table(out: &mut Vec<u8>, table: &HashMap<String, Vec<f32>>) {
+fn write_table(out: &mut Vec<u8>, table: &HashMap<String, (u64, Vec<f32>)>) {
     out.extend_from_slice(&(table.len() as u32).to_le_bytes());
     // Sorted for byte-stable files under identical content.
     let mut names: Vec<&String> = table.keys().collect();
     names.sort();
     for name in names {
-        let vector = &table[name];
+        let (hash, vector) = &table[name];
         write_string(out, name);
+        out.extend_from_slice(&hash.to_le_bytes());
         out.extend_from_slice(&(vector.len() as u32).to_le_bytes());
         for value in vector {
             out.extend_from_slice(&value.to_le_bytes());
@@ -195,11 +213,14 @@ fn read_string(bytes: &[u8], pos: &mut usize) -> Option<String> {
     String::from_utf8(slice.to_vec()).ok()
 }
 
-fn read_table(bytes: &[u8], pos: &mut usize) -> Option<HashMap<String, Vec<f32>>> {
+fn read_table(bytes: &[u8], pos: &mut usize) -> Option<HashMap<String, (u64, Vec<f32>)>> {
     let count = read_u32(bytes, pos)? as usize;
     let mut table = HashMap::with_capacity(count.min(1 << 20));
     for _ in 0..count {
         let name = read_string(bytes, pos)?;
+        let hash_bytes = bytes.get(*pos..*pos + 8)?;
+        *pos += 8;
+        let hash = u64::from_le_bytes(hash_bytes.try_into().ok()?);
         let dim = read_u32(bytes, pos)? as usize;
         let mut vector = Vec::with_capacity(dim.min(1 << 16));
         for _ in 0..dim {
@@ -207,7 +228,7 @@ fn read_table(bytes: &[u8], pos: &mut usize) -> Option<HashMap<String, Vec<f32>>
             *pos += 4;
             vector.push(f32::from_le_bytes(slice.try_into().ok()?));
         }
-        table.insert(name, vector);
+        table.insert(name, (hash, vector));
     }
     Some(table)
 }
@@ -228,14 +249,14 @@ mod tests {
             model: "test-model".into(),
             ..Default::default()
         };
-        store.concepts.insert("りんご".into(), vec![1.0, 0.0]);
-        store.labels.insert("好き".into(), vec![0.0, 1.0]);
+        store.concepts.insert("りんご".into(), (7, vec![1.0, 0.0]));
+        store.labels.insert("好き".into(), (9, vec![0.0, 1.0]));
 
         let bytes = store.to_bytes();
         let loaded = VectorStore::from_bytes(&bytes).unwrap();
         assert_eq!(loaded.model, "test-model");
-        assert_eq!(loaded.concepts["りんご"], vec![1.0, 0.0]);
-        assert_eq!(loaded.labels["好き"], vec![0.0, 1.0]);
+        assert_eq!(loaded.concepts["りんご"], (7, vec![1.0, 0.0]));
+        assert_eq!(loaded.labels["好き"], (9, vec![0.0, 1.0]));
 
         assert!(VectorStore::from_bytes(b"garbage").is_none());
         assert!(VectorStore::from_bytes(&bytes[..bytes.len() - 1]).is_none());

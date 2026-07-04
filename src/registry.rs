@@ -38,7 +38,7 @@ use std::sync::{Arc, RwLock};
 use associative_rag::context::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::embedding::{EmbeddingProvider, VectorStore, similarity};
+use crate::embedding::{EmbeddingProvider, VectorStore, fnv1a, similarity};
 
 /// Server-side metadata for one context: the prose half of the routing
 /// directory plus the cache policy flag.
@@ -460,33 +460,56 @@ impl AppState {
         Some(scored)
     }
 
-    /// Embeds every canonical concept and label name that has no vector
-    /// yet (all of them after a model change) and persists the vector
-    /// sidecar. Explicit rather than automatic — an agent or operator
-    /// calls this after ingesting, so embedding spend stays intentional.
-    /// Returns (newly embedded, total vectors), or `None` for an unknown
-    /// context.
+    /// Embeds the GLOSS of every canonical concept and label — the name
+    /// plus its heaviest facts — and persists the vector sidecar. Bare
+    /// names carry too little signal for sentence-trained embedding
+    /// models; the graph supplies the context itself. Each vector
+    /// remembers the hash of the gloss it was computed from, so a
+    /// refresh re-embeds exactly the names that are new or whose graph
+    /// context changed. Explicit rather than automatic — an agent or
+    /// operator calls this after ingesting, so embedding spend stays
+    /// intentional. Returns (newly embedded, total vectors), or `None`
+    /// for an unknown context.
     pub fn refresh_embeddings(&self, name: &str) -> Option<Result<(usize, usize), String>> {
+        /// How many facts a concept gloss carries.
+        const GLOSS_FACTS: usize = 4;
+        /// How many example triples a label gloss carries.
+        const GLOSS_EXAMPLES: usize = 3;
+
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Err(
                 "no embedding provider is configured (set ARAG_EMBED_URL and ARAG_EMBED_MODEL)"
                     .to_string(),
             ));
         };
-        let names = match self.read_context(name, |context| {
-            let concepts: Vec<String> = context
+        let glosses = match self.read_context(name, |context| {
+            let concepts: Vec<(String, String)> = context
                 .concept_names()
                 .into_iter()
-                .map(String::from)
+                .map(|name| {
+                    let gloss = context
+                        .concept_gloss(name, GLOSS_FACTS)
+                        .unwrap_or_else(|| name.to_string());
+                    (name.to_string(), gloss)
+                })
                 .collect();
-            let labels: Vec<String> = context.labels().into_iter().map(String::from).collect();
+            let labels: Vec<(String, String)> = context
+                .labels()
+                .into_iter()
+                .map(|name| {
+                    let gloss = context
+                        .label_gloss(name, GLOSS_EXAMPLES)
+                        .unwrap_or_else(|| name.to_string());
+                    (name.to_string(), gloss)
+                })
+                .collect();
             (concepts, labels)
         }) {
-            Ok(names) => names,
+            Ok(glosses) => glosses,
             Err(AccessError::NotFound) => return None,
             Err(AccessError::Load(message)) => return Some(Err(message)),
         };
-        let (concepts, labels) = names;
+        let (concepts, labels) = glosses;
         let entry = self.lookup(name)?;
         let path = vectors_path(&self.0.data_dir, &file_stem(name));
 
@@ -495,25 +518,36 @@ impl AppState {
         // the same names; the merge below stays correct.
         let existing = VectorStore::load(&path);
         let fresh_model = existing.model != embedder.model();
-        let missing = |table: &HashMap<String, Vec<f32>>, names: &[String]| -> Vec<String> {
-            names
+        let stale = |table: &HashMap<String, (u64, Vec<f32>)>,
+                     entries: &[(String, String)]|
+         -> Vec<(String, String, u64)> {
+            entries
                 .iter()
-                .filter(|name| fresh_model || !table.contains_key(*name))
-                .cloned()
+                .filter_map(|(name, gloss)| {
+                    let hash = fnv1a(gloss);
+                    let outdated =
+                        fresh_model || table.get(name).is_none_or(|&(stored, _)| stored != hash);
+                    outdated.then(|| (name.clone(), gloss.clone(), hash))
+                })
                 .collect()
         };
-        let missing_concepts = missing(&existing.concepts, &concepts);
-        let missing_labels = missing(&existing.labels, &labels);
+        let stale_concepts = stale(&existing.concepts, &concepts);
+        let stale_labels = stale(&existing.labels, &labels);
         let mut embedded_concepts = Vec::new();
         let mut embedded_labels = Vec::new();
-        for (missing, embedded) in [
-            (&missing_concepts, &mut embedded_concepts),
-            (&missing_labels, &mut embedded_labels),
+        for (stale, embedded) in [
+            (&stale_concepts, &mut embedded_concepts),
+            (&stale_labels, &mut embedded_labels),
         ] {
-            for chunk in missing.chunks(128) {
-                let texts: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            for chunk in stale.chunks(128) {
+                let texts: Vec<&str> = chunk.iter().map(|(_, gloss, _)| gloss.as_str()).collect();
                 match embedder.embed(&texts) {
-                    Ok(vectors) => embedded.extend(chunk.iter().cloned().zip(vectors)),
+                    Ok(vectors) => embedded.extend(
+                        chunk
+                            .iter()
+                            .zip(vectors)
+                            .map(|((name, _, hash), vector)| (name.clone(), (*hash, vector))),
+                    ),
                     Err(error) => return Some(Err(error)),
                 }
             }
@@ -553,16 +587,15 @@ impl AppState {
         cue: &str,
         labels: bool,
     ) -> Option<Result<Vec<(String, f32)>, String>> {
-        // Calibrated against text-embedding-3-large on short Japanese
-        // strings: synonym/translation pairs land at ~0.45–0.66
-        // (アップル×りんご 0.66, 仕込み水×雲居山の伏流水 0.445) while the
-        // unrelated noise band reaches ~0.32 (りんご×自動車 0.315), so
-        // 0.4 admits real matches with margin against the noise. Known
-        // honest limit: rare-jargon paraphrases (醸造責任者×杜氏 0.28)
-        // sit inside the noise band for these models and stay out —
-        // that gap belongs to the LLM's own rewording loop and to alias
-        // registration, not to a lower floor.
-        const SEMANTIC_FLOOR: f32 = 0.4;
+        // Calibrated against text-embedding-3-large with GLOSSED names
+        // (name + graph context): true matches land at ~0.44–0.58 —
+        // jargon paraphrases included (醸造責任者×杜氏 0.53, 質問形
+        // 「酒造りの責任者は誰」0.58, アップル×りんご 0.45) — while the
+        // noise band drops to ~0.17 (自動車×杜氏グロス 0.09,
+        // 自動車×りんごグロス 0.17), far better separated than bare
+        // names ever were. 0.35 admits the weakest true matches with
+        // ~2× margin over noise.
+        const SEMANTIC_FLOOR: f32 = 0.35;
         const SEMANTIC_LIMIT: usize = 5;
 
         let Some(embedder) = self.0.embedder.clone() else {
@@ -587,7 +620,7 @@ impl AppState {
         };
         let mut scored: Vec<(String, f32)> = table
             .iter()
-            .map(|(name, vector)| (name.clone(), similarity(&cue_vector, vector)))
+            .map(|(name, (_, vector))| (name.clone(), similarity(&cue_vector, vector)))
             .filter(|&(_, score)| score >= SEMANTIC_FLOOR)
             .collect();
         scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -1238,9 +1271,10 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// Deterministic provider: mapped names get fixed unit vectors,
-    /// everything else lands on an axis orthogonal to all of them.
-    struct MockEmbeddings(HashMap<String, Vec<f32>>);
+    /// Deterministic provider: a text starting with a mapped key gets
+    /// that key's unit vector (glosses start with their name), anything
+    /// else lands on an axis orthogonal to all of them.
+    struct MockEmbeddings(Vec<(String, Vec<f32>)>);
 
     impl EmbeddingProvider for MockEmbeddings {
         fn model(&self) -> &str {
@@ -1252,8 +1286,9 @@ mod tests {
                 .iter()
                 .map(|text| {
                     self.0
-                        .get(*text)
-                        .cloned()
+                        .iter()
+                        .find(|(key, _)| text.starts_with(key.as_str()))
+                        .map(|(_, vector)| vector.clone())
                         .unwrap_or_else(|| vec![0.0, 0.0, 1.0])
                 })
                 .collect())
@@ -1263,10 +1298,11 @@ mod tests {
     #[test]
     fn semantic_fallback_lands_paraphrases_after_refresh() {
         let dir = scratch_dir("embed");
-        let mut vectors = HashMap::new();
-        vectors.insert("りんご".to_string(), vec![1.0, 0.0, 0.0]);
-        vectors.insert("アップル".to_string(), vec![0.96, 0.28, 0.0]);
-        let embedder = Some(Arc::new(MockEmbeddings(vectors)) as Arc<dyn EmbeddingProvider>);
+        let embedder = MockEmbeddings(vec![
+            ("りんご".to_string(), vec![1.0, 0.0, 0.0]),
+            ("アップル".to_string(), vec![0.96, 0.28, 0.0]),
+        ]);
+        let embedder = Some(Arc::new(embedder) as Arc<dyn EmbeddingProvider>);
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
         state
             .create("fruit", ContextMeta::default())
@@ -1294,8 +1330,8 @@ mod tests {
                 .is_empty()
         );
 
-        // Refresh embeds every canonical name once; a second run is a
-        // no-op.
+        // Refresh embeds every canonical name's gloss once; a second run
+        // is a no-op.
         let (embedded, total) = state.refresh_embeddings("fruit").unwrap().unwrap();
         assert_eq!(embedded, 3); // りんご, 果物 + label 分類
         assert_eq!(total, 3);
@@ -1310,6 +1346,20 @@ mod tests {
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].0, "りんご");
         assert!(hits[0].1 > 0.9);
+
+        // A new fact changes りんご's gloss: the next refresh re-embeds
+        // exactly what changed — りんご plus the new 青森 and 産地 —
+        // while 果物 and 分類, whose glosses are untouched, are not
+        // re-sent to the provider.
+        state
+            .write_context("fruit", |context| {
+                context.associate("りんご", "産地", "青森", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        let (embedded, total) = state.refresh_embeddings("fruit").unwrap().unwrap();
+        assert_eq!(embedded, 3);
+        assert_eq!(total, 5);
 
         assert!(state.semantic_resolve("nope", "x", false).is_none());
 

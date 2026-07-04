@@ -1213,6 +1213,66 @@ impl Context {
             .collect()
     }
 
+    /// A compact textual gloss of one concept: its name followed by its
+    /// heaviest facts phrased as minimal sentences, most established
+    /// first (|weight| descending, ties in insertion order), negatives
+    /// phrased as denials. This is what an external embedding tier
+    /// should embed instead of the bare name — a lone word carries too
+    /// little signal for sentence-trained embedding models (measured on
+    /// text-embedding-3-large: 醸造責任者×杜氏 lands at cosine 0.28
+    /// bare but 0.53 glossed) — and the graph already owns the context.
+    /// Returns `None` for an unknown concept.
+    pub fn concept_gloss(&self, concept: &str, facts: usize) -> Option<String> {
+        let &id = self.concept_ids.get(concept)?;
+        let edges = self.heaviest(self.outgoing(id).chain(self.incoming(id)), facts);
+        Some(self.gloss_text(self.concept_name(id), &edges))
+    }
+
+    /// [`Context::concept_gloss`] for a relation label: the label's name
+    /// followed by up to `examples` of the heaviest triples that use it,
+    /// so the embedding sees what the relation relates.
+    pub fn label_gloss(&self, label: &str, examples: usize) -> Option<String> {
+        let &id = self.label_ids.get(label)?;
+        let edges = self.heaviest(self.labeled(id), examples);
+        Some(self.gloss_text(self.label_name(id), &edges))
+    }
+
+    /// The `keep` heaviest edges of a chain walk, |weight| descending,
+    /// ties toward insertion order.
+    fn heaviest(&self, edges: impl Iterator<Item = EdgeId>, keep: usize) -> Vec<EdgeId> {
+        let mut edges: Vec<EdgeId> = edges.collect();
+        edges.sort_by(|&a, &b| {
+            self.edges[b as usize]
+                .weight
+                .abs()
+                .total_cmp(&self.edges[a as usize].weight.abs())
+                .then_with(|| a.cmp(&b))
+        });
+        edges.truncate(keep);
+        edges
+    }
+
+    /// Renders a name plus fact sentences: `名前。AのBはC。…`, negatives
+    /// as `…ではない。` — mechanical rather than fluent, which is all an
+    /// embedding needs.
+    fn gloss_text(&self, name: &str, edges: &[EdgeId]) -> String {
+        let mut gloss = String::from(name);
+        gloss.push('。');
+        for &edge_id in edges {
+            let edge = &self.edges[edge_id as usize];
+            gloss.push_str(self.concept_name(edge.subject));
+            gloss.push('の');
+            gloss.push_str(self.label_name(edge.label));
+            gloss.push('は');
+            gloss.push_str(self.concept_name(edge.object));
+            if edge.weight < 0.0 {
+                gloss.push_str("ではない");
+            }
+            gloss.push('。');
+        }
+        gloss
+    }
+
     /// How many distinct (subject, label, object) associations are stored.
     pub fn association_count(&self) -> usize {
         self.edges.len()
@@ -3657,6 +3717,38 @@ mod tests {
         assert_eq!(top, vec![("私", 4), ("りんご", 2)]);
         // A limit beyond the table is just everything.
         assert_eq!(context.top_concepts(100).len(), 4);
+    }
+
+    #[test]
+    fn glosses_phrase_the_heaviest_context_around_a_name() {
+        let mut context = Context::default();
+        context.associate("青嶺酒造", "杜氏", "高瀬", 2.0).unwrap();
+        context.associate("高瀬", "出身", "南部杜氏", 1.0).unwrap();
+        context
+            .associate("高瀬", "監督する", "麹造り", 1.0)
+            .unwrap();
+        context
+            .associate("青嶺酒造", "行う", "大量生産", -1.0)
+            .unwrap();
+
+        // Heaviest facts first, capped at `facts`; ties in insertion
+        // order (出身 before 監督する).
+        assert_eq!(
+            context.concept_gloss("高瀬", 2).unwrap(),
+            "高瀬。青嶺酒造の杜氏は高瀬。高瀬の出身は南部杜氏。"
+        );
+        // A label gloss shows what the relation relates.
+        assert_eq!(
+            context.label_gloss("杜氏", 3).unwrap(),
+            "杜氏。青嶺酒造の杜氏は高瀬。"
+        );
+        // Negative facts read as denials.
+        assert_eq!(
+            context.concept_gloss("大量生産", 1).unwrap(),
+            "大量生産。青嶺酒造の行うは大量生産ではない。"
+        );
+        assert!(context.concept_gloss("存在しない概念", 1).is_none());
+        assert!(context.label_gloss("存在しない関係", 1).is_none());
     }
 
     #[test]

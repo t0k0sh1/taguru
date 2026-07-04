@@ -27,7 +27,9 @@
    言い換えて再試行するか、`dice_floor` を下げて(既定 0.3 → 例えば 0.2)ファジー
    一致の許容を一時的に広げます。埋め込みが設定済みのサーバーでは、字面の全層が
    外れたときだけ意味検索が自動でフォールバックします(結果の `tier` が
-   `"semantic"`、score はコサイン類似度 — 字面スコアとは別の尺度)。それでも空なら
+   `"semantic"`、score はコサイン類似度 — 字面スコアとは別の尺度)。名前は
+   グラフ文脈付きのグロスとして埋め込まれているため、専門語の言い換え
+   (醸造責任者→杜氏)や質問形の cue も届きます。それでも空なら
    文脈選択が誤りの可能性があります — 次候補のコンテキストへ。
 3. **見出しから絞る**: ハブ概念は `describe` で「どのラベルが何件あるか」だけを先に
    確認し、`query` に label 配列(`"label": ["住所","職歴"]`)を渡して必要な面だけを
@@ -83,7 +85,7 @@
 | POST | `/contexts/{name}/activate` | `{origins, decay?=0.5, limit?=20}` → `[{strength, path, association}]` |
 | POST | `/contexts/{name}/resolve` | `{cue, dice_floor?}` → `[{name, score, tier}]` 概念名候補 |
 | POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?}` → `[{name, score, tier}]` 関係名候補 |
-| POST | `/contexts/{name}/embeddings/refresh` | 概念・ラベル名の埋め込みを差分更新(取り込み後に実行) |
+| POST | `/contexts/{name}/embeddings/refresh` | 概念・ラベルのグロス埋め込みを差分更新(取り込み後に実行。文脈が変わった名前は自動再埋め込み) |
 | GET | `/contexts/{name}/labels` | 関係語彙(正準のみ) |
 | GET/POST | `/contexts/{name}/aliases` | エクスポート / `{concepts:{別綴:正準}, labels:{...}}` |
 | GET/POST | `/contexts/{name}/sources` | 登録済み source 一覧 / `{passages:{source:原文}}` |
