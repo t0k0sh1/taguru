@@ -59,6 +59,9 @@
 2. `POST /contexts/{name}/associations` にバッチで書き込みます(1文書=1リクエスト、
    各要素に `source` を付けてください)。
 3. 原文を `POST /contexts/{name}/sources` に登録します(source id → パッセージ)。
+   粒度は段落〜規則単位に保ってください — セクション丸ごとの長大なパッセージは
+   全文検索(BM25)の文書長正規化で不利になり、細部の質問が別の短い
+   パッセージに負けます。
 4. `POST /contexts/{name}/unreachable_from` を文書の主要エンティティで実行し、
    到達不能の事実(取りこぼす島)がないか監査します。非空なら所属エッジの不足です。
    埋め込みが設定済みなら、最後に `POST /contexts/{name}/embeddings/refresh` で

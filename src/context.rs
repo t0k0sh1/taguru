@@ -1213,6 +1213,40 @@ impl Context {
             .collect()
     }
 
+    /// Whether any single association directly connects the two
+    /// concepts, in either direction under any label. Unknown names are
+    /// simply not adjacent. Audits use this to tell RELATED apart from
+    /// DUPLICATE: concepts joined by an edge legitimately resemble each
+    /// other (their glosses quote the same fact) and are not forks.
+    pub fn adjacent(&self, a: &str, b: &str) -> bool {
+        let (Some(&id_a), Some(&id_b)) = (self.concept_ids.get(a), self.concept_ids.get(b)) else {
+            return false;
+        };
+        self.outgoing(id_a)
+            .chain(self.incoming(id_a))
+            .any(|edge_id| {
+                let edge = &self.edges[edge_id as usize];
+                edge.subject == id_b || edge.object == id_b
+            })
+    }
+
+    /// Whether the two relation labels are ever used on one common
+    /// subject. Genuinely distinct labels tend to co-occur on a subject
+    /// (単数形にする条件 and 複数形にする条件 on 配列名); accidental
+    /// forks tend NOT to — they were minted in parallel and used apart —
+    /// so co-occurrence marks a pair as related rather than duplicate.
+    pub fn labels_share_subject(&self, a: &str, b: &str) -> bool {
+        let (Some(&id_a), Some(&id_b)) = (self.label_ids.get(a), self.label_ids.get(b)) else {
+            return false;
+        };
+        let subjects: HashSet<ConceptId> = self
+            .labeled(id_a)
+            .map(|edge_id| self.edges[edge_id as usize].subject)
+            .collect();
+        self.labeled(id_b)
+            .any(|edge_id| subjects.contains(&self.edges[edge_id as usize].subject))
+    }
+
     /// Concept pairs whose spellings look like accidental forks of one
     /// referent — the lexical half of a vocabulary audit. Spelling drift
     /// fails silently in this system (two spellings = two referents =

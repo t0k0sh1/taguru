@@ -470,8 +470,27 @@ impl AppState {
             pairs.truncate(PAIR_CAP);
             pairs
         };
-        let concepts = sweep(&store.concepts, &mut skipped);
-        let labels = sweep(&store.labels, &mut skipped);
+        let mut concepts = sweep(&store.concepts, &mut skipped);
+        let mut labels = sweep(&store.labels, &mut skipped);
+        // Related is not duplicate: concepts joined by an edge and labels
+        // co-used on one subject resemble each other BECAUSE they are
+        // related (glosses quote shared facts), and would bury the real
+        // fork candidates in noise. Filtering needs the graph, so the
+        // context loads if cold — acceptable for an explicit audit.
+        match self.read_context(name, |context| {
+            concepts.retain(|(a, b, _)| !context.adjacent(a, b));
+            labels.retain(|(a, b, _)| !context.labels_share_subject(a, b));
+        }) {
+            Ok(()) => {}
+            Err(AccessError::NotFound) => return None,
+            Err(AccessError::Load(message)) => {
+                // Vectors were readable but the graph was not: serve the
+                // unfiltered pairs and say why they are noisier.
+                skipped = Some(format!(
+                    "関連ペアの除外はスキップ (グラフ未ロード: {message})"
+                ));
+            }
+        }
         Some((concepts, labels, skipped))
     }
 
@@ -1670,8 +1689,18 @@ mod tests {
         assert!(note.is_some());
 
         state.refresh_embeddings("sake").unwrap().unwrap();
-        let (_, labels, note) = state.semantic_twins("sake", 0.6).unwrap();
+        let (concepts, labels, note) = state.semantic_twins("sake", 0.6).unwrap();
         assert!(note.is_none());
+        // Directly connected concepts (青嶺酒造 —創業年→ 1907年) are
+        // related, not duplicates, and must be filtered out however
+        // similar their vectors are.
+        assert!(
+            concepts.iter().all(
+                |(a, b, _)| !(a.contains("青嶺酒造") && b.contains("1907年"))
+                    && !(a.contains("1907年") && b.contains("青嶺酒造"))
+            ),
+            "{concepts:?}"
+        );
         assert_eq!(labels.len(), 1, "{labels:?}");
         assert_eq!(
             (labels[0].0.as_str(), labels[0].1.as_str()),
