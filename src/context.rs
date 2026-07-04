@@ -66,6 +66,40 @@ impl fmt::Display for ContextFull {
 
 impl Error for ContextFull {}
 
+/// Error returned by [`Context::add_concept_alias`] and
+/// [`Context::add_label_alias`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasError {
+    /// The canonical spelling is not interned in this namespace.
+    UnknownCanonical,
+    /// The alias spelling already resolves to a different record. One
+    /// spelling is one referent within a namespace — aliases included —
+    /// so an alias can never shadow an existing name or alias. In
+    /// particular, two spellings that BOTH already exist as concepts
+    /// cannot be aliased together: that is a merge, which does not
+    /// exist; rebuild the context instead.
+    Conflict,
+    /// The alias table or the string arena is out of space; the alias
+    /// was not added and the context is unchanged.
+    Full(ContextFull),
+}
+
+impl fmt::Display for AliasError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AliasError::UnknownCanonical => {
+                write!(f, "the canonical spelling is not interned")
+            }
+            AliasError::Conflict => {
+                write!(f, "the alias already resolves to a different record")
+            }
+            AliasError::Full(full) => full.fmt(f),
+        }
+    }
+}
+
+impl Error for AliasError {}
+
 /// One source's accumulated contribution to an association's weight.
 ///
 /// `source` is an opaque identifier chosen by the caller — a document id, a
@@ -207,6 +241,21 @@ struct SourceRecord {
     name_len: u32,
 }
 
+/// One alternative spelling in fixed-width form: where the alias string
+/// lives in the arena and which record it resolves to. Aliases are
+/// entry-only — they feed the lookup maps and the entry index, never
+/// appear in results, and never touch the graph — so this record carries
+/// no chains.
+///
+/// Layout: 3 × u32 = 12 bytes, alignment 4, no padding.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct AliasRecord {
+    name_offset: u32,
+    name_len: u32,
+    target: u32,
+}
+
 /// One directed, weighted edge in fixed-width form. The three `next_*`
 /// links replace per-node `Vec<EdgeId>` adjacency lists: every edge is a
 /// member of exactly three chains — its subject's outgoing chain, its
@@ -256,6 +305,7 @@ const _: () = {
         size_of::<AttributionRecord>() == AttributionRecord::SIZE
             && align_of::<AttributionRecord>() == 8
     );
+    assert!(size_of::<AliasRecord>() == AliasRecord::SIZE && align_of::<AliasRecord>() == 4);
 };
 
 /// A weighted, labeled, directed graph of concepts — a many-to-many
@@ -285,22 +335,24 @@ const _: () = {
 ///
 /// # Storage layout
 ///
-/// Everything a `Context` knows lives in six flat buffers: one UTF-8 string
-/// arena plus five tables of fixed-width, naturally aligned, pointer-free
-/// `#[repr(C)]` records (u32 ids and offsets, f64 weights). Variable-length
-/// structure is expressed inside the fixed widths: strings live in the
-/// arena and records hold (offset, len) pairs; adjacency lists are
-/// intrusive singly-linked chains threaded through the edge records
-/// (`next_outgoing` / `next_incoming` / `next_labeled`, terminated by a
-/// `NIL` sentinel) and appended at the tail, which is what preserves the
-/// insertion-order guarantees of the read API. Every mutation is an append
-/// or an in-place field update — records never move — so the whole state
-/// dumps and restores as one contiguous image via [`Context::to_bytes`] /
-/// [`Context::from_bytes`].
+/// Everything a `Context` knows lives in eight flat buffers: one UTF-8
+/// string arena plus seven tables of fixed-width, naturally aligned,
+/// pointer-free `#[repr(C)]` records (u32 ids and offsets, f64 weights) —
+/// concepts, labels, sources, edges, attributions, and the two alias
+/// tables. Variable-length structure is expressed inside the fixed
+/// widths: strings live in the arena and records hold (offset, len)
+/// pairs; adjacency lists are intrusive singly-linked chains threaded
+/// through the edge records (`next_outgoing` / `next_incoming` /
+/// `next_labeled`, terminated by a `NIL` sentinel) and appended at the
+/// tail, which is what preserves the insertion-order guarantees of the
+/// read API. Every mutation is an append or an in-place field update —
+/// records never move — so the whole state dumps and restores as one
+/// contiguous image via [`Context::to_bytes`] / [`Context::from_bytes`].
 ///
-/// The hash maps and lowercase name shadows are derived read-path indexes
-/// over those buffers (string → id, exact triple → edge, case-folded names
-/// for `resolve`). They are not part of the persistent image; `from_bytes`
+/// The hash maps and normalized entry indexes are derived read-path
+/// structures over those buffers (spelling → id with aliases folded in,
+/// exact triple → edge, normalized forms and bigram postings for
+/// `resolve`). They are not part of the persistent image; `from_bytes`
 /// rebuilds them while validating it.
 ///
 /// Capacity: ids and arena offsets are u32, so one `Context` holds at most
@@ -317,7 +369,13 @@ pub struct Context {
     sources: Vec<SourceRecord>,
     edges: Vec<EdgeRecord>,
     attributions: Vec<AttributionRecord>,
-    /// Derived index: interned name → concept id. Not persisted.
+    /// Alternative concept spellings, resolving to canonical concepts at
+    /// every entry point. Persisted.
+    concept_aliases: Vec<AliasRecord>,
+    /// Alternative label spellings. Persisted.
+    label_aliases: Vec<AliasRecord>,
+    /// Derived index: interned name → concept id, aliases included. Not
+    /// persisted.
     concept_ids: HashMap<String, ConceptId>,
     /// Derived index: interned name → label id. Not persisted.
     label_ids: HashMap<String, LabelId>,
@@ -1126,7 +1184,8 @@ impl Context {
             + self.labels.len() * size_of::<LabelRecord>()
             + self.sources.len() * size_of::<SourceRecord>()
             + self.edges.len() * size_of::<EdgeRecord>()
-            + self.attributions.len() * size_of::<AttributionRecord>();
+            + self.attributions.len() * size_of::<AttributionRecord>()
+            + (self.concept_aliases.len() + self.label_aliases.len()) * size_of::<AliasRecord>();
 
         const MAP_ENTRY_OVERHEAD: usize = 48;
         let name_entries = self.concepts.len() + self.labels.len() + self.sources.len();
@@ -1175,6 +1234,142 @@ impl Context {
         (0..self.edges.len() as u32)
             .filter(|&edge_id| !visited.contains(&self.edges[edge_id as usize].subject))
             .map(|edge_id| self.association(edge_id))
+            .collect()
+    }
+
+    /// Registers an alternative spelling for an existing concept. Aliases
+    /// are entry-only: every lookup — `query`, `recall`, `describe`,
+    /// walk origins, `resolve` candidates, and interning on the write
+    /// path — resolves the alias to its canonical concept, but results
+    /// always carry the canonical spelling and the graph never grows an
+    /// alias node. Registering an alias is therefore the post-hoc repair
+    /// for "the knowledge exists but this wording misses it": queries
+    /// with the new spelling start landing, and future ingests using it
+    /// accumulate into the canonical concept instead of forking a new
+    /// one.
+    ///
+    /// `canonical` may itself be an alias — the new alias resolves to
+    /// the true canonical record. Re-registering an existing alias of
+    /// the same record is a no-op `Ok`, so alias imports are idempotent.
+    ///
+    /// # Errors
+    ///
+    /// [`AliasError::UnknownCanonical`] when `canonical` is not
+    /// interned; [`AliasError::Conflict`] when `alias` already resolves
+    /// to a different record (aliasing two existing concepts together
+    /// would be a merge, which does not exist — rebuild instead);
+    /// [`AliasError::Full`] when the alias table or arena is out of
+    /// space. The context is unchanged on every error.
+    pub fn add_concept_alias(
+        &mut self,
+        alias: impl Into<String>,
+        canonical: &str,
+    ) -> Result<(), AliasError> {
+        let alias = alias.into();
+        let Some(&target) = self.concept_ids.get(canonical) else {
+            return Err(AliasError::UnknownCanonical);
+        };
+        if let Some(&existing) = self.concept_ids.get(&alias) {
+            return if existing == target {
+                Ok(())
+            } else {
+                Err(AliasError::Conflict)
+            };
+        }
+        if !ids_left(self.concept_aliases.len(), 1) {
+            return Err(AliasError::Full(ContextFull(
+                "the concept alias table is out of u32 ids",
+            )));
+        }
+        if !arena_fits(self.arena.len(), alias.len()) {
+            return Err(AliasError::Full(ContextFull(
+                "the string arena is out of offset space",
+            )));
+        }
+        let (name_offset, name_len) = intern_name(&mut self.arena, &alias);
+        self.concept_aliases.push(AliasRecord {
+            name_offset,
+            name_len,
+            target,
+        });
+        self.concept_index.push(&alias, target);
+        self.concept_ids.insert(alias, target);
+        Ok(())
+    }
+
+    /// [`Context::add_concept_alias`] for relation labels — the label
+    /// vocabulary is where spellings fork most often ("創業年" vs
+    /// "設立年"), and a label alias heals exactly that: label-pinned
+    /// queries and future ingests using either spelling land on one
+    /// relation.
+    ///
+    /// # Errors
+    ///
+    /// As [`Context::add_concept_alias`], within the label namespace.
+    pub fn add_label_alias(
+        &mut self,
+        alias: impl Into<String>,
+        canonical: &str,
+    ) -> Result<(), AliasError> {
+        let alias = alias.into();
+        let Some(&target) = self.label_ids.get(canonical) else {
+            return Err(AliasError::UnknownCanonical);
+        };
+        if let Some(&existing) = self.label_ids.get(&alias) {
+            return if existing == target {
+                Ok(())
+            } else {
+                Err(AliasError::Conflict)
+            };
+        }
+        if !ids_left(self.label_aliases.len(), 1) {
+            return Err(AliasError::Full(ContextFull(
+                "the label alias table is out of u32 ids",
+            )));
+        }
+        if !arena_fits(self.arena.len(), alias.len()) {
+            return Err(AliasError::Full(ContextFull(
+                "the string arena is out of offset space",
+            )));
+        }
+        let (name_offset, name_len) = intern_name(&mut self.arena, &alias);
+        self.label_aliases.push(AliasRecord {
+            name_offset,
+            name_len,
+            target,
+        });
+        self.label_index.push(&alias, target);
+        self.label_ids.insert(alias, target);
+        Ok(())
+    }
+
+    /// Every concept alias as (alias, canonical) pairs in registration
+    /// order — one coherent table, so workflows that treat the alias
+    /// vocabulary as a unit (export names, translate, re-import) never
+    /// have to walk the records.
+    pub fn concept_aliases(&self) -> Vec<(&str, &str)> {
+        self.concept_aliases
+            .iter()
+            .map(|record| {
+                (
+                    self.arena_str(record.name_offset, record.name_len),
+                    self.concept_name(record.target),
+                )
+            })
+            .collect()
+    }
+
+    /// Every label alias as (alias, canonical) pairs in registration
+    /// order.
+    pub fn label_aliases(&self) -> Vec<(&str, &str)> {
+        self.label_aliases
+            .iter()
+            .map(|record| {
+                (
+                    self.arena_str(record.name_offset, record.name_len),
+                    self.label_name(record.target),
+                )
+            })
             .collect()
     }
 
@@ -1571,10 +1766,17 @@ impl Ord for Candidate {
 /// First 8 bytes of every image.
 const IMAGE_MAGIC: [u8; 8] = *b"ARAGCTX\0";
 /// Format version; bump whenever any record layout or section changes.
-const IMAGE_VERSION: u32 = 1;
+/// Version history: 1 = the original six sections; 2 adds the concept
+/// and label alias tables between the sources and the arena. Version 1
+/// images still load (their alias tables are empty); writing always
+/// produces the current version.
+const IMAGE_VERSION: u32 = 2;
 /// Magic + version + 4 bytes of padding, so the first section starts
 /// 8-byte aligned.
 const IMAGE_HEADER_SIZE: usize = 16;
+/// Seven record tables plus the arena, each section prefixed by a u64
+/// length.
+const IMAGE_SECTIONS: usize = 8;
 
 /// Error returned by [`Context::from_bytes`] when an image is truncated,
 /// wrongly versioned, or internally inconsistent. The message names the
@@ -1604,12 +1806,13 @@ impl Context {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut image = Vec::with_capacity(
             IMAGE_HEADER_SIZE
-                + 6 * size_of::<u64>()
+                + IMAGE_SECTIONS * size_of::<u64>()
                 + self.edges.len() * EdgeRecord::SIZE
                 + self.attributions.len() * AttributionRecord::SIZE
                 + self.concepts.len() * ConceptRecord::SIZE
                 + self.labels.len() * LabelRecord::SIZE
                 + self.sources.len() * SourceRecord::SIZE
+                + (self.concept_aliases.len() + self.label_aliases.len()) * AliasRecord::SIZE
                 + self.arena.len(),
         );
         image.extend_from_slice(&IMAGE_MAGIC);
@@ -1620,6 +1823,8 @@ impl Context {
         store_table(&self.concepts, &mut image);
         store_table(&self.labels, &mut image);
         store_table(&self.sources, &mut image);
+        store_table(&self.concept_aliases, &mut image);
+        store_table(&self.label_aliases, &mut image);
         image.extend_from_slice(&(self.arena.len() as u64).to_le_bytes());
         image.extend_from_slice(&self.arena);
         image
@@ -1644,7 +1849,8 @@ impl Context {
         if reader.take(IMAGE_MAGIC.len())? != IMAGE_MAGIC {
             return Err(CorruptImage("image does not start with the context magic"));
         }
-        if reader.read_u32()? != IMAGE_VERSION {
+        let version = reader.read_u32()?;
+        if version != 1 && version != IMAGE_VERSION {
             return Err(CorruptImage("image format version is not supported"));
         }
         reader.take(4)?; // header padding
@@ -1654,6 +1860,15 @@ impl Context {
         let concepts = load_table::<ConceptRecord>(&mut reader)?;
         let labels = load_table::<LabelRecord>(&mut reader)?;
         let sources = load_table::<SourceRecord>(&mut reader)?;
+        // Version 1 predates aliases; its images simply have none.
+        let (concept_aliases, label_aliases) = if version >= 2 {
+            (
+                load_table::<AliasRecord>(&mut reader)?,
+                load_table::<AliasRecord>(&mut reader)?,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let arena_len = usize::try_from(reader.read_u64()?)
             .map_err(|_| CorruptImage("arena length overflows this platform"))?;
         let arena = reader.take(arena_len)?.to_vec();
@@ -1668,6 +1883,8 @@ impl Context {
             sources,
             edges,
             attributions,
+            concept_aliases,
+            label_aliases,
             concept_ids: HashMap::new(),
             label_ids: HashMap::new(),
             source_ids: HashMap::new(),
@@ -1711,6 +1928,37 @@ impl Context {
                 .is_some()
             {
                 return Err(CorruptImage("two source records share one name"));
+            }
+        }
+
+        // Aliases join the lookup maps after the canonical names, so any
+        // spelling collision — with a name or another alias — surfaces.
+        for record in &self.concept_aliases {
+            let alias = checked_arena_str(&self.arena, record.name_offset, record.name_len)?;
+            if record.target as usize >= self.concepts.len() {
+                return Err(CorruptImage("concept alias targets an unknown concept"));
+            }
+            self.concept_index.push(alias, record.target);
+            if self
+                .concept_ids
+                .insert(alias.to_string(), record.target)
+                .is_some()
+            {
+                return Err(CorruptImage("concept alias collides with another spelling"));
+            }
+        }
+        for record in &self.label_aliases {
+            let alias = checked_arena_str(&self.arena, record.name_offset, record.name_len)?;
+            if record.target as usize >= self.labels.len() {
+                return Err(CorruptImage("label alias targets an unknown label"));
+            }
+            self.label_index.push(alias, record.target);
+            if self
+                .label_ids
+                .insert(alias.to_string(), record.target)
+                .is_some()
+            {
+                return Err(CorruptImage("label alias collides with another spelling"));
             }
         }
 
@@ -1972,6 +2220,24 @@ impl Record for SourceRecord {
         Ok(Self {
             name_offset: reader.read_u32()?,
             name_len: reader.read_u32()?,
+        })
+    }
+}
+
+impl Record for AliasRecord {
+    const SIZE: usize = 12;
+
+    fn store(&self, image: &mut Vec<u8>) {
+        image.extend_from_slice(&self.name_offset.to_le_bytes());
+        image.extend_from_slice(&self.name_len.to_le_bytes());
+        image.extend_from_slice(&self.target.to_le_bytes());
+    }
+
+    fn load(reader: &mut Reader) -> Result<Self, CorruptImage> {
+        Ok(Self {
+            name_offset: reader.read_u32()?,
+            name_len: reader.read_u32()?,
+            target: reader.read_u32()?,
         })
     }
 }
@@ -2617,6 +2883,143 @@ mod tests {
 
         assert!(context.resolve("ぶどう").is_empty());
         assert!(context.resolve("").is_empty());
+    }
+
+    #[test]
+    fn aliases_resolve_at_every_entry_point() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "創業年", "1907年", 1.0)
+            .unwrap();
+        context
+            .add_concept_alias("Aomine Brewery", "青嶺酒造")
+            .unwrap();
+        context.add_label_alias("設立年", "創業年").unwrap();
+
+        // Reads through the alias land on canonical knowledge, and the
+        // results carry the canonical spelling.
+        assert_eq!(
+            context.query(Some("Aomine Brewery"), Some("設立年"), None),
+            vec![assoc("青嶺酒造", "創業年", "1907年", 1.0)]
+        );
+        assert_eq!(context.recall("Aomine Brewery").len(), 1);
+        assert_eq!(
+            context.describe("Aomine Brewery").unwrap().concept,
+            "青嶺酒造"
+        );
+        assert_eq!(context.explore(&["Aomine Brewery"], 1).len(), 1);
+
+        // resolve surfaces the canonical name for an alias hit.
+        assert_eq!(context.resolve("aomine")[0].name, "青嶺酒造");
+        assert_eq!(context.resolve_label("設立")[0].name, "創業年");
+
+        // Writes through the alias accumulate into the canonical concept
+        // instead of forking a new one.
+        context
+            .associate("Aomine Brewery", "設立年", "1907年", 1.0)
+            .unwrap();
+        assert_eq!(context.concept_count(), 2);
+        assert_eq!(
+            weight_between(&context, "青嶺酒造", "創業年", "1907年"),
+            2.0
+        );
+
+        // Vocabulary views stay canonical-only; aliases live in their
+        // own exportable tables.
+        assert_eq!(context.labels(), vec!["創業年"]);
+        assert_eq!(
+            context.concept_aliases(),
+            vec![("Aomine Brewery", "青嶺酒造")]
+        );
+        assert_eq!(context.label_aliases(), vec![("設立年", "創業年")]);
+    }
+
+    #[test]
+    fn alias_conflicts_and_unknowns_are_rejected() {
+        let mut context = Context::default();
+        context
+            .associate("IPA", "公開する", "10大脅威", 1.0)
+            .unwrap();
+        context
+            .associate("情報処理推進機構", "所在地", "東京", 1.0)
+            .unwrap();
+
+        assert_eq!(
+            context.add_concept_alias("独法", "存在しない概念"),
+            Err(AliasError::UnknownCanonical)
+        );
+        // Two spellings that both already exist as concepts cannot be
+        // aliased together — that would be a merge.
+        assert_eq!(
+            context.add_concept_alias("IPA", "情報処理推進機構"),
+            Err(AliasError::Conflict)
+        );
+        // Re-registering the same mapping is idempotent; re-pointing the
+        // alias elsewhere is a conflict.
+        assert_eq!(
+            context.add_concept_alias("機構", "情報処理推進機構"),
+            Ok(())
+        );
+        assert_eq!(
+            context.add_concept_alias("機構", "情報処理推進機構"),
+            Ok(())
+        );
+        assert_eq!(
+            context.add_concept_alias("機構", "IPA"),
+            Err(AliasError::Conflict)
+        );
+        // Aliasing to an alias resolves to the true canonical record.
+        assert_eq!(context.add_concept_alias("kikou", "機構"), Ok(()));
+        assert_eq!(
+            context.concept_aliases(),
+            vec![("機構", "情報処理推進機構"), ("kikou", "情報処理推進機構")]
+        );
+    }
+
+    #[test]
+    fn aliases_survive_the_image_roundtrip_and_v1_images_still_load() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "創業年", "1907年", 1.0)
+            .unwrap();
+        context.add_concept_alias("Aomine", "青嶺酒造").unwrap();
+        context.add_label_alias("設立年", "創業年").unwrap();
+
+        let restored = Context::from_bytes(&context.to_bytes()).expect("v2 image must load");
+        assert_eq!(restored.concept_aliases(), context.concept_aliases());
+        assert_eq!(restored.label_aliases(), context.label_aliases());
+        assert_eq!(
+            restored.query(Some("Aomine"), Some("設立年"), None),
+            context.query(Some("Aomine"), Some("設立年"), None)
+        );
+
+        // A version-1 image is a version-2 image minus the two alias
+        // sections. For this aliasless context those are exactly the 16
+        // zero bytes before the arena section: header 16, edges 8+40,
+        // attributions 8, concepts 8+64, labels 8+20, sources 8 → the
+        // alias counts sit at 180..196. Set the version back to 1 and
+        // cut them; the image must load with no aliases.
+        let mut aliasless = Context::default();
+        aliasless.associate("私", "好き", "りんご", 1.0).unwrap();
+        let v2 = aliasless.to_bytes();
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(&v2[..180]);
+        v1.extend_from_slice(&v2[196..]);
+        v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+        let loaded = Context::from_bytes(&v1).expect("v1 image must still load");
+        assert_eq!(loaded.recall("私").len(), 1);
+        assert!(loaded.concept_aliases().is_empty());
+
+        // An alias record pointing at a nonexistent concept is caught.
+        // Same section math, plus one 12-byte alias record whose target
+        // field is its last 4 bytes: 180 + 8 → record at 188, target at
+        // 196..200.
+        let mut with_alias = Context::default();
+        with_alias.associate("私", "好き", "りんご", 1.0).unwrap();
+        with_alias.add_concept_alias("わたし", "私").unwrap();
+        let mut corrupt = with_alias.to_bytes();
+        corrupt[196..200].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Context::from_bytes(&corrupt).is_err());
     }
 
     #[test]

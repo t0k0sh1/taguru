@@ -62,6 +62,10 @@ async fn main() {
         .route("/contexts/{name}/resolve_label", post(api::resolve_label))
         .route("/contexts/{name}/labels", get(api::labels))
         .route(
+            "/contexts/{name}/aliases",
+            get(api::list_aliases).post(api::add_aliases),
+        )
+        .route(
             "/contexts/{name}/unreachable_from",
             post(api::unreachable_from),
         )

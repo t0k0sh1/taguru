@@ -3,9 +3,10 @@
 //! around the library — never retrieval semantics of its own — so each
 //! handler is a lock, a library call, and a serialized reply.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
-use associative_rag::context::{Association, Context};
+use associative_rag::context::{AliasError, Association, Context};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -249,6 +250,95 @@ fn as_refs(position: &Option<OneOrMany>) -> Vec<&str> {
         None => Vec::new(),
         Some(OneOrMany::One(name)) => vec![name.as_str()],
         Some(OneOrMany::Many(names)) => names.iter().map(String::as_str).collect(),
+    }
+}
+
+/// Alias registrations, alias → canonical per namespace. Applied in
+/// sorted order (BTreeMap), aborting at the first failure with the
+/// applied count reported — like association batches, each item is
+/// all-or-nothing in the library.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct AliasRequest {
+    pub concepts: BTreeMap<String, String>,
+    pub labels: BTreeMap<String, String>,
+}
+
+/// The full alias vocabulary of one context — the exportable unit for
+/// bulk workflows (dump names, translate, re-import).
+#[derive(Serialize)]
+pub struct AliasExport {
+    pub concepts: BTreeMap<String, String>,
+    pub labels: BTreeMap<String, String>,
+}
+
+pub async fn add_aliases(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<AliasRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    let outcome = state.write_context(&name, |context| {
+        let mut applied = 0usize;
+        for (alias, canonical) in &request.concepts {
+            if let Err(alias_error) = context.add_concept_alias(alias.as_str(), canonical) {
+                let full = matches!(alias_error, AliasError::Full(_));
+                return Err((
+                    applied,
+                    format!("concept alias '{alias}' → '{canonical}': {alias_error}"),
+                    full,
+                ));
+            }
+            applied += 1;
+        }
+        for (alias, canonical) in &request.labels {
+            if let Err(alias_error) = context.add_label_alias(alias.as_str(), canonical) {
+                let full = matches!(alias_error, AliasError::Full(_));
+                return Err((
+                    applied,
+                    format!("label alias '{alias}' → '{canonical}': {alias_error}"),
+                    full,
+                ));
+            }
+            applied += 1;
+        }
+        Ok(applied)
+    });
+
+    match outcome {
+        Err(failure) => access_error(failure, &name, started_at),
+        Ok(Ok(applied)) => ok(applied, started_at),
+        Ok(Err((applied, message, full))) => {
+            let status = if full {
+                StatusCode::INSUFFICIENT_STORAGE
+            } else {
+                StatusCode::CONFLICT
+            };
+            error(
+                status,
+                format!("applied {applied} aliases, then {message}"),
+                started_at,
+            )
+        }
+    }
+}
+
+pub async fn list_aliases(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    let started_at = Instant::now();
+    match state.read_context(&name, |context| AliasExport {
+        concepts: context
+            .concept_aliases()
+            .into_iter()
+            .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
+            .collect(),
+        labels: context
+            .label_aliases()
+            .into_iter()
+            .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
+            .collect(),
+    }) {
+        Ok(result) => ok(result, started_at),
+        Err(failure) => access_error(failure, &name, started_at),
     }
 }
 
