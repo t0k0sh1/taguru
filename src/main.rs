@@ -1,5 +1,6 @@
 mod api;
 mod embedding;
+mod metrics;
 mod registry;
 
 use std::path::PathBuf;
@@ -93,6 +94,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/metrics", get(metrics::render))
         .route("/protocol", get(api::protocol))
         .route("/contexts", get(api::list_contexts))
         .route(
@@ -142,6 +144,14 @@ async fn main() {
             "/contexts/{name}/vocabulary/audit",
             post(api::audit_vocabulary),
         )
+        // Layers wrap only the routes registered above, so this comes
+        // last. Outermost on purpose: every response — the coming
+        // auth/timeout rejections included — lands in the access log
+        // and the RED metrics.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            metrics::track_http,
+        ))
         .with_state(state.clone());
 
     let addr = std::env::var("TAGURU_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());

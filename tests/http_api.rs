@@ -329,6 +329,49 @@ fn full_retrieval_loop_over_http() {
 }
 
 #[test]
+fn metrics_expose_prometheus_text_reflecting_traffic() {
+    let server = Server::start("metrics");
+
+    // Two health probes, then two recalls against DIFFERENT context
+    // names on the same route template (both 404 — routing happened,
+    // which is all the label needs).
+    server.call("GET", "/health", None);
+    server.call("GET", "/health", None);
+    server.call("POST", "/contexts/nope1/recall", Some(json!({"cue": "x"})));
+    server.call("POST", "/contexts/nope2/recall", Some(json!({"cue": "x"})));
+    // And one path that matches no route at all.
+    server.call("GET", "/definitely/not/a/route", None);
+
+    let (status, body) = server.call("GET", "/metrics", None);
+    assert_eq!(status, 200);
+    let text = body.as_str().expect("metrics body is text, not JSON");
+
+    // Counted traffic, keyed by route template.
+    assert!(
+        text.contains(
+            "taguru_http_requests_total{method=\"GET\",route=\"/health\",status=\"200\"} 2"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "taguru_http_requests_total{method=\"POST\",route=\"/contexts/{name}/recall\",status=\"404\"} 2"
+        ),
+        "two context names must fold into ONE templated series: {text}"
+    );
+    // The raw paths never become label values; unmatched requests all
+    // share one bucket.
+    assert!(!text.contains("nope1"), "raw path leaked into labels");
+    assert!(!text.contains("/definitely/not/a/route"));
+    assert!(text.contains("route=\"<unmatched>\""));
+
+    // Histogram, domain counters, and gauges are all present.
+    assert!(text.contains("taguru_http_request_duration_seconds_bucket"));
+    assert!(text.contains("taguru_flush_total{outcome=\"ok\"}"));
+    assert!(text.contains("taguru_contexts_registered 0"));
+}
+
+#[test]
 fn log_output_is_structured_when_json_format_is_requested() {
     let data_dir = std::env::temp_dir().join(format!("taguru-jsonlog-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data_dir);

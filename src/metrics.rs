@@ -1,0 +1,534 @@
+//! Hand-rolled observability: RED metrics per route plus domain
+//! counters (cache, flush, embedding), rendered as Prometheus text on
+//! demand. Hand-rolled on purpose — the fixed catalog below needs a
+//! few atomics and one render function, not a metrics facade crate;
+//! the same reasoning that keeps BM25 and the vector store in-tree.
+//!
+//! Hot-path cost is one atomic increment per event. Histograms store
+//! per-bin counts and defer the cumulative `le` semantics to render
+//! (scrape) time.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+use axum::extract::{MatchedPath, Request, State};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+
+use crate::registry::AppState;
+
+/// (upper bound in ms, its Prometheus `le` label). Fixed strings keep
+/// the rendered form stable — `le="1"`, never a float-formatting
+/// surprise like `le="1.0"`.
+const LATENCY_BUCKETS: [(u64, &str); 8] = [
+    (1, "0.001"),
+    (5, "0.005"),
+    (10, "0.01"),
+    (50, "0.05"),
+    (100, "0.1"),
+    (500, "0.5"),
+    (1000, "1"),
+    (5000, "5"),
+];
+
+/// One latency distribution. `counts[i]` is the exclusive bin ending
+/// at `LATENCY_BUCKETS[i]` — NOT cumulative; the `_bucket{le=…}`
+/// prefix sums are computed at render time so recording stays a single
+/// increment. `count` doubles as the `+Inf` bucket and the `_count`
+/// line (the exposition format defines them to be equal), so it also
+/// counts observations past the largest finite bound.
+#[derive(Default)]
+struct Histogram {
+    counts: [AtomicU64; LATENCY_BUCKETS.len()],
+    sum_micros: AtomicU64,
+    count: AtomicU64,
+}
+
+impl Histogram {
+    fn observe(&self, elapsed: Duration) {
+        let millis = elapsed.as_millis() as u64;
+        if let Some(bin) = LATENCY_BUCKETS
+            .iter()
+            .position(|&(bound, _)| millis <= bound)
+        {
+            self.counts[bin].fetch_add(1, Ordering::Relaxed);
+        }
+        self.sum_micros
+            .fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Cumulative `_bucket{le=…}` values, ascending, one per finite bound.
+    fn cumulative(&self) -> [u64; LATENCY_BUCKETS.len()] {
+        let mut running = 0u64;
+        let mut out = [0u64; LATENCY_BUCKETS.len()];
+        for (slot, count) in out.iter_mut().zip(&self.counts) {
+            running += count.load(Ordering::Relaxed);
+            *slot = running;
+        }
+        out
+    }
+}
+
+/// Per-(method, route template) statistics.
+#[derive(Default)]
+struct RouteStat {
+    /// Status → count. Bounded per route: a route emits a handful of
+    /// distinct statuses over its life.
+    by_status: RwLock<HashMap<u16, AtomicU64>>,
+    latency: Histogram,
+}
+
+/// The whole registry: shared through `AppState`, so the HTTP
+/// middleware, the handlers, and the spawned flusher all reach the
+/// same instance.
+#[derive(Default)]
+pub struct Metrics {
+    /// (method, route template) → stats, interned on first sight. The
+    /// lazy `RwLock<HashMap<…, Arc<…>>>` mirrors the registry's own
+    /// entry map idiom. Route templates keep cardinality bounded —
+    /// raw paths would mint one series per context name.
+    http: RwLock<HashMap<(String, String), Arc<RouteStat>>>,
+    cache_hits: AtomicU64,
+    cache_loads_ok: AtomicU64,
+    cache_loads_failed: AtomicU64,
+    evictions_ok: AtomicU64,
+    evictions_failed: AtomicU64,
+    flush_ok: AtomicU64,
+    flush_failed: AtomicU64,
+    embed_refresh_ok: AtomicU64,
+    embed_refresh_failed: AtomicU64,
+    embed_resolve_ok: AtomicU64,
+    embed_resolve_failed: AtomicU64,
+}
+
+/// Point-in-time gauges, computed from the registry at scrape time
+/// rather than maintained incrementally — they cannot drift.
+pub struct GaugeSnapshot {
+    pub contexts_registered: u64,
+    pub contexts_resident: u64,
+    pub resident_bytes: u64,
+}
+
+impl Metrics {
+    pub fn record_http(&self, method: &str, route: &str, status: u16, elapsed: Duration) {
+        let stat = self.route_stat(method, route);
+        stat.latency.observe(elapsed);
+        if let Some(counter) = stat.by_status.read().unwrap().get(&status) {
+            counter.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        stat.by_status
+            .write()
+            .unwrap()
+            .entry(status)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn route_stat(&self, method: &str, route: &str) -> Arc<RouteStat> {
+        if let Some(stat) = self
+            .http
+            .read()
+            .unwrap()
+            .get(&(method.to_string(), route.to_string()))
+        {
+            return Arc::clone(stat);
+        }
+        Arc::clone(
+            self.http
+                .write()
+                .unwrap()
+                .entry((method.to_string(), route.to_string()))
+                .or_default(),
+        )
+    }
+
+    pub fn record_cache_hit(&self) {
+        self.cache_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_cache_load(&self, ok: bool) {
+        let counter = if ok {
+            &self.cache_loads_ok
+        } else {
+            &self.cache_loads_failed
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_eviction(&self, ok: bool) {
+        let counter = if ok {
+            &self.evictions_ok
+        } else {
+            &self.evictions_failed
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_flush(&self, ok: bool) {
+        let counter = if ok {
+            &self.flush_ok
+        } else {
+            &self.flush_failed
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_embed_refresh(&self, ok: bool) {
+        let counter = if ok {
+            &self.embed_refresh_ok
+        } else {
+            &self.embed_refresh_failed
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_embed_resolve(&self, ok: bool) {
+        let counter = if ok {
+            &self.embed_resolve_ok
+        } else {
+            &self.embed_resolve_failed
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The full Prometheus text-exposition body. Deterministic: the
+    /// dynamic keys (routes, statuses) are sorted before emission, so
+    /// identical state renders byte-identical output.
+    pub fn render_prometheus(&self, gauges: &GaugeSnapshot) -> String {
+        let mut out = String::new();
+
+        let http = self.http.read().unwrap();
+        let mut routes: Vec<(&(String, String), &Arc<RouteStat>)> = http.iter().collect();
+        routes.sort_by(|a, b| a.0.cmp(b.0));
+
+        push_header(
+            &mut out,
+            "taguru_http_requests_total",
+            "counter",
+            "Total HTTP requests by method, route template, and status code.",
+        );
+        for ((method, route), stat) in &routes {
+            let statuses = stat.by_status.read().unwrap();
+            let mut by_status: Vec<(u16, u64)> = statuses
+                .iter()
+                .map(|(&status, count)| (status, count.load(Ordering::Relaxed)))
+                .collect();
+            by_status.sort_unstable_by_key(|&(status, _)| status);
+            for (status, count) in by_status {
+                out.push_str(&format!(
+                    "taguru_http_requests_total{{method=\"{method}\",route=\"{route}\",status=\"{status}\"}} {count}\n"
+                ));
+            }
+        }
+
+        push_header(
+            &mut out,
+            "taguru_http_request_duration_seconds",
+            "histogram",
+            "HTTP request latency by method and route template.",
+        );
+        for ((method, route), stat) in &routes {
+            let cumulative = stat.latency.cumulative();
+            for ((_, le), value) in LATENCY_BUCKETS.iter().zip(cumulative) {
+                out.push_str(&format!(
+                    "taguru_http_request_duration_seconds_bucket{{method=\"{method}\",route=\"{route}\",le=\"{le}\"}} {value}\n"
+                ));
+            }
+            let count = stat.latency.count.load(Ordering::Relaxed);
+            let sum = stat.latency.sum_micros.load(Ordering::Relaxed) as f64 / 1e6;
+            out.push_str(&format!(
+                "taguru_http_request_duration_seconds_bucket{{method=\"{method}\",route=\"{route}\",le=\"+Inf\"}} {count}\n"
+            ));
+            out.push_str(&format!(
+                "taguru_http_request_duration_seconds_sum{{method=\"{method}\",route=\"{route}\"}} {sum}\n"
+            ));
+            out.push_str(&format!(
+                "taguru_http_request_duration_seconds_count{{method=\"{method}\",route=\"{route}\"}} {count}\n"
+            ));
+        }
+        drop(http);
+
+        // Fixed-cardinality families always emit every label
+        // combination, zeros included, so dashboards never see an
+        // absent series.
+        push_header(
+            &mut out,
+            "taguru_cache_hits_total",
+            "counter",
+            "Context cache hits (already resident, no disk load).",
+        );
+        out.push_str(&format!(
+            "taguru_cache_hits_total {}\n",
+            self.cache_hits.load(Ordering::Relaxed)
+        ));
+        push_outcomes(
+            &mut out,
+            "taguru_cache_loads_total",
+            "Context loads from disk into the resident cache, by outcome.",
+            &self.cache_loads_ok,
+            &self.cache_loads_failed,
+        );
+        push_outcomes(
+            &mut out,
+            "taguru_cache_evictions_total",
+            "Contexts evicted from the resident cache, by outcome (a failed eviction save keeps the context resident).",
+            &self.evictions_ok,
+            &self.evictions_failed,
+        );
+        push_outcomes(
+            &mut out,
+            "taguru_flush_total",
+            "Dirty-context persistence attempts, by outcome.",
+            &self.flush_ok,
+            &self.flush_failed,
+        );
+        push_header(
+            &mut out,
+            "taguru_embedding_requests_total",
+            "counter",
+            "Embedding provider round trips, by operation and outcome.",
+        );
+        for (operation, ok, failed) in [
+            (
+                "refresh",
+                &self.embed_refresh_ok,
+                &self.embed_refresh_failed,
+            ),
+            (
+                "resolve",
+                &self.embed_resolve_ok,
+                &self.embed_resolve_failed,
+            ),
+        ] {
+            out.push_str(&format!(
+                "taguru_embedding_requests_total{{operation=\"{operation}\",outcome=\"ok\"}} {}\n",
+                ok.load(Ordering::Relaxed)
+            ));
+            out.push_str(&format!(
+                "taguru_embedding_requests_total{{operation=\"{operation}\",outcome=\"failed\"}} {}\n",
+                failed.load(Ordering::Relaxed)
+            ));
+        }
+
+        push_header(
+            &mut out,
+            "taguru_contexts_registered",
+            "gauge",
+            "Contexts known to the registry.",
+        );
+        out.push_str(&format!(
+            "taguru_contexts_registered {}\n",
+            gauges.contexts_registered
+        ));
+        push_header(
+            &mut out,
+            "taguru_contexts_resident",
+            "gauge",
+            "Contexts currently resident in memory.",
+        );
+        out.push_str(&format!(
+            "taguru_contexts_resident {}\n",
+            gauges.contexts_resident
+        ));
+        push_header(
+            &mut out,
+            "taguru_resident_bytes",
+            "gauge",
+            "Estimated resident bytes of loaded contexts and cached vector stores.",
+        );
+        out.push_str(&format!(
+            "taguru_resident_bytes {}\n",
+            gauges.resident_bytes
+        ));
+
+        out
+    }
+}
+
+fn push_header(out: &mut String, name: &str, kind: &str, help: &str) {
+    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
+}
+
+/// One counter family with the ok/failed outcome label, zeros included.
+fn push_outcomes(out: &mut String, name: &str, help: &str, ok: &AtomicU64, failed: &AtomicU64) {
+    push_header(out, name, "counter", help);
+    out.push_str(&format!(
+        "{name}{{outcome=\"ok\"}} {}\n",
+        ok.load(Ordering::Relaxed)
+    ));
+    out.push_str(&format!(
+        "{name}{{outcome=\"failed\"}} {}\n",
+        failed.load(Ordering::Relaxed)
+    ));
+}
+
+/// Access-log + RED-metrics middleware, one pass per request.
+/// `MatchedPath` comes as `Option` deliberately: the required form
+/// rejects before the fallback runs and would hijack 404 handling.
+/// Unmatched requests all land in one `<unmatched>` series so a path
+/// scanner cannot mint unbounded label values.
+pub async fn track_http(
+    State(state): State<AppState>,
+    matched: Option<MatchedPath>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().as_str().to_string();
+    let route = matched
+        .as_ref()
+        .map(|matched| matched.as_str().to_string())
+        .unwrap_or_else(|| "<unmatched>".to_string());
+    let started = Instant::now();
+
+    let response = next.run(request).await;
+
+    let elapsed = started.elapsed();
+    let status = response.status().as_u16();
+    state
+        .metrics()
+        .record_http(&method, &route, status, elapsed);
+    tracing::info!(
+        method = %method,
+        route = %route,
+        status,
+        latency_ms = elapsed.as_secs_f64() * 1000.0,
+        "http",
+    );
+    response
+}
+
+/// GET /metrics: the whole registry in Prometheus text format.
+pub async fn render(State(state): State<AppState>) -> impl IntoResponse {
+    let body = state.metrics().render_prometheus(&state.gauge_snapshot());
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_gauges() -> GaugeSnapshot {
+        GaugeSnapshot {
+            contexts_registered: 0,
+            contexts_resident: 0,
+            resident_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn histogram_bucket_boundaries_are_cumulative() {
+        let histogram = Histogram::default();
+        histogram.observe(Duration::from_millis(0)); // le 1
+        histogram.observe(Duration::from_millis(3)); // le 5
+        histogram.observe(Duration::from_millis(3)); // le 5
+        histogram.observe(Duration::from_millis(400)); // le 500
+
+        let cumulative = histogram.cumulative();
+        assert_eq!(cumulative, [1, 3, 3, 3, 3, 4, 4, 4]);
+        let mut previous = 0;
+        for value in cumulative {
+            assert!(value >= previous, "buckets must never decrease");
+            previous = value;
+        }
+    }
+
+    #[test]
+    fn histogram_plus_inf_equals_count_even_past_the_largest_bound() {
+        let metrics = Metrics::default();
+        metrics.record_http("GET", "/x", 200, Duration::from_millis(2));
+        // Past the 5000ms top bound: lands in no finite bucket, but
+        // still counts toward +Inf and _count.
+        metrics.record_http("GET", "/x", 200, Duration::from_secs(60));
+
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(rendered.contains(
+            "taguru_http_request_duration_seconds_bucket{method=\"GET\",route=\"/x\",le=\"5\"} 1"
+        ));
+        assert!(rendered.contains(
+            "taguru_http_request_duration_seconds_bucket{method=\"GET\",route=\"/x\",le=\"+Inf\"} 2"
+        ));
+        assert!(
+            rendered.contains(
+                "taguru_http_request_duration_seconds_count{method=\"GET\",route=\"/x\"} 2"
+            )
+        );
+    }
+
+    #[test]
+    fn histogram_sum_renders_seconds_not_millis() {
+        let metrics = Metrics::default();
+        metrics.record_http("GET", "/x", 200, Duration::from_millis(250));
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            rendered.contains(
+                "taguru_http_request_duration_seconds_sum{method=\"GET\",route=\"/x\"} 0.25\n"
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn render_is_deterministic_with_sorted_dynamic_keys() {
+        let metrics = Metrics::default();
+        // Insertion order deliberately unsorted.
+        metrics.record_http("POST", "/b", 200, Duration::from_millis(1));
+        metrics.record_http("GET", "/a", 404, Duration::from_millis(1));
+        metrics.record_http("GET", "/a", 200, Duration::from_millis(1));
+
+        let first = metrics.render_prometheus(&empty_gauges());
+        let second = metrics.render_prometheus(&empty_gauges());
+        assert_eq!(first, second, "identical state must render identically");
+
+        let get_a = first.find("method=\"GET\",route=\"/a\",status=").unwrap();
+        let post_b = first.find("method=\"POST\",route=\"/b\",status=").unwrap();
+        assert!(get_a < post_b, "routes must render in sorted order");
+        let status_200 = first.find("route=\"/a\",status=\"200\"").unwrap();
+        let status_404 = first.find("route=\"/a\",status=\"404\"").unwrap();
+        assert!(status_200 < status_404, "statuses must render sorted");
+    }
+
+    #[test]
+    fn render_carries_help_and_type_for_every_metric_name() {
+        let metrics = Metrics::default();
+        metrics.record_http("GET", "/a", 200, Duration::from_millis(1));
+        metrics.record_flush(true);
+        let rendered = metrics.render_prometheus(&GaugeSnapshot {
+            contexts_registered: 2,
+            contexts_resident: 1,
+            resident_bytes: 640,
+        });
+
+        // Every sample line's metric name must have been introduced by
+        // a HELP/TYPE pair (bucket/sum/count roll up to their family).
+        let mut declared: Vec<&str> = Vec::new();
+        for line in rendered.lines() {
+            if let Some(rest) = line.strip_prefix("# TYPE ") {
+                declared.push(rest.split(' ').next().unwrap());
+            } else if !line.starts_with('#') && !line.is_empty() {
+                let name = line.split(['{', ' ']).next().unwrap();
+                let family = name
+                    .strip_suffix("_bucket")
+                    .or_else(|| name.strip_suffix("_sum"))
+                    .or_else(|| name.strip_suffix("_count"))
+                    .filter(|family| declared.contains(family))
+                    .unwrap_or(name);
+                assert!(declared.contains(&family), "undeclared metric {name}");
+            }
+        }
+        // And the zero-valued fixed families are present at all.
+        assert!(rendered.contains(
+            "taguru_embedding_requests_total{operation=\"resolve\",outcome=\"failed\"} 0"
+        ));
+        assert!(rendered.contains("taguru_contexts_resident 1"));
+    }
+}

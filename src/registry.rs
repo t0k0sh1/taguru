@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use taguru::context::Context;
 
 use crate::embedding::{EmbeddingProvider, VectorStore, fnv1a, similarity};
+use crate::metrics::{GaugeSnapshot, Metrics};
 
 /// Server-side metadata for one context: the prose half of the routing
 /// directory plus the cache policy flag.
@@ -212,6 +213,10 @@ struct StateInner {
     /// fallback path. Valid for the whole process because the provider
     /// (and so the model) is fixed at boot.
     cue_cache: Mutex<CueCache>,
+    /// The shared observability registry; every `AppState` clone —
+    /// handlers, middleware, the flusher task — increments the same
+    /// counters.
+    metrics: Metrics,
 }
 
 /// A FIFO-bounded map of cue → embedding. FIFO rather than LRU keeps it
@@ -280,16 +285,57 @@ impl AppState {
             clock: AtomicU64::new(0),
             embedder,
             cue_cache: Mutex::new(CueCache::default()),
+            metrics: Metrics::default(),
         }));
         for (name, entry) in state.snapshot() {
             let mut inner = entry.inner.write().unwrap();
             if inner.meta.pinned
-                && let Err(error) = ensure_hot(&state.0.data_dir, &name, &mut inner)
+                && let Err(error) =
+                    ensure_hot(&state.0.data_dir, &name, &mut inner, &state.0.metrics)
             {
                 tracing::warn!("pinned context '{name}' not preloaded: {error}");
             }
         }
         Ok(state)
+    }
+
+    /// The shared observability registry — the HTTP middleware records
+    /// into it, GET /metrics renders it.
+    pub fn metrics(&self) -> &Metrics {
+        &self.0.metrics
+    }
+
+    /// Point-in-time gauges for a scrape, computed from the registry
+    /// so they cannot drift: how many contexts exist, how many are
+    /// resident, and the resident-bytes estimate (loaded graphs plus
+    /// cached vector stores — the same accounting the cache budget
+    /// uses).
+    pub fn gauge_snapshot(&self) -> GaugeSnapshot {
+        let snapshot = self.snapshot();
+        let contexts_registered = snapshot.len() as u64;
+        let mut contexts_resident = 0u64;
+        let mut resident_bytes = 0u64;
+        for (_, entry) in snapshot {
+            let inner = entry.inner.read().unwrap();
+            if let Slot::Hot(context) = &inner.slot {
+                contexts_resident += 1;
+                resident_bytes += context.footprint() as u64;
+            }
+            drop(inner);
+            let vectors = entry
+                .vectors
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|store| store.footprint())
+                .unwrap_or(0);
+            resident_bytes += vectors as u64;
+        }
+        GaugeSnapshot {
+            contexts_registered,
+            contexts_resident,
+            resident_bytes,
+        }
     }
 
     pub fn context_count(&self) -> usize {
@@ -693,13 +739,19 @@ impl AppState {
             for chunk in stale.chunks(128) {
                 let texts: Vec<&str> = chunk.iter().map(|(_, gloss, _)| gloss.as_str()).collect();
                 match embedder.embed(&texts) {
-                    Ok(vectors) => embedded.extend(
-                        chunk
-                            .iter()
-                            .zip(vectors)
-                            .map(|((name, _, hash), vector)| (name.clone(), (*hash, vector))),
-                    ),
-                    Err(error) => return Some(Err(error)),
+                    Ok(vectors) => {
+                        self.0.metrics.record_embed_refresh(true);
+                        embedded.extend(
+                            chunk
+                                .iter()
+                                .zip(vectors)
+                                .map(|((name, _, hash), vector)| (name.clone(), (*hash, vector))),
+                        );
+                    }
+                    Err(error) => {
+                        self.0.metrics.record_embed_refresh(false);
+                        return Some(Err(error));
+                    }
                 }
             }
         }
@@ -781,8 +833,14 @@ impl AppState {
             Some(vector) => vector,
             None => {
                 let vector = match embedder.embed(&[cue]) {
-                    Ok(mut vectors) => Arc::new(vectors.pop().unwrap_or_default()),
-                    Err(error) => return Some(Err(error)),
+                    Ok(mut vectors) => {
+                        self.0.metrics.record_embed_resolve(true);
+                        Arc::new(vectors.pop().unwrap_or_default())
+                    }
+                    Err(error) => {
+                        self.0.metrics.record_embed_resolve(false);
+                        return Some(Err(error));
+                    }
                 };
                 self.0
                     .cue_cache
@@ -837,7 +895,7 @@ impl AppState {
                 inner.meta.semantic_floor = Some(floor.clamp(0.0, 1.0));
             }
             if inner.meta.pinned
-                && let Err(error) = ensure_hot(&self.0.data_dir, name, inner)
+                && let Err(error) = ensure_hot(&self.0.data_dir, name, inner, &self.0.metrics)
             {
                 return Some(Err(io::Error::other(error)));
             }
@@ -922,10 +980,12 @@ impl AppState {
                 Ok(()) => {
                     inner.stats = stats;
                     entry.dirty.store(false, Ordering::Relaxed);
+                    self.0.metrics.record_flush(true);
                     flushed.push(name);
                 }
                 Err(error) => {
                     tracing::warn!("flush of context '{name}' failed (will retry): {error}");
+                    self.0.metrics.record_flush(false);
                 }
             }
         }
@@ -955,7 +1015,8 @@ impl AppState {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let result = {
             let mut inner = entry.inner.write().unwrap();
-            ensure_hot(&self.0.data_dir, name, &mut inner).map_err(AccessError::Load)?;
+            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
+                .map_err(AccessError::Load)?;
             let Slot::Hot(context) = &mut inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
             };
@@ -1049,6 +1110,7 @@ impl AppState {
                         tracing::warn!(
                             "context '{name}' stays resident, eviction save failed: {error}"
                         );
+                        self.0.metrics.record_eviction(false);
                         continue;
                     }
                     inner.stats = stats;
@@ -1057,6 +1119,7 @@ impl AppState {
                     inner.stats = ContextStats::of(context);
                 }
                 inner.slot = Slot::Cold;
+                self.0.metrics.record_eviction(true);
             }
             *entry.vectors.lock().unwrap() = None;
             total = total.saturating_sub(bytes);
@@ -1065,15 +1128,32 @@ impl AppState {
 }
 
 /// Loads the image behind a cold slot; hot slots pass through. On
-/// success the slot is hot and the stats are fresh.
-fn ensure_hot(data_dir: &Path, name: &str, inner: &mut EntryInner) -> Result<(), String> {
+/// success the slot is hot and the stats are fresh. Every call lands
+/// in the cache metrics: hot is a hit, a Cold→Hot attempt is a load.
+fn ensure_hot(
+    data_dir: &Path,
+    name: &str,
+    inner: &mut EntryInner,
+    metrics: &Metrics,
+) -> Result<(), String> {
     if matches!(inner.slot, Slot::Hot(_)) {
+        metrics.record_cache_hit();
         return Ok(());
     }
     let path = image_path(data_dir, &file_stem(name));
-    let bytes = fs::read(&path).map_err(|e| format!("context '{name}' image unreadable: {e}"))?;
-    let mut context =
-        Context::from_bytes(&bytes).map_err(|e| format!("context '{name}' image corrupt: {e}"))?;
+    let loaded = fs::read(&path)
+        .map_err(|e| format!("context '{name}' image unreadable: {e}"))
+        .and_then(|bytes| {
+            Context::from_bytes(&bytes).map_err(|e| format!("context '{name}' image corrupt: {e}"))
+        });
+    let mut context = match loaded {
+        Ok(context) => context,
+        Err(error) => {
+            metrics.record_cache_load(false);
+            return Err(error);
+        }
+    };
+    metrics.record_cache_load(true);
     // The image carries knowledge only; tuning config lives in the
     // sidecar and is re-applied on every load.
     context.set_dice_floor(inner.meta.dice_floor);
@@ -1306,6 +1386,148 @@ mod tests {
         assert_eq!(name_from_stem("%zz"), None);
         // Undecodable UTF-8 is refused rather than lossily replaced.
         assert_eq!(name_from_stem("%FF%FE"), None);
+    }
+
+    /// The rendered /metrics body — the public read surface every
+    /// counter assertion goes through.
+    fn rendered(state: &AppState) -> String {
+        state.metrics().render_prometheus(&state.gauge_snapshot())
+    }
+
+    #[test]
+    fn ensure_hot_records_hits_and_loads() {
+        let dir = scratch_dir("m-cache");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.flush_dirty();
+        }
+
+        // A fresh boot leaves the context cold: the first read loads
+        // from disk, the second is a pure hit.
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(rendered(&state).contains("taguru_cache_loads_total{outcome=\"ok\"} 1"));
+        state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(rendered(&state).contains("taguru_cache_hits_total 1"));
+
+        // Gauges come from the registry itself.
+        assert!(rendered(&state).contains("taguru_contexts_registered 1"));
+        assert!(rendered(&state).contains("taguru_contexts_resident 1"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn flush_and_eviction_record_their_outcomes() {
+        let dir = scratch_dir("m-flush");
+        let state = AppState::boot(dir.clone(), 1, None).unwrap();
+        state
+            .create("a", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .create("b", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("a", |context| {
+                context.associate("私", "好き", "りんご", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        // Touching b evicts a under the one-byte budget.
+        state
+            .read_context("b", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        let body = rendered(&state);
+        assert!(
+            body.contains("taguru_cache_evictions_total{outcome=\"ok\"} 1"),
+            "{body}"
+        );
+
+        state
+            .write_context("b", |context| {
+                context.associate("用語", "意味", "定義", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        state.flush_dirty();
+        assert!(
+            rendered(&state).contains("taguru_flush_total{outcome=\"ok\"} 1"),
+            "a flushed dirty context must count"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn embedding_calls_record_success_and_failure() {
+        /// Same model name as the mock, so stored vectors stay usable,
+        /// but every provider round trip fails.
+        struct FailingEmbeddings;
+        impl EmbeddingProvider for FailingEmbeddings {
+            fn model(&self) -> &str {
+                "mock"
+            }
+            fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+                Err("provider down".to_string())
+            }
+        }
+
+        let dir = scratch_dir("m-embed");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let embedder =
+                Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            state
+                .create("fruit", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("fruit", |context| {
+                    context.associate("りんご", "分類", "果物", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+            state.refresh_embeddings("fruit").unwrap().unwrap();
+            // One batch per namespace: two successful provider calls.
+            assert!(rendered(&state).contains(
+                "taguru_embedding_requests_total{operation=\"refresh\",outcome=\"ok\"} 2"
+            ));
+            state.flush_dirty();
+        }
+
+        // Same data, failing provider: the resolve-path cue embedding
+        // fails and is counted as such.
+        let embedder = Some(Arc::new(FailingEmbeddings) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        assert!(
+            state
+                .semantic_resolve("fruit", "アップル", false, None)
+                .unwrap()
+                .is_err()
+        );
+        let body = rendered(&state);
+        assert!(
+            body.contains(
+                "taguru_embedding_requests_total{operation=\"resolve\",outcome=\"failed\"} 1"
+            ),
+            "{body}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
