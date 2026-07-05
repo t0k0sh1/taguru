@@ -52,6 +52,7 @@ async fn main() {
     let timeout_secs = env_number("TAGURU_REQUEST_TIMEOUT_SECS", 30);
 
     let api_token = Arc::new(std::env::var("TAGURU_API_TOKEN").ok());
+    let auth_configured = api_token.is_some();
     if api_token.is_none() {
         warn!(
             "TAGURU_API_TOKEN is not set: the API accepts UNAUTHENTICATED requests \
@@ -89,14 +90,6 @@ async fn main() {
         wal_max_bytes,
     )
     .expect("data directory must be usable");
-    info!(
-        contexts = state.context_count(),
-        data_dir = %data_dir.display(),
-        cache_mib = cache_bytes / (1024 * 1024),
-        flush_secs,
-        wal_enabled,
-        "server ready",
-    );
 
     let flusher = state.clone();
     tokio::spawn(async move {
@@ -206,12 +199,40 @@ async fn main() {
         .with_state(state.clone());
 
     let addr = std::env::var("TAGURU_ADDR").unwrap_or_else(|_| "127.0.0.1:8248".to_string());
-    let listener = TcpListener::bind(&addr).await.unwrap();
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(bind_error) => {
+            // The one boot failure an operator hits routinely deserves
+            // a diagnosis, not a panic backtrace.
+            tracing::error!(
+                %addr,
+                error = %bind_error,
+                "cannot bind — is the port already in use, or the address not local? \
+                 Set TAGURU_ADDR to change where the server listens"
+            );
+            std::process::exit(1);
+        }
+    };
     // Print the RESOLVED address: with port 0 the OS picks one, and
     // whoever spawned us (integration tests included) reads it here.
     // This stdout line is a contract — logging changes must not touch it.
     println!("listening on {}", listener.local_addr().unwrap());
-    info!(addr = %listener.local_addr().unwrap(), "listening");
+    // "ready" only after the socket exists: everything an operator
+    // needs to sanity-check the deployment, in one line, at the moment
+    // requests can actually arrive.
+    info!(
+        addr = %listener.local_addr().unwrap(),
+        contexts = state.context_count(),
+        data_dir = %data_dir.display(),
+        cache_mib = cache_bytes / (1024 * 1024),
+        flush_secs,
+        wal_enabled,
+        wal_max_mib = wal_max_bytes / (1024 * 1024),
+        max_body_mib = max_body_bytes / (1024 * 1024),
+        timeout_secs,
+        auth_enabled = auth_configured,
+        "server ready",
+    );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await

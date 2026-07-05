@@ -789,6 +789,33 @@ fn the_wal_cap_env_refuses_writes_rather_than_growing_forever() {
 }
 
 #[test]
+fn a_bind_failure_exits_with_a_diagnosis_not_a_panic() {
+    // Occupy a port, then ask the server to bind it.
+    let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = holder.local_addr().unwrap().to_string();
+    let data_dir =
+        std::env::temp_dir().join(format!("taguru-http-bindfail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .env("TAGURU_ADDR", &addr)
+        .env("TAGURU_DATA_DIR", &data_dir)
+        .env_remove("TAGURU_EMBED_URL")
+        .env_remove("TAGURU_API_TOKEN")
+        .output()
+        .expect("server binary must spawn");
+
+    assert!(!output.status.success(), "a failed bind must exit nonzero");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot bind"), "{stderr}");
+    assert!(
+        !stderr.contains("panicked"),
+        "an operator mistake must not read as a crash: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[test]
 #[cfg(unix)]
 fn health_reports_503_while_flushes_fail_and_recovers_after() {
     use std::os::unix::fs::PermissionsExt;

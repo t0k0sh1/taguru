@@ -389,7 +389,7 @@ impl Metrics {
             &mut out,
             "taguru_resident_bytes",
             "gauge",
-            "Estimated resident bytes of loaded contexts and cached vector stores.",
+            "Modeled resident estimate of loaded contexts and cached vector stores (graph and vector footprints, NOT process RSS).",
         );
         out.push_str(&format!(
             "taguru_resident_bytes {}\n",
@@ -411,6 +411,16 @@ impl Metrics {
         out.push_str(&format!(
             "taguru_last_flush_success_timestamp_seconds {}\n",
             self.last_flush_success_epoch.load(Ordering::Relaxed)
+        ));
+        push_header(
+            &mut out,
+            "taguru_build_info",
+            "gauge",
+            "Build metadata as labels; the value is always 1.",
+        );
+        out.push_str(&format!(
+            "taguru_build_info{{version=\"{}\"}} 1\n",
+            env!("CARGO_PKG_VERSION")
         ));
 
         out
@@ -622,5 +632,9 @@ mod tests {
             "taguru_embedding_requests_total{operation=\"resolve\",outcome=\"failed\"} 0"
         ));
         assert!(rendered.contains("taguru_contexts_resident 1"));
+        assert!(rendered.contains(&format!(
+            "taguru_build_info{{version=\"{}\"}} 1",
+            env!("CARGO_PKG_VERSION")
+        )));
     }
 }

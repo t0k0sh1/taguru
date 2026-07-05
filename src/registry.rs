@@ -404,11 +404,20 @@ impl AppState {
         }));
         for (name, entry) in state.snapshot() {
             let mut inner = entry.inner.write().unwrap();
-            if inner.meta.pinned
-                && let Err(error) =
-                    ensure_hot(&state.0.data_dir, &name, &mut inner, &state.0.metrics)
-            {
-                tracing::warn!("pinned context '{name}' not preloaded: {error}");
+            if !inner.meta.pinned {
+                continue;
+            }
+            // Serial and chatty on purpose: a boot that spends seconds
+            // loading pinned contexts should say what it is loading,
+            // not sit silent until "server ready".
+            let preload_started = std::time::Instant::now();
+            match ensure_hot(&state.0.data_dir, &name, &mut inner, &state.0.metrics) {
+                Ok(()) => tracing::info!(
+                    context = %name,
+                    ms = preload_started.elapsed().as_millis() as u64,
+                    "preloaded pinned context"
+                ),
+                Err(error) => tracing::warn!("pinned context '{name}' not preloaded: {error}"),
             }
         }
         Ok(state)
