@@ -17,12 +17,34 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
+/// Why a batch is being embedded: glosses entering the store (`Index`)
+/// or a live cue looking things up (`Query`). Modern embedding APIs
+/// (Cohere, Voyage) encode documents and queries asymmetrically; the
+/// OpenAI request shape cannot carry the distinction, so the HTTP
+/// provider forwards it as an `X-Taguru-Embed-Purpose` header for
+/// bridging proxies to map (e.g. onto Cohere's `input_type`). Plain
+/// OpenAI-compatible servers ignore the header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmbedPurpose {
+    Index,
+    Query,
+}
+
+impl EmbedPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EmbedPurpose::Index => "index",
+            EmbedPurpose::Query => "query",
+        }
+    }
+}
+
 /// Anything that can turn short strings into vectors. The HTTP provider
 /// is the real one; tests inject a deterministic mock.
 pub trait EmbeddingProvider: Send + Sync {
     fn model(&self) -> &str;
     /// Returns one vector per input text, all the same dimension.
-    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String>;
+    fn embed(&self, texts: &[&str], purpose: EmbedPurpose) -> Result<Vec<Vec<f32>>, String>;
 }
 
 /// OpenAI-compatible `/embeddings` client: `{model, input: [...]}` in,
@@ -54,7 +76,7 @@ impl EmbeddingProvider for HttpEmbeddings {
         &self.model
     }
 
-    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+    fn embed(&self, texts: &[&str], purpose: EmbedPurpose) -> Result<Vec<Vec<f32>>, String> {
         // A client span per provider round trip — the one downstream
         // call whose latency Taguru's own timings cannot explain. Runs
         // on the caller's thread (block_in_place), so a request span
@@ -64,12 +86,14 @@ impl EmbeddingProvider for HttpEmbeddings {
             otel.kind = "client",
             embed.model = %self.model,
             embed.inputs = texts.len(),
+            embed.purpose = purpose.as_str(),
         );
         let _guard = span.enter();
         let mut request = self
             .agent
             .post(&self.url)
-            .set("Content-Type", "application/json");
+            .set("Content-Type", "application/json")
+            .set("X-Taguru-Embed-Purpose", purpose.as_str());
         if let Some(key) = &self.api_key {
             request = request.set("Authorization", &format!("Bearer {key}"));
         }
@@ -290,6 +314,59 @@ mod tests {
         assert!((similarity(&a, &a) - 1.0).abs() < 1e-6);
         let b = vec![-a[1], a[0]];
         assert!(similarity(&a, &b).abs() < 1e-6);
+    }
+
+    /// The HTTP provider must tell a bridging proxy WHY it is embedding
+    /// (Cohere-style asymmetric models need `input_type`), and must
+    /// normalize whatever comes back. One stub round trip checks both.
+    #[test]
+    fn http_embeddings_sends_the_purpose_header_and_normalizes() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            // The request is tiny; read until the header block is in.
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let body = br#"{"data":[{"embedding":[3.0,4.0]}]}"#;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            String::from_utf8_lossy(&request).to_string()
+        });
+
+        let provider = HttpEmbeddings {
+            url: format!("http://{addr}"),
+            model: "stub-model".to_string(),
+            api_key: None,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+        let vectors = provider
+            .embed(&["こんにちは"], EmbedPurpose::Query)
+            .unwrap();
+        // 3-4-5 triangle, normalized on receipt.
+        assert_eq!(vectors, vec![vec![0.6, 0.8]]);
+
+        let request = served.join().unwrap().to_lowercase();
+        assert!(
+            request.contains("x-taguru-embed-purpose: query"),
+            "{request}"
+        );
     }
 
     #[test]

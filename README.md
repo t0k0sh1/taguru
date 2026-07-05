@@ -83,6 +83,11 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #                          short Japanese names too poorly; the default floor
 #                          0.35 is calibrated for 3-large + glosses)
 #                          API_KEY=$OPENAI_API_KEY
+#                     Every request carries X-Taguru-Embed-Purpose:
+#                     "index" (gloss refresh) or "query" (cue resolve), so
+#                     a proxy in front of an asymmetric model (Cohere,
+#                     Voyage: input_type / prefixes) can encode each side
+#                     correctly. Plain OpenAI servers ignore the header.
 #   TAGURU_EMBED_AUTO=1 refresh embeddings incrementally with each flush
 #                     (opt-in; unset means manual POST /embeddings/refresh only).
 #                     Recommended whenever agents drive the ingest: an agent

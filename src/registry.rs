@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use taguru::context::{AliasError, Context};
 
-use crate::embedding::{EmbeddingProvider, VectorStore, fnv1a, similarity};
+use crate::embedding::{EmbedPurpose, EmbeddingProvider, VectorStore, fnv1a, similarity};
 use crate::metrics::{GaugeSnapshot, Metrics};
 use crate::wal::{self, WalOp};
 
@@ -1126,7 +1126,7 @@ impl AppState {
         ] {
             for chunk in stale.chunks(128) {
                 let texts: Vec<&str> = chunk.iter().map(|(_, gloss, _)| gloss.as_str()).collect();
-                match embedder.embed(&texts) {
+                match embedder.embed(&texts, EmbedPurpose::Index) {
                     Ok(vectors) => {
                         self.0.metrics.record_embed_refresh(true);
                         embedded.extend(
@@ -1213,7 +1213,7 @@ impl AppState {
         let cue_vector = match cached {
             Some(vector) => vector,
             None => {
-                let vector = match embedder.embed(&[cue]) {
+                let vector = match embedder.embed(&[cue], EmbedPurpose::Query) {
                     Ok(mut vectors) => {
                         self.0.metrics.record_embed_resolve(true);
                         Arc::new(vectors.pop().unwrap_or_default())
@@ -2395,7 +2395,11 @@ mod tests {
             fn model(&self) -> &str {
                 "mock"
             }
-            fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+            fn embed(
+                &self,
+                _texts: &[&str],
+                _purpose: EmbedPurpose,
+            ) -> Result<Vec<Vec<f32>>, String> {
                 Err("provider down".to_string())
             }
         }
@@ -3571,7 +3575,7 @@ mod tests {
             "mock"
         }
 
-        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+        fn embed(&self, texts: &[&str], _purpose: EmbedPurpose) -> Result<Vec<Vec<f32>>, String> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(texts
                 .iter()
@@ -3584,6 +3588,57 @@ mod tests {
                 })
                 .collect())
         }
+    }
+
+    /// The two provider call sites declare opposite purposes: gloss
+    /// refresh embeds as `Index`, live cue resolution as `Query` — the
+    /// distinction an asymmetric-model proxy keys `input_type` on.
+    #[test]
+    fn refresh_embeds_as_index_and_cue_resolution_as_query() {
+        struct RecordingEmbeddings(Arc<Mutex<Vec<EmbedPurpose>>>);
+        impl EmbeddingProvider for RecordingEmbeddings {
+            fn model(&self) -> &str {
+                "recorder"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                purpose: EmbedPurpose,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                self.0.lock().unwrap().push(purpose);
+                Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            }
+        }
+
+        let dir = scratch_dir("purpose");
+        let purposes = Arc::new(Mutex::new(Vec::new()));
+        let embedder = Some(
+            Arc::new(RecordingEmbeddings(Arc::clone(&purposes))) as Arc<dyn EmbeddingProvider>
+        );
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("p", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("p", |context| {
+                context.associate("a", "l", "b", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        state.refresh_embeddings("p").unwrap().unwrap();
+        state
+            .semantic_resolve("p", "cue", false, None)
+            .unwrap()
+            .unwrap();
+
+        let seen = purposes.lock().unwrap().clone();
+        let (cue_call, refresh_calls) = seen.split_last().unwrap();
+        assert!(!refresh_calls.is_empty());
+        assert!(refresh_calls.iter().all(|p| *p == EmbedPurpose::Index));
+        assert_eq!(*cue_call, EmbedPurpose::Query);
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
