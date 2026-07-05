@@ -147,7 +147,7 @@
 | POST | `/contexts/{name}/recall` | `{cue, limit?}` → `{total, matches}` |
 | POST | `/contexts/{name}/query` | `{subject?, label?, object?, limit?}` 各位置は文字列or配列 → `{total, matches}` |
 | POST | `/contexts/{name}/describe` | `{concept}` → ラベル見出し(件数・役割別)/ null |
-| POST | `/contexts/{name}/explore` | `{origins, max_depth?}` → `[{distance, path, association}]`(ホップ上限10、省略時も適用) |
+| POST | `/contexts/{name}/explore` | `{origins, max_depth?, limit?}` → `{total, matches:[{distance, path, association}]}`(ホップ上限10、省略時も適用。切り詰めは近い順に残る) |
 | POST | `/contexts/{name}/activate` | `{origins, decay?=0.5, limit?=20}` → `[{strength, path, association}]` |
 | POST | `/contexts/{name}/resolve` | `{cue, dice_floor?, semantic_floor?}` → `[{name, score, tier}]` 概念名候補 |
 | POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?, semantic_floor?}` → `[{name, score, tier}]` 関係名候補 |
@@ -180,9 +180,10 @@
   — 分割して再送)/ weight が範囲外(有限かつ |weight| ≤ 1,000,000。バッチごと拒否)。
   `408` タイムアウト(既定30秒。クエリを絞って再試行)。`413`
   リクエストボディ超過(既定8MiB。本文はJSONではないプレーンテキストです)。
-- recall / query の既定 limit は 100。`total` が matches 数を超えていたら切り詰めが
-  起きています(強い |weight| 順で残ります)。絞り込むか limit を上げてください —
-  ただしどのエンドポイントも limit の上限は 1000 です。
+- recall / query / explore の既定 limit は 100。`total` が matches 数を超えていたら
+  切り詰めが起きています(recall/query は強い |weight| 順、explore は近いホップ順で
+  残ります)。絞り込むか limit を上げてください — ただしどのエンドポイントも limit の
+  上限は 1000 です。
 - 200 が返った書き込みは WAL により永続です(クラッシュしても再起動時に復元されます。
   サーバーが `TAGURU_WAL=0` で運用されている場合のみ、フラッシュ間隔(既定5秒)以内の
   書き込みがクラッシュで失われ得ます)。

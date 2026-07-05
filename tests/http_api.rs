@@ -279,7 +279,7 @@ fn full_retrieval_loop_over_http() {
         Some(json!({"origins": ["青嶺酒造"], "max_depth": 2})),
     );
     assert!(
-        walked
+        walked["matches"]
             .as_array()
             .unwrap()
             .iter()
@@ -523,7 +523,7 @@ fn explore_without_max_depth_stops_at_the_server_ceiling() {
         "/contexts/sake/explore",
         Some(json!({"origins": ["c0"]})),
     );
-    let deepest = walked
+    let deepest = walked["matches"]
         .as_array()
         .unwrap()
         .iter()
@@ -531,6 +531,40 @@ fn explore_without_max_depth_stops_at_the_server_ceiling() {
         .max()
         .unwrap();
     assert_eq!(deepest, 10, "omitted max_depth must stop at the ceiling");
+}
+
+#[test]
+fn explore_pages_and_keeps_the_closest_past_the_limit() {
+    let server = Server::start("explorepage");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    // A hub with four direct neighbours; one leads a hop further to a
+    // heavy edge.
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "hub", "label": "l", "object": "n1", "weight": 1.0},
+            {"subject": "hub", "label": "l", "object": "n2", "weight": 1.0},
+            {"subject": "hub", "label": "l", "object": "n3", "weight": 1.0},
+            {"subject": "hub", "label": "l", "object": "n4", "weight": 1.0},
+            {"subject": "n1", "label": "l", "object": "far", "weight": 9.0},
+        ])),
+    );
+
+    let walked = server.ok(
+        "POST",
+        "/contexts/sake/explore",
+        Some(json!({"origins": ["hub"], "limit": 3})),
+    );
+    assert_eq!(walked["total"], json!(5));
+    let matches = walked["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 3);
+    // The cut keeps the closest structure, not the heaviest weight:
+    // the distance-2 edge (weight 9.0) is what falls off.
+    assert!(
+        matches.iter().all(|r| r["distance"] == json!(1)),
+        "{walked}"
+    );
 }
 
 #[test]

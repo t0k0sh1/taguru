@@ -11,7 +11,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use taguru::context::{Association, Context, Resolution};
+use taguru::context::{Association, Context, Recollection, Resolution};
 
 use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 
@@ -665,6 +665,20 @@ pub struct ExploreRequest {
     /// Hop ceiling. Omitted — and everything above it — means the
     /// server maximum ([`MAX_EXPLORE_DEPTH`]).
     pub max_depth: Option<usize>,
+    /// Result cap. Omitted means 100, ceiling 1000 — depth bounds the
+    /// walk, this bounds the response.
+    pub limit: Option<usize>,
+}
+
+/// A bounded explore result: the same `{total, matches}` shape as
+/// [`MatchPage`], but the cut keeps the CLOSEST structure — explore
+/// is a neighbourhood walk, so past the limit the nearest hops
+/// survive, not the heaviest weights. The library already returns
+/// matches sorted by distance, so truncation is the whole cut.
+#[derive(Serialize)]
+pub struct ExplorePage {
+    pub total: usize,
+    pub matches: Vec<Recollection>,
 }
 
 pub async fn explore(
@@ -682,7 +696,14 @@ pub async fn explore(
             clamp(request.max_depth, Context::UNBOUNDED, MAX_EXPLORE_DEPTH),
         )
     }) {
-        Ok(result) => ok(result, started_at),
+        Ok(mut matches) => {
+            // Depth alone does not bound the response: one dense hub
+            // can put a million edges within a single hop, and explore
+            // used to return them all in one body.
+            let total = matches.len();
+            matches.truncate(clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT));
+            ok(ExplorePage { total, matches }, started_at)
+        }
         Err(failure) => access_error(failure, &name, started_at),
     }
 }

@@ -343,12 +343,14 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "explore",
-            "構造の網羅走査 (ホップ距離注釈付き)。ランキング不要で近傍を全部見たいときに。",
+            "構造の網羅走査 (ホップ距離注釈付き)。ランキング不要で近傍を見たいときに。\
+             limit 既定100 (上限1000)、切り詰めは近いホップ順に残る (total で検知)。",
             object_schema(
                 json!({
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
-                    "max_depth": { "type": "integer" }
+                    "max_depth": { "type": "integer" },
+                    "limit": { "type": "integer" }
                 }),
                 &["context", "origins"],
             ),
@@ -521,7 +523,7 @@ fn route_tool(
         "explore" => (
             "POST",
             format!("{}/explore", context_path("context")?),
-            Some(pick(arguments, &["origins", "max_depth"])),
+            Some(pick(arguments, &["origins", "max_depth", "limit"])),
         ),
         "list_labels" => ("GET", format!("{}/labels", context_path("context")?), None),
         "get_aliases" => ("GET", format!("{}/aliases", context_path("context")?), None),
