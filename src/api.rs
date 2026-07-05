@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use axum::Json;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{FromRequest, Path, Request, State};
+use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use taguru::context::{Association, Context, Recollection, Resolution};
@@ -66,6 +67,51 @@ fn not_found(name: &str, started_at: Instant) -> Response {
         StatusCode::NOT_FOUND,
         format!("context '{name}' not found"),
         started_at,
+    )
+}
+
+/// axum's Json extractor with its rejections reshaped into the
+/// [`ApiError`] body: a machine client parses ONE error shape on every
+/// axis, malformed JSON included. The status codes stay axum's — 400
+/// for broken syntax, 415 for the wrong media type, 422 for
+/// well-formed JSON of the wrong type — only the body changes.
+pub struct AppJson<T>(pub T);
+
+impl<S, T> FromRequest<S> for AppJson<T>
+where
+    Json<T>: FromRequest<S, Rejection = JsonRejection>,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(request, state).await {
+            Ok(Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(error(
+                rejection.status(),
+                rejection.body_text(),
+                Instant::now(),
+            )),
+        }
+    }
+}
+
+/// The router-wide 404: paths outside the API answer in the error
+/// shape too, with a pointer at the self-describing endpoint.
+pub async fn unknown_path(method: Method, uri: Uri) -> Response {
+    error(
+        StatusCode::NOT_FOUND,
+        format!("no route for {method} {uri}; GET /protocol lists the API"),
+        Instant::now(),
+    )
+}
+
+/// A known path hit with the wrong verb — same story, 405.
+pub async fn method_not_allowed(method: Method, uri: Uri) -> Response {
+    error(
+        StatusCode::METHOD_NOT_ALLOWED,
+        format!("{method} is not supported on {uri}; GET /protocol lists the API"),
+        Instant::now(),
     )
 }
 
@@ -173,7 +219,7 @@ pub struct UpdateContextRequest {
 pub async fn update_context(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<UpdateContextRequest>,
+    AppJson(request): AppJson<UpdateContextRequest>,
 ) -> Response {
     let started_at = Instant::now();
     if let Some(description) = &request.description
@@ -223,7 +269,7 @@ pub async fn delete_context(State(state): State<AppState>, Path(name): Path<Stri
 pub async fn add_associations(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(associations): Json<Vec<AssocOp>>,
+    AppJson(associations): AppJson<Vec<AssocOp>>,
 ) -> Response {
     let started_at = Instant::now();
     // Refused before the write lock is even taken: nothing of an
@@ -441,7 +487,7 @@ pub struct AliasExport {
 pub async fn add_aliases(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<AliasRequest>,
+    AppJson(request): AppJson<AliasRequest>,
 ) -> Response {
     let started_at = Instant::now();
     // Aliases intern names on both sides; the same cap as every other
@@ -510,7 +556,7 @@ pub struct StorePassagesRequest {
 pub async fn store_passages(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<StorePassagesRequest>,
+    AppJson(request): AppJson<StorePassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
     // Source ids are names (the passage text itself is a document and
@@ -549,7 +595,7 @@ pub struct PassageLookup {
 pub async fn lookup_passages(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<LookupPassagesRequest>,
+    AppJson(request): AppJson<LookupPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
     match state.lookup_passages(&name, &request.sources) {
@@ -666,7 +712,7 @@ pub struct RetractOutcome {
 pub async fn retract_source(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<RetractSourceRequest>,
+    AppJson(request): AppJson<RetractSourceRequest>,
 ) -> Response {
     let started_at = Instant::now();
     match state.retract_source(&name, &request.source) {
@@ -700,7 +746,7 @@ pub struct PassageHit {
 pub async fn search_passages(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<SearchPassagesRequest>,
+    AppJson(request): AppJson<SearchPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
     match state.search_passages(
@@ -732,7 +778,7 @@ pub struct RecallRequest {
 pub async fn recall(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<RecallRequest>,
+    AppJson(request): AppJson<RecallRequest>,
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.recall(&request.cue)) {
@@ -753,7 +799,7 @@ pub struct QueryRequest {
 pub async fn query(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<QueryRequest>,
+    AppJson(request): AppJson<QueryRequest>,
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| {
@@ -780,7 +826,7 @@ pub struct DescribeRequest {
 pub async fn describe(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<DescribeRequest>,
+    AppJson(request): AppJson<DescribeRequest>,
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.describe(&request.concept)) {
@@ -814,7 +860,7 @@ pub struct ExplorePage {
 pub async fn explore(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<ExploreRequest>,
+    AppJson(request): AppJson<ExploreRequest>,
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| {
@@ -850,7 +896,7 @@ pub struct ActivateRequest {
 pub async fn activate(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<ActivateRequest>,
+    AppJson(request): AppJson<ActivateRequest>,
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| {
@@ -980,7 +1026,7 @@ fn resolve_with_fallback(
 pub async fn resolve(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<ResolveRequest>,
+    AppJson(request): AppJson<ResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
     resolve_with_fallback(&state, &name, &request, false, started_at)
@@ -989,7 +1035,7 @@ pub async fn resolve(
 pub async fn resolve_label(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<ResolveRequest>,
+    AppJson(request): AppJson<ResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
     resolve_with_fallback(&state, &name, &request, true, started_at)
@@ -1052,7 +1098,7 @@ pub struct UnreachableFromRequest {
 pub async fn unreachable_from(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<UnreachableFromRequest>,
+    AppJson(request): AppJson<UnreachableFromRequest>,
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| {

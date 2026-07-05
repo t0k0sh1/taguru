@@ -171,6 +171,10 @@ async fn main() {
             "/contexts/{name}/vocabulary/audit",
             post(api::audit_vocabulary),
         )
+        // Off-axis errors answer in the ApiError shape too: unknown
+        // paths, and known paths hit with the wrong verb.
+        .fallback(api::unknown_path)
+        .method_not_allowed_fallback(api::method_not_allowed)
         // Layers wrap only the routes registered above and nest by
         // call order — later .layer() calls sit outside earlier ones.
         // Body limit innermost, then auth, then the timeout (its

@@ -548,6 +548,53 @@ fn a_present_body_is_parsed_whatever_the_content_type_says() {
 }
 
 #[test]
+fn off_axis_errors_speak_the_api_error_shape_too() {
+    let server = Server::start("errshape");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+
+    // Unknown path → 404 in the error shape.
+    let (status, body) = server.call("GET", "/contextz", None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["status"], json!("error"), "{body}");
+    assert!(body["time"].is_number(), "{body}");
+
+    // Known path, wrong method → 405 in the error shape.
+    let (status, body) = server.call("DELETE", "/contexts/sake/recall", None);
+    assert_eq!(status, 405, "{body}");
+    assert_eq!(body["status"], json!("error"), "{body}");
+
+    // Malformed JSON on a JSON-required endpoint → 400 in shape.
+    let (status, body) = server.call_raw(
+        "POST",
+        "/contexts/sake/recall",
+        Some("{not json"),
+        Some("application/json"),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["status"], json!("error"), "{body}");
+
+    // Wrong media type → 415 in shape.
+    let (status, body) = server.call_raw(
+        "POST",
+        "/contexts/sake/recall",
+        Some("cue=x"),
+        Some("application/x-www-form-urlencoded"),
+    );
+    assert_eq!(status, 415, "{body}");
+    assert_eq!(body["status"], json!("error"), "{body}");
+
+    // Well-formed JSON of the wrong type → 422 in shape.
+    let (status, body) = server.call_raw(
+        "POST",
+        "/contexts/sake/recall",
+        Some(r#"{"cue": 42}"#),
+        Some("application/json"),
+    );
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["status"], json!("error"), "{body}");
+}
+
+#[test]
 fn oversized_names_are_rejected_at_every_write_boundary() {
     let server = Server::start("namecap");
     let long = "字".repeat(400); // 1200 bytes, over the 1024-byte name cap
