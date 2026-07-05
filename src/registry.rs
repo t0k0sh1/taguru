@@ -362,6 +362,23 @@ pub const DEFAULT_WAL_MAX_BYTES: usize = 256 * 1024 * 1024;
 #[derive(Clone)]
 pub struct AppState(Arc<StateInner>);
 
+/// Floor for the semantic entry tier when neither the call, the
+/// context, nor the server (`TAGURU_SEMANTIC_FLOOR`) sets one.
+/// Calibrated against text-embedding-3-large with GLOSSED names
+/// (name + graph context): true matches land at ~0.44–0.58 — jargon
+/// paraphrases included (醸造責任者×杜氏 0.53, 質問形「酒造りの責任者は誰」
+/// 0.58, アップル×りんご 0.45) — while the noise band drops to ~0.17
+/// (自動車×杜氏グロス 0.09, 自動車×りんごグロス 0.17), far better
+/// separated than bare names ever were. 0.35 admits the weakest true
+/// matches with ~2× margin over noise.
+///
+/// The right floor is a property of the EMBEDDING MODEL, not of any
+/// context: amazon.titan-embed-text-v2 (512d), for one, puts Japanese
+/// true matches at ~0.2–0.3 over a ~0.15 noise band, so 0.35 silently
+/// discards its correct answers — that deployment wants
+/// `TAGURU_SEMANTIC_FLOOR≈0.2` next to its `TAGURU_EMBED_MODEL`.
+const DEFAULT_SEMANTIC_FLOOR: f32 = 0.35;
+
 struct StateInner {
     data_dir: PathBuf,
     /// Resident-bytes budget for unpinned hot contexts, enforced after
@@ -375,6 +392,11 @@ struct StateInner {
     /// The optional semantic entry tier; `None` keeps resolve purely
     /// lexical.
     embedder: Option<Arc<dyn EmbeddingProvider>>,
+    /// Fallback semantic floor when neither the call nor the context
+    /// sets one — the server default ([`DEFAULT_SEMANTIC_FLOOR`] unless
+    /// `TAGURU_SEMANTIC_FLOOR` recalibrates it for the configured
+    /// embedding model).
+    default_semantic_floor: f32,
     /// Process-lifetime cache of cue embeddings — an LLM client repeats
     /// query wording, and every hit saves a provider round trip on the
     /// fallback path. Valid for the whole process because the provider
@@ -448,7 +470,14 @@ impl AppState {
         cache_bytes: usize,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
     ) -> io::Result<Self> {
-        Self::boot_with(data_dir, cache_bytes, embedder, true, DEFAULT_WAL_MAX_BYTES)
+        Self::boot_with(
+            data_dir,
+            cache_bytes,
+            embedder,
+            true,
+            DEFAULT_WAL_MAX_BYTES,
+            None,
+        )
     }
 
     /// Opens (creating if needed) the data directory and registers every
@@ -457,13 +486,17 @@ impl AppState {
     /// that fails to load is left cold with a warning rather than
     /// taking the server down. `wal_enabled: false` restores the
     /// flush-interval durability window (`TAGURU_WAL=0`);
-    /// `wal_max_bytes` is the per-context log ceiling (0 = unlimited).
+    /// `wal_max_bytes` is the per-context log ceiling (0 = unlimited);
+    /// `default_semantic_floor` recalibrates the semantic entry floor
+    /// for the configured embedding model (`TAGURU_SEMANTIC_FLOOR`,
+    /// `None` = the text-embedding-3-large calibration).
     pub fn boot_with(
         data_dir: PathBuf,
         cache_bytes: usize,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
         wal_enabled: bool,
         wal_max_bytes: usize,
+        default_semantic_floor: Option<f32>,
     ) -> io::Result<Self> {
         fs::create_dir_all(&data_dir)?;
         let mut registry = HashMap::new();
@@ -504,6 +537,9 @@ impl AppState {
             registry: RwLock::new(registry),
             clock: AtomicU64::new(0),
             embedder,
+            default_semantic_floor: default_semantic_floor
+                .unwrap_or(DEFAULT_SEMANTIC_FLOOR)
+                .clamp(0.0, 1.0),
             cue_cache: Mutex::new(CueCache::default()),
             metrics: Metrics::default(),
             wal_enabled,
@@ -1146,26 +1182,18 @@ impl AppState {
         labels: bool,
         floor_override: Option<f32>,
     ) -> Option<Result<Vec<(String, f32)>, String>> {
-        // Calibrated against text-embedding-3-large with GLOSSED names
-        // (name + graph context): true matches land at ~0.44–0.58 —
-        // jargon paraphrases included (醸造責任者×杜氏 0.53, 質問形
-        // 「酒造りの責任者は誰」0.58, アップル×りんご 0.45) — while the
-        // noise band drops to ~0.17 (自動車×杜氏グロス 0.09,
-        // 自動車×りんごグロス 0.17), far better separated than bare
-        // names ever were. 0.35 admits the weakest true matches with
-        // ~2× margin over noise.
-        const SEMANTIC_FLOOR: f32 = 0.35;
         const SEMANTIC_LIMIT: usize = 5;
 
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Ok(Vec::new()));
         };
         let entry = self.lookup(name)?;
-        // One-call override beats the context setting beats the default.
+        // One-call override beats the context setting beats the server
+        // default (see [`DEFAULT_SEMANTIC_FLOOR`] for the calibration).
         let context_floor = entry.inner.read().unwrap().meta.semantic_floor;
         let floor = floor_override
             .or(context_floor)
-            .unwrap_or(SEMANTIC_FLOOR)
+            .unwrap_or(self.0.default_semantic_floor)
             .clamp(0.0, 1.0);
         let store = self.entry_vectors(&entry, &file_stem(name));
         if store.model != embedder.model() {
@@ -2643,7 +2671,8 @@ mod tests {
         // second is refused — the backstop for a flush that never
         // succeeds again.
         let capped_dir = scratch_dir("wal-capped");
-        let state = AppState::boot_with(capped_dir.clone(), usize::MAX, None, true, 1).unwrap();
+        let state =
+            AppState::boot_with(capped_dir.clone(), usize::MAX, None, true, 1, None).unwrap();
         state
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
@@ -3069,9 +3098,15 @@ mod tests {
     fn disabling_the_wal_restores_the_flush_window() {
         let dir = scratch_dir("wal-off");
         {
-            let state =
-                AppState::boot_with(dir.clone(), usize::MAX, None, false, DEFAULT_WAL_MAX_BYTES)
-                    .unwrap();
+            let state = AppState::boot_with(
+                dir.clone(),
+                usize::MAX,
+                None,
+                false,
+                DEFAULT_WAL_MAX_BYTES,
+                None,
+            )
+            .unwrap();
             state
                 .create("sake", ContextMeta::default())
                 .map_err(|_| "create")
@@ -3787,6 +3822,57 @@ mod tests {
             .unwrap();
         assert_eq!(miss(None)[0].0, "りんご");
         assert_eq!(state.directory()[0].semantic_floor, Some(0.2));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// TAGURU_SEMANTIC_FLOOR reaches boot as a server-wide default that
+    /// sits UNDER the per-context setting and the per-call override —
+    /// it recalibrates the floor for the configured embedding model
+    /// without touching any context.
+    #[test]
+    fn semantic_floor_server_default_recalibrates_under_context_and_call() {
+        let dir = scratch_dir("semfloor-srv");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            embedder,
+            true,
+            DEFAULT_WAL_MAX_BYTES,
+            Some(0.2),
+        )
+        .unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("fruit", |context| {
+                context.associate("りんご", "分類", "果物", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        state.refresh_embeddings("fruit").unwrap().unwrap();
+
+        let hits = |floor: Option<f32>| {
+            state
+                .semantic_resolve("fruit", "みかん", false, floor)
+                .unwrap()
+                .unwrap()
+        };
+        // みかん×りんご = cosine 0.28: lost under the built-in 0.35,
+        // admitted by the recalibrated server default.
+        assert_eq!(hits(None)[0].0, "りんご");
+        // The context setting still beats the server default ...
+        state
+            .update_meta("fruit", None, None, None, Some(0.9))
+            .unwrap()
+            .unwrap();
+        assert!(hits(None).is_empty());
+        // ... and the one-call override still beats them both.
+        assert_eq!(hits(Some(0.1))[0].0, "りんご");
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -85,6 +85,17 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #                          API_KEY=$OPENAI_API_KEY
 #   TAGURU_EMBED_AUTO=1 refresh embeddings incrementally with each flush
 #                     (opt-in; unset means manual POST /embeddings/refresh only)
+#   TAGURU_SEMANTIC_FLOOR  server default for the semantic entry floor
+#                     (default 0.35, calibrated for text-embedding-3-large).
+#                     The right value is a property of the EMBEDDING MODEL —
+#                     each puts true matches and noise on different cosine
+#                     bands. Calibrate by probing resolve with
+#                     {"semantic_floor": 0.05} and setting the floor between
+#                     the noise band and the true matches:
+#                       text-embedding-3-large            0.35 (the default)
+#                       amazon.titan-embed-text-v2 (512d) ~0.2 (Japanese:
+#                         true matches 0.2–0.3, noise ~0.15)
+#                     Per-context settings and per-call overrides still win.
 #   RUST_LOG            log filter (default info), EnvFilter syntax
 #   TAGURU_LOG_FORMAT   json for one JSON object per log line (default: pretty).
 #                     Logs go to stderr.

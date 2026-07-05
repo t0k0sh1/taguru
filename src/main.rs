@@ -101,6 +101,13 @@ async fn serve() {
         info!("auto embedding refresh enabled (runs with each flush)");
     }
     let embedder = embedder.map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>);
+    // The right semantic floor is a property of the embedding model
+    // (cosine bands differ per model), so its recalibration lives here
+    // beside TAGURU_EMBED_MODEL rather than on every context.
+    let semantic_floor = env_floor("TAGURU_SEMANTIC_FLOOR");
+    if let Some(floor) = semantic_floor {
+        info!(floor, "semantic floor default recalibrated");
+    }
 
     // The WAL closes the flush-interval loss window; opting out
     // (TAGURU_WAL=0) restores the old posture for benchmarks or
@@ -118,6 +125,7 @@ async fn serve() {
         embedder,
         wal_enabled,
         wal_max_bytes,
+        semantic_floor,
     )
     .expect("data directory must be usable");
 
@@ -365,5 +373,19 @@ fn env_number(key: &str, default: usize) -> usize {
             default
         }),
         Err(_) => default,
+    }
+}
+
+/// An optional 0..=1 fraction from the environment; anything else
+/// (including NaN) is ignored with a warning, keeping the built-in
+/// calibration.
+fn env_floor(key: &str) -> Option<f32> {
+    let value = std::env::var(key).ok()?;
+    match value.parse::<f32>() {
+        Ok(floor) if (0.0..=1.0).contains(&floor) => Some(floor),
+        _ => {
+            warn!("ignoring {key}={value}: not a number between 0 and 1");
+            None
+        }
     }
 }
