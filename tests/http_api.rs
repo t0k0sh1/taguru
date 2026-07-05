@@ -99,18 +99,30 @@ impl Server {
                 .send_string(&body.to_string()),
             None => request.call(),
         };
-        let (status, text) = match response {
-            Ok(response) => {
-                let status = response.status();
-                (status, response.into_string().unwrap_or_default())
-            }
-            Err(ureq::Error::Status(status, response)) => {
-                (status, response.into_string().unwrap_or_default())
-            }
-            Err(error) => panic!("request {method} {path} failed: {error}"),
+        finish(response, method, path)
+    }
+
+    /// A raw request: the body goes out as-is, with a Content-Type only
+    /// when one is given — for the header-omission cases the JSON
+    /// helpers cannot express.
+    fn call_raw(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        content_type: Option<&str>,
+    ) -> (u16, Value) {
+        let mut request = ureq::AgentBuilder::new()
+            .build()
+            .request(method, &format!("{}{path}", self.base));
+        if let Some(content_type) = content_type {
+            request = request.set("Content-Type", content_type);
+        }
+        let response = match body {
+            Some(body) => request.send_string(body),
+            None => request.call(),
         };
-        let parsed = serde_json::from_str(&text).unwrap_or(Value::String(text));
-        (status, parsed)
+        finish(response, method, path)
     }
 
     fn ok(&self, method: &str, path: &str, body: Option<Value>) -> Value {
@@ -142,6 +154,23 @@ impl Server {
         std::mem::forget(self);
         data_dir
     }
+}
+
+/// Shared response tail: status plus parsed JSON body (or the raw
+/// text when it is not JSON).
+fn finish(response: Result<ureq::Response, ureq::Error>, method: &str, path: &str) -> (u16, Value) {
+    let (status, text) = match response {
+        Ok(response) => {
+            let status = response.status();
+            (status, response.into_string().unwrap_or_default())
+        }
+        Err(ureq::Error::Status(status, response)) => {
+            (status, response.into_string().unwrap_or_default())
+        }
+        Err(error) => panic!("request {method} {path} failed: {error}"),
+    };
+    let parsed = serde_json::from_str(&text).unwrap_or(Value::String(text));
+    (status, parsed)
 }
 
 impl Drop for Server {
@@ -475,6 +504,47 @@ fn an_insane_weight_is_rejected_before_any_write() {
             {"subject": "a", "label": "l2", "object": "b", "weight": -1.0e6},
         ])),
     );
+}
+
+#[test]
+fn a_present_body_is_parsed_whatever_the_content_type_says() {
+    let server = Server::start("rawbody");
+
+    // requests.put(url, data=json.dumps(...)) territory: a JSON body
+    // with no JSON Content-Type. The description must land — this
+    // used to silently drop the body and create with every field
+    // defaulted, under a 200.
+    let (status, body) = server.call_raw(
+        "PUT",
+        "/contexts/sake",
+        Some(r#"{"description":"青嶺酒造の記憶","pinned":true}"#),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    let directory = server.ok("GET", "/contexts", None);
+    assert_eq!(directory[0]["description"], json!("青嶺酒造の記憶"));
+    assert_eq!(directory[0]["pinned"], json!(true));
+
+    // A present body that is not JSON is an error, never defaults.
+    let (status, body) =
+        server.call_raw("PUT", "/contexts/beer", Some("definitely not json"), None);
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["status"], json!("error"));
+
+    // An absent body still means defaults — the documented shape.
+    let (status, body) = server.call_raw("PUT", "/contexts/beer", None, None);
+    assert_eq!(status, 200, "{body}");
+
+    // The other optional-body endpoint follows the same contract.
+    let (status, body) = server.call_raw(
+        "POST",
+        "/contexts/sake/vocabulary/audit",
+        Some("also not json"),
+        None,
+    );
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = server.call_raw("POST", "/contexts/sake/vocabulary/audit", None, None);
+    assert_eq!(status, 200, "{body}");
 }
 
 #[test]

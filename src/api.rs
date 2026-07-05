@@ -118,10 +118,13 @@ pub struct CreateContextRequest {
 pub async fn create_context(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    body: Option<Json<CreateContextRequest>>,
+    body: axum::body::Bytes,
 ) -> Response {
     let started_at = Instant::now();
-    let Json(request) = body.unwrap_or_default();
+    let request: CreateContextRequest = match optional_body(&body, started_at) {
+        Ok(request) => request,
+        Err(refusal) => return *refusal,
+    };
     if let Some(refusal) = oversized(
         "the context name",
         &name,
@@ -329,6 +332,29 @@ const MAX_CONTEXT_NAME_BYTES: usize = 64;
 /// Byte cap on a context description — it too rides in every
 /// directory listing.
 const MAX_DESCRIPTION_BYTES: usize = 4096;
+
+/// The optional-body contract of create and audit: an ABSENT body
+/// means defaults, but a PRESENT body must parse as JSON — whatever
+/// the Content-Type header says. `Option<Json<T>>` answered a
+/// missing or mismatched header with `None` even when a body was
+/// present, so a client that forgot the header (Python's
+/// `requests.put(url, data=...)` territory) had its whole payload
+/// silently replaced by defaults, under a 200.
+fn optional_body<T: Default + serde::de::DeserializeOwned>(
+    body: &axum::body::Bytes,
+    started_at: Instant,
+) -> Result<T, Box<Response>> {
+    if body.is_empty() {
+        return Ok(T::default());
+    }
+    serde_json::from_slice(body).map_err(|parse| {
+        Box::new(error(
+            StatusCode::BAD_REQUEST,
+            format!("the request body is not valid JSON: {parse}"),
+            started_at,
+        ))
+    })
+}
 
 /// The one gate every persisted name goes through: `Some(400)` when
 /// `value` runs over `cap`, with `what` naming the offender precisely
@@ -581,10 +607,13 @@ fn twin_pairs<S>(pairs: Vec<(String, String, S)>) -> Vec<TwinPair<S>> {
 pub async fn audit_vocabulary(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    body: Option<Json<VocabularyAuditRequest>>,
+    body: axum::body::Bytes,
 ) -> Response {
     let started_at = Instant::now();
-    let Json(request) = body.unwrap_or_default();
+    let request: VocabularyAuditRequest = match optional_body(&body, started_at) {
+        Ok(request) => request,
+        Err(refusal) => return *refusal,
+    };
     let dice_floor = request.dice_floor.unwrap_or(0.6);
     let cosine_floor = request.cosine_floor.unwrap_or(0.6);
 
