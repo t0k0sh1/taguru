@@ -17,6 +17,9 @@ const USAGE: &str = concat!(
 USAGE:
   taguru [serve] [--config FILE]        start the HTTP server (the default)
   taguru version                        print the version
+  taguru health [URL]                   exit 0 iff a running server's /health
+                                        answers 200 — the container
+                                        HEALTHCHECK; URL defaults to TAGURU_ADDR
   taguru inspect PATH                   verify a data directory or one .ctx
                                         image offline (backup check) — the
                                         same validating load the server runs
@@ -79,6 +82,7 @@ pub fn dispatch() -> ServeArgs {
             print!("{USAGE}");
             exit(0)
         }
+        Some("health") => exit(health(&args[1..])),
         Some("inspect") => exit(crate::inspect::run(&args[1..])),
         Some("estimate") => exit(crate::estimate::run(&args[1..])),
         Some(other) => {
@@ -110,6 +114,66 @@ fn parse_serve(args: &[String]) -> ServeArgs {
     // a container image bakes TAGURU_CONFIG in.
     let config = config.or_else(|| std::env::var("TAGURU_CONFIG").ok().map(PathBuf::from));
     ServeArgs { config }
+}
+
+/// `taguru health [URL]`: one GET against a running server's /health,
+/// exit 0 iff it answers 200. This exists for container HEALTHCHECKs —
+/// a scratch image has no curl, but it always has taguru itself.
+/// /health is exempt from bearer auth, so no token is needed here.
+fn health(args: &[String]) -> i32 {
+    let base = match args {
+        [] => default_base_url(),
+        [flag] if flag == "--help" || flag == "-h" => {
+            println!("usage: taguru health [URL]   exit 0 iff GET URL/health answers 200");
+            return 0;
+        }
+        [url] => url.trim_end_matches('/').to_string(),
+        [_, extra, ..] => usage_error(&format!("'health' takes one optional URL, got '{extra}'")),
+    };
+    let url = format!("{base}/health");
+    // The agent timeout stays under HEALTHCHECK's own 5s deadline so
+    // the verdict (and its message) comes from here, not from a kill.
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(4))
+        .build();
+    match agent.get(&url).call() {
+        Ok(response) => {
+            println!("{}", response.into_string().unwrap_or_default().trim());
+            0
+        }
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            eprintln!("taguru: health: {url} answered {code}: {}", body.trim());
+            1
+        }
+        Err(error) => {
+            eprintln!("taguru: health: {error}");
+            1
+        }
+    }
+}
+
+/// The URL `health` probes when none is given: TAGURU_ADDR, with an
+/// unspecified bind address read as its loopback — 0.0.0.0 is
+/// reachable at 127.0.0.1 from inside the same network namespace, and
+/// inside the namespace is exactly where a HEALTHCHECK runs.
+fn default_base_url() -> String {
+    let addr = std::env::var("TAGURU_ADDR").unwrap_or_else(|_| "127.0.0.1:8248".to_string());
+    format!("http://{}", loopback_of(&addr))
+}
+
+fn loopback_of(addr: &str) -> String {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    match addr.parse::<SocketAddr>() {
+        Ok(mut socket) if socket.ip().is_unspecified() => {
+            socket.set_ip(match socket.ip() {
+                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            });
+            socket.to_string()
+        }
+        _ => addr.to_string(),
+    }
 }
 
 fn refuse_extras(command: &str, extras: &[String]) {
@@ -249,6 +313,15 @@ mod tests {
     fn config_keys_with_spaces_are_refused() {
         let error = parse_config("TAGURU WAL=1\n").unwrap_err();
         assert!(error.contains("line 1"), "{error}");
+    }
+
+    #[test]
+    fn an_unspecified_bind_address_probes_via_loopback() {
+        assert_eq!(loopback_of("0.0.0.0:8248"), "127.0.0.1:8248");
+        assert_eq!(loopback_of("[::]:8248"), "[::1]:8248");
+        assert_eq!(loopback_of("127.0.0.1:8248"), "127.0.0.1:8248");
+        // Hostnames don't parse as socket addresses; pass them through.
+        assert_eq!(loopback_of("localhost:8248"), "localhost:8248");
     }
 
     #[test]

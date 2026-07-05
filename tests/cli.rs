@@ -76,6 +76,36 @@ fn serve_with_config(config: &std::path::Path, extra_env: &[(&str, &str)]) -> St
     stderr
 }
 
+/// Spawns a live server on a free port with a scratch data dir. The
+/// caller kills the child and removes the directory.
+fn spawn_server(tag: &str) -> (std::process::Child, String, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("taguru-cli-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .env_remove("TAGURU_CONFIG")
+        .env_remove("TAGURU_API_TOKEN")
+        .env_remove("TAGURU_EMBED_URL")
+        .env("TAGURU_ADDR", "127.0.0.1:0")
+        .env("TAGURU_DATA_DIR", dir.join("data"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("server must spawn");
+    let stdout = child.stdout.take().expect("stdout must be piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let addr = loop {
+        let line = lines
+            .next()
+            .expect("server must reach its listen line")
+            .expect("stdout must be readable");
+        if let Some(addr) = line.strip_prefix("listening on ") {
+            break addr.to_string();
+        }
+    };
+    (child, addr, dir)
+}
+
 #[test]
 fn version_subcommand_prints_the_version_and_nothing_else() {
     let output = run(&["version"]);
@@ -205,6 +235,64 @@ fn taguru_config_variable_names_the_file_too() {
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn health_answers_ok_against_a_live_server() {
+    let (mut child, addr, dir) = spawn_server("health-ok");
+    let output = run(&["health", &format!("http://{addr}")]);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn health_derives_its_target_from_taguru_addr() {
+    let (mut child, addr, dir) = spawn_server("health-env");
+    let output = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .arg("health")
+        .env_remove("TAGURU_CONFIG")
+        .env("TAGURU_ADDR", &addr)
+        .output()
+        .expect("binary must run");
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn health_exits_nonzero_when_nothing_listens() {
+    // Learn a free port, then release it: a brief race, but nothing
+    // is likely to grab this exact port before the probe fires.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    let output = run(&["health", &format!("http://{addr}")]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("health"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn health_refuses_trailing_arguments() {
+    let output = run(&["health", "http://127.0.0.1:1", "extra"]);
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]
