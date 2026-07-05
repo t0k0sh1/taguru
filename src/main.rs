@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use embedding::EmbeddingProvider;
 use registry::AppState;
 use tokio::net::TcpListener;
@@ -130,7 +130,8 @@ async fn main() {
         .route("/contexts", get(api::list_contexts))
         .route(
             "/contexts/{name}",
-            put(api::create_context)
+            get(api::get_context)
+                .put(api::create_context)
                 .patch(api::update_context)
                 .delete(api::delete_context),
         )

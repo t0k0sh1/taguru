@@ -96,6 +96,32 @@ where
     }
 }
 
+/// axum's Query extractor with rejections reshaped into the
+/// [`ApiError`] body, exactly as [`AppJson`] does for request bodies.
+pub struct AppQuery<T>(pub T);
+
+impl<S, T> axum::extract::FromRequestParts<S> for AppQuery<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::extract::Query::<T>::from_request_parts(parts, state).await {
+            Ok(axum::extract::Query(value)) => Ok(Self(value)),
+            Err(rejection) => Err(error(
+                rejection.status(),
+                rejection.body_text(),
+                Instant::now(),
+            )),
+        }
+    }
+}
+
 /// The router-wide 404: paths outside the API answer in the error
 /// shape too, with a pointer at the self-describing endpoint.
 pub async fn unknown_path(method: Method, uri: Uri) -> Response {
@@ -127,12 +153,58 @@ fn access_error(failure: AccessError, name: &str, started_at: Instant) -> Respon
     }
 }
 
+/// Keyset paging over the name-sorted directory.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ListContextsQuery {
+    /// Page size; omitted means the ceiling (1000) — the directory is
+    /// the routing surface, and a sane deployment fits one page.
+    pub limit: Option<usize>,
+    /// Only contexts whose name sorts strictly after this one.
+    pub after: Option<String>,
+}
+
+/// A bounded directory page: like every other listing, `total` names
+/// the full count so a truncated view is visible.
+#[derive(Serialize)]
+pub struct ContextPage {
+    pub total: usize,
+    pub contexts: Vec<crate::registry::DirectoryEntry>,
+}
+
 /// The routing directory, skills-style: name, prose description, and
 /// stats for every context, so an LLM client can decide where to search
 /// (and where to ingest) without the server owning that judgement.
-pub async fn list_contexts(State(state): State<AppState>) -> Response {
+/// Paged like every other listing — thousands of contexts must not
+/// mean a megabytes-large response on every routing decision.
+pub async fn list_contexts(
+    State(state): State<AppState>,
+    AppQuery(query): AppQuery<ListContextsQuery>,
+) -> Response {
     let started_at = Instant::now();
-    ok(state.directory(), started_at)
+    let directory = state.directory();
+    let total = directory.len();
+    let contexts: Vec<_> = directory
+        .into_iter()
+        .filter(|entry| {
+            query
+                .after
+                .as_deref()
+                .is_none_or(|after| entry.name.as_str() > after)
+        })
+        .take(clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT))
+        .collect();
+    ok(ContextPage { total, contexts }, started_at)
+}
+
+/// One directory row by name — the cheap existence-and-stats check,
+/// without listing anything else.
+pub async fn get_context(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    let started_at = Instant::now();
+    match state.directory_entry(&name) {
+        Some(entry) => ok(entry, started_at),
+        None => not_found(&name, started_at),
+    }
 }
 
 /// The LLM-facing manual — ingest discipline, retrieval loop, API

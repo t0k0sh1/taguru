@@ -139,7 +139,8 @@
 
 | Method | Path | Body / 戻り |
 |---|---|---|
-| GET | `/contexts` | 目録: name, description, pinned, loaded, dice_floor, stats |
+| GET | `/contexts` | `?limit=1000&after=名前` → `{total, contexts:[{name, description, pinned, loaded, dice_floor, semantic_floor, stats}]}`(名前順のキーセットページング) |
+| GET | `/contexts/{name}` | 単一コンテキストの目録行 / 404 |
 | PUT | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → 作成 |
 | PATCH | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → メタ更新 |
 | DELETE | `/contexts/{name}` | 削除(ファイルごと) |

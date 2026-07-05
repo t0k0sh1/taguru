@@ -1120,28 +1120,16 @@ impl AppState {
         let mut directory: Vec<DirectoryEntry> = self
             .snapshot()
             .into_iter()
-            .filter_map(|(name, entry)| {
-                let inner = entry.inner.read().unwrap();
-                let (loaded, stats) = match &inner.slot {
-                    Slot::Hot(context) => (true, ContextStats::of(context)),
-                    Slot::Cold => (false, inner.stats.clone()),
-                    // The snapshot raced a delete: not part of the
-                    // directory anymore.
-                    Slot::Deleted => return None,
-                };
-                Some(DirectoryEntry {
-                    name,
-                    description: inner.meta.description.clone(),
-                    pinned: inner.meta.pinned,
-                    loaded,
-                    dice_floor: inner.meta.dice_floor,
-                    semantic_floor: inner.meta.semantic_floor,
-                    stats,
-                })
-            })
+            .filter_map(|(name, entry)| describe_entry(name, &entry))
             .collect();
         directory.sort_by(|a, b| a.name.cmp(&b.name));
         directory
+    }
+
+    /// One directory row by name, or `None` for an unknown context.
+    pub fn directory_entry(&self, name: &str) -> Option<DirectoryEntry> {
+        let entry = self.lookup(name)?;
+        describe_entry(name.to_string(), &entry)
     }
 
     /// Runs a read-only operation on one context, loading it first if
@@ -1599,6 +1587,26 @@ impl AppState {
             .resident_estimate
             .store(total as i64, Ordering::Relaxed);
     }
+}
+
+/// One directory row, or `None` when the entry was deleted between the
+/// caller's snapshot/lookup and this lock.
+fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
+    let inner = entry.inner.read().unwrap();
+    let (loaded, stats) = match &inner.slot {
+        Slot::Hot(context) => (true, ContextStats::of(context)),
+        Slot::Cold => (false, inner.stats.clone()),
+        Slot::Deleted => return None,
+    };
+    Some(DirectoryEntry {
+        name,
+        description: inner.meta.description.clone(),
+        pinned: inner.meta.pinned,
+        loaded,
+        dice_floor: inner.meta.dice_floor,
+        semantic_floor: inner.meta.semantic_floor,
+        stats,
+    })
 }
 
 /// Loads the image behind a cold slot and replays whatever the WAL

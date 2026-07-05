@@ -191,7 +191,9 @@ fn full_retrieval_loop_over_http() {
     let (status, protocol) = server.call("GET", "/protocol", None);
     assert_eq!(status, 200);
     assert!(protocol.as_str().unwrap().contains("# Taguru"));
-    assert_eq!(server.ok("GET", "/contexts", None), json!([]));
+    let directory = server.ok("GET", "/contexts", None);
+    assert_eq!(directory["total"], json!(0));
+    assert_eq!(directory["contexts"], json!([]));
 
     // Create; duplicates conflict; unknown contexts 404.
     server.ok(
@@ -383,16 +385,22 @@ fn full_retrieval_loop_over_http() {
         "/contexts/sake",
         Some(json!({"pinned": true, "semantic_floor": 0.2})),
     );
-    let directory = server.ok("GET", "/contexts", None);
-    assert_eq!(directory[0]["pinned"], json!(true));
-    assert_eq!(directory[0]["semantic_floor"], json!(0.2));
-    assert_eq!(directory[0]["stats"]["associations"], json!(5));
+    let listed = server.ok("GET", "/contexts", None)["contexts"].clone();
+    assert_eq!(listed[0]["pinned"], json!(true));
+    assert_eq!(listed[0]["semantic_floor"], json!(0.2));
+    assert_eq!(listed[0]["stats"]["associations"], json!(5));
+    // The single-context row says the same thing without the listing.
+    let single = server.ok("GET", "/contexts/sake", None);
+    assert_eq!(single["name"], json!("sake"));
+    assert_eq!(single["stats"]["associations"], json!(5));
     let (status, _) = server.call("POST", "/contexts/sake/embeddings/refresh", None);
     assert_eq!(status, 501);
 
     // Deletion removes the context and its files.
     server.ok("DELETE", "/contexts/sake", None);
-    assert_eq!(server.ok("GET", "/contexts", None), json!([]));
+    assert_eq!(server.ok("GET", "/contexts", None)["total"], json!(0));
+    let (status, _) = server.call("GET", "/contexts/sake", None);
+    assert_eq!(status, 404);
 }
 
 #[test]
@@ -463,7 +471,7 @@ fn an_association_batch_over_the_cap_is_rejected_before_any_write() {
 
     // The guard ran before the write lock: nothing was applied.
     let directory = server.ok("GET", "/contexts", None);
-    assert_eq!(directory[0]["stats"]["associations"], json!(0));
+    assert_eq!(directory["contexts"][0]["stats"]["associations"], json!(0));
 }
 
 #[test]
@@ -493,7 +501,7 @@ fn an_insane_weight_is_rejected_before_any_write() {
     // Refused whole, before the write lock: not even the sane first
     // item landed.
     let directory = server.ok("GET", "/contexts", None);
-    assert_eq!(directory[0]["stats"]["associations"], json!(0));
+    assert_eq!(directory["contexts"][0]["stats"]["associations"], json!(0));
 
     // The documented boundary stays usable, negation included.
     server.ok(
@@ -504,6 +512,45 @@ fn an_insane_weight_is_rejected_before_any_write() {
             {"subject": "a", "label": "l2", "object": "b", "weight": -1.0e6},
         ])),
     );
+}
+
+#[test]
+fn the_directory_pages_by_name_and_serves_single_contexts() {
+    let server = Server::start("dirpage");
+    for name in ["apple", "banana", "cherry"] {
+        server.ok(
+            "PUT",
+            &format!("/contexts/{name}"),
+            Some(json!({"description": name})),
+        );
+    }
+
+    let page = server.ok("GET", "/contexts?limit=2", None);
+    assert_eq!(page["total"], json!(3), "total names the full count");
+    let names: Vec<&str> = page["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["apple", "banana"], "name order, first page");
+
+    let page = server.ok("GET", "/contexts?limit=2&after=banana", None);
+    assert_eq!(page["total"], json!(3));
+    let names: Vec<&str> = page["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["cherry"], "keyset picks up after the cursor");
+
+    let single = server.ok("GET", "/contexts/banana", None);
+    assert_eq!(single["name"], json!("banana"));
+    assert_eq!(single["description"], json!("banana"));
+    let (status, body) = server.call("GET", "/contexts/nope", None);
+    assert_eq!(status, 404);
+    assert_eq!(body["status"], json!("error"));
 }
 
 #[test]
@@ -522,8 +569,11 @@ fn a_present_body_is_parsed_whatever_the_content_type_says() {
     );
     assert_eq!(status, 200, "{body}");
     let directory = server.ok("GET", "/contexts", None);
-    assert_eq!(directory[0]["description"], json!("青嶺酒造の記憶"));
-    assert_eq!(directory[0]["pinned"], json!(true));
+    assert_eq!(
+        directory["contexts"][0]["description"],
+        json!("青嶺酒造の記憶")
+    );
+    assert_eq!(directory["contexts"][0]["pinned"], json!(true));
 
     // A present body that is not JSON is an error, never defaults.
     let (status, body) =
@@ -660,7 +710,7 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
 
     // Nothing landed anywhere.
     let directory = server.ok("GET", "/contexts", None);
-    assert_eq!(directory[0]["stats"]["associations"], json!(0));
+    assert_eq!(directory["contexts"][0]["stats"]["associations"], json!(0));
 
     // The boundary itself stays usable.
     server.ok(
@@ -983,8 +1033,11 @@ fn data_survives_a_graceful_restart() {
     let data_dir = server.stop_gracefully();
     let server = Server::start_on("restart2", data_dir);
     let directory = server.ok("GET", "/contexts", None);
-    assert_eq!(directory[0]["name"], json!("sake"));
-    assert_eq!(directory[0]["description"], json!("再起動テスト"));
+    assert_eq!(directory["contexts"][0]["name"], json!("sake"));
+    assert_eq!(
+        directory["contexts"][0]["description"],
+        json!("再起動テスト")
+    );
     let recalled = server.ok(
         "POST",
         "/contexts/sake/recall",
