@@ -1,0 +1,8 @@
+# The build needs exactly what the Dockerfile COPYs; whitelist it so
+# the context stays kilobytes (target/ and data/ would otherwise ship
+# gigabytes to the daemon).
+*
+!Cargo.toml
+!Cargo.lock
+!src
+!docs

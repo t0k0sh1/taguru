@@ -107,6 +107,38 @@ cargo run --release
 #                     provider round trip cannot be preempted mid-call)
 ```
 
+### Docker
+
+The published image is the server alone on `scratch`: a ~13 MB static
+binary — no shell, no libc, no CA bundle (TLS roots are compiled in),
+nothing to patch or scan.
+
+```sh
+docker run -d --name taguru \
+  -p 127.0.0.1:8248:8248 \
+  -v taguru-data:/data \
+  ghcr.io/t0k0sh1/taguru:latest
+```
+
+Inside the container the server binds 0.0.0.0 (loopback would be
+unreachable through `-p`), so UNAUTHENTICATED mode reaches as far as
+the port is published — keep `-p` scoped to `127.0.0.1`, or set
+`TAGURU_API_TOKEN`. Configuration is the same environment variables
+(`-e`, or `--env-file taguru.env` — the very file `--config` reads).
+The process runs as uid 65532: a named volume inherits that ownership
+automatically, a bind mount needs `chown -R 65532` first (or run with
+`--user "$(id -u)"`). `--read-only` works (/data is the only write
+target), `docker stop` is a graceful shutdown (flush + usage sweep),
+and the built-in HEALTHCHECK is `taguru health` — the binary probing
+itself. Backups verify without a local toolchain:
+
+```sh
+docker run --rm -v taguru-data:/data ghcr.io/t0k0sh1/taguru inspect /data
+```
+
+`docker build -t taguru .` builds the same image locally; releases
+publish linux/amd64 + linux/arm64 to GHCR on version tags.
+
 Observability: every request lands in the access log, and
 `GET /metrics` serves Prometheus text — per-route request counts and
 latency histograms, cache/flush/WAL/embedding outcomes, a 500-cause
