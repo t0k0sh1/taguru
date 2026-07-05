@@ -104,7 +104,9 @@ them up together, never partially. Every writer is fsync + rename, so
 a filesystem-level point-in-time snapshot (ZFS/Btrfs/LVM) of the data
 directory is safe at any moment; a file-by-file copy of a *running*
 server (plain `rsync`/`cp`) is not guaranteed consistent across files
-— stop the server or use a real snapshot.
+— stop the server or use a real snapshot. `POST /flush` persists every
+dirty context on demand (and answers with their names), so images are
+current before the snapshot is taken.
 
 ```sh
 curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \

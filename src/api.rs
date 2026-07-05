@@ -197,6 +197,15 @@ pub async fn list_contexts(
     ok(ContextPage { total, contexts }, started_at)
 }
 
+/// POST /flush: persist every dirty context NOW and answer with the
+/// names that flushed — the quiescing move before a file-level backup,
+/// instead of "stop the server or wait out the flush interval".
+pub async fn flush_all(State(state): State<AppState>) -> Response {
+    let started_at = Instant::now();
+    let flushed = tokio::task::block_in_place(|| state.flush_dirty());
+    ok(flushed, started_at)
+}
+
 /// One directory row by name — the cheap existence-and-stats check,
 /// without listing anything else.
 pub async fn get_context(State(state): State<AppState>, Path(name): Path<String>) -> Response {

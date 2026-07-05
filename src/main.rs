@@ -127,6 +127,7 @@ async fn main() {
         .route("/health", get(metrics::health))
         .route("/metrics", get(metrics::render))
         .route("/protocol", get(api::protocol))
+        .route("/flush", post(api::flush_all))
         .route("/contexts", get(api::list_contexts))
         .route(
             "/contexts/{name}",

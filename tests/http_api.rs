@@ -813,6 +813,24 @@ fn explore_pages_and_keeps_the_closest_past_the_limit() {
 }
 
 #[test]
+fn post_flush_persists_dirty_contexts_on_demand() {
+    // The periodic flusher is effectively off: the endpoint is the
+    // only thing that can move the image.
+    let server = Server::start_with_env("forceflush", &[("TAGURU_FLUSH_SECS", "3600")]);
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([{"subject": "a", "label": "l", "object": "b", "weight": 1.0}])),
+    );
+
+    let flushed = server.ok("POST", "/flush", None);
+    assert_eq!(flushed, json!(["sake"]), "the dirty context must flush");
+    // Nothing left dirty: an immediate second call is a no-op.
+    assert_eq!(server.ok("POST", "/flush", None), json!([]));
+}
+
+#[test]
 fn the_wal_cap_env_refuses_writes_rather_than_growing_forever() {
     // Flushes effectively never run, so the log can only grow; a
     // 1-byte cap trips on the second write.
