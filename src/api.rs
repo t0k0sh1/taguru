@@ -122,6 +122,22 @@ pub async fn create_context(
 ) -> Response {
     let started_at = Instant::now();
     let Json(request) = body.unwrap_or_default();
+    if let Some(refusal) = oversized(
+        "the context name",
+        &name,
+        MAX_CONTEXT_NAME_BYTES,
+        started_at,
+    ) {
+        return refusal;
+    }
+    if let Some(refusal) = oversized(
+        "the description",
+        &request.description,
+        MAX_DESCRIPTION_BYTES,
+        started_at,
+    ) {
+        return refusal;
+    }
     let meta = ContextMeta {
         description: request.description,
         pinned: request.pinned,
@@ -157,6 +173,16 @@ pub async fn update_context(
     Json(request): Json<UpdateContextRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(description) = &request.description
+        && let Some(refusal) = oversized(
+            "the description",
+            description,
+            MAX_DESCRIPTION_BYTES,
+            started_at,
+        )
+    {
+        return refusal;
+    }
     match state.update_meta(
         &name,
         request.description,
@@ -225,6 +251,23 @@ pub async fn add_associations(
                 started_at,
             );
         }
+        // And a name the graph must never intern — see MAX_NAME_BYTES.
+        let source = op.source.as_deref().unwrap_or("");
+        for (field, value) in [
+            ("subject", op.subject.as_str()),
+            ("label", op.label.as_str()),
+            ("object", op.object.as_str()),
+            ("source", source),
+        ] {
+            if let Some(refusal) = oversized(
+                &format!("associations[{index}].{field}"),
+                value,
+                MAX_NAME_BYTES,
+                started_at,
+            ) {
+                return refusal;
+            }
+        }
     }
     let total = associations.len();
     match state.add_associations(&name, associations) {
@@ -269,6 +312,40 @@ const MAX_ASSOCIATIONS_PER_REQUEST: usize = 10_000;
 /// unreadable, unresettable fact. At ±1e6 per op, saturating would
 /// take ~1.8e302 acknowledged writes.
 const MAX_ASSOCIATION_WEIGHT: f64 = 1e6;
+
+/// Byte cap on every name-shaped write: subject/label/object, source
+/// ids, aliases. Names are entry keys, not documents — the graph
+/// interns every distinct spelling forever, and the top-concepts
+/// snapshot carries them into every directory listing (one 4 MB
+/// subject made every GET /contexts response 4 MB, resident outside
+/// the cache budget).
+const MAX_NAME_BYTES: usize = 1024;
+
+/// Byte cap on a context name: it becomes a file stem, percent-encoded
+/// at up to 3× — 64 bytes keeps the longest sidecar filename well
+/// under every filesystem's 255-byte limit.
+const MAX_CONTEXT_NAME_BYTES: usize = 64;
+
+/// Byte cap on a context description — it too rides in every
+/// directory listing.
+const MAX_DESCRIPTION_BYTES: usize = 4096;
+
+/// The one gate every persisted name goes through: `Some(400)` when
+/// `value` runs over `cap`, with `what` naming the offender precisely
+/// enough to fix the request. The value itself is never echoed — it
+/// is the oversized thing.
+fn oversized(what: &str, value: &str, cap: usize, started_at: Instant) -> Option<Response> {
+    (value.len() > cap).then(|| {
+        error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{what} is {} bytes, over the {cap}-byte cap; nothing was applied",
+                value.len()
+            ),
+            started_at,
+        )
+    })
+}
 
 /// The one clamp every numeric cap in this file goes through: an
 /// omitted value takes the default, and nothing exceeds the ceiling.
@@ -341,6 +418,22 @@ pub async fn add_aliases(
     Json(request): Json<AliasRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    // Aliases intern names on both sides; the same cap as every other
+    // name-shaped write.
+    for (namespace, pairs) in [("concepts", &request.concepts), ("labels", &request.labels)] {
+        for (alias, canonical) in pairs {
+            for (role, value) in [("alias", alias.as_str()), ("canonical", canonical.as_str())] {
+                if let Some(refusal) = oversized(
+                    &format!("a {namespace} {role}"),
+                    value,
+                    MAX_NAME_BYTES,
+                    started_at,
+                ) {
+                    return refusal;
+                }
+            }
+        }
+    }
     match state.add_aliases(&name, &request.concepts, &request.labels) {
         Err(failure) => access_error(failure, &name, started_at),
         Ok(Ok(applied)) => ok(applied, started_at),
@@ -394,6 +487,14 @@ pub async fn store_passages(
     Json(request): Json<StorePassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    // Source ids are names (the passage text itself is a document and
+    // rides under the body cap instead).
+    for source in request.passages.keys() {
+        if let Some(refusal) = oversized("a passage source id", source, MAX_NAME_BYTES, started_at)
+        {
+            return refusal;
+        }
+    }
     match state.store_passages(&name, request.passages) {
         None => not_found(&name, started_at),
         Some(Ok(stored)) => ok(stored, started_at),

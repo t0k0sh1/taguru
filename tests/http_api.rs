@@ -478,6 +478,84 @@ fn an_insane_weight_is_rejected_before_any_write() {
 }
 
 #[test]
+fn oversized_names_are_rejected_at_every_write_boundary() {
+    let server = Server::start("namecap");
+    let long = "字".repeat(400); // 1200 bytes, over the 1024-byte name cap
+
+    // A context name becomes a file stem (percent-encoded ×3): 64
+    // bytes is the cap.
+    let (status, body) = server.call(
+        "PUT",
+        &format!("/contexts/{}", "n".repeat(65)),
+        Some(json!({})),
+    );
+    assert_eq!(status, 400, "{body}");
+
+    // The description rides in every directory listing.
+    let (status, body) = server.call(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "d".repeat(5000)})),
+    );
+    assert_eq!(status, 400, "{body}");
+
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    let (status, body) = server.call(
+        "PATCH",
+        "/contexts/sake",
+        Some(json!({"description": "d".repeat(5000)})),
+    );
+    assert_eq!(status, 400, "{body}");
+
+    // Graph names: the top-concepts snapshot carries them into every
+    // GET /contexts response, far outside the cache budget.
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([{"subject": long, "label": "l", "object": "o", "weight": 1.0}])),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("associations[0].subject"),
+        "the message must point at the offending field: {body}"
+    );
+
+    // Aliases and passage source ids persist names too.
+    let mut concepts = serde_json::Map::new();
+    concepts.insert(long.clone(), json!("x"));
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/aliases",
+        Some(json!({"concepts": concepts, "labels": {}})),
+    );
+    assert_eq!(status, 400, "{body}");
+    let mut passages = serde_json::Map::new();
+    passages.insert(long.clone(), json!("原文"));
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": passages})),
+    );
+    assert_eq!(status, 400, "{body}");
+
+    // Nothing landed anywhere.
+    let directory = server.ok("GET", "/contexts", None);
+    assert_eq!(directory[0]["stats"]["associations"], json!(0));
+
+    // The boundary itself stays usable.
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([{
+            "subject": "s".repeat(1024), "label": "l", "object": "o", "weight": 1.0
+        }])),
+    );
+}
+
+#[test]
 fn unreachable_from_pages_like_recall_and_query() {
     let server = Server::start("orphanpage");
     server.ok("PUT", "/contexts/sake", Some(json!({})));
