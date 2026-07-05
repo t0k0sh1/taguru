@@ -6,6 +6,7 @@
 //! Exit codes: 0 success · 1 operation failure (corruption found,
 //! server error) · 2 usage error.
 
+use std::path::{Path, PathBuf};
 use std::process::exit;
 
 const USAGE: &str = concat!(
@@ -14,9 +15,15 @@ const USAGE: &str = concat!(
     " — long-term semantic memory for LLMs
 
 USAGE:
-  taguru [serve]                        start the HTTP server (the default)
+  taguru [serve] [--config FILE]        start the HTTP server (the default)
   taguru version                        print the version
   taguru --help                         this text
+
+CONFIGURATION FILE (--config FILE, or TAGURU_CONFIG=FILE):
+  KEY=VALUE per line, # comments and blank lines ignored — the same
+  dialect `docker run --env-file` reads, so one file serves both. Real
+  environment variables always win over the file; unknown TAGURU_*
+  keys are flagged as probable typos.
 
 ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_ADDR                  bind address (127.0.0.1:8248; port 0 = pick free)
@@ -45,7 +52,9 @@ EXIT CODES: 0 ok · 1 failure or corruption found · 2 usage error
 /// What `main` should do once the arguments are understood. Offline
 /// subcommands never return — they print and exit before any runtime,
 /// listener, or telemetry exists.
-pub struct ServeArgs {}
+pub struct ServeArgs {
+    pub config: Option<PathBuf>,
+}
 
 /// Parses the process arguments, running and exiting for everything
 /// except `serve`, whose settings it returns.
@@ -54,6 +63,7 @@ pub fn dispatch() -> ServeArgs {
     match args.first().map(String::as_str) {
         None => parse_serve(&[]),
         Some("serve") => parse_serve(&args[1..]),
+        Some("--config") => parse_serve(&args),
         Some("version") => {
             refuse_extras("version", &args[1..]);
             println!("taguru {}", env!("CARGO_PKG_VERSION"));
@@ -70,11 +80,17 @@ pub fn dispatch() -> ServeArgs {
     }
 }
 
-/// `serve` takes no arguments (yet — the config flag arrives with the
-/// configuration file).
+/// `serve` takes exactly one optional `--config FILE`.
 fn parse_serve(args: &[String]) -> ServeArgs {
-    if let Some(arg) = args.first() {
+    let mut config = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
         match arg.as_str() {
+            "--config" => match rest.next() {
+                Some(path) if config.is_none() => config = Some(PathBuf::from(path)),
+                Some(_) => usage_error("--config given twice"),
+                None => usage_error("--config needs a file path"),
+            },
             "--help" | "-h" => {
                 print!("{USAGE}");
                 exit(0)
@@ -82,7 +98,10 @@ fn parse_serve(args: &[String]) -> ServeArgs {
             other => usage_error(&format!("unknown argument '{other}'")),
         }
     }
-    ServeArgs {}
+    // The flag beats the variable, so a shell override works even when
+    // a container image bakes TAGURU_CONFIG in.
+    let config = config.or_else(|| std::env::var("TAGURU_CONFIG").ok().map(PathBuf::from));
+    ServeArgs { config }
 }
 
 fn refuse_extras(command: &str, extras: &[String]) {
@@ -94,4 +113,136 @@ fn refuse_extras(command: &str, extras: &[String]) {
 fn usage_error(message: &str) -> ! {
     eprintln!("taguru: {message} — try 'taguru --help'");
     exit(2)
+}
+
+/// Every variable the server reads, for typo detection: a config file
+/// is where a misspelled knob silently becomes a no-op, and unlike the
+/// shell it is worth linting.
+const KNOWN_KEYS: [&str; 16] = [
+    "TAGURU_ADDR",
+    "TAGURU_DATA_DIR",
+    "TAGURU_CACHE_BYTES",
+    "TAGURU_FLUSH_SECS",
+    "TAGURU_WAL",
+    "TAGURU_WAL_MAX_BYTES",
+    "TAGURU_API_TOKEN",
+    "TAGURU_MAX_BODY_BYTES",
+    "TAGURU_REQUEST_TIMEOUT_SECS",
+    "TAGURU_EMBED_URL",
+    "TAGURU_EMBED_MODEL",
+    "TAGURU_EMBED_API_KEY",
+    "TAGURU_EMBED_AUTO",
+    "TAGURU_LOG_FORMAT",
+    "TAGURU_LOG_SEARCHES",
+    "TAGURU_CONFIG",
+];
+
+/// Reads a configuration file into the process environment. Exits with
+/// a usage error on an unreadable file or a malformed line — a config
+/// the operator pointed at explicitly must never be half-applied.
+///
+/// Call this before the async runtime exists: applying the file means
+/// `std::env::set_var`, which is only sound while the process is
+/// single-threaded.
+pub fn load_config(path: &Path) {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => usage_error(&format!("cannot read config {}: {error}", path.display())),
+    };
+    let pairs = match parse_config(&text) {
+        Ok(pairs) => pairs,
+        Err(message) => usage_error(&format!("config {}: {message}", path.display())),
+    };
+    for (key, value) in pairs {
+        if key.starts_with("TAGURU_") && !KNOWN_KEYS.contains(&key.as_str()) {
+            eprintln!("taguru: config: {key} is not a variable taguru reads (typo?)");
+        }
+        // The real environment wins: a `docker run -e` or shell export
+        // must override the file, exactly as it overrides an image's
+        // baked-in defaults.
+        if std::env::var_os(&key).is_some() {
+            eprintln!("taguru: config: {key} set in the environment; the file value is ignored");
+            continue;
+        }
+        // SAFETY: the caller runs this before the tokio runtime (or
+        // any other thread) starts, so no concurrent environment
+        // access exists.
+        unsafe { std::env::set_var(&key, &value) };
+    }
+}
+
+/// The `docker run --env-file` dialect: one KEY=VALUE per line, `#`
+/// comments and blank lines ignored, values taken verbatim (no quoting
+/// or expansion). Returned in file order.
+fn parse_config(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut pairs = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!(
+                "line {}: expected KEY=VALUE, got '{raw}'",
+                index + 1
+            ));
+        };
+        let key = key.trim();
+        if key.is_empty() || key.contains(char::is_whitespace) {
+            return Err(format!(
+                "line {}: '{key}' is not a variable name",
+                index + 1
+            ));
+        }
+        pairs.push((key.to_string(), value.to_string()));
+    }
+    Ok(pairs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_lines_parse_the_env_file_dialect() {
+        let text =
+            "# comment\n\nTAGURU_ADDR=127.0.0.1:0\nTAGURU_API_TOKEN=a=b=c\n  TAGURU_WAL=1  \n";
+        let pairs = parse_config(text).unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                ("TAGURU_ADDR".to_string(), "127.0.0.1:0".to_string()),
+                // The first '=' splits; the value keeps the rest verbatim.
+                ("TAGURU_API_TOKEN".to_string(), "a=b=c".to_string()),
+                ("TAGURU_WAL".to_string(), "1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn config_lines_without_a_separator_are_refused_with_the_line_number() {
+        let error = parse_config("TAGURU_WAL=1\nnot a pair\n").unwrap_err();
+        assert!(error.contains("line 2"), "{error}");
+    }
+
+    #[test]
+    fn config_keys_with_spaces_are_refused() {
+        let error = parse_config("TAGURU WAL=1\n").unwrap_err();
+        assert!(error.contains("line 1"), "{error}");
+    }
+
+    #[test]
+    fn every_documented_variable_is_a_known_key() {
+        // The usage text and the typo lint must agree: a variable
+        // documented in --help but missing from KNOWN_KEYS would warn
+        // on a perfectly valid config.
+        for line in USAGE.lines() {
+            let Some(name) = line.split_whitespace().next() else {
+                continue;
+            };
+            if name.starts_with("TAGURU_") {
+                assert!(KNOWN_KEYS.contains(&name), "{name} missing from KNOWN_KEYS");
+            }
+        }
+    }
 }

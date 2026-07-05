@@ -49,6 +49,12 @@ playbook for clients itself: `GET /protocol` (the content of
 
 ```sh
 cargo run --release
+# Same knobs from a file: `taguru --config taguru.env` (or
+# TAGURU_CONFIG=taguru.env) reads KEY=VALUE lines — the exact dialect
+# `docker run --env-file` accepts, so ONE file drives both. Real
+# environment variables win over the file, and unknown TAGURU_* keys
+# in it are flagged as probable typos. `taguru --help` lists every
+# variable; `taguru version` prints the version.
 # Environment:
 #   TAGURU_ADDR         bind address (default 127.0.0.1:8248 — "TAGU" on a
 #                     phone keypad, chosen to avoid the defaults of likely

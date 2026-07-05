@@ -1,8 +1,11 @@
 //! CLI integration tests: the real binary, real arguments, real exit
 //! codes. The serve default is pinned by every test in http_api.rs;
-//! this file covers everything that must NOT start a server.
+//! this file covers everything that must NOT start a server, plus the
+//! configuration file.
 
-use std::process::{Command, Output};
+use std::io::{BufRead, BufReader, Read};
+use std::path::PathBuf;
+use std::process::{Command, Output, Stdio};
 
 fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_taguru"))
@@ -10,6 +13,67 @@ fn run(args: &[&str]) -> Output {
         .env_remove("TAGURU_CONFIG")
         .output()
         .expect("binary must run")
+}
+
+/// A scratch directory holding a config file (and doubling as the data
+/// directory the file points at). Removed by the caller.
+fn write_config(tag: &str, lines: &str) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("taguru-cli-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let config = dir.join("taguru.env");
+    let data_dir = dir.join("data");
+    let text = format!("TAGURU_DATA_DIR={}\n{lines}", data_dir.display());
+    std::fs::write(&config, text).expect("config must be writable");
+    (dir, config)
+}
+
+/// Spawns `taguru --config <file>` with a scrubbed environment plus
+/// `extra_env`, waits for the listen line (proof the file supplied the
+/// address), then stops it and returns the whole stderr.
+fn serve_with_config(config: &std::path::Path, extra_env: &[(&str, &str)]) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    command
+        .args(["--config", &config.display().to_string()])
+        .env_remove("TAGURU_ADDR")
+        .env_remove("TAGURU_DATA_DIR")
+        .env_remove("TAGURU_EMBED_URL")
+        .env_remove("TAGURU_API_TOKEN")
+        .env_remove("TAGURU_CONFIG")
+        .env_remove("TAGURU_LOG_SEARCHES")
+        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_PROTOCOL");
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("server must spawn");
+
+    let stdout = child.stdout.take().expect("stdout must be piped");
+    let mut lines = BufReader::new(stdout).lines();
+    loop {
+        let line = lines
+            .next()
+            .expect("server must reach its listen line")
+            .expect("stdout must be readable");
+        if line.starts_with("listening on ") {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr must be piped")
+        .read_to_string(&mut stderr)
+        .expect("stderr must be readable");
+    stderr
 }
 
 #[test]
@@ -55,4 +119,90 @@ fn an_unknown_argument_is_refused_with_a_usage_exit() {
 fn version_refuses_trailing_arguments() {
     let output = run(&["version", "extra"]);
     assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn a_config_file_supplies_what_the_environment_lacks() {
+    // TAGURU_ADDR and TAGURU_DATA_DIR come ONLY from the file; the
+    // server reaching its listen line proves both were applied.
+    let (dir, config) = write_config("supplies", "TAGURU_ADDR=127.0.0.1:0\n");
+    serve_with_config(&config, &[]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_real_environment_beats_the_config_file() {
+    // The file names an unbindable address (port 1); the environment
+    // overrides it with a working one. Reaching the listen line proves
+    // the environment won — and the notice says so.
+    let (dir, config) = write_config("envwins", "TAGURU_ADDR=127.0.0.1:1\n");
+    let stderr = serve_with_config(&config, &[("TAGURU_ADDR", "127.0.0.1:0")]);
+    assert!(
+        stderr.contains("TAGURU_ADDR set in the environment"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_unknown_taguru_key_in_the_config_is_flagged_as_a_typo() {
+    let (dir, config) = write_config(
+        "typo",
+        "TAGURU_ADDR=127.0.0.1:0\nTAGURU_CAHCE_BYTES=1048576\n",
+    );
+    let stderr = serve_with_config(&config, &[]);
+    assert!(
+        stderr.contains("TAGURU_CAHCE_BYTES is not a variable taguru reads"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_malformed_config_line_refuses_to_boot() {
+    let (dir, config) = write_config("malformed", "not a pair\n");
+    let output = run(&["--config", &config.display().to_string()]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("line 2"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_missing_config_file_refuses_to_boot() {
+    let output = run(&["--config", "/nonexistent/taguru.env"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot read config"), "{stderr}");
+}
+
+#[test]
+fn taguru_config_variable_names_the_file_too() {
+    let (dir, config) = write_config("viaenv", "TAGURU_ADDR=127.0.0.1:0\n");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    command
+        .env_remove("TAGURU_ADDR")
+        .env_remove("TAGURU_DATA_DIR")
+        .env_remove("TAGURU_EMBED_URL")
+        .env_remove("TAGURU_API_TOKEN")
+        .env("TAGURU_CONFIG", &config);
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("server must spawn");
+    let stdout = child.stdout.take().expect("stdout must be piped");
+    let mut lines = BufReader::new(stdout).lines();
+    loop {
+        let line = lines
+            .next()
+            .expect("server must reach its listen line")
+            .expect("stdout must be readable");
+        if line.starts_with("listening on ") {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
 }

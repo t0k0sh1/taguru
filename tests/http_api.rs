@@ -50,7 +50,9 @@ impl Server {
             .env_remove("OTEL_EXPORTER_OTLP_PROTOCOL")
             // Content-free logs unless a test opts in, whatever the
             // developer shell says.
-            .env_remove("TAGURU_LOG_SEARCHES");
+            .env_remove("TAGURU_LOG_SEARCHES")
+            // And no config file from the developer shell either.
+            .env_remove("TAGURU_CONFIG");
         for (key, value) in extra_env {
             command.env(key, value);
         }
@@ -1469,7 +1471,8 @@ fn json_log_session(tag: &str, extra_env: &[(&str, &str)], drive: impl FnOnce(&s
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_PROTOCOL")
-        .env_remove("TAGURU_LOG_SEARCHES");
+        .env_remove("TAGURU_LOG_SEARCHES")
+        .env_remove("TAGURU_CONFIG");
     for (key, value) in extra_env {
         command.env(key, value);
     }

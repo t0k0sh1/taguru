@@ -19,7 +19,9 @@ use registry::AppState;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
-/// Configuration comes from the environment:
+/// Configuration comes from the environment — or from a KEY=VALUE file
+/// (`--config FILE` / `TAGURU_CONFIG=FILE`, the `docker --env-file`
+/// dialect; real environment variables win over the file):
 /// - `TAGURU_DATA_DIR`: where context images and sidecars live (default
 ///   `data`). Disk is the source of truth; memory is a cache over it.
 /// - `TAGURU_CACHE_BYTES`: resident budget for unpinned loaded contexts
@@ -53,11 +55,18 @@ fn main() {
     // telemetry exists: `taguru version` and friends must never start
     // a server (`--help` used to).
     let serve_args = cli::dispatch();
-    serve(serve_args);
+    // The config file becomes environment variables HERE, while the
+    // process is still single-threaded (set_var's soundness condition)
+    // and before init_telemetry reads RUST_LOG/OTEL_* — file values
+    // must steer those too.
+    if let Some(path) = &serve_args.config {
+        cli::load_config(path);
+    }
+    serve();
 }
 
 #[tokio::main]
-async fn serve(_args: cli::ServeArgs) {
+async fn serve() {
     // The subscriber must exist before anything can log — the
     // env_number warnings just below would otherwise be dropped
     // silently (tracing has no default subscriber and no buffering).
