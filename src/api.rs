@@ -464,16 +464,22 @@ pub async fn audit_vocabulary(
     let dice_floor = request.dice_floor.unwrap_or(0.6);
     let cosine_floor = request.cosine_floor.unwrap_or(0.6);
 
-    let lexical = match state.read_context(&name, |context| {
-        (
-            context.similar_concepts(dice_floor),
-            context.similar_labels(dice_floor),
-        )
+    // BOTH halves are CPU-bound pairwise sweeps — the lexical one is
+    // O(Σ posting_len²) over the whole vocabulary, seconds at tens of
+    // thousands of concepts. Neither may run on an async worker: with
+    // the lexical half inline, a handful of concurrent audits pinned
+    // every worker and starved every other request, /health included.
+    let lexical = match tokio::task::block_in_place(|| {
+        state.read_context(&name, |context| {
+            (
+                context.similar_concepts(dice_floor),
+                context.similar_labels(dice_floor),
+            )
+        })
     }) {
         Ok(lexical) => lexical,
         Err(failure) => return access_error(failure, &name, started_at),
     };
-    // The pairwise sweep is CPU-bound; keep the runtime's workers free.
     let semantic = tokio::task::block_in_place(|| state.semantic_twins(&name, cosine_floor));
     let Some((semantic_concepts, semantic_labels, semantic_note)) = semantic else {
         return not_found(&name, started_at);
