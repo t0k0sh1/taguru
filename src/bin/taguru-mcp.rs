@@ -32,17 +32,36 @@ fn main() {
         // an immediate stderr clue, not a 401 on the first tool call.
         eprintln!("taguru-mcp: TAGURU_API_TOKEN not set; requests go out without credentials");
     }
+    // The bridge must outlast the server's own request budget (default
+    // 30s, above 60s with embeddings configured), or the agent sees a
+    // raw transport error instead of the server's 408 in the error
+    // shape. 75s clears both defaults; TAGURU_MCP_TIMEOUT_SECS adjusts
+    // it alongside a raised TAGURU_REQUEST_TIMEOUT_SECS.
+    let timeout_secs = std::env::var("TAGURU_MCP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(75);
     let bridge = Bridge {
         base: base.trim_end_matches('/').to_string(),
         token,
         agent: ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(timeout_secs))
             .build(),
     };
 
     let instructions = bridge
         .call("GET", "/protocol", None)
-        .unwrap_or_else(|_| FALLBACK_INSTRUCTIONS.to_string());
+        .unwrap_or_else(|error| {
+            // The bundled copy keeps the agent functional, but a dead or
+            // misaddressed server should not be discovered one failed tool
+            // call at a time.
+            eprintln!(
+                "taguru-mcp: GET /protocol failed ({error}); serving the bundled copy — \
+             is the server up at {}?",
+                bridge.base
+            );
+            FALLBACK_INSTRUCTIONS.to_string()
+        });
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -269,6 +288,11 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "list_sources",
+            "原文が登録済みの source id 一覧。retract_source や lookup_passages の対象確認、差分同期の棚卸しに。",
+            object_schema(json!({ "context": context }), &["context"]),
+        ),
+        (
             "resolve",
             "自由な言い回しを格納済みの概念名に解決する (正規化+誤字も吸収)。検索の入口: explore/activate の origins はここで得た正準名を使う。空なら言い換えるか dice_floor を下げて (例 0.2) 再試行。",
             object_schema(
@@ -490,6 +514,7 @@ fn route_tool(
             format!("{}/sources/lookup", context_path("context")?),
             Some(pick(arguments, &["sources"])),
         ),
+        "list_sources" => ("GET", format!("{}/sources", context_path("context")?), None),
         "resolve" => (
             "POST",
             format!("{}/resolve", context_path("context")?),
