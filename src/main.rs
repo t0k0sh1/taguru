@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod cli;
 mod embedding;
 mod limits;
 mod metrics;
@@ -47,8 +48,16 @@ use tracing::{info, warn};
 ///   inbound `traceparent` or `X-Amzn-Trace-Id`, `trace_id` stamped
 ///   into the access log. The other standard `OTEL_*` variables
 ///   (service name, headers, batch cadence) apply. Unset: no tracing.
+fn main() {
+    // Argument handling runs before ANY runtime, listener, or
+    // telemetry exists: `taguru version` and friends must never start
+    // a server (`--help` used to).
+    let serve_args = cli::dispatch();
+    serve(serve_args);
+}
+
 #[tokio::main]
-async fn main() {
+async fn serve(_args: cli::ServeArgs) {
     // The subscriber must exist before anything can log — the
     // env_number warnings just below would otherwise be dropped
     // silently (tracing has no default subscriber and no buffering).
