@@ -99,8 +99,19 @@ cargo run --release
 Observability: every request lands in the access log, and
 `GET /metrics` serves Prometheus text — per-route request counts and
 latency histograms, cache/flush/WAL/embedding outcomes, a 500-cause
-breakdown (`taguru_errors_total{kind=...}`), residency and
-WAL-size gauges, and the last-successful-flush timestamp.
+breakdown (`taguru_errors_total{kind=...}`), retrieval hit/empty
+counts per operation (`taguru_searches_total`) with a resolve-tier
+split (`taguru_resolves_total` — a rising `semantic` share means cues
+are drifting from the stored vocabulary), residency and WAL-size
+gauges, and the last-successful-flush timestamp. Per-context numbers
+deliberately stay OUT of the metric labels (context names are
+client-minted, so they would mint unbounded series): the routing
+directory (`GET /contexts`) carries them instead — usage counters
+beside the graph stats (reads, empty reads, writes, last-read/write
+times), separating contexts nobody chooses from contexts that get
+chosen but answer nothing. Usage counters are advisory: they persist
+with each image flush and once at graceful shutdown, so a crash loses
+the tail; reads never cause disk writes.
 Distributed tracing is opt-in: with `OTEL_EXPORTER_OTLP_ENDPOINT` set,
 every request becomes an OTLP span that joins the trace an inbound
 W3C `traceparent` or AWS `X-Amzn-Trace-Id` (ALB / API Gateway)

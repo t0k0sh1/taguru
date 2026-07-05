@@ -423,17 +423,25 @@ pub async fn add_associations(
     let total = associations.len();
     match state.add_associations(&name, associations) {
         Err(failure) => access_error(&state, failure, &name, started_at),
-        Ok(Ok(applied)) => ok(applied, started_at),
+        Ok(Ok(applied)) => {
+            state.note_write(&name);
+            ok(applied, started_at)
+        }
         // Items before the failing one are applied (each item is
         // all-or-nothing in the library); report how far the batch got.
-        Ok(Err(partial)) => error(
-            StatusCode::INSUFFICIENT_STORAGE,
-            format!(
-                "applied {} of {total} associations, then: {}",
-                partial.applied, partial.message
-            ),
-            started_at,
-        ),
+        Ok(Err(partial)) => {
+            if partial.applied > 0 {
+                state.note_write(&name);
+            }
+            error(
+                StatusCode::INSUFFICIENT_STORAGE,
+                format!(
+                    "applied {} of {total} associations, then: {}",
+                    partial.applied, partial.message
+                ),
+                started_at,
+            )
+        }
     }
 }
 
@@ -610,8 +618,14 @@ pub async fn add_aliases(
     }
     match state.add_aliases(&name, &request.concepts, &request.labels) {
         Err(failure) => access_error(&state, failure, &name, started_at),
-        Ok(Ok(applied)) => ok(applied, started_at),
+        Ok(Ok(applied)) => {
+            state.note_write(&name);
+            ok(applied, started_at)
+        }
         Ok(Err(partial)) => {
+            if partial.applied > 0 {
+                state.note_write(&name);
+            }
             let status = if partial.full {
                 StatusCode::INSUFFICIENT_STORAGE
             } else {
@@ -671,7 +685,10 @@ pub async fn store_passages(
     }
     match state.store_passages(&name, request.passages) {
         None => not_found(&name, started_at),
-        Some(Ok(stored)) => ok(stored, started_at),
+        Some(Ok(stored)) => {
+            state.note_write(&name);
+            ok(stored, started_at)
+        }
         Some(Err(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
@@ -705,7 +722,10 @@ pub async fn lookup_passages(
     let started_at = Instant::now();
     match state.lookup_passages(&name, &request.sources) {
         None => not_found(&name, started_at),
-        Some((passages, missing)) => ok(PassageLookup { passages, missing }, started_at),
+        Some((passages, missing)) => {
+            state.note_read(&name, passages.is_empty());
+            ok(PassageLookup { passages, missing }, started_at)
+        }
     }
 }
 
@@ -822,13 +842,20 @@ pub async fn retract_source(
     let started_at = Instant::now();
     match state.retract_source(&name, &request.source) {
         Err(failure) => access_error(&state, failure, &name, started_at),
-        Ok((associations_touched, passage_removed)) => ok(
-            RetractOutcome {
-                associations_touched,
-                passage_removed,
-            },
-            started_at,
-        ),
+        Ok((associations_touched, passage_removed)) => {
+            // A retraction that found nothing changed nothing; only an
+            // effective one counts as a write.
+            if associations_touched > 0 || passage_removed {
+                state.note_write(&name);
+            }
+            ok(
+                RetractOutcome {
+                    associations_touched,
+                    passage_removed,
+                },
+                started_at,
+            )
+        }
     }
 }
 
@@ -861,9 +888,7 @@ pub async fn search_passages(
     ) {
         None => not_found(&name, started_at),
         Some(hits) => {
-            state
-                .metrics()
-                .record_search(SearchOp::SearchPassages, hits.is_empty());
+            state.note_search(SearchOp::SearchPassages, &name, hits.is_empty());
             ok(
                 hits.into_iter()
                     .map(|(source, score, text)| PassageHit {
@@ -894,9 +919,7 @@ pub async fn recall(
     match state.read_context(&name, |context| context.recall(&request.cue)) {
         Ok(result) => {
             let paged = page(result, request.limit);
-            state
-                .metrics()
-                .record_search(SearchOp::Recall, paged.total == 0);
+            state.note_search(SearchOp::Recall, &name, paged.total == 0);
             ok(paged, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -927,9 +950,7 @@ pub async fn query(
     }) {
         Ok(result) => {
             let paged = page(result, request.limit);
-            state
-                .metrics()
-                .record_search(SearchOp::Query, paged.total == 0);
+            state.note_search(SearchOp::Query, &name, paged.total == 0);
             ok(paged, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -952,7 +973,10 @@ pub async fn describe(
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.describe(&request.concept)) {
-        Ok(result) => ok(result, started_at),
+        Ok(result) => {
+            state.note_read(&name, result.is_none());
+            ok(result, started_at)
+        }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
@@ -1000,7 +1024,7 @@ pub async fn explore(
             // used to return them all in one body.
             let total = matches.len();
             matches.truncate(clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT));
-            state.metrics().record_search(SearchOp::Explore, total == 0);
+            state.note_search(SearchOp::Explore, &name, total == 0);
             ok(ExplorePage { total, matches }, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -1031,9 +1055,7 @@ pub async fn activate(
         )
     }) {
         Ok(result) => {
-            state
-                .metrics()
-                .record_search(SearchOp::Activate, result.is_empty());
+            state.note_search(SearchOp::Activate, &name, result.is_empty());
             ok(result, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -1158,7 +1180,7 @@ fn resolve_with_fallback(
     } else {
         SearchOp::Resolve
     };
-    state.metrics().record_search(op, served.is_empty());
+    state.note_search(op, name, served.is_empty());
     state
         .metrics()
         .record_resolve_tier(resolve_tier_of(&served));

@@ -22,8 +22,9 @@ answers back into prose are your job.
 ## Retrieval loop
 
 1. **Pick a context**: `GET /contexts` lists names, human-written
-   descriptions, and mechanical stats (association counts, top
-   concepts, label sample — these never go stale).
+   descriptions, mechanical stats (association counts, top concepts,
+   label sample — these never go stale), and usage counters (reads,
+   empty reads, writes, last-read/write unix seconds).
 2. **Resolve cues**: extract entity and relation candidates from the
    question; `resolve` (concepts) / `resolve_label` (relations). The
    entry is normalized — width, case, katakana/hiragana, light typos
@@ -172,7 +173,7 @@ Source code takes the same discipline; only the naming changes.
 
 | Method | Path | Body / returns |
 |---|---|---|
-| GET | `/contexts` | `?limit=1000&after=name` → `{total, contexts:[{name, description, pinned, loaded, dice_floor, semantic_floor, stats}]}` (keyset paging by name) |
+| GET | `/contexts` | `?limit=1000&after=name` → `{total, contexts:[{name, description, pinned, loaded, dice_floor, semantic_floor, stats, usage}]}` (keyset paging by name) |
 | GET | `/contexts/{name}` | one directory row / 404 |
 | PUT | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → create |
 | PATCH | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → update metadata |

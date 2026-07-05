@@ -204,7 +204,7 @@ fn tool_definitions() -> Vec<Value> {
     let tools = vec![
         (
             "list_contexts",
-            "Routing directory: every context's name, description, stats (counts, top concepts, label sample). Pick the search/ingest target here yourself.",
+            "Routing directory: every context's name, description, stats (counts, top concepts, label sample), and usage counters (reads/empty_reads/writes, last-used times). Pick the search/ingest target here yourself.",
             object_schema(json!({}), &[]),
         ),
         (

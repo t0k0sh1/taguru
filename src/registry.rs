@@ -115,15 +115,84 @@ impl ContextStats {
     }
 }
 
+/// Cumulative usage counters for one context — the "is this context
+/// earning its keep" numbers the directory serves. `reads` counts the
+/// retrieval operations (resolve, describe, query, activate, recall,
+/// explore, passage search/lookup), `empty_reads` the subset that
+/// matched nothing, `writes` the data mutations. The two failure modes
+/// of a memory read differently: a context nobody reads was never
+/// CHOSEN (description/routing problem), while a high empty share
+/// means it gets chosen but cannot ANSWER (coverage problem).
+///
+/// Advisory data, deliberately outside the WAL guarantee: counters
+/// live in memory and reach the sidecar when the context flushes for
+/// other reasons, plus one sweep at graceful shutdown — a crash loses
+/// the increments since then, and reads never cause disk writes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextUsage {
+    pub reads: u64,
+    pub empty_reads: u64,
+    pub writes: u64,
+    /// Unix seconds of the most recent read / write; 0 = never.
+    pub last_read_epoch: u64,
+    pub last_write_epoch: u64,
+}
+
+/// Lock-free mirror of [`ContextUsage`]: bumped on the request path
+/// with relaxed atomics — counting a read must never queue behind a
+/// writer holding the entry lock — and snapshotted for the directory
+/// and the sidecar.
+#[derive(Default)]
+struct UsageCounters {
+    reads: AtomicU64,
+    empty_reads: AtomicU64,
+    writes: AtomicU64,
+    last_read_epoch: AtomicU64,
+    last_write_epoch: AtomicU64,
+}
+
+impl UsageCounters {
+    fn seeded(usage: &ContextUsage) -> Self {
+        Self {
+            reads: AtomicU64::new(usage.reads),
+            empty_reads: AtomicU64::new(usage.empty_reads),
+            writes: AtomicU64::new(usage.writes),
+            last_read_epoch: AtomicU64::new(usage.last_read_epoch),
+            last_write_epoch: AtomicU64::new(usage.last_write_epoch),
+        }
+    }
+
+    fn snapshot(&self) -> ContextUsage {
+        ContextUsage {
+            reads: self.reads.load(Ordering::Relaxed),
+            empty_reads: self.empty_reads.load(Ordering::Relaxed),
+            writes: self.writes.load(Ordering::Relaxed),
+            last_read_epoch: self.last_read_epoch.load(Ordering::Relaxed),
+            last_write_epoch: self.last_write_epoch.load(Ordering::Relaxed),
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
 /// What `{name}.meta.json` holds: the meta inline plus the stats
 /// snapshot as of the last save, so a directory listing can describe a
-/// cold context without touching its image.
+/// cold context without touching its image. `usage` rides along under
+/// `#[serde(default)]`, so sidecars from before it existed load with
+/// zeroed counters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct MetaFile {
     #[serde(flatten)]
     meta: ContextMeta,
     stats: ContextStats,
+    usage: ContextUsage,
 }
 
 /// One row of `GET /contexts` — the routing directory an LLM client
@@ -142,6 +211,7 @@ pub struct DirectoryEntry {
     /// Per-context semantic floor; null means the default (0.35).
     pub semantic_floor: Option<f32>,
     pub stats: ContextStats,
+    pub usage: ContextUsage,
 }
 
 /// Whether a context's network is resident. Cold entries keep only
@@ -171,10 +241,21 @@ pub struct Entry {
     /// by refresh, cleared by eviction, and counted against the cache
     /// budget. Lock order: `inner` before `vectors`, never the reverse.
     vectors: Mutex<Option<Arc<VectorStore>>>,
+    /// Usage counters (see [`ContextUsage`]). `usage_dirty` marks
+    /// increments the sidecar has not seen yet, so the shutdown sweep
+    /// skips the contexts nobody touched.
+    usage: UsageCounters,
+    usage_dirty: AtomicBool,
 }
 
 impl Entry {
-    fn new(meta: ContextMeta, stats: ContextStats, slot: Slot, wal_bytes: u64) -> Self {
+    fn new(
+        meta: ContextMeta,
+        stats: ContextStats,
+        slot: Slot,
+        wal_bytes: u64,
+        usage: ContextUsage,
+    ) -> Self {
         Self {
             inner: RwLock::new(EntryInner {
                 meta,
@@ -187,6 +268,8 @@ impl Entry {
             dirty: AtomicBool::new(false),
             last_touch: AtomicU64::new(0),
             vectors: Mutex::new(None),
+            usage: UsageCounters::seeded(&usage),
+            usage_dirty: AtomicBool::new(false),
         }
     }
 
@@ -403,7 +486,7 @@ impl AppState {
                 tracing::warn!("skipping {}: file name does not decode", path.display());
                 continue;
             };
-            let MetaFile { meta, stats } = read_meta_file(&data_dir, stem);
+            let MetaFile { meta, stats, usage } = read_meta_file(&data_dir, stem);
             // The gauge must see leftover logs from the first scrape,
             // not only after each context's first touch.
             let wal_bytes = fs::metadata(wal_path(&data_dir, stem))
@@ -411,7 +494,7 @@ impl AppState {
                 .unwrap_or(0);
             registry.insert(
                 name,
-                Arc::new(Entry::new(meta, stats, Slot::Cold, wal_bytes)),
+                Arc::new(Entry::new(meta, stats, Slot::Cold, wal_bytes, usage)),
             );
         }
 
@@ -453,6 +536,73 @@ impl AppState {
     /// into it, GET /metrics renders it.
     pub fn metrics(&self) -> &Metrics {
         &self.0.metrics
+    }
+
+    /// Counts one successful retrieval twice over: the aggregate
+    /// searches family (by operation) and the context's own usage row.
+    pub fn note_search(&self, op: crate::metrics::SearchOp, name: &str, empty: bool) {
+        self.0.metrics.record_search(op, empty);
+        self.note_read(name, empty);
+    }
+
+    /// Bumps a context's read counters — relaxed atomics only, so a
+    /// read is counted without ever waiting on the entry lock. Unknown
+    /// names (a delete racing the response) are silently skipped.
+    pub fn note_read(&self, name: &str, empty: bool) {
+        let Some(entry) = self.lookup(name) else {
+            return;
+        };
+        entry.usage.reads.fetch_add(1, Ordering::Relaxed);
+        if empty {
+            entry.usage.empty_reads.fetch_add(1, Ordering::Relaxed);
+        }
+        entry
+            .usage
+            .last_read_epoch
+            .store(unix_now(), Ordering::Relaxed);
+        entry.usage_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Bumps a context's write counter, same contract as
+    /// [`AppState::note_read`].
+    pub fn note_write(&self, name: &str) {
+        let Some(entry) = self.lookup(name) else {
+            return;
+        };
+        entry.usage.writes.fetch_add(1, Ordering::Relaxed);
+        entry
+            .usage
+            .last_write_epoch
+            .store(unix_now(), Ordering::Relaxed);
+        entry.usage_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Persists every usage snapshot the sidecars have not seen — the
+    /// graceful-shutdown sweep behind the crash-loss contract on
+    /// [`ContextUsage`]. Purely-read contexts never flush, so without
+    /// this their counters would evaporate on every restart. Runs
+    /// after the final [`AppState::flush_dirty`], so the stats written
+    /// beside the counters are current.
+    pub fn persist_usage(&self) {
+        for (name, entry) in self.snapshot() {
+            if !entry.usage_dirty.swap(false, Ordering::Relaxed) {
+                continue;
+            }
+            let Some(guard) = entry.lock_unless_deleted() else {
+                continue;
+            };
+            let outcome = write_meta(
+                &self.0.data_dir,
+                &file_stem(&name),
+                &guard.meta,
+                &guard.stats,
+                &entry.usage.snapshot(),
+            );
+            if let Err(error) = outcome {
+                entry.usage_dirty.store(true, Ordering::Relaxed);
+                tracing::warn!("usage counters for '{name}' not persisted: {error}");
+            }
+        }
     }
 
     /// Point-in-time gauges for a scrape, computed from the registry
@@ -534,10 +684,18 @@ impl AppState {
         let mut context = Context::default();
         context.set_dice_floor(meta.dice_floor);
         let stats = ContextStats::of(&context);
-        save_files(&self.0.data_dir, name, &meta, &stats, &context).map_err(CreateError::Io)?;
+        let usage = ContextUsage::default();
+        save_files(&self.0.data_dir, name, &meta, &stats, &usage, &context)
+            .map_err(CreateError::Io)?;
         registry.insert(
             name.to_string(),
-            Arc::new(Entry::new(meta, stats, Slot::Hot(Box::new(context)), 0)),
+            Arc::new(Entry::new(
+                meta,
+                stats,
+                Slot::Hot(Box::new(context)),
+                0,
+                usage,
+            )),
         );
         Ok(())
     }
@@ -1105,6 +1263,7 @@ impl AppState {
                 &file_stem(name),
                 &inner.meta,
                 &inner.stats,
+                &entry.usage.snapshot(),
             )
             .map(|()| inner.meta.clone())
         };
@@ -1277,8 +1436,19 @@ impl AppState {
             return false;
         };
         let inner = &mut *guard;
-        let outcome = commit_staged(&staged, &image)
-            .and_then(|()| write_meta(&self.0.data_dir, &stem, &meta, &stats));
+        // Claim the usage flag before snapshotting: an increment racing
+        // this write either lands in the snapshot or re-marks the flag —
+        // never both lost. (Advisory counters; a failed write re-marks.)
+        entry.usage_dirty.store(false, Ordering::Relaxed);
+        let outcome = commit_staged(&staged, &image).and_then(|()| {
+            write_meta(
+                &self.0.data_dir,
+                &stem,
+                &meta,
+                &stats,
+                &entry.usage.snapshot(),
+            )
+        });
         match outcome {
             Ok(()) => {
                 inner.stats = stats;
@@ -1304,6 +1474,7 @@ impl AppState {
                 tracing::warn!("flush of context '{name}' failed (will retry): {error}");
                 let _ = fs::remove_file(&staged);
                 entry.dirty.store(true, Ordering::Relaxed);
+                entry.usage_dirty.store(true, Ordering::Relaxed);
                 self.0.metrics.record_flush(false);
                 false
             }
@@ -1552,9 +1723,14 @@ impl AppState {
                 if entry.dirty.load(Ordering::Relaxed) {
                     context.set_applied_seq(watermark);
                     let stats = ContextStats::of(context);
-                    if let Err(error) =
-                        save_files(&self.0.data_dir, &name, &inner.meta, &stats, context)
-                    {
+                    if let Err(error) = save_files(
+                        &self.0.data_dir,
+                        &name,
+                        &inner.meta,
+                        &stats,
+                        &entry.usage.snapshot(),
+                        context,
+                    ) {
                         tracing::warn!(
                             "context '{name}' stays resident, eviction save failed: {error}"
                         );
@@ -1604,6 +1780,7 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
         dice_floor: inner.meta.dice_floor,
         semantic_floor: inner.meta.semantic_floor,
         stats,
+        usage: entry.usage.snapshot(),
     })
 }
 
@@ -1889,17 +2066,25 @@ fn save_files(
     name: &str,
     meta: &ContextMeta,
     stats: &ContextStats,
+    usage: &ContextUsage,
     context: &Context,
 ) -> io::Result<()> {
     let stem = file_stem(name);
     write_atomic(&image_path(dir, &stem), &context.to_bytes())?;
-    write_meta(dir, &stem, meta, stats)
+    write_meta(dir, &stem, meta, stats, usage)
 }
 
-fn write_meta(dir: &Path, stem: &str, meta: &ContextMeta, stats: &ContextStats) -> io::Result<()> {
+fn write_meta(
+    dir: &Path,
+    stem: &str,
+    meta: &ContextMeta,
+    stats: &ContextStats,
+    usage: &ContextUsage,
+) -> io::Result<()> {
     let file = MetaFile {
         meta: meta.clone(),
         stats: stats.clone(),
+        usage: usage.clone(),
     };
     write_atomic(&meta_path(dir, stem), &serde_json::to_vec_pretty(&file)?)
 }
@@ -2057,6 +2242,43 @@ mod tests {
     /// counter assertion goes through.
     fn rendered(state: &AppState) -> String {
         state.metrics().render_prometheus(&state.gauge_snapshot())
+    }
+
+    #[test]
+    fn meta_sidecar_without_usage_field_loads_with_zeroed_counters() {
+        // A sidecar written before usage counters existed.
+        let json = br#"{"description":"d","pinned":false,"stats":{"associations":3}}"#;
+        let file: MetaFile = serde_json::from_slice(json).unwrap();
+        assert_eq!(file.stats.associations, 3);
+        assert_eq!(file.usage.reads, 0);
+        assert_eq!(file.usage.last_read_epoch, 0);
+    }
+
+    #[test]
+    fn usage_notes_accumulate_and_survive_a_reboot_via_the_shutdown_sweep() {
+        let dir = scratch_dir("usage-sweep");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.note_read("sake", false);
+            state.note_read("sake", true);
+            state.note_write("sake");
+            let usage = state.directory_entry("sake").unwrap().usage;
+            assert_eq!((usage.reads, usage.empty_reads, usage.writes), (2, 1, 1));
+            assert!(usage.last_read_epoch > 0);
+            assert!(usage.last_write_epoch > 0);
+            // Nothing marked the graph dirty since create, so no flush
+            // will run: the sweep alone must put the counters on disk.
+            state.persist_usage();
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let usage = state.directory_entry("sake").unwrap().usage;
+        assert_eq!((usage.reads, usage.empty_reads, usage.writes), (2, 1, 1));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

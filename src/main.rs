@@ -250,6 +250,9 @@ async fn main() {
 
     // Nothing dirty may outlive the process: one final flush.
     tokio::task::block_in_place(|| state.flush_dirty());
+    // Usage counters skip the WAL by design; the graceful stop is
+    // where purely-read contexts get theirs onto disk.
+    tokio::task::block_in_place(|| state.persist_usage());
     info!("flushed dirty contexts on shutdown");
     // The batch worker still owns the last spans; hand them to the
     // collector before the process ends.
