@@ -188,6 +188,9 @@ are likewise driven by the agent through the tools.
 cargo test                                    # library + registry + QA goldens
 cargo test --test qa_recall -- --nocapture    # per-question recall table
 cargo run --release --example benchmark       # per-operation latency (100k/1M associations)
+taguru estimate --associations 1_000_000      # memory/disk sizing for a target corpus:
+                                              # builds a context of that shape and
+                                              # MEASURES it (latency: see benchmark)
 ```
 
 `tests/qa_recall.rs` is the retrieval-quality regression floor: 11

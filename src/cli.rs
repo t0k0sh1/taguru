@@ -20,6 +20,9 @@ USAGE:
   taguru inspect PATH                   verify a data directory or one .ctx
                                         image offline (backup check) — the
                                         same validating load the server runs
+  taguru estimate --associations N ...  size memory/disk for a target corpus
+                                        by building and measuring one
+                                        (see: taguru estimate --help)
   taguru --help                         this text
 
 CONFIGURATION FILE (--config FILE, or TAGURU_CONFIG=FILE):
@@ -77,6 +80,7 @@ pub fn dispatch() -> ServeArgs {
             exit(0)
         }
         Some("inspect") => exit(crate::inspect::run(&args[1..])),
+        Some("estimate") => exit(crate::estimate::run(&args[1..])),
         Some(other) => {
             eprintln!("taguru: unknown argument '{other}' — try 'taguru --help'");
             exit(2)

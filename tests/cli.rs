@@ -272,3 +272,32 @@ fn inspect_refuses_a_nonexistent_path() {
     let output = run(&["inspect", "/nonexistent/data"]);
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn estimate_reports_memory_and_disk_for_a_target_shape() {
+    let output = run(&[
+        "estimate",
+        "--associations",
+        "20000",
+        "--embedding-dims",
+        "3072",
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("graph footprint"), "{stdout}");
+    assert!(stdout.contains("vector store"), "{stdout}");
+    assert!(stdout.contains("image"), "{stdout}");
+    assert!(stdout.contains("TAGURU_CACHE_BYTES"), "{stdout}");
+    assert!(stdout.contains("example benchmark"), "{stdout}");
+}
+
+#[test]
+fn estimate_requires_the_association_count() {
+    let output = run(&["estimate"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--associations is required"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
