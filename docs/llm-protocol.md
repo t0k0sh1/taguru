@@ -157,10 +157,10 @@
 | GET/POST | `/contexts/{name}/aliases` | エクスポート / `{concepts:{別綴:正準}, labels:{...}}` |
 | GET/POST | `/contexts/{name}/sources` | 登録済み source 一覧 / `{passages:{source:原文}}` |
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
-| POST | `/contexts/{name}/sources/search` | `{query, limit?}` → `[{source, score, text}]` 原文全文検索 |
+| POST | `/contexts/{name}/sources/search` | `{query, limit?=5}` → `[{source, score, text}]` 原文全文検索 |
 | POST | `/contexts/{name}/sources/retract` | `{source}` → 出典の寄与を撤回(差分同期) |
 | POST | `/contexts/{name}/unreachable_from` | `{origins, limit?}` → `{total, matches}` 到達不能な連想 |
-| POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?, cosine_floor?}` → 綴り・同義の分岐候補 |
+| POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?=0.6, cosine_floor?=0.6}` → 綴り・同義の分岐候補 |
 
 ## 認証
 
@@ -177,6 +177,9 @@
 - `401` 認証エラー(上記)。`404` 未知のコンテキスト。`409` 重複作成・エイリアス衝突。
 - `507` コンテキスト満杯(`ContextFull`)。書き込みは適用されていません。それ以上の
   知識は新しいコンテキストへ。
+- `501` 埋め込みプロバイダー未設定で `/embeddings/refresh` を呼んだ(サーバー側の
+  TAGURU_EMBED_* が必要)。`502` 埋め込みプロバイダー障害(refresh、または resolve の
+  意味フォールバック中)— 時間をおいて再試行してください。
 - `400` associations バッチ上限超過(1リクエスト10,000件まで。何も適用されていません
   — 分割して再送)/ weight が範囲外(有限かつ |weight| ≤ 1,000,000。バッチごと拒否)/
   名前が長すぎる(subject・label・object・source・エイリアスは1024バイトまで —
@@ -186,10 +189,10 @@
   リクエストボディ超過(既定8MiB。本文はJSONではないプレーンテキストです)。
 - 軸外のエラーも同じ形で返ります: 未知のパスは `404`、パスは合っているがメソッド違いは
   `405`、壊れたJSONは `400`、Content-Type 違いは `415`、形は合うが型が違うJSONは `422`。
-- recall / query / explore の既定 limit は 100。`total` が matches 数を超えていたら
-  切り詰めが起きています(recall/query は強い |weight| 順、explore は近いホップ順で
-  残ります)。絞り込むか limit を上げてください — ただしどのエンドポイントも limit の
-  上限は 1000 です。
+- recall / query / explore / unreachable_from の既定 limit は 100。`total` が matches
+  数を超えていたら切り詰めが起きています(recall/query/unreachable_from は強い
+  |weight| 順、explore は近いホップ順で残ります)。絞り込むか limit を上げてください —
+  ただしどのエンドポイントも limit の上限は 1000 です。
 - 200 が返った書き込みは WAL により永続です(クラッシュしても再起動時に復元されます。
   サーバーが `TAGURU_WAL=0` で運用されている場合のみ、フラッシュ間隔(既定5秒)以内の
   書き込みがクラッシュで失われ得ます)。
