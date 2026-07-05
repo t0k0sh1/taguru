@@ -145,10 +145,17 @@ pub struct DirectoryEntry {
 }
 
 /// Whether a context's network is resident. Cold entries keep only
-/// their metadata and stats snapshot in memory.
+/// their metadata and stats snapshot in memory. Deleted is the
+/// tombstone [`AppState::delete`] leaves for anyone who cloned the
+/// entry's `Arc` out of the registry before the removal — the
+/// flusher's and evictor's snapshots, a looked-up handle racing the
+/// delete. Whoever takes the entry lock next must treat the context
+/// as gone: a stale flush that still saw `Hot` here used to recreate
+/// the files of a deleted context, resurrecting it on the next boot.
 enum Slot {
     Hot(Box<Context>),
     Cold,
+    Deleted,
 }
 
 pub struct Entry {
@@ -179,6 +186,17 @@ impl Entry {
             last_touch: AtomicU64::new(0),
             vectors: Mutex::new(None),
         }
+    }
+
+    /// The entry's write lock, or `None` if a delete beat the caller to
+    /// it — a handle that predates the removal must not touch the files
+    /// the delete just removed, let alone recreate them. Every
+    /// post-lookup lock acquisition goes through here so no path can
+    /// forget the tombstone.
+    #[allow(clippy::readonly_write_lock)] // some callers lock purely for exclusion
+    fn lock_unless_deleted(&self) -> Option<std::sync::RwLockWriteGuard<'_, EntryInner>> {
+        let guard = self.inner.write().unwrap();
+        (!matches!(guard.slot, Slot::Deleted)).then_some(guard)
     }
 }
 
@@ -433,13 +451,20 @@ impl AppState {
         Ok(())
     }
 
-    /// Removes a context from the registry and deletes its files. Waits
-    /// for any in-flight operation on the entry (its lock is taken after
-    /// removal), so a concurrent flush cannot recreate the files. Any
-    /// unflushed writes are discarded — deletion destroys the context.
+    /// Removes a context from the registry and deletes its files. The
+    /// entry's lock is taken after the removal — waiting out any
+    /// in-flight operation — and the slot becomes a tombstone under
+    /// it: a flusher, evictor, or writer whose handle predates the
+    /// removal finds [`Slot::Deleted`] when it finally locks, and
+    /// backs off instead of recreating the files. Any unflushed writes
+    /// are discarded — deletion destroys the context.
     pub fn delete(&self, name: &str) -> Option<io::Result<()>> {
         let entry = self.0.registry.write().unwrap().remove(name)?;
-        let _in_flight = entry.inner.write().unwrap();
+        let mut in_flight = entry.inner.write().unwrap();
+        in_flight.slot = Slot::Deleted;
+        entry.dirty.store(false, Ordering::Relaxed);
+        // Lock order: `inner` before `vectors`, as documented on Entry.
+        *entry.vectors.lock().unwrap() = None;
         let stem = file_stem(name);
         let mut outcome = Ok(());
         for file in [
@@ -473,7 +498,7 @@ impl AppState {
         let entry = self.lookup(name)?;
         // The entry lock only serializes read-modify-write on the
         // passages file; the context itself is never loaded for this.
-        let _guard = entry.inner.write().unwrap();
+        let _guard = entry.lock_unless_deleted()?;
         let path = sources_path(&self.0.data_dir, &file_stem(name));
         let mut stored = read_passages(&path);
         let added = passages.len();
@@ -627,7 +652,10 @@ impl AppState {
             // Raced with a delete; there is nothing left to clean up.
             return Ok((touched, false));
         };
-        let _guard = entry.inner.write().unwrap();
+        let Some(_guard) = entry.lock_unless_deleted() else {
+            // Same race, one step later: the delete beat us to the lock.
+            return Ok((touched, false));
+        };
         let path = sources_path(&self.0.data_dir, &file_stem(name));
         let mut stored = read_passages(&path);
         let mut passage_removed = false;
@@ -834,8 +862,9 @@ impl AppState {
         let newly_embedded = embedded_concepts.len() + embedded_labels.len();
 
         // Merge under the entry lock so concurrent refreshes serialize
-        // on the read-modify-write of the sidecar.
-        let _guard = entry.inner.write().unwrap();
+        // on the read-modify-write of the sidecar. A `None` means a
+        // delete won the lock first: don't recreate the sidecar.
+        let _guard = entry.lock_unless_deleted()?;
         let mut store = VectorStore::load(&path);
         if store.model != embedder.model() {
             store = VectorStore {
@@ -949,7 +978,9 @@ impl AppState {
     ) -> Option<io::Result<ContextMeta>> {
         let entry = self.lookup(name)?;
         let outcome = {
-            let mut guard = entry.inner.write().unwrap();
+            // A `None` means a delete won the lock first: don't
+            // recreate the sidecar it just removed.
+            let mut guard = entry.lock_unless_deleted()?;
             let inner = &mut *guard;
             if let Some(description) = description {
                 inner.meta.description = description;
@@ -994,13 +1025,16 @@ impl AppState {
         let mut directory: Vec<DirectoryEntry> = self
             .snapshot()
             .into_iter()
-            .map(|(name, entry)| {
+            .filter_map(|(name, entry)| {
                 let inner = entry.inner.read().unwrap();
                 let (loaded, stats) = match &inner.slot {
                     Slot::Hot(context) => (true, ContextStats::of(context)),
                     Slot::Cold => (false, inner.stats.clone()),
+                    // The snapshot raced a delete: not part of the
+                    // directory anymore.
+                    Slot::Deleted => return None,
                 };
-                DirectoryEntry {
+                Some(DirectoryEntry {
                     name,
                     description: inner.meta.description.clone(),
                     pinned: inner.meta.pinned,
@@ -1008,7 +1042,7 @@ impl AppState {
                     dice_floor: inner.meta.dice_floor,
                     semantic_floor: inner.meta.semantic_floor,
                     stats,
-                }
+                })
             })
             .collect();
         directory.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1047,38 +1081,51 @@ impl AppState {
     pub fn flush_dirty(&self) -> Vec<String> {
         let mut flushed = Vec::new();
         for (name, entry) in self.snapshot() {
-            if !entry.dirty.load(Ordering::Relaxed) {
-                continue;
-            }
-            let mut guard = entry.inner.write().unwrap();
-            let inner = &mut *guard;
-            let watermark = inner.wal_seq - 1;
-            let Slot::Hot(context) = &mut inner.slot else {
-                continue;
-            };
-            // The image about to be written reflects everything logged
-            // so far: bake that in as the watermark, and those WAL
-            // records are replay-inert even if truncation below never
-            // happens (crash, unwritable file — doesn't matter).
-            context.set_applied_seq(watermark);
-            let stats = ContextStats::of(context);
-            match save_files(&self.0.data_dir, &name, &inner.meta, &stats, context) {
-                Ok(()) => {
-                    inner.stats = stats;
-                    entry.dirty.store(false, Ordering::Relaxed);
-                    self.0.metrics.record_flush(true);
-                    if let Err(error) = wal::reset(&wal_path(&self.0.data_dir, &file_stem(&name))) {
-                        tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
-                    }
-                    flushed.push(name);
-                }
-                Err(error) => {
-                    tracing::warn!("flush of context '{name}' failed (will retry): {error}");
-                    self.0.metrics.record_flush(false);
-                }
+            if self.flush_entry(&name, &entry) {
+                flushed.push(name);
             }
         }
         flushed
+    }
+
+    /// One entry's flush: persist if dirty and still hot. Split out of
+    /// [`AppState::flush_dirty`] so the delete-race regression test can
+    /// drive the exact window a real flusher hits — snapshot taken
+    /// before a delete, entry lock taken after it.
+    fn flush_entry(&self, name: &str, entry: &Entry) -> bool {
+        if !entry.dirty.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut guard = entry.inner.write().unwrap();
+        let inner = &mut *guard;
+        let watermark = inner.wal_seq - 1;
+        // Cold has nothing to write; Deleted must write nothing — this
+        // snapshot predates a delete and the files are gone for good.
+        let Slot::Hot(context) = &mut inner.slot else {
+            return false;
+        };
+        // The image about to be written reflects everything logged
+        // so far: bake that in as the watermark, and those WAL
+        // records are replay-inert even if truncation below never
+        // happens (crash, unwritable file — doesn't matter).
+        context.set_applied_seq(watermark);
+        let stats = ContextStats::of(context);
+        match save_files(&self.0.data_dir, name, &inner.meta, &stats, context) {
+            Ok(()) => {
+                inner.stats = stats;
+                entry.dirty.store(false, Ordering::Relaxed);
+                self.0.metrics.record_flush(true);
+                if let Err(error) = wal::reset(&wal_path(&self.0.data_dir, &file_stem(name))) {
+                    tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
+                }
+                true
+            }
+            Err(error) => {
+                tracing::warn!("flush of context '{name}' failed (will retry): {error}");
+                self.0.metrics.record_flush(false);
+                false
+            }
+        }
     }
 
     fn lookup(&self, name: &str) -> Option<Arc<Entry>> {
@@ -1103,7 +1150,9 @@ impl AppState {
     ) -> Result<T, AccessError> {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let result = {
-            let mut inner = entry.inner.write().unwrap();
+            // The lookup can predate a concurrent delete; the tombstone
+            // set under this same lock is the authoritative answer.
+            let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
                 .map_err(AccessError::Load)?;
             let Slot::Hot(context) = &mut inner.slot else {
@@ -1139,7 +1188,10 @@ impl AppState {
     ) -> Result<T, AccessError> {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let result = {
-            let mut inner = entry.inner.write().unwrap();
+            // Same tombstone rule as with_hot: a delete that beat us to
+            // this lock owns the name — appending here would recreate
+            // the WAL file it just removed.
+            let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
                 .map_err(AccessError::Load)?;
             if self.0.wal_enabled {
@@ -1231,7 +1283,9 @@ impl AppState {
             }
             let resident = match &inner.slot {
                 Slot::Hot(context) => context.footprint(),
-                Slot::Cold => 0,
+                // A deleted entry holds nothing: the tombstone dropped
+                // the graph and the delete cleared the vectors.
+                Slot::Cold | Slot::Deleted => 0,
             };
             drop(inner);
             // Cached vector stores count too — a cold entry can hold a
@@ -1314,6 +1368,11 @@ fn ensure_hot(
     if matches!(inner.slot, Slot::Hot(_)) {
         metrics.record_cache_hit();
         return Ok(());
+    }
+    // Callers check the tombstone under this same lock before calling;
+    // seeing one here means a caller forgot.
+    if matches!(inner.slot, Slot::Deleted) {
+        return Err(format!("context '{name}' is deleted"));
     }
     let stem = file_stem(name);
     let loaded = fs::read(image_path(data_dir, &stem))
@@ -1854,6 +1913,169 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_flush_whose_snapshot_predates_a_delete_does_not_resurrect_the_files() {
+        let dir = scratch_dir("delete-vs-flush");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("victim", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "victim",
+                vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+            )
+            .unwrap()
+            .unwrap();
+
+        // The flusher's world an instant before the delete: entry Arcs
+        // cloned out of the registry, the victim still dirty.
+        let stale = state.snapshot();
+        state.delete("victim").unwrap().unwrap();
+
+        // Even if a stale handle re-marks the entry dirty (delete does
+        // clear the flag, but that is an optimization), the tombstone
+        // is what must hold.
+        for (_, entry) in &stale {
+            entry.dirty.store(true, Ordering::Relaxed);
+        }
+        // The flusher arrives late and works through its stale snapshot.
+        for (name, entry) in &stale {
+            assert!(
+                !state.flush_entry(name, entry),
+                "a deleted context must not flush"
+            );
+        }
+
+        let stem = file_stem("victim");
+        for suffix in [
+            "ctx",
+            "meta.json",
+            "sources.json",
+            "vectors.bin",
+            "wal.jsonl",
+        ] {
+            let path = dir.join(format!("{stem}.{suffix}"));
+            assert!(
+                !path.exists(),
+                "{} came back after the delete",
+                path.display()
+            );
+        }
+        // The resurrection a user would see: a reboot re-registering it.
+        let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert_eq!(
+            reborn.context_count(),
+            0,
+            "the deleted context re-registered on boot"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn every_latecomer_behind_a_delete_finds_the_tombstone() {
+        let dir = scratch_dir("delete-tombstone");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("victim", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let (_, stale) = state
+            .snapshot()
+            .into_iter()
+            .find(|(name, _)| name == "victim")
+            .unwrap();
+        state.delete("victim").unwrap().unwrap();
+
+        // The gate every post-lookup lock acquisition goes through:
+        // a handle that predates the removal must be turned away.
+        assert!(
+            stale.lock_unless_deleted().is_none(),
+            "the tombstone must refuse a stale handle"
+        );
+        // And the public write path answers NotFound rather than
+        // recreating the WAL file the delete just removed.
+        assert!(matches!(
+            state.add_associations(
+                "victim",
+                vec![assoc_op("幽霊", "は", "残らない", 1.0, None)],
+            ),
+            Err(AccessError::NotFound)
+        ));
+        assert!(!wal_path(&dir, &file_stem("victim")).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_flusher_stalled_on_another_context_cannot_resurrect_a_delete() {
+        use std::thread;
+        use std::time::Duration;
+
+        let dir = scratch_dir("delete-mid-flush");
+        for round in 0..12 {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            for name in ["decoy", "victim"] {
+                state
+                    .create(name, ContextMeta::default())
+                    .map_err(|_| "create")
+                    .unwrap();
+                state
+                    .add_associations(
+                        name,
+                        vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+
+            // A periodic flusher mid-run: it snapshots BOTH contexts,
+            // then stalls on the decoy's lock — in the rounds where the
+            // decoy comes first in its iteration order — while the
+            // delete below runs to completion. The stalled half then
+            // reaches the victim through its stale handle. Whatever the
+            // iteration order, the end state must be identical: the
+            // victim stays deleted.
+            let decoy = state.lookup("decoy").unwrap();
+            let hold = decoy.inner.write().unwrap();
+            let flusher = {
+                let state = state.clone();
+                thread::spawn(move || {
+                    state.flush_dirty();
+                })
+            };
+            thread::sleep(Duration::from_millis(20)); // flusher snapshots, then parks on the decoy
+            state.delete("victim").unwrap().unwrap();
+            drop(hold);
+            flusher.join().unwrap();
+
+            let stem = file_stem("victim");
+            for suffix in [
+                "ctx",
+                "meta.json",
+                "sources.json",
+                "vectors.bin",
+                "wal.jsonl",
+            ] {
+                let path = dir.join(format!("{stem}.{suffix}"));
+                assert!(
+                    !path.exists(),
+                    "round {round}: {} survived the delete",
+                    path.display()
+                );
+            }
+            let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            assert_eq!(
+                reborn.context_count(),
+                1,
+                "round {round}: only the decoy may remain"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
