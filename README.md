@@ -235,6 +235,11 @@ describe/query/activate → passage lookup → cited answer. Chunking,
 fact extraction, and the post-ingest coverage audit (audit_coverage)
 are likewise driven by the agent through the tools.
 
+Running the agent or the embeddings on Amazon Bedrock? See
+[docs/bedrock.md](docs/bedrock.md): the Converse hosting pattern for
+taguru-mcp, an InvokeModel embedding proxy, floor calibration, and the
+access-gate diagnosis commands.
+
 ## Verification
 
 ```sh
