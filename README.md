@@ -155,6 +155,13 @@ entry, aliases, two-hop composition, negation, and corroboration) must
 keep coming back fully answered by mechanically running the documented
 retrieval loop.
 
+`tests/code_recall.rs` is the same floor for source-code knowledge: 9
+questions against a fictional Rust crate — camelCase and typo cues
+landing on snake_case identifiers, qualified `Type::fn` and
+path-fragment cues, case twins (`Frame` the struct vs `frame` the
+accessor, both surfaced rather than merged), and natural-language
+aliases bridging onto identifiers.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
