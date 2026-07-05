@@ -786,9 +786,8 @@ impl AppState {
             read_passages(&sources_path(&self.0.data_dir, &file_stem(name)))
         };
         let query_grams: Vec<u64> = {
-            let normalized = taguru::context::normalize_entry(query);
             let mut seen = std::collections::HashSet::new();
-            text_terms(&normalized)
+            passage_terms(query)
                 .into_iter()
                 .filter(|gram| seen.insert(*gram))
                 .collect()
@@ -801,10 +800,9 @@ impl AppState {
         let passages: Vec<(&String, &String, HashMap<u64, f32>, f32)> = stored
             .iter()
             .map(|(source, text)| {
-                let normalized = taguru::context::normalize_entry(text);
                 let mut frequencies: HashMap<u64, f32> = HashMap::new();
                 let mut length = 0f32;
-                for gram in text_terms(&normalized) {
+                for gram in passage_terms(text) {
                     *frequencies.entry(gram).or_insert(0.0) += 1.0;
                     length += 1.0;
                 }
@@ -1764,17 +1762,74 @@ fn wal_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.wal.jsonl"))
 }
 
-/// The "terms" of the passage search, as u64 keys. ASCII-alphanumeric
-/// runs count as whole words; everything else contributes adjacent
-/// character pairs within its run (a run of one contributes the lone
-/// character). Space-delimited languages need word terms — character
-/// pairs occur in every English document alike, which flattens IDF to
-/// nothing — while undelimited Japanese needs the bigrams. Runs break
-/// at spaces and punctuation, and a script switch breaks the run too,
-/// so terms never straddle "第10篇"-style boundaries.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x1_0000_01b3;
+
+/// The terms of one passage or query: [`text_terms`] over the
+/// normalized text, plus a word term per piece of every camelCase run
+/// in the RAW text — normalization lowercases away exactly the
+/// boundaries that let `state` reach `AppState`, so the split must
+/// read the original. One function serves both sides of the search,
+/// so they cannot disagree about what a term is.
+fn passage_terms(raw: &str) -> Vec<u64> {
+    let mut terms = text_terms(&taguru::context::normalize_entry(raw));
+    let mut run: Vec<char> = Vec::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            run.push(ch);
+        } else {
+            camel_pieces(&run, &mut terms);
+            run.clear();
+        }
+    }
+    camel_pieces(&run, &mut terms);
+    terms
+}
+
+/// Appends one lowercased word term per piece of an ASCII run that
+/// splits at case boundaries: `aB` → `a|B`, digits stick to their
+/// piece (`U64Max` → `u64|max`), and an acronym ends before its last
+/// capital (`HTTPServer` → `http|server`). A run with no boundary
+/// appends nothing — its whole-word term is already in the stream.
+/// Pieces hash exactly like [`text_terms`] words, so a piece matches
+/// wherever the same word occurs standalone.
+fn camel_pieces(run: &[char], terms: &mut Vec<u64>) {
+    let mut starts = vec![0];
+    for at in 1..run.len() {
+        if !run[at].is_ascii_uppercase() {
+            continue;
+        }
+        let after_lower = run[at - 1].is_ascii_lowercase() || run[at - 1].is_ascii_digit();
+        let ends_acronym = run[at - 1].is_ascii_uppercase()
+            && run.get(at + 1).is_some_and(|ch| ch.is_ascii_lowercase());
+        if after_lower || ends_acronym {
+            starts.push(at);
+        }
+    }
+    if starts.len() < 2 {
+        return;
+    }
+    starts.push(run.len());
+    for window in starts.windows(2) {
+        let mut word = FNV_OFFSET;
+        for ch in &run[window[0]..window[1]] {
+            word ^= ch.to_ascii_lowercase() as u64;
+            word = word.wrapping_mul(FNV_PRIME);
+        }
+        terms.push(word | 1 << 63);
+    }
+}
+
+/// The word/bigram layer under [`passage_terms`], as u64 keys.
+/// ASCII-alphanumeric runs count as whole words; everything else
+/// contributes adjacent character pairs within its run (a run of one
+/// contributes the lone character). Space-delimited languages need
+/// word terms — character pairs occur in every English document alike,
+/// which flattens IDF to nothing — while undelimited Japanese needs
+/// the bigrams. Runs break at spaces and punctuation, and a script
+/// switch breaks the run too, so terms never straddle "第10篇"-style
+/// boundaries.
 fn text_terms(text: &str) -> Vec<u64> {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x1_0000_01b3;
     let mut terms = Vec::new();
     let mut word = FNV_OFFSET; // running FNV-1a over the current ASCII word
     let mut in_word = false;
@@ -2882,6 +2937,33 @@ mod tests {
     }
 
     #[test]
+    fn camel_pieces_join_the_passage_term_stream() {
+        let word = |text: &str| text_terms(text)[0];
+
+        // A camelCase run carries its whole-word term AND its pieces,
+        // hashed exactly like standalone words.
+        let terms = passage_terms("AppState");
+        assert!(terms.contains(&word("appstate")));
+        assert!(terms.contains(&word("app")));
+        assert!(terms.contains(&word("state")));
+
+        // An acronym ends before its last capital.
+        let terms = passage_terms("HTTPServer");
+        assert!(terms.contains(&word("http")));
+        assert!(terms.contains(&word("server")));
+
+        // Digits stick to their piece; the boundary is the case change.
+        let terms = passage_terms("U64Max");
+        assert!(terms.contains(&word("u64")));
+        assert!(terms.contains(&word("max")));
+
+        // Runs with no case boundary add nothing: snake_case already
+        // splits at the underscore, ALLCAPS and lowercase stay whole.
+        assert_eq!(passage_terms("flush_dirty"), text_terms("flush_dirty"));
+        assert_eq!(passage_terms("WAL replay"), text_terms("wal replay"));
+    }
+
+    #[test]
     fn budget_evicts_lru_and_reloads_transparently() {
         let dir = scratch_dir("evict");
         // A budget of one byte: at most the just-used context stays hot.
@@ -3172,6 +3254,35 @@ mod tests {
             hits.len() < 2 || hits[0].1 > hits[1].1,
             "the containing passage must win decisively, not by tie-break"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_camel_case_piece_finds_the_passage() {
+        let dir = scratch_dir("camel");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("code", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // "AppState" and "PathBuf" occur only as camelCase tokens here —
+        // none of their pieces appears as a standalone word.
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "src/registry.rs:AppState".to_string(),
+            "impl AppState { pub fn boot_with(dir: PathBuf) -> Self { todo!() } }".to_string(),
+        );
+        state.store_passages("code", passages).unwrap().unwrap();
+
+        for query in ["state", "State", "app", "path"] {
+            let hits = state.search_passages("code", query, 3).unwrap();
+            assert_eq!(
+                hits.first().map(|hit| hit.0.as_str()),
+                Some("src/registry.rs:AppState"),
+                "a piece of a camelCase identifier must reach its passage (query {query:?})"
+            );
+        }
 
         let _ = fs::remove_dir_all(dir);
     }
