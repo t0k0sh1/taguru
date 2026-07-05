@@ -41,6 +41,9 @@ impl Server {
             .env("TAGURU_DATA_DIR", &data_dir)
             .env("TAGURU_FLUSH_SECS", "1")
             .env_remove("TAGURU_EMBED_URL") // lexical-only, hermetic
+            .env_remove("TAGURU_EMBED_MODEL")
+            .env_remove("TAGURU_EMBED_AUTO")
+            .env_remove("TAGURU_SEMANTIC_FLOOR")
             .env_remove("TAGURU_API_TOKEN") // unauthenticated unless a test opts in
             // No tracing unless a test opts in — a developer shell
             // with a live OTel setup must not flip every test here
@@ -192,6 +195,33 @@ impl Drop for Server {
     }
 }
 
+/// GET /protocol carries a live-configuration trailer once the semantic
+/// tier is configured: an agent must learn from the manual itself that
+/// `refresh_embeddings` is worth calling here (or already automatic) —
+/// the static text alone leaves a configured tier dark.
+#[test]
+fn protocol_reports_the_semantic_tier_when_configured() {
+    // /protocol never calls the provider, so a dead endpoint serves.
+    let embed_env = [
+        ("TAGURU_EMBED_URL", "http://127.0.0.1:9/v1/embeddings"),
+        ("TAGURU_EMBED_MODEL", "proto-test-model"),
+    ];
+    let server = Server::start_with_env("proto-embed", &embed_env);
+    let (status, protocol) = server.call("GET", "/protocol", None);
+    assert_eq!(status, 200);
+    let text = protocol.as_str().unwrap();
+    assert!(text.contains("## This server"));
+    assert!(text.contains("`proto-test-model`"));
+    assert!(text.contains("calling `refresh_embeddings`"));
+    assert!(!text.contains("auto-refreshes"));
+
+    let mut auto_env = embed_env.to_vec();
+    auto_env.push(("TAGURU_EMBED_AUTO", "1"));
+    let server = Server::start_with_env("proto-auto", &auto_env);
+    let (_, protocol) = server.call("GET", "/protocol", None);
+    assert!(protocol.as_str().unwrap().contains("auto-refreshes"));
+}
+
 #[test]
 fn full_retrieval_loop_over_http() {
     let server = Server::start("loop");
@@ -202,6 +232,8 @@ fn full_retrieval_loop_over_http() {
     let (status, protocol) = server.call("GET", "/protocol", None);
     assert_eq!(status, 200);
     assert!(protocol.as_str().unwrap().contains("# Taguru"));
+    // Lexical-only server: no live-configuration trailer to act on.
+    assert!(!protocol.as_str().unwrap().contains("## This server"));
     let directory = server.ok("GET", "/contexts", None);
     assert_eq!(directory["total"], json!(0));
     assert_eq!(directory["contexts"], json!([]));

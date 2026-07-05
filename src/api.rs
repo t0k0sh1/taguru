@@ -246,16 +246,47 @@ pub async fn get_context(State(state): State<AppState>, Path(name): Path<String>
 
 /// The LLM-facing manual — ingest discipline, retrieval loop, API
 /// reference — served by the API itself so a client can learn the
-/// protocol at connect time, the way it would read a skill.
-pub async fn protocol() -> Response {
+/// protocol at connect time, the way it would read a skill. The static
+/// text carries this server's live configuration as a trailer, so the
+/// agent also learns which optional tiers are actually on.
+pub async fn protocol(trailer: Option<String>) -> Response {
+    let mut body = include_str!("../docs/llm-protocol.md").to_string();
+    if let Some(trailer) = &trailer {
+        body.push_str(trailer);
+    }
     (
         [(
             axum::http::header::CONTENT_TYPE,
             "text/markdown; charset=utf-8",
         )],
-        include_str!("../docs/llm-protocol.md"),
+        body,
     )
         .into_response()
+}
+
+/// The `## This server` trailer behind [`protocol`]: the runtime facts
+/// an agent acts on differently — today, whether the semantic tier is
+/// live and who runs the gloss refresh. The static manual cannot say
+/// this ("servers with embeddings only"), and an agent that cannot see
+/// that embeddings are on never calls `refresh_embeddings`, leaving
+/// the tier dark over a fully configured provider.
+pub fn protocol_trailer(embed_model: Option<&str>, auto_embed: bool) -> Option<String> {
+    let model = embed_model?;
+    let refresh_note = if auto_embed {
+        "This server auto-refreshes embeddings shortly after each write \
+         settles; calling `refresh_embeddings` yourself only buys \
+         immediacy."
+    } else {
+        "Nothing embeds glosses automatically here: finish every ingest \
+         and alias fix by calling `refresh_embeddings` on the context \
+         you touched, or its new names stay invisible to the semantic \
+         tier."
+    };
+    Some(format!(
+        "\n---\n\n## This server\n\nSemantic entry is ON (embedding model `{model}`): `resolve` falls \
+         back to embedded glosses, and `refresh_embeddings` and \
+         `audit_vocabulary`'s semantic pass are live. {refresh_note}\n"
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1373,6 +1404,20 @@ pub async fn unreachable_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_trailer_names_the_model_and_the_refresh_owner() {
+        assert!(protocol_trailer(None, false).is_none());
+        // No provider means no trailer even with the auto flag stuck on.
+        assert!(protocol_trailer(None, true).is_none());
+
+        let manual = protocol_trailer(Some("test-model"), false).unwrap();
+        assert!(manual.contains("`test-model`"));
+        assert!(manual.contains("calling `refresh_embeddings`"));
+
+        let auto = protocol_trailer(Some("test-model"), true).unwrap();
+        assert!(auto.contains("auto-refreshes"));
+    }
 
     fn assoc(object: &str, weight: f64) -> Association {
         Association {

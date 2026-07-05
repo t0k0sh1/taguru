@@ -101,6 +101,13 @@ async fn serve() {
         info!("auto embedding refresh enabled (runs with each flush)");
     }
     let embedder = embedder.map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>);
+    // /protocol tells connecting agents which optional tiers are live;
+    // the model name is captured here because the provider itself moves
+    // into the state.
+    let protocol_trailer = api::protocol_trailer(
+        embedder.as_ref().map(|provider| provider.model()),
+        auto_embed,
+    );
     // The right semantic floor is a property of the embedding model
     // (cosine bands differ per model), so its recalibration lives here
     // beside TAGURU_EMBED_MODEL rather than on every context.
@@ -164,7 +171,10 @@ async fn serve() {
     let app = Router::new()
         .route("/health", get(metrics::health))
         .route("/metrics", get(metrics::render))
-        .route("/protocol", get(api::protocol))
+        .route(
+            "/protocol",
+            get(move || api::protocol(protocol_trailer.clone())),
+        )
         .route("/flush", post(api::flush_all))
         .route("/contexts", get(api::list_contexts))
         .route(

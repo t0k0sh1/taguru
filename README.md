@@ -84,7 +84,11 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #                          0.35 is calibrated for 3-large + glosses)
 #                          API_KEY=$OPENAI_API_KEY
 #   TAGURU_EMBED_AUTO=1 refresh embeddings incrementally with each flush
-#                     (opt-in; unset means manual POST /embeddings/refresh only)
+#                     (opt-in; unset means manual POST /embeddings/refresh only).
+#                     Recommended whenever agents drive the ingest: an agent
+#                     cannot be counted on to call refresh_embeddings, and
+#                     GET /protocol tells connecting agents which mode this
+#                     server runs.
 #   TAGURU_SEMANTIC_FLOOR  server default for the semantic entry floor
 #                     (default 0.35, calibrated for text-embedding-3-large).
 #                     The right value is a property of the EMBEDDING MODEL —
