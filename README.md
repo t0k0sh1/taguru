@@ -81,6 +81,12 @@ cargo run --release
 #   RUST_LOG            log filter (default info), EnvFilter syntax
 #   TAGURU_LOG_FORMAT   json for one JSON object per log line (default: pretty).
 #                     Logs go to stderr.
+#   OTEL_EXPORTER_OTLP_ENDPOINT
+#                     turns on OTLP/HTTP span export (e.g. the collector
+#                     sidecar http://localhost:4318). The other standard
+#                     OTEL_* variables apply — OTEL_SERVICE_NAME (default
+#                     taguru), OTEL_EXPORTER_OTLP_HEADERS, batch cadence.
+#                     Unset = no tracing, byte-identical logs.
 #   TAGURU_API_TOKEN    bearer token required on everything but /health and
 #                     /metrics. Unset = UNAUTHENTICATED (localhost only).
 #                     The MCP bridge reads the same variable.
@@ -94,6 +100,14 @@ Observability: every request lands in the access log, and
 `GET /metrics` serves Prometheus text — per-route request counts and
 latency histograms, cache/flush/WAL/embedding outcomes, residency and
 WAL-size gauges, and the last-successful-flush timestamp.
+Distributed tracing is opt-in: with `OTEL_EXPORTER_OTLP_ENDPOINT` set,
+every request becomes an OTLP span that joins the trace an inbound
+W3C `traceparent` or AWS `X-Amzn-Trace-Id` (ALB / API Gateway)
+started, the embedding-provider round trip shows up as a child span,
+and the access log carries the `trace_id` so logs and traces
+cross-reference. Any OTLP backend works — an OpenTelemetry Collector,
+the Datadog Agent, ADOT for X-Ray, Jaeger, Tempo — and switching is
+collector configuration, not a Taguru change.
 `GET /health` answers `200 ok` while the write path is healthy and
 `503` (JSON error shape) while the most recent image flush has failed
 — it recovers by itself one flush interval after the disk does.

@@ -449,6 +449,12 @@ fn push_outcomes(out: &mut String, name: &str, help: &str, ok: &AtomicU64, faile
 /// rejects before the fallback runs and would hijack 404 handling.
 /// Unmatched requests all land in one `<unmatched>` series so a path
 /// scanner cannot mint unbounded label values.
+///
+/// With span export configured this is also where the request span is
+/// born — parented from the inbound trace context, named per HTTP
+/// semconv, its trace id stamped into the access log so a log line
+/// finds its trace and vice versa. Without it, the disabled branch
+/// leaves the response path and the log shape exactly as before.
 pub async fn track_http(
     State(state): State<AppState>,
     matched: Option<MatchedPath>,
@@ -462,21 +468,83 @@ pub async fn track_http(
         .unwrap_or_else(|| "<unmatched>".to_string());
     let started = Instant::now();
 
-    let response = next.run(request).await;
+    let (response, trace_id) = if crate::trace::enabled() {
+        traced_request(&method, &route, request, next).await
+    } else {
+        (next.run(request).await, None)
+    };
 
     let elapsed = started.elapsed();
     let status = response.status().as_u16();
     state
         .metrics()
         .record_http(&method, &route, status, elapsed);
-    tracing::info!(
-        method = %method,
-        route = %route,
-        status,
-        latency_ms = elapsed.as_secs_f64() * 1000.0,
-        "http",
-    );
+    match trace_id {
+        Some(trace_id) => tracing::info!(
+            method = %method,
+            route = %route,
+            status,
+            latency_ms = elapsed.as_secs_f64() * 1000.0,
+            trace_id = %trace_id,
+            "http",
+        ),
+        None => tracing::info!(
+            method = %method,
+            route = %route,
+            status,
+            latency_ms = elapsed.as_secs_f64() * 1000.0,
+            "http",
+        ),
+    }
     response
+}
+
+/// Runs the request inside an OTel server span. Span name and
+/// attributes follow HTTP semconv (`{method} {route}`, method only
+/// when unmatched); a 5xx marks the span as an error, a 4xx does not —
+/// for a server, a client's mistake is a normal outcome.
+async fn traced_request(
+    method: &str,
+    route: &str,
+    request: Request,
+    next: Next,
+) -> (Response, Option<String>) {
+    use tracing::Instrument as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let span = tracing::info_span!(
+        "request",
+        otel.name = %if route == "<unmatched>" {
+            method.to_string()
+        } else {
+            format!("{method} {route}")
+        },
+        otel.kind = "server",
+        http.request.method = %method,
+        http.route = %route,
+        url.path = %request.uri().path(),
+        http.response.status_code = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    // Only fails without an export layer, and we only run when one is
+    // installed.
+    let _ = span.set_parent(crate::trace::extract_parent(request.headers()));
+    let trace_id = {
+        use opentelemetry::trace::TraceContextExt as _;
+        span.context().span().span_context().trace_id().to_string()
+    };
+
+    let response = next.run(request).instrument(span.clone()).await;
+
+    // i64 keeps the attribute an OTLP int — a bare u16 records as text.
+    span.record(
+        "http.response.status_code",
+        i64::from(response.status().as_u16()),
+    );
+    if response.status().is_server_error() {
+        span.record("otel.status_code", "ERROR");
+    }
+    (response, Some(trace_id))
 }
 
 /// GET /health: 200 "ok" while the write path is healthy, 503 in the

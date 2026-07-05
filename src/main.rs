@@ -4,6 +4,7 @@ mod embedding;
 mod limits;
 mod metrics;
 mod registry;
+mod trace;
 mod wal;
 
 use std::path::PathBuf;
@@ -37,12 +38,17 @@ use tracing::{info, warn};
 /// - `RUST_LOG`: log filter (default `info`), standard EnvFilter syntax.
 /// - `TAGURU_LOG_FORMAT`: `json` for one JSON object per log line;
 ///   anything else keeps the human-readable format. Logs go to stderr.
+/// - `OTEL_EXPORTER_OTLP_ENDPOINT` (or the `_TRACES_` variant): turns
+///   on OTLP/HTTP span export — one span per request, parented from an
+///   inbound `traceparent` or `X-Amzn-Trace-Id`, `trace_id` stamped
+///   into the access log. The other standard `OTEL_*` variables
+///   (service name, headers, batch cadence) apply. Unset: no tracing.
 #[tokio::main]
 async fn main() {
     // The subscriber must exist before anything can log — the
     // env_number warnings just below would otherwise be dropped
     // silently (tracing has no default subscriber and no buffering).
-    init_tracing();
+    let tracer_provider = init_telemetry();
 
     let data_dir =
         PathBuf::from(std::env::var("TAGURU_DATA_DIR").unwrap_or_else(|_| "data".into()));
@@ -245,24 +251,61 @@ async fn main() {
     // Nothing dirty may outlive the process: one final flush.
     tokio::task::block_in_place(|| state.flush_dirty());
     info!("flushed dirty contexts on shutdown");
+    // The batch worker still owns the last spans; hand them to the
+    // collector before the process ends.
+    if let Some(provider) = tracer_provider
+        && let Err(error) = tokio::task::block_in_place(|| provider.shutdown())
+    {
+        warn!(error = %error, "trace export flush on shutdown failed");
+    }
 }
 
 /// Installs the global tracing subscriber: `RUST_LOG` filtering
 /// (default `info`), human-readable or JSON lines per
 /// `TAGURU_LOG_FORMAT`, written to stderr — stdout stays reserved for
-/// the bootstrap contract lines tests parse.
-fn init_tracing() {
+/// the bootstrap contract lines tests parse. When an OTLP endpoint is
+/// configured, an export layer rides alongside; `RUST_LOG` shapes only
+/// the stderr log, never what is exported.
+fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
     let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let json = std::env::var("TAGURU_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr);
+
+    let (provider, exporter_error) = trace::provider();
+    let otel_layer = provider.as_ref().map(|provider| {
+        use opentelemetry::trace::TracerProvider as _;
+        // INFO keeps the export layer from re-enabling debug/trace
+        // callsites the stderr filter would otherwise leave off.
+        tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("taguru"))
+            .with_filter(tracing::level_filters::LevelFilter::INFO)
+    });
+
+    let registry = tracing_subscriber::registry().with(otel_layer);
+    let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
     if json {
-        builder.json().init();
+        registry
+            .with(stderr_layer.json().with_filter(filter))
+            .init();
     } else {
-        builder.init();
+        registry.with(stderr_layer.with_filter(filter)).init();
     }
+
+    // Deferred from trace::provider(): logging works only now.
+    if let Some(error) = exporter_error {
+        warn!(
+            error,
+            "span export disabled: the OTLP exporter failed to build"
+        );
+    }
+    if provider.is_some() {
+        info!("OTLP span export enabled");
+    }
+    provider
 }
 
 async fn shutdown_signal() {

@@ -14,6 +14,10 @@ tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "s
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "json"] }
 subtle = "2.6"
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "http-json", "reqwest-blocking-client"] }
+tracing-opentelemetry = { version = "0.33", default-features = false }
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

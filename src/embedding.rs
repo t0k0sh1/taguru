@@ -55,6 +55,17 @@ impl EmbeddingProvider for HttpEmbeddings {
     }
 
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+        // A client span per provider round trip — the one downstream
+        // call whose latency Taguru's own timings cannot explain. Runs
+        // on the caller's thread (block_in_place), so a request span
+        // in scope becomes its parent automatically.
+        let span = tracing::info_span!(
+            "embed",
+            otel.kind = "client",
+            embed.model = %self.model,
+            embed.inputs = texts.len(),
+        );
+        let _guard = span.enter();
         let mut request = self
             .agent
             .post(&self.url)
