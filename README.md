@@ -143,7 +143,11 @@ directory is safe at any moment; a file-by-file copy of a *running*
 server (plain `rsync`/`cp`) is not guaranteed consistent across files
 — stop the server or use a real snapshot. `POST /flush` persists every
 dirty context on demand (and answers with their names), so images are
-current before the snapshot is taken.
+current before the snapshot is taken. Verify a backup offline with
+`taguru inspect /path/to/data`: every image goes through the same
+fully validating load the server boots with, every WAL through the
+same replay parser, with per-context stats — nonzero exit means
+something holding acknowledged data is corrupt.
 
 ```sh
 curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \

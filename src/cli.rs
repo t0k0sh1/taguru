@@ -17,6 +17,9 @@ const USAGE: &str = concat!(
 USAGE:
   taguru [serve] [--config FILE]        start the HTTP server (the default)
   taguru version                        print the version
+  taguru inspect PATH                   verify a data directory or one .ctx
+                                        image offline (backup check) — the
+                                        same validating load the server runs
   taguru --help                         this text
 
 CONFIGURATION FILE (--config FILE, or TAGURU_CONFIG=FILE):
@@ -73,6 +76,7 @@ pub fn dispatch() -> ServeArgs {
             print!("{USAGE}");
             exit(0)
         }
+        Some("inspect") => exit(crate::inspect::run(&args[1..])),
         Some(other) => {
             eprintln!("taguru: unknown argument '{other}' — try 'taguru --help'");
             exit(2)
@@ -113,6 +117,18 @@ fn refuse_extras(command: &str, extras: &[String]) {
 fn usage_error(message: &str) -> ! {
     eprintln!("taguru: {message} — try 'taguru --help'");
     exit(2)
+}
+
+/// Human-readable byte count: exact under a KiB, one decimal above —
+/// these sit in report lines, not accounting ledgers.
+pub fn fmt_bytes(bytes: u64) -> String {
+    const UNITS: [(&str, u64); 3] = [("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)];
+    for (unit, size) in UNITS {
+        if bytes >= size {
+            return format!("{:.1} {unit}", bytes as f64 / size as f64);
+        }
+    }
+    format!("{bytes} B")
 }
 
 /// Every variable the server reads, for typo detection: a config file

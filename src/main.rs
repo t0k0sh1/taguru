@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod cli;
 mod embedding;
+mod inspect;
 mod limits;
 mod metrics;
 mod registry;

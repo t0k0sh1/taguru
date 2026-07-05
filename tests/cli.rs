@@ -206,3 +206,69 @@ fn taguru_config_variable_names_the_file_too() {
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn inspect_verifies_a_directory_and_a_single_image() {
+    let dir = std::env::temp_dir().join(format!("taguru-cli-inspect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut context = taguru::context::Context::default();
+    context
+        .associate("青嶺酒造", "代表銘柄", "青嶺", 1.0)
+        .unwrap();
+    let image = dir.join("sake.ctx");
+    std::fs::write(&image, context.to_bytes()).unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("sake: ok"), "{stdout}");
+    assert!(stdout.contains("1 associations"), "{stdout}");
+    assert!(stdout.contains("2 concepts"), "{stdout}");
+    assert!(stdout.contains("total: 1 contexts"), "{stdout}");
+
+    let output = run(&["inspect", &image.display().to_string()]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn inspect_flags_a_corrupt_image_and_a_corrupt_wal() {
+    let dir = std::env::temp_dir().join(format!("taguru-cli-corrupt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A truncated/garbage image must fail the whole inspection.
+    std::fs::write(dir.join("bad.ctx"), b"not an image").unwrap();
+    let output = run(&["inspect", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("CORRUPT image"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    // A healthy image whose WAL does not parse: the log holds
+    // acknowledged writes that exist nowhere else, so this fails too.
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(dir.join("sake.wal.jsonl"), b"not json\n").unwrap();
+    std::fs::remove_file(dir.join("bad.ctx")).unwrap();
+    let output = run(&["inspect", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("CORRUPT WAL"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn inspect_refuses_a_nonexistent_path() {
+    let output = run(&["inspect", "/nonexistent/data"]);
+    assert_eq!(output.status.code(), Some(2));
+}

@@ -1919,23 +1919,23 @@ fn apply_op(context: &mut Context, op: &WalOp) -> Result<(), (String, bool)> {
     }
 }
 
-fn image_path(dir: &Path, stem: &str) -> PathBuf {
+pub(crate) fn image_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.ctx"))
 }
 
-fn meta_path(dir: &Path, stem: &str) -> PathBuf {
+pub(crate) fn meta_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.meta.json"))
 }
 
-fn sources_path(dir: &Path, stem: &str) -> PathBuf {
+pub(crate) fn sources_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.sources.json"))
 }
 
-fn vectors_path(dir: &Path, stem: &str) -> PathBuf {
+pub(crate) fn vectors_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.vectors.bin"))
 }
 
-fn wal_path(dir: &Path, stem: &str) -> PathBuf {
+pub(crate) fn wal_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.wal.jsonl"))
 }
 
@@ -2173,7 +2173,7 @@ fn file_stem(name: &str) -> String {
 }
 
 /// Decodes [`file_stem`]'s encoding back into a context name.
-fn name_from_stem(stem: &str) -> Option<String> {
+pub(crate) fn name_from_stem(stem: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(stem.len());
     let mut cursor = stem.bytes();
     while let Some(byte) = cursor.next() {
