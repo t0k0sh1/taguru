@@ -1005,6 +1005,60 @@ fn metrics_expose_prometheus_text_reflecting_traffic() {
 }
 
 #[test]
+fn search_outcomes_and_resolve_tiers_land_in_the_metrics_text() {
+    let server = Server::start("searchmetrics");
+    server.ok("PUT", "/contexts/sm", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts/sm/associations",
+        Some(json!([{
+            "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
+            "weight": 1.0, "source": "p1"
+        }])),
+    );
+
+    // One hit and one empty recall; one confident resolve and one miss
+    // (no embedding provider in the harness, so nothing rescues it).
+    server.ok(
+        "POST",
+        "/contexts/sm/recall",
+        Some(json!({"cue": "青嶺酒造"})),
+    );
+    server.ok("POST", "/contexts/sm/recall", Some(json!({"cue": "qqqq"})));
+    server.ok(
+        "POST",
+        "/contexts/sm/resolve",
+        Some(json!({"cue": "青嶺酒造"})),
+    );
+    server.ok("POST", "/contexts/sm/resolve", Some(json!({"cue": "qqqq"})));
+
+    let (status, body) = server.call("GET", "/metrics", None);
+    assert_eq!(status, 200);
+    let text = body.as_str().expect("metrics body is text, not JSON");
+
+    assert!(
+        text.contains("taguru_searches_total{op=\"recall\",outcome=\"hit\"} 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("taguru_searches_total{op=\"recall\",outcome=\"empty\"} 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("taguru_searches_total{op=\"resolve\",outcome=\"hit\"} 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("taguru_resolves_total{tier=\"lexical\"} 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("taguru_resolves_total{tier=\"miss\"} 1"),
+        "{text}"
+    );
+}
+
+#[test]
 fn log_output_is_structured_when_json_format_is_requested() {
     let data_dir = std::env::temp_dir().join(format!("taguru-jsonlog-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data_dir);

@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use taguru::context::{Association, Context, Recollection, Resolution};
 
-use crate::metrics::ErrorKind;
+use crate::metrics::{ErrorKind, ResolveTier, SearchOp};
 use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 
 #[derive(Serialize)]
@@ -860,16 +860,21 @@ pub async fn search_passages(
         clamp(request.limit, 5, MAX_MATCH_LIMIT),
     ) {
         None => not_found(&name, started_at),
-        Some(hits) => ok(
-            hits.into_iter()
-                .map(|(source, score, text)| PassageHit {
-                    source,
-                    score,
-                    text,
-                })
-                .collect::<Vec<_>>(),
-            started_at,
-        ),
+        Some(hits) => {
+            state
+                .metrics()
+                .record_search(SearchOp::SearchPassages, hits.is_empty());
+            ok(
+                hits.into_iter()
+                    .map(|(source, score, text)| PassageHit {
+                        source,
+                        score,
+                        text,
+                    })
+                    .collect::<Vec<_>>(),
+                started_at,
+            )
+        }
     }
 }
 
@@ -887,7 +892,13 @@ pub async fn recall(
 ) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.recall(&request.cue)) {
-        Ok(result) => ok(page(result, request.limit), started_at),
+        Ok(result) => {
+            let paged = page(result, request.limit);
+            state
+                .metrics()
+                .record_search(SearchOp::Recall, paged.total == 0);
+            ok(paged, started_at)
+        }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
@@ -914,7 +925,13 @@ pub async fn query(
             &as_refs(&request.object),
         )
     }) {
-        Ok(result) => ok(page(result, request.limit), started_at),
+        Ok(result) => {
+            let paged = page(result, request.limit);
+            state
+                .metrics()
+                .record_search(SearchOp::Query, paged.total == 0);
+            ok(paged, started_at)
+        }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
@@ -983,6 +1000,7 @@ pub async fn explore(
             // used to return them all in one body.
             let total = matches.len();
             matches.truncate(clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT));
+            state.metrics().record_search(SearchOp::Explore, total == 0);
             ok(ExplorePage { total, matches }, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -1012,7 +1030,12 @@ pub async fn activate(
             clamp(request.limit, 20, MAX_MATCH_LIMIT),
         )
     }) {
-        Ok(result) => ok(result, started_at),
+        Ok(result) => {
+            state
+                .metrics()
+                .record_search(SearchOp::Activate, result.is_empty());
+            ok(result, started_at)
+        }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
@@ -1099,32 +1122,62 @@ fn resolve_with_fallback(
     let confident = lexical
         .first()
         .is_some_and(|best| best.score >= LEXICAL_CONFIDENCE);
-    if confident {
-        return ok(lexical_tier(lexical), started_at);
-    }
+    let served = if confident {
+        lexical_tier(lexical)
+    } else {
+        // The provider round trip can take hundreds of milliseconds;
+        // tell the runtime this thread will block so other tasks
+        // migrate off it.
+        match tokio::task::block_in_place(|| {
+            state.semantic_resolve(name, &request.cue, labels, request.semantic_floor)
+        }) {
+            None => return not_found(name, started_at),
+            Some(Ok(semantic)) => merge_tiers(lexical, semantic),
+            // The semantic tier is enrichment once ANY lexical
+            // candidate exists: degrade to the weak lexical results
+            // and log, rather than failing an answerable request over
+            // a provider hiccup.
+            Some(Err(message)) if !lexical.is_empty() => {
+                tracing::warn!("semantic entry failed (serving weak lexical results): {message}");
+                lexical_tier(lexical)
+            }
+            Some(Err(message)) => {
+                tracing::warn!(
+                    "semantic entry failed with nothing lexical to fall back on: {message}"
+                );
+                return error(
+                    StatusCode::BAD_GATEWAY,
+                    format!("semantic entry failed: {message}"),
+                    started_at,
+                );
+            }
+        }
+    };
+    let op = if labels {
+        SearchOp::ResolveLabel
+    } else {
+        SearchOp::Resolve
+    };
+    state.metrics().record_search(op, served.is_empty());
+    state
+        .metrics()
+        .record_resolve_tier(resolve_tier_of(&served));
+    ok(served, started_at)
+}
 
-    // The provider round trip can take hundreds of milliseconds; tell
-    // the runtime this thread will block so other tasks migrate off it.
-    match tokio::task::block_in_place(|| {
-        state.semantic_resolve(name, &request.cue, labels, request.semantic_floor)
-    }) {
-        None => not_found(name, started_at),
-        Some(Ok(semantic)) => ok(merge_tiers(lexical, semantic), started_at),
-        // The semantic tier is enrichment once ANY lexical candidate
-        // exists: degrade to the weak lexical results and log, rather
-        // than failing an answerable request over a provider hiccup.
-        Some(Err(message)) if !lexical.is_empty() => {
-            tracing::warn!("semantic entry failed (serving weak lexical results): {message}");
-            ok(lexical_tier(lexical), started_at)
-        }
-        Some(Err(message)) => {
-            tracing::warn!("semantic entry failed with nothing lexical to fall back on: {message}");
-            error(
-                StatusCode::BAD_GATEWAY,
-                format!("semantic entry failed: {message}"),
-                started_at,
-            )
-        }
+/// Classifies a resolve by what was actually served, so every serve
+/// path lands in exactly one bucket: any semantic candidate means the
+/// semantic tier answered; otherwise the best (first) lexical score
+/// decides confident versus fragment-weak; nothing at all is a miss.
+fn resolve_tier_of(served: &[TieredResolution]) -> ResolveTier {
+    if served.is_empty() {
+        ResolveTier::Miss
+    } else if served.iter().any(|candidate| candidate.tier == "semantic") {
+        ResolveTier::Semantic
+    } else if served[0].score >= LEXICAL_CONFIDENCE {
+        ResolveTier::Lexical
+    } else {
+        ResolveTier::WeakLexical
     }
 }
 
@@ -1227,6 +1280,36 @@ mod tests {
             weight,
             attributions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn resolve_tier_classification_reads_the_served_payload() {
+        let candidate = |score: f64, tier: &'static str| TieredResolution {
+            name: "n".to_string(),
+            score,
+            tier,
+        };
+
+        assert_eq!(resolve_tier_of(&[]), ResolveTier::Miss);
+        // Any semantic candidate marks the whole answer semantic, even
+        // behind weak lexical ones (lexical always keeps the front).
+        assert_eq!(
+            resolve_tier_of(&[candidate(0.2, "lexical"), candidate(0.55, "semantic")]),
+            ResolveTier::Semantic
+        );
+        assert_eq!(
+            resolve_tier_of(&[candidate(0.9, "lexical"), candidate(0.2, "lexical")]),
+            ResolveTier::Lexical
+        );
+        // The confidence boundary itself counts as confident.
+        assert_eq!(
+            resolve_tier_of(&[candidate(LEXICAL_CONFIDENCE, "lexical")]),
+            ResolveTier::Lexical
+        );
+        assert_eq!(
+            resolve_tier_of(&[candidate(0.11, "lexical")]),
+            ResolveTier::WeakLexical
+        );
     }
 
     #[test]

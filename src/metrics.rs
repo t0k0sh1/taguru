@@ -108,6 +108,9 @@ pub struct Metrics {
     errors_load: AtomicU64,
     errors_wal_refused: AtomicU64,
     errors_io: AtomicU64,
+    /// `[op][outcome]`, outcome 0 = hit, 1 = empty.
+    searches: [[AtomicU64; 2]; SearchOp::ALL.len()],
+    resolve_tiers: [AtomicU64; ResolveTier::ALL.len()],
     /// Set while the most recent flush attempt failed; cleared by the
     /// next success. Drives /health: the flusher retries every tick,
     /// so this is a self-healing signal, never a latched one.
@@ -128,6 +131,80 @@ pub enum ErrorKind {
     Load,
     WalRefused,
     Io,
+}
+
+/// The retrieval operations whose hit/empty split is tracked — the
+/// aggregate "is the memory answering" pulse. A fixed set on purpose:
+/// ops are the labels, so the family's cardinality is sealed here.
+#[derive(Clone, Copy)]
+pub enum SearchOp {
+    Resolve,
+    ResolveLabel,
+    Recall,
+    Query,
+    Activate,
+    SearchPassages,
+    Explore,
+}
+
+impl SearchOp {
+    const ALL: [SearchOp; 7] = [
+        SearchOp::Resolve,
+        SearchOp::ResolveLabel,
+        SearchOp::Recall,
+        SearchOp::Query,
+        SearchOp::Activate,
+        SearchOp::SearchPassages,
+        SearchOp::Explore,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            SearchOp::Resolve => "resolve",
+            SearchOp::ResolveLabel => "resolve_label",
+            SearchOp::Recall => "recall",
+            SearchOp::Query => "query",
+            SearchOp::Activate => "activate",
+            SearchOp::SearchPassages => "search_passages",
+            SearchOp::Explore => "explore",
+        }
+    }
+}
+
+/// Which tier ultimately answered a resolve (or resolve_label) —
+/// classified from the served payload, so every serve path lands in
+/// exactly one bucket. The drift signal lives here: a rising
+/// `semantic` share means the cues clients send are pulling away from
+/// the stored vocabulary; a rising `miss` share means coverage gaps.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ResolveTier {
+    /// A confident string match answered alone.
+    Lexical,
+    /// Embedding candidates were part of the answer.
+    Semantic,
+    /// Only sub-confidence string fragments survived (the semantic
+    /// tier ran but contributed nothing, failed, or is not configured).
+    WeakLexical,
+    /// Nothing at all.
+    Miss,
+}
+
+impl ResolveTier {
+    const ALL: [ResolveTier; 4] = [
+        ResolveTier::Lexical,
+        ResolveTier::Semantic,
+        ResolveTier::WeakLexical,
+        ResolveTier::Miss,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            ResolveTier::Lexical => "lexical",
+            ResolveTier::Semantic => "semantic",
+            ResolveTier::WeakLexical => "weak_lexical",
+            ResolveTier::Miss => "miss",
+        }
+    }
 }
 
 /// Point-in-time gauges, computed from the registry at scrape time
@@ -263,6 +340,16 @@ impl Metrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// One successful retrieval, split by whether it matched anything.
+    /// Error responses never land here — a 500 is not an empty search.
+    pub fn record_search(&self, op: SearchOp, empty: bool) {
+        self.searches[op as usize][usize::from(empty)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_resolve_tier(&self, tier: ResolveTier) {
+        self.resolve_tiers[tier as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The full Prometheus text-exposition body. Deterministic: the
     /// dynamic keys (routes, statuses) are sorted before emission, so
     /// identical state renders byte-identical output.
@@ -386,6 +473,40 @@ impl Metrics {
             out.push_str(&format!(
                 "taguru_embedding_requests_total{{operation=\"{operation}\",outcome=\"failed\"}} {}\n",
                 failed.load(Ordering::Relaxed)
+            ));
+        }
+
+        push_header(
+            &mut out,
+            "taguru_searches_total",
+            "counter",
+            "Successful retrieval requests by operation and outcome \
+             (empty = the operation ran but matched nothing).",
+        );
+        for op in SearchOp::ALL {
+            for (outcome, slot) in [("hit", 0), ("empty", 1)] {
+                out.push_str(&format!(
+                    "taguru_searches_total{{op=\"{}\",outcome=\"{outcome}\"}} {}\n",
+                    op.as_str(),
+                    self.searches[op as usize][slot].load(Ordering::Relaxed)
+                ));
+            }
+        }
+        push_header(
+            &mut out,
+            "taguru_resolves_total",
+            "counter",
+            "Resolve and resolve_label requests by the tier that answered: \
+             lexical = confident string match, semantic = embedding candidates \
+             included, weak_lexical = only sub-confidence string fragments, \
+             miss = nothing. A rising semantic share means cues are drifting \
+             from the stored vocabulary.",
+        );
+        for tier in ResolveTier::ALL {
+            out.push_str(&format!(
+                "taguru_resolves_total{{tier=\"{}\"}} {}\n",
+                tier.as_str(),
+                self.resolve_tiers[tier as usize].load(Ordering::Relaxed)
             ));
         }
 
@@ -722,6 +843,40 @@ mod tests {
         // The untouched kind still renders, so dashboards never see an
         // absent series.
         assert!(rendered.contains("taguru_errors_total{kind=\"io\"} 0"));
+    }
+
+    #[test]
+    fn search_outcomes_render_per_op_including_untouched_zeros() {
+        let metrics = Metrics::default();
+        metrics.record_search(SearchOp::Recall, false);
+        metrics.record_search(SearchOp::Recall, false);
+        metrics.record_search(SearchOp::Recall, true);
+        metrics.record_search(SearchOp::SearchPassages, true);
+
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(rendered.contains("taguru_searches_total{op=\"recall\",outcome=\"hit\"} 2"));
+        assert!(rendered.contains("taguru_searches_total{op=\"recall\",outcome=\"empty\"} 1"));
+        assert!(
+            rendered.contains("taguru_searches_total{op=\"search_passages\",outcome=\"empty\"} 1")
+        );
+        // Untouched ops still render both outcomes.
+        assert!(rendered.contains("taguru_searches_total{op=\"explore\",outcome=\"hit\"} 0"));
+        assert!(rendered.contains("taguru_searches_total{op=\"resolve\",outcome=\"empty\"} 0"));
+    }
+
+    #[test]
+    fn resolve_tiers_render_all_four_buckets() {
+        let metrics = Metrics::default();
+        metrics.record_resolve_tier(ResolveTier::Lexical);
+        metrics.record_resolve_tier(ResolveTier::Semantic);
+        metrics.record_resolve_tier(ResolveTier::Semantic);
+        metrics.record_resolve_tier(ResolveTier::Miss);
+
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(rendered.contains("taguru_resolves_total{tier=\"lexical\"} 1"));
+        assert!(rendered.contains("taguru_resolves_total{tier=\"semantic\"} 2"));
+        assert!(rendered.contains("taguru_resolves_total{tier=\"weak_lexical\"} 0"));
+        assert!(rendered.contains("taguru_resolves_total{tier=\"miss\"} 1"));
     }
 
     #[test]
