@@ -200,31 +200,30 @@ fn pick(arguments: &Value, keys: &[&str]) -> Value {
 }
 
 fn tool_definitions() -> Vec<Value> {
-    let context =
-        json!({ "type": "string", "description": "コンテキスト名 (GET list_contexts の name)" });
+    let context = json!({ "type": "string", "description": "Context name (from list_contexts)" });
     let tools = vec![
         (
             "list_contexts",
-            "ルーティング目録: 全コンテキストの名前・説明・統計(件数、次数上位概念、ラベル見本)。どの文脈で検索・取り込みするかはこの目録を見て自分で判断する。",
+            "Routing directory: every context's name, description, stats (counts, top concepts, label sample). Pick the search/ingest target here yourself.",
             object_schema(json!({}), &[]),
         ),
         (
             "create_context",
-            "コンテキストを作る。1コンテキスト=1文脈: 1つの綴りは1つの指示対象。同じ綴りで別物を扱うならコンテキストを分ける。description はルーティングの根拠になるので、何の文脈かを具体的に書く。",
+            "Create a context. One context = one 文脈: one spelling, one referent — different things sharing a spelling get separate contexts. The description drives routing; say concretely what the context covers.",
             object_schema(
                 json!({
                     "name": { "type": "string" },
                     "description": { "type": "string" },
-                    "pinned": { "type": "boolean", "description": "常駐させる (用語集など常に熱い文脈)" },
-                    "dice_floor": { "type": "number", "description": "ファジー入口の許容 (既定0.3)" },
-                    "semantic_floor": { "type": "number", "description": "意味検索の許容 (既定0.35)" }
+                    "pinned": { "type": "boolean", "description": "keep resident (always-hot contexts like glossaries)" },
+                    "dice_floor": { "type": "number", "description": "fuzzy-entry floor (default 0.3)" },
+                    "semantic_floor": { "type": "number", "description": "semantic-entry floor (default 0.35)" }
                 }),
                 &["name"],
             ),
         ),
         (
             "update_context",
-            "説明・pinned・dice_floor を更新する。",
+            "Update description / pinned / dice_floor.",
             object_schema(
                 json!({
                     "name": { "type": "string" },
@@ -238,12 +237,12 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "delete_context",
-            "コンテキストをファイルごと削除する (取り消し不能)。",
+            "Delete a context and its files (irreversible).",
             object_schema(json!({ "name": { "type": "string" } }), &["name"]),
         ),
         (
             "add_associations",
-            "事実をバッチで書き込む (1文書=1回)。規律: 綴りは resolve/resolve_label で既存を確認してから再利用 (check before mint)。1文書内の言い換えは再主張しない。否定は肯定ラベル+負の weight。暗黙の所属関係は明示的なエッジにする。順序のある手順は 最初の工程/次の工程/工程 の3種エッジで編む (詳細は get_protocol)。各要素に source (出典id) を付ける。",
+            "Write facts as a batch (one document = one call), a source id on every element. Discipline: check spellings with resolve/resolve_label and reuse before minting; don't re-assert paraphrases within one document; negation = positive label + negative weight; make implicit membership an explicit edge; weave ordered procedures with the three edges 最初の工程/次の工程/工程 (details in get_protocol).",
             object_schema(
                 json!({
                     "context": context,
@@ -267,7 +266,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "store_passages",
-            "出典idの背後にある原文を登録する (source id → パッセージ)。取り込みの最後に必ず登録し、回答時は attribution の source をここから逆引きして原文に基づいて答える。",
+            "Register the original text behind each source id. Always finish an ingest with this; answers ground in originals looked up from attributions.",
             object_schema(
                 json!({
                     "context": context,
@@ -278,7 +277,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "lookup_passages",
-            "attribution が示す source id 群を原文に逆引きする。「グラフで見つけて原文で答える」の後半。",
+            "Fetch the passages behind attribution source ids — the answer-from-originals half of retrieval.",
             object_schema(
                 json!({
                     "context": context,
@@ -289,25 +288,25 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_sources",
-            "原文が登録済みの source id 一覧。retract_source や lookup_passages の対象確認、差分同期の棚卸しに。",
+            "Source ids with registered passages — targets for retract_source / lookup_passages, inventory for diff sync.",
             object_schema(json!({ "context": context }), &["context"]),
         ),
         (
             "resolve",
-            "自由な言い回しを格納済みの概念名に解決する (正規化+誤字も吸収)。検索の入口: explore/activate の origins はここで得た正準名を使う。空なら言い換えるか dice_floor を下げて (例 0.2) 再試行。",
+            "Resolve free wording to stored concept names (normalized entry, absorbs typos). The retrieval entry: use the canonical names it returns as origins for explore/activate. Empty → reword, or lower dice_floor (e.g. 0.2) and retry.",
             object_schema(
                 json!({
                     "context": context,
                     "cue": { "type": "string" },
-                    "dice_floor": { "type": "number", "description": "この1回だけのファジー許容の上書き" },
-                    "semantic_floor": { "type": "number", "description": "この1回だけの意味検索許容の上書き" }
+                    "dice_floor": { "type": "number", "description": "one-call override of the fuzzy floor" },
+                    "semantic_floor": { "type": "number", "description": "one-call override of the semantic floor" }
                 }),
                 &["context", "cue"],
             ),
         ),
         (
             "resolve_label",
-            "関係ラベル名への解決。書き込み前の check-before-mint と、query のラベル選びに使う。",
+            "resolve, for relation labels. Use before writes (check before mint) and to pick query labels.",
             object_schema(
                 json!({
                     "context": context,
@@ -320,7 +319,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "describe",
-            "概念の見出し: どのラベルの事実が何件あるか (役割別)。ハブ概念はまずこれで全体像を掴み、必要なラベルだけ query で取る — 全プロフィールをいきなり取らない。",
+            "A concept's outline: which labels carry how many facts, per role. Check a hub here first, then query just the labels you need — never pull a whole profile blind.",
             object_schema(
                 json!({ "context": context, "concept": { "type": "string" } }),
                 &["context", "concept"],
@@ -328,13 +327,13 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "query",
-            "位置固定の検索。subject/label/object は文字列または配列 (配列=いずれかに一致)。describe で見出しを確認してからラベルを絞るのが定石。",
+            "Position-pinned search. subject/label/object each take a string or an array (array = match any). Outline with describe, then narrow by label.",
             object_schema(
                 json!({
                     "context": context,
-                    "subject": { "description": "文字列または配列" },
-                    "label": { "description": "文字列または配列" },
-                    "object": { "description": "文字列または配列" },
+                    "subject": { "description": "string or array" },
+                    "label": { "description": "string or array" },
+                    "object": { "description": "string or array" },
                     "limit": { "type": "integer" }
                 }),
                 &["context"],
@@ -342,7 +341,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "recall",
-            "cue に触れる全連想 (主語・ラベル・目的語のどこに現れても)。役割を区別したいときは query を使う。",
+            "Every association touching the cue, whatever its position. Use query when the role matters.",
             object_schema(
                 json!({
                     "context": context,
@@ -354,21 +353,20 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "activate",
-            "起点から活性化を広げ、関連の強い順に返す (path に経由概念)。関連知識の収集はこれが主役。strength は同一呼び出し内の順序値。",
+            "Spread activation from origins, strongest first (path shows the route). The main tool for gathering related knowledge. strength orders within one call only.",
             object_schema(
                 json!({
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
-                    "decay": { "type": "number", "description": "既定0.5" },
-                    "limit": { "type": "integer", "description": "既定20" }
+                    "decay": { "type": "number", "description": "default 0.5" },
+                    "limit": { "type": "integer", "description": "default 20" }
                 }),
                 &["context", "origins"],
             ),
         ),
         (
             "explore",
-            "構造の網羅走査 (ホップ距離注釈付き)。ランキング不要で近傍を見たいときに。\
-             limit 既定100 (上限1000)、切り詰めは近いホップ順に残る (total で検知)。",
+            "Exhaustive structural walk with hop distances, for unranked neighborhood views. limit defaults to 100 (max 1000); truncation keeps the nearest hops (watch total).",
             object_schema(
                 json!({
                     "context": context,
@@ -381,21 +379,21 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_labels",
-            "関係ラベルの全語彙 (正準のみ)。抽出前に眺めて綴りの分岐を防ぐ。",
+            "The full relation vocabulary (canonical only). Read it before extracting to avoid spelling forks.",
             object_schema(json!({ "context": context }), &["context"]),
         ),
         (
             "get_aliases",
-            "登録済みエイリアスのエクスポート (別綴り→正準)。",
+            "Export registered aliases (alias → canonical).",
             object_schema(json!({ "context": context }), &["context"]),
         ),
         (
             "add_aliases",
-            "別綴りを正準名に張る (入口専用; 結果は常に正準綴り)。ヒットしない言い回しを見つけたときの修復。既存の2概念を繋ぐことはできない (それはマージ=作り直しの領分)。",
+            "Point alternate spellings at canonical names (entry-only; results always return canonicals). The fix when live wording misses. Cannot join two existing concepts — that would be a merge, which is rebuild territory.",
             object_schema(
                 json!({
                     "context": context,
-                    "concepts": { "type": "object", "additionalProperties": { "type": "string" }, "description": "別綴り→正準の対応" },
+                    "concepts": { "type": "object", "additionalProperties": { "type": "string" }, "description": "alias → canonical" },
                     "labels": { "type": "object", "additionalProperties": { "type": "string" } }
                 }),
                 &["context"],
@@ -403,7 +401,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "retract_source",
-            "1つの出典 (文書) の寄与をグラフと原文ストアから撤回する。文書が更新されたときの差分同期: 旧版を retract してから新版を再取り込みする。概念やエッジ自体は残る (重みが差し引かれるだけ)。",
+            "Withdraw one source's (document's) contributions from graph and passage store. Diff sync for updated documents: retract the old version, then re-ingest the new. Concepts and edges remain; only weights come down.",
             object_schema(
                 json!({ "context": context, "source": { "type": "string" } }),
                 &["context", "source"],
@@ -411,36 +409,36 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "search_passages",
-            "登録済み原文への全文検索 (bigram BM25)。トリプルに落ちない知識 (手続きの順序・条件・談話) のための第2レーン: グラフ検索で見つからない質問はこちらでも探す。",
+            "Full-text search over registered passages (bigram BM25). The second lane, for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short.",
             object_schema(
                 json!({
                     "context": context,
                     "query": { "type": "string" },
-                    "limit": { "type": "integer", "description": "既定5" }
+                    "limit": { "type": "integer", "description": "default 5" }
                 }),
                 &["context", "query"],
             ),
         ),
         (
             "refresh_embeddings",
-            "取り込み後に概念・ラベルのグロス (名前+グラフ文脈) の埋め込みを差分更新する (埋め込み設定済みのサーバーのみ)。グラフが成長して文脈が変わった名前は自動で再埋め込みされる。これを実行しておくと、専門語の言い換えや質問形の cue が resolve の意味フォールバックで着地する。",
+            "After ingesting, re-embed the glosses (name + graph context) of new or changed concepts and labels (servers with embeddings only). Makes paraphrases and question-shaped cues land through resolve's semantic fallback.",
             object_schema(json!({ "context": context }), &["context"]),
         ),
         (
             "audit_vocabulary",
-            "語彙の健全性監査: 綴りの分岐候補 (字面: 青嶺酒蔵/青嶺酒造) と同義の分岐候補 (意味: 創業年/設立年、要 embeddings) を列挙する。候補であって断定ではない — 本当に同一指示対象なら aliases で綴りを寄せ、別物なら放置する。定期的に、また取り込みの節目に実行する。",
+            "Vocabulary health check: lexical fork candidates (青嶺酒蔵/青嶺酒造) and semantic ones (創業年/設立年; needs embeddings). Candidates, not verdicts — same referent → alias onto one canonical; different → leave. Run at ingest milestones.",
             object_schema(
                 json!({
                     "context": context,
-                    "dice_floor": { "type": "number", "description": "字面検出の下限 (既定0.6)" },
-                    "cosine_floor": { "type": "number", "description": "意味検出の下限 (既定0.6)" }
+                    "dice_floor": { "type": "number", "description": "lexical floor (default 0.6)" },
+                    "cosine_floor": { "type": "number", "description": "semantic floor (default 0.6)" }
                 }),
                 &["context"],
             ),
         ),
         (
             "audit_coverage",
-            "取り込み監査: origins (文書の主要エンティティ) からどの走査でも到達できない連想を列挙する。非空なら所属エッジの不足 — 補ってから終える。",
+            "Post-ingest audit: associations unreachable from origins (the document's main entities). Non-empty = membership edges are missing — add them before finishing.",
             object_schema(
                 json!({
                     "context": context,
@@ -451,7 +449,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         (
             "get_protocol",
-            "取り込み規律と検索ループの完全な手順書 (このサーバーのマニュアル)。",
+            "The complete manual: ingest discipline and retrieval loop.",
             object_schema(json!({}), &[]),
         ),
     ];
