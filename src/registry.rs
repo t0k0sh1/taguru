@@ -440,6 +440,29 @@ impl AppState {
         if registry.contains_key(name) {
             return Err(CreateError::AlreadyExists);
         }
+        // A name can be reused after a delete, and a delete that failed
+        // partway (the name is unregistered first) or a half-restored
+        // backup leaves the old generation's files behind. Nothing may
+        // bleed into the new context — a stale WAL would even replay
+        // the old generation's acknowledged writes into the fresh image
+        // on its next cold load. Clear the slate before writing the
+        // image: a crash in between leaves no image, so nothing
+        // registers and the next attempt clears again; durability of
+        // the unlinks rides on save_files' parent-directory fsync just
+        // below. A leftover that cannot be removed fails the create —
+        // registering on top of it would hand out a haunted context.
+        let stem = file_stem(name);
+        for stale in [
+            wal_path(&self.0.data_dir, &stem),
+            sources_path(&self.0.data_dir, &stem),
+            vectors_path(&self.0.data_dir, &stem),
+        ] {
+            if let Err(error) = fs::remove_file(&stale)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(CreateError::Io(error));
+            }
+        }
         let mut context = Context::default();
         context.set_dice_floor(meta.dice_floor);
         let stats = ContextStats::of(&context);
@@ -1971,6 +1994,62 @@ mod tests {
             reborn.context_count(),
             0,
             "the deleted context re-registered on boot"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn create_does_not_inherit_files_left_by_an_earlier_generation() {
+        let dir = scratch_dir("create-clean-slate");
+        fs::create_dir_all(&dir).unwrap();
+        let stem = file_stem("sake");
+        // Litter an earlier generation can leave when its delete fails
+        // partway (the name is unregistered first) or when files are
+        // restored by hand: an acknowledged-write log, passages,
+        // vectors — but no image, so nothing registers at boot.
+        wal::append_batch(
+            &wal_path(&dir, &stem),
+            1,
+            &[WalOp::Associate(assoc_op(
+                "幽霊",
+                "正体",
+                "枯れ尾花",
+                1.0,
+                None,
+            ))],
+        )
+        .unwrap();
+        fs::write(sources_path(&dir, &stem), br#"{"ghost":"old passage"}"#).unwrap();
+        fs::write(vectors_path(&dir, &stem), b"stale").unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert_eq!(state.context_count(), 0, "no image, nothing registers");
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        assert!(
+            !sources_path(&dir, &stem).exists(),
+            "stale passages survived the create"
+        );
+        assert!(
+            !vectors_path(&dir, &stem).exists(),
+            "stale vectors survived the create"
+        );
+        drop(state);
+
+        // The reboot is where inheritance would bite: a cold load
+        // replays whatever the WAL holds above the fresh image's
+        // watermark 0.
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let recalled = state
+            .read_context("sake", |context| context.recall("幽霊"))
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(
+            recalled.is_empty(),
+            "the old generation's WAL replayed into the new context"
         );
 
         let _ = fs::remove_dir_all(dir);
