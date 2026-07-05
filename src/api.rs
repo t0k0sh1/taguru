@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use taguru::context::{Association, Context, Recollection, Resolution};
 
+use crate::metrics::ErrorKind;
 use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 
 #[derive(Serialize)]
@@ -141,15 +142,26 @@ pub async fn method_not_allowed(method: Method, uri: Uri) -> Response {
     )
 }
 
-fn access_error(failure: AccessError, name: &str, started_at: Instant) -> Response {
+fn access_error(
+    state: &AppState,
+    failure: AccessError,
+    name: &str,
+    started_at: Instant,
+) -> Response {
     match failure {
         AccessError::NotFound => not_found(name, started_at),
-        AccessError::Load(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message, started_at),
-        AccessError::Unpersisted(message) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("write not persisted (nothing was applied): {message}"),
-            started_at,
-        ),
+        AccessError::Load(message) => {
+            state.metrics().record_error(ErrorKind::Load);
+            error(StatusCode::INTERNAL_SERVER_ERROR, message, started_at)
+        }
+        AccessError::Unpersisted(message) => {
+            state.metrics().record_error(ErrorKind::WalRefused);
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("write not persisted (nothing was applied): {message}"),
+                started_at,
+            )
+        }
     }
 }
 
@@ -281,11 +293,14 @@ pub async fn create_context(
             format!("context '{name}' already exists"),
             started_at,
         ),
-        Err(CreateError::Io(io_error)) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("context '{name}' could not be persisted: {io_error}"),
-            started_at,
-        ),
+        Err(CreateError::Io(io_error)) => {
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("context '{name}' could not be persisted: {io_error}"),
+                started_at,
+            )
+        }
     }
 }
 
@@ -322,11 +337,14 @@ pub async fn update_context(
     ) {
         None => not_found(&name, started_at),
         Some(Ok(meta)) => ok(meta, started_at),
-        Some(Err(io_error)) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("metadata update not persisted: {io_error}"),
-            started_at,
-        ),
+        Some(Err(io_error)) => {
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("metadata update not persisted: {io_error}"),
+                started_at,
+            )
+        }
     }
 }
 
@@ -335,11 +353,14 @@ pub async fn delete_context(State(state): State<AppState>, Path(name): Path<Stri
     match state.delete(&name) {
         None => not_found(&name, started_at),
         Some(Ok(())) => ok(true, started_at),
-        Some(Err(io_error)) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("context '{name}' removed but its files were not: {io_error}"),
-            started_at,
-        ),
+        Some(Err(io_error)) => {
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("context '{name}' removed but its files were not: {io_error}"),
+                started_at,
+            )
+        }
     }
 }
 
@@ -401,7 +422,7 @@ pub async fn add_associations(
     }
     let total = associations.len();
     match state.add_associations(&name, associations) {
-        Err(failure) => access_error(failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
         Ok(Ok(applied)) => ok(applied, started_at),
         // Items before the failing one are applied (each item is
         // all-or-nothing in the library); report how far the batch got.
@@ -588,7 +609,7 @@ pub async fn add_aliases(
         }
     }
     match state.add_aliases(&name, &request.concepts, &request.labels) {
-        Err(failure) => access_error(failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
         Ok(Ok(applied)) => ok(applied, started_at),
         Ok(Err(partial)) => {
             let status = if partial.full {
@@ -623,7 +644,7 @@ pub async fn list_aliases(State(state): State<AppState>, Path(name): Path<String
             .collect(),
     }) {
         Ok(result) => ok(result, started_at),
-        Err(failure) => access_error(failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
 
@@ -651,11 +672,14 @@ pub async fn store_passages(
     match state.store_passages(&name, request.passages) {
         None => not_found(&name, started_at),
         Some(Ok(stored)) => ok(stored, started_at),
-        Some(Err(io_error)) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("passages could not be persisted: {io_error}"),
-            started_at,
-        ),
+        Some(Err(io_error)) => {
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("passages could not be persisted: {io_error}"),
+                started_at,
+            )
+        }
     }
 }
 
@@ -758,7 +782,7 @@ pub async fn audit_vocabulary(
         })
     }) {
         Ok(lexical) => lexical,
-        Err(failure) => return access_error(failure, &name, started_at),
+        Err(failure) => return access_error(&state, failure, &name, started_at),
     };
     let semantic = tokio::task::block_in_place(|| state.semantic_twins(&name, cosine_floor));
     let Some((semantic_concepts, semantic_labels, semantic_note)) = semantic else {
@@ -797,7 +821,7 @@ pub async fn retract_source(
 ) -> Response {
     let started_at = Instant::now();
     match state.retract_source(&name, &request.source) {
-        Err(failure) => access_error(failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
         Ok((associations_touched, passage_removed)) => ok(
             RetractOutcome {
                 associations_touched,
@@ -864,7 +888,7 @@ pub async fn recall(
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.recall(&request.cue)) {
         Ok(result) => ok(page(result, request.limit), started_at),
-        Err(failure) => access_error(failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
 
@@ -891,7 +915,7 @@ pub async fn query(
         )
     }) {
         Ok(result) => ok(page(result, request.limit), started_at),
-        Err(failure) => access_error(failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
 
@@ -912,7 +936,7 @@ pub async fn describe(
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.describe(&request.concept)) {
         Ok(result) => ok(result, started_at),
-        Err(failure) => access_error(failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
 
@@ -961,7 +985,7 @@ pub async fn explore(
             matches.truncate(clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT));
             ok(ExplorePage { total, matches }, started_at)
         }
-        Err(failure) => access_error(failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
 
@@ -989,7 +1013,7 @@ pub async fn activate(
         )
     }) {
         Ok(result) => ok(result, started_at),
-        Err(failure) => access_error(failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
 
@@ -1070,7 +1094,7 @@ fn resolve_with_fallback(
         (true, None) => context.resolve_label(&request.cue),
     }) {
         Ok(result) => result,
-        Err(failure) => return access_error(failure, name, started_at),
+        Err(failure) => return access_error(state, failure, name, started_at),
     };
     let confident = lexical
         .first()
@@ -1164,7 +1188,7 @@ pub async fn labels(State(state): State<AppState>, Path(name): Path<String>) -> 
             .collect::<Vec<String>>()
     }) {
         Ok(result) => ok(result, started_at),
-        Err(failure) => access_error(failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
 
@@ -1187,7 +1211,7 @@ pub async fn unreachable_from(
         context.unreachable_from(&origins)
     }) {
         Ok(result) => ok(page(result, request.limit), started_at),
-        Err(failure) => access_error(failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
 

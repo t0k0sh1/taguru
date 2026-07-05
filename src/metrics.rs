@@ -105,6 +105,9 @@ pub struct Metrics {
     embed_refresh_failed: AtomicU64,
     embed_resolve_ok: AtomicU64,
     embed_resolve_failed: AtomicU64,
+    errors_load: AtomicU64,
+    errors_wal_refused: AtomicU64,
+    errors_io: AtomicU64,
     /// Set while the most recent flush attempt failed; cleared by the
     /// next success. Drives /health: the flusher retries every tick,
     /// so this is a self-healing signal, never a latched one.
@@ -113,6 +116,18 @@ pub struct Metrics {
     /// boot). `time() - this` on a dashboard says how stale images are
     /// without knowing the flush interval.
     last_flush_success_epoch: AtomicU64,
+}
+
+/// Why a request answered 500. The status code alone cannot separate
+/// these — and they demand different responses from an operator: `load`
+/// is a corrupt or unreadable image (restore from backup), `wal_refused`
+/// is the durability path failing writes (check the disk NOW), `io` is
+/// a sidecar or image file operation failing outside the WAL path.
+#[derive(Clone, Copy)]
+pub enum ErrorKind {
+    Load,
+    WalRefused,
+    Io,
 }
 
 /// Point-in-time gauges, computed from the registry at scrape time
@@ -235,6 +250,15 @@ impl Metrics {
             &self.embed_resolve_ok
         } else {
             &self.embed_resolve_failed
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_error(&self, kind: ErrorKind) {
+        let counter = match kind {
+            ErrorKind::Load => &self.errors_load,
+            ErrorKind::WalRefused => &self.errors_wal_refused,
+            ErrorKind::Io => &self.errors_io,
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -362,6 +386,25 @@ impl Metrics {
             out.push_str(&format!(
                 "taguru_embedding_requests_total{{operation=\"{operation}\",outcome=\"failed\"}} {}\n",
                 failed.load(Ordering::Relaxed)
+            ));
+        }
+
+        push_header(
+            &mut out,
+            "taguru_errors_total",
+            "counter",
+            "Requests answered 500, by cause: load = image/WAL unreadable on load, \
+             wal_refused = the WAL could not durably record a write (nothing applied), \
+             io = a file operation failed outside the WAL path.",
+        );
+        for (kind, counter) in [
+            ("io", &self.errors_io),
+            ("load", &self.errors_load),
+            ("wal_refused", &self.errors_wal_refused),
+        ] {
+            out.push_str(&format!(
+                "taguru_errors_total{{kind=\"{kind}\"}} {}\n",
+                counter.load(Ordering::Relaxed)
             ));
         }
 
@@ -664,6 +707,21 @@ mod tests {
         let status_200 = first.find("route=\"/a\",status=\"200\"").unwrap();
         let status_404 = first.find("route=\"/a\",status=\"404\"").unwrap();
         assert!(status_200 < status_404, "statuses must render sorted");
+    }
+
+    #[test]
+    fn error_kinds_render_individually_with_zeros_for_the_untouched_ones() {
+        let metrics = Metrics::default();
+        metrics.record_error(ErrorKind::Load);
+        metrics.record_error(ErrorKind::Load);
+        metrics.record_error(ErrorKind::WalRefused);
+
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(rendered.contains("taguru_errors_total{kind=\"load\"} 2"));
+        assert!(rendered.contains("taguru_errors_total{kind=\"wal_refused\"} 1"));
+        // The untouched kind still renders, so dashboards never see an
+        // absent series.
+        assert!(rendered.contains("taguru_errors_total{kind=\"io\"} 0"));
     }
 
     #[test]

@@ -98,7 +98,8 @@ cargo run --release
 
 Observability: every request lands in the access log, and
 `GET /metrics` serves Prometheus text — per-route request counts and
-latency histograms, cache/flush/WAL/embedding outcomes, residency and
+latency histograms, cache/flush/WAL/embedding outcomes, a 500-cause
+breakdown (`taguru_errors_total{kind=...}`), residency and
 WAL-size gauges, and the last-successful-flush timestamp.
 Distributed tracing is opt-in: with `OTEL_EXPORTER_OTLP_ENDPOINT` set,
 every request becomes an OTLP span that joins the trace an inbound
