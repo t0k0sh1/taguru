@@ -142,6 +142,22 @@ pub async fn method_not_allowed(method: Method, uri: Uri) -> Response {
     )
 }
 
+/// Whether each retrieval emits a `taguru::search` event line
+/// (`TAGURU_LOG_SEARCHES=1`). Off by default ON PURPOSE: cues are the
+/// user's memory content, and until now the log stream carried no
+/// content at all — copying queries into the log pipeline is a data
+/// decision the operator must make, not inherit. When on, the lines
+/// feed keyword/phrase analysis downstream (what do clients actually
+/// ask, and which cues come back empty) — aggregation belongs to the
+/// log system, which is why there is no in-server top-K.
+fn search_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("TAGURU_LOG_SEARCHES")
+            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    })
+}
+
 fn access_error(
     state: &AppState,
     failure: AccessError,
@@ -889,6 +905,17 @@ pub async fn search_passages(
         None => not_found(&name, started_at),
         Some(hits) => {
             state.note_search(SearchOp::SearchPassages, &name, hits.is_empty());
+            if search_log_enabled() {
+                tracing::info!(
+                    target: "taguru::search",
+                    context = %name,
+                    op = "search_passages",
+                    cue = %request.query,
+                    hits = hits.len(),
+                    top_score = hits.first().map_or(0.0, |&(_, score, _)| f64::from(score)),
+                    "search",
+                );
+            }
             ok(
                 hits.into_iter()
                     .map(|(source, score, text)| PassageHit {
@@ -920,6 +947,16 @@ pub async fn recall(
         Ok(result) => {
             let paged = page(result, request.limit);
             state.note_search(SearchOp::Recall, &name, paged.total == 0);
+            if search_log_enabled() {
+                tracing::info!(
+                    target: "taguru::search",
+                    context = %name,
+                    op = "recall",
+                    cue = %request.cue,
+                    hits = paged.total,
+                    "search",
+                );
+            }
             ok(paged, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -951,6 +988,18 @@ pub async fn query(
         Ok(result) => {
             let paged = page(result, request.limit);
             state.note_search(SearchOp::Query, &name, paged.total == 0);
+            if search_log_enabled() {
+                tracing::info!(
+                    target: "taguru::search",
+                    context = %name,
+                    op = "query",
+                    subject = %as_refs(&request.subject).join(","),
+                    label = %as_refs(&request.label).join(","),
+                    object = %as_refs(&request.object).join(","),
+                    hits = paged.total,
+                    "search",
+                );
+            }
             ok(paged, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -1025,6 +1074,16 @@ pub async fn explore(
             let total = matches.len();
             matches.truncate(clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT));
             state.note_search(SearchOp::Explore, &name, total == 0);
+            if search_log_enabled() {
+                tracing::info!(
+                    target: "taguru::search",
+                    context = %name,
+                    op = "explore",
+                    origins = %request.origins.join(","),
+                    hits = total,
+                    "search",
+                );
+            }
             ok(ExplorePage { total, matches }, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -1056,6 +1115,16 @@ pub async fn activate(
     }) {
         Ok(result) => {
             state.note_search(SearchOp::Activate, &name, result.is_empty());
+            if search_log_enabled() {
+                tracing::info!(
+                    target: "taguru::search",
+                    context = %name,
+                    op = "activate",
+                    origins = %request.origins.join(","),
+                    hits = result.len(),
+                    "search",
+                );
+            }
             ok(result, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -1180,10 +1249,21 @@ fn resolve_with_fallback(
     } else {
         SearchOp::Resolve
     };
+    let tier = resolve_tier_of(&served);
     state.note_search(op, name, served.is_empty());
-    state
-        .metrics()
-        .record_resolve_tier(resolve_tier_of(&served));
+    state.metrics().record_resolve_tier(tier);
+    if search_log_enabled() {
+        tracing::info!(
+            target: "taguru::search",
+            context = %name,
+            op = if labels { "resolve_label" } else { "resolve" },
+            cue = %request.cue,
+            hits = served.len(),
+            tier = tier.as_str(),
+            top_score = served.first().map_or(0.0, |best| best.score),
+            "search",
+        );
+    }
     ok(served, started_at)
 }
 

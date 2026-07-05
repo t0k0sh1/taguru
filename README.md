@@ -81,6 +81,11 @@ cargo run --release
 #   RUST_LOG            log filter (default info), EnvFilter syntax
 #   TAGURU_LOG_FORMAT   json for one JSON object per log line (default: pretty).
 #                     Logs go to stderr.
+#   TAGURU_LOG_SEARCHES=1 one taguru::search event line per retrieval
+#                     (context, op, cue, hits) — the raw material for
+#                     keyword analysis in your log pipeline. Off by
+#                     default: cues are memory CONTENT, and the log
+#                     stream carries none unless you opt in.
 #   OTEL_EXPORTER_OTLP_ENDPOINT
 #                     turns on OTLP/HTTP span export (e.g. the collector
 #                     sidecar http://localhost:4318). The other standard

@@ -197,7 +197,9 @@ impl ResolveTier {
         ResolveTier::Miss,
     ];
 
-    fn as_str(self) -> &'static str {
+    /// The stable name shared by the metric label and the search event
+    /// log, so the two vocabularies can never drift apart.
+    pub fn as_str(self) -> &'static str {
         match self {
             ResolveTier::Lexical => "lexical",
             ResolveTier::Semantic => "semantic",

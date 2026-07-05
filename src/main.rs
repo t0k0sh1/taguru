@@ -38,6 +38,10 @@ use tracing::{info, warn};
 /// - `RUST_LOG`: log filter (default `info`), standard EnvFilter syntax.
 /// - `TAGURU_LOG_FORMAT`: `json` for one JSON object per log line;
 ///   anything else keeps the human-readable format. Logs go to stderr.
+/// - `TAGURU_LOG_SEARCHES`: `1` emits one `taguru::search` event line
+///   per retrieval (context, op, cue, hits) for keyword analysis in
+///   the log pipeline. Off by default: cues are memory content, and
+///   the standard log stream carries no content.
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT` (or the `_TRACES_` variant): turns
 ///   on OTLP/HTTP span export — one span per request, parented from an
 ///   inbound `traceparent` or `X-Amzn-Trace-Id`, `trace_id` stamped
