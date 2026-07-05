@@ -789,6 +789,58 @@ fn the_wal_cap_env_refuses_writes_rather_than_growing_forever() {
 }
 
 #[test]
+#[cfg(unix)]
+fn health_reports_503_while_flushes_fail_and_recovers_after() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let server = Server::start("health503");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    // The first write creates the WAL file while the directory is
+    // still writable; afterwards appends only need the existing file.
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([{"subject": "a", "label": "l", "object": "b", "weight": 1.0}])),
+    );
+
+    std::fs::set_permissions(&server.data_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Keep the context dirty each round so a tick between our calls
+    // cannot leave the flusher idle-and-green.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let degraded = loop {
+        let _ = server.call(
+            "POST",
+            "/contexts/sake/associations",
+            Some(json!([{"subject": "a", "label": "l", "object": "b", "weight": 0.001}])),
+        );
+        let (status, body) = server.call("GET", "/health", None);
+        if status == 503 {
+            break body;
+        }
+        assert!(Instant::now() < deadline, "health never degraded");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(degraded["status"], json!("error"), "{degraded}");
+
+    std::fs::set_permissions(&server.data_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let _ = server.call(
+            "POST",
+            "/contexts/sake/associations",
+            Some(json!([{"subject": "a", "label": "l", "object": "b", "weight": 0.001}])),
+        );
+        let (status, _) = server.call("GET", "/health", None);
+        if status == 200 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "health never recovered");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[test]
 fn a_body_over_the_configured_limit_is_rejected_with_413() {
     let server = Server::start_with_env("bodycap", &[("TAGURU_MAX_BODY_BYTES", "16")]);
     let (status, _) = server.call(

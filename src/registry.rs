@@ -2198,6 +2198,52 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn health_follows_the_flusher_down_and_back_up() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("health");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+            )
+            .unwrap()
+            .unwrap();
+        state.flush_dirty();
+        assert!(state.metrics().flush_is_healthy());
+        let stamped = state.metrics().last_flush_success_epoch();
+        assert!(stamped > 0, "a successful flush must stamp the gauge");
+        assert!(rendered(&state).contains(&format!(
+            "taguru_last_flush_success_timestamp_seconds {stamped}"
+        )));
+
+        // The disk goes bad: the next flush fails, health turns with it.
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("青嶺酒造", "杜氏", "高瀬", 1.0, None)],
+            )
+            .unwrap()
+            .unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(state.flush_dirty().is_empty());
+        assert!(!state.metrics().flush_is_healthy());
+
+        // The disk recovers: the next tick heals the signal.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(state.flush_dirty(), vec!["sake".to_string()]);
+        assert!(state.metrics().flush_is_healthy());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn every_latecomer_behind_a_delete_finds_the_tombstone() {
         let dir = scratch_dir("delete-tombstone");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();

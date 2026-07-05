@@ -9,11 +9,12 @@
 //! (scrape) time.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{MatchedPath, Request, State};
+use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -104,6 +105,14 @@ pub struct Metrics {
     embed_refresh_failed: AtomicU64,
     embed_resolve_ok: AtomicU64,
     embed_resolve_failed: AtomicU64,
+    /// Set while the most recent flush attempt failed; cleared by the
+    /// next success. Drives /health: the flusher retries every tick,
+    /// so this is a self-healing signal, never a latched one.
+    flush_degraded: AtomicBool,
+    /// Unix seconds of the last successful image flush (0 = none since
+    /// boot). `time() - this` on a dashboard says how stale images are
+    /// without knowing the flush interval.
+    last_flush_success_epoch: AtomicU64,
 }
 
 /// Point-in-time gauges, computed from the registry at scrape time
@@ -181,6 +190,26 @@ impl Metrics {
             &self.flush_failed
         };
         counter.fetch_add(1, Ordering::Relaxed);
+        self.flush_degraded.store(!ok, Ordering::Relaxed);
+        if ok {
+            let epoch = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|since| since.as_secs())
+                .unwrap_or(0);
+            self.last_flush_success_epoch
+                .store(epoch, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether the most recent image-flush attempt succeeded (true
+    /// when none has run yet — an idle server is a healthy server).
+    pub fn flush_is_healthy(&self) -> bool {
+        !self.flush_degraded.load(Ordering::Relaxed)
+    }
+
+    /// Unix seconds of the last successful flush; 0 when none yet.
+    pub fn last_flush_success_epoch(&self) -> u64 {
+        self.last_flush_success_epoch.load(Ordering::Relaxed)
     }
 
     pub fn record_wal_append(&self, ok: bool) {
@@ -373,6 +402,16 @@ impl Metrics {
             "Total bytes across all write-ahead logs; sustained growth means image flushes are failing.",
         );
         out.push_str(&format!("taguru_wal_bytes {}\n", gauges.wal_bytes));
+        push_header(
+            &mut out,
+            "taguru_last_flush_success_timestamp_seconds",
+            "gauge",
+            "Unix time of the last successful image flush (0 = none since boot); alert on time() minus this.",
+        );
+        out.push_str(&format!(
+            "taguru_last_flush_success_timestamp_seconds {}\n",
+            self.last_flush_success_epoch.load(Ordering::Relaxed)
+        ));
 
         out
     }
@@ -428,6 +467,28 @@ pub async fn track_http(
         "http",
     );
     response
+}
+
+/// GET /health: 200 "ok" while the write path is healthy, 503 in the
+/// ApiError shape when the most recent image flush failed. The check
+/// is the flusher's own outcome, so an orchestrator's probe turns red
+/// within one flush interval of the disk going bad — and green again
+/// one interval after it recovers. (An idle server with nothing dirty
+/// reports its last known state.)
+pub async fn health(State(state): State<AppState>) -> Response {
+    if state.metrics().flush_is_healthy() {
+        return "ok".into_response();
+    }
+    let reason = match state.metrics().last_flush_success_epoch() {
+        0 => "the last image flush failed, and none has succeeded since boot — \
+              check disk space and the server log"
+            .to_string(),
+        epoch => format!(
+            "the last image flush failed; the last success was at unix {epoch} — \
+             check disk space and the server log"
+        ),
+    };
+    crate::api::error(StatusCode::SERVICE_UNAVAILABLE, reason, Instant::now())
 }
 
 /// GET /metrics: the whole registry in Prometheus text format.

@@ -129,7 +129,7 @@ async fn main() {
     });
 
     let app = Router::new()
-        .route("/health", get(|| async { "ok" }))
+        .route("/health", get(metrics::health))
         .route("/metrics", get(metrics::render))
         .route("/protocol", get(api::protocol))
         .route("/contexts", get(api::list_contexts))

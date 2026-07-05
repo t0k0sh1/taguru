@@ -92,8 +92,11 @@ cargo run --release
 
 Observability: every request lands in the access log, and
 `GET /metrics` serves Prometheus text — per-route request counts and
-latency histograms, cache/flush/embedding outcomes, and residency
-gauges.
+latency histograms, cache/flush/WAL/embedding outcomes, residency and
+WAL-size gauges, and the last-successful-flush timestamp.
+`GET /health` answers `200 ok` while the write path is healthy and
+`503` (JSON error shape) while the most recent image flush has failed
+— it recovers by itself one flush interval after the disk does.
 
 Backups: one context is the whole file family — `{stem}.ctx`,
 `.meta.json`, `.sources.json`, `.vectors.bin`, `.wal.jsonl` — back
