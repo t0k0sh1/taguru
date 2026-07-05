@@ -50,7 +50,10 @@ playbook for clients itself: `GET /protocol` (the content of
 ```sh
 cargo run --release
 # Environment:
-#   TAGURU_ADDR         bind address (default 127.0.0.1:3000)
+#   TAGURU_ADDR         bind address (default 127.0.0.1:8248 — "TAGU" on a
+#                     phone keypad, chosen to avoid the defaults of likely
+#                     neighbours: FastAPI/Chroma 8000, Next.js/Grafana 3000,
+#                     Ollama 11434, Qdrant 6333, Weaviate 8080)
 #   TAGURU_DATA_DIR     data directory (default ./data)
 #   TAGURU_CACHE_BYTES  resident budget for unpinned contexts (default 512 MiB)
 #   TAGURU_FLUSH_SECS   image flush interval (default 5). With the WAL on
@@ -95,11 +98,11 @@ server (plain `rsync`/`cp`) is not guaranteed consistent across files
 — stop the server or use a real snapshot.
 
 ```sh
-curl -X PUT localhost:3000/contexts/sake -H 'Content-Type: application/json' \
+curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \
   -d '{"description":"青嶺酒造という架空の酒蔵の知識"}'
-curl -X POST localhost:3000/contexts/sake/associations -H 'Content-Type: application/json' \
+curl -X POST localhost:8248/contexts/sake/associations -H 'Content-Type: application/json' \
   -d '[{"subject":"青嶺酒造","label":"代表銘柄","object":"青嶺","weight":1.0,"source":"第1段落"}]'
-curl -X POST localhost:3000/contexts/sake/activate -H 'Content-Type: application/json' \
+curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application/json' \
   -d '{"origins":["青嶺酒造"]}'
 ```
 
@@ -117,7 +120,7 @@ content of `/protocol`).
 
 ```sh
 cargo build --release                       # builds target/release/taguru-mcp
-claude mcp add taguru -e TAGURU_URL=http://127.0.0.1:3000 -- /path/to/target/release/taguru-mcp
+claude mcp add taguru -e TAGURU_URL=http://127.0.0.1:8248 -- /path/to/target/release/taguru-mcp
 ```
 
 With that in place, requests like "ingest the documents in this folder

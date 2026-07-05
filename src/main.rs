@@ -29,8 +29,11 @@ use tracing::{info, warn};
 /// - `TAGURU_WAL`: per-context write-ahead log for acknowledged graph
 ///   writes (default on). `0`/`false` restores the flush-interval
 ///   crash-loss window.
-/// - `TAGURU_ADDR`: bind address (default 127.0.0.1:3000; port 0 picks a
-///   free port and the resolved address is printed).
+/// - `TAGURU_ADDR`: bind address (default 127.0.0.1:8248 — "TAGU" on a
+///   phone keypad, clear of the defaults Taguru tends to sit beside:
+///   3000 Next.js/Grafana, 8000 FastAPI/Chroma, 8080 Weaviate, 11434
+///   Ollama, 6333 Qdrant. Port 0 picks a free port and the resolved
+///   address is printed).
 /// - `RUST_LOG`: log filter (default `info`), standard EnvFilter syntax.
 /// - `TAGURU_LOG_FORMAT`: `json` for one JSON object per log line;
 ///   anything else keeps the human-readable format. Logs go to stderr.
@@ -189,7 +192,7 @@ async fn main() {
         ))
         .with_state(state.clone());
 
-    let addr = std::env::var("TAGURU_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let addr = std::env::var("TAGURU_ADDR").unwrap_or_else(|_| "127.0.0.1:8248".to_string());
     let listener = TcpListener::bind(&addr).await.unwrap();
     // Print the RESOLVED address: with port 0 the OS picks one, and
     // whoever spawned us (integration tests included) reads it here.
