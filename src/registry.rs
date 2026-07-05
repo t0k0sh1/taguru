@@ -1115,13 +1115,47 @@ impl AppState {
     }
 
     /// Runs a read-only operation on one context, loading it first if
-    /// cold.
+    /// cold. A hot context is served under the SHARED lock, so
+    /// concurrent reads of one context run in parallel — a long explore
+    /// no longer makes every recall on the same context queue behind
+    /// it. Only a cold load (and every write) takes the exclusive path.
     pub fn read_context<T>(
         &self,
         name: &str,
         operate: impl FnOnce(&Context) -> T,
     ) -> Result<T, AccessError> {
-        self.with_hot(name, false, |context| operate(context))
+        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        // Fast path: already resident, shared lock, no exclusivity.
+        {
+            let inner = entry.inner.read().unwrap();
+            match &inner.slot {
+                Slot::Hot(context) => {
+                    self.0.metrics.record_cache_hit();
+                    let result = operate(context);
+                    drop(inner);
+                    self.touch(&entry);
+                    self.enforce_budget(name);
+                    return Ok(result);
+                }
+                Slot::Deleted => return Err(AccessError::NotFound),
+                Slot::Cold => {}
+            }
+        }
+        // Slow path: load under the exclusive lock. ensure_hot
+        // re-checks the slot, so losing the load race to a concurrent
+        // reader is fine — its load counts as ours.
+        let result = {
+            let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
+            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
+                .map_err(AccessError::Load)?;
+            let Slot::Hot(context) = &inner.slot else {
+                unreachable!("ensure_hot leaves the slot hot");
+            };
+            operate(context)
+        };
+        self.touch(&entry);
+        self.enforce_budget(name);
+        Ok(result)
     }
 
     /// Runs a mutating operation on one context, loading it first if
@@ -1136,7 +1170,21 @@ impl AppState {
         name: &str,
         operate: impl FnOnce(&mut Context) -> T,
     ) -> Result<T, AccessError> {
-        self.with_hot(name, true, operate)
+        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        let result = {
+            let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
+            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
+                .map_err(AccessError::Load)?;
+            let Slot::Hot(context) = &mut inner.slot else {
+                unreachable!("ensure_hot leaves the slot hot");
+            };
+            let result = operate(context);
+            entry.dirty.store(true, Ordering::Relaxed);
+            result
+        };
+        self.touch(&entry);
+        self.enforce_budget(name);
+        Ok(result)
     }
 
     /// Persists every dirty context and returns the names it flushed —
@@ -1210,34 +1258,12 @@ impl AppState {
             .collect()
     }
 
-    fn with_hot<T>(
-        &self,
-        name: &str,
-        mark_dirty: bool,
-        operate: impl FnOnce(&mut Context) -> T,
-    ) -> Result<T, AccessError> {
-        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
-        let result = {
-            // The lookup can predate a concurrent delete; the tombstone
-            // set under this same lock is the authoritative answer.
-            let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
-            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
-                .map_err(AccessError::Load)?;
-            let Slot::Hot(context) = &mut inner.slot else {
-                unreachable!("ensure_hot leaves the slot hot");
-            };
-            let result = operate(context);
-            if mark_dirty {
-                entry.dirty.store(true, Ordering::Relaxed);
-            }
-            result
-        };
+    /// Stamps the LRU clock on an entry after an operation.
+    fn touch(&self, entry: &Entry) {
         entry.last_touch.store(
             self.0.clock.fetch_add(1, Ordering::Relaxed) + 1,
             Ordering::Relaxed,
         );
-        self.enforce_budget(name);
-        Ok(result)
     }
 
     /// The write path of the HTTP mutators: stage the whole batch in
@@ -1304,10 +1330,7 @@ impl AppState {
             entry.dirty.store(true, Ordering::Relaxed);
             result
         };
-        entry.last_touch.store(
-            self.0.clock.fetch_add(1, Ordering::Relaxed) + 1,
-            Ordering::Relaxed,
-        );
+        self.touch(&entry);
         self.enforce_budget(name);
         Ok(result)
     }
@@ -2248,6 +2271,60 @@ mod tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(state.flush_dirty(), vec!["sake".to_string()]);
         assert!(state.metrics().flush_is_healthy());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_reads_of_one_hot_context_do_not_serialize() {
+        use std::sync::atomic::AtomicUsize;
+        use std::thread;
+        use std::time::Duration;
+
+        let dir = scratch_dir("read-parallel");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+            )
+            .unwrap()
+            .unwrap();
+
+        let in_read = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut readers = Vec::new();
+        for _ in 0..2 {
+            let state = state.clone();
+            let in_read = Arc::clone(&in_read);
+            let peak = Arc::clone(&peak);
+            readers.push(thread::spawn(move || {
+                state
+                    .read_context("sake", |context| {
+                        let now = in_read.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        // Long enough that the two readers MUST overlap
+                        // unless one lock is excluding the other.
+                        thread::sleep(Duration::from_millis(150));
+                        in_read.fetch_sub(1, Ordering::SeqCst);
+                        context.association_count()
+                    })
+                    .map_err(|_| "read")
+                    .unwrap();
+            }));
+        }
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            2,
+            "two readers must be inside one hot context at the same time"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
