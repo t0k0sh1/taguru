@@ -3,6 +3,14 @@ name = "taguru"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "Long-term semantic memory for LLMs: an association-graph server with structural recall, plus an MCP stdio bridge"
+repository = "https://github.com/t0k0sh1/taguru"
+readme = "README.md"
+keywords = ["llm", "memory", "mcp", "knowledge-graph", "semantic-memory"]
+categories = ["database-implementations", "web-programming::http-server"]
+# samples/ is raw ingest material for manual runs (1.2 MB of it Project
+# Gutenberg text) — nothing in src/ or tests/ reads it.
+exclude = ["/samples", "/.github", "/Dockerfile", "/.dockerignore"]
 
 [dependencies]
 axum = "0.8.9"

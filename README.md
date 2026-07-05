@@ -48,7 +48,8 @@ playbook for clients itself: `GET /protocol` (the content of
 ## Running
 
 ```sh
-cargo run --release
+cargo run --release   # or `cargo install taguru`, which installs the
+                      # server (`taguru`) and the MCP bridge (`taguru-mcp`)
 # Same knobs from a file: `taguru --config taguru.env` (or
 # TAGURU_CONFIG=taguru.env) reads KEY=VALUE lines — the exact dialect
 # `docker run --env-file` accepts, so ONE file drives both. Real
@@ -203,7 +204,7 @@ automatically as the tool definitions and the MCP instructions (the
 content of `/protocol`).
 
 ```sh
-cargo build --release                       # builds target/release/taguru-mcp
+cargo build --release   # or `cargo install taguru`, which puts taguru-mcp on PATH
 claude mcp add taguru -e TAGURU_URL=http://127.0.0.1:8248 -- /path/to/target/release/taguru-mcp
 ```
 
