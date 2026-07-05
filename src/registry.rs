@@ -1560,11 +1560,11 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fsync_parent_dir(path)
 }
 
-/// Persists a rename by syncing the directory that holds the entry.
-/// Unix-only; elsewhere the rename stays atomic against a crash
-/// mid-write, just not durable against power loss — unix is what this
-/// server targets.
-fn fsync_parent_dir(path: &Path) -> io::Result<()> {
+/// Persists a rename or file creation by syncing the directory that
+/// holds the entry. Unix-only; elsewhere the rename stays atomic
+/// against a crash mid-write, just not durable against power loss —
+/// unix is what this server targets.
+pub(crate) fn fsync_parent_dir(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         fs::File::open(parent)?.sync_all()?;

@@ -41,7 +41,9 @@ struct WalRecord {
 /// single fsync after all of them — the HTTP batch is the natural
 /// group-commit unit (one document, one request, one lock, one sync).
 /// On `Err` nothing may be assumed durable; the caller must not have
-/// applied anything yet (write-ahead: log, sync, THEN apply).
+/// applied anything yet (write-ahead: log, sync, THEN apply). Callers
+/// serialize appends per log (the context's entry lock), so only
+/// crashes race this function, never other appenders.
 pub fn append_batch(path: &Path, first_seq: u64, ops: &[WalOp]) -> io::Result<()> {
     let mut buffer = Vec::new();
     for (offset, op) in ops.iter().enumerate() {
@@ -52,12 +54,45 @@ pub fn append_batch(path: &Path, first_seq: u64, ops: &[WalOp]) -> io::Result<()
         serde_json::to_writer(&mut buffer, &record)?;
         buffer.push(b'\n');
     }
-    let mut file = fs::OpenOptions::new()
-        .create(true)
+    // Creating the log adds an entry to the parent directory's own
+    // data: without syncing the directory too, power loss can drop the
+    // whole file even though its contents were fsynced — the same rule
+    // `write_atomic` follows for renames. `create_new` tells the two
+    // cases apart in the open itself.
+    let (mut file, created) = match fs::OpenOptions::new()
+        .create_new(true)
         .append(true)
-        .open(path)?;
-    file.write_all(&buffer)?;
-    file.sync_all()
+        .open(path)
+    {
+        Ok(file) => (file, true),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            (fs::OpenOptions::new().append(true).open(path)?, false)
+        }
+        Err(error) => return Err(error),
+    };
+    let length_before = file.metadata()?.len();
+    let outcome = file
+        .write_all(&buffer)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            if created {
+                crate::registry::fsync_parent_dir(path)
+            } else {
+                Ok(())
+            }
+        });
+    if let Err(error) = outcome {
+        // The caller refuses the write on `Err` and hands the same seq
+        // numbers to the next batch — so any bytes that DID land here
+        // would later replay as ghost records beside the real ones,
+        // double-applying their seqs. Put the log back exactly as it
+        // was. Best effort: if even this fails the disk is failing
+        // twice over, and replay's torn-tail rule still absorbs the
+        // common partial-append shape.
+        let _ = file.set_len(length_before);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Reads the log back: every op with `seq > watermark` in file order,
