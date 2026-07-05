@@ -438,6 +438,46 @@ fn an_association_batch_over_the_cap_is_rejected_before_any_write() {
 }
 
 #[test]
+fn an_insane_weight_is_rejected_before_any_write() {
+    let server = Server::start("weightcap");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+
+    // Finite but absurd: two of these would saturate an edge to
+    // +Infinity, and a later retract would mint Inf − Inf = NaN — a
+    // fact nothing can read or reset again.
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "a", "label": "l", "object": "b", "weight": 1.0},
+            {"subject": "青嶺酒造", "label": "生産量", "object": "無限", "weight": 1.0e300},
+        ])),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("associations[1].weight"),
+        "the message must point at the offending item: {body}"
+    );
+    // Refused whole, before the write lock: not even the sane first
+    // item landed.
+    let directory = server.ok("GET", "/contexts", None);
+    assert_eq!(directory[0]["stats"]["associations"], json!(0));
+
+    // The documented boundary stays usable, negation included.
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "a", "label": "l", "object": "b", "weight": 1.0e6},
+            {"subject": "a", "label": "l2", "object": "b", "weight": -1.0e6},
+        ])),
+    );
+}
+
+#[test]
 fn unreachable_from_pages_like_recall_and_query() {
     let server = Server::start("orphanpage");
     server.ok("PUT", "/contexts/sake", Some(json!({})));

@@ -210,6 +210,22 @@ pub async fn add_associations(
             started_at,
         );
     }
+    // Also refused whole: a weight the graph must never accumulate.
+    // JSON cannot carry Infinity or NaN, but it carries 1e300 just
+    // fine, and saturation never washes out of an edge.
+    for (index, op) in associations.iter().enumerate() {
+        if !op.weight.is_finite() || op.weight.abs() > MAX_ASSOCIATION_WEIGHT {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "associations[{index}].weight {} is outside the accepted range \
+                     (finite, |weight| <= {MAX_ASSOCIATION_WEIGHT}); nothing was applied",
+                    op.weight
+                ),
+                started_at,
+            );
+        }
+    }
     let total = associations.len();
     match state.add_associations(&name, associations) {
         Err(failure) => access_error(failure, &name, started_at),
@@ -246,6 +262,13 @@ const MAX_EXPLORE_DEPTH: usize = 10;
 /// Per-request association batch cap — one document's facts arrive as
 /// one request; anything past this is asked to split.
 const MAX_ASSOCIATIONS_PER_REQUEST: usize = 10_000;
+
+/// Per-op weight ceiling (absolute value). Weights accumulate on an
+/// edge across writes and floats saturate: two f64::MAX writes made an
+/// edge +Infinity, and a later retract minted Inf − Inf = NaN — an
+/// unreadable, unresettable fact. At ±1e6 per op, saturating would
+/// take ~1.8e302 acknowledged writes.
+const MAX_ASSOCIATION_WEIGHT: f64 = 1e6;
 
 /// The one clamp every numeric cap in this file goes through: an
 /// omitted value takes the default, and nothing exceeds the ceiling.
