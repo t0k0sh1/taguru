@@ -62,6 +62,12 @@ cargo run --release
 #                     graph write is fsynced before it applies, so a
 #                     crash loses nothing (default on; 0/false restores
 #                     the flush-interval loss window)
+#   TAGURU_WAL_MAX_BYTES  per-context WAL ceiling (default 256 MiB,
+#                     0 = unlimited). The log truncates after every
+#                     successful image flush, so it only nears the cap
+#                     when flushes keep failing — past it, writes are
+#                     refused (500) instead of growing the log forever.
+#                     Watch taguru_wal_bytes.
 #   TAGURU_EMBED_URL / TAGURU_EMBED_MODEL / TAGURU_EMBED_API_KEY
 #                     semantic entry tier (OpenAI-compatible /embeddings).
 #                     Unset keeps the entry purely lexical.

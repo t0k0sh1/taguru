@@ -174,13 +174,14 @@ pub struct Entry {
 }
 
 impl Entry {
-    fn new(meta: ContextMeta, stats: ContextStats, slot: Slot) -> Self {
+    fn new(meta: ContextMeta, stats: ContextStats, slot: Slot, wal_bytes: u64) -> Self {
         Self {
             inner: RwLock::new(EntryInner {
                 meta,
                 stats,
                 slot,
                 wal_seq: 1,
+                wal_bytes,
             }),
             dirty: AtomicBool::new(false),
             last_touch: AtomicU64::new(0),
@@ -210,6 +211,12 @@ struct EntryInner {
     /// write lock (append and flush both hold it). Meaningful while
     /// hot; a cold load recomputes it from the replay's tail.
     wal_seq: u64,
+    /// Size of this context's log on disk — the growth signal behind
+    /// the `taguru_wal_bytes` gauge and the `TAGURU_WAL_MAX_BYTES`
+    /// backstop. Advanced on append, re-stat'ed on load, zeroed on
+    /// truncation; a log only shrinks after a successful image save,
+    /// so sustained growth here means flushes are failing.
+    wal_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -254,6 +261,12 @@ pub struct PartialWrite {
     pub full: bool,
 }
 
+/// Default per-context WAL ceiling (`TAGURU_WAL_MAX_BYTES`): a healthy
+/// server truncates the log every flush interval, so a log this large
+/// means the image has been failing to save for a long time — refuse
+/// new writes rather than grow without bound.
+pub const DEFAULT_WAL_MAX_BYTES: usize = 256 * 1024 * 1024;
+
 /// Shared server state: the data directory, the cache budget, and the
 /// context registry.
 #[derive(Clone)]
@@ -287,6 +300,12 @@ struct StateInner {
     /// regardless — a log left behind by an earlier WAL-enabled run
     /// must never be ignored.
     wal_enabled: bool,
+    /// Per-context ceiling on the log (`TAGURU_WAL_MAX_BYTES`, 0 =
+    /// unlimited). The log only truncates after a successful image
+    /// save, so a persistently failing flush would otherwise grow it
+    /// without bound; past the cap new writes are refused
+    /// ([`AccessError::Unpersisted`]) instead.
+    wal_max_bytes: usize,
 }
 
 /// A FIFO-bounded map of cue → embedding. FIFO rather than LRU keeps it
@@ -320,16 +339,16 @@ impl CueCache {
 }
 
 impl AppState {
-    /// [`AppState::boot_with`] with the WAL on — the deployment
-    /// default, and what the tests boot with (so the whole existing
-    /// suite exercises the WAL-enabled paths).
+    /// [`AppState::boot_with`] with the WAL on and the default log cap
+    /// — the deployment defaults, and what the tests boot with (so the
+    /// whole existing suite exercises the WAL-enabled paths).
     #[cfg(test)]
     pub fn boot(
         data_dir: PathBuf,
         cache_bytes: usize,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
     ) -> io::Result<Self> {
-        Self::boot_with(data_dir, cache_bytes, embedder, true)
+        Self::boot_with(data_dir, cache_bytes, embedder, true, DEFAULT_WAL_MAX_BYTES)
     }
 
     /// Opens (creating if needed) the data directory and registers every
@@ -337,12 +356,14 @@ impl AppState {
     /// snapshots. Pinned contexts are loaded eagerly; a pinned image
     /// that fails to load is left cold with a warning rather than
     /// taking the server down. `wal_enabled: false` restores the
-    /// flush-interval durability window (`TAGURU_WAL=0`).
+    /// flush-interval durability window (`TAGURU_WAL=0`);
+    /// `wal_max_bytes` is the per-context log ceiling (0 = unlimited).
     pub fn boot_with(
         data_dir: PathBuf,
         cache_bytes: usize,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
         wal_enabled: bool,
+        wal_max_bytes: usize,
     ) -> io::Result<Self> {
         fs::create_dir_all(&data_dir)?;
         let mut registry = HashMap::new();
@@ -359,7 +380,15 @@ impl AppState {
                 continue;
             };
             let MetaFile { meta, stats } = read_meta_file(&data_dir, stem);
-            registry.insert(name, Arc::new(Entry::new(meta, stats, Slot::Cold)));
+            // The gauge must see leftover logs from the first scrape,
+            // not only after each context's first touch.
+            let wal_bytes = fs::metadata(wal_path(&data_dir, stem))
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            registry.insert(
+                name,
+                Arc::new(Entry::new(meta, stats, Slot::Cold, wal_bytes)),
+            );
         }
 
         let state = Self(Arc::new(StateInner {
@@ -371,6 +400,7 @@ impl AppState {
             cue_cache: Mutex::new(CueCache::default()),
             metrics: Metrics::default(),
             wal_enabled,
+            wal_max_bytes,
         }));
         for (name, entry) in state.snapshot() {
             let mut inner = entry.inner.write().unwrap();
@@ -400,12 +430,14 @@ impl AppState {
         let contexts_registered = snapshot.len() as u64;
         let mut contexts_resident = 0u64;
         let mut resident_bytes = 0u64;
+        let mut wal_bytes = 0u64;
         for (_, entry) in snapshot {
             let inner = entry.inner.read().unwrap();
             if let Slot::Hot(context) = &inner.slot {
                 contexts_resident += 1;
                 resident_bytes += context.footprint() as u64;
             }
+            wal_bytes += inner.wal_bytes;
             drop(inner);
             let vectors = entry
                 .vectors
@@ -420,6 +452,7 @@ impl AppState {
             contexts_registered,
             contexts_resident,
             resident_bytes,
+            wal_bytes,
         }
     }
 
@@ -469,7 +502,7 @@ impl AppState {
         save_files(&self.0.data_dir, name, &meta, &stats, &context).map_err(CreateError::Io)?;
         registry.insert(
             name.to_string(),
-            Arc::new(Entry::new(meta, stats, Slot::Hot(Box::new(context)))),
+            Arc::new(Entry::new(meta, stats, Slot::Hot(Box::new(context)), 0)),
         );
         Ok(())
     }
@@ -1138,8 +1171,11 @@ impl AppState {
                 inner.stats = stats;
                 entry.dirty.store(false, Ordering::Relaxed);
                 self.0.metrics.record_flush(true);
-                if let Err(error) = wal::reset(&wal_path(&self.0.data_dir, &file_stem(name))) {
-                    tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
+                match wal::reset(&wal_path(&self.0.data_dir, &file_stem(name))) {
+                    Ok(()) => inner.wal_bytes = 0,
+                    Err(error) => {
+                        tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
+                    }
                 }
                 true
             }
@@ -1218,10 +1254,39 @@ impl AppState {
             ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
                 .map_err(AccessError::Load)?;
             if self.0.wal_enabled {
+                // Backstop against unbounded growth: the log only
+                // truncates after a successful image save, so a
+                // persistently failing flush would grow it forever.
+                // Past the cap, refuse writes — loudly — instead.
+                if self.0.wal_max_bytes > 0 && inner.wal_bytes >= self.0.wal_max_bytes as u64 {
+                    tracing::warn!(
+                        context = %name,
+                        wal_bytes = inner.wal_bytes,
+                        cap = self.0.wal_max_bytes,
+                        "WAL over its cap with the image failing to flush; write refused"
+                    );
+                    return Err(AccessError::Unpersisted(format!(
+                        "the write-ahead log is at {} bytes (cap {}): the image has been \
+                         failing to flush — check disk space and the server log",
+                        inner.wal_bytes, self.0.wal_max_bytes
+                    )));
+                }
                 let path = wal_path(&self.0.data_dir, &file_stem(name));
-                wal::append_batch(&path, inner.wal_seq, ops)
-                    .map_err(|error| AccessError::Unpersisted(error.to_string()))?;
-                inner.wal_seq += ops.len() as u64;
+                match wal::append_batch(&path, inner.wal_seq, ops) {
+                    Ok(appended) => {
+                        self.0.metrics.record_wal_append(true);
+                        inner.wal_bytes += appended;
+                        inner.wal_seq += ops.len() as u64;
+                    }
+                    Err(error) => {
+                        // The client sees the refusal; the operator
+                        // must too — the core durability promise just
+                        // failed to engage.
+                        self.0.metrics.record_wal_append(false);
+                        tracing::warn!(context = %name, %error, "WAL append failed; write refused");
+                        return Err(AccessError::Unpersisted(error.to_string()));
+                    }
+                }
             }
             let Slot::Hot(context) = &mut inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
@@ -1362,8 +1427,11 @@ impl AppState {
                     }
                     inner.stats = stats;
                     entry.dirty.store(false, Ordering::Relaxed);
-                    if let Err(error) = wal::reset(&wal_path(&self.0.data_dir, &file_stem(&name))) {
-                        tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
+                    match wal::reset(&wal_path(&self.0.data_dir, &file_stem(&name))) {
+                        Ok(()) => inner.wal_bytes = 0,
+                        Err(error) => {
+                            tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
+                        }
                     }
                 } else {
                     inner.stats = ContextStats::of(context);
@@ -1430,6 +1498,11 @@ fn ensure_hot(
     inner.stats = ContextStats::of(&context);
     inner.slot = Slot::Hot(Box::new(context));
     inner.wal_seq = top + 1;
+    // Re-stat rather than trust the registration-time size: appends
+    // and truncations may have happened while this entry sat cold.
+    inner.wal_bytes = fs::metadata(wal_path(data_dir, &stem))
+        .map(|meta| meta.len())
+        .unwrap_or(0);
     Ok(())
 }
 
@@ -2056,6 +2129,75 @@ mod tests {
     }
 
     #[test]
+    fn wal_growth_is_visible_and_the_cap_refuses_further_writes() {
+        let dir = scratch_dir("wal-gauge");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            assert_eq!(state.gauge_snapshot().wal_bytes, 0);
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                )
+                .unwrap()
+                .unwrap();
+            let grown = state.gauge_snapshot().wal_bytes;
+            assert!(grown > 0, "an append must show in the gauge");
+            assert!(rendered(&state).contains("taguru_wal_appends_total{outcome=\"ok\"} 1"));
+            assert!(rendered(&state).contains(&format!("taguru_wal_bytes {grown}")));
+            state.flush_dirty();
+            assert_eq!(
+                state.gauge_snapshot().wal_bytes,
+                0,
+                "truncation must zero the gauge"
+            );
+
+            // Leave an unflushed write behind for the reboot check.
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "杜氏", "高瀬", 1.0, None)],
+                )
+                .unwrap()
+                .unwrap();
+        }
+
+        // Registration alone — no touch — must already see the
+        // leftover log, or the first scrapes after a reboot lie.
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            state.gauge_snapshot().wal_bytes > 0,
+            "boot must stat leftover logs"
+        );
+
+        // A tiny cap: the first write passes (the log is empty), the
+        // second is refused — the backstop for a flush that never
+        // succeeds again.
+        let capped_dir = scratch_dir("wal-capped");
+        let state = AppState::boot_with(capped_dir.clone(), usize::MAX, None, true, 1).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations("sake", vec![assoc_op("a", "l", "b", 1.0, None)])
+            .unwrap()
+            .unwrap();
+        let refused = state.add_associations("sake", vec![assoc_op("c", "l", "d", 1.0, None)]);
+        assert!(
+            matches!(refused, Err(AccessError::Unpersisted(_))),
+            "over the cap the write must be refused: {refused:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(capped_dir);
+    }
+
+    #[test]
     fn every_latecomer_behind_a_delete_finds_the_tombstone() {
         let dir = scratch_dir("delete-tombstone");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
@@ -2278,7 +2420,9 @@ mod tests {
     fn disabling_the_wal_restores_the_flush_window() {
         let dir = scratch_dir("wal-off");
         {
-            let state = AppState::boot_with(dir.clone(), usize::MAX, None, false).unwrap();
+            let state =
+                AppState::boot_with(dir.clone(), usize::MAX, None, false, DEFAULT_WAL_MAX_BYTES)
+                    .unwrap();
             state
                 .create("sake", ContextMeta::default())
                 .map_err(|_| "create")

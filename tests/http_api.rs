@@ -763,6 +763,32 @@ fn explore_pages_and_keeps_the_closest_past_the_limit() {
 }
 
 #[test]
+fn the_wal_cap_env_refuses_writes_rather_than_growing_forever() {
+    // Flushes effectively never run, so the log can only grow; a
+    // 1-byte cap trips on the second write.
+    let server = Server::start_with_env(
+        "walcap",
+        &[("TAGURU_WAL_MAX_BYTES", "1"), ("TAGURU_FLUSH_SECS", "3600")],
+    );
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([{"subject": "a", "label": "l", "object": "b", "weight": 1.0}])),
+    );
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([{"subject": "c", "label": "l", "object": "d", "weight": 1.0}])),
+    );
+    assert_eq!(status, 500, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("write-ahead log"),
+        "{body}"
+    );
+}
+
+#[test]
 fn a_body_over_the_configured_limit_is_rejected_with_413() {
     let server = Server::start_with_env("bodycap", &[("TAGURU_MAX_BODY_BYTES", "16")]);
     let (status, _) = server.call(

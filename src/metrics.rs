@@ -98,6 +98,8 @@ pub struct Metrics {
     evictions_failed: AtomicU64,
     flush_ok: AtomicU64,
     flush_failed: AtomicU64,
+    wal_appends_ok: AtomicU64,
+    wal_appends_failed: AtomicU64,
     embed_refresh_ok: AtomicU64,
     embed_refresh_failed: AtomicU64,
     embed_resolve_ok: AtomicU64,
@@ -110,6 +112,10 @@ pub struct GaugeSnapshot {
     pub contexts_registered: u64,
     pub contexts_resident: u64,
     pub resident_bytes: u64,
+    /// Total bytes across every context's write-ahead log. A healthy
+    /// server truncates each log every flush interval; sustained
+    /// growth here means images are failing to save.
+    pub wal_bytes: u64,
 }
 
 impl Metrics {
@@ -173,6 +179,15 @@ impl Metrics {
             &self.flush_ok
         } else {
             &self.flush_failed
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_wal_append(&self, ok: bool) {
+        let counter = if ok {
+            &self.wal_appends_ok
+        } else {
+            &self.wal_appends_failed
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -286,6 +301,13 @@ impl Metrics {
             &self.flush_ok,
             &self.flush_failed,
         );
+        push_outcomes(
+            &mut out,
+            "taguru_wal_appends_total",
+            "Write-ahead log append batches, by outcome (a failed append refuses the write).",
+            &self.wal_appends_ok,
+            &self.wal_appends_failed,
+        );
         push_header(
             &mut out,
             "taguru_embedding_requests_total",
@@ -344,6 +366,13 @@ impl Metrics {
             "taguru_resident_bytes {}\n",
             gauges.resident_bytes
         ));
+        push_header(
+            &mut out,
+            "taguru_wal_bytes",
+            "gauge",
+            "Total bytes across all write-ahead logs; sustained growth means image flushes are failing.",
+        );
+        out.push_str(&format!("taguru_wal_bytes {}\n", gauges.wal_bytes));
 
         out
     }
@@ -422,6 +451,7 @@ mod tests {
             contexts_registered: 0,
             contexts_resident: 0,
             resident_bytes: 0,
+            wal_bytes: 0,
         }
     }
 
@@ -506,6 +536,7 @@ mod tests {
             contexts_registered: 2,
             contexts_resident: 1,
             resident_bytes: 640,
+            wal_bytes: 0,
         });
 
         // Every sample line's metric name must have been introduced by

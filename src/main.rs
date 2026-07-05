@@ -77,9 +77,18 @@ async fn main() {
     let wal_enabled = std::env::var("TAGURU_WAL")
         .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
         .unwrap_or(true);
+    // Backstop for a persistently failing flush: past this, writes are
+    // refused rather than growing the log without bound (0 = no cap).
+    let wal_max_bytes = env_number("TAGURU_WAL_MAX_BYTES", registry::DEFAULT_WAL_MAX_BYTES);
 
-    let state = AppState::boot_with(data_dir.clone(), cache_bytes, embedder, wal_enabled)
-        .expect("data directory must be usable");
+    let state = AppState::boot_with(
+        data_dir.clone(),
+        cache_bytes,
+        embedder,
+        wal_enabled,
+        wal_max_bytes,
+    )
+    .expect("data directory must be usable");
     info!(
         contexts = state.context_count(),
         data_dir = %data_dir.display(),

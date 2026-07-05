@@ -40,11 +40,12 @@ struct WalRecord {
 /// Appends `ops` numbered from `first_seq`, one line each, with a
 /// single fsync after all of them — the HTTP batch is the natural
 /// group-commit unit (one document, one request, one lock, one sync).
+/// Returns the bytes appended, so the caller can track log growth.
 /// On `Err` nothing may be assumed durable; the caller must not have
 /// applied anything yet (write-ahead: log, sync, THEN apply). Callers
 /// serialize appends per log (the context's entry lock), so only
 /// crashes race this function, never other appenders.
-pub fn append_batch(path: &Path, first_seq: u64, ops: &[WalOp]) -> io::Result<()> {
+pub fn append_batch(path: &Path, first_seq: u64, ops: &[WalOp]) -> io::Result<u64> {
     let mut buffer = Vec::new();
     for (offset, op) in ops.iter().enumerate() {
         let record = WalRecord {
@@ -92,7 +93,7 @@ pub fn append_batch(path: &Path, first_seq: u64, ops: &[WalOp]) -> io::Result<()
         let _ = file.set_len(length_before);
         return Err(error);
     }
-    Ok(())
+    Ok(buffer.len() as u64)
 }
 
 /// Reads the log back: every op with `seq > watermark` in file order,
