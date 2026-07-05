@@ -386,7 +386,14 @@ impl AppState {
         let mut registry = HashMap::new();
         for dir_entry in fs::read_dir(&data_dir)? {
             let path = dir_entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("ctx") {
+            let extension = path.extension().and_then(|e| e.to_str());
+            // Crash leftovers of staged writes: never published, and
+            // nothing may linger as unbounded disk litter.
+            if extension.is_some_and(|e| e.starts_with("tmp")) {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            if extension != Some("ctx") {
                 continue;
             }
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -1226,43 +1233,91 @@ impl AppState {
         flushed
     }
 
-    /// One entry's flush: persist if dirty and still hot. Split out of
-    /// [`AppState::flush_dirty`] so the delete-race regression test can
-    /// drive the exact window a real flusher hits — snapshot taken
-    /// before a delete, entry lock taken after it.
+    /// One entry's flush. Split out of [`AppState::flush_dirty`] so the
+    /// delete-race regression test can drive the exact window a real
+    /// flusher hits — snapshot taken before a delete, entry lock taken
+    /// after it.
+    ///
+    /// The image's disk work runs with the entry UNLOCKED: serialize a
+    /// consistent snapshot under the lock, stage it (write + fsync,
+    /// the megabytes half) without the lock, then re-take the lock to
+    /// publish. Readers and writers of the context proceed while the
+    /// bytes land; before this, every flush stalled them for the whole
+    /// write.
     fn flush_entry(&self, name: &str, entry: &Entry) -> bool {
-        if !entry.dirty.load(Ordering::Relaxed) {
+        // Claim the flag: one flusher per entry at a time, so
+        // concurrent flush_dirty calls (a tick against the shutdown
+        // flush) can never stage the same image twice.
+        if !entry.dirty.swap(false, Ordering::Relaxed) {
             return false;
         }
-        let mut guard = entry.inner.write().unwrap();
-        let inner = &mut *guard;
-        let watermark = inner.wal_seq - 1;
-        // Cold has nothing to write; Deleted must write nothing — this
-        // snapshot predates a delete and the files are gone for good.
-        let Slot::Hot(context) = &mut inner.slot else {
+        let (bytes, meta, stats, watermark) = {
+            let mut guard = entry.inner.write().unwrap();
+            let inner = &mut *guard;
+            let watermark = inner.wal_seq - 1;
+            // Cold has nothing to write; Deleted must write nothing —
+            // that snapshot predates a delete and the files are gone
+            // for good.
+            let Slot::Hot(context) = &mut inner.slot else {
+                return false;
+            };
+            // The image about to be written reflects everything logged
+            // so far: bake that in as the watermark, and those WAL
+            // records are replay-inert even if truncation below never
+            // happens (crash, unwritable file — doesn't matter).
+            context.set_applied_seq(watermark);
+            let stats = ContextStats::of(context);
+            (context.to_bytes(), inner.meta.clone(), stats, watermark)
+        };
+
+        let stem = file_stem(name);
+        let image = image_path(&self.0.data_dir, &stem);
+        let staged = match stage_bytes(&image, &bytes) {
+            Ok(staged) => staged,
+            Err(error) => {
+                tracing::warn!("flush of context '{name}' failed (will retry): {error}");
+                entry.dirty.store(true, Ordering::Relaxed);
+                self.0.metrics.record_flush(false);
+                return false;
+            }
+        };
+
+        // Publication goes back under the lock: files for a name are
+        // only ever created while holding its entry lock — the
+        // tombstone invariant — so a delete that won the race while we
+        // were staging must find us backing off, not recreating.
+        let Some(mut guard) = entry.lock_unless_deleted() else {
+            let _ = fs::remove_file(&staged);
             return false;
         };
-        // The image about to be written reflects everything logged
-        // so far: bake that in as the watermark, and those WAL
-        // records are replay-inert even if truncation below never
-        // happens (crash, unwritable file — doesn't matter).
-        context.set_applied_seq(watermark);
-        let stats = ContextStats::of(context);
-        match save_files(&self.0.data_dir, name, &inner.meta, &stats, context) {
+        let inner = &mut *guard;
+        let outcome = commit_staged(&staged, &image)
+            .and_then(|()| write_meta(&self.0.data_dir, &stem, &meta, &stats));
+        match outcome {
             Ok(()) => {
                 inner.stats = stats;
-                entry.dirty.store(false, Ordering::Relaxed);
                 self.0.metrics.record_flush(true);
-                match wal::reset(&wal_path(&self.0.data_dir, &file_stem(name))) {
-                    Ok(()) => inner.wal_bytes = 0,
-                    Err(error) => {
-                        tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
+                // Truncation is only sound if the image just published
+                // covers the whole log: a write that landed while the
+                // bytes were in flight sits PAST our watermark, and its
+                // records must survive until the next flush bakes them
+                // into an image of their own.
+                if inner.wal_seq - 1 == watermark {
+                    match wal::reset(&wal_path(&self.0.data_dir, &stem)) {
+                        Ok(()) => inner.wal_bytes = 0,
+                        Err(error) => {
+                            tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
+                        }
                     }
+                } else {
+                    entry.dirty.store(true, Ordering::Relaxed);
                 }
                 true
             }
             Err(error) => {
                 tracing::warn!("flush of context '{name}' failed (will retry): {error}");
+                let _ = fs::remove_file(&staged);
+                entry.dirty.store(true, Ordering::Relaxed);
                 self.0.metrics.record_flush(false);
                 false
             }
@@ -1805,14 +1860,38 @@ fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
 /// without that a crash can forget the rename even though the file
 /// contents reached disk.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let staged = stage_bytes(path, bytes)?;
+    commit_staged(&staged, path)
+}
+
+/// A unique per-process staging name beside `path`. Concurrent
+/// stagers (the flusher against an eviction, a shutdown flush against
+/// a tick) must never write the same temporary file — with a fixed
+/// name, one truncates the other mid-write and a torn image gets
+/// renamed into place. Leftovers from a crash are swept at boot.
+fn staging_path(path: &Path) -> PathBuf {
+    static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
+    let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
+    path.with_extension(format!("tmp{nonce}"))
+}
+
+/// The heavy half of [`write_atomic`]: writes and fsyncs `bytes` under
+/// a staging name beside `path`. Safe to run without any lock — the
+/// file is invisible until [`commit_staged`] publishes it.
+fn stage_bytes(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     use std::io::Write;
 
-    let tmp = path.with_extension("tmp");
-    let mut file = fs::File::create(&tmp)?;
+    let staged = staging_path(path);
+    let mut file = fs::File::create(&staged)?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp, path)?;
+    Ok(staged)
+}
+
+/// The cheap half of [`write_atomic`]: atomically publishes a staged
+/// file at its final path — rename plus parent-directory fsync.
+fn commit_staged(staged: &Path, path: &Path) -> io::Result<()> {
+    fs::rename(staged, path)?;
     fsync_parent_dir(path)
 }
 
@@ -2345,6 +2424,53 @@ mod tests {
     }
 
     #[test]
+    fn writes_racing_the_flusher_survive_a_restart() {
+        use std::thread;
+
+        let dir = scratch_dir("flush-race");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let writer = {
+                let state = state.clone();
+                thread::spawn(move || {
+                    for index in 0..100 {
+                        state
+                            .add_associations(
+                                "sake",
+                                vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
+                            )
+                            .unwrap()
+                            .unwrap();
+                    }
+                })
+            };
+            // Flush continuously while the writes land, so staging and
+            // publication interleave with appends every which way. The
+            // dangerous outcome is a truncation eating a record the
+            // published image does not contain.
+            while !writer.is_finished() {
+                state.flush_dirty();
+            }
+            writer.join().unwrap();
+            // No final flush: the drop is the crash, and some tail of
+            // writes lives only in the WAL.
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let count = state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(count, 100, "every acknowledged write must survive");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn the_budget_gate_tracks_loads_writes_pins_and_deletes() {
         let dir = scratch_dir("estimate");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
@@ -2700,8 +2826,19 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"first");
         write_atomic(&path, b"second").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"second");
-        // A successful write consumes its temporary staging file.
-        assert!(!dir.join("file.tmp").exists());
+        // A successful write consumes its (uniquely named) staging file.
+        let leftovers = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.starts_with("tmp"))
+            })
+            .count();
+        assert_eq!(leftovers, 0, "staging files must not survive a commit");
 
         let _ = fs::remove_dir_all(dir);
     }

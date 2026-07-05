@@ -97,7 +97,9 @@ async fn main() {
         ticker.tick().await; // the first tick fires immediately; skip it
         loop {
             ticker.tick().await;
-            let flushed = flusher.flush_dirty();
+            // Serialization and fsyncs are blocking work; keep the
+            // async workers free while images land on disk.
+            let flushed = tokio::task::block_in_place(|| flusher.flush_dirty());
             // Opt-in: a flushed context just changed on disk, so its
             // glosses may have changed too — re-embed the difference.
             // Best effort: a failed refresh is retried the next time a
@@ -239,7 +241,7 @@ async fn main() {
         .unwrap();
 
     // Nothing dirty may outlive the process: one final flush.
-    state.flush_dirty();
+    tokio::task::block_in_place(|| state.flush_dirty());
     info!("flushed dirty contexts on shutdown");
 }
 
