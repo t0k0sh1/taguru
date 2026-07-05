@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -182,6 +182,7 @@ impl Entry {
                 slot,
                 wal_seq: 1,
                 wal_bytes,
+                counted_bytes: 0,
             }),
             dirty: AtomicBool::new(false),
             last_touch: AtomicU64::new(0),
@@ -217,6 +218,12 @@ struct EntryInner {
     /// truncation; a log only shrinks after a successful image save,
     /// so sustained growth here means flushes are failing.
     wal_bytes: u64,
+    /// What this entry currently contributes to the global resident
+    /// estimate (graph footprint; 0 while cold, deleted, or pinned —
+    /// the budget covers unpinned residents only). Kept absolute and
+    /// recounted under this lock, so the global sum cannot drift from
+    /// double-applied deltas.
+    counted_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -306,6 +313,16 @@ struct StateInner {
     /// without bound; past the cap new writes are refused
     /// ([`AccessError::Unpersisted`]) instead.
     wal_max_bytes: usize,
+    /// Running estimate of unpinned resident graph bytes — the cheap
+    /// gate in front of the budget sweep. Adjusted by absolute
+    /// per-entry recounts (see `EntryInner::counted_bytes`); the
+    /// periodic full sweep reconciles it against measured reality
+    /// (folding in vector stores, which are not tracked between
+    /// sweeps). Signed so a transient over-subtraction cannot wrap.
+    resident_estimate: AtomicI64,
+    /// Operation counter behind the every-64th forced sweep — the
+    /// bound on how stale the estimate can get.
+    budget_ops: AtomicU64,
 }
 
 /// A FIFO-bounded map of cue → embedding. FIFO rather than LRU keeps it
@@ -401,6 +418,8 @@ impl AppState {
             metrics: Metrics::default(),
             wal_enabled,
             wal_max_bytes,
+            resident_estimate: AtomicI64::new(0),
+            budget_ops: AtomicU64::new(0),
         }));
         for (name, entry) in state.snapshot() {
             let mut inner = entry.inner.write().unwrap();
@@ -527,6 +546,7 @@ impl AppState {
         let entry = self.0.registry.write().unwrap().remove(name)?;
         let mut in_flight = entry.inner.write().unwrap();
         in_flight.slot = Slot::Deleted;
+        self.recount_entry(&mut in_flight);
         entry.dirty.store(false, Ordering::Relaxed);
         // Lock order: `inner` before `vectors`, as documented on Entry.
         *entry.vectors.lock().unwrap() = None;
@@ -1071,6 +1091,9 @@ impl AppState {
             {
                 return Some(Err(io::Error::other(error)));
             }
+            // A pin toggle moves the entry into or out of the budget's
+            // world; the estimate must follow.
+            self.recount_entry(inner);
             let inner = &*inner;
             write_meta(
                 &self.0.data_dir,
@@ -1148,6 +1171,7 @@ impl AppState {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
                 .map_err(AccessError::Load)?;
+            self.recount_entry(&mut inner);
             let Slot::Hot(context) = &inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
             };
@@ -1180,6 +1204,7 @@ impl AppState {
             };
             let result = operate(context);
             entry.dirty.store(true, Ordering::Relaxed);
+            self.recount_entry(&mut inner);
             result
         };
         self.touch(&entry);
@@ -1266,6 +1291,25 @@ impl AppState {
         );
     }
 
+    /// Recounts one entry's contribution to the resident estimate —
+    /// absolute, not a delta, so repeated calls under the entry lock
+    /// can never double-apply. Called wherever residency, size, or
+    /// pinnedness can change: loads, writes, pin toggles, eviction,
+    /// delete. Pinned entries count as zero — the budget covers
+    /// unpinned residents only, and the gate must agree with the
+    /// sweep on that or pinned-heavy deployments would sweep forever.
+    fn recount_entry(&self, inner: &mut EntryInner) {
+        let now = match (&inner.slot, inner.meta.pinned) {
+            (Slot::Hot(context), false) => context.footprint(),
+            _ => 0,
+        };
+        let before = inner.counted_bytes;
+        inner.counted_bytes = now;
+        self.0
+            .resident_estimate
+            .fetch_add(now as i64 - before as i64, Ordering::Relaxed);
+    }
+
     /// The write path of the HTTP mutators: stage the whole batch in
     /// the context's WAL — one fsync, group commit at exactly the
     /// granularity the API already locks at — and only then run
@@ -1328,6 +1372,7 @@ impl AppState {
             };
             let result = operate(context);
             entry.dirty.store(true, Ordering::Relaxed);
+            self.recount_entry(&mut inner);
             result
         };
         self.touch(&entry);
@@ -1394,6 +1439,19 @@ impl AppState {
     /// thrash. Dirty contexts are persisted before eviction; if that
     /// save fails they stay resident rather than losing writes.
     fn enforce_budget(&self, except: &str) {
+        // Cheap gate in front of the O(contexts) sweep below: one
+        // atomic load of the graph estimate, which per-entry recounts
+        // keep exact. Vector-store residency is NOT tracked between
+        // sweeps, so every 64th operation forces a real sweep anyway —
+        // its reconciling store below bounds any staleness or drift at
+        // 64 operations. Before this gate the full sweep (snapshot,
+        // two lock acquisitions per context) ran on every request.
+        let ops = self.0.budget_ops.fetch_add(1, Ordering::Relaxed);
+        let budget = i64::try_from(self.0.cache_bytes).unwrap_or(i64::MAX);
+        if !ops.is_multiple_of(64) && self.0.resident_estimate.load(Ordering::Relaxed) <= budget {
+            return;
+        }
+
         let mut candidates: Vec<(u64, usize, String, Arc<Entry>)> = Vec::new();
         let mut total = 0usize;
         for (name, entry) in self.snapshot() {
@@ -1424,6 +1482,11 @@ impl AppState {
             total += bytes;
             candidates.push((entry.last_touch.load(Ordering::Relaxed), bytes, name, entry));
         }
+        // Reconcile the gate with measured reality — vectors included,
+        // and any drift folded away.
+        self.0
+            .resident_estimate
+            .store(total as i64, Ordering::Relaxed);
         if total <= self.0.cache_bytes {
             return;
         }
@@ -1469,11 +1532,17 @@ impl AppState {
                     inner.stats = ContextStats::of(context);
                 }
                 inner.slot = Slot::Cold;
+                // Local zero only: the absolute store below settles the
+                // global, so a recount's delta would double-count.
+                inner.counted_bytes = 0;
                 self.0.metrics.record_eviction(true);
             }
             *entry.vectors.lock().unwrap() = None;
             total = total.saturating_sub(bytes);
         }
+        self.0
+            .resident_estimate
+            .store(total as i64, Ordering::Relaxed);
     }
 }
 
@@ -2271,6 +2340,43 @@ mod tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(state.flush_dirty(), vec!["sake".to_string()]);
         assert!(state.metrics().flush_is_healthy());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_budget_gate_tracks_loads_writes_pins_and_deletes() {
+        let dir = scratch_dir("estimate");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+            )
+            .unwrap()
+            .unwrap();
+        let after_write = state.0.resident_estimate.load(Ordering::Relaxed);
+        assert!(after_write > 0, "a resident written context must count");
+
+        // Pinning moves it out of the budget's world…
+        state
+            .update_meta("sake", None, Some(true), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.0.resident_estimate.load(Ordering::Relaxed), 0);
+        // …and unpinning brings it back.
+        state
+            .update_meta("sake", None, Some(false), None, None)
+            .unwrap()
+            .unwrap();
+        assert!(state.0.resident_estimate.load(Ordering::Relaxed) >= after_write);
+
+        state.delete("sake").unwrap().unwrap();
+        assert_eq!(state.0.resident_estimate.load(Ordering::Relaxed), 0);
 
         let _ = fs::remove_dir_all(dir);
     }
