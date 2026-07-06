@@ -39,11 +39,13 @@ playbook for clients itself: `GET /protocol` (the content of
   is the source of truth; memory is a cache managed at whole-context
   granularity. Each context is persisted as `{name}.ctx` (the image) +
   `{name}.meta.json` (description, pinning, stats) +
-  `{name}.sources.json` (original passages). Boot registers every
-  context cold (pinned ones preload), the first access loads
-  transparently, least-recently-used contexts are evicted past the
-  cache budget, and writes mark a context dirty — persisted by the
-  periodic flusher, on eviction, and on shutdown.
+  `{name}.passages.bin` / `{name}.passages.wal.jsonl` (original
+  passages: a compacted snapshot plus an append-log, fsynced per batch
+  — a pre-migration `{name}.sources.json` is read once and retired).
+  Boot registers every context cold (pinned ones preload), the first
+  access loads transparently, least-recently-used contexts are evicted
+  past the cache budget, and writes mark a context dirty — persisted by
+  the periodic flusher, on eviction, and on shutdown.
 
 ## Running
 
@@ -75,6 +77,14 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #                     when flushes keep failing — past it, writes are
 #                     refused (500) instead of growing the log forever.
 #                     Watch taguru_wal_bytes.
+#   TAGURU_PASSAGES_WAL_MAX_BYTES  backstop for each context's passage
+#                     log (default 1 GiB, 0 = unlimited). Passages ride
+#                     their own always-on log + compacted snapshot; the
+#                     log legitimately grows to about the snapshot's
+#                     size before compaction, so this refuses stores
+#                     only when the log is ALSO past 2× the snapshot —
+#                     i.e. compaction itself is failing. Watch
+#                     taguru_passages_wal_bytes.
 #   TAGURU_EMBED_URL / TAGURU_EMBED_MODEL / TAGURU_EMBED_API_KEY
 #                     semantic entry tier (OpenAI-compatible /embeddings).
 #                     Unset keeps the entry purely lexical.
@@ -192,8 +202,9 @@ latency histograms, cache/flush/WAL/embedding outcomes, a 500-cause
 breakdown (`taguru_errors_total{kind=...}`), retrieval hit/empty
 counts per operation (`taguru_searches_total`) with a resolve-tier
 split (`taguru_resolves_total` — a rising `semantic` share means cues
-are drifting from the stored vocabulary), residency and WAL-size
-gauges, and the last-successful-flush timestamp. Per-context numbers
+are drifting from the stored vocabulary), residency and log-size
+gauges (the graph WAL and the passage log each have their own), and
+the last-successful-flush timestamp. Per-context numbers
 deliberately stay OUT of the metric labels (context names are
 client-minted, so they would mint unbounded series): the routing
 directory (`GET /contexts`) carries them instead — usage counters
@@ -215,8 +226,9 @@ collector configuration, not a Taguru change.
 — it recovers by itself one flush interval after the disk does.
 
 Backups: one context is the whole file family — `{stem}.ctx`,
-`.meta.json`, `.sources.json`, `.vectors.bin`, `.wal.jsonl` — back
-them up together, never partially. Every writer is fsync + rename, so
+`.meta.json`, `.passages.bin`, `.passages.wal.jsonl`, `.vectors.bin`,
+`.wal.jsonl` (plus a legacy `.sources.json` until the first passage
+compaction retires it) — back them up together, never partially. Every writer is fsync + rename, so
 a filesystem-level point-in-time snapshot (ZFS/Btrfs/LVM) of the data
 directory is safe at any moment; a file-by-file copy of a *running*
 server (plain `rsync`/`cp`) is not guaranteed consistent across files
