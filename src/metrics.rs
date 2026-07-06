@@ -219,6 +219,11 @@ pub struct GaugeSnapshot {
     /// server truncates each log every flush interval; sustained
     /// growth here means images are failing to save.
     pub wal_bytes: u64,
+    /// Total bytes across every context's PASSAGE log. This one grows
+    /// legitimately up to about each context's snapshot size before its
+    /// ratio-triggered compaction; growth far past the snapshots means
+    /// compactions are failing.
+    pub passages_wal_bytes: u64,
 }
 
 impl Metrics {
@@ -570,6 +575,16 @@ impl Metrics {
         out.push_str(&format!("taguru_wal_bytes {}\n", gauges.wal_bytes));
         push_header(
             &mut out,
+            "taguru_passages_wal_bytes",
+            "gauge",
+            "Total bytes across all passage logs; these legitimately grow to about each context's snapshot size, so alert on growth far past that.",
+        );
+        out.push_str(&format!(
+            "taguru_passages_wal_bytes {}\n",
+            gauges.passages_wal_bytes
+        ));
+        push_header(
+            &mut out,
             "taguru_last_flush_success_timestamp_seconds",
             "gauge",
             "Unix time of the last successful image flush (0 = none since boot); alert on time() minus this.",
@@ -767,6 +782,7 @@ mod tests {
             contexts_resident: 0,
             resident_bytes: 0,
             wal_bytes: 0,
+            passages_wal_bytes: 0,
         }
     }
 
@@ -901,6 +917,7 @@ mod tests {
             contexts_resident: 1,
             resident_bytes: 640,
             wal_bytes: 0,
+            passages_wal_bytes: 0,
         });
 
         // Every sample line's metric name must have been introduced by

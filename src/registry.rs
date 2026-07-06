@@ -400,6 +400,16 @@ pub struct PartialWrite {
 /// new writes rather than grow without bound.
 pub const DEFAULT_WAL_MAX_BYTES: usize = 256 * 1024 * 1024;
 
+/// Default ceiling for a context's PASSAGE log
+/// (`TAGURU_PASSAGES_WAL_MAX_BYTES`). Larger than the graph's: the
+/// ratio-triggered compaction legitimately lets the log grow to about
+/// the snapshot's own size before compacting, so this is sized as a
+/// backstop for a compaction that is failing outright, not as a bound
+/// any healthy context ever nears (the refusal additionally requires
+/// the log to have outgrown 2× the last snapshot — see
+/// `PassageStore::store`).
+pub const DEFAULT_PASSAGES_WAL_MAX_BYTES: usize = 1024 * 1024 * 1024;
+
 /// The boot knobs `taguru serve` and `taguru import` read identically —
 /// one reading, so the two entrances cannot drift. The values stay
 /// visible (rather than being swallowed by [`AppState::boot_with`])
@@ -409,6 +419,7 @@ pub struct BootConfig {
     pub cache_bytes: usize,
     pub wal_enabled: bool,
     pub wal_max_bytes: usize,
+    pub passages_wal_max_bytes: usize,
     pub semantic_floor: Option<f32>,
 }
 
@@ -429,6 +440,12 @@ impl BootConfig {
             // writes are refused rather than growing the log without
             // bound (0 = no cap).
             wal_max_bytes: crate::env_number("TAGURU_WAL_MAX_BYTES", DEFAULT_WAL_MAX_BYTES),
+            // The passage log's own backstop; it only engages when
+            // compaction is demonstrably stuck (see PassageStore).
+            passages_wal_max_bytes: crate::env_number(
+                "TAGURU_PASSAGES_WAL_MAX_BYTES",
+                DEFAULT_PASSAGES_WAL_MAX_BYTES,
+            ),
             // The right semantic floor is a property of the embedding
             // model (cosine bands differ per model), so its
             // recalibration lives beside TAGURU_EMBED_MODEL rather
@@ -445,6 +462,7 @@ impl BootConfig {
             embedder,
             self.wal_enabled,
             self.wal_max_bytes,
+            self.passages_wal_max_bytes,
             self.semantic_floor,
         )
     }
@@ -516,6 +534,11 @@ struct StateInner {
     /// without bound; past the cap new writes are refused
     /// ([`AccessError::Unpersisted`]) instead.
     wal_max_bytes: usize,
+    /// Same backstop for each context's passage log
+    /// (`TAGURU_PASSAGES_WAL_MAX_BYTES`, 0 = unlimited), handed to the
+    /// store on load; it refuses stores only when compaction is
+    /// demonstrably stuck.
+    passages_wal_max_bytes: usize,
     /// Running estimate of unpinned resident graph bytes — the cheap
     /// gate in front of the budget sweep. Adjusted by absolute
     /// per-entry recounts (see `EntryInner::counted_bytes`); the
@@ -574,6 +597,7 @@ impl AppState {
             embedder,
             true,
             DEFAULT_WAL_MAX_BYTES,
+            DEFAULT_PASSAGES_WAL_MAX_BYTES,
             None,
         )
     }
@@ -594,6 +618,7 @@ impl AppState {
         embedder: Option<Arc<dyn EmbeddingProvider>>,
         wal_enabled: bool,
         wal_max_bytes: usize,
+        passages_wal_max_bytes: usize,
         default_semantic_floor: Option<f32>,
     ) -> io::Result<Self> {
         fs::create_dir_all(&data_dir)?;
@@ -618,6 +643,7 @@ impl AppState {
             metrics: Metrics::default(),
             wal_enabled,
             wal_max_bytes,
+            passages_wal_max_bytes,
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
         }));
@@ -730,7 +756,8 @@ impl AppState {
         let mut contexts_resident = 0u64;
         let mut resident_bytes = 0u64;
         let mut wal_bytes = 0u64;
-        for (_, entry) in snapshot {
+        let mut passages_wal_bytes = 0u64;
+        for (name, entry) in snapshot {
             let inner = entry.inner.read().unwrap();
             if let Slot::Hot(context) = &inner.slot {
                 contexts_resident += 1;
@@ -740,12 +767,29 @@ impl AppState {
             drop(inner);
             resident_bytes += entry.vectors_footprint() as u64;
             resident_bytes += entry.passages_footprint() as u64;
+            // A resident store knows its pending log; a cold one gets a
+            // stat — the gauge must not go blind just because a context
+            // was evicted.
+            passages_wal_bytes += {
+                let resident = entry
+                    .passages
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|store| store.pending_log_bytes());
+                resident.unwrap_or_else(|| {
+                    fs::metadata(passages_wal_path(&self.0.data_dir, &file_stem(&name)))
+                        .map(|meta| meta.len())
+                        .unwrap_or(0)
+                })
+            };
         }
         GaugeSnapshot {
             contexts_registered,
             contexts_resident,
             resident_bytes,
             wal_bytes,
+            passages_wal_bytes,
         }
     }
 
@@ -927,6 +971,7 @@ impl AppState {
             passages_path(&self.0.data_dir, stem),
             &sources_path(&self.0.data_dir, stem),
             passages_wal_path(&self.0.data_dir, stem),
+            self.0.passages_wal_max_bytes,
         )?);
         *slot = Some(Arc::clone(&store));
         Ok(store)
@@ -2955,8 +3000,16 @@ mod tests {
         // second is refused — the backstop for a flush that never
         // succeeds again.
         let capped_dir = scratch_dir("wal-capped");
-        let state =
-            AppState::boot_with(capped_dir.clone(), usize::MAX, None, true, 1, None).unwrap();
+        let state = AppState::boot_with(
+            capped_dir.clone(),
+            usize::MAX,
+            None,
+            true,
+            1,
+            DEFAULT_PASSAGES_WAL_MAX_BYTES,
+            None,
+        )
+        .unwrap();
         state
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
@@ -3435,6 +3488,7 @@ mod tests {
                 None,
                 false,
                 DEFAULT_WAL_MAX_BYTES,
+                DEFAULT_PASSAGES_WAL_MAX_BYTES,
                 None,
             )
             .unwrap();
@@ -4329,6 +4383,7 @@ mod tests {
             embedder,
             true,
             DEFAULT_WAL_MAX_BYTES,
+            DEFAULT_PASSAGES_WAL_MAX_BYTES,
             Some(0.2),
         )
         .unwrap();

@@ -50,6 +50,8 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_FLUSH_SECS            image flush interval (5)
   TAGURU_WAL                   fsync write-ahead log, 0/false = off (on)
   TAGURU_WAL_MAX_BYTES         per-context WAL ceiling, 0 = none (256 MiB)
+  TAGURU_PASSAGES_WAL_MAX_BYTES  passage-log backstop, engages only when
+                               compaction is stuck; 0 = none (1 GiB)
   TAGURU_API_TOKEN             bearer token; unset = UNAUTHENTICATED
   TAGURU_API_TOKENS            named keys 'ci:tokA,laptop:tokB' — the access
                                log carries the key name; rotate by overlap
@@ -228,13 +230,14 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 24] = [
+const KNOWN_KEYS: [&str; 25] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
     "TAGURU_FLUSH_SECS",
     "TAGURU_WAL",
     "TAGURU_WAL_MAX_BYTES",
+    "TAGURU_PASSAGES_WAL_MAX_BYTES",
     "TAGURU_API_TOKEN",
     "TAGURU_API_TOKENS",
     "TAGURU_PUBLIC_URL",
