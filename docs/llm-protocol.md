@@ -66,7 +66,10 @@ answers back into prose are your job.
 1. Decompose the document into (subject, label, object, weight).
    - **Check before mint**: `resolve` / `resolve_label` before coining
      any spelling; reuse what exists. `GET /contexts/{name}/labels`
-     lists the relation vocabulary.
+     lists the relation vocabulary. A near-hit whose gloss shows a
+     DIFFERENT thing (a lookalike, not your entity) → keep your own
+     spelling and record the distinction (step 5), so the collision
+     warns instead of confusing from then on.
    - Don't re-assert paraphrases within one document (inflates
      weight). DO re-assert across documents (that's corroboration).
    - Negation: positive label, negative weight.
@@ -84,10 +87,18 @@ answers back into prose are your job.
    unnecessary when the server runs `TAGURU_EMBED_AUTO`).
 5. At milestones, `POST /contexts/{name}/vocabulary/audit` lists fork
    candidates (lexical twins = spelling drift, semantic twins =
-   synonym forks). Candidates, not verdicts. Same referent → pick one
-   canonical, point an alias at it, use the canonical from then on.
-   (Forks that already accumulated facts cannot be merged — that's
-   rebuild territory.)
+   synonym forks). Candidates, not verdicts — adjudicate each pair:
+   - Same referent → pick one canonical, point an alias at it, use
+     the canonical from then on. (Forks that already accumulated
+     facts cannot be merged — that's rebuild territory.)
+   - Different things that will keep colliding (前株/後株 company
+     names, 東京都/京都) → record the distinction as an ordinary
+     fact: `{"subject": "株式会社青嶺", "label": "別物", "object":
+     "青嶺株式会社", "weight": 1.0}`. One direction is enough —
+     glosses carry incoming edges too, so both names warn in
+     resolve's evidence from then on, even before either concept has
+     any other fact. Use one label consistently per context (`別物`,
+     or `distinct_from` in English vocabularies).
 6. When live wording misses, register alternate spellings:
    `POST /contexts/{name}/aliases`. Aliases are entry-only; results
    always return the canonical. An alias cannot join two existing
