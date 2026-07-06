@@ -675,6 +675,13 @@ struct StateInner {
     /// how many per context at most (`TAGURU_PASSAGE_VECTOR_LIMIT`).
     embed_passages: bool,
     passage_vector_limit: usize,
+    /// Names whose delete is still removing files. A delete takes the
+    /// name out of the registry FIRST and only then (unlocked) unlinks
+    /// the file family — without this set, a create() in that window
+    /// would lay down a new generation for the tail of the delete's
+    /// unlink loop to destroy. Entered in the same critical section
+    /// that removes the name, left when the files are gone.
+    pending_deletes: Mutex<std::collections::HashSet<String>>,
     /// Running estimate of unpinned resident graph bytes — the cheap
     /// gate in front of the budget sweep. Adjusted by absolute
     /// per-entry recounts (see `EntryInner::counted_bytes`); the
@@ -772,6 +779,7 @@ impl AppState {
             passages_wal_max_bytes: options.passages_wal_max_bytes,
             embed_passages: options.embed_passages,
             passage_vector_limit: options.passage_vector_limit,
+            pending_deletes: Mutex::new(std::collections::HashSet::new()),
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
         }));
@@ -937,7 +945,12 @@ impl AppState {
     /// create call returns. A persistence failure fails the create.
     pub fn create(&self, name: &str, meta: ContextMeta) -> Result<(), CreateError> {
         let mut registry = self.0.registry.write().unwrap();
-        if registry.contains_key(name) {
+        // A name mid-delete is still taken: its delete has left the
+        // registry but is still unlinking files, and a create landing
+        // now would have its fresh generation destroyed by the tail of
+        // that loop. The client sees the same refusal as for a live
+        // name and simply retries after the delete's response.
+        if registry.contains_key(name) || self.0.pending_deletes.lock().unwrap().contains(name) {
             return Err(CreateError::AlreadyExists);
         }
         // A name can be reused after a delete, and a delete that failed
@@ -992,8 +1005,23 @@ impl AppState {
     /// removal finds [`Slot::Deleted`] when it finally locks, and
     /// backs off instead of recreating the files. Any unflushed writes
     /// are discarded — deletion destroys the context.
+    ///
+    /// The name enters `pending_deletes` in the same critical section
+    /// that unregisters it and leaves only after the unlink loop: to a
+    /// concurrent create() the name stays taken for the delete's whole
+    /// run, so no new generation of files can appear under the tail of
+    /// this one's removals.
     pub fn delete(&self, name: &str) -> Option<io::Result<()>> {
-        let entry = self.0.registry.write().unwrap().remove(name)?;
+        let entry = {
+            let mut registry = self.0.registry.write().unwrap();
+            let entry = registry.remove(name)?;
+            self.0
+                .pending_deletes
+                .lock()
+                .unwrap()
+                .insert(name.to_string());
+            entry
+        };
         let mut in_flight = entry.inner.write().unwrap();
         in_flight.slot = Slot::Deleted;
         self.recount_entry(&mut in_flight);
@@ -1022,6 +1050,7 @@ impl AppState {
                 outcome = Err(error);
             }
         }
+        self.0.pending_deletes.lock().unwrap().remove(name);
         Some(outcome)
     }
 
@@ -4252,6 +4281,49 @@ mod tests {
         assert!(!sources_path(&dir, &file_stem("sake")).exists());
         assert!(!passages_path(&dir, &file_stem("sake")).exists());
         assert!(!passages_wal_path(&dir, &file_stem("sake")).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_create_racing_a_slow_delete_is_refused_not_interleaved() {
+        let dir = scratch_dir("delete-create-race");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        // Stall the delete mid-flight: it unregisters the name, then
+        // must wait for this read guard before it may touch files —
+        // exactly the window where a create used to interleave and
+        // have its new generation unlinked from under it.
+        let entry = state.lookup("sake").unwrap();
+        let stall = entry.inner.read().unwrap();
+        let deleter = {
+            let state = state.clone();
+            std::thread::spawn(move || state.delete("sake").unwrap().unwrap())
+        };
+        while state.lookup("sake").is_some() {
+            std::thread::yield_now();
+        }
+        assert!(
+            matches!(
+                state.create("sake", ContextMeta::default()),
+                Err(CreateError::AlreadyExists)
+            ),
+            "a mid-delete name must read as taken"
+        );
+
+        drop(stall);
+        deleter.join().unwrap();
+        // The delete has fully finished: the name is free again and the
+        // recreate starts from a clean slate.
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "recreate")
+            .unwrap();
+        assert!(image_path(&dir, &file_stem("sake")).exists());
 
         let _ = fs::remove_dir_all(dir);
     }
