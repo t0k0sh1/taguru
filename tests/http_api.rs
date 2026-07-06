@@ -2180,6 +2180,104 @@ fn a_malformed_file_refuses_the_whole_import_before_any_write() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// POST /import with a raw JSONL body (the batch is not a JSON
+/// document, so the JSON helpers cannot carry it) and an optional
+/// bearer token.
+fn post_import(server: &Server, body: &str, token: Option<&str>) -> (u16, Value) {
+    let mut request = ureq::AgentBuilder::new()
+        .build()
+        .request("POST", &format!("{}/import", server.base));
+    if let Some(token) = token {
+        request = request.set("Authorization", &format!("Bearer {token}"));
+    }
+    finish(request.send_string(body), "POST", "/import")
+}
+
+#[test]
+fn the_import_endpoint_applies_batches_to_a_live_server() {
+    let server = Server::start_with_env("http-import", &[("TAGURU_API_TOKEN", "opskey")]);
+    let batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-live\", \
+                 \"create\": {\"description\": \"d\"}}\n\
+                 {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
+                 {\"passage\": \"蔵の杜氏は高瀬。\"}\n";
+
+    // The endpoint sits behind bearer auth like any other write.
+    let (status, _) = post_import(&server, batch, None);
+    assert_eq!(status, 401);
+
+    let (status, first) = post_import(&server, batch, Some("opskey"));
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(first["result"]["created"], json!(true));
+    assert_eq!(first["result"]["associations"], json!(1));
+    assert_eq!(first["result"]["passage_stored"], json!(true));
+    assert_eq!(first["result"]["retracted"], json!(0));
+
+    // Same batch again: the source is replaced, not doubled — the
+    // no-downtime spelling of the CLI's idempotency.
+    let (status, second) = post_import(&server, batch, Some("opskey"));
+    assert_eq!(status, 200, "{second}");
+    assert_eq!(second["result"]["retracted"], json!(1));
+    let (status, edge) = server.call_with_token(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "蔵", "label": "杜氏"})),
+        Some("opskey"),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(edge["result"]["matches"][0]["weight"], json!(2.0));
+}
+
+#[test]
+fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
+    let server = Server::start("http-import-refuse");
+
+    // Malformed op line: 400, named by line number.
+    let (status, refusal) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s\"}\n\n{\"foo\": 1}\n",
+        None,
+    );
+    assert_eq!(status, 400);
+    assert!(
+        refusal["error"].as_str().unwrap().contains("line 3"),
+        "{refusal}"
+    );
+
+    // Absent context, no create block: 404.
+    let (status, refusal) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"ghost\", \"source\": \"s\"}\n",
+        None,
+    );
+    assert_eq!(status, 404);
+    assert!(
+        refusal["error"].as_str().unwrap().contains("create block"),
+        "{refusal}"
+    );
+
+    // Re-pointing an existing alias is the API's usual conflict: 409.
+    let (status, _) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s1\", \"create\": {}}\n\
+         {\"subject\": \"X\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
+         {\"alias\": \"A\", \"canonical\": \"X\", \"kind\": \"concept\"}\n",
+        None,
+    );
+    assert_eq!(status, 200);
+    let (status, refusal) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s2\"}\n\
+         {\"subject\": \"Y\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
+         {\"alias\": \"A\", \"canonical\": \"Y\", \"kind\": \"concept\"}\n",
+        None,
+    );
+    assert_eq!(status, 409, "{refusal}");
+    assert!(
+        refusal["error"].as_str().unwrap().contains("applied"),
+        "{refusal}"
+    );
+}
+
 #[test]
 fn importing_into_an_absent_context_needs_a_create_block() {
     let batches = batch_dir("import-nocreate");

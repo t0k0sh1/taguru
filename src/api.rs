@@ -915,6 +915,82 @@ pub async fn retract_source(
     }
 }
 
+/// What `POST /import` accomplished — the same numbers the CLI's
+/// per-file report line carries.
+#[derive(Serialize)]
+pub struct ImportOutcome {
+    pub context: String,
+    pub source: String,
+    pub created: bool,
+    pub retracted: usize,
+    pub associations: usize,
+    pub aliases: usize,
+    pub passage_stored: bool,
+}
+
+/// `POST /import` — the batch-file contract (docs/import.md) over
+/// HTTP: the body IS one batch file, applied to the live server with
+/// the same validate-first, retract-then-apply semantics as `taguru
+/// import`. One request states one source's complete truth, so bulk
+/// loads reach a running server without a downtime window. The body
+/// cap, auth, timeout, and rate limit apply as on any endpoint;
+/// embeddings ride the next flush (`TAGURU_EMBED_AUTO`) exactly as
+/// live writes do.
+pub async fn import_batch(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
+    let started_at = Instant::now();
+    let batch = match crate::ingest::parse_batch(&body[..]) {
+        Ok(batch) => batch,
+        // Line-numbered, like the CLI's validation pass.
+        Err(message) => return error(StatusCode::BAD_REQUEST, message, started_at),
+    };
+    match crate::ingest::apply_batch(&state, &batch) {
+        Ok(applied) => ok(
+            ImportOutcome {
+                context: batch.context.clone(),
+                source: batch.source.clone(),
+                created: applied.created,
+                retracted: applied.retracted,
+                associations: applied.associations,
+                aliases: applied.aliases,
+                passage_stored: applied.passage_stored,
+            },
+            started_at,
+        ),
+        Err(crate::ingest::ApplyRefusal::Access(failure)) => {
+            access_error(&state, failure, &batch.context, started_at)
+        }
+        Err(refusal @ crate::ingest::ApplyRefusal::NoContext(_)) => {
+            error(StatusCode::NOT_FOUND, refusal.text(), started_at)
+        }
+        Err(refusal @ crate::ingest::ApplyRefusal::Io(_)) => {
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                refusal.text(),
+                started_at,
+            )
+        }
+        Err(crate::ingest::ApplyRefusal::Partial {
+            applied,
+            message,
+            full,
+        }) => {
+            // The batch got partway: what landed counts as a write,
+            // and the status keeps the capacity/conflict distinction
+            // every partial write reports.
+            if applied > 0 {
+                state.note_write(&batch.context);
+            }
+            let status = if full {
+                StatusCode::INSUFFICIENT_STORAGE
+            } else {
+                StatusCode::CONFLICT
+            };
+            error(status, message, started_at)
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SearchPassagesRequest {
     pub query: String,

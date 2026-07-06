@@ -24,6 +24,12 @@
 //! through — WAL-staged, budget-enforced, flushed — and the data
 //! directory lock makes the server/import conflict a refusal instead
 //! of a corruption.
+//!
+//! The same contract is served live as `POST /import` (one request =
+//! one batch file), so bulk loads reach a running server without a
+//! downtime window; [`parse_batch`] and [`apply_batch`] are that
+//! endpoint's core too, which is what keeps the two entrances from
+//! drifting apart.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
@@ -36,7 +42,7 @@ use crate::api::{
     MAX_ASSOCIATION_WEIGHT, MAX_ASSOCIATIONS_PER_REQUEST, MAX_CONTEXT_NAME_BYTES,
     MAX_DESCRIPTION_BYTES, MAX_NAME_BYTES,
 };
-use crate::registry::{AccessError, AppState, AssocOp, ContextMeta};
+use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 
 const USAGE: &str = "\
 usage: taguru import [--dry-run] [--no-embed] [--config FILE] FILE|DIR...
@@ -45,7 +51,9 @@ Applies JSONL batch files to TAGURU_DATA_DIR offline (the server must
 not be running — the directory lock enforces it). One file = one
 source's complete truth: import retracts the source, then applies the
 file, so re-importing is idempotent. A directory expands to its
-*.jsonl files, sorted by name. Format: docs/import.md.
+*.jsonl files, sorted by name. Format: docs/import.md. A running
+server accepts the same body at POST /import (authenticated), one
+file per request — live systems need no downtime window.
 
   --dry-run    validate every file and report; touch nothing
   --no-embed   skip the embedding refresh TAGURU_EMBED_URL would enable
@@ -197,14 +205,14 @@ pub fn run(args: &[String]) -> i32 {
     let mut touched: BTreeSet<String> = BTreeSet::new();
     let mut ops_since_flush = 0usize;
     for (path, batch) in &batches {
-        match apply(&state, batch) {
-            Ok(outcome) => {
-                println!("{}: {outcome}", path.display());
+        match apply_batch(&state, batch) {
+            Ok(applied) => {
+                println!("{}: {}", path.display(), report(batch, &applied));
                 touched.insert(batch.context.clone());
                 ops_since_flush += batch.op_count();
             }
-            Err(message) => {
-                eprintln!("taguru: import: {}: {message}", path.display());
+            Err(refusal) => {
+                eprintln!("taguru: import: {}: {}", path.display(), refusal.text());
                 failures += 1;
             }
         }
@@ -284,9 +292,9 @@ fn expand(paths: &[String]) -> Result<Vec<PathBuf>, String> {
 /// One parsed batch file: the header's claims plus the accumulated op
 /// lines, every association already stamped with the header's source.
 #[cfg_attr(test, derive(Debug))]
-struct Batch {
-    context: String,
-    source: String,
+pub(crate) struct Batch {
+    pub(crate) context: String,
+    pub(crate) source: String,
     create: Option<ContextMeta>,
     passage: Option<String>,
     associations: Vec<AssocOp>,
@@ -369,7 +377,7 @@ struct PassageLine {
 /// Parses one batch file completely, or says which line refused and
 /// why. Blank lines are skipped; the first non-blank line must be the
 /// header.
-fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
+pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
     let mut batch: Option<Batch> = None;
     for (index, line) in reader.lines().enumerate() {
         let number = index + 1;
@@ -510,35 +518,87 @@ fn check_size(number: usize, field: &str, text: &str, cap: usize) -> Result<(), 
     Ok(())
 }
 
+/// What one batch accomplished — the CLI formats it into a report
+/// line, `POST /import` serializes it into the response.
+pub(crate) struct Applied {
+    pub(crate) created: bool,
+    pub(crate) retracted: usize,
+    pub(crate) associations: usize,
+    pub(crate) aliases: usize,
+    pub(crate) passage_stored: bool,
+}
+
+/// Why a batch did not (fully) apply — one shape for both entrances:
+/// the CLI prints [`ApplyRefusal::text`], the HTTP endpoint maps the
+/// variant onto a status and sends the same words.
+pub(crate) enum ApplyRefusal {
+    /// The context does not exist and the batch brought no create
+    /// block (404 over HTTP).
+    NoContext(String),
+    /// Filesystem trouble creating the context or persisting the
+    /// passage (500).
+    Io(String),
+    /// The registry refused access (mapped like every other write).
+    Access(AccessError),
+    /// The library rejected an op partway; `applied` counts what
+    /// landed first, `full` distinguishes capacity (507) from
+    /// conflict (409). The retraction makes a corrected retry exact.
+    Partial {
+        applied: usize,
+        message: String,
+        full: bool,
+    },
+}
+
+impl ApplyRefusal {
+    pub(crate) fn text(&self) -> String {
+        match self {
+            Self::NoContext(context) => {
+                format!("context '{context}' does not exist and the batch brought no create block")
+            }
+            Self::Io(message) => message.clone(),
+            Self::Access(AccessError::NotFound) => {
+                "the context was deleted out from under the batch".to_string()
+            }
+            Self::Access(AccessError::Load(error)) => {
+                format!("the context image would not load: {error}")
+            }
+            Self::Access(AccessError::Unpersisted(error)) => {
+                format!("the WAL refused the write: {error}")
+            }
+            Self::Partial { message, .. } => message.clone(),
+        }
+    }
+}
+
 /// Applies one validated batch: ensure the context, retract the
 /// source, then land passage → associations → aliases. Aliases go
 /// last on purpose — an alias needs its canonical interned, and the
 /// associations just before are what intern it.
-fn apply(state: &AppState, batch: &Batch) -> Result<String, String> {
+pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, ApplyRefusal> {
     let mut created = false;
     if state.directory_entry(&batch.context).is_none() {
         let Some(meta) = &batch.create else {
-            return Err(format!(
-                "context '{}' does not exist and the file has no create block",
-                batch.context
-            ));
+            return Err(ApplyRefusal::NoContext(batch.context.clone()));
         };
-        state
-            .create(&batch.context, meta.clone())
-            .map_err(|error| match error {
-                crate::registry::CreateError::AlreadyExists => {
-                    "context appeared mid-run (impossible under the directory lock)".to_string()
-                }
-                crate::registry::CreateError::Io(io_error) => {
-                    format!("creating context '{}': {io_error}", batch.context)
-                }
-            })?;
-        created = true;
+        match state.create(&batch.context, meta.clone()) {
+            Ok(()) => created = true,
+            // Another writer got between the check and the create —
+            // possible on the live server, harmless everywhere: the
+            // context exists now, which is all the batch needed.
+            Err(CreateError::AlreadyExists) => {}
+            Err(CreateError::Io(io_error)) => {
+                return Err(ApplyRefusal::Io(format!(
+                    "creating context '{}': {io_error}",
+                    batch.context
+                )));
+            }
+        }
     }
 
     let (retracted, _passage_dropped) = state
         .retract_source(&batch.context, &batch.source)
-        .map_err(access_text)?;
+        .map_err(ApplyRefusal::Access)?;
 
     if let Some(text) = &batch.passage {
         state
@@ -546,24 +606,28 @@ fn apply(state: &AppState, batch: &Batch) -> Result<String, String> {
                 &batch.context,
                 BTreeMap::from([(batch.source.clone(), text.clone())]),
             )
-            .ok_or_else(|| "context vanished mid-import".to_string())?
-            .map_err(|io_error| format!("passage not persisted: {io_error}"))?;
+            .ok_or(ApplyRefusal::Access(AccessError::NotFound))?
+            .map_err(|io_error| ApplyRefusal::Io(format!("passage not persisted: {io_error}")))?;
     }
 
     let mut associations = 0;
     for chunk in batch.associations.chunks(MAX_ASSOCIATIONS_PER_REQUEST) {
         match state
             .add_associations(&batch.context, chunk.to_vec())
-            .map_err(access_text)?
+            .map_err(ApplyRefusal::Access)?
         {
             Ok(applied) => associations += applied,
             Err(partial) => {
-                return Err(format!(
-                    "applied {} association(s), then: {} — fix the file and re-import; \
-                     the retraction makes the retry exact",
-                    associations + partial.applied,
-                    partial.message
-                ));
+                let applied = associations + partial.applied;
+                return Err(ApplyRefusal::Partial {
+                    applied,
+                    message: format!(
+                        "applied {applied} association(s), then: {} — fix the batch and \
+                         re-import; the retraction makes the retry exact",
+                        partial.message
+                    ),
+                    full: partial.full,
+                });
             }
         }
     }
@@ -572,42 +636,49 @@ fn apply(state: &AppState, batch: &Batch) -> Result<String, String> {
     if !batch.concepts.is_empty() || !batch.labels.is_empty() {
         match state
             .add_aliases(&batch.context, &batch.concepts, &batch.labels)
-            .map_err(access_text)?
+            .map_err(ApplyRefusal::Access)?
         {
             Ok(applied) => aliases += applied,
             Err(partial) => {
-                return Err(format!(
-                    "applied {} alias(es), then: {}",
-                    partial.applied, partial.message
-                ));
+                return Err(ApplyRefusal::Partial {
+                    applied: partial.applied,
+                    message: format!(
+                        "applied {} alias(es), then: {}",
+                        partial.applied, partial.message
+                    ),
+                    full: partial.full,
+                });
             }
         }
     }
 
     state.note_write(&batch.context);
-    Ok(format!(
-        "context '{}'{} ← source '{}' ({} association(s) retracted): +{associations} \
-         association(s), +{aliases} alias(es){}",
-        batch.context,
-        if created { " (created)" } else { "" },
-        batch.source,
+    Ok(Applied {
+        created,
         retracted,
-        if batch.passage.is_some() {
+        associations,
+        aliases,
+        passage_stored: batch.passage.is_some(),
+    })
+}
+
+/// The CLI's per-file report line.
+fn report(batch: &Batch, applied: &Applied) -> String {
+    format!(
+        "context '{}'{} ← source '{}' ({} association(s) retracted): +{} \
+         association(s), +{} alias(es){}",
+        batch.context,
+        if applied.created { " (created)" } else { "" },
+        batch.source,
+        applied.retracted,
+        applied.associations,
+        applied.aliases,
+        if applied.passage_stored {
             ", passage stored"
         } else {
             ""
         }
-    ))
-}
-
-fn access_text(failure: AccessError) -> String {
-    match failure {
-        AccessError::NotFound => {
-            "context disappeared mid-import (impossible under the directory lock)".to_string()
-        }
-        AccessError::Load(error) => format!("the context image would not load: {error}"),
-        AccessError::Unpersisted(error) => format!("the WAL refused the write: {error}"),
-    }
+    )
 }
 
 /// Import logs like the server does (RUST_LOG, stderr) so registry

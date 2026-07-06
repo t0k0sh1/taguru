@@ -230,6 +230,7 @@ async fn serve() {
             get(move || api::protocol(protocol_trailer.clone())),
         )
         .route("/flush", post(api::flush_all))
+        .route("/import", post(api::import_batch))
         .route("/contexts", get(api::list_contexts))
         .route(
             "/contexts/{name}",
