@@ -1095,11 +1095,6 @@ impl AppState {
     /// intentional. Returns (newly embedded, total vectors), or `None`
     /// for an unknown context.
     pub fn refresh_embeddings(&self, name: &str) -> Option<Result<(usize, usize), String>> {
-        /// How many facts a concept gloss carries.
-        const GLOSS_FACTS: usize = 4;
-        /// How many example triples a label gloss carries.
-        const GLOSS_EXAMPLES: usize = 3;
-
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Err(
                 "no embedding provider is configured (set TAGURU_EMBED_URL and TAGURU_EMBED_MODEL)"
@@ -1112,7 +1107,7 @@ impl AppState {
                 .into_iter()
                 .map(|name| {
                     let gloss = context
-                        .concept_gloss(name, GLOSS_FACTS)
+                        .concept_gloss(name, Context::GLOSS_FACTS)
                         .unwrap_or_else(|| name.to_string());
                     (name.to_string(), gloss)
                 })
@@ -1122,7 +1117,7 @@ impl AppState {
                 .into_iter()
                 .map(|name| {
                     let gloss = context
-                        .label_gloss(name, GLOSS_EXAMPLES)
+                        .label_gloss(name, Context::GLOSS_EXAMPLES)
                         .unwrap_or_else(|| name.to_string());
                     (name.to_string(), gloss)
                 })

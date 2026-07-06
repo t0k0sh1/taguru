@@ -1327,6 +1327,13 @@ pub struct TieredResolution {
     /// cosine, not a string overlap.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<&'static str>,
+    /// The candidate's own gloss — its name plus its heaviest facts,
+    /// the same text the semantic tier embeds. This is the evidence
+    /// that tells lookalike candidates apart: string overlap says
+    /// 東京都 and 京都 are near, their facts say they are different
+    /// things. Attached to the top candidates only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gloss: Option<String>,
 }
 
 fn lexical_tier(resolutions: Vec<Resolution>) -> Vec<TieredResolution> {
@@ -1337,6 +1344,7 @@ fn lexical_tier(resolutions: Vec<Resolution>) -> Vec<TieredResolution> {
             score: resolution.score,
             tier: "lexical",
             kind: Some(resolution.kind.as_str()),
+            gloss: None,
         })
         .collect()
 }
@@ -1365,9 +1373,53 @@ fn merge_tiers(lexical: Vec<Resolution>, semantic: Vec<(String, f32)>) -> Vec<Ti
             score: f64::from(score),
             tier: "semantic",
             kind: None,
+            gloss: None,
         });
     }
     merged
+}
+
+/// How many resolve candidates carry their gloss. The head of the list
+/// is where a caller weighs lookalikes against each other; decorating a
+/// long fuzzy tail would only bloat the response it has already
+/// stopped reading.
+const GLOSSED_CANDIDATES: usize = 8;
+
+/// Attaches each top candidate's gloss — the evidence a caller needs
+/// to tell lookalike names apart without a second round trip. One
+/// shared read after the tiers settle, covering lexical and semantic
+/// candidates alike; if the context vanished in between, the
+/// candidates simply keep gloss = None (the entry answer itself
+/// already succeeded, and a decoration must not turn it into an
+/// error).
+fn attach_glosses(
+    state: &AppState,
+    name: &str,
+    labels: bool,
+    mut served: Vec<TieredResolution>,
+) -> Vec<TieredResolution> {
+    let head = served.len().min(GLOSSED_CANDIDATES);
+    if head == 0 {
+        return served;
+    }
+    let glosses = state.read_context(name, |context| {
+        served[..head]
+            .iter()
+            .map(|candidate| {
+                if labels {
+                    context.label_gloss(&candidate.name, Context::GLOSS_EXAMPLES)
+                } else {
+                    context.concept_gloss(&candidate.name, Context::GLOSS_FACTS)
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+    if let Ok(glosses) = glosses {
+        for (candidate, gloss) in served.iter_mut().zip(glosses) {
+            candidate.gloss = gloss;
+        }
+    }
+    served
 }
 
 /// The full entry ladder: lexical tiers first; the semantic tier runs
@@ -1401,6 +1453,7 @@ fn resolve_with_fallback(
             Err(response) => return response,
         }
     };
+    let served = attach_glosses(state, name, labels, served);
     let op = if labels {
         SearchOp::ResolveLabel
     } else {
@@ -1600,6 +1653,7 @@ mod tests {
             score,
             tier,
             kind: None,
+            gloss: None,
         };
 
         assert_eq!(resolve_tier_of(&[]), ResolveTier::Miss);
