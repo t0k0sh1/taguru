@@ -96,7 +96,11 @@ answers back into prose are your job.
    into paragraphs internally (blank-line boundaries) and searches at
    paragraph granularity, so a long document does not bury its best
    paragraph. Blank lines between logical units are what make that
-   split work — keep them.
+   split work — keep them. Optionally attach doc2query `questions` —
+   per paragraph, the questions a user would type whose answer is that
+   paragraph, phrased AWAY from its wording; on servers with passage
+   embedding they index beside the paragraph and catch question-shaped
+   searches its own vector misses.
 4. Audit reachability: `POST /contexts/{name}/unreachable_from` with
    the document's main entities. Non-empty = membership edges are
    missing. If embeddings are configured, finish with
@@ -228,7 +232,7 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/embeddings/refresh` | re-embed new/changed concept and label glosses (run after ingest) |
 | GET | `/contexts/{name}/labels` | relation vocabulary (canonical only) |
 | GET/POST/DELETE | `/contexts/{name}/aliases` | export / register `{concepts:{alias:canonical}, labels:{...}}` / withdraw `{concepts:[alias], labels:[...]}` |
-| GET/POST | `/contexts/{name}/sources` | registered source list / `{passages:{source:text}}` |
+| GET/POST | `/contexts/{name}/sources` | registered source list / `{passages:{source:text}, questions?:{source:[{paragraph, question}]}}` → `{stored, questions_stored, questions_dropped}` (a dropped question named a paragraph its text's blank-line split does not have) |
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
 | POST | `/contexts/{name}/sources/search` | `{query, limit?=5}` → `[{source, index, score, text, lanes}]` best PARAGRAPHS across passages (`index` = paragraph position in its source; `text` = that paragraph alone; `lanes.bm25`/`lanes.vector` = per-lane `{rank, score}`; `score` is rank-fused when the vector lane ran, raw BM25 otherwise) |
 | POST | `/contexts/{name}/sources/retract` | `{source}` → withdraw that source's contributions (diff sync) |

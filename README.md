@@ -115,11 +115,12 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #                     Budget it as paragraphs × dimensions × 4 bytes of
 #                     resident vectors per context, and raise
 #                     TAGURU_CACHE_BYTES to keep the whole working set in.
-#   TAGURU_PASSAGE_VECTOR_LIMIT  max embedded paragraphs per context
-#                     (default 20000 ≈ 120 MiB at 1536 dims). Past it the
-#                     lexical lane still serves every paragraph; only the
-#                     semantic lane goes partial (the refresh response
-#                     reports how many were skipped).
+#   TAGURU_PASSAGE_VECTOR_LIMIT  max embedded rows per context (default
+#                     20000 ≈ 120 MiB at 1536 dims). Paragraphs and
+#                     doc2query questions (`taguru extract --questions`)
+#                     each spend one row. Past it the lexical lane still
+#                     serves every paragraph; only the semantic lane goes
+#                     partial (the refresh response reports the skips).
 #   TAGURU_SEMANTIC_FLOOR  server default for the semantic entry floor
 #                     (default 0.35, calibrated for text-embedding-3-large).
 #                     The right value is a property of the EMBEDDING MODEL —
