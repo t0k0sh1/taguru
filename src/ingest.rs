@@ -283,6 +283,11 @@ pub(crate) struct Batch {
     pub(crate) source: String,
     create: Option<ContextMeta>,
     passage: Option<String>,
+    /// doc2query questions, (paragraph index, question). Structure is
+    /// validated here (caps, a passage to attach to); whether each
+    /// index exists in the passage's split is settled at store time,
+    /// one rule for every entrance.
+    questions: Vec<(u32, String)>,
     associations: Vec<AssocOp>,
     concepts: BTreeMap<String, String>,
     labels: BTreeMap<String, String>,
@@ -306,7 +311,7 @@ impl Batch {
 
     fn describe(&self) -> String {
         format!(
-            "context '{}' ← source '{}': {} association(s), {} alias(es){}",
+            "context '{}' ← source '{}': {} association(s), {} alias(es){}{}",
             self.context,
             self.source,
             self.associations.len(),
@@ -315,6 +320,11 @@ impl Batch {
                 ", 1 passage"
             } else {
                 ""
+            },
+            if self.questions.is_empty() {
+                String::new()
+            } else {
+                format!(", {} question(s)", self.questions.len())
             }
         )
     }
@@ -371,6 +381,13 @@ struct PassageLine {
     passage: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuestionLine {
+    paragraph: u32,
+    question: String,
+}
+
 /// Parses one batch file completely, or says which line refused and
 /// why. Blank lines are skipped; the first non-blank line must be the
 /// header.
@@ -394,7 +411,19 @@ pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
             Some(batch) => parse_op(batch, line, number)?,
         }
     }
-    batch.ok_or_else(|| "empty file: expected a batch header line".to_string())
+    let batch = batch.ok_or_else(|| "empty file: expected a batch header line".to_string())?;
+    // Questions attach to paragraphs of THIS batch's passage; with no
+    // passage line there is no text for them to name (apply retracts
+    // the source first, so "the previously stored text" does not exist
+    // either).
+    if !batch.questions.is_empty() && batch.passage.is_none() {
+        return Err(format!(
+            "{} question line(s) but no passage line — questions attach to this \
+             file's passage",
+            batch.questions.len()
+        ));
+    }
+    Ok(batch)
 }
 
 fn parse_header(line: &str, number: usize) -> Result<Batch, String> {
@@ -427,6 +456,7 @@ fn parse_header(line: &str, number: usize) -> Result<Batch, String> {
             semantic_floor: block.semantic_floor.map(|floor| floor.clamp(0.0, 1.0)),
         }),
         passage: None,
+        questions: Vec::new(),
         associations: Vec::new(),
         concepts: BTreeMap::new(),
         labels: BTreeMap::new(),
@@ -496,10 +526,32 @@ fn parse_op(batch: &mut Batch, line: &str, number: usize) -> Result<(), String> 
                  one passage (the header source's original text)"
             ));
         }
+    } else if object.contains_key("question") {
+        let op: QuestionLine = serde_json::from_value(value)
+            .map_err(|error| format!("line {number}: question: {error}"))?;
+        check_size(
+            number,
+            "question",
+            &op.question,
+            crate::api::MAX_QUESTION_BYTES,
+        )?;
+        let siblings = batch
+            .questions
+            .iter()
+            .filter(|&&(paragraph, _)| paragraph == op.paragraph)
+            .count();
+        if siblings >= crate::api::MAX_QUESTIONS_PER_PARAGRAPH {
+            return Err(format!(
+                "line {number}: paragraph {} already carries {} questions (the cap)",
+                op.paragraph,
+                crate::api::MAX_QUESTIONS_PER_PARAGRAPH
+            ));
+        }
+        batch.questions.push((op.paragraph, op.question));
     } else {
         return Err(format!(
             "line {number}: not an association (subject/label/object/weight), an alias \
-             (alias/canonical/kind), or a passage line"
+             (alias/canonical/kind), a passage line, or a question (paragraph/question) line"
         ));
     }
     Ok(())
@@ -523,6 +575,11 @@ pub(crate) struct Applied {
     pub(crate) associations: usize,
     pub(crate) aliases: usize,
     pub(crate) passage_stored: bool,
+    pub(crate) questions_stored: usize,
+    /// Questions naming a paragraph their passage's split does not
+    /// have — most often a producer's index drifting from the server's
+    /// canonical split.
+    pub(crate) questions_dropped: usize,
 }
 
 /// Why a batch did not (fully) apply — one shape for both entrances:
@@ -597,17 +654,24 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         .retract_source(&batch.context, &batch.source)
         .map_err(ApplyRefusal::Access)?;
 
+    let mut questions_stored = 0;
+    let mut questions_dropped = 0;
     if let Some(text) = &batch.passage {
-        state
+        let outcome = state
             .store_passages(
                 &batch.context,
                 BTreeMap::from([(
                     batch.source.clone(),
-                    crate::passages::PassageSubmission::plain(text.clone()),
+                    crate::passages::PassageSubmission {
+                        text: text.clone(),
+                        questions: batch.questions.clone(),
+                    },
                 )]),
             )
             .ok_or(ApplyRefusal::Access(AccessError::NotFound))?
             .map_err(|io_error| ApplyRefusal::Io(format!("passage not persisted: {io_error}")))?;
+        questions_stored = outcome.questions_stored;
+        questions_dropped = outcome.questions_dropped;
     }
 
     let mut associations = 0;
@@ -659,6 +723,8 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         associations,
         aliases,
         passage_stored: batch.passage.is_some(),
+        questions_stored,
+        questions_dropped,
     })
 }
 
@@ -666,7 +732,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
 fn report(batch: &Batch, applied: &Applied) -> String {
     format!(
         "context '{}'{} ← source '{}' ({} association(s) retracted): +{} \
-         association(s), +{} alias(es){}",
+         association(s), +{} alias(es){}{}",
         batch.context,
         if applied.created { " (created)" } else { "" },
         batch.source,
@@ -677,6 +743,13 @@ fn report(batch: &Batch, applied: &Applied) -> String {
             ", passage stored"
         } else {
             ""
+        },
+        match (applied.questions_stored, applied.questions_dropped) {
+            (0, 0) => String::new(),
+            (stored, 0) => format!(", +{stored} question(s)"),
+            (stored, dropped) => {
+                format!(", +{stored} question(s) ({dropped} dropped: no such paragraph)")
+            }
         }
     )
 }
@@ -768,6 +841,54 @@ mod tests {
         .unwrap_err();
         assert!(
             error.contains("line 3") && error.contains("passage"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_question_line_rides_the_batch_and_needs_a_passage_to_attach_to() {
+        let batch = parse(&format!(
+            "{HEADER}\n\
+             {{\"passage\": \"一つ目。\\n\\n二つ目。\"}}\n\
+             {{\"paragraph\": 1, \"question\": \"二つ目は何?\"}}\n"
+        ))
+        .unwrap();
+        assert_eq!(batch.questions, vec![(1, "二つ目は何?".to_string())]);
+        assert!(
+            batch.describe().contains("1 question(s)"),
+            "{}",
+            batch.describe()
+        );
+
+        // The same question line without a passage has nothing to name.
+        let error = parse(&format!(
+            "{HEADER}\n{{\"paragraph\": 1, \"question\": \"二つ目は何?\"}}\n"
+        ))
+        .unwrap_err();
+        assert!(error.contains("no passage line"), "{error}");
+    }
+
+    #[test]
+    fn more_than_the_per_paragraph_question_cap_in_one_file_is_refused() {
+        let questions: String = (0..=crate::api::MAX_QUESTIONS_PER_PARAGRAPH)
+            .map(|i| format!("{{\"paragraph\": 0, \"question\": \"言い換え{i}?\"}}\n"))
+            .collect();
+        let error = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\"}}\n{questions}"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("already carries") && error.contains("the cap"),
+            "{error}"
+        );
+
+        let long = "q".repeat(crate::api::MAX_QUESTION_BYTES + 1);
+        let error = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\"}}\n{{\"paragraph\": 0, \"question\": \"{long}\"}}\n"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("question") && error.contains("cap"),
             "{error}"
         );
     }

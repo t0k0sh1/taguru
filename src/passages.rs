@@ -43,7 +43,8 @@ pub(crate) struct PassageSubmission {
 }
 
 impl PassageSubmission {
-    /// A bare passage — every pre-doc2query caller's shape.
+    /// A bare passage — the shape most tests submit.
+    #[cfg(test)]
     pub(crate) fn plain(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),

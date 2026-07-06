@@ -2843,3 +2843,41 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
     );
     assert_eq!(none.as_array().unwrap().len(), 0);
 }
+
+/// doc2query over HTTP: questions ride the store request per source,
+/// out-of-range ones are dropped with their count reported (never
+/// failing the passage), and questions for a source the request does
+/// not carry are refused outright.
+#[test]
+fn store_passages_accepts_questions_and_reports_the_bookkeeping() {
+    let server = Server::start("passage-questions");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    let result = server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {"doc": "一つ目。\n\n二つ目。"},
+            "questions": {"doc": [
+                {"paragraph": 1, "question": "二つ目は何?"},
+                {"paragraph": 9, "question": "存在しない段落への質問?"}
+            ]}
+        })),
+    );
+    assert_eq!(result["stored"], 1, "{result}");
+    assert_eq!(result["questions_stored"], 1, "{result}");
+    assert_eq!(result["questions_dropped"], 1, "{result}");
+
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {},
+            "questions": {"ghost": [{"paragraph": 0, "question": "誰の質問?"}]}
+        })),
+    );
+    assert_eq!(status, 400, "{body}");
+}
