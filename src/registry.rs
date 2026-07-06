@@ -472,6 +472,40 @@ pub struct BootConfig {
 /// every paragraph; only the semantic lane goes partial.
 pub const DEFAULT_PASSAGE_VECTOR_LIMIT: usize = 20_000;
 
+/// One fused passage-search hit with its per-lane evidence: 1-based
+/// rank and raw score in each lane that surfaced it. BM25 scores and
+/// cosine similarities live on different scales — which is exactly why
+/// the fusion above them is rank-based.
+#[derive(Debug)]
+pub struct PassageSearchHit {
+    pub source: String,
+    pub index: u32,
+    pub score: f32,
+    pub text: String,
+    pub bm25: Option<(usize, f32)>,
+    pub vector: Option<(usize, f32)>,
+}
+
+/// Accumulator behind the fusion: hashes come from whichever lane saw
+/// the paragraph first; the store's hash check settles staleness.
+struct FusedHit {
+    hash: u64,
+    fused: f32,
+    bm25: Option<(usize, f32)>,
+    vector: Option<(usize, f32)>,
+}
+
+impl FusedHit {
+    fn new(hash: u64) -> Self {
+        Self {
+            hash,
+            fused: 0.0,
+            bm25: None,
+            vector: None,
+        }
+    }
+}
+
 /// What one passage embedding refresh accomplished: rows newly
 /// embedded, rows now in the sidecar, and paragraphs left without a
 /// vector because the per-context limit cut them off.
@@ -1236,27 +1270,35 @@ impl AppState {
 
     /// Full-text search over the registered passages — the second lane
     /// beside the graph, for knowledge that does not decompose into
-    /// triples (procedures, conditions, discourse). BM25 over the same
-    /// normalization as the entry index with mixed terms (ASCII words,
-    /// character bigrams elsewhere), scored per PARAGRAPH: the ranking
-    /// unit is what an answer actually cites, and a long document no
-    /// longer buries its best paragraph inside its own length
-    /// normalization. Hits are (source, paragraph index, score,
-    /// paragraph text).
+    /// triples (procedures, conditions, discourse). Scored per
+    /// PARAGRAPH: the ranking unit is what an answer actually cites,
+    /// and a long document no longer buries its best paragraph inside
+    /// its own length normalization.
     ///
-    /// The scoring runs on the resident [`crate::bm25::Bm25Index`],
-    /// built once per residency and updated in place by store/retract
-    /// — a query never re-tokenizes the corpus. Texts resolve through
-    /// the store afterwards, hash-checked: a paragraph that changed
-    /// between the index's view and now is dropped rather than served
-    /// with a stale score against fresh text.
-    #[allow(clippy::type_complexity)]
+    /// Two ranking lanes, fused: the lexical one runs on the resident
+    /// [`crate::bm25::Bm25Index`] (built once per residency, updated in
+    /// place by store/retract — a query never re-tokenizes the corpus),
+    /// and, where paragraph embedding is on, a semantic one sweeps the
+    /// paragraph vectors with the query embedded as
+    /// [`EmbedPurpose::Query`]. Fusion is reciprocal rank (k = 60):
+    /// rank-based, so the two lanes' incomparable score scales never
+    /// need reconciling. Each hit reports its per-lane rank and raw
+    /// score — the server presents evidence, the reading LLM judges,
+    /// same as resolve's tiers. With the vector lane off or its
+    /// provider failing, results degrade to pure BM25 (raw score,
+    /// evidence intact) — a broken decoration never breaks the answer.
+    ///
+    /// Texts resolve through the store afterwards, hash-checked: a
+    /// paragraph that changed between a lane's view and now is dropped
+    /// rather than served with a stale score against fresh text.
     pub fn search_passages(
         &self,
         name: &str,
         query: &str,
         limit: usize,
-    ) -> Option<io::Result<Vec<(String, u32, f32, String)>>> {
+    ) -> Option<io::Result<Vec<PassageSearchHit>>> {
+        const RRF_K: f32 = 60.0;
+
         let entry = self.lookup(name)?;
         let store = {
             let _fence = entry.read_unless_deleted()?;
@@ -1275,10 +1317,14 @@ impl AppState {
         if query_grams.is_empty() {
             return Some(Ok(Vec::new()));
         }
+        // Both lanes over-fetch: fusion can promote a hit neither lane
+        // put in its own top `limit`, and the hash check below may drop
+        // stragglers.
+        let pool = limit.saturating_mul(4).max(50);
 
-        // Ensure a resident index: build on the residency's first
-        // search, rebuild when tombstones have piled up. Double-checked
-        // so concurrent first searches build once.
+        // Lexical lane: ensure a resident index — build on the
+        // residency's first search, rebuild when tombstones have piled
+        // up. Double-checked so concurrent first searches build once.
         let stale = {
             let guard = entry.bm25.read().unwrap();
             match &*guard {
@@ -1304,36 +1350,145 @@ impl AppState {
                 );
             }
         }
-        let raw = {
+        let lexical = {
             let guard = entry.bm25.read().unwrap();
             let index = guard.as_ref().expect("index was just built");
-            // Over-fetch: the hash check below may drop hits that
-            // changed underfoot, and the caller still deserves `limit`.
-            index.search(&query_grams, limit.saturating_mul(2))
+            index.search(&query_grams, pool)
         };
 
-        let mut hits = Vec::with_capacity(raw.len().min(limit));
-        for (source, index, hash, score) in raw {
+        // Semantic lane, where the operator opted the corpus in: the
+        // query embeds through the same cue cache resolve uses.
+        let semantic: Vec<(String, u32, u64, f32)> = if self.passage_embedding_enabled() {
+            let embedder = self.0.embedder.clone().expect("enabled implies a provider");
+            let vectors = self.entry_passage_vectors(&entry, &file_stem(name));
+            if vectors.is_empty() || vectors.model != embedder.model() {
+                Vec::new()
+            } else {
+                match self.cue_vector(&*embedder, query) {
+                    Ok(cue) => vectors
+                        .top_matches(&cue, pool)
+                        .into_iter()
+                        .map(|(key, score)| (key.source.clone(), key.index, key.hash, score))
+                        .collect(),
+                    Err(error) => {
+                        // Degrade, loudly: the lexical lane still
+                        // answers.
+                        tracing::warn!(
+                            context = %name,
+                            error,
+                            "passage query embedding failed; serving the lexical lane alone"
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Reciprocal rank fusion. With one lane empty the formula
+        // degrades to that lane's own ranking; the top-level score
+        // stays the raw BM25 number in that case so a lexical-only
+        // deployment keeps its historical score semantics.
+        let fused = !semantic.is_empty();
+        let mut accumulated: HashMap<(String, u32), FusedHit> = HashMap::new();
+        for (rank, (source, index, hash, score)) in lexical.into_iter().enumerate() {
+            let entry = accumulated
+                .entry((source, index))
+                .or_insert_with(|| FusedHit::new(hash));
+            entry.fused += 1.0 / (RRF_K + (rank + 1) as f32);
+            entry.bm25 = Some((rank + 1, score));
+        }
+        for (rank, (source, index, hash, score)) in semantic.into_iter().enumerate() {
+            let entry = accumulated
+                .entry((source, index))
+                .or_insert_with(|| FusedHit::new(hash));
+            entry.fused += 1.0 / (RRF_K + (rank + 1) as f32);
+            entry.vector = Some((rank + 1, score));
+        }
+        let mut ranked: Vec<((String, u32), FusedHit)> = accumulated.into_iter().collect();
+        ranked.sort_by(|a, b| {
+            b.1.fused
+                .total_cmp(&a.1.fused)
+                .then_with(|| a.0.0.cmp(&b.0.0))
+                .then_with(|| a.0.1.cmp(&b.0.1))
+        });
+
+        let mut hits = Vec::new();
+        for ((source, index), fused_hit) in ranked {
             let Some(record) = store.get(&source) else {
                 continue;
             };
             let Some(span) = record.paragraphs.get(index as usize) else {
                 continue;
             };
-            if span.hash != hash {
+            if span.hash != fused_hit.hash {
                 continue;
             }
-            hits.push((
+            let score = if fused {
+                fused_hit.fused
+            } else {
+                fused_hit.bm25.map(|(_, score)| score).unwrap_or(0.0)
+            };
+            hits.push(PassageSearchHit {
                 source,
                 index,
                 score,
-                record.text[span.start as usize..span.end as usize].to_string(),
-            ));
+                text: record.text[span.start as usize..span.end as usize].to_string(),
+                bm25: fused_hit.bm25,
+                vector: fused_hit.vector,
+            });
             if hits.len() == limit {
                 break;
             }
         }
         Some(Ok(hits))
+    }
+
+    /// The query side of every embedding lookup: process cache first,
+    /// provider (as [`EmbedPurpose::Query`]) on a miss. No lock is held
+    /// across the provider call.
+    fn cue_vector(
+        &self,
+        embedder: &dyn EmbeddingProvider,
+        cue: &str,
+    ) -> Result<Arc<Vec<f32>>, String> {
+        if let Some(vector) = self.0.cue_cache.lock().unwrap().get(cue) {
+            return Ok(vector);
+        }
+        match embedder.embed(&[cue], EmbedPurpose::Query) {
+            Ok(mut vectors) => {
+                self.0.metrics.record_embed_resolve(true);
+                let vector = Arc::new(vectors.pop().unwrap_or_default());
+                self.0
+                    .cue_cache
+                    .lock()
+                    .unwrap()
+                    .insert(cue.to_string(), Arc::clone(&vector));
+                Ok(vector)
+            }
+            Err(error) => {
+                self.0.metrics.record_embed_resolve(false);
+                Err(error)
+            }
+        }
+    }
+
+    /// The paragraph vector sidecar, loaded on first use and held until
+    /// refresh replaces it or eviction clears it.
+    fn entry_passage_vectors(&self, entry: &Entry, stem: &str) -> Arc<PassageVectorStore> {
+        let mut cached = entry.passage_vectors.lock().unwrap();
+        match &*cached {
+            Some(store) => Arc::clone(store),
+            None => {
+                let store = Arc::new(PassageVectorStore::load(&pvectors_path(
+                    &self.0.data_dir,
+                    stem,
+                )));
+                *cached = Some(Arc::clone(&store));
+                store
+            }
+        }
     }
 
     /// Folds freshly stored/retracted sources into the resident BM25
@@ -1678,29 +1833,9 @@ impl AppState {
         if table.is_empty() {
             return Some(Ok(Vec::new()));
         }
-        // Cue vectors come from the process cache when the wording has
-        // been seen before; no lock is held across the provider call.
-        let cached = self.0.cue_cache.lock().unwrap().get(cue);
-        let cue_vector = match cached {
-            Some(vector) => vector,
-            None => {
-                let vector = match embedder.embed(&[cue], EmbedPurpose::Query) {
-                    Ok(mut vectors) => {
-                        self.0.metrics.record_embed_resolve(true);
-                        Arc::new(vectors.pop().unwrap_or_default())
-                    }
-                    Err(error) => {
-                        self.0.metrics.record_embed_resolve(false);
-                        return Some(Err(error));
-                    }
-                };
-                self.0
-                    .cue_cache
-                    .lock()
-                    .unwrap()
-                    .insert(cue.to_string(), Arc::clone(&vector));
-                vector
-            }
+        let cue_vector = match self.cue_vector(&*embedder, cue) {
+            Ok(vector) => vector,
+            Err(error) => return Some(Err(error)),
         };
         let mut scored: Vec<(String, f32)> = table
             .iter()
@@ -4264,8 +4399,8 @@ mod tests {
             .search_passages("sake", "精米歩合はどこまで磨く?", 3)
             .unwrap()
             .unwrap();
-        assert_eq!(hits[0].0, "第2段落");
-        assert!(hits[0].2 > 0.0);
+        assert_eq!(hits[0].source, "第2段落");
+        assert!(hits[0].score > 0.0);
 
         // No shared bigrams at all → nothing, not noise.
         assert!(
@@ -4316,9 +4451,9 @@ mod tests {
             .search_passages("papers", "ambition must be made to counteract ambition", 2)
             .unwrap()
             .unwrap();
-        assert_eq!(hits[0].0, "第51篇");
+        assert_eq!(hits[0].source, "第51篇");
         assert!(
-            hits.len() < 2 || hits[0].2 > hits[1].2,
+            hits.len() < 2 || hits[0].score > hits[1].score,
             "the containing passage must win decisively, not by tie-break"
         );
 
@@ -4345,7 +4480,7 @@ mod tests {
         for query in ["state", "State", "app", "path"] {
             let hits = state.search_passages("code", query, 3).unwrap().unwrap();
             assert_eq!(
-                hits.first().map(|hit| hit.0.as_str()),
+                hits.first().map(|hit| hit.source.as_str()),
                 Some("src/registry.rs:AppState"),
                 "a piece of a camelCase identifier must reach its passage (query {query:?})"
             );
@@ -4375,12 +4510,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            (hits[0].0.as_str(), hits[0].1),
+            (hits[0].source.as_str(), hits[0].index),
             ("docs/aomine.md", 1),
             "the hit names the paragraph, not just the document"
         );
         assert_eq!(
-            hits[0].3, "原料米には山田錦を使い、精米歩合は50パーセントまで磨く。",
+            hits[0].text, "原料米には山田錦を使い、精米歩合は50パーセントまで磨く。",
             "the text is the answering paragraph alone"
         );
 
@@ -4421,7 +4556,7 @@ mod tests {
             .search_passages("sake", "杜氏の出身", 3)
             .unwrap()
             .unwrap();
-        assert_eq!(hits[0].0, "第2章");
+        assert_eq!(hits[0].source, "第2章");
 
         // And a retraction disappears the same way.
         state.retract_source("sake", "第2章").unwrap();
@@ -4431,7 +4566,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .iter()
-                .all(|hit| hit.0 != "第2章"),
+                .all(|hit| hit.source != "第2章"),
             "a retracted source must leave the index too"
         );
 
@@ -4471,7 +4606,7 @@ mod tests {
                 .search_passages("sake", "蔵開きの祭り", 3)
                 .unwrap()
                 .unwrap()[0]
-                .0,
+                .source,
             "第1章",
             "the next search rebuilds and still answers"
         );
@@ -4699,6 +4834,163 @@ mod tests {
         // The next refresh buys only the missing paragraph.
         let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
         assert_eq!((outcome.embedded, outcome.total), (1, 129));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hybrid_search_surfaces_a_vector_only_hit_that_shares_no_letters() {
+        // The Q→A gap in miniature: the query shares no bigrams with
+        // the stored paragraph, so the lexical lane alone returns
+        // nothing — the vector lane is what finds it, and the response
+        // says so.
+        let dir = scratch_dir("hybrid-vector-only");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state.store_passages("fruit", passages).unwrap().unwrap();
+        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+
+        let hits = state
+            .search_passages("fruit", "アップル", 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits[0].source, "doc-a");
+        assert!(
+            hits[0].bm25.is_none(),
+            "no shared bigram — the lexical lane must not have seen this"
+        );
+        let (rank, cosine) = hits[0].vector.expect("the vector lane found it");
+        assert_eq!(rank, 1);
+        assert!(cosine > 0.9, "{cosine}");
+        assert!(
+            (hits[0].score - 1.0 / 61.0).abs() < 1e-6,
+            "one lane at rank 1 fuses to 1/(60+1), got {}",
+            hits[0].score
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hybrid_search_reports_both_lanes_when_both_agree() {
+        let dir = scratch_dir("hybrid-both");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state.store_passages("fruit", passages).unwrap().unwrap();
+        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+
+        let hits = state
+            .search_passages("fruit", "りんごは真っ赤", 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits[0].source, "doc-a");
+        let (bm25_rank, bm25_score) = hits[0].bm25.expect("shared bigrams");
+        let (vector_rank, _) = hits[0].vector.expect("same fruit, same axis");
+        assert_eq!((bm25_rank, vector_rank), (1, 1));
+        assert!(bm25_score > 0.0);
+        assert!(
+            (hits[0].score - 2.0 / 61.0).abs() < 1e-6,
+            "two lanes at rank 1 fuse to 2/(60+1), got {}",
+            hits[0].score
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hybrid_search_degrades_to_bm25_when_the_query_embedding_fails() {
+        struct FlakyEmbeddings {
+            calls: std::sync::atomic::AtomicUsize,
+            fail_on: usize,
+        }
+        impl EmbeddingProvider for FlakyEmbeddings {
+            fn model(&self) -> &str {
+                "flaky"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let call = self.calls.fetch_add(1, Ordering::Relaxed);
+                if call == self.fail_on {
+                    return Err("provider hiccup".to_string());
+                }
+                Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            }
+        }
+
+        let dir = scratch_dir("hybrid-degrade");
+        let state = boot_for_passage_embedding(
+            &dir,
+            Arc::new(FlakyEmbeddings {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                fail_on: 1, // the refresh succeeds; the QUERY embed fails
+            }),
+            20_000,
+        );
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state.store_passages("fruit", passages).unwrap().unwrap();
+        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+
+        let hits = state
+            .search_passages("fruit", "りんご", 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            hits[0].source, "doc-a",
+            "a broken decoration must not break the answer"
+        );
+        assert!(hits[0].vector.is_none());
+        let (_, bm25_score) = hits[0].bm25.unwrap();
+        assert_eq!(
+            hits[0].score, bm25_score,
+            "with no semantic lane the score stays the raw BM25 number"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lexical_only_deployments_keep_raw_bm25_scores() {
+        let dir = scratch_dir("hybrid-lexical-only");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state.store_passages("fruit", passages).unwrap().unwrap();
+
+        let hits = state
+            .search_passages("fruit", "りんご", 3)
+            .unwrap()
+            .unwrap();
+        assert!(hits[0].vector.is_none());
+        let (rank, bm25_score) = hits[0].bm25.unwrap();
+        assert_eq!(rank, 1);
+        assert_eq!(hits[0].score, bm25_score);
+        assert!(hits[0].score > 0.1, "raw BM25, not a tiny RRF quotient");
 
         let _ = fs::remove_dir_all(dir);
     }

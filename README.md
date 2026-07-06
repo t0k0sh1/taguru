@@ -3,10 +3,13 @@
 Long-term semantic memory for LLMs that recalls the way a thread is
 pulled in hand over hand (手繰る, *taguru*). Knowledge accumulates as
 (subject, relation label, object, signed weight, source) associations,
-and retrieval is **structural** rather than embedding-similarity: the
-cue is not what a question looks like but what it is *about* — the
-糸口, the end of the thread — and the graph is walked from there to
-draw the knowledge out.
+and retrieval is **structural** first: the cue is not what a question
+looks like but what it is *about* — the 糸口, the end of the thread —
+and the graph is walked from there to draw the knowledge out. Original
+passages ride alongside as the text lane, searched per paragraph by
+BM25 fused with optional paragraph embeddings — similarity serves as
+one lane of evidence there, never as the primary retrieval mechanism,
+and every hit says which lane found it.
 
 The intended client is an LLM. Everything that needs language
 understanding — decomposing documents into facts, choosing a context,
@@ -104,6 +107,19 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #                     cannot be counted on to call refresh_embeddings, and
 #                     GET /protocol tells connecting agents which mode this
 #                     server runs.
+#   TAGURU_EMBED_PASSAGES=1 also embed stored paragraphs — the semantic
+#                     lane of passage search, for question-shaped queries
+#                     landing on answer-shaped text. Opt-in on top of the
+#                     provider: a corpus is orders of magnitude more text
+#                     than its glosses, so the spend must be chosen.
+#                     Budget it as paragraphs × dimensions × 4 bytes of
+#                     resident vectors per context, and raise
+#                     TAGURU_CACHE_BYTES to keep the whole working set in.
+#   TAGURU_PASSAGE_VECTOR_LIMIT  max embedded paragraphs per context
+#                     (default 20000 ≈ 120 MiB at 1536 dims). Past it the
+#                     lexical lane still serves every paragraph; only the
+#                     semantic lane goes partial (the refresh response
+#                     reports how many were skipped).
 #   TAGURU_SEMANTIC_FLOOR  server default for the semantic entry floor
 #                     (default 0.35, calibrated for text-embedding-3-large).
 #                     The right value is a property of the EMBEDDING MODEL —

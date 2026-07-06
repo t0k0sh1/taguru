@@ -58,8 +58,22 @@ answers back into prose are your job.
 6. **Switch to the text lane**: knowledge that never fit a triple
    (procedural detail, conditions, discourse) was never in the graph.
    When graph results can't compose the answer, run
-   `POST /contexts/{name}/sources/search` (full-text over passages).
-   Graph first, text as the safety net.
+   `POST /contexts/{name}/sources/search` — paragraph search with a
+   lexical lane (BM25) fused with a semantic lane (paragraph
+   embeddings) where the server has them. Graph first, text as the
+   safety net.
+   - **Phrase the query as an answer, not a question.** Most embedding
+     models place a question ("What plan includes SSO?") measurably
+     farther from its answer ("SSO is available on the Enterprise
+     plan.") than two independently phrased statements sit from each
+     other. Guess a plausible declarative sentence and search with
+     THAT — the guess does not need to be correct, only shaped like
+     the text you hope to find. It costs nothing when the lexical lane
+     would have found it anyway, and recovers what the lexical lane
+     alone would miss.
+   - Each hit's `lanes` field says which lane surfaced it at what
+     rank. A vector-only hit is the paraphrase case; a BM25-only hit
+     matched wording. Both are evidence, not verdicts — read the text.
 
 ## Ingest loop
 
@@ -216,7 +230,7 @@ Source code takes the same discipline; only the naming changes.
 | GET/POST/DELETE | `/contexts/{name}/aliases` | export / register `{concepts:{alias:canonical}, labels:{...}}` / withdraw `{concepts:[alias], labels:[...]}` |
 | GET/POST | `/contexts/{name}/sources` | registered source list / `{passages:{source:text}}` |
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
-| POST | `/contexts/{name}/sources/search` | `{query, limit?=5}` → `[{source, index, score, text}]` best PARAGRAPHS across passages (`index` = paragraph position in its source; `text` = that paragraph alone) |
+| POST | `/contexts/{name}/sources/search` | `{query, limit?=5}` → `[{source, index, score, text, lanes}]` best PARAGRAPHS across passages (`index` = paragraph position in its source; `text` = that paragraph alone; `lanes.bm25`/`lanes.vector` = per-lane `{rank, score}`; `score` is rank-fused when the vector lane ran, raw BM25 otherwise) |
 | POST | `/contexts/{name}/sources/retract` | `{source}` → withdraw that source's contributions (diff sync) |
 | POST | `/contexts/{name}/unreachable_from` | `{origins, limit?}` → `{total, matches}` unreachable associations |
 | POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?=0.6, cosine_floor?=0.6}` → spelling/synonym fork candidates |
