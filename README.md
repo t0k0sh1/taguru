@@ -284,6 +284,30 @@ curl -X POST localhost:8248/import -H 'Authorization: Bearer <key>' \
 
 Full contract for both entrances: [docs/import.md](docs/import.md).
 
+### Documents in, batch files out (`taguru extract`)
+
+Where do batch files come from? Any pipeline that speaks the format —
+or the packaged producer: `taguru extract` reads `.md`/`.txt`
+documents, has any OpenAI-compatible chat model decompose each into
+associations under the /protocol discipline, and writes one batch
+file per document (the document's path as the source id), ready for
+either import entrance:
+
+```sh
+TAGURU_EXTRACT_URL=https://api.openai.com/v1/chat/completions \
+TAGURU_EXTRACT_MODEL=gpt-4.1 TAGURU_EXTRACT_API_KEY=$KEY \
+taguru extract --context sake --description "酒蔵の知識" --out batches/ docs/
+taguru import batches/
+```
+
+The server-side rule is unchanged — it never holds model
+credentials; `TAGURU_EXTRACT_*` lives in the offline producer's
+environment only. A manifest in `--out` skips unchanged documents on
+re-runs (`--force` overrides), model output is validated against the
+batch contract before anything is written, and local or bridged
+models (Ollama, LiteLLM in front of Bedrock) work the same way the
+embedding side does. Full contract: [docs/extract.md](docs/extract.md).
+
 ## Using it from an LLM agent (MCP)
 
 `taguru-mcp` is an MCP stdio bridge to a running HTTP server. Agents

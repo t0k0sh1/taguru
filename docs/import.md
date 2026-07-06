@@ -186,11 +186,17 @@ system that must keep answering → `POST /import`.
 
 ## Producing batch files
 
-Taguru deliberately does not extract facts from prose — that is the
-reading LLM's job (the server never holds model credentials). A
-typical pipeline reads documents, has a model emit associations in
-the `/protocol` discipline, and writes one batch file per document
-with the document id as the source. The Converse-loop pattern in
-[bedrock.md](bedrock.md) and the tool vocabulary in
-[llm-protocol.md](llm-protocol.md) are the two halves of that
-producer; the batch file is just its offline serialization.
+Taguru's server deliberately does not extract facts from prose — that
+is the reading LLM's job, and the server never holds model
+credentials. A producer reads documents, has a model emit
+associations in the `/protocol` discipline, and writes one batch file
+per document with the document id as the source.
+
+One such producer ships in the box: [`taguru extract`](extract.md),
+an offline subcommand that does exactly the above through any
+OpenAI-compatible chat endpoint, holding its `TAGURU_EXTRACT_*`
+credentials in its own environment — the server-side boundary is
+unchanged. Custom pipelines remain first-class: the Converse-loop
+pattern in [bedrock.md](bedrock.md) and the tool vocabulary in
+[llm-protocol.md](llm-protocol.md) are the two halves of such a
+producer, and the batch file is just its offline serialization.
