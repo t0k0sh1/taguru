@@ -71,8 +71,9 @@ const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Passage cap, mirroring the HTTP default: over the API a passage
 /// rides under `TAGURU_MAX_BODY_BYTES` (8 MiB), and a file must not
-/// smuggle in what a request could not.
-const MAX_PASSAGE_BYTES: usize = 8 * 1024 * 1024;
+/// smuggle in what a request could not. Extract caps whole documents
+/// here too — a document over it could not ride as a passage.
+pub(crate) const MAX_PASSAGE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Ops applied between mid-run flushes. Import batches can dwarf any
 /// live traffic; flushing every so often keeps each context's WAL far
@@ -305,6 +306,17 @@ pub(crate) struct Batch {
 impl Batch {
     fn op_count(&self) -> usize {
         self.associations.len() + self.concepts.len() + self.labels.len()
+    }
+
+    /// The relation spellings this batch settles on — extract feeds
+    /// them to later documents' prompts so one run reuses one
+    /// vocabulary.
+    pub(crate) fn label_vocabulary(&self) -> BTreeSet<String> {
+        self.associations
+            .iter()
+            .map(|op| op.label.clone())
+            .chain(self.labels.values().cloned())
+            .collect()
     }
 
     fn describe(&self) -> String {

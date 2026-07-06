@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod embedding;
 mod estimate;
+mod extract;
 mod ingest;
 mod inspect;
 mod limits;

@@ -2383,3 +2383,252 @@ fn importing_into_an_absent_context_needs_a_create_block() {
     let _ = std::fs::remove_dir_all(&batches);
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+/// A one-shot OpenAI-compatible chat stub: answers the canned
+/// assistant texts in order, one connection per request, then hands
+/// back every captured request (headers + body) through the join.
+fn stub_chat_server(replies: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        for reply in replies {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let header_end = loop {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break buffer.len();
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+                if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break position + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            while buffer.len() < header_end + content_length {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+            }
+            captured.push(format!(
+                "{headers}\n{}",
+                String::from_utf8_lossy(&buffer[header_end..])
+            ));
+            let payload = json!({
+                "choices": [{"message": {"role": "assistant", "content": reply}}]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        captured
+    });
+    (url, handle)
+}
+
+/// Runs `taguru extract`, hermetic like the other spawns: only the
+/// given TAGURU_EXTRACT_* values reach it.
+fn run_extract(
+    out_dir: &std::path::Path,
+    env: &[(&str, &str)],
+    args: &[&str],
+) -> (i32, String, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    command
+        .arg("extract")
+        .env_remove("TAGURU_EXTRACT_URL")
+        .env_remove("TAGURU_EXTRACT_MODEL")
+        .env_remove("TAGURU_EXTRACT_API_KEY")
+        .env_remove("TAGURU_CONFIG");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command
+        .args(["--out", out_dir.to_str().unwrap()])
+        .args(args)
+        .output()
+        .expect("extract must run");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves() {
+    let docs = batch_dir("extract-docs");
+    let aomine = docs.join("aomine.md");
+    let takase = docs.join("takase.md");
+    std::fs::write(
+        &aomine,
+        "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。大量生産は行わない。",
+    )
+    .unwrap();
+    std::fs::write(&takase, "高瀬は青嶺酒造の杜氏。").unwrap();
+    let aomine_src = aomine.to_str().unwrap();
+    let takase_src = takase.to_str().unwrap();
+
+    // Dry run: no provider configured, nothing called, nothing written.
+    let out = batch_dir("extract-out");
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[],
+        &["--dry-run", "--context", "sake", aomine_src, takase_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout.matches("would extract").count(), 2, "{stdout}");
+
+    // The real run. aomine answers fenced (the extractor must strip
+    // markdown fences) and carries one duplicate triple and one alias
+    // whose canonical exists nowhere. takase answers garbage first —
+    // one corrective turn — then a valid object with weight omitted.
+    let aomine_reply = json!({
+        "associations": [
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0},
+            {"subject": "青嶺酒造", "label": "行う", "object": "大量生産", "weight": -1.0},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0}
+        ],
+        "aliases": [
+            {"alias": "Aomine", "canonical": "青嶺酒造", "kind": "concept"},
+            {"alias": "幽霊", "canonical": "存在しない", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let takase_reply =
+        json!({"associations": [{"subject": "高瀬", "label": "所属", "object": "青嶺酒造"}]})
+            .to_string();
+    let (url, requests) = stub_chat_server(vec![
+        format!("```json\n{aomine_reply}\n```"),
+        "Sure! Here are the facts I found.".to_string(),
+        takase_reply.clone(),
+    ]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ("TAGURU_EXTRACT_API_KEY", "sekrit"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "sake",
+            "--description",
+            "酒蔵の記憶",
+            aomine_src,
+            takase_src,
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("3 association(s)"), "{stdout}");
+    assert!(stdout.contains("1 duplicate(s) folded"), "{stdout}");
+    assert!(stdout.contains("1 item(s) dropped"), "{stdout}");
+    assert!(stdout.contains("2 written"), "{stdout}");
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].contains("Bearer sekrit"), "{}", requests[0]);
+    assert!(
+        requests[0].contains("青嶺酒造は1907年に創業した。"),
+        "{}",
+        requests[0]
+    );
+    // The second document's prompt carries the first document's labels…
+    assert!(
+        requests[1].contains("創業年"),
+        "vocabulary did not accumulate: {}",
+        requests[1]
+    );
+    // …and the corrective turn asks again after the garbage answer.
+    assert!(
+        requests[2].contains("only the JSON object"),
+        "{}",
+        requests[2]
+    );
+
+    // Import applies what extract wrote; the server serves the facts,
+    // the alias entry, the negative weight, and the original passage.
+    let data_dir = std::env::temp_dir().join(format!("taguru-http-extract-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, stdout, stderr) = run_import(&data_dir, &[out.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let server = Server::start_on("extract-serve", data_dir);
+    let brewer = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "Aomine", "label": "杜氏"})),
+    );
+    assert_eq!(brewer["matches"][0]["object"], json!("高瀬"));
+    let negated = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造", "label": "行う"})),
+    );
+    assert_eq!(negated["matches"][0]["weight"], json!(-1.0));
+    let membership = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "高瀬", "label": "所属"})),
+    );
+    assert_eq!(membership["matches"][0]["weight"], json!(1.0));
+    let passages = server.ok(
+        "POST",
+        "/contexts/sake/sources/lookup",
+        Some(json!({"sources": [aomine_src]})),
+    );
+    assert_eq!(
+        passages["passages"][aomine_src],
+        json!("青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。大量生産は行わない。")
+    );
+    drop(server);
+
+    // Unchanged documents skip without a single model call: the
+    // endpoint here refuses every connection, so an attempt would fail
+    // loudly instead of passing.
+    let dead = [
+        ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_extract(&out, &dead, &["--context", "sake", aomine_src, takase_src]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout.matches("unchanged, skipped").count(), 2, "{stdout}");
+
+    // --force re-extracts both.
+    let (url, requests) = stub_chat_server(vec![aomine_reply, takase_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &["--force", "--context", "sake", aomine_src, takase_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("2 written"), "{stdout}");
+    assert_eq!(requests.join().unwrap().len(), 2);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}

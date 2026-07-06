@@ -31,6 +31,10 @@ USAGE:
                                         loads (see: taguru import --help);
                                         the directory lock refuses to run
                                         beside a live server
+  taguru extract --context NAME --out DIR FILE|DIR...
+                                        decompose documents into batch files
+                                        through an OpenAI-compatible chat
+                                        model (see: taguru extract --help)
   taguru --help                         this text
 
 CONFIGURATION FILE (--config FILE, or TAGURU_CONFIG=FILE):
@@ -62,6 +66,10 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_SEMANTIC_FLOOR        semantic entry floor when neither the call nor
                                the context sets one (0.35, calibrated for
                                text-embedding-3-large; model-dependent)
+  TAGURU_EXTRACT_URL           OpenAI-compatible /chat/completions endpoint,
+                               read only by 'taguru extract' (off)
+  TAGURU_EXTRACT_MODEL         extraction model name
+  TAGURU_EXTRACT_API_KEY       extraction provider credential
   RUST_LOG                     log filter, EnvFilter syntax (info)
   TAGURU_LOG_FORMAT            json for JSON log lines (pretty)
   TAGURU_LOG_SEARCHES          1 = per-search event log; cues are memory
@@ -100,6 +108,7 @@ pub fn dispatch() -> ServeArgs {
         Some("inspect") => exit(crate::inspect::run(&args[1..])),
         Some("estimate") => exit(crate::estimate::run(&args[1..])),
         Some("import") => exit(crate::ingest::run(&args[1..])),
+        Some("extract") => exit(crate::extract::run(&args[1..])),
         Some(other) => {
             eprintln!("taguru: unknown argument '{other}' — try 'taguru --help'");
             exit(2)
@@ -217,7 +226,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 20] = [
+const KNOWN_KEYS: [&str; 23] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -235,6 +244,9 @@ const KNOWN_KEYS: [&str; 20] = [
     "TAGURU_EMBED_API_KEY",
     "TAGURU_EMBED_AUTO",
     "TAGURU_SEMANTIC_FLOOR",
+    "TAGURU_EXTRACT_URL",
+    "TAGURU_EXTRACT_MODEL",
+    "TAGURU_EXTRACT_API_KEY",
     "TAGURU_LOG_FORMAT",
     "TAGURU_LOG_SEARCHES",
     "TAGURU_CONFIG",
