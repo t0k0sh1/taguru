@@ -11,6 +11,7 @@ mod mcp;
 mod metrics;
 mod oauth;
 mod oauth_http;
+mod paragraph;
 mod passages;
 mod registry;
 mod remote_mcp;

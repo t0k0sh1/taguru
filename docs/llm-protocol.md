@@ -78,8 +78,11 @@ answers back into prose are your job.
 2. `POST /contexts/{name}/associations` in batches — one document per
    request, a `source` on every element.
 3. Register originals: `POST /contexts/{name}/sources` (source id →
-   passage). Keep passages paragraph-to-rule sized — BM25 length
-   normalization buries details inside section-sized passages.
+   passage). Store the document's full text as-is: the server splits it
+   into paragraphs internally (blank-line boundaries) and searches at
+   paragraph granularity, so a long document does not bury its best
+   paragraph. Blank lines between logical units are what make that
+   split work — keep them.
 4. Audit reachability: `POST /contexts/{name}/unreachable_from` with
    the document's main entities. Non-empty = membership edges are
    missing. If embeddings are configured, finish with
@@ -213,7 +216,7 @@ Source code takes the same discipline; only the naming changes.
 | GET/POST/DELETE | `/contexts/{name}/aliases` | export / register `{concepts:{alias:canonical}, labels:{...}}` / withdraw `{concepts:[alias], labels:[...]}` |
 | GET/POST | `/contexts/{name}/sources` | registered source list / `{passages:{source:text}}` |
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
-| POST | `/contexts/{name}/sources/search` | `{query, limit?=5}` → `[{source, score, text}]` full-text over passages |
+| POST | `/contexts/{name}/sources/search` | `{query, limit?=5}` → `[{source, index, score, text}]` best PARAGRAPHS across passages (`index` = paragraph position in its source; `text` = that paragraph alone) |
 | POST | `/contexts/{name}/sources/retract` | `{source}` → withdraw that source's contributions (diff sync) |
 | POST | `/contexts/{name}/unreachable_from` | `{origins, limit?}` → `{total, matches}` unreachable associations |
 | POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?=0.6, cosine_floor?=0.6}` → spelling/synonym fork candidates |

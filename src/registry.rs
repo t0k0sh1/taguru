@@ -934,8 +934,8 @@ impl AppState {
         let mut missing = Vec::new();
         for source in sources {
             match store.get(source) {
-                Some(text) => {
-                    passages.insert(source.clone(), text.to_string());
+                Some(record) => {
+                    passages.insert(source.clone(), record.text.to_string());
                 }
                 None => missing.push(source.clone()),
             }
@@ -1115,15 +1115,19 @@ impl AppState {
     /// beside the graph, for knowledge that does not decompose into
     /// triples (procedures, conditions, discourse). BM25 over the same
     /// normalization as the entry index with mixed terms (ASCII words,
-    /// character bigrams elsewhere); scores are recomputed per query
-    /// over the resident store, which is fine at sidecar scale.
+    /// character bigrams elsewhere), scored per PARAGRAPH: the ranking
+    /// unit is what an answer actually cites, and a long document no
+    /// longer buries its best paragraph inside its own length
+    /// normalization. Hits are (source, paragraph index, score,
+    /// paragraph text). Scores are recomputed per query over the
+    /// resident store, which is fine at sidecar scale.
     #[allow(clippy::type_complexity)]
     pub fn search_passages(
         &self,
         name: &str,
         query: &str,
         limit: usize,
-    ) -> Option<io::Result<Vec<(String, f32, String)>>> {
+    ) -> Option<io::Result<Vec<(String, u32, f32, String)>>> {
         const K1: f32 = 1.2;
         const B: f32 = 0.75;
 
@@ -1142,42 +1146,48 @@ impl AppState {
                 .filter(|gram| seen.insert(*gram))
                 .collect()
         };
-        if stored.is_empty() || query_grams.is_empty() {
+        if query_grams.is_empty() {
             return Some(Ok(Vec::new()));
         }
 
-        // Term statistics per passage, one normalization pass each.
-        let passages: Vec<(&String, &str, HashMap<u64, f32>, f32)> = stored
+        // Term statistics per paragraph, one normalization pass each.
+        let paragraphs: Vec<(&String, u32, &str, HashMap<u64, f32>, f32)> = stored
             .iter()
-            .map(|(source, text)| {
-                let mut frequencies: HashMap<u64, f32> = HashMap::new();
-                let mut length = 0f32;
-                for gram in passage_terms(text) {
-                    *frequencies.entry(gram).or_insert(0.0) += 1.0;
-                    length += 1.0;
-                }
-                (source, text.as_ref(), frequencies, length)
+            .flat_map(|(source, record)| {
+                record.paragraph_texts().map(move |(span, text)| {
+                    let mut frequencies: HashMap<u64, f32> = HashMap::new();
+                    let mut length = 0f32;
+                    for gram in passage_terms(text) {
+                        *frequencies.entry(gram).or_insert(0.0) += 1.0;
+                        length += 1.0;
+                    }
+                    (source, span.index, text, frequencies, length)
+                })
             })
             .collect();
-        let total = passages.len() as f32;
+        if paragraphs.is_empty() {
+            return Some(Ok(Vec::new()));
+        }
+        let total = paragraphs.len() as f32;
         let average_length =
-            (passages.iter().map(|(.., length)| length).sum::<f32>() / total).max(1.0);
+            (paragraphs.iter().map(|(.., length)| length).sum::<f32>() / total).max(1.0);
         // Document frequencies once per query term, not per (term ×
-        // passage) pair — IDF only reads how many passages carry the term.
+        // paragraph) pair — IDF only reads how many paragraphs carry
+        // the term.
         let document_frequencies: HashMap<u64, f32> = query_grams
             .iter()
             .map(|&gram| {
-                let carriers = passages
+                let carriers = paragraphs
                     .iter()
-                    .filter(|(_, _, frequencies, _)| frequencies.contains_key(&gram))
+                    .filter(|(_, _, _, frequencies, _)| frequencies.contains_key(&gram))
                     .count() as f32;
                 (gram, carriers)
             })
             .collect();
 
-        let mut scored: Vec<(String, f32, String)> = passages
+        let mut scored: Vec<(String, u32, f32, String)> = paragraphs
             .iter()
-            .map(|(source, text, frequencies, length)| {
+            .map(|(source, index, text, frequencies, length)| {
                 let mut score = 0f32;
                 for gram in &query_grams {
                     let Some(&frequency) = frequencies.get(gram) else {
@@ -1190,11 +1200,15 @@ impl AppState {
                     score += idf * (frequency * (K1 + 1.0))
                         / (frequency + K1 * (1.0 - B + B * length / average_length));
                 }
-                ((*source).clone(), score, (*text).to_string())
+                ((*source).clone(), *index, score, (*text).to_string())
             })
-            .filter(|&(_, score, _)| score > 0.0)
+            .filter(|&(_, _, score, _)| score > 0.0)
             .collect();
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scored.sort_by(|a, b| {
+            b.2.total_cmp(&a.2)
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.1.cmp(&b.1))
+        });
         scored.truncate(limit);
         Some(Ok(scored))
     }
@@ -3946,7 +3960,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].0, "第2段落");
-        assert!(hits[0].1 > 0.0);
+        assert!(hits[0].2 > 0.0);
 
         // No shared bigrams at all → nothing, not noise.
         assert!(
@@ -3999,7 +4013,7 @@ mod tests {
             .unwrap();
         assert_eq!(hits[0].0, "第51篇");
         assert!(
-            hits.len() < 2 || hits[0].1 > hits[1].1,
+            hits.len() < 2 || hits[0].2 > hits[1].2,
             "the containing passage must win decisively, not by tie-break"
         );
 
@@ -4031,6 +4045,39 @@ mod tests {
                 "a piece of a camelCase identifier must reach its passage (query {query:?})"
             );
         }
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn passage_search_returns_the_answering_paragraph_not_the_whole_document() {
+        let dir = scratch_dir("bm25-paragraph");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // One document, three paragraphs; only the middle one answers.
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "docs/aomine.md".to_string(),
+            "青嶺酒造は雲居県霧沢町の蔵元である。\n\n原料米には山田錦を使い、精米歩合は50パーセントまで磨く。\n\n蔵開きの祭りでは新酒がふるまわれる。".to_string(),
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+
+        let hits = state
+            .search_passages("sake", "精米歩合はどこまで磨く?", 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (hits[0].0.as_str(), hits[0].1),
+            ("docs/aomine.md", 1),
+            "the hit names the paragraph, not just the document"
+        );
+        assert_eq!(
+            hits[0].3, "原料米には山田錦を使い、精米歩合は50パーセントまで磨く。",
+            "the text is the answering paragraph alone"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
