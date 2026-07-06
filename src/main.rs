@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod embedding;
 mod estimate;
+mod ingest;
 mod inspect;
 mod limits;
 mod mcp;
@@ -462,7 +463,7 @@ async fn shutdown_signal() {
     }
 }
 
-fn env_number(key: &str, default: usize) -> usize {
+pub(crate) fn env_number(key: &str, default: usize) -> usize {
     match std::env::var(key) {
         Ok(value) => value.parse().unwrap_or_else(|_| {
             warn!("ignoring {key}={value}: not a number; using {default}");
@@ -475,7 +476,7 @@ fn env_number(key: &str, default: usize) -> usize {
 /// An optional 0..=1 fraction from the environment; anything else
 /// (including NaN) is ignored with a warning, keeping the built-in
 /// calibration.
-fn env_floor(key: &str) -> Option<f32> {
+pub(crate) fn env_floor(key: &str) -> Option<f32> {
     let value = std::env::var(key).ok()?;
     match value.parse::<f32>() {
         Ok(floor) if (0.0..=1.0).contains(&floor) => Some(floor),

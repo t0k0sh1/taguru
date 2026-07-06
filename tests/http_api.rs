@@ -1993,3 +1993,210 @@ fn search_events_stay_absent_without_the_opt_in() {
         "cue content leaked into the default log stream"
     );
 }
+
+/// Runs `taguru import` against `data_dir`, hermetic the same way the
+/// server spawns are: nothing from the developer shell reaches it.
+fn run_import(data_dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .arg("import")
+        .env("TAGURU_DATA_DIR", data_dir)
+        .env_remove("TAGURU_EMBED_URL")
+        .env_remove("TAGURU_EMBED_MODEL")
+        .env_remove("TAGURU_EMBED_AUTO")
+        .env_remove("TAGURU_SEMANTIC_FLOOR")
+        .env_remove("TAGURU_WAL")
+        .env_remove("TAGURU_WAL_MAX_BYTES")
+        .env_remove("TAGURU_CACHE_BYTES")
+        .env_remove("TAGURU_CONFIG")
+        .args(args)
+        .output()
+        .expect("import must run");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// A scratch directory for batch files, separate from any data dir.
+fn batch_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("taguru-batches-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("batch dir must be creatable");
+    dir
+}
+
+#[test]
+fn an_offline_import_lands_facts_passage_and_aliases_the_server_serves() {
+    let batches = batch_dir("import-serve");
+    let file = batches.join("guide.jsonl");
+    std::fs::write(
+        &file,
+        r#"{"taguru_batch": 1, "context": "sake", "source": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+{"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0}
+{"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0}
+{"alias": "Aomine", "canonical": "青嶺酒造", "kind": "concept"}
+{"passage": "青嶺酒造の杜氏は高瀬。1907年創業。"}
+"#,
+    )
+    .unwrap();
+
+    let data_dir =
+        std::env::temp_dir().join(format!("taguru-http-import-serve-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("+2 association(s)"), "{stdout}");
+    assert!(stdout.contains("(created)"), "{stdout}");
+
+    // The server boots on the imported directory and serves it all:
+    // the facts, the alias entry point, and the original passage.
+    let server = Server::start_on("import-serve", data_dir);
+    let brewer = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "Aomine", "label": "杜氏"})),
+    );
+    assert_eq!(brewer["matches"][0]["subject"], json!("青嶺酒造"));
+    assert_eq!(brewer["matches"][0]["object"], json!("高瀬"));
+    assert_eq!(brewer["matches"][0]["weight"], json!(2.0));
+    let passages = server.ok(
+        "POST",
+        "/contexts/sake/sources/lookup",
+        Some(json!({"sources": ["doc-guide"]})),
+    );
+    assert_eq!(
+        passages["passages"]["doc-guide"],
+        json!("青嶺酒造の杜氏は高瀬。1907年創業。")
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+#[test]
+fn reimporting_a_source_replaces_it_instead_of_doubling() {
+    let batches = batch_dir("import-idem");
+    let file = batches.join("facts.jsonl");
+    let header = r#"{"taguru_batch": 1, "context": "sake", "source": "doc-1", "create": {"description": "d"}}"#;
+    std::fs::write(
+        &file,
+        format!(
+            "{header}\n{}\n",
+            r#"{"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 2.0}"#
+        ),
+    )
+    .unwrap();
+
+    let data_dir =
+        std::env::temp_dir().join(format!("taguru-http-import-idem-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    // Twice: the weight must not accumulate across identical imports.
+    for _ in 0..2 {
+        let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+        assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    }
+    let server = Server::start_on("import-idem", data_dir);
+    let edge = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "蔵", "label": "杜氏"})),
+    );
+    assert_eq!(edge["matches"][0]["weight"], json!(2.0));
+    assert_eq!(
+        edge["matches"][0]["attributions"].as_array().unwrap().len(),
+        1
+    );
+    let data_dir = server.stop_gracefully();
+
+    // A revised file for the same source: its truth replaces, never
+    // stacks onto, the old one.
+    std::fs::write(
+        &file,
+        format!(
+            "{header}\n{}\n",
+            r#"{"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 5.0}"#
+        ),
+    )
+    .unwrap();
+    let (code, _, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let server = Server::start_on("import-idem-2", data_dir);
+    let edge = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "蔵", "label": "杜氏"})),
+    );
+    assert_eq!(edge["matches"][0]["weight"], json!(5.0));
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+#[test]
+fn import_refuses_a_data_directory_a_live_server_holds() {
+    let server = Server::start("import-locked");
+    let batches = batch_dir("import-locked");
+    let file = batches.join("late.jsonl");
+    std::fs::write(
+        &file,
+        "{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s\", \"create\": {}}\n",
+    )
+    .unwrap();
+    let (code, _, stderr) = run_import(&server.data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("another taguru process"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+#[test]
+fn a_malformed_file_refuses_the_whole_import_before_any_write() {
+    let batches = batch_dir("import-refuse");
+    let good = batches.join("good.jsonl");
+    std::fs::write(
+        &good,
+        "{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s\", \"create\": {}}\n",
+    )
+    .unwrap();
+    let bad = batches.join("bad.jsonl");
+    std::fs::write(
+        &bad,
+        "{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"t\"}\n\n{\"foo\": 1}\n",
+    )
+    .unwrap();
+
+    let data_dir =
+        std::env::temp_dir().join(format!("taguru-http-import-refuse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, _, stderr) = run_import(&data_dir, &[good.to_str().unwrap(), bad.to_str().unwrap()]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("line 3"), "{stderr}");
+    assert!(stderr.contains("nothing was applied"), "{stderr}");
+    // Refused during validation: the good file was NOT applied either —
+    // the data directory was never even created.
+    assert!(!data_dir.exists(), "validation must not touch the disk");
+
+    // The same holds for a clean --dry-run.
+    let (code, stdout, stderr) = run_import(&data_dir, &["--dry-run", good.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("dry run"), "{stdout}");
+    assert!(!data_dir.exists(), "a dry run must not touch the disk");
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+#[test]
+fn importing_into_an_absent_context_needs_a_create_block() {
+    let batches = batch_dir("import-nocreate");
+    let file = batches.join("orphan.jsonl");
+    std::fs::write(
+        &file,
+        "{\"taguru_batch\": 1, \"context\": \"ghost\", \"source\": \"s\"}\n",
+    )
+    .unwrap();
+    let data_dir = std::env::temp_dir().join(format!(
+        "taguru-http-import-nocreate-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, _, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("no create block"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&batches);
+    let _ = std::fs::remove_dir_all(&data_dir);
+}

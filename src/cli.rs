@@ -26,6 +26,11 @@ USAGE:
   taguru estimate --associations N ...  size memory/disk for a target corpus
                                         by building and measuring one
                                         (see: taguru estimate --help)
+  taguru import [--dry-run] FILE|DIR... apply JSONL batch files to the data
+                                        directory offline — bulk/initial
+                                        loads (see: taguru import --help);
+                                        the directory lock refuses to run
+                                        beside a live server
   taguru --help                         this text
 
 CONFIGURATION FILE (--config FILE, or TAGURU_CONFIG=FILE):
@@ -94,6 +99,7 @@ pub fn dispatch() -> ServeArgs {
         Some("health") => exit(health(&args[1..])),
         Some("inspect") => exit(crate::inspect::run(&args[1..])),
         Some("estimate") => exit(crate::estimate::run(&args[1..])),
+        Some("import") => exit(crate::ingest::run(&args[1..])),
         Some(other) => {
             eprintln!("taguru: unknown argument '{other}' — try 'taguru --help'");
             exit(2)

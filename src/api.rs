@@ -516,15 +516,17 @@ const MAX_MATCH_LIMIT: usize = 1000;
 const MAX_EXPLORE_DEPTH: usize = 10;
 
 /// Per-request association batch cap — one document's facts arrive as
-/// one request; anything past this is asked to split.
-const MAX_ASSOCIATIONS_PER_REQUEST: usize = 10_000;
+/// one request; anything past this is asked to split. (`pub(crate)`:
+/// the offline import chunks its applies at the same size.)
+pub(crate) const MAX_ASSOCIATIONS_PER_REQUEST: usize = 10_000;
 
 /// Per-op weight ceiling (absolute value). Weights accumulate on an
 /// edge across writes and floats saturate: two f64::MAX writes made an
 /// edge +Infinity, and a later retract minted Inf − Inf = NaN — an
 /// unreadable, unresettable fact. At ±1e6 per op, saturating would
-/// take ~1.8e302 acknowledged writes.
-const MAX_ASSOCIATION_WEIGHT: f64 = 1e6;
+/// take ~1.8e302 acknowledged writes. (`pub(crate)`: the offline
+/// import enforces the same caps, file lines instead of requests.)
+pub(crate) const MAX_ASSOCIATION_WEIGHT: f64 = 1e6;
 
 /// Byte cap on every name-shaped write: subject/label/object, source
 /// ids, aliases. Names are entry keys, not documents — the graph
@@ -532,16 +534,16 @@ const MAX_ASSOCIATION_WEIGHT: f64 = 1e6;
 /// snapshot carries them into every directory listing (one 4 MB
 /// subject made every GET /contexts response 4 MB, resident outside
 /// the cache budget).
-const MAX_NAME_BYTES: usize = 1024;
+pub(crate) const MAX_NAME_BYTES: usize = 1024;
 
 /// Byte cap on a context name: it becomes a file stem, percent-encoded
 /// at up to 3× — 64 bytes keeps the longest sidecar filename well
 /// under every filesystem's 255-byte limit.
-const MAX_CONTEXT_NAME_BYTES: usize = 64;
+pub(crate) const MAX_CONTEXT_NAME_BYTES: usize = 64;
 
 /// Byte cap on a context description — it too rides in every
 /// directory listing.
-const MAX_DESCRIPTION_BYTES: usize = 4096;
+pub(crate) const MAX_DESCRIPTION_BYTES: usize = 4096;
 
 /// The optional-body contract of create and audit: an ABSENT body
 /// means defaults, but a PRESENT body must parse as JSON — whatever
