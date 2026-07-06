@@ -2615,7 +2615,7 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     assert_eq!(stdout.matches("unchanged, skipped").count(), 2, "{stdout}");
 
     // --force re-extracts both.
-    let (url, requests) = stub_chat_server(vec![aomine_reply, takase_reply]);
+    let (url, requests) = stub_chat_server(vec![aomine_reply.clone(), takase_reply.clone()]);
     let provider = [
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
@@ -2626,6 +2626,23 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
         &["--force", "--context", "sake", aomine_src, takase_src],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("2 written"), "{stdout}");
+    assert_eq!(requests.join().unwrap().len(), 2);
+
+    // A re-pointed --context re-extracts too — a skip would leave
+    // files whose headers still send everything to 'sake'.
+    let (url, requests) = stub_chat_server(vec![aomine_reply, takase_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &["--context", "vats", aomine_src, takase_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
     assert!(stdout.contains("2 written"), "{stdout}");
     assert_eq!(requests.join().unwrap().len(), 2);
 

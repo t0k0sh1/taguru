@@ -17,9 +17,10 @@
 //!
 //! Extraction is the expensive step (model calls per document), so a
 //! manifest in the output directory records what each batch file was
-//! computed from — document hash × model × prompt version — and
-//! unchanged documents are skipped (`--force` overrides). Import is
-//! idempotent, so re-running the whole pipeline is always safe.
+//! computed from — document hash × model × prompt version × target
+//! context — and unchanged documents are skipped (`--force`
+//! overrides). Import is idempotent, so re-running the whole pipeline
+//! is always safe.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -243,7 +244,7 @@ pub fn run(args: &[String]) -> i32 {
         };
         let hash = sha256_hex(text.as_bytes());
 
-        if !force && manifest.matches(&source, &hash, &model_name) && out_path.is_file() {
+        if !force && manifest.matches(&source, &hash, &model_name, &context) && out_path.is_file() {
             // A skipped document still contributes its labels, so
             // later documents keep reusing the same vocabulary.
             if let Ok(batch) = fs::File::open(&out_path)
@@ -316,7 +317,7 @@ pub fn run(args: &[String]) -> i32 {
             failures += 1;
             continue;
         }
-        manifest.record(&source, &hash, &model_name, &file_name);
+        manifest.record(&source, &hash, &model_name, &context, &file_name);
         vocabulary.extend(extraction.label_vocabulary());
 
         let mut notes = String::new();
@@ -870,7 +871,11 @@ fn floor_char_boundary(text: &str, index: usize) -> usize {
 
 /// What each batch file was computed from. Extraction is the
 /// expensive step, so unchanged documents skip; any input to the
-/// computation changing — document bytes, model, prompt — re-extracts.
+/// computation changing — document bytes, model, prompt, target
+/// context — re-extracts. The context matters even though the model
+/// never sees its name: it is baked into the emitted header, and a
+/// skip that kept a stale header would send the batch to the wrong
+/// context on import.
 #[derive(Default, serde::Serialize, Deserialize)]
 struct Manifest {
     #[serde(default)]
@@ -882,6 +887,10 @@ struct ManifestEntry {
     sha256: String,
     model: String,
     prompt_version: u32,
+    // Default: entries written before this field existed carry no
+    // context, mismatch whatever is asked, and simply re-extract once.
+    #[serde(default)]
+    context: String,
     output: String,
 }
 
@@ -902,19 +911,23 @@ impl Manifest {
         }
     }
 
-    fn matches(&self, source: &str, sha256: &str, model: &str) -> bool {
+    fn matches(&self, source: &str, sha256: &str, model: &str, context: &str) -> bool {
         self.documents.get(source).is_some_and(|entry| {
-            entry.sha256 == sha256 && entry.model == model && entry.prompt_version == PROMPT_VERSION
+            entry.sha256 == sha256
+                && entry.model == model
+                && entry.prompt_version == PROMPT_VERSION
+                && entry.context == context
         })
     }
 
-    fn record(&mut self, source: &str, sha256: &str, model: &str, output: &str) {
+    fn record(&mut self, source: &str, sha256: &str, model: &str, context: &str, output: &str) {
         self.documents.insert(
             source.to_string(),
             ManifestEntry {
                 sha256: sha256.to_string(),
                 model: model.to_string(),
                 prompt_version: PROMPT_VERSION,
+                context: context.to_string(),
                 output: output.to_string(),
             },
         );
@@ -1084,11 +1097,14 @@ mod tests {
     #[test]
     fn manifests_skip_only_exact_recomputations() {
         let mut manifest = Manifest::default();
-        manifest.record("a.md", "hash-1", "model-1", "a.md.jsonl");
-        assert!(manifest.matches("a.md", "hash-1", "model-1"));
-        assert!(!manifest.matches("a.md", "hash-2", "model-1"));
-        assert!(!manifest.matches("a.md", "hash-1", "model-2"));
-        assert!(!manifest.matches("b.md", "hash-1", "model-1"));
+        manifest.record("a.md", "hash-1", "model-1", "sake", "a.md.jsonl");
+        assert!(manifest.matches("a.md", "hash-1", "model-1", "sake"));
+        assert!(!manifest.matches("a.md", "hash-2", "model-1", "sake"));
+        assert!(!manifest.matches("a.md", "hash-1", "model-2", "sake"));
+        assert!(!manifest.matches("b.md", "hash-1", "model-1", "sake"));
+        // A re-pointed --context must re-extract, not keep files whose
+        // headers still name the old target.
+        assert!(!manifest.matches("a.md", "hash-1", "model-1", "vats"));
 
         // A prompt bump invalidates entries recorded under the old one.
         manifest
@@ -1096,7 +1112,7 @@ mod tests {
             .get_mut("a.md")
             .expect("just recorded")
             .prompt_version = PROMPT_VERSION + 1;
-        assert!(!manifest.matches("a.md", "hash-1", "model-1"));
+        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake"));
 
         let dir = std::env::temp_dir().join(format!("taguru-manifest-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -1104,11 +1120,23 @@ mod tests {
         let path = dir.join(MANIFEST_NAME);
         assert!(Manifest::load(&path).documents.is_empty());
         let mut manifest = Manifest::default();
-        manifest.record("a.md", "hash-1", "model-1", "a.md.jsonl");
+        manifest.record("a.md", "hash-1", "model-1", "sake", "a.md.jsonl");
         manifest.save(&path).unwrap();
-        assert!(Manifest::load(&path).matches("a.md", "hash-1", "model-1"));
+        assert!(Manifest::load(&path).matches("a.md", "hash-1", "model-1", "sake"));
         fs::write(&path, "not json").unwrap();
         assert!(Manifest::load(&path).documents.is_empty());
+
+        // An entry written before the context field existed still
+        // loads — and mismatches, so it re-extracts exactly once.
+        fs::write(
+            &path,
+            r#"{"documents": {"a.md": {"sha256": "hash-1", "model": "model-1",
+                "prompt_version": 1, "output": "a.md.jsonl"}}}"#,
+        )
+        .unwrap();
+        let legacy = Manifest::load(&path);
+        assert_eq!(legacy.documents.len(), 1);
+        assert!(!legacy.matches("a.md", "hash-1", "model-1", "sake"));
         let _ = fs::remove_dir_all(&dir);
     }
 

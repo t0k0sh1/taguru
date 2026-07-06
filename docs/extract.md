@@ -93,12 +93,24 @@ batch passage could not carry them; split the document.
 
 Extraction is the expensive step, so `--out` carries
 `.extract-manifest.json`: per document, the content hash × model ×
-prompt version its batch file was computed from. A document whose
-computation inputs are unchanged is skipped; `--force` overrides, and
-a missing or corrupt manifest degrades to re-extraction — never to a
-false "unchanged". Keep the out directory between runs and a nightly
-extract-and-import costs model calls only for documents that changed;
-import's retract-then-apply makes the re-application exact.
+prompt version × target context its batch file was computed from. A
+document whose computation inputs are unchanged is skipped; `--force`
+overrides, and a missing or corrupt manifest degrades to
+re-extraction — never to a false "unchanged". Keep the out directory
+between runs and a nightly extract-and-import costs model calls only
+for documents that changed; import's retract-then-apply makes the
+re-application exact.
+
+The context is one of those inputs on purpose: it is baked into every
+emitted header, so re-running the same out directory with a different
+`--context` re-extracts rather than keeping files addressed to the
+old target. Still, give each context its own out directory — the
+manifest holds one entry per document, so alternating two contexts
+over one directory re-extracts everything on every flip, and the
+second context's files overwrite the first's. Batch files from many
+out directories apply together in one run (`taguru import sake/
+code/`): each file's header names its own context, so "one extract
+run per context, one import for everything" is the intended shape.
 
 ## Trust: extraction is an assertion channel
 
