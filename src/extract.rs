@@ -580,30 +580,29 @@ struct ModelOutput {
     aliases: Vec<ModelAlias>,
 }
 
+// Every field is an Option: models emit explicit nulls as readily as
+// they omit fields, and serde's `default` covers only absence — a
+// null must cost one item in merge(), never the whole chunk.
 #[derive(Deserialize)]
 struct ModelAssociation {
     #[serde(default)]
-    subject: String,
+    subject: Option<String>,
     #[serde(default)]
-    label: String,
+    label: Option<String>,
     #[serde(default)]
-    object: String,
-    #[serde(default = "default_weight")]
-    weight: f64,
-}
-
-fn default_weight() -> f64 {
-    1.0
+    object: Option<String>,
+    #[serde(default)]
+    weight: Option<f64>,
 }
 
 #[derive(Deserialize)]
 struct ModelAlias {
     #[serde(default)]
-    alias: String,
+    alias: Option<String>,
     #[serde(default)]
-    canonical: String,
+    canonical: Option<String>,
     #[serde(default)]
-    kind: String,
+    kind: Option<String>,
 }
 
 /// The assistant text must contain one JSON object; code fences and
@@ -679,33 +678,35 @@ fn merge(outputs: Vec<ModelOutput>) -> Extraction {
     let mut aliases: Vec<ModelAlias> = Vec::new();
     for output in outputs {
         for item in output.associations {
-            let names_ok = [&item.subject, &item.label, &item.object]
+            // Absent and null both read as empty; an omitted weight is
+            // a plain assertion.
+            let subject = item.subject.unwrap_or_default();
+            let label = item.label.unwrap_or_default();
+            let object = item.object.unwrap_or_default();
+            let weight = item.weight.unwrap_or(1.0);
+            let names_ok = [&subject, &label, &object]
                 .iter()
                 .all(|text| !text.trim().is_empty() && text.len() <= MAX_NAME_BYTES);
             // A zero weight asserts nothing; refusing it here beats
             // shipping a fact the graph treats as absent.
             if !names_ok
-                || !item.weight.is_finite()
-                || item.weight == 0.0
-                || item.weight.abs() > MAX_ASSOCIATION_WEIGHT
+                || !weight.is_finite()
+                || weight == 0.0
+                || weight.abs() > MAX_ASSOCIATION_WEIGHT
             {
                 extraction.dropped += 1;
                 continue;
             }
-            let key = (
-                item.subject.clone(),
-                item.label.clone(),
-                item.object.clone(),
-            );
+            let key = (subject.clone(), label.clone(), object.clone());
             if !seen.insert(key) {
                 extraction.duplicates += 1;
                 continue;
             }
             extraction.associations.push(Fact {
-                subject: item.subject,
-                label: item.label,
-                object: item.object,
-                weight: item.weight,
+                subject,
+                label,
+                object,
+                weight,
             });
         }
         aliases.extend(output.aliases);
@@ -721,34 +722,33 @@ fn merge(outputs: Vec<ModelOutput>) -> Extraction {
         label_names.insert(&fact.label);
     }
     for alias in aliases {
-        let (namespace, names) = match alias.kind.as_str() {
-            "concept" => (&mut extraction.concepts, &concept_names),
-            "label" => (&mut extraction.labels, &label_names),
+        let spelling = alias.alias.unwrap_or_default();
+        let canonical = alias.canonical.unwrap_or_default();
+        let (namespace, names) = match alias.kind.as_deref() {
+            Some("concept") => (&mut extraction.concepts, &concept_names),
+            Some("label") => (&mut extraction.labels, &label_names),
             _ => {
                 extraction.dropped += 1;
                 continue;
             }
         };
-        let shape_ok = !alias.alias.trim().is_empty()
-            && alias.alias.len() <= MAX_NAME_BYTES
-            && alias.canonical.len() <= MAX_NAME_BYTES
-            && alias.alias != alias.canonical;
+        let shape_ok = !spelling.trim().is_empty()
+            && spelling.len() <= MAX_NAME_BYTES
+            && canonical.len() <= MAX_NAME_BYTES
+            && spelling != canonical;
         // An alias spelling that is itself a name would shadow a real
         // record — the registry refuses that as a conflict, so it
         // never leaves here.
-        if !shape_ok
-            || !names.contains(alias.canonical.as_str())
-            || names.contains(alias.alias.as_str())
-        {
+        if !shape_ok || !names.contains(canonical.as_str()) || names.contains(spelling.as_str()) {
             extraction.dropped += 1;
             continue;
         }
-        match namespace.entry(alias.alias) {
+        match namespace.entry(spelling) {
             Entry::Vacant(vacant) => {
-                vacant.insert(alias.canonical);
+                vacant.insert(canonical);
             }
             Entry::Occupied(existing) => {
-                if *existing.get() == alias.canonical {
+                if *existing.get() == canonical {
                     extraction.duplicates += 1;
                 } else {
                     extraction.dropped += 1;
@@ -976,7 +976,7 @@ mod tests {
             r#"{"associations": [{"subject": "a", "label": "l", "object": "b", "weight": 2.0}]}"#;
         let output = parse_model_output(plain).unwrap();
         assert_eq!(output.associations.len(), 1);
-        assert_eq!(output.associations[0].weight, 2.0);
+        assert_eq!(output.associations[0].weight, Some(2.0));
         assert!(output.aliases.is_empty());
 
         let fenced = format!("```json\n{plain}\n```");
@@ -985,32 +985,50 @@ mod tests {
         let wrapped = format!("Here you go:\n{plain}\nHope that helps!");
         assert_eq!(parse_model_output(&wrapped).unwrap().associations.len(), 1);
 
-        // Omitted weight defaults to a plain assertion; unknown fields
-        // from a chatty model pass through instead of failing the file.
-        let defaulted =
+        // Unknown fields from a chatty model pass through instead of
+        // failing the file.
+        let extras =
             r#"{"associations": [{"subject": "a", "label": "l", "object": "b"}], "notes": "hi"}"#;
-        assert_eq!(
-            parse_model_output(defaulted).unwrap().associations[0].weight,
-            1.0
-        );
+        assert_eq!(parse_model_output(extras).unwrap().associations.len(), 1);
 
         assert!(parse_model_output("no json here").is_err());
     }
 
+    #[test]
+    fn explicit_nulls_cost_the_item_never_the_document() {
+        // Real models emit "object": null as readily as they omit the
+        // field; both must reach merge() as a droppable item, not fail
+        // the chunk at the serde layer.
+        let nully = r#"{"associations": [
+            {"subject": "a", "label": "l", "object": null, "weight": 1.0},
+            {"subject": "b", "label": "l", "object": "c"}
+        ], "aliases": [
+            {"alias": null, "canonical": "b", "kind": "concept"},
+            {"alias": "x", "canonical": "b", "kind": null}
+        ]}"#;
+        let output = parse_model_output(nully).expect("nulls must parse");
+        let merged = merge(vec![output]);
+        assert_eq!(merged.associations.len(), 1);
+        // An omitted weight is a plain assertion.
+        assert_eq!(merged.associations[0].weight, 1.0);
+        assert!(merged.concepts.is_empty());
+        assert_eq!(merged.dropped, 3);
+    }
+
     fn association(subject: &str, label: &str, object: &str, weight: f64) -> ModelAssociation {
         ModelAssociation {
-            subject: subject.into(),
-            label: label.into(),
-            object: object.into(),
-            weight,
+            subject: Some(subject.into()),
+            label: Some(label.into()),
+            object: Some(object.into()),
+            weight: Some(weight),
         }
     }
 
     fn alias(alias: &str, canonical: &str, kind: &str) -> ModelAlias {
         ModelAlias {
-            alias: alias.into(),
-            canonical: canonical.into(),
-            kind: kind.into(),
+            alias: Some(alias.into()),
+            canonical: Some(canonical.into()),
+            kind: Some(kind.into()),
         }
     }
 

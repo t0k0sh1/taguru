@@ -2498,14 +2498,16 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     assert_eq!(stdout.matches("would extract").count(), 2, "{stdout}");
 
     // The real run. aomine answers fenced (the extractor must strip
-    // markdown fences) and carries one duplicate triple and one alias
-    // whose canonical exists nowhere. takase answers garbage first —
-    // one corrective turn — then a valid object with weight omitted.
+    // markdown fences) and carries one duplicate triple, one alias
+    // whose canonical exists nowhere, and one null-valued item — real
+    // models emit all three. takase answers garbage first — one
+    // corrective turn — then a valid object with weight omitted.
     let aomine_reply = json!({
         "associations": [
             {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0},
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0},
             {"subject": "青嶺酒造", "label": "行う", "object": "大量生産", "weight": -1.0},
+            {"subject": "青嶺酒造", "label": "所在地", "object": null},
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0}
         ],
         "aliases": [
@@ -2542,7 +2544,7 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("3 association(s)"), "{stdout}");
     assert!(stdout.contains("1 duplicate(s) folded"), "{stdout}");
-    assert!(stdout.contains("1 item(s) dropped"), "{stdout}");
+    assert!(stdout.contains("2 item(s) dropped"), "{stdout}");
     assert!(stdout.contains("2 written"), "{stdout}");
 
     let requests = requests.join().unwrap();
