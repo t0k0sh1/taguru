@@ -382,6 +382,11 @@ impl PassageVectorStore {
         let model = read_string(bytes, &mut pos)?;
         let dim = read_u32(bytes, &mut pos)? as usize;
         let count = read_u32(bytes, &mut pos)? as usize;
+        // Rows without a dimension cannot exist through push(); a file
+        // claiming them is corrupt, not merely empty.
+        if count > 0 && dim == 0 {
+            return None;
+        }
         let mut keys = Vec::with_capacity(count.min(1 << 20));
         for _ in 0..count {
             let source = read_string(bytes, &mut pos)?;

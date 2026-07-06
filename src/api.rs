@@ -1746,6 +1746,62 @@ mod tests {
     use super::*;
     use taguru::context::MatchKind;
 
+    /// Absent halves of the new response shapes must OMIT their keys,
+    /// never serialize as null: older clients of /embeddings/refresh
+    /// keep the exact historical two-key body, and lane consumers test
+    /// key presence.
+    #[test]
+    fn refresh_and_lane_shapes_omit_absent_keys_rather_than_nulling_them() {
+        let legacy = serde_json::to_value(RefreshOutcome {
+            embedded: 3,
+            total: 9,
+            glosses: None,
+            passages: None,
+        })
+        .unwrap();
+        assert_eq!(
+            legacy,
+            serde_json::json!({"embedded": 3, "total": 9}),
+            "passage lane off = the historical shape, byte for byte"
+        );
+
+        let broken_down = serde_json::to_value(RefreshOutcome {
+            embedded: 5,
+            total: 12,
+            glosses: Some(RefreshBreakdown {
+                embedded: 2,
+                total: 4,
+                skipped_over_limit: None,
+            }),
+            passages: Some(RefreshBreakdown {
+                embedded: 3,
+                total: 8,
+                skipped_over_limit: Some(1),
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            broken_down["glosses"],
+            serde_json::json!({"embedded": 2, "total": 4}),
+            "a gloss breakdown never grows a skipped_over_limit key"
+        );
+        assert_eq!(broken_down["passages"]["skipped_over_limit"], 1);
+
+        let lanes = serde_json::to_value(PassageLanes {
+            bm25: Some(LaneEvidence {
+                rank: 1,
+                score: 2.5,
+            }),
+            vector: None,
+        })
+        .unwrap();
+        assert_eq!(
+            lanes,
+            serde_json::json!({"bm25": {"rank": 1, "score": 2.5}}),
+            "an absent lane omits its key"
+        );
+    }
+
     #[test]
     fn protocol_trailer_names_the_model_and_the_refresh_owner() {
         assert!(protocol_trailer(None, false).is_none());

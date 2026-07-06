@@ -267,6 +267,13 @@ pub struct Entry {
     /// (passage writes do not mark the GRAPH dirty, so the flush list
     /// alone would miss passage-only activity).
     passages_embed_dirty: AtomicBool,
+    /// Serializes whole passage-embedding refreshes: the ticker and
+    /// the HTTP endpoint can fire concurrently, each computes offline
+    /// for seconds, and an unserialized OLDER run would publish (and
+    /// persist) its sidecar over a newer one's on the way out. The
+    /// loser of this lock re-diffs against the winner's hashes and
+    /// no-ops.
+    passage_refresh: Mutex<()>,
     /// Usage counters (see [`ContextUsage`]). `usage_dirty` marks
     /// increments the sidecar has not seen yet, so the shutdown sweep
     /// skips the contexts nobody touched.
@@ -298,6 +305,7 @@ impl Entry {
             bm25: RwLock::new(None),
             passage_vectors: Mutex::new(None),
             passages_embed_dirty: AtomicBool::new(false),
+            passage_refresh: Mutex::new(()),
             usage: UsageCounters::seeded(&usage),
             usage_dirty: AtomicBool::new(false),
         }
@@ -486,24 +494,13 @@ pub struct PassageSearchHit {
     pub vector: Option<(usize, f32)>,
 }
 
-/// Accumulator behind the fusion: hashes come from whichever lane saw
-/// the paragraph first; the store's hash check settles staleness.
+/// Accumulator behind the fusion: each lane keeps the (rank, score,
+/// paragraph hash) it actually scored, so staleness settles per lane
+/// against the store's current text.
+#[derive(Default)]
 struct FusedHit {
-    hash: u64,
-    fused: f32,
-    bm25: Option<(usize, f32)>,
-    vector: Option<(usize, f32)>,
-}
-
-impl FusedHit {
-    fn new(hash: u64) -> Self {
-        Self {
-            hash,
-            fused: 0.0,
-            bm25: None,
-            vector: None,
-        }
-    }
+    bm25: Option<(usize, f32, u64)>,
+    vector: Option<(usize, f32, u64)>,
 }
 
 /// What one passage embedding refresh accomplished: rows newly
@@ -1300,13 +1297,9 @@ impl AppState {
         const RRF_K: f32 = 60.0;
 
         let entry = self.lookup(name)?;
-        let store = {
-            let _fence = entry.read_unless_deleted()?;
-            match self.entry_passages(&entry, &file_stem(name)) {
-                Ok(store) => store,
-                Err(error) => return Some(Err(error)),
-            }
-        };
+        if limit == 0 {
+            return entry.read_unless_deleted().map(|_| Ok(Vec::new()));
+        }
         let query_grams: Vec<u64> = {
             let mut seen = std::collections::HashSet::new();
             passage_terms(query)
@@ -1315,12 +1308,43 @@ impl AppState {
                 .collect()
         };
         if query_grams.is_empty() {
-            return Some(Ok(Vec::new()));
+            return entry.read_unless_deleted().map(|_| Ok(Vec::new()));
         }
         // Both lanes over-fetch: fusion can promote a hit neither lane
-        // put in its own top `limit`, and the hash check below may drop
-        // stragglers.
+        // put in its own top `limit`, and the staleness checks below
+        // may drop stragglers.
         let pool = limit.saturating_mul(4).max(50);
+
+        // The semantic lane's query embedding runs BEFORE any lock: a
+        // provider round trip must never extend the fence below.
+        let cue = if self.passage_embedding_enabled() {
+            let embedder = self.0.embedder.clone().expect("enabled implies a provider");
+            match self.cue_vector(&*embedder, query) {
+                Ok(vector) => Some(vector),
+                Err(error) => {
+                    // Degrade, loudly: the lexical lane still answers.
+                    tracing::warn!(
+                        context = %name,
+                        error,
+                        "passage query embedding failed; serving the lexical lane alone"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Everything below holds the read fence: eviction and deletion
+        // are excluded for the whole search, so `store` IS the resident
+        // store throughout — an index built from a handle that predates
+        // an eviction would silently hide writes that landed in the
+        // freshly reloaded store until the next rebuild.
+        let _fence = entry.read_unless_deleted()?;
+        let store = match self.entry_passages(&entry, &file_stem(name)) {
+            Ok(store) => store,
+            Err(error) => return Some(Err(error)),
+        };
 
         // Lexical lane: ensure a resident index — build on the
         // residency's first search, rebuild when tombstones have piled
@@ -1356,92 +1380,88 @@ impl AppState {
             index.search(&query_grams, pool)
         };
 
-        // Semantic lane, where the operator opted the corpus in: the
-        // query embeds through the same cue cache resolve uses.
-        let semantic: Vec<(String, u32, u64, f32)> = if self.passage_embedding_enabled() {
-            let embedder = self.0.embedder.clone().expect("enabled implies a provider");
-            let vectors = self.entry_passage_vectors(&entry, &file_stem(name));
-            if vectors.is_empty() || vectors.model != embedder.model() {
-                Vec::new()
-            } else {
-                match self.cue_vector(&*embedder, query) {
-                    Ok(cue) => vectors
-                        .top_matches(&cue, pool)
+        // Semantic lane: sweep the paragraph vectors with the
+        // pre-embedded query.
+        let semantic: Vec<(String, u32, u64, f32)> = match &cue {
+            Some(cue) => {
+                let vectors = self.entry_passage_vectors(&entry, &file_stem(name));
+                let model_matches = self
+                    .0
+                    .embedder
+                    .as_ref()
+                    .is_some_and(|embedder| vectors.model == embedder.model());
+                if vectors.is_empty() || !model_matches {
+                    Vec::new()
+                } else {
+                    vectors
+                        .top_matches(cue, pool)
                         .into_iter()
                         .map(|(key, score)| (key.source.clone(), key.index, key.hash, score))
-                        .collect(),
-                    Err(error) => {
-                        // Degrade, loudly: the lexical lane still
-                        // answers.
-                        tracing::warn!(
-                            context = %name,
-                            error,
-                            "passage query embedding failed; serving the lexical lane alone"
-                        );
-                        Vec::new()
-                    }
+                        .collect()
                 }
             }
-        } else {
-            Vec::new()
+            None => Vec::new(),
         };
 
-        // Reciprocal rank fusion. With one lane empty the formula
-        // degrades to that lane's own ranking; the top-level score
-        // stays the raw BM25 number in that case so a lexical-only
-        // deployment keeps its historical score semantics.
+        // Fuse by rank, then validate EACH LANE against the store's
+        // current paragraph: every lane scored the text it saw, and
+        // vectors routinely lag the text between refreshes — a stale
+        // lane must neither smuggle its outdated score onto fresh text
+        // nor veto the other lane's fresh match, so each loses exactly
+        // its own evidence (and its fusion term). The top-level score
+        // stays the raw BM25 number when no semantic lane ran, so a
+        // lexical-only deployment keeps its historical score semantics.
         let fused = !semantic.is_empty();
         let mut accumulated: HashMap<(String, u32), FusedHit> = HashMap::new();
         for (rank, (source, index, hash, score)) in lexical.into_iter().enumerate() {
-            let entry = accumulated
-                .entry((source, index))
-                .or_insert_with(|| FusedHit::new(hash));
-            entry.fused += 1.0 / (RRF_K + (rank + 1) as f32);
-            entry.bm25 = Some((rank + 1, score));
+            accumulated.entry((source, index)).or_default().bm25 = Some((rank + 1, score, hash));
         }
         for (rank, (source, index, hash, score)) in semantic.into_iter().enumerate() {
-            let entry = accumulated
-                .entry((source, index))
-                .or_insert_with(|| FusedHit::new(hash));
-            entry.fused += 1.0 / (RRF_K + (rank + 1) as f32);
-            entry.vector = Some((rank + 1, score));
+            accumulated.entry((source, index)).or_default().vector = Some((rank + 1, score, hash));
         }
-        let mut ranked: Vec<((String, u32), FusedHit)> = accumulated.into_iter().collect();
-        ranked.sort_by(|a, b| {
-            b.1.fused
-                .total_cmp(&a.1.fused)
-                .then_with(|| a.0.0.cmp(&b.0.0))
-                .then_with(|| a.0.1.cmp(&b.0.1))
-        });
 
-        let mut hits = Vec::new();
-        for ((source, index), fused_hit) in ranked {
+        let rrf =
+            |lane: &Option<(usize, f32)>| lane.map_or(0.0, |(rank, _)| 1.0 / (RRF_K + rank as f32));
+        let mut hits: Vec<PassageSearchHit> = Vec::new();
+        for ((source, index), lanes) in accumulated {
             let Some(record) = store.get(&source) else {
                 continue;
             };
             let Some(span) = record.paragraphs.get(index as usize) else {
                 continue;
             };
-            if span.hash != fused_hit.hash {
+            let bm25 = lanes
+                .bm25
+                .filter(|&(.., hash)| hash == span.hash)
+                .map(|(rank, score, _)| (rank, score));
+            let vector = lanes
+                .vector
+                .filter(|&(.., hash)| hash == span.hash)
+                .map(|(rank, score, _)| (rank, score));
+            if bm25.is_none() && vector.is_none() {
                 continue;
             }
             let score = if fused {
-                fused_hit.fused
+                rrf(&bm25) + rrf(&vector)
             } else {
-                fused_hit.bm25.map(|(_, score)| score).unwrap_or(0.0)
+                bm25.map(|(_, score)| score).unwrap_or(0.0)
             };
             hits.push(PassageSearchHit {
                 source,
                 index,
                 score,
                 text: record.text[span.start as usize..span.end as usize].to_string(),
-                bm25: fused_hit.bm25,
-                vector: fused_hit.vector,
+                bm25,
+                vector,
             });
-            if hits.len() == limit {
-                break;
-            }
         }
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.source.cmp(&b.source))
+                .then_with(|| a.index.cmp(&b.index))
+        });
+        hits.truncate(limit);
         Some(Ok(hits))
     }
 
@@ -1691,6 +1711,9 @@ impl AppState {
             ));
         }
         let entry = self.lookup(name)?;
+        // One refresh per context at a time (see Entry::passage_refresh
+        // for why); the diff below makes the loser's pass a no-op.
+        let _serial = entry.passage_refresh.lock().unwrap();
         // Claim the dirty flag up front: work that lands mid-refresh
         // re-marks it, so the ticker returns — never lost, never
         // double-claimed.
@@ -1699,7 +1722,13 @@ impl AppState {
             let _fence = entry.read_unless_deleted()?;
             match self.entry_passages(&entry, &file_stem(name)) {
                 Ok(store) => store,
-                Err(error) => return Some(Err(error.to_string())),
+                Err(error) => {
+                    // The claim above must not eat the work: a store
+                    // that cannot load now still needs its refresh once
+                    // it can.
+                    entry.passages_embed_dirty.store(true, Ordering::Relaxed);
+                    return Some(Err(error.to_string()));
+                }
             }
         };
         let records = store.snapshot();
@@ -4905,6 +4934,58 @@ mod tests {
         assert!(
             (hits[0].score - 2.0 / 61.0).abs() < 1e-6,
             "two lanes at rank 1 fuse to 2/(60+1), got {}",
+            hits[0].score
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_lane_that_scored_outdated_text_loses_its_evidence_not_the_hit() {
+        // Vectors refresh on their own cadence and routinely lag the
+        // text. After an edit, the in-place-updated BM25 lane must
+        // keep answering while the vector lane's stale evidence is
+        // dropped — never attached to text it did not score, and never
+        // vetoing the fresh lexical match.
+        let dir = scratch_dir("hybrid-stale-lane");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state.store_passages("fruit", passages).unwrap().unwrap();
+        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+
+        // The text changes; the vector sidecar is NOT refreshed.
+        let mut edited = BTreeMap::new();
+        edited.insert(
+            "doc-a".to_string(),
+            "りんごは青森の名産である。".to_string(),
+        );
+        state.store_passages("fruit", edited).unwrap().unwrap();
+
+        let hits = state
+            .search_passages("fruit", "りんご", 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits[0].source, "doc-a");
+        assert!(hits[0].text.contains("青森"), "the CURRENT text is served");
+        assert!(
+            hits[0].bm25.is_some(),
+            "the lexical lane scored the fresh text and survives"
+        );
+        assert!(
+            hits[0].vector.is_none(),
+            "the vector lane scored the OLD text; its evidence must drop"
+        );
+        let (bm25_rank, _) = hits[0].bm25.unwrap();
+        assert!(
+            (hits[0].score - 1.0 / (60.0 + bm25_rank as f32)).abs() < 1e-6,
+            "the fused score counts surviving lanes only, got {}",
             hits[0].score
         );
 
