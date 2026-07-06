@@ -82,6 +82,13 @@ async fn serve() {
     let flush_secs = env_number("TAGURU_FLUSH_SECS", 5);
     let max_body_bytes = env_number("TAGURU_MAX_BODY_BYTES", 8 * 1024 * 1024);
     let timeout_secs = env_number("TAGURU_REQUEST_TIMEOUT_SECS", 30);
+    let rate_per_minute = env_number("TAGURU_RATE_LIMIT_PER_MIN", 0);
+    let rate_limiter = Arc::new(limits::RateLimiter::new(
+        u32::try_from(rate_per_minute).unwrap_or(u32::MAX),
+    ));
+    if !rate_limiter.is_disabled() {
+        info!(per_minute = rate_per_minute, "per-key rate limit enabled");
+    }
 
     // Misconfigured credentials refuse to boot: a keyring that
     // silently dropped an entry would surface as an auth hole.
@@ -264,11 +271,16 @@ async fn serve() {
         )
         // Layers wrap only the routes registered above and nest by
         // call order — later .layer() calls sit outside earlier ones.
-        // Body limit innermost, then auth, then the timeout (its
-        // budget covers auth and body handling too), and metrics
-        // outermost: every response — 401, 408, 413 — lands in the
-        // access log and the RED metrics.
+        // Body limit innermost, then the per-key rate gate (inside
+        // auth: budget is spent only by authenticated keys), then
+        // auth, then the timeout (its budget covers auth and body
+        // handling too), and metrics outermost: every response — 401,
+        // 408, 413, 429 — lands in the access log and the RED metrics.
         .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes))
+        .layer(axum::middleware::from_fn_with_state(
+            rate_limiter,
+            limits::enforce_rate_limit,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             keyring,
             auth::require_bearer,

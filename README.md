@@ -133,6 +133,13 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #   TAGURU_REQUEST_TIMEOUT_SECS  per-request budget (default 30; raise
 #                     above 60 when TAGURU_EMBED_URL is configured — the
 #                     provider round trip cannot be preempted mid-call)
+#   TAGURU_RATE_LIMIT_PER_MIN  per-key request budget (default 0 = off):
+#                     each named key may burst a full minute's allowance,
+#                     then settles to the sustained rate; unauthenticated
+#                     deployments share one anonymous bucket. Past it:
+#                     429 in the error shape with Retry-After (seconds);
+#                     /health and /metrics stay exempt. Turn this on
+#                     whenever the server leaves localhost.
 ```
 
 ### Docker

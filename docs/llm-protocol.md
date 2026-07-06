@@ -223,6 +223,8 @@ Source code takes the same discipline; only the naming changes.
   name ≤ 64, description ≤ 4096). `408` timeout (default 30 s —
   narrow the query and retry). `413` body over the cap (default
   8 MiB; this one answers in plain text, not the JSON error shape).
+  `429` this key is over its request budget — wait the `Retry-After`
+  seconds and continue; prefer batching writes over rapid-fire calls.
 - Off-axis errors answer in the same shape: unknown path `404`, right
   path wrong verb `405`, broken JSON `400`, wrong Content-Type `415`,
   well-formed but mistyped JSON `422`.

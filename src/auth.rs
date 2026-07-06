@@ -20,8 +20,10 @@ use crate::api;
 /// Paths that answer without credentials. `/health` is the liveness
 /// probe — orchestrators must reach it unconfigured. `/metrics`
 /// carries only aggregates and route templates (no context names, no
-/// content), and exempting it keeps scrape configs trivial.
-const EXEMPT: [&str; 2] = ["/health", "/metrics"];
+/// content), and exempting it keeps scrape configs trivial. The rate
+/// limiter honors the same list: probes and scrapes must not starve
+/// behind a chatty client.
+pub(crate) const EXEMPT: [&str; 2] = ["/health", "/metrics"];
 
 /// The authenticated key's name, attached to the RESPONSE: the access
 /// log middleware sits outside this one, so response extensions are
@@ -128,6 +130,10 @@ pub async fn require_bearer(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
     if let Some(key) = presented.and_then(|token| keyring.authenticate(token)) {
+        let mut request = request;
+        // Inner layers (the rate limiter) key their work on WHO; the
+        // response copy below feeds the access log on the way out.
+        request.extensions_mut().insert(AuthKey(Arc::clone(&key)));
         let mut response = next.run(request).await;
         response.extensions_mut().insert(AuthKey(key));
         return response;

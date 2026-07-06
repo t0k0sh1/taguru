@@ -46,6 +46,8 @@ ENVIRONMENT (every knob; unset = the shown default):
                                log carries the key name; rotate by overlap
   TAGURU_MAX_BODY_BYTES        request body cap (8 MiB)
   TAGURU_REQUEST_TIMEOUT_SECS  per-request budget (30)
+  TAGURU_RATE_LIMIT_PER_MIN    per-key request budget; past it 429 +
+                               Retry-After (0 = off)
   TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off)
   TAGURU_EMBED_MODEL           embedding model name
   TAGURU_EMBED_API_KEY         embedding provider credential
@@ -207,7 +209,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 18] = [
+const KNOWN_KEYS: [&str; 19] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -218,6 +220,7 @@ const KNOWN_KEYS: [&str; 18] = [
     "TAGURU_API_TOKENS",
     "TAGURU_MAX_BODY_BYTES",
     "TAGURU_REQUEST_TIMEOUT_SECS",
+    "TAGURU_RATE_LIMIT_PER_MIN",
     "TAGURU_EMBED_URL",
     "TAGURU_EMBED_MODEL",
     "TAGURU_EMBED_API_KEY",

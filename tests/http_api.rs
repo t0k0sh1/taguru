@@ -46,6 +46,7 @@ impl Server {
             .env_remove("TAGURU_SEMANTIC_FLOOR")
             .env_remove("TAGURU_API_TOKEN") // unauthenticated unless a test opts in
             .env_remove("TAGURU_API_TOKENS")
+            .env_remove("TAGURU_RATE_LIMIT_PER_MIN")
             // No tracing unless a test opts in — a developer shell
             // with a live OTel setup must not flip every test here
             // into export mode.
@@ -243,6 +244,36 @@ fn named_api_tokens_authenticate_alongside_the_default() {
     }
     let (status, _) = server.call_with_token("GET", "/contexts", None, Some("tok-c"));
     assert_eq!(status, 401);
+}
+
+/// The request budget is spent per key: one key exhausts alone while
+/// the other keeps working, and the probes stay exempt.
+#[test]
+fn rate_limit_is_per_key_and_spares_probes() {
+    let server = Server::start_with_env(
+        "ratelimit",
+        &[
+            ("TAGURU_API_TOKENS", "hot:tok-hot,calm:tok-calm"),
+            ("TAGURU_RATE_LIMIT_PER_MIN", "2"),
+        ],
+    );
+
+    for _ in 0..2 {
+        let (status, _) = server.call_with_token("GET", "/contexts", None, Some("tok-hot"));
+        assert_eq!(status, 200);
+    }
+    let (status, refused) = server.call_with_token("GET", "/contexts", None, Some("tok-hot"));
+    assert_eq!(status, 429);
+    assert_eq!(refused["status"], "error");
+    assert!(
+        refused["error"].as_str().unwrap().contains("budget"),
+        "{refused}"
+    );
+
+    let (status, _) = server.call_with_token("GET", "/contexts", None, Some("tok-calm"));
+    assert_eq!(status, 200, "an untouched key must keep its own budget");
+    let (status, _) = server.call("GET", "/health", None);
+    assert_eq!(status, 200, "probes must not starve behind a hot key");
 }
 
 /// POST /mcp speaks the MCP Streamable HTTP transport (stateless
