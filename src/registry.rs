@@ -42,7 +42,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use taguru::context::{AliasError, Context};
 
-use crate::embedding::{EmbedPurpose, EmbeddingProvider, VectorStore, fnv1a, similarity};
+use crate::embedding::{
+    EmbedPurpose, EmbeddingProvider, VectorStore, VectorTable, fnv1a, similarity,
+};
 use crate::metrics::{GaugeSnapshot, Metrics};
 use crate::wal::{self, WalOp};
 
@@ -283,6 +285,17 @@ impl Entry {
         let guard = self.inner.write().unwrap();
         (!matches!(guard.slot, Slot::Deleted)).then_some(guard)
     }
+
+    /// Bytes the cached vector sidecar holds resident — zero when none
+    /// is loaded. The cache budget and the gauges count it the same way.
+    fn vectors_footprint(&self) -> usize {
+        self.vectors
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|store| store.footprint())
+            .unwrap_or(0)
+    }
 }
 
 struct EntryInner {
@@ -509,37 +522,7 @@ impl AppState {
         // server) would each cache and flush independently — last
         // writer wins, silently.
         let dir_lock = lock_data_dir(&data_dir)?;
-        let mut registry = HashMap::new();
-        for dir_entry in fs::read_dir(&data_dir)? {
-            let path = dir_entry?.path();
-            let extension = path.extension().and_then(|e| e.to_str());
-            // Crash leftovers of staged writes: never published, and
-            // nothing may linger as unbounded disk litter.
-            if extension.is_some_and(|e| e.starts_with("tmp")) {
-                let _ = fs::remove_file(&path);
-                continue;
-            }
-            if extension != Some("ctx") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let Some(name) = name_from_stem(stem) else {
-                tracing::warn!("skipping {}: file name does not decode", path.display());
-                continue;
-            };
-            let MetaFile { meta, stats, usage } = read_meta_file(&data_dir, stem);
-            // The gauge must see leftover logs from the first scrape,
-            // not only after each context's first touch.
-            let wal_bytes = fs::metadata(wal_path(&data_dir, stem))
-                .map(|meta| meta.len())
-                .unwrap_or(0);
-            registry.insert(
-                name,
-                Arc::new(Entry::new(meta, stats, Slot::Cold, wal_bytes, usage)),
-            );
-        }
+        let registry = scan_data_dir(&data_dir)?;
 
         let state = Self(Arc::new(StateInner {
             data_dir,
@@ -558,16 +541,21 @@ impl AppState {
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
         }));
-        for (name, entry) in state.snapshot() {
+        state.preload_pinned();
+        Ok(state)
+    }
+
+    /// Loads every pinned context now — serial and chatty on purpose:
+    /// a boot that spends seconds loading pinned contexts should say
+    /// what it is loading, not sit silent until "server ready".
+    fn preload_pinned(&self) {
+        for (name, entry) in self.snapshot() {
             let mut inner = entry.inner.write().unwrap();
             if !inner.meta.pinned {
                 continue;
             }
-            // Serial and chatty on purpose: a boot that spends seconds
-            // loading pinned contexts should say what it is loading,
-            // not sit silent until "server ready".
             let preload_started = std::time::Instant::now();
-            match ensure_hot(&state.0.data_dir, &name, &mut inner, &state.0.metrics) {
+            match ensure_hot(&self.0.data_dir, &name, &mut inner, &self.0.metrics) {
                 Ok(()) => tracing::info!(
                     context = %name,
                     ms = preload_started.elapsed().as_millis() as u64,
@@ -576,7 +564,6 @@ impl AppState {
                 Err(error) => tracing::warn!("pinned context '{name}' not preloaded: {error}"),
             }
         }
-        Ok(state)
     }
 
     /// The shared observability registry — the HTTP middleware records
@@ -671,14 +658,7 @@ impl AppState {
             }
             wal_bytes += inner.wal_bytes;
             drop(inner);
-            let vectors = entry
-                .vectors
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|store| store.footprint())
-                .unwrap_or(0);
-            resident_bytes += vectors as u64;
+            resident_bytes += entry.vectors_footprint() as u64;
         }
         GaugeSnapshot {
             contexts_registered,
@@ -875,7 +855,7 @@ impl AppState {
         }
 
         let mut skipped = None;
-        let sweep = |table: &HashMap<String, (u64, Vec<f32>)>,
+        let sweep = |table: &VectorTable,
                      skipped: &mut Option<String>|
          -> Vec<(String, String, f32)> {
             if table.len() > SWEEP_CAP {
@@ -1114,46 +1094,16 @@ impl AppState {
         // the same names; the merge below stays correct.
         let existing = VectorStore::load(&path);
         let fresh_model = existing.model != embedder.model();
-        let stale = |table: &HashMap<String, (u64, Vec<f32>)>,
-                     entries: &[(String, String)]|
-         -> Vec<(String, String, u64)> {
-            entries
-                .iter()
-                .filter_map(|(name, gloss)| {
-                    let hash = fnv1a(gloss);
-                    let outdated =
-                        fresh_model || table.get(name).is_none_or(|&(stored, _)| stored != hash);
-                    outdated.then(|| (name.clone(), gloss.clone(), hash))
-                })
-                .collect()
-        };
-        let stale_concepts = stale(&existing.concepts, &concepts);
-        let stale_labels = stale(&existing.labels, &labels);
-        let mut embedded_concepts = Vec::new();
-        let mut embedded_labels = Vec::new();
-        for (stale, embedded) in [
-            (&stale_concepts, &mut embedded_concepts),
-            (&stale_labels, &mut embedded_labels),
-        ] {
-            for chunk in stale.chunks(128) {
-                let texts: Vec<&str> = chunk.iter().map(|(_, gloss, _)| gloss.as_str()).collect();
-                match embedder.embed(&texts, EmbedPurpose::Index) {
-                    Ok(vectors) => {
-                        self.0.metrics.record_embed_refresh(true);
-                        embedded.extend(
-                            chunk
-                                .iter()
-                                .zip(vectors)
-                                .map(|((name, _, hash), vector)| (name.clone(), (*hash, vector))),
-                        );
-                    }
-                    Err(error) => {
-                        self.0.metrics.record_embed_refresh(false);
-                        return Some(Err(error));
-                    }
-                }
-            }
-        }
+        let embedded_concepts =
+            match self.embed_stale(&*embedder, &existing.concepts, &concepts, fresh_model) {
+                Ok(embedded) => embedded,
+                Err(error) => return Some(Err(error)),
+            };
+        let embedded_labels =
+            match self.embed_stale(&*embedder, &existing.labels, &labels, fresh_model) {
+                Ok(embedded) => embedded,
+                Err(error) => return Some(Err(error)),
+            };
         let newly_embedded = embedded_concepts.len() + embedded_labels.len();
 
         // Merge under the entry lock so concurrent refreshes serialize
@@ -1178,6 +1128,48 @@ impl AppState {
         // Publish the fresh store so queries never re-read the sidecar.
         *entry.vectors.lock().unwrap() = Some(Arc::new(store));
         Some(Ok((newly_embedded, total)))
+    }
+
+    /// Diffs one gloss table against its stored vectors and embeds what
+    /// is new or changed, 128 glosses per provider call. Each vector
+    /// remembers the hash of the gloss it came from; `fresh_model`
+    /// marks everything stale.
+    fn embed_stale(
+        &self,
+        embedder: &dyn EmbeddingProvider,
+        stored: &VectorTable,
+        entries: &[(String, String)],
+        fresh_model: bool,
+    ) -> Result<VectorTable, String> {
+        let stale: Vec<(String, String, u64)> = entries
+            .iter()
+            .filter_map(|(name, gloss)| {
+                let hash = fnv1a(gloss);
+                let outdated =
+                    fresh_model || stored.get(name).is_none_or(|&(hashed, _)| hashed != hash);
+                outdated.then(|| (name.clone(), gloss.clone(), hash))
+            })
+            .collect();
+        let mut embedded = VectorTable::new();
+        for chunk in stale.chunks(128) {
+            let texts: Vec<&str> = chunk.iter().map(|(_, gloss, _)| gloss.as_str()).collect();
+            match embedder.embed(&texts, EmbedPurpose::Index) {
+                Ok(vectors) => {
+                    self.0.metrics.record_embed_refresh(true);
+                    embedded.extend(
+                        chunk
+                            .iter()
+                            .zip(vectors)
+                            .map(|((name, _, hash), vector)| (name.clone(), (*hash, vector))),
+                    );
+                }
+                Err(error) => {
+                    self.0.metrics.record_embed_refresh(false);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(embedded)
     }
 
     /// The semantic fallback behind resolve: nearest stored names by
@@ -1498,12 +1490,7 @@ impl AppState {
                 // records must survive until the next flush bakes them
                 // into an image of their own.
                 if inner.wal_seq - 1 == watermark {
-                    match wal::reset(&wal_path(&self.0.data_dir, &stem)) {
-                        Ok(()) => inner.wal_bytes = 0,
-                        Err(error) => {
-                            tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
-                        }
-                    }
+                    self.truncate_wal(name, inner);
                 } else {
                     entry.dirty.store(true, Ordering::Relaxed);
                 }
@@ -1516,6 +1503,19 @@ impl AppState {
                 entry.usage_dirty.store(true, Ordering::Relaxed);
                 self.0.metrics.record_flush(false);
                 false
+            }
+        }
+    }
+
+    /// Truncates a context's log once an image covering everything in
+    /// it has published. Failure is harmless — the image's watermark
+    /// already makes the logged records replay-inert — so it warns and
+    /// moves on.
+    fn truncate_wal(&self, name: &str, inner: &mut EntryInner) {
+        match wal::reset(&wal_path(&self.0.data_dir, &file_stem(name))) {
+            Ok(()) => inner.wal_bytes = 0,
+            Err(error) => {
+                tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
             }
         }
     }
@@ -1744,14 +1744,7 @@ impl AppState {
             drop(inner);
             // Cached vector stores count too — a cold entry can hold a
             // large one after a semantic query.
-            let vectors = entry
-                .vectors
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|store| store.footprint())
-                .unwrap_or(0);
-            let bytes = resident + vectors;
+            let bytes = resident + entry.vectors_footprint();
             if bytes == 0 {
                 continue;
             }
@@ -1775,55 +1768,61 @@ impl AppState {
             if name == except {
                 continue;
             }
-            let mut guard = entry.inner.write().unwrap();
-            let inner = &mut *guard;
-            // Re-check under the write lock; the entry may have changed
-            // between the snapshot and now.
-            if inner.meta.pinned {
-                continue;
+            if self.evict_entry(&name, &entry) {
+                total = total.saturating_sub(bytes);
             }
-            let watermark = inner.wal_seq - 1;
-            if let Slot::Hot(context) = &mut inner.slot {
-                if entry.dirty.load(Ordering::Relaxed) {
-                    context.set_applied_seq(watermark);
-                    let stats = ContextStats::of(context);
-                    if let Err(error) = save_files(
-                        &self.0.data_dir,
-                        &name,
-                        &inner.meta,
-                        &stats,
-                        &entry.usage.snapshot(),
-                        context,
-                    ) {
-                        tracing::warn!(
-                            "context '{name}' stays resident, eviction save failed: {error}"
-                        );
-                        self.0.metrics.record_eviction(false);
-                        continue;
-                    }
-                    inner.stats = stats;
-                    entry.dirty.store(false, Ordering::Relaxed);
-                    match wal::reset(&wal_path(&self.0.data_dir, &file_stem(&name))) {
-                        Ok(()) => inner.wal_bytes = 0,
-                        Err(error) => {
-                            tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
-                        }
-                    }
-                } else {
-                    inner.stats = ContextStats::of(context);
-                }
-                inner.slot = Slot::Cold;
-                // Local zero only: the absolute store below settles the
-                // global, so a recount's delta would double-count.
-                inner.counted_bytes = 0;
-                self.0.metrics.record_eviction(true);
-            }
-            *entry.vectors.lock().unwrap() = None;
-            total = total.saturating_sub(bytes);
         }
         self.0
             .resident_estimate
             .store(total as i64, Ordering::Relaxed);
+    }
+
+    /// One entry's eviction, everything under its write lock: persist
+    /// if dirty, drop the graph, clear the cached vectors. `false`
+    /// means nothing was freed — the entry got pinned since the
+    /// caller's sweep, or its save failed (it stays resident rather
+    /// than losing writes).
+    fn evict_entry(&self, name: &str, entry: &Entry) -> bool {
+        let mut guard = entry.inner.write().unwrap();
+        let inner = &mut *guard;
+        // Re-check under the write lock; the entry may have changed
+        // between the snapshot and now.
+        if inner.meta.pinned {
+            return false;
+        }
+        let watermark = inner.wal_seq - 1;
+        if let Slot::Hot(context) = &mut inner.slot {
+            if entry.dirty.load(Ordering::Relaxed) {
+                context.set_applied_seq(watermark);
+                let stats = ContextStats::of(context);
+                if let Err(error) = save_files(
+                    &self.0.data_dir,
+                    name,
+                    &inner.meta,
+                    &stats,
+                    &entry.usage.snapshot(),
+                    context,
+                ) {
+                    tracing::warn!(
+                        "context '{name}' stays resident, eviction save failed: {error}"
+                    );
+                    self.0.metrics.record_eviction(false);
+                    return false;
+                }
+                inner.stats = stats;
+                entry.dirty.store(false, Ordering::Relaxed);
+                self.truncate_wal(name, inner);
+            } else {
+                inner.stats = ContextStats::of(context);
+            }
+            inner.slot = Slot::Cold;
+            // Local zero only: the caller's absolute store settles the
+            // global, so a recount's delta would double-count.
+            inner.counted_bytes = 0;
+            self.0.metrics.record_eviction(true);
+        }
+        *entry.vectors.lock().unwrap() = None;
+        true
     }
 }
 
@@ -1846,6 +1845,43 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
         stats,
         usage: entry.usage.snapshot(),
     })
+}
+
+/// One boot-time pass over the data directory: crash leftovers of
+/// staged writes are deleted (never published, and nothing may linger
+/// as unbounded disk litter), and every context image found is
+/// registered cold, described by its sidecar snapshot.
+fn scan_data_dir(data_dir: &Path) -> io::Result<HashMap<String, Arc<Entry>>> {
+    let mut registry = HashMap::new();
+    for dir_entry in fs::read_dir(data_dir)? {
+        let path = dir_entry?.path();
+        let extension = path.extension().and_then(|e| e.to_str());
+        if extension.is_some_and(|e| e.starts_with("tmp")) {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        if extension != Some("ctx") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(name) = name_from_stem(stem) else {
+            tracing::warn!("skipping {}: file name does not decode", path.display());
+            continue;
+        };
+        let MetaFile { meta, stats, usage } = read_meta_file(data_dir, stem);
+        // The gauge must see leftover logs from the first scrape, not
+        // only after each context's first touch.
+        let wal_bytes = fs::metadata(wal_path(data_dir, stem))
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        registry.insert(
+            name,
+            Arc::new(Entry::new(meta, stats, Slot::Cold, wal_bytes, usage)),
+        );
+    }
+    Ok(registry)
 }
 
 /// Loads the image behind a cold slot and replays whatever the WAL

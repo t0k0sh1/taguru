@@ -159,17 +159,19 @@ pub fn similarity(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
+/// name → (gloss hash, unit vector). The hash is of the gloss the
+/// vector was computed from, so a refresh re-embeds exactly the names
+/// whose graph context changed.
+pub type VectorTable = HashMap<String, (u64, Vec<f32>)>;
+
 /// One context's name vectors: a derived cache keyed by the model that
 /// produced it. Wholesale discarded on model change — vectors from two
 /// models must never be compared.
 #[derive(Debug, Default)]
 pub struct VectorStore {
     pub model: String,
-    /// name → (gloss hash, unit vector). The hash is of the gloss the
-    /// vector was computed from, so a refresh re-embeds exactly the
-    /// names whose graph context changed.
-    pub concepts: HashMap<String, (u64, Vec<f32>)>,
-    pub labels: HashMap<String, (u64, Vec<f32>)>,
+    pub concepts: VectorTable,
+    pub labels: VectorTable,
 }
 
 const VECTOR_MAGIC: &[u8; 8] = b"TAGURUV2";
@@ -195,7 +197,7 @@ impl VectorStore {
     /// cache budget can account for it.
     pub fn footprint(&self) -> usize {
         const ENTRY_OVERHEAD: usize = 64;
-        let table = |table: &HashMap<String, (u64, Vec<f32>)>| -> usize {
+        let table = |table: &VectorTable| -> usize {
             table
                 .iter()
                 .map(|(name, (_, vector))| name.len() + vector.len() * 4 + ENTRY_OVERHEAD)
@@ -235,7 +237,7 @@ fn write_string(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(text.as_bytes());
 }
 
-fn write_table(out: &mut Vec<u8>, table: &HashMap<String, (u64, Vec<f32>)>) {
+fn write_table(out: &mut Vec<u8>, table: &VectorTable) {
     out.extend_from_slice(&(table.len() as u32).to_le_bytes());
     // Sorted for byte-stable files under identical content.
     let mut names: Vec<&String> = table.keys().collect();
@@ -258,7 +260,7 @@ fn read_string(bytes: &[u8], pos: &mut usize) -> Option<String> {
     String::from_utf8(slice.to_vec()).ok()
 }
 
-fn read_table(bytes: &[u8], pos: &mut usize) -> Option<HashMap<String, (u64, Vec<f32>)>> {
+fn read_table(bytes: &[u8], pos: &mut usize) -> Option<VectorTable> {
     let count = read_u32(bytes, pos)? as usize;
     let mut table = HashMap::with_capacity(count.min(1 << 20));
     for _ in 0..count {
