@@ -780,6 +780,17 @@ pub struct StorePassagesRequest {
     pub passages: BTreeMap<String, String>,
 }
 
+/// What a passage store accomplished. `stored` counts the batch (the
+/// historical number, now named); the question tallies report doc2query
+/// bookkeeping — a dropped question named a paragraph that does not
+/// exist in the text it rode in with.
+#[derive(Serialize)]
+pub struct StoredPassages {
+    pub stored: usize,
+    pub questions_stored: usize,
+    pub questions_dropped: usize,
+}
+
 pub async fn store_passages(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -794,14 +805,26 @@ pub async fn store_passages(
             return refusal;
         }
     }
+    let passages: BTreeMap<String, crate::passages::PassageSubmission> = request
+        .passages
+        .into_iter()
+        .map(|(source, text)| (source, crate::passages::PassageSubmission::plain(text)))
+        .collect();
     // Off the async worker: the store fsyncs its log, and folding the
     // new paragraphs into a resident index tokenizes them.
-    let outcome = tokio::task::block_in_place(|| state.store_passages(&name, request.passages));
+    let outcome = tokio::task::block_in_place(|| state.store_passages(&name, passages));
     match outcome {
         None => not_found(&name, started_at),
-        Some(Ok(stored)) => {
+        Some(Ok(outcome)) => {
             state.note_write(&name);
-            ok(stored, started_at)
+            ok(
+                StoredPassages {
+                    stored: outcome.stored,
+                    questions_stored: outcome.questions_stored,
+                    questions_dropped: outcome.questions_dropped,
+                },
+                started_at,
+            )
         }
         Some(Err(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);

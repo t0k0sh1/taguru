@@ -31,28 +31,80 @@ use serde::{Deserialize, Serialize};
 use crate::paragraph::{self, ParagraphSpan};
 use crate::wal;
 
-/// One source's resident passage: the byte-exact text and its
-/// paragraph spans, computed once per residency (never persisted —
-/// the split function is deterministic, so the spans are as durable
-/// as the text they index). Handed out as `Arc`, so search and the
-/// index/vector lanes walk paragraphs without holding the store lock
-/// and without copying text.
+/// One source's submitted passage: the text, and optionally the
+/// doc2query questions riding with it — (paragraph index, question)
+/// pairs a producer (`taguru extract --questions`, or any client)
+/// attached so question-shaped queries can land on answer-shaped
+/// paragraphs from the index side too.
+#[derive(Debug, Clone)]
+pub(crate) struct PassageSubmission {
+    pub(crate) text: String,
+    pub(crate) questions: Vec<(u32, String)>,
+}
+
+impl PassageSubmission {
+    /// A bare passage — every pre-doc2query caller's shape.
+    pub(crate) fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            questions: Vec::new(),
+        }
+    }
+}
+
+/// What one store call accomplished, question bookkeeping included:
+/// out-of-range questions are dropped one by one (the paragraph they
+/// name does not exist in the text they rode in with), never failing
+/// the passages they accompanied.
+#[derive(Debug, Default)]
+pub(crate) struct StoreOutcome {
+    pub(crate) stored: usize,
+    pub(crate) questions_stored: usize,
+    pub(crate) questions_dropped: usize,
+}
+
+/// One source's resident passage: the byte-exact text, its paragraph
+/// spans (computed once per residency, never persisted — the split
+/// function is deterministic, so the spans are as durable as the text
+/// they index), and its stored questions, validated against those
+/// spans and sorted by paragraph. Handed out as `Arc`, so search and
+/// the index/vector lanes walk paragraphs without holding the store
+/// lock and without copying text.
 #[derive(Debug)]
 pub(crate) struct PassageRecord {
     pub(crate) text: Arc<str>,
     pub(crate) paragraphs: Vec<ParagraphSpan>,
+    pub(crate) questions: Vec<(u32, String)>,
 }
 
 impl PassageRecord {
-    fn new(text: Arc<str>) -> Arc<Self> {
+    /// Builds the record, keeping only questions whose paragraph
+    /// exists in THIS text's split — the one validation point both the
+    /// live path and replay go through, so they can never disagree.
+    /// Returns how many were dropped.
+    fn new(text: Arc<str>, questions: Vec<(u32, String)>) -> (Arc<Self>, usize) {
         let paragraphs = paragraph::split(&text);
-        Arc::new(Self { text, paragraphs })
+        let offered = questions.len();
+        let mut questions: Vec<(u32, String)> = questions
+            .into_iter()
+            .filter(|&(paragraph, _)| (paragraph as usize) < paragraphs.len())
+            .collect();
+        questions.sort_by_key(|&(paragraph, _)| paragraph);
+        let dropped = offered - questions.len();
+        (
+            Arc::new(Self {
+                text,
+                paragraphs,
+                questions,
+            }),
+            dropped,
+        )
     }
 
     /// Constructor for sibling modules' unit tests.
     #[cfg(test)]
     pub(crate) fn for_tests(text: &str) -> Arc<Self> {
-        Self::new(Arc::from(text))
+        Self::new(Arc::from(text), Vec::new()).0
     }
 
     /// The paragraph texts behind the spans, in order.
@@ -69,12 +121,21 @@ impl PassageRecord {
 /// Both ops are last-write-wins, so a replay overlapping the snapshot
 /// re-applies harmlessly — the watermark still gates it, but a bug
 /// there degrades to wasted work, not corruption (unlike `associate`,
-/// which accumulates).
+/// which accumulates). `questions` is additive (older logs simply have
+/// none) and carries the submission AS OFFERED — validation happens in
+/// `PassageRecord::new`, identically on the live path and on replay.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum PassageOp {
-    Store { source: String, text: String },
-    Retract { source: String },
+    Store {
+        source: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        questions: Vec<(u32, String)>,
+    },
+    Retract {
+        source: String,
+    },
 }
 
 /// Per-source-id rough constant for the resident estimate, matching
@@ -88,7 +149,10 @@ const COMPACT_FLOOR_BYTES: u64 = 4 * 1024 * 1024;
 /// (see the module doc for why a ratio, never a fixed threshold).
 const COMPACT_RATIO: u64 = 1;
 
-const SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS1";
+const SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS2";
+/// The pre-doc2query snapshot format: same layout minus the per-source
+/// question blocks. Read forever, written never again.
+const LEGACY_SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS1";
 
 #[derive(Debug)]
 struct PassageStoreInner {
@@ -180,7 +244,9 @@ impl PassageStore {
                 (
                     legacy
                         .into_iter()
-                        .map(|(source, text)| (source, PassageRecord::new(Arc::from(text))))
+                        .map(|(source, text)| {
+                            (source, PassageRecord::new(Arc::from(text), Vec::new()).0)
+                        })
                         .collect(),
                     0,
                     0,
@@ -193,8 +259,12 @@ impl PassageStore {
         let (ops, top) = wal::replay::<PassageOp>(&log_path, watermark)?;
         for op in ops {
             match op {
-                PassageOp::Store { source, text } => {
-                    sources.insert(source, PassageRecord::new(Arc::from(text)));
+                PassageOp::Store {
+                    source,
+                    text,
+                    questions,
+                } => {
+                    sources.insert(source, PassageRecord::new(Arc::from(text), questions).0);
                 }
                 PassageOp::Retract { source } => {
                     sources.remove(&source);
@@ -230,32 +300,41 @@ impl PassageStore {
 
     /// Merge-upserts a batch, log-first: fsync the ops, then apply —
     /// on `Err` nothing was applied and nothing must be assumed
-    /// durable. Returns the batch size (the historical contract: how
-    /// many the request carried, not how many keys were new).
-    pub(crate) fn store(&self, passages: BTreeMap<String, String>) -> io::Result<usize> {
+    /// durable. `stored` keeps the historical contract (how many the
+    /// request carried, not how many keys were new); the question
+    /// tallies say how many rode in and how many named a paragraph
+    /// that does not exist in their own text.
+    pub(crate) fn store(
+        &self,
+        passages: BTreeMap<String, PassageSubmission>,
+    ) -> io::Result<StoreOutcome> {
         // Paragraph spans use u32 offsets. Every ingress today sits far
         // below this (the 8 MiB import cap, the HTTP body cap), but the
         // body cap is operator-tunable — refuse cleanly here rather
         // than let a 4 GiB text reach the splitter's assert.
-        if let Some((source, text)) = passages
+        if let Some((source, submission)) = passages
             .iter()
-            .find(|(_, text)| text.len() > u32::MAX as usize)
+            .find(|(_, submission)| submission.text.len() > u32::MAX as usize)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "passage '{source}' is {} bytes; passages are capped at 4 GiB",
-                    text.len()
+                    submission.text.len()
                 ),
             ));
         }
         let ops: Vec<PassageOp> = passages
             .into_iter()
-            .map(|(source, text)| PassageOp::Store { source, text })
+            .map(|(source, submission)| PassageOp::Store {
+                source,
+                text: submission.text,
+                questions: submission.questions,
+            })
             .collect();
         let count = ops.len();
         if count == 0 {
-            return Ok(0);
+            return Ok(StoreOutcome::default());
         }
         let writer = self.writer.lock().unwrap();
         // The backstop, checked under `writer` so it is exact: refuse
@@ -278,8 +357,12 @@ impl PassageStore {
                 )));
             }
         }
-        self.append_and_apply_locked(&writer, &ops)?;
-        Ok(count)
+        let (questions_stored, questions_dropped) = self.append_and_apply_locked(&writer, &ops)?;
+        Ok(StoreOutcome {
+            stored: count,
+            questions_stored,
+            questions_dropped,
+        })
     }
 
     /// Withdraws one source's passage. Returns whether one existed —
@@ -301,15 +384,24 @@ impl PassageStore {
         &self,
         _writer: &std::sync::MutexGuard<'_, ()>,
         ops: &[PassageOp],
-    ) -> io::Result<()> {
+    ) -> io::Result<(usize, usize)> {
         let first_seq = self.inner.read().unwrap().next_seq;
         let appended = wal::append_batch(&self.log_path, first_seq, ops)?;
+        let mut questions_stored = 0usize;
+        let mut questions_dropped = 0usize;
         let over_ratio = {
             let mut inner = self.inner.write().unwrap();
             for op in ops {
                 match op {
-                    PassageOp::Store { source, text } => {
-                        let record = PassageRecord::new(Arc::from(text.as_str()));
+                    PassageOp::Store {
+                        source,
+                        text,
+                        questions,
+                    } => {
+                        let (record, dropped) =
+                            PassageRecord::new(Arc::from(text.as_str()), questions.clone());
+                        questions_stored += record.questions.len();
+                        questions_dropped += dropped;
                         inner.resident_bytes += record_bytes(source, &record);
                         if let Some(previous) = inner.sources.insert(source.clone(), record) {
                             inner.resident_bytes -= record_bytes(source, &previous);
@@ -338,7 +430,7 @@ impl PassageStore {
                 );
             }
         }
-        Ok(())
+        Ok((questions_stored, questions_dropped))
     }
 
     /// Rewrites the snapshot from the current map and truncates the
@@ -449,11 +541,16 @@ fn read_legacy(path: &Path) -> BTreeMap<String, String> {
 }
 
 /// What one resident record costs, for the running footprint: key,
-/// text, spans, and the per-entry overhead constant.
+/// text, spans, questions, and the per-entry overhead constant.
 fn record_bytes(source: &str, record: &PassageRecord) -> usize {
     source.len()
         + record.text.len()
         + record.paragraphs.len() * std::mem::size_of::<ParagraphSpan>()
+        + record
+            .questions
+            .iter()
+            .map(|(_, question)| question.len() + 8)
+            .sum::<usize>()
         + SOURCE_OVERHEAD
 }
 
@@ -462,20 +559,33 @@ fn snapshot_to_bytes(sources: &BTreeMap<String, Arc<PassageRecord>>, watermark: 
     out.extend_from_slice(SNAPSHOT_MAGIC);
     out.extend_from_slice(&watermark.to_le_bytes());
     out.extend_from_slice(&(sources.len() as u32).to_le_bytes());
-    // BTreeMap iterates sorted: identical content is byte-identical.
-    // Only the text lands on disk — spans are recomputed on load.
+    // BTreeMap iterates sorted (and a record's questions are sorted by
+    // paragraph at construction): identical content is byte-identical.
+    // Text and questions land on disk — spans are recomputed on load.
     for (source, record) in sources {
         write_chunk(&mut out, source.as_bytes());
         write_chunk(&mut out, record.text.as_bytes());
+        out.extend_from_slice(&(record.questions.len() as u32).to_le_bytes());
+        for (paragraph, question) in &record.questions {
+            out.extend_from_slice(&paragraph.to_le_bytes());
+            write_chunk(&mut out, question.as_bytes());
+        }
     }
     out
 }
 
 fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageRecord>>, u64)> {
     let mut pos = 0usize;
-    if bytes.get(..8)? != SNAPSHOT_MAGIC {
+    let magic = bytes.get(..8)?;
+    // TAGURUS1 predates questions; its layout is S2 minus the question
+    // blocks, so one parser reads both.
+    let questions_on_disk = if magic == SNAPSHOT_MAGIC {
+        true
+    } else if magic == LEGACY_SNAPSHOT_MAGIC {
+        false
+    } else {
         return None;
-    }
+    };
     pos += 8;
     let watermark = u64::from_le_bytes(bytes.get(pos..pos + 8)?.try_into().ok()?);
     pos += 8;
@@ -484,8 +594,22 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
     let mut sources = BTreeMap::new();
     for _ in 0..count {
         let source = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
-        let text = std::str::from_utf8(read_chunk(bytes, &mut pos)?).ok()?;
-        sources.insert(source, PassageRecord::new(Arc::from(text)));
+        let text = std::str::from_utf8(read_chunk(bytes, &mut pos)?)
+            .ok()?
+            .to_string();
+        let mut questions = Vec::new();
+        if questions_on_disk {
+            let question_count =
+                u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
+            pos += 4;
+            for _ in 0..question_count {
+                let paragraph = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                pos += 4;
+                let question = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
+                questions.push((paragraph, question));
+            }
+        }
+        sources.insert(source, PassageRecord::new(Arc::from(text), questions).0);
     }
     (pos == bytes.len()).then_some((sources, watermark))
 }
@@ -529,10 +653,10 @@ mod tests {
         .unwrap()
     }
 
-    fn batch(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+    fn batch(entries: &[(&str, &str)]) -> BTreeMap<String, PassageSubmission> {
         entries
             .iter()
-            .map(|&(source, text)| (source.to_string(), text.to_string()))
+            .map(|&(source, text)| (source.to_string(), PassageSubmission::plain(text)))
             .collect()
     }
 
@@ -545,11 +669,15 @@ mod tests {
     fn passage_store_upsert_is_idempotent_last_write_wins() {
         let dir = scratch_dir("upsert");
         let store = open(&dir);
-        assert_eq!(store.store(batch(&[("第1段落", "旧版")])).unwrap(), 1);
+        assert_eq!(
+            store.store(batch(&[("第1段落", "旧版")])).unwrap().stored,
+            1
+        );
         assert_eq!(
             store
                 .store(batch(&[("第1段落", "新版"), ("第2段落", "追加")]))
-                .unwrap(),
+                .unwrap()
+                .stored,
             2,
             "the return value counts the batch, not just new keys"
         );
@@ -720,15 +848,84 @@ mod tests {
     }
 
     #[test]
+    fn passage_record_keeps_questions_validated_and_sorted_by_paragraph() {
+        let dir = scratch_dir("questions");
+        {
+            let store = open(&dir);
+            let mut passages = BTreeMap::new();
+            passages.insert(
+                "doc".to_string(),
+                PassageSubmission {
+                    text: "一つ目。\n\n二つ目。".to_string(),
+                    questions: vec![
+                        (1, "二番目は何?".to_string()),
+                        (0, "最初は何?".to_string()),
+                        (9, "存在しない段落への質問?".to_string()),
+                    ],
+                },
+            );
+            let outcome = store.store(passages).unwrap();
+            assert_eq!(
+                (
+                    outcome.stored,
+                    outcome.questions_stored,
+                    outcome.questions_dropped
+                ),
+                (1, 2, 1),
+                "the out-of-range question drops without failing its passage"
+            );
+            let record = store.get("doc").unwrap();
+            assert_eq!(
+                record.questions,
+                vec![(0, "最初は何?".to_string()), (1, "二番目は何?".to_string())]
+            );
+        }
+        // Questions are acknowledged writes: the log replays them.
+        let reborn = open(&dir);
+        assert_eq!(reborn.get("doc").unwrap().questions.len(), 2);
+    }
+
+    #[test]
+    fn a_legacy_s1_snapshot_loads_with_empty_questions_and_upgrades_on_compaction() {
+        let dir = scratch_dir("s1-upgrade");
+        // S1 byte-for-byte: magic, watermark, count, [key, text] chunks
+        // — the S2 layout minus the question blocks.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"TAGURUS1");
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        for chunk in ["old-doc", "旧本文。"] {
+            bytes.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(chunk.as_bytes());
+        }
+        fs::write(dir.join("t.passages.bin"), &bytes).unwrap();
+
+        let store = open(&dir);
+        let record = store.get("old-doc").unwrap();
+        assert_eq!(record.text.as_ref(), "旧本文。");
+        assert!(record.questions.is_empty());
+        store.compact().unwrap();
+        drop(store);
+
+        let head = fs::read(dir.join("t.passages.bin")).unwrap();
+        assert_eq!(&head[..8], b"TAGURUS2", "the rewrite upgrades the format");
+        let reborn = open(&dir);
+        assert_eq!(text(&reborn, "old-doc").as_deref(), Some("旧本文。"));
+    }
+
+    #[test]
     fn passage_snapshot_rejects_truncated_or_garbage_bytes() {
-        let sources: BTreeMap<String, Arc<PassageRecord>> =
-            [("a".to_string(), PassageRecord::new(Arc::from("text")))]
-                .into_iter()
-                .collect();
+        let sources: BTreeMap<String, Arc<PassageRecord>> = [(
+            "a".to_string(),
+            PassageRecord::new(Arc::from("text"), vec![(0, "何のtext?".to_string())]).0,
+        )]
+        .into_iter()
+        .collect();
         let bytes = snapshot_to_bytes(&sources, 7);
         let (parsed, watermark) = snapshot_from_bytes(&bytes).unwrap();
         assert_eq!(watermark, 7);
         assert_eq!(parsed["a"].text.as_ref(), "text");
+        assert_eq!(parsed["a"].questions, vec![(0, "何のtext?".to_string())]);
 
         assert!(snapshot_from_bytes(b"garbage").is_none());
         assert!(snapshot_from_bytes(&bytes[..bytes.len() - 1]).is_none());
