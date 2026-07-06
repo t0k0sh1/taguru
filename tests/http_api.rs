@@ -1383,6 +1383,99 @@ fn metrics_expose_prometheus_text_reflecting_traffic() {
 }
 
 #[test]
+fn lookalike_candidates_carry_the_evidence_to_tell_them_apart() {
+    let server = Server::start("lookalikes");
+    server.ok(
+        "PUT",
+        "/contexts/looks",
+        Some(json!({"description": "字面の近い別物たち"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/looks/associations",
+        Some(json!([
+            {"subject": "東京都", "label": "分類", "object": "日本の首都", "weight": 1.0},
+            {"subject": "京都", "label": "所在", "object": "関西", "weight": 1.0},
+            {"subject": "青嶺株式会社", "label": "業種", "object": "電機メーカー", "weight": 1.0},
+            {"subject": "possible", "label": "means", "object": "can_be_done", "weight": 1.0},
+            {"subject": "impossible", "label": "means", "object": "can_be_done", "weight": -1.0},
+        ])),
+    );
+
+    // 東京都/京都: the containment lookalike scores a strong 0.67, and
+    // the response says both how it matched and what it actually is —
+    // enough to reject it without a second round trip.
+    let kyoto = server.ok(
+        "POST",
+        "/contexts/looks/resolve",
+        Some(json!({"cue": "京都"})),
+    );
+    assert_eq!(kyoto[0]["name"], json!("京都"));
+    assert_eq!(kyoto[0]["kind"], json!("exact"));
+    assert!(
+        kyoto[0]["gloss"].as_str().unwrap().contains("関西"),
+        "{kyoto}"
+    );
+    assert_eq!(kyoto[1]["name"], json!("東京都"));
+    assert_eq!(kyoto[1]["kind"], json!("containment"));
+    assert!(
+        kyoto[1]["gloss"].as_str().unwrap().contains("日本の首都"),
+        "{kyoto}"
+    );
+
+    // 前株/後株: the cue names a company that is NOT registered; the
+    // stored lookalike surfaces through the fuzzy tier, and its gloss
+    // (wrong line of business) is what lets the caller reject it.
+    let maekabu = server.ok(
+        "POST",
+        "/contexts/looks/resolve",
+        Some(json!({"cue": "株式会社青嶺"})),
+    );
+    assert_eq!(maekabu[0]["name"], json!("青嶺株式会社"));
+    assert_eq!(maekabu[0]["kind"], json!("fuzzy"));
+    assert!(
+        maekabu[0]["gloss"]
+            .as_str()
+            .unwrap()
+            .contains("電機メーカー"),
+        "{maekabu}"
+    );
+
+    // possible/impossible: containment scores 0.8 for the antonym; the
+    // negative fact renders as a denial in its gloss.
+    let possible = server.ok(
+        "POST",
+        "/contexts/looks/resolve",
+        Some(json!({"cue": "possible"})),
+    );
+    assert_eq!(possible[0]["name"], json!("possible"));
+    assert_eq!(possible[0]["kind"], json!("exact"));
+    assert_eq!(possible[1]["name"], json!("impossible"));
+    assert_eq!(possible[1]["kind"], json!("containment"));
+    assert_eq!(possible[1]["score"], json!(8.0 / 10.0));
+    assert!(
+        possible[1]["gloss"]
+            .as_str()
+            .unwrap()
+            .contains("can_be_doneではない"),
+        "{possible}"
+    );
+
+    // Labels resolve with the same evidence; the gloss shows example
+    // triples so a writer can pick the right relation before minting.
+    let label = server.ok(
+        "POST",
+        "/contexts/looks/resolve_label",
+        Some(json!({"cue": "means"})),
+    );
+    assert_eq!(label[0]["kind"], json!("exact"));
+    assert!(
+        label[0]["gloss"].as_str().unwrap().contains("means"),
+        "{label}"
+    );
+}
+
+#[test]
 fn search_outcomes_and_resolve_tiers_land_in_the_metrics_text() {
     let server = Server::start("searchmetrics");
     server.ok("PUT", "/contexts/sm", Some(json!({"description": "d"})));

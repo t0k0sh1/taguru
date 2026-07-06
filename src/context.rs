@@ -1355,6 +1355,15 @@ impl Context {
             .collect()
     }
 
+    /// Facts a concept gloss carries when the caller has no reason to
+    /// choose: enough graph context to place the name, few enough that
+    /// one new heavy fact does not churn every stored vector. Shared
+    /// by the embedding refresh and the resolve response so the text a
+    /// caller reads is exactly the text the concept's vector encodes.
+    pub const GLOSS_FACTS: usize = 4;
+    /// Example triples a label gloss carries, same story.
+    pub const GLOSS_EXAMPLES: usize = 3;
+
     /// A compact textual gloss of one concept: its name followed by its
     /// heaviest facts phrased as minimal sentences, most established
     /// first (|weight| descending, ties in insertion order), negatives
@@ -1363,7 +1372,10 @@ impl Context {
     /// little signal for sentence-trained embedding models (measured on
     /// text-embedding-3-large: 醸造責任者×杜氏 lands at cosine 0.28
     /// bare but 0.53 glossed) — and the graph already owns the context.
-    /// Returns `None` for an unknown concept.
+    /// The same text rides along on resolve candidates, where it is
+    /// the evidence that tells lookalike names apart (東京都 is not
+    /// 京都; their facts are disjoint even when their spellings
+    /// overlap). Returns `None` for an unknown concept.
     pub fn concept_gloss(&self, concept: &str, facts: usize) -> Option<String> {
         let &id = self.concept_ids.get(concept)?;
         let edges = self.heaviest(self.outgoing(id).chain(self.incoming(id)), facts);

@@ -39,9 +39,11 @@ answers back into prose are your job.
    Lexical candidates carry `kind`: `exact`/`alias` mean the cue IS a
    stored spelling; `containment`/`fuzzy` mean it merely overlaps one —
    a high score there can be a lookalike, not the thing (京都 scores
-   0.67 against 東京都, `possible` 0.8 against `impossible`). Don't
-   adopt a containment/fuzzy candidate on score alone when the stakes
-   differ; check it (`describe`) first.
+   0.67 against 東京都, `possible` 0.8 against `impossible`). The top
+   candidates carry `gloss`, the name plus its heaviest facts: read it
+   before adopting a containment/fuzzy hit — string overlap says two
+   names are near, the glosses say whether they are the same thing.
+   Never adopt a lookalike on score alone.
 3. **Outline, then narrow**: `describe` a hub concept first (which
    labels, how many, per role), then `query` just the facets you need
    (`"label": ["住所","職歴"]`). Don't pull whole profiles.
@@ -193,8 +195,8 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/describe` | `{concept}` → label outline (counts per role) / null |
 | POST | `/contexts/{name}/explore` | `{origins, max_depth?, limit?}` → `{total, matches:[{distance, path, association}]}` (hop cap 10, applied when omitted; truncation keeps the nearest) |
 | POST | `/contexts/{name}/activate` | `{origins, decay?=0.5, limit?=20}` → `[{strength, path, association}]` |
-| POST | `/contexts/{name}/resolve` | `{cue, dice_floor?, semantic_floor?}` → `[{name, score, tier, kind?}]` concept candidates |
-| POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?, semantic_floor?}` → `[{name, score, tier, kind?}]` relation candidates |
+| POST | `/contexts/{name}/resolve` | `{cue, dice_floor?, semantic_floor?}` → `[{name, score, tier, kind?, gloss?}]` concept candidates |
+| POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?, semantic_floor?}` → `[{name, score, tier, kind?, gloss?}]` relation candidates |
 | POST | `/contexts/{name}/embeddings/refresh` | re-embed new/changed concept and label glosses (run after ingest) |
 | GET | `/contexts/{name}/labels` | relation vocabulary (canonical only) |
 | GET/POST/DELETE | `/contexts/{name}/aliases` | export / register `{concepts:{alias:canonical}, labels:{...}}` / withdraw `{concepts:[alias], labels:[...]}` |
