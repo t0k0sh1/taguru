@@ -240,6 +240,28 @@ curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application
 For the endpoint list and the ingest/retrieval discipline, see
 `GET /protocol`.
 
+### Bulk loads offline (`taguru import`)
+
+Initial loads and migrations skip HTTP entirely: `taguru import
+FILE|DIR...` applies JSONL batch files straight to `TAGURU_DATA_DIR`
+through the same WAL-staged write path the server uses. One file
+states one **source**'s complete truth — import retracts the source,
+then applies the file — so re-importing is idempotent and a revised
+file replaces cleanly instead of double-counting weights.
+
+```jsonl
+{"taguru_batch": 1, "context": "sake", "source": "docs/aomine.md", "create": {"description": "酒蔵の知識"}}
+{"passage": "青嶺酒造は1907年創業。杜氏は高瀬。"}
+{"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0}
+{"alias": "Aomine Brewery", "canonical": "青嶺酒造", "kind": "concept"}
+```
+
+Validation is a separate pass: a malformed line refuses the whole run
+(with its line number) before anything is written, and `--dry-run`
+stops there on purpose. The data directory lock makes import and a
+running server mutually exclusive — no torn state, just a refusal.
+Full contract: [docs/import.md](docs/import.md).
+
 ## Using it from an LLM agent (MCP)
 
 `taguru-mcp` is an MCP stdio bridge to a running HTTP server. Agents
