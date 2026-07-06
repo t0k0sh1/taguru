@@ -129,6 +129,18 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #                     revocation instead of a total rotation, and rotation
 #                     itself is an overlap: add the new key, move callers,
 #                     drop the old. Malformed entries refuse to boot.
+#   TAGURU_PUBLIC_URL   the server's public base URL (e.g.
+#                     https://memory.example.com). Setting it enables OAuth
+#                     on the remote MCP endpoint for clients that insist on
+#                     it (claude.ai custom connectors): they discover the
+#                     flow (RFC 9728), register themselves, and land on a
+#                     consent page where you paste an EXISTING API key —
+#                     the connection then acts as that key, "key@client" in
+#                     the access log and the rate limits. OAuth tokens open
+#                     /mcp only; the raw API stays key-only. Revoke by
+#                     removing the grant from data_dir/oauth.json (restart);
+#                     idle grants expire after 30 days. Requires
+#                     TAGURU_API_TOKEN(S) — consent delegates a real key.
 #   TAGURU_MAX_BODY_BYTES      request body cap (default 8 MiB)
 #   TAGURU_REQUEST_TIMEOUT_SECS  per-request budget (default 30; raise
 #                     above 60 when TAGURU_EMBED_URL is configured — the
@@ -260,6 +272,13 @@ claude mcp add --transport http taguru https://your-host/mcp \
 # Claude API: mcp_servers = [{type: "url", url: "https://your-host/mcp",
 #                             name: "taguru", authorization_token: "…"}]
 ```
+
+claude.ai custom connectors (web and mobile) authenticate with OAuth
+instead of a pasted header: set `TAGURU_PUBLIC_URL`, point the
+connector at `https://your-host/mcp`, and approve the consent page by
+pasting one of your API keys — the connection then acts as that key.
+Discovery, dynamic registration, and PKCE are built in; no external
+identity provider is involved.
 
 Expose it beyond localhost only behind TLS (a reverse proxy, as with
 the rest of the API), and remember a token is the whole credential —
