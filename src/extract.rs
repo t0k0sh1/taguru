@@ -581,6 +581,7 @@ fn user_message(source: &str, index: usize, total: usize, text: &str) -> String 
 /// unknown fields pass, weight defaults — because [`merge`] validates
 /// every item strictly before anything is emitted.
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Debug))]
 struct ModelOutput {
     #[serde(default)]
     associations: Vec<ModelAssociation>,
@@ -592,6 +593,7 @@ struct ModelOutput {
 // they omit fields, and serde's `default` covers only absence — a
 // null must cost one item in merge(), never the whole chunk.
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Debug))]
 struct ModelAssociation {
     #[serde(default)]
     subject: Option<String>,
@@ -604,6 +606,7 @@ struct ModelAssociation {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Debug))]
 struct ModelAlias {
     #[serde(default)]
     alias: Option<String>,
@@ -617,6 +620,16 @@ struct ModelAlias {
 /// prose around it are tolerated (strip, then widest-braces fallback).
 fn parse_model_output(content: &str) -> Result<ModelOutput, String> {
     let unfenced = strip_fences(content.trim());
+    // Name the real failure: a thinking-mode model can spend its whole
+    // budget on reasoning and answer with no text at all, and "EOF at
+    // line 1 column 0" diagnoses nothing.
+    if unfenced.is_empty() {
+        return Err(
+            "the answer was empty — thinking-mode models can burn their whole budget on \
+             reasoning before any text (docs/extract.md: turn thinking off)"
+                .to_string(),
+        );
+    }
     match serde_json::from_str(unfenced) {
         Ok(output) => Ok(output),
         Err(first) => {
@@ -1000,6 +1013,13 @@ mod tests {
         assert_eq!(parse_model_output(extras).unwrap().associations.len(), 1);
 
         assert!(parse_model_output("no json here").is_err());
+
+        // A thinking model that reasoned itself out of budget answers
+        // with nothing; the error must say so, not "EOF at column 0".
+        let error = parse_model_output("").unwrap_err();
+        assert!(error.contains("empty"), "{error}");
+        let error = parse_model_output("```json\n```").unwrap_err();
+        assert!(error.contains("empty"), "{error}");
     }
 
     #[test]

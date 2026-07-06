@@ -60,8 +60,10 @@ Ollama on a laptop.
   blew a 300 s timeout with it on. The extractor speaks plain
   OpenAI-compatible chat and does not toggle vendor thinking flags —
   pick a non-thinking model, or disable thinking on the serving side.
-  The symptom is `timed out reading response` while the GPU sits
-  busy.
+  The symptoms: `timed out reading response` while the GPU sits busy —
+  or, with no timeout set, minutes of reasoning ending in an *empty*
+  answer (reported as exactly that), because the reasoning consumed
+  the whole generation budget.
 - **Give the server a real context window.** A 24 KiB chunk is
   roughly 6 k tokens; a serving default of 4 k silently truncates the
   request — no error, just quietly worse output. On Ollama, bake the
@@ -169,7 +171,11 @@ What to expect by model class, measured: small local models (≤ ~10 B)
 hold the format but not the discipline — labels come back
 sentence-shaped and barely repeat (one run: 106 distinct labels
 across 113 associations), and concepts multiply as noun phrases
-instead of converging on entities. The system degrades the way it was
+instead of converging on entities. One size up, the same corpus
+behaved differently in kind: a 12 B model settled on 13 short
+canonical labels across 55 associations and followed the procedure
+discipline unprompted — the discipline boundary sits near there, not
+at frontier scale. The system degrades the way it was
 designed to: the lexical entry still absorbs much of the drift,
 `sources/search` answers what the graph fumbles, and
 `vocabulary/audit` lists the twins for the alias loop to heal. That
