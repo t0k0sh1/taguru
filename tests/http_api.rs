@@ -45,6 +45,7 @@ impl Server {
             .env_remove("TAGURU_EMBED_AUTO")
             .env_remove("TAGURU_SEMANTIC_FLOOR")
             .env_remove("TAGURU_API_TOKEN") // unauthenticated unless a test opts in
+            .env_remove("TAGURU_API_TOKENS")
             // No tracing unless a test opts in — a developer shell
             // with a live OTel setup must not flip every test here
             // into export mode.
@@ -220,6 +221,28 @@ fn protocol_reports_the_semantic_tier_when_configured() {
     let server = Server::start_with_env("proto-auto", &auto_env);
     let (_, protocol) = server.call("GET", "/protocol", None);
     assert!(protocol.as_str().unwrap().contains("auto-refreshes"));
+}
+
+/// Named keys (TAGURU_API_TOKENS) authenticate alongside the classic
+/// single token, so one client's key can rotate or die alone.
+#[test]
+fn named_api_tokens_authenticate_alongside_the_default() {
+    let server = Server::start_with_env(
+        "keyring",
+        &[
+            ("TAGURU_API_TOKEN", "legacy"),
+            ("TAGURU_API_TOKENS", "ci:tok-a,laptop:tok-b"),
+        ],
+    );
+
+    let (status, _) = server.call("GET", "/contexts", None);
+    assert_eq!(status, 401);
+    for token in ["tok-a", "tok-b", "legacy"] {
+        let (status, _) = server.call_with_token("GET", "/contexts", None, Some(token));
+        assert_eq!(status, 200, "token {token} must authenticate");
+    }
+    let (status, _) = server.call_with_token("GET", "/contexts", None, Some("tok-c"));
+    assert_eq!(status, 401);
 }
 
 /// POST /mcp speaks the MCP Streamable HTTP transport (stateless

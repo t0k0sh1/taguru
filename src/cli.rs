@@ -42,6 +42,8 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_WAL                   fsync write-ahead log, 0/false = off (on)
   TAGURU_WAL_MAX_BYTES         per-context WAL ceiling, 0 = none (256 MiB)
   TAGURU_API_TOKEN             bearer token; unset = UNAUTHENTICATED
+  TAGURU_API_TOKENS            named keys 'ci:tokA,laptop:tokB' — the access
+                               log carries the key name; rotate by overlap
   TAGURU_MAX_BODY_BYTES        request body cap (8 MiB)
   TAGURU_REQUEST_TIMEOUT_SECS  per-request budget (30)
   TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off)
@@ -205,7 +207,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 17] = [
+const KNOWN_KEYS: [&str; 18] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -213,6 +215,7 @@ const KNOWN_KEYS: [&str; 17] = [
     "TAGURU_WAL",
     "TAGURU_WAL_MAX_BYTES",
     "TAGURU_API_TOKEN",
+    "TAGURU_API_TOKENS",
     "TAGURU_MAX_BODY_BYTES",
     "TAGURU_REQUEST_TIMEOUT_SECS",
     "TAGURU_EMBED_URL",

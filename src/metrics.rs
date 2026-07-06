@@ -645,11 +645,20 @@ pub async fn track_http(
     state
         .metrics()
         .record_http(&method, &route, status, elapsed);
+    // Which credential made the request — stamped on the response by
+    // the auth layer. "-" = unauthenticated (exempt path, auth off, or
+    // a rejection).
+    let key = response
+        .extensions()
+        .get::<crate::auth::AuthKey>()
+        .map_or("-", |key| key.0.as_ref())
+        .to_string();
     match trace_id {
         Some(trace_id) => tracing::info!(
             method = %method,
             route = %route,
             status,
+            key = %key,
             latency_ms = elapsed.as_secs_f64() * 1000.0,
             trace_id = %trace_id,
             "http",
@@ -658,6 +667,7 @@ pub async fn track_http(
             method = %method,
             route = %route,
             status,
+            key = %key,
             latency_ms = elapsed.as_secs_f64() * 1000.0,
             "http",
         ),

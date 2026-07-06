@@ -83,11 +83,24 @@ async fn serve() {
     let max_body_bytes = env_number("TAGURU_MAX_BODY_BYTES", 8 * 1024 * 1024);
     let timeout_secs = env_number("TAGURU_REQUEST_TIMEOUT_SECS", 30);
 
-    let api_token = Arc::new(std::env::var("TAGURU_API_TOKEN").ok());
-    let auth_configured = api_token.is_some();
-    if api_token.is_none() {
+    // Misconfigured credentials refuse to boot: a keyring that
+    // silently dropped an entry would surface as an auth hole.
+    let keyring = match auth::Keyring::parse(
+        std::env::var("TAGURU_API_TOKEN").ok(),
+        std::env::var("TAGURU_API_TOKENS").ok(),
+    ) {
+        Ok(keyring) => Arc::new(keyring),
+        Err(error) => {
+            tracing::error!(%error, "refusing to start with broken credentials");
+            std::process::exit(1);
+        }
+    };
+    let auth_configured = !keyring.is_disabled();
+    if auth_configured {
+        info!(keys = keyring.key_count(), "bearer auth enabled");
+    } else {
         warn!(
-            "TAGURU_API_TOKEN is not set: the API accepts UNAUTHENTICATED requests \
+            "TAGURU_API_TOKEN(S) is not set: the API accepts UNAUTHENTICATED requests \
              (fine on localhost, never on an exposed address)"
         );
     }
@@ -257,7 +270,7 @@ async fn serve() {
         // access log and the RED metrics.
         .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes))
         .layer(axum::middleware::from_fn_with_state(
-            api_token,
+            keyring,
             auth::require_bearer,
         ))
         .layer(axum::middleware::from_fn_with_state(

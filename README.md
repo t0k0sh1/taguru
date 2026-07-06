@@ -122,6 +122,13 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #   TAGURU_API_TOKEN    bearer token required on everything but /health and
 #                     /metrics. Unset = UNAUTHENTICATED (localhost only).
 #                     The MCP bridge reads the same variable.
+#   TAGURU_API_TOKENS   named bearer keys ("ci:tokA,laptop:tokB"), accepted
+#                     alongside TAGURU_API_TOKEN (whose key name is
+#                     "default"). The access log then says WHICH key made
+#                     each request (key=...), one leaked key is one
+#                     revocation instead of a total rotation, and rotation
+#                     itself is an overlap: add the new key, move callers,
+#                     drop the old. Malformed entries refuse to boot.
 #   TAGURU_MAX_BODY_BYTES      request body cap (default 8 MiB)
 #   TAGURU_REQUEST_TIMEOUT_SECS  per-request budget (default 30; raise
 #                     above 60 when TAGURU_EMBED_URL is configured — the
@@ -248,8 +255,10 @@ claude mcp add --transport http taguru https://your-host/mcp \
 ```
 
 Expose it beyond localhost only behind TLS (a reverse proxy, as with
-the rest of the API), and remember the token is the sole credential —
-whoever holds it holds the memory.
+the rest of the API), and remember a token is the whole credential —
+whoever holds one holds the memory. Mint one named key per client
+(`TAGURU_API_TOKENS`) so a leak is one revocation, not a rotation of
+everything.
 
 Running the agent or the embeddings on Amazon Bedrock? See
 [docs/bedrock.md](docs/bedrock.md): the Converse hosting pattern for
