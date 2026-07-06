@@ -381,6 +381,11 @@ const DEFAULT_SEMANTIC_FLOOR: f32 = 0.35;
 
 struct StateInner {
     data_dir: PathBuf,
+    /// The advisory exclusive lock that makes this process the data
+    /// directory's single writer — held (never read) for the whole
+    /// life of the state, released by the OS when the last clone
+    /// drops or the process dies. See [`lock_data_dir`].
+    _dir_lock: fs::File,
     /// Resident-bytes budget for unpinned hot contexts, enforced after
     /// every operation by evicting least-recently-used contexts. The
     /// most recently used context is never evicted, so one context
@@ -499,6 +504,11 @@ impl AppState {
         default_semantic_floor: Option<f32>,
     ) -> io::Result<Self> {
         fs::create_dir_all(&data_dir)?;
+        // Before reading anything: two live registries over one
+        // directory (a second serve, or an import against a running
+        // server) would each cache and flush independently — last
+        // writer wins, silently.
+        let dir_lock = lock_data_dir(&data_dir)?;
         let mut registry = HashMap::new();
         for dir_entry in fs::read_dir(&data_dir)? {
             let path = dir_entry?.path();
@@ -533,6 +543,7 @@ impl AppState {
 
         let state = Self(Arc::new(StateInner {
             data_dir,
+            _dir_lock: dir_lock,
             cache_bytes,
             registry: RwLock::new(registry),
             clock: AtomicU64::new(0),
@@ -2171,6 +2182,27 @@ fn commit_staged(staged: &Path, path: &Path) -> io::Result<()> {
     fsync_parent_dir(path)
 }
 
+/// Takes the advisory exclusive lock (`.taguru.lock`) that admits one
+/// registry per data directory at a time: `taguru serve` and `taguru
+/// import` both boot through here, so whichever is second gets a
+/// refusal naming the conflict instead of a silent last-flush-wins
+/// overwrite. The lock lives on the open descriptor, not the file —
+/// a crash releases it with the process, and the empty lock file
+/// left behind means nothing. Advisory: it binds taguru processes,
+/// not arbitrary tools, and network filesystems honor it unreliably.
+fn lock_data_dir(dir: &Path) -> io::Result<fs::File> {
+    let file = fs::File::create(dir.join(".taguru.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => Err(io::Error::other(format!(
+            "data directory {} is held by another taguru process \
+             (a running serve, or an import) — stop that one first",
+            dir.display()
+        ))),
+        Err(fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
 /// Persists a rename or file creation by syncing the directory that
 /// holds the entry. Unix-only; elsewhere the rename stays atomic
 /// against a crash mid-write, just not durable against power loss —
@@ -2306,6 +2338,26 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let usage = state.directory_entry("sake").unwrap().usage;
         assert_eq!((usage.reads, usage.empty_reads, usage.writes), (2, 1, 1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_data_directory_admits_one_registry_at_a_time() {
+        let dir = scratch_dir("dir-lock");
+        let holder = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        // flock-style locks are per descriptor, so a second registry in
+        // the SAME process is refused exactly as a second process would
+        // be — which is what lets one test prove the contract.
+        let error = AppState::boot(dir.clone(), usize::MAX, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("another taguru process"),
+            "{error}"
+        );
+        // The lock dies with its holder; the directory is reusable.
+        drop(holder);
+        let _reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2558,7 +2610,10 @@ mod tests {
                 path.display()
             );
         }
-        // The resurrection a user would see: a reboot re-registering it.
+        // The resurrection a user would see: a reboot re-registering
+        // it. A real reboot means the old process is gone — and the
+        // directory lock with it.
+        drop(state);
         let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert_eq!(
             reborn.context_count(),
@@ -2971,6 +3026,9 @@ mod tests {
                     path.display()
                 );
             }
+            // A reboot's view — with the old generation (and its
+            // directory lock) gone first, as in any real reboot.
+            drop(state);
             let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             assert_eq!(
                 reborn.context_count(),

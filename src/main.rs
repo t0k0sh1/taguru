@@ -172,15 +172,22 @@ async fn serve() {
     // refused rather than growing the log without bound (0 = no cap).
     let wal_max_bytes = env_number("TAGURU_WAL_MAX_BYTES", registry::DEFAULT_WAL_MAX_BYTES);
 
-    let state = AppState::boot_with(
+    let state = match AppState::boot_with(
         data_dir.clone(),
         cache_bytes,
         embedder,
         wal_enabled,
         wal_max_bytes,
         semantic_floor,
-    )
-    .expect("data directory must be usable");
+    ) {
+        Ok(state) => state,
+        // A held lock or an unreadable directory is an operator
+        // problem, not a bug: one line, no backtrace.
+        Err(error) => {
+            tracing::error!(%error, "data directory is not usable");
+            std::process::exit(1);
+        }
+    };
 
     let flusher = state.clone();
     tokio::spawn(async move {
