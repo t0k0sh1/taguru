@@ -49,6 +49,12 @@ impl PassageRecord {
         Arc::new(Self { text, paragraphs })
     }
 
+    /// Constructor for sibling modules' unit tests.
+    #[cfg(test)]
+    pub(crate) fn for_tests(text: &str) -> Arc<Self> {
+        Self::new(Arc::from(text))
+    }
+
     /// The paragraph texts behind the spans, in order.
     pub(crate) fn paragraph_texts(&self) -> impl Iterator<Item = (&ParagraphSpan, &str)> {
         self.paragraphs

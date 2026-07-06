@@ -250,6 +250,13 @@ pub struct Entry {
     /// `vectors`; the fence means files for a name are only touched
     /// while a delete cannot be planting its tombstone.
     passages: Mutex<Option<Arc<crate::passages::PassageStore>>>,
+    /// The resident BM25 paragraph index — derived from `passages`,
+    /// rebuilt from a store snapshot whenever missing or tombstone-
+    /// heavy, dropped on eviction. Lock rule: acquire this only AFTER
+    /// every passage-store lock is released (holding `bm25` while
+    /// READING the store is fine and is how a build works; the reverse
+    /// nesting would deadlock against it).
+    bm25: RwLock<Option<crate::bm25::Bm25Index>>,
     /// Usage counters (see [`ContextUsage`]). `usage_dirty` marks
     /// increments the sidecar has not seen yet, so the shutdown sweep
     /// skips the contexts nobody touched.
@@ -278,6 +285,7 @@ impl Entry {
             last_touch: AtomicU64::new(0),
             vectors: Mutex::new(None),
             passages: Mutex::new(None),
+            bm25: RwLock::new(None),
             usage: UsageCounters::seeded(&usage),
             usage_dirty: AtomicBool::new(false),
         }
@@ -324,6 +332,16 @@ impl Entry {
             .unwrap()
             .as_ref()
             .map(|store| store.footprint())
+            .unwrap_or(0)
+    }
+
+    /// Bytes the resident BM25 index holds — zero while cold.
+    fn bm25_footprint(&self) -> usize {
+        self.bm25
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|index| index.footprint())
             .unwrap_or(0)
     }
 }
@@ -767,6 +785,7 @@ impl AppState {
             drop(inner);
             resident_bytes += entry.vectors_footprint() as u64;
             resident_bytes += entry.passages_footprint() as u64;
+            resident_bytes += entry.bm25_footprint() as u64;
             // A resident store knows its pending log; a cold one gets a
             // stat — the gauge must not go blind just because a context
             // was evicted.
@@ -870,6 +889,7 @@ impl AppState {
         // Lock order: `inner` before `passages` before `vectors`, as
         // documented on Entry.
         *entry.passages.lock().unwrap() = None;
+        *entry.bm25.write().unwrap() = None;
         *entry.vectors.lock().unwrap() = None;
         let stem = file_stem(name);
         let mut outcome = Ok(());
@@ -906,7 +926,16 @@ impl AppState {
         let entry = self.lookup(name)?;
         let fence = entry.read_unless_deleted()?;
         let outcome = match self.entry_passages(&entry, &file_stem(name)) {
-            Ok(store) => store.store(passages),
+            Ok(store) => {
+                let sources: Vec<String> = passages.keys().cloned().collect();
+                let stored = store.store(passages);
+                if stored.is_ok() {
+                    // Every store lock is released again; fold the new
+                    // paragraphs into the resident index.
+                    self.refresh_bm25(&entry, &store, &sources);
+                }
+                stored
+            }
             Err(error) => Err(error),
         };
         drop(fence);
@@ -1097,7 +1126,16 @@ impl AppState {
         // `passage_removed: false`.
         let passage_removed = match self.entry_passages(&entry, &file_stem(name)) {
             Ok(store) => match store.retract(source) {
-                Ok(removed) => removed,
+                Ok(removed) => {
+                    if removed {
+                        self.refresh_bm25(
+                            &entry,
+                            &store,
+                            std::slice::from_ref(&source.to_string()),
+                        );
+                    }
+                    removed
+                }
                 Err(error) => {
                     tracing::warn!("passage for '{source}' not removed from disk: {error}");
                     false
@@ -1119,8 +1157,14 @@ impl AppState {
     /// unit is what an answer actually cites, and a long document no
     /// longer buries its best paragraph inside its own length
     /// normalization. Hits are (source, paragraph index, score,
-    /// paragraph text). Scores are recomputed per query over the
-    /// resident store, which is fine at sidecar scale.
+    /// paragraph text).
+    ///
+    /// The scoring runs on the resident [`crate::bm25::Bm25Index`],
+    /// built once per residency and updated in place by store/retract
+    /// — a query never re-tokenizes the corpus. Texts resolve through
+    /// the store afterwards, hash-checked: a paragraph that changed
+    /// between the index's view and now is dropped rather than served
+    /// with a stale score against fresh text.
     #[allow(clippy::type_complexity)]
     pub fn search_passages(
         &self,
@@ -1128,14 +1172,11 @@ impl AppState {
         query: &str,
         limit: usize,
     ) -> Option<io::Result<Vec<(String, u32, f32, String)>>> {
-        const K1: f32 = 1.2;
-        const B: f32 = 0.75;
-
         let entry = self.lookup(name)?;
-        let stored = {
+        let store = {
             let _fence = entry.read_unless_deleted()?;
             match self.entry_passages(&entry, &file_stem(name)) {
-                Ok(store) => store.snapshot(),
+                Ok(store) => store,
                 Err(error) => return Some(Err(error)),
             }
         };
@@ -1150,67 +1191,78 @@ impl AppState {
             return Some(Ok(Vec::new()));
         }
 
-        // Term statistics per paragraph, one normalization pass each.
-        let paragraphs: Vec<(&String, u32, &str, HashMap<u64, f32>, f32)> = stored
-            .iter()
-            .flat_map(|(source, record)| {
-                record.paragraph_texts().map(move |(span, text)| {
-                    let mut frequencies: HashMap<u64, f32> = HashMap::new();
-                    let mut length = 0f32;
-                    for gram in passage_terms(text) {
-                        *frequencies.entry(gram).or_insert(0.0) += 1.0;
-                        length += 1.0;
-                    }
-                    (source, span.index, text, frequencies, length)
-                })
-            })
-            .collect();
-        if paragraphs.is_empty() {
-            return Some(Ok(Vec::new()));
+        // Ensure a resident index: build on the residency's first
+        // search, rebuild when tombstones have piled up. Double-checked
+        // so concurrent first searches build once.
+        let stale = {
+            let guard = entry.bm25.read().unwrap();
+            match &*guard {
+                None => true,
+                Some(index) => index.needs_reclaim(),
+            }
+        };
+        if stale {
+            let mut guard = entry.bm25.write().unwrap();
+            let rebuild = match &*guard {
+                None => true,
+                Some(index) => index.needs_reclaim(),
+            };
+            if rebuild {
+                *guard = Some(crate::bm25::Bm25Index::build(&store.snapshot()));
+            }
         }
-        let total = paragraphs.len() as f32;
-        let average_length =
-            (paragraphs.iter().map(|(.., length)| length).sum::<f32>() / total).max(1.0);
-        // Document frequencies once per query term, not per (term ×
-        // paragraph) pair — IDF only reads how many paragraphs carry
-        // the term.
-        let document_frequencies: HashMap<u64, f32> = query_grams
-            .iter()
-            .map(|&gram| {
-                let carriers = paragraphs
-                    .iter()
-                    .filter(|(_, _, _, frequencies, _)| frequencies.contains_key(&gram))
-                    .count() as f32;
-                (gram, carriers)
-            })
-            .collect();
+        let raw = {
+            let guard = entry.bm25.read().unwrap();
+            let index = guard.as_ref().expect("index was just built");
+            // Over-fetch: the hash check below may drop hits that
+            // changed underfoot, and the caller still deserves `limit`.
+            index.search(&query_grams, limit.saturating_mul(2))
+        };
 
-        let mut scored: Vec<(String, u32, f32, String)> = paragraphs
-            .iter()
-            .map(|(source, index, text, frequencies, length)| {
-                let mut score = 0f32;
-                for gram in &query_grams {
-                    let Some(&frequency) = frequencies.get(gram) else {
-                        continue;
-                    };
-                    let document_frequency = document_frequencies[gram];
-                    let idf = (1.0
-                        + (total - document_frequency + 0.5) / (document_frequency + 0.5))
-                        .ln();
-                    score += idf * (frequency * (K1 + 1.0))
-                        / (frequency + K1 * (1.0 - B + B * length / average_length));
-                }
-                ((*source).clone(), *index, score, (*text).to_string())
-            })
-            .filter(|&(_, _, score, _)| score > 0.0)
-            .collect();
-        scored.sort_by(|a, b| {
-            b.2.total_cmp(&a.2)
-                .then_with(|| a.0.cmp(&b.0))
-                .then_with(|| a.1.cmp(&b.1))
-        });
-        scored.truncate(limit);
-        Some(Ok(scored))
+        let mut hits = Vec::with_capacity(raw.len().min(limit));
+        for (source, index, hash, score) in raw {
+            let Some(record) = store.get(&source) else {
+                continue;
+            };
+            let Some(span) = record.paragraphs.get(index as usize) else {
+                continue;
+            };
+            if span.hash != hash {
+                continue;
+            }
+            hits.push((
+                source,
+                index,
+                score,
+                record.text[span.start as usize..span.end as usize].to_string(),
+            ));
+            if hits.len() == limit {
+                break;
+            }
+        }
+        Some(Ok(hits))
+    }
+
+    /// Folds freshly stored/retracted sources into the resident BM25
+    /// index, if one exists (a cold index just rebuilds on its next
+    /// search). Called with every passage-store lock RELEASED — the
+    /// documented order for `Entry::bm25`.
+    fn refresh_bm25(
+        &self,
+        entry: &Entry,
+        store: &crate::passages::PassageStore,
+        sources: &[String],
+    ) {
+        let mut guard = entry.bm25.write().unwrap();
+        let Some(index) = guard.as_mut() else {
+            return;
+        };
+        for source in sources {
+            match store.get(source) {
+                Some(record) => index.upsert_source(source, &record),
+                None => index.remove_source(source),
+            }
+        }
     }
 
     /// Embeds the GLOSS of every canonical concept and label — the name
@@ -1916,9 +1968,12 @@ impl AppState {
                 Slot::Cold | Slot::Deleted => 0,
             };
             drop(inner);
-            // Cached vector stores and resident passages count too — a
-            // cold entry can hold plenty of both.
-            let bytes = resident + entry.vectors_footprint() + entry.passages_footprint();
+            // Cached vector stores, resident passages, and the BM25
+            // index count too — a cold entry can hold plenty of each.
+            let bytes = resident
+                + entry.vectors_footprint()
+                + entry.passages_footprint()
+                + entry.bm25_footprint();
             if bytes == 0 {
                 continue;
             }
@@ -2008,6 +2063,7 @@ impl AppState {
             }
             *passages = None;
         }
+        *entry.bm25.write().unwrap() = None;
         *entry.vectors.lock().unwrap() = None;
         true
     }
@@ -2266,7 +2322,7 @@ const FNV_PRIME: u64 = 0x1_0000_01b3;
 /// boundaries that let `state` reach `AppState`, so the split must
 /// read the original. One function serves both sides of the search,
 /// so they cannot disagree about what a term is.
-fn passage_terms(raw: &str) -> Vec<u64> {
+pub(crate) fn passage_terms(raw: &str) -> Vec<u64> {
     let mut terms = text_terms(&taguru::context::normalize_entry(raw));
     let mut run: Vec<char> = Vec::new();
     for ch in raw.chars() {
@@ -4077,6 +4133,98 @@ mod tests {
         assert_eq!(
             hits[0].3, "原料米には山田錦を使い、精米歩合は50パーセントまで磨く。",
             "the text is the answering paragraph alone"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_store_after_the_first_search_updates_the_index_in_place() {
+        let dir = scratch_dir("bm25-incremental");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("第1章".to_string(), "青嶺酒造の創業は1907年。".to_string());
+        state.store_passages("sake", passages).unwrap().unwrap();
+
+        // First search builds the resident index.
+        assert!(
+            !state
+                .search_passages("sake", "創業はいつ", 3)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+
+        // A later store must reach searches through the in-place
+        // update — no reclaim is due, so a rebuild cannot be the
+        // reason this passes.
+        let mut more = BTreeMap::new();
+        more.insert(
+            "第2章".to_string(),
+            "杜氏の高瀬は南部杜氏の出身。".to_string(),
+        );
+        state.store_passages("sake", more).unwrap().unwrap();
+        let hits = state
+            .search_passages("sake", "杜氏の出身", 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits[0].0, "第2章");
+
+        // And a retraction disappears the same way.
+        state.retract_source("sake", "第2章").unwrap();
+        assert!(
+            state
+                .search_passages("sake", "杜氏の出身", 3)
+                .unwrap()
+                .unwrap()
+                .iter()
+                .all(|hit| hit.0 != "第2章"),
+            "a retracted source must leave the index too"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn eviction_drops_the_resident_index_and_a_later_search_rebuilds_it() {
+        let dir = scratch_dir("bm25-evict");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1章".to_string(),
+            "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+        assert!(
+            !state
+                .search_passages("sake", "蔵開きの祭り", 3)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        assert!(
+            entry.bm25.read().unwrap().is_none(),
+            "eviction must drop the resident index"
+        );
+        assert_eq!(
+            state
+                .search_passages("sake", "蔵開きの祭り", 3)
+                .unwrap()
+                .unwrap()[0]
+                .0,
+            "第1章",
+            "the next search rebuilds and still answers"
         );
 
         let _ = fs::remove_dir_all(dir);

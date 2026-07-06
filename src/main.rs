@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod bm25;
 mod cli;
 mod embedding;
 mod estimate;
