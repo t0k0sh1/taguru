@@ -441,6 +441,27 @@ pub struct BootConfig {
     pub semantic_floor: Option<f32>,
 }
 
+/// The behavioral knobs [`AppState::boot_with`] takes as one struct:
+/// the list only grows with the server, and a test that wants ONE knob
+/// should not have to name seven.
+pub struct BootOptions {
+    pub wal_enabled: bool,
+    pub wal_max_bytes: usize,
+    pub passages_wal_max_bytes: usize,
+    pub default_semantic_floor: Option<f32>,
+}
+
+impl Default for BootOptions {
+    fn default() -> Self {
+        Self {
+            wal_enabled: true,
+            wal_max_bytes: DEFAULT_WAL_MAX_BYTES,
+            passages_wal_max_bytes: DEFAULT_PASSAGES_WAL_MAX_BYTES,
+            default_semantic_floor: None,
+        }
+    }
+}
+
 impl BootConfig {
     pub fn from_env() -> Self {
         Self {
@@ -478,10 +499,12 @@ impl BootConfig {
             self.data_dir.clone(),
             self.cache_bytes,
             embedder,
-            self.wal_enabled,
-            self.wal_max_bytes,
-            self.passages_wal_max_bytes,
-            self.semantic_floor,
+            BootOptions {
+                wal_enabled: self.wal_enabled,
+                wal_max_bytes: self.wal_max_bytes,
+                passages_wal_max_bytes: self.passages_wal_max_bytes,
+                default_semantic_floor: self.semantic_floor,
+            },
         )
     }
 }
@@ -609,15 +632,7 @@ impl AppState {
         cache_bytes: usize,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
     ) -> io::Result<Self> {
-        Self::boot_with(
-            data_dir,
-            cache_bytes,
-            embedder,
-            true,
-            DEFAULT_WAL_MAX_BYTES,
-            DEFAULT_PASSAGES_WAL_MAX_BYTES,
-            None,
-        )
+        Self::boot_with(data_dir, cache_bytes, embedder, BootOptions::default())
     }
 
     /// Opens (creating if needed) the data directory and registers every
@@ -634,10 +649,7 @@ impl AppState {
         data_dir: PathBuf,
         cache_bytes: usize,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
-        wal_enabled: bool,
-        wal_max_bytes: usize,
-        passages_wal_max_bytes: usize,
-        default_semantic_floor: Option<f32>,
+        options: BootOptions,
     ) -> io::Result<Self> {
         fs::create_dir_all(&data_dir)?;
         // Before reading anything: two live registries over one
@@ -654,14 +666,15 @@ impl AppState {
             registry: RwLock::new(registry),
             clock: AtomicU64::new(0),
             embedder,
-            default_semantic_floor: default_semantic_floor
+            default_semantic_floor: options
+                .default_semantic_floor
                 .unwrap_or(DEFAULT_SEMANTIC_FLOOR)
                 .clamp(0.0, 1.0),
             cue_cache: Mutex::new(CueCache::default()),
             metrics: Metrics::default(),
-            wal_enabled,
-            wal_max_bytes,
-            passages_wal_max_bytes,
+            wal_enabled: options.wal_enabled,
+            wal_max_bytes: options.wal_max_bytes,
+            passages_wal_max_bytes: options.passages_wal_max_bytes,
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
         }));
@@ -3082,10 +3095,10 @@ mod tests {
             capped_dir.clone(),
             usize::MAX,
             None,
-            true,
-            1,
-            DEFAULT_PASSAGES_WAL_MAX_BYTES,
-            None,
+            BootOptions {
+                wal_max_bytes: 1,
+                ..BootOptions::default()
+            },
         )
         .unwrap();
         state
@@ -3564,10 +3577,10 @@ mod tests {
                 dir.clone(),
                 usize::MAX,
                 None,
-                false,
-                DEFAULT_WAL_MAX_BYTES,
-                DEFAULT_PASSAGES_WAL_MAX_BYTES,
-                None,
+                BootOptions {
+                    wal_enabled: false,
+                    ..BootOptions::default()
+                },
             )
             .unwrap();
             state
@@ -4584,10 +4597,10 @@ mod tests {
             dir.clone(),
             usize::MAX,
             embedder,
-            true,
-            DEFAULT_WAL_MAX_BYTES,
-            DEFAULT_PASSAGES_WAL_MAX_BYTES,
-            Some(0.2),
+            BootOptions {
+                default_semantic_floor: Some(0.2),
+                ..BootOptions::default()
+            },
         )
         .unwrap();
         state
