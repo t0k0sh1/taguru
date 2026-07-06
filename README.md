@@ -235,6 +235,22 @@ describe/query/activate → passage lookup → cited answer. Chunking,
 fact extraction, and the post-ingest coverage audit (audit_coverage)
 are likewise driven by the agent through the tools.
 
+The same tools are also served remotely: `POST /mcp` speaks the MCP
+Streamable HTTP transport (stateless profile — plain JSON responses,
+no session to manage), behind the same bearer token as the rest of the
+API. Any remote-capable MCP client connects with just a URL:
+
+```sh
+claude mcp add --transport http taguru https://your-host/mcp \
+  --header "Authorization: Bearer $TAGURU_API_TOKEN"
+# Claude API: mcp_servers = [{type: "url", url: "https://your-host/mcp",
+#                             name: "taguru", authorization_token: "…"}]
+```
+
+Expose it beyond localhost only behind TLS (a reverse proxy, as with
+the rest of the API), and remember the token is the sole credential —
+whoever holds it holds the memory.
+
 Running the agent or the embeddings on Amazon Bedrock? See
 [docs/bedrock.md](docs/bedrock.md): the Converse hosting pattern for
 taguru-mcp, an InvokeModel embedding proxy, floor calibration, and the

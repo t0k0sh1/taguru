@@ -250,18 +250,25 @@ pub async fn get_context(State(state): State<AppState>, Path(name): Path<String>
 /// text carries this server's live configuration as a trailer, so the
 /// agent also learns which optional tiers are actually on.
 pub async fn protocol(trailer: Option<String>) -> Response {
-    let mut body = include_str!("../docs/llm-protocol.md").to_string();
-    if let Some(trailer) = &trailer {
-        body.push_str(trailer);
-    }
     (
         [(
             axum::http::header::CONTENT_TYPE,
             "text/markdown; charset=utf-8",
         )],
-        body,
+        protocol_text(trailer.as_deref()),
     )
         .into_response()
+}
+
+/// The manual as served: static text plus the live-configuration
+/// trailer. Shared with the MCP transports, whose `initialize` must
+/// hand out exactly what GET /protocol serves.
+pub fn protocol_text(trailer: Option<&str>) -> String {
+    let mut body = include_str!("../docs/llm-protocol.md").to_string();
+    if let Some(trailer) = trailer {
+        body.push_str(trailer);
+    }
+    body
 }
 
 /// The `## This server` trailer behind [`protocol`]: the runtime facts

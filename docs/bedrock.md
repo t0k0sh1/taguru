@@ -35,10 +35,13 @@ diff sync with no double weighting — the manual alone carried the
 discipline across a non-Anthropic host API.
 
 Managed agent runtimes (Bedrock AgentCore and friends) want *remote*
-MCP endpoints; `taguru-mcp` is stdio-only. Co-locate it in the agent's
-container (`cargo install taguru` ships it), or skip MCP and put the
-HTTP API behind an OpenAPI action group / Gateway target — it is a
-small JSON API with bearer auth.
+MCP endpoints — and the server serves one: `POST /mcp` speaks the MCP
+Streamable HTTP transport behind the same bearer token as the rest of
+the API (front it with TLS via a reverse proxy). Register
+`https://your-host/mcp` directly. The stdio bridge remains the right
+fit for co-located setups, and where MCP does not reach, the HTTP API
+still suits an OpenAPI action group / Gateway target — it is a small
+JSON API with bearer auth.
 
 ## Embeddings: Bedrock models behind a bridging proxy
 

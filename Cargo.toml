@@ -26,6 +26,6 @@ opentelemetry = { version = "0.32", default-features = false, features = ["trace
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "http-json", "reqwest-blocking-client"] }
 tracing-opentelemetry = { version = "0.33", default-features = false }
-
-[dev-dependencies]
+# Already in the tree through axum; made direct for ServiceExt::oneshot,
+# which drives the in-process dispatch behind POST /mcp.
 tower = { version = "0.5.3", features = ["util"] }

@@ -222,6 +222,118 @@ fn protocol_reports_the_semantic_tier_when_configured() {
     assert!(protocol.as_str().unwrap().contains("auto-refreshes"));
 }
 
+/// POST /mcp speaks the MCP Streamable HTTP transport (stateless
+/// profile): the same tools as the stdio bridge, over the same routes.
+#[test]
+fn mcp_over_http_serves_initialize_tools_and_calls() {
+    let server = Server::start("mcp");
+
+    let (status, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18"}})),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(reply["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(
+        reply["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    let instructions = reply["result"]["instructions"].as_str().unwrap();
+    assert!(instructions.contains("# Taguru"));
+
+    let (_, tools) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})),
+    );
+    let list = tools["result"]["tools"].as_array().unwrap();
+    assert!(
+        list.iter().any(|tool| tool["name"] == "recall"),
+        "tools/list must advertise the bridge's tool set"
+    );
+
+    // A notification: heard (202), nothing to answer with.
+    let (status, _) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "method": "notifications/initialized"})),
+    );
+    assert_eq!(status, 202);
+
+    // A real tool round trip: create a context, then see it listed.
+    let (_, created) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "create_context",
+                               "arguments": {"name": "remote", "description": "over /mcp"}}})),
+    );
+    assert!(created["result"].get("isError").is_none(), "{created}");
+    let (_, listed) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": {"name": "list_contexts", "arguments": {}}})),
+    );
+    let text = listed["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\"remote\""), "{text}");
+
+    // A failing tool travels as isError CONTENT (the agent reads the
+    // server's explanation), not as a JSON-RPC protocol error.
+    let (status, failed) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                    "params": {"name": "describe",
+                               "arguments": {"context": "nope", "concept": "x"}}})),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(failed["result"]["isError"], true);
+    let error_text = failed["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(error_text.contains("HTTP 404"), "{error_text}");
+
+    // Unknown JSON-RPC methods ARE protocol errors...
+    let (_, unknown) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 6, "method": "resources/list"})),
+    );
+    assert_eq!(unknown["error"]["code"], -32601);
+    // ...broken JSON answers -32700 in JSON-RPC dress...
+    let (status, parse) = server.call_raw("POST", "/mcp", Some("{nope"), Some("application/json"));
+    assert_eq!(status, 400);
+    assert_eq!(parse["error"]["code"], -32700);
+    // ...and the wrong verb answers like any other route.
+    let (status, _) = server.call("GET", "/mcp", None);
+    assert_eq!(status, 405);
+}
+
+/// /mcp sits behind the bearer token like every route — and a tool
+/// dispatched through it is NOT re-authenticated inside; the /mcp
+/// entry is the auth point.
+#[test]
+fn mcp_endpoint_honors_bearer_auth_end_to_end() {
+    let server = Server::start_with_env("mcp-auth", &[("TAGURU_API_TOKEN", "mcp-secret")]);
+
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
+    let (status, _) = server.call("POST", "/mcp", Some(init.clone()));
+    assert_eq!(status, 401);
+    let (status, _) = server.call_with_token("POST", "/mcp", Some(init), Some("mcp-secret"));
+    assert_eq!(status, 200);
+
+    // The dispatched inner request carries no Authorization header; if
+    // dispatch re-entered the middleware, this would come back as an
+    // isError HTTP 401 content block.
+    let call = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                      "params": {"name": "create_context",
+                                 "arguments": {"name": "armed", "description": "token-protected"}}});
+    let (status, reply) = server.call_with_token("POST", "/mcp", Some(call), Some("mcp-secret"));
+    assert_eq!(status, 200);
+    assert!(reply["result"].get("isError").is_none(), "{reply}");
+}
+
 #[test]
 fn full_retrieval_loop_over_http() {
     let server = Server::start("loop");

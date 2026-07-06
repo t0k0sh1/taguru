@@ -5,8 +5,10 @@ mod embedding;
 mod estimate;
 mod inspect;
 mod limits;
+mod mcp;
 mod metrics;
 mod registry;
+mod remote_mcp;
 mod trace;
 mod wal;
 
@@ -108,6 +110,9 @@ async fn serve() {
         embedder.as_ref().map(|provider| provider.model()),
         auto_embed,
     );
+    // MCP initialize hands out exactly what GET /protocol serves —
+    // both transports, one manual.
+    let mcp_instructions = Arc::new(api::protocol_text(protocol_trailer.as_deref()));
     // The right semantic floor is a property of the embedding model
     // (cosine bands differ per model), so its recalibration lives here
     // beside TAGURU_EMBED_MODEL rather than on every context.
@@ -229,6 +234,21 @@ async fn serve() {
         // paths, and known paths hit with the wrong verb.
         .fallback(api::unknown_path)
         .method_not_allowed_fallback(api::method_not_allowed)
+        .with_state(state.clone());
+
+    // POST /mcp speaks the MCP Streamable HTTP transport over these
+    // same routes. The dispatch handle is captured BEFORE the
+    // middleware stack goes on, so a tool call that already passed
+    // auth, the timeout, and the body cap at /mcp is not re-charged
+    // inside — one client request, one budget, one log line.
+    let mcp_dispatch = app.clone();
+    let app = app
+        .route(
+            "/mcp",
+            post(move |body: axum::body::Bytes| {
+                remote_mcp::serve(mcp_dispatch.clone(), Arc::clone(&mcp_instructions), body)
+            }),
+        )
         // Layers wrap only the routes registered above and nest by
         // call order — later .layer() calls sit outside earlier ones.
         // Body limit innermost, then auth, then the timeout (its
@@ -247,8 +267,7 @@ async fn serve() {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             metrics::track_http,
-        ))
-        .with_state(state.clone());
+        ));
 
     let addr = std::env::var("TAGURU_ADDR").unwrap_or_else(|_| "127.0.0.1:8248".to_string());
     let listener = match TcpListener::bind(&addr).await {
