@@ -233,6 +233,22 @@ impl PassageStore {
     /// durable. Returns the batch size (the historical contract: how
     /// many the request carried, not how many keys were new).
     pub(crate) fn store(&self, passages: BTreeMap<String, String>) -> io::Result<usize> {
+        // Paragraph spans use u32 offsets. Every ingress today sits far
+        // below this (the 8 MiB import cap, the HTTP body cap), but the
+        // body cap is operator-tunable — refuse cleanly here rather
+        // than let a 4 GiB text reach the splitter's assert.
+        if let Some((source, text)) = passages
+            .iter()
+            .find(|(_, text)| text.len() > u32::MAX as usize)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "passage '{source}' is {} bytes; passages are capped at 4 GiB",
+                    text.len()
+                ),
+            ));
+        }
         let ops: Vec<PassageOp> = passages
             .into_iter()
             .map(|(source, text)| PassageOp::Store { source, text })

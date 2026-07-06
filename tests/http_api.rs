@@ -43,6 +43,9 @@ impl Server {
             .env_remove("TAGURU_EMBED_URL") // lexical-only, hermetic
             .env_remove("TAGURU_EMBED_MODEL")
             .env_remove("TAGURU_EMBED_AUTO")
+            .env_remove("TAGURU_EMBED_PASSAGES")
+            .env_remove("TAGURU_PASSAGE_VECTOR_LIMIT")
+            .env_remove("TAGURU_PASSAGES_WAL_MAX_BYTES")
             .env_remove("TAGURU_SEMANTIC_FLOOR")
             .env_remove("TAGURU_API_TOKEN") // unauthenticated unless a test opts in
             .env_remove("TAGURU_API_TOKENS")
@@ -2790,4 +2793,53 @@ fn the_extract_timeout_knob_bounds_a_stalled_provider() {
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The hybrid-search wire contract on a lexical-only server: hits are
+/// paragraph-granular, every hit carries its lane evidence, the
+/// top-level score stays the raw BM25 number (no semantic lane ran),
+/// and the vector key is absent rather than null.
+#[test]
+fn passage_search_serves_paragraph_hits_with_lane_evidence() {
+    let server = Server::start("passage-lanes");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {
+            "docs/aomine.md": "青嶺酒造は雲居県霧沢町の蔵元である。\n\n\
+                原料米には山田錦を使い、精米歩合は50パーセントまで磨く。"
+        }})),
+    );
+
+    let hits = server.ok(
+        "POST",
+        "/contexts/sake/sources/search",
+        Some(json!({"query": "精米歩合はどこまで磨く?", "limit": 3})),
+    );
+    let hit = &hits[0];
+    assert_eq!(hit["source"], "docs/aomine.md");
+    assert_eq!(hit["index"], 1, "the hit names the answering PARAGRAPH");
+    assert!(hit["text"].as_str().unwrap().starts_with("原料米"), "{hit}");
+    assert_eq!(hit["lanes"]["bm25"]["rank"], 1, "{hit}");
+    assert_eq!(
+        hit["score"], hit["lanes"]["bm25"]["score"],
+        "lexical-only deployments keep raw BM25 score semantics"
+    );
+    assert!(
+        hit["lanes"].get("vector").is_none(),
+        "no provider, no vector key: {hit}"
+    );
+
+    // A zero limit asks for nothing and gets nothing.
+    let none = server.ok(
+        "POST",
+        "/contexts/sake/sources/search",
+        Some(json!({"query": "精米", "limit": 0})),
+    );
+    assert_eq!(none.as_array().unwrap().len(), 0);
 }
