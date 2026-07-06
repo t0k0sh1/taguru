@@ -11,8 +11,8 @@ use taguru::context::Context;
 
 use crate::cli::fmt_bytes;
 use crate::registry::{
-    meta_path, name_from_stem, passages_path, passages_wal_path, sources_path, vectors_path,
-    wal_path,
+    meta_path, name_from_stem, passages_path, passages_wal_path, pvectors_path, sources_path,
+    vectors_path, wal_path,
 };
 use crate::wal;
 
@@ -150,7 +150,9 @@ fn inspect_directory(dir: &Path) -> i32 {
         };
 
         let wal_bytes = file_size(&wal_path(dir, stem));
-        let vector_bytes = file_size(&vectors_path(dir, stem));
+        // Both vector sidecars are derived caches — size-only here.
+        let vector_bytes =
+            file_size(&vectors_path(dir, stem)) + file_size(&pvectors_path(dir, stem));
         let passage_bytes = file_size(&passages_path(dir, stem))
             + file_size(&passages_wal_path(dir, stem))
             + file_size(&sources_path(dir, stem));

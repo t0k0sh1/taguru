@@ -43,7 +43,8 @@ use serde::{Deserialize, Serialize};
 use taguru::context::{AliasError, Context};
 
 use crate::embedding::{
-    EmbedPurpose, EmbeddingProvider, VectorStore, VectorTable, fnv1a, similarity,
+    EmbedPurpose, EmbeddingProvider, PassageKey, PassageVectorStore, VectorStore, VectorTable,
+    fnv1a, similarity,
 };
 use crate::metrics::{GaugeSnapshot, Metrics};
 use crate::wal::{self, WalOp};
@@ -257,6 +258,15 @@ pub struct Entry {
     /// READING the store is fine and is how a build works; the reverse
     /// nesting would deadlock against it).
     bm25: RwLock<Option<crate::bm25::Bm25Index>>,
+    /// The paragraph vector sidecar, resident after first use — the
+    /// vector lane's mirror of `vectors`, in its own slot so resolve's
+    /// small hot gloss store never shares a fate with this big one.
+    passage_vectors: Mutex<Option<Arc<PassageVectorStore>>>,
+    /// Set when a passage store/retract lands, cleared when a passage
+    /// embedding refresh claims it — the auto-refresh ticker's signal
+    /// (passage writes do not mark the GRAPH dirty, so the flush list
+    /// alone would miss passage-only activity).
+    passages_embed_dirty: AtomicBool,
     /// Usage counters (see [`ContextUsage`]). `usage_dirty` marks
     /// increments the sidecar has not seen yet, so the shutdown sweep
     /// skips the contexts nobody touched.
@@ -286,6 +296,8 @@ impl Entry {
             vectors: Mutex::new(None),
             passages: Mutex::new(None),
             bm25: RwLock::new(None),
+            passage_vectors: Mutex::new(None),
+            passages_embed_dirty: AtomicBool::new(false),
             usage: UsageCounters::seeded(&usage),
             usage_dirty: AtomicBool::new(false),
         }
@@ -342,6 +354,16 @@ impl Entry {
             .unwrap()
             .as_ref()
             .map(|index| index.footprint())
+            .unwrap_or(0)
+    }
+
+    /// Bytes the resident paragraph vectors hold — zero while cold.
+    fn passage_vectors_footprint(&self) -> usize {
+        self.passage_vectors
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|store| store.footprint())
             .unwrap_or(0)
     }
 }
@@ -438,7 +460,26 @@ pub struct BootConfig {
     pub wal_enabled: bool,
     pub wal_max_bytes: usize,
     pub passages_wal_max_bytes: usize,
+    pub embed_passages: bool,
+    pub passage_vector_limit: usize,
     pub semantic_floor: Option<f32>,
+}
+
+/// Default ceiling on how many paragraphs per context get a vector
+/// (`TAGURU_PASSAGE_VECTOR_LIMIT`). The vector lane's footprint is
+/// paragraphs × dimensions × 4 bytes — 20 000 rows of a 1536-dim model
+/// is ~120 MiB — and past the limit the lexical lane still serves
+/// every paragraph; only the semantic lane goes partial.
+pub const DEFAULT_PASSAGE_VECTOR_LIMIT: usize = 20_000;
+
+/// What one passage embedding refresh accomplished: rows newly
+/// embedded, rows now in the sidecar, and paragraphs left without a
+/// vector because the per-context limit cut them off.
+#[derive(Debug)]
+pub struct PassageRefreshOutcome {
+    pub embedded: usize,
+    pub total: usize,
+    pub skipped_over_limit: usize,
 }
 
 /// The behavioral knobs [`AppState::boot_with`] takes as one struct:
@@ -448,6 +489,11 @@ pub struct BootOptions {
     pub wal_enabled: bool,
     pub wal_max_bytes: usize,
     pub passages_wal_max_bytes: usize,
+    /// Whether paragraphs get embedded at all (`TAGURU_EMBED_PASSAGES`,
+    /// default off): a corpus is orders of magnitude more text than its
+    /// glosses, so the spend is opt-in even where gloss embedding is on.
+    pub embed_passages: bool,
+    pub passage_vector_limit: usize,
     pub default_semantic_floor: Option<f32>,
 }
 
@@ -457,6 +503,8 @@ impl Default for BootOptions {
             wal_enabled: true,
             wal_max_bytes: DEFAULT_WAL_MAX_BYTES,
             passages_wal_max_bytes: DEFAULT_PASSAGES_WAL_MAX_BYTES,
+            embed_passages: false,
+            passage_vector_limit: DEFAULT_PASSAGE_VECTOR_LIMIT,
             default_semantic_floor: None,
         }
     }
@@ -485,6 +533,16 @@ impl BootConfig {
                 "TAGURU_PASSAGES_WAL_MAX_BYTES",
                 DEFAULT_PASSAGES_WAL_MAX_BYTES,
             ),
+            // Paragraph embedding is opt-in on top of the provider
+            // being configured — a corpus is orders of magnitude more
+            // text than its glosses.
+            embed_passages: std::env::var("TAGURU_EMBED_PASSAGES")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            passage_vector_limit: crate::env_number(
+                "TAGURU_PASSAGE_VECTOR_LIMIT",
+                DEFAULT_PASSAGE_VECTOR_LIMIT,
+            ),
             // The right semantic floor is a property of the embedding
             // model (cosine bands differ per model), so its
             // recalibration lives beside TAGURU_EMBED_MODEL rather
@@ -503,6 +561,8 @@ impl BootConfig {
                 wal_enabled: self.wal_enabled,
                 wal_max_bytes: self.wal_max_bytes,
                 passages_wal_max_bytes: self.passages_wal_max_bytes,
+                embed_passages: self.embed_passages,
+                passage_vector_limit: self.passage_vector_limit,
                 default_semantic_floor: self.semantic_floor,
             },
         )
@@ -580,6 +640,10 @@ struct StateInner {
     /// store on load; it refuses stores only when compaction is
     /// demonstrably stuck.
     passages_wal_max_bytes: usize,
+    /// Whether paragraphs get embedded (`TAGURU_EMBED_PASSAGES`) and
+    /// how many per context at most (`TAGURU_PASSAGE_VECTOR_LIMIT`).
+    embed_passages: bool,
+    passage_vector_limit: usize,
     /// Running estimate of unpinned resident graph bytes — the cheap
     /// gate in front of the budget sweep. Adjusted by absolute
     /// per-entry recounts (see `EntryInner::counted_bytes`); the
@@ -675,6 +739,8 @@ impl AppState {
             wal_enabled: options.wal_enabled,
             wal_max_bytes: options.wal_max_bytes,
             passages_wal_max_bytes: options.passages_wal_max_bytes,
+            embed_passages: options.embed_passages,
+            passage_vector_limit: options.passage_vector_limit,
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
         }));
@@ -799,6 +865,7 @@ impl AppState {
             resident_bytes += entry.vectors_footprint() as u64;
             resident_bytes += entry.passages_footprint() as u64;
             resident_bytes += entry.bm25_footprint() as u64;
+            resident_bytes += entry.passage_vectors_footprint() as u64;
             // A resident store knows its pending log; a cold one gets a
             // stat — the gauge must not go blind just because a context
             // was evicted.
@@ -859,6 +926,7 @@ impl AppState {
             sources_path(&self.0.data_dir, &stem),
             passages_path(&self.0.data_dir, &stem),
             passages_wal_path(&self.0.data_dir, &stem),
+            pvectors_path(&self.0.data_dir, &stem),
             vectors_path(&self.0.data_dir, &stem),
         ] {
             if let Err(error) = fs::remove_file(&stale)
@@ -903,6 +971,7 @@ impl AppState {
         // documented on Entry.
         *entry.passages.lock().unwrap() = None;
         *entry.bm25.write().unwrap() = None;
+        *entry.passage_vectors.lock().unwrap() = None;
         *entry.vectors.lock().unwrap() = None;
         let stem = file_stem(name);
         let mut outcome = Ok(());
@@ -912,6 +981,7 @@ impl AppState {
             format!("{stem}.sources.json"),
             format!("{stem}.passages.bin"),
             format!("{stem}.passages.wal.jsonl"),
+            format!("{stem}.pvectors.bin"),
             format!("{stem}.vectors.bin"),
             format!("{stem}.wal.jsonl"),
         ] {
@@ -946,6 +1016,7 @@ impl AppState {
                     // Every store lock is released again; fold the new
                     // paragraphs into the resident index.
                     self.refresh_bm25(&entry, &store, &sources);
+                    entry.passages_embed_dirty.store(true, Ordering::Relaxed);
                 }
                 stored
             }
@@ -1146,6 +1217,7 @@ impl AppState {
                             &store,
                             std::slice::from_ref(&source.to_string()),
                         );
+                        entry.passages_embed_dirty.store(true, Ordering::Relaxed);
                     }
                     removed
                 }
@@ -1417,6 +1489,155 @@ impl AppState {
             }
         }
         Ok(embedded)
+    }
+
+    /// Whether the vector lane over paragraphs is on at all: a provider
+    /// is configured AND the operator opted the corpus in
+    /// (`TAGURU_EMBED_PASSAGES`).
+    pub fn passage_embedding_enabled(&self) -> bool {
+        self.0.embed_passages && self.0.embedder.is_some()
+    }
+
+    /// Contexts whose passages changed since their last embedding
+    /// refresh — the auto-refresh ticker's work list. Claiming is the
+    /// caller's job via [`AppState::refresh_passage_embeddings`].
+    pub fn passage_embed_dirty_names(&self) -> Vec<String> {
+        self.snapshot()
+            .into_iter()
+            .filter(|(_, entry)| entry.passages_embed_dirty.load(Ordering::Relaxed))
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// Embeds every stored paragraph (`EmbedPurpose::Index`) into the
+    /// `{stem}.pvectors.bin` sidecar: the vector lane's index side.
+    /// Diff-driven like the gloss refresh — a paragraph whose FNV-1a
+    /// hash already has a row under the current model is carried
+    /// forward, a vanished paragraph's row is dropped (retraction
+    /// pruning falls out of the rebuild), and only the rest go to the
+    /// provider, 128 per call. The sidecar is written AT MOST ONCE per
+    /// refresh: writing per batch would multiply a large store's bytes
+    /// across the whole backfill. A provider failure partway persists
+    /// what did land and reports the error — the next refresh continues
+    /// from there instead of re-buying the same vectors.
+    pub fn refresh_passage_embeddings(
+        &self,
+        name: &str,
+    ) -> Option<Result<PassageRefreshOutcome, String>> {
+        let Some(embedder) = self.0.embedder.clone() else {
+            return Some(Err(
+                "no embedding provider is configured (set TAGURU_EMBED_URL and TAGURU_EMBED_MODEL)"
+                    .to_string(),
+            ));
+        };
+        if !self.0.embed_passages {
+            return Some(Err(
+                "passage embedding is disabled (set TAGURU_EMBED_PASSAGES=1)".to_string(),
+            ));
+        }
+        let entry = self.lookup(name)?;
+        // Claim the dirty flag up front: work that lands mid-refresh
+        // re-marks it, so the ticker returns — never lost, never
+        // double-claimed.
+        entry.passages_embed_dirty.store(false, Ordering::Relaxed);
+        let store = {
+            let _fence = entry.read_unless_deleted()?;
+            match self.entry_passages(&entry, &file_stem(name)) {
+                Ok(store) => store,
+                Err(error) => return Some(Err(error.to_string())),
+            }
+        };
+        let records = store.snapshot();
+        let path = pvectors_path(&self.0.data_dir, &file_stem(name));
+        let existing = PassageVectorStore::load(&path);
+        let fresh_model = existing.model != embedder.model();
+        let carried: HashMap<(&str, u32, u64), &[f32]> = if fresh_model {
+            HashMap::new()
+        } else {
+            existing
+                .iter()
+                .map(|(key, row)| ((key.source.as_str(), key.index, key.hash), row))
+                .collect()
+        };
+
+        // Deterministic (source, index) walk — snapshot() is sorted by
+        // source — so the same paragraphs win the limit run after run.
+        let mut fresh = PassageVectorStore::new(embedder.model());
+        let mut to_embed: Vec<(String, u32, u64, String)> = Vec::new();
+        let mut skipped_over_limit = 0usize;
+        for (source, record) in &records {
+            for (span, text) in record.paragraph_texts() {
+                if fresh.len() + to_embed.len() >= self.0.passage_vector_limit {
+                    skipped_over_limit += 1;
+                    continue;
+                }
+                match carried.get(&(source.as_str(), span.index, span.hash)) {
+                    Some(row) => fresh.push(
+                        PassageKey {
+                            source: source.clone(),
+                            index: span.index,
+                            hash: span.hash,
+                        },
+                        row.to_vec(),
+                    ),
+                    None => {
+                        to_embed.push((source.clone(), span.index, span.hash, text.to_string()));
+                    }
+                }
+            }
+        }
+
+        let mut embedded = 0usize;
+        let mut failure: Option<String> = None;
+        for chunk in to_embed.chunks(128) {
+            let texts: Vec<&str> = chunk.iter().map(|(.., text)| text.as_str()).collect();
+            match embedder.embed(&texts, EmbedPurpose::Index) {
+                Ok(vectors) => {
+                    self.0.metrics.record_embed_refresh(true);
+                    for ((source, index, hash, _), vector) in chunk.iter().zip(vectors) {
+                        fresh.push(
+                            PassageKey {
+                                source: source.clone(),
+                                index: *index,
+                                hash: *hash,
+                            },
+                            vector,
+                        );
+                        embedded += 1;
+                    }
+                }
+                Err(error) => {
+                    self.0.metrics.record_embed_refresh(false);
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+
+        // Publish under the entry lock (a delete that won it must not
+        // see its files recreated), and only when something changed —
+        // an all-carried refresh is a no-op, not a rewrite.
+        let changed =
+            embedded > 0 || fresh.len() != existing.len() || (fresh_model && !fresh.is_empty());
+        let _guard = entry.lock_unless_deleted()?;
+        if changed && let Err(error) = fresh.save(&path) {
+            entry.passages_embed_dirty.store(true, Ordering::Relaxed);
+            return Some(Err(format!("passage vectors not persisted: {error}")));
+        }
+        let total_rows = fresh.len();
+        *entry.passage_vectors.lock().unwrap() = Some(Arc::new(fresh));
+        match failure {
+            Some(error) => {
+                // What landed is durable; the rest stays claimed as work.
+                entry.passages_embed_dirty.store(true, Ordering::Relaxed);
+                Some(Err(error))
+            }
+            None => Some(Ok(PassageRefreshOutcome {
+                embedded,
+                total: total_rows,
+                skipped_over_limit,
+            })),
+        }
     }
 
     /// The semantic fallback behind resolve: nearest stored names by
@@ -1989,12 +2210,14 @@ impl AppState {
                 Slot::Cold | Slot::Deleted => 0,
             };
             drop(inner);
-            // Cached vector stores, resident passages, and the BM25
-            // index count too — a cold entry can hold plenty of each.
+            // Cached vector stores, resident passages, the BM25 index,
+            // and paragraph vectors count too — a cold entry can hold
+            // plenty of each.
             let bytes = resident
                 + entry.vectors_footprint()
                 + entry.passages_footprint()
-                + entry.bm25_footprint();
+                + entry.bm25_footprint()
+                + entry.passage_vectors_footprint();
             if bytes == 0 {
                 continue;
             }
@@ -2085,6 +2308,7 @@ impl AppState {
             *passages = None;
         }
         *entry.bm25.write().unwrap() = None;
+        *entry.passage_vectors.lock().unwrap() = None;
         *entry.vectors.lock().unwrap() = None;
         true
     }
@@ -2324,6 +2548,10 @@ pub(crate) fn passages_path(dir: &Path, stem: &str) -> PathBuf {
 
 pub(crate) fn passages_wal_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.passages.wal.jsonl"))
+}
+
+pub(crate) fn pvectors_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.pvectors.bin"))
 }
 
 pub(crate) fn vectors_path(dir: &Path, stem: &str) -> PathBuf {
@@ -4247,6 +4475,249 @@ mod tests {
             "第1章",
             "the next search rebuilds and still answers"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn boot_for_passage_embedding(
+        dir: &Path,
+        embedder: Arc<dyn EmbeddingProvider>,
+        limit: usize,
+    ) -> AppState {
+        AppState::boot_with(
+            dir.to_path_buf(),
+            usize::MAX,
+            Some(embedder),
+            BootOptions {
+                embed_passages: true,
+                passage_vector_limit: limit,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn refresh_passage_embeddings_embeds_every_paragraph_once_then_nothing() {
+        let dir = scratch_dir("pvec-first");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc-a".to_string(),
+            "最初の段落。\n\n二番目の段落。".to_string(),
+        );
+        passages.insert("doc-b".to_string(), "三番目の段落。".to_string());
+        state.store_passages("sake", passages).unwrap().unwrap();
+        assert_eq!(
+            state.passage_embed_dirty_names(),
+            vec!["sake".to_string()],
+            "a store marks the context for the auto ticker"
+        );
+
+        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        assert_eq!(
+            (outcome.embedded, outcome.total, outcome.skipped_over_limit),
+            (3, 3, 0)
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "three paragraphs fit one provider batch"
+        );
+        assert!(
+            state.passage_embed_dirty_names().is_empty(),
+            "the refresh claims the dirty flag"
+        );
+
+        // Unchanged corpus: nothing embeds, nobody talks to the provider.
+        let again = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        assert_eq!((again.embedded, again.total), (0, 3));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_passage_embeddings_re_embeds_only_the_changed_paragraph() {
+        let dir = scratch_dir("pvec-diff");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc-a".to_string(),
+            "変わらない段落。\n\n古い版の段落。".to_string(),
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+        state.refresh_passage_embeddings("sake").unwrap().unwrap();
+
+        let mut updated = BTreeMap::new();
+        updated.insert(
+            "doc-a".to_string(),
+            "変わらない段落。\n\n新しい版の段落。".to_string(),
+        );
+        state.store_passages("sake", updated).unwrap().unwrap();
+        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        assert_eq!(
+            outcome.embedded, 1,
+            "the unchanged paragraph rides its hash, only the edit re-embeds"
+        );
+        assert_eq!(outcome.total, 2);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_passage_embeddings_prunes_vectors_for_a_retracted_source() {
+        let dir = scratch_dir("pvec-prune");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "残る段落。".to_string());
+        passages.insert("doc-b".to_string(), "消える段落。".to_string());
+        state.store_passages("sake", passages).unwrap().unwrap();
+        state.refresh_passage_embeddings("sake").unwrap().unwrap();
+
+        state.retract_source("sake", "doc-b").unwrap();
+        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        assert_eq!(
+            (outcome.embedded, outcome.total),
+            (0, 1),
+            "the retracted source's row is gone without any re-embedding"
+        );
+        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        assert_eq!(sidecar.len(), 1, "the prune reached the disk too");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_passage_embeddings_skips_paragraphs_beyond_the_configured_limit() {
+        let dir = scratch_dir("pvec-limit");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 2);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc-a".to_string(),
+            "一つ目。\n\n二つ目。\n\n三つ目。".to_string(),
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+
+        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        assert_eq!(
+            (outcome.embedded, outcome.total, outcome.skipped_over_limit),
+            (2, 2, 1),
+            "past the limit the lexical lane still serves; only the vector lane goes partial"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_passage_embeddings_persists_partial_progress_after_a_provider_failure() {
+        /// Succeeds except on exactly its `fail_on`-th call (0-based).
+        struct FlakyEmbeddings {
+            calls: std::sync::atomic::AtomicUsize,
+            fail_on: usize,
+        }
+        impl EmbeddingProvider for FlakyEmbeddings {
+            fn model(&self) -> &str {
+                "flaky"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let call = self.calls.fetch_add(1, Ordering::Relaxed);
+                if call == self.fail_on {
+                    return Err("provider hiccup".to_string());
+                }
+                Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            }
+        }
+
+        let dir = scratch_dir("pvec-partial");
+        let state = boot_for_passage_embedding(
+            &dir,
+            Arc::new(FlakyEmbeddings {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                fail_on: 1,
+            }),
+            20_000,
+        );
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // 129 paragraphs = one full batch of 128 plus one more, so the
+        // second provider call is the one that fails.
+        let text = (0..129)
+            .map(|i| format!("段落その{i}。"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-big".to_string(), text);
+        state.store_passages("sake", passages).unwrap().unwrap();
+
+        let error = state
+            .refresh_passage_embeddings("sake")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("hiccup"), "{error}");
+        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        assert_eq!(
+            sidecar.len(),
+            128,
+            "the batch that landed is durable despite the failure"
+        );
+        assert_eq!(
+            state.passage_embed_dirty_names(),
+            vec!["sake".to_string()],
+            "unfinished work stays claimed for the ticker"
+        );
+
+        // The next refresh buys only the missing paragraph.
+        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        assert_eq!((outcome.embedded, outcome.total), (1, 129));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_passage_embeddings_requires_the_opt_in() {
+        let dir = scratch_dir("pvec-optin");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let error = state
+            .refresh_passage_embeddings("sake")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("TAGURU_EMBED_PASSAGES"), "{error}");
 
         let _ = fs::remove_dir_all(dir);
     }

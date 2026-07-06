@@ -1580,11 +1580,26 @@ pub async fn resolve_label(
     resolve_with_fallback(&state, &name, &request, true, started_at)
 }
 
-/// What one embedding refresh accomplished.
+/// What one embedding refresh accomplished. `embedded`/`total` stay
+/// the all-up numbers older clients read; the breakdowns appear only
+/// when the passage lane ran, so a gloss-only deployment keeps its
+/// exact historical shape.
 #[derive(Serialize)]
 pub struct RefreshOutcome {
     pub embedded: usize,
     pub total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glosses: Option<RefreshBreakdown>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passages: Option<RefreshBreakdown>,
+}
+
+#[derive(Serialize)]
+pub struct RefreshBreakdown {
+    pub embedded: usize,
+    pub total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_over_limit: Option<usize>,
 }
 
 pub async fn refresh_embeddings(
@@ -1601,12 +1616,54 @@ pub async fn refresh_embeddings(
     }
     // Refresh batches can talk to the provider for seconds; keep the
     // runtime's workers unstarved while this one blocks.
-    match tokio::task::block_in_place(|| state.refresh_embeddings(&name)) {
+    let glosses = match tokio::task::block_in_place(|| state.refresh_embeddings(&name)) {
+        None => return not_found(&name, started_at),
+        Some(Ok(counts)) => counts,
+        Some(Err(message)) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("embedding refresh failed: {message}"),
+                started_at,
+            );
+        }
+    };
+    if !state.passage_embedding_enabled() {
+        let (embedded, total) = glosses;
+        return ok(
+            RefreshOutcome {
+                embedded,
+                total,
+                glosses: None,
+                passages: None,
+            },
+            started_at,
+        );
+    }
+    match tokio::task::block_in_place(|| state.refresh_passage_embeddings(&name)) {
         None => not_found(&name, started_at),
-        Some(Ok((embedded, total))) => ok(RefreshOutcome { embedded, total }, started_at),
+        Some(Ok(passages)) => ok(
+            RefreshOutcome {
+                embedded: glosses.0 + passages.embedded,
+                total: glosses.1 + passages.total,
+                glosses: Some(RefreshBreakdown {
+                    embedded: glosses.0,
+                    total: glosses.1,
+                    skipped_over_limit: None,
+                }),
+                passages: Some(RefreshBreakdown {
+                    embedded: passages.embedded,
+                    total: passages.total,
+                    skipped_over_limit: Some(passages.skipped_over_limit),
+                }),
+            },
+            started_at,
+        ),
+        // The gloss half already succeeded and partial passage progress
+        // is persisted — but the caller asked for a refresh and did not
+        // fully get one; say so.
         Some(Err(message)) => error(
             StatusCode::BAD_GATEWAY,
-            format!("embedding refresh failed: {message}"),
+            format!("passage embedding refresh failed partway (progress is saved): {message}"),
             started_at,
         ),
     }

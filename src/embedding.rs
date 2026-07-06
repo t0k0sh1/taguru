@@ -232,6 +232,163 @@ impl VectorStore {
     }
 }
 
+/// One embedded paragraph's identity: the source id attributions
+/// carry, the paragraph's position within that source's current split,
+/// and the FNV-1a hash of exactly its bytes — the staleness detector,
+/// same as gloss vectors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassageKey {
+    pub source: String,
+    pub index: u32,
+    pub hash: u64,
+}
+
+const PASSAGE_VECTOR_MAGIC: &[u8; 8] = b"TAGURUP1";
+
+/// Paragraph vectors for one context, `{stem}.pvectors.bin`. Unlike
+/// the gloss [`VectorStore`] this is a FLAT table — one contiguous
+/// `Vec<f32>` of unit rows — because every query scans all of it (a
+/// nearest-neighbor sweep has no point lookups), and at 10⁴–10⁵ rows
+/// sequential prefetch is what the scan lives on. Kept separate from
+/// the gloss store on purpose: glosses are small and ride every
+/// resolve, paragraphs are big and ride only passage search — one
+/// file, one Arc, one budget entry each, so neither pays for the
+/// other. Same derived-cache contract: corrupt means re-embed, never
+/// an outage, and a model change discards it wholesale.
+#[derive(Debug, Default)]
+pub struct PassageVectorStore {
+    pub model: String,
+    dim: usize,
+    keys: Vec<PassageKey>,
+    data: Vec<f32>,
+}
+
+impl PassageVectorStore {
+    pub fn new(model: &str) -> Self {
+        Self {
+            model: model.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Appends one row. The first row fixes the dimension; a
+    /// mismatched later row is a provider bug and is dropped loudly
+    /// rather than corrupting the flat layout.
+    pub fn push(&mut self, key: PassageKey, vector: Vec<f32>) {
+        if self.keys.is_empty() {
+            self.dim = vector.len();
+        }
+        if vector.len() != self.dim || self.dim == 0 {
+            tracing::warn!(
+                "dropping a {}-dim passage vector from a {}-dim store",
+                vector.len(),
+                self.dim
+            );
+            return;
+        }
+        self.keys.push(key);
+        self.data.extend_from_slice(&vector);
+    }
+
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Every (key, unit row) pair, in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (&PassageKey, &[f32])> {
+        self.keys
+            .iter()
+            .zip(self.data.chunks_exact(self.dim.max(1)))
+    }
+
+    /// Rough resident bytes when held in memory, for the cache budget.
+    pub fn footprint(&self) -> usize {
+        const KEY_OVERHEAD: usize = 48;
+        self.data.len() * 4
+            + self
+                .keys
+                .iter()
+                .map(|key| key.source.len() + KEY_OVERHEAD)
+                .sum::<usize>()
+    }
+
+    /// Reads the sidecar, returning an empty store on any problem — a
+    /// corrupt vector cache costs a re-embed, never an outage.
+    pub fn load(path: &Path) -> Self {
+        match std::fs::read(path) {
+            Ok(bytes) => Self::from_bytes(&bytes).unwrap_or_else(|| {
+                tracing::warn!(
+                    "ignoring corrupt passage vector store at {}",
+                    path.display()
+                );
+                Self::default()
+            }),
+            Err(_) => Self::default(),
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        crate::registry::write_atomic(path, &self.to_bytes())
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(PASSAGE_VECTOR_MAGIC);
+        write_string(&mut out, &self.model);
+        out.extend_from_slice(&(self.dim as u32).to_le_bytes());
+        out.extend_from_slice(&(self.keys.len() as u32).to_le_bytes());
+        for key in &self.keys {
+            write_string(&mut out, &key.source);
+            out.extend_from_slice(&key.index.to_le_bytes());
+            out.extend_from_slice(&key.hash.to_le_bytes());
+        }
+        for value in &self.data {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut pos = 0usize;
+        if bytes.get(..8)? != PASSAGE_VECTOR_MAGIC {
+            return None;
+        }
+        pos += 8;
+        let model = read_string(bytes, &mut pos)?;
+        let dim = read_u32(bytes, &mut pos)? as usize;
+        let count = read_u32(bytes, &mut pos)? as usize;
+        let mut keys = Vec::with_capacity(count.min(1 << 20));
+        for _ in 0..count {
+            let source = read_string(bytes, &mut pos)?;
+            let index = read_u32(bytes, &mut pos)?;
+            let hash_bytes = bytes.get(pos..pos + 8)?;
+            pos += 8;
+            let hash = u64::from_le_bytes(hash_bytes.try_into().ok()?);
+            keys.push(PassageKey {
+                source,
+                index,
+                hash,
+            });
+        }
+        let mut data = Vec::with_capacity((count * dim).min(1 << 26));
+        for _ in 0..count * dim {
+            let slice = bytes.get(pos..pos + 4)?;
+            pos += 4;
+            data.push(f32::from_le_bytes(slice.try_into().ok()?));
+        }
+        (pos == bytes.len()).then_some(Self {
+            model,
+            dim,
+            keys,
+            data,
+        })
+    }
+}
+
 fn write_string(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(&(text.len() as u32).to_le_bytes());
     out.extend_from_slice(text.as_bytes());
@@ -369,6 +526,53 @@ mod tests {
             request.contains("x-taguru-embed-purpose: query"),
             "{request}"
         );
+    }
+
+    #[test]
+    fn passage_vector_store_round_trips_and_rejects_garbage() {
+        let mut store = PassageVectorStore::new("test-model");
+        store.push(
+            PassageKey {
+                source: "docs/aomine.md".into(),
+                index: 0,
+                hash: 7,
+            },
+            vec![1.0, 0.0],
+        );
+        store.push(
+            PassageKey {
+                source: "docs/aomine.md".into(),
+                index: 1,
+                hash: 9,
+            },
+            vec![0.0, 1.0],
+        );
+        // A wrong-dimension row is dropped, not silently misaligned.
+        store.push(
+            PassageKey {
+                source: "bad".into(),
+                index: 0,
+                hash: 1,
+            },
+            vec![1.0, 0.0, 0.0],
+        );
+        assert_eq!(store.len(), 2);
+
+        let bytes = store.to_bytes();
+        let loaded = PassageVectorStore::from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.model, "test-model");
+        assert_eq!(loaded.len(), 2);
+        let rows: Vec<(&PassageKey, &[f32])> = loaded.iter().collect();
+        assert_eq!(rows[0].0.index, 0);
+        assert_eq!(rows[0].1, &[1.0, 0.0]);
+        assert_eq!(rows[1].0.hash, 9);
+        assert_eq!(rows[1].1, &[0.0, 1.0]);
+
+        assert!(PassageVectorStore::from_bytes(b"garbage").is_none());
+        assert!(PassageVectorStore::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+        let mut padded = bytes.clone();
+        padded.push(0);
+        assert!(PassageVectorStore::from_bytes(&padded).is_none());
     }
 
     #[test]
