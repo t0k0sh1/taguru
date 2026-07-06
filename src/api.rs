@@ -833,10 +833,11 @@ pub async fn lookup_passages(
     let started_at = Instant::now();
     match state.lookup_passages(&name, &request.sources) {
         None => not_found(&name, started_at),
-        Some((passages, missing)) => {
+        Some(Ok((passages, missing))) => {
             state.note_read(&name, passages.is_empty());
             ok(PassageLookup { passages, missing }, started_at)
         }
+        Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
     }
 }
 
@@ -844,8 +845,25 @@ pub async fn list_sources(State(state): State<AppState>, Path(name): Path<String
     let started_at = Instant::now();
     match state.passage_sources(&name) {
         None => not_found(&name, started_at),
-        Some(sources) => ok(sources, started_at),
+        Some(Ok(sources)) => ok(sources, started_at),
+        Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
     }
+}
+
+/// The passage store exists but could not be loaded — its snapshot and
+/// log hold acknowledged writes, so this is a 500 pointing at disk,
+/// never a silent empty answer.
+fn passages_unreadable(
+    state: &AppState,
+    io_error: std::io::Error,
+    started_at: Instant,
+) -> Response {
+    state.metrics().record_error(ErrorKind::Io);
+    error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("passages could not be read: {io_error}"),
+        started_at,
+    )
 }
 
 /// Vocabulary audit request: floors for the two fork detectors.
@@ -1074,7 +1092,8 @@ pub async fn search_passages(
         clamp(request.limit, 5, MAX_MATCH_LIMIT),
     ) {
         None => not_found(&name, started_at),
-        Some(hits) => {
+        Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
+        Some(Ok(hits)) => {
             state.note_search(SearchOp::SearchPassages, &name, hits.is_empty());
             if search_log_enabled() {
                 tracing::info!(

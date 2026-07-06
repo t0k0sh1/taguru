@@ -243,6 +243,13 @@ pub struct Entry {
     /// by refresh, cleared by eviction, and counted against the cache
     /// budget. Lock order: `inner` before `vectors`, never the reverse.
     vectors: Mutex<Option<Arc<VectorStore>>>,
+    /// The passage store, resident after first use (see
+    /// [`crate::passages::PassageStore`]) and counted against the cache
+    /// budget like `vectors`. Lock order: `inner` (the tombstone fence,
+    /// held SHARED for a passage operation's whole run) → `passages` →
+    /// `vectors`; the fence means files for a name are only touched
+    /// while a delete cannot be planting its tombstone.
+    passages: Mutex<Option<Arc<crate::passages::PassageStore>>>,
     /// Usage counters (see [`ContextUsage`]). `usage_dirty` marks
     /// increments the sidecar has not seen yet, so the shutdown sweep
     /// skips the contexts nobody touched.
@@ -270,6 +277,7 @@ impl Entry {
             dirty: AtomicBool::new(false),
             last_touch: AtomicU64::new(0),
             vectors: Mutex::new(None),
+            passages: Mutex::new(None),
             usage: UsageCounters::seeded(&usage),
             usage_dirty: AtomicBool::new(false),
         }
@@ -286,10 +294,32 @@ impl Entry {
         (!matches!(guard.slot, Slot::Deleted)).then_some(guard)
     }
 
+    /// The read half of the tombstone fence: passage operations hold
+    /// this SHARED guard for their whole run — concurrent with graph
+    /// reads and with each other, but correctly serialized against
+    /// [`AppState::delete`], whose exclusive lock plants the tombstone.
+    /// Whichever side locks first wins cleanly: a fence taken first
+    /// makes the delete wait; a tombstone planted first turns the
+    /// operation into a no-op instead of a file resurrection.
+    fn read_unless_deleted(&self) -> Option<std::sync::RwLockReadGuard<'_, EntryInner>> {
+        let guard = self.inner.read().unwrap();
+        (!matches!(guard.slot, Slot::Deleted)).then_some(guard)
+    }
+
     /// Bytes the cached vector sidecar holds resident — zero when none
     /// is loaded. The cache budget and the gauges count it the same way.
     fn vectors_footprint(&self) -> usize {
         self.vectors
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|store| store.footprint())
+            .unwrap_or(0)
+    }
+
+    /// Bytes the resident passage store holds — zero while cold.
+    fn passages_footprint(&self) -> usize {
+        self.passages
             .lock()
             .unwrap()
             .as_ref()
@@ -709,6 +739,7 @@ impl AppState {
             wal_bytes += inner.wal_bytes;
             drop(inner);
             resident_bytes += entry.vectors_footprint() as u64;
+            resident_bytes += entry.passages_footprint() as u64;
         }
         GaugeSnapshot {
             contexts_registered,
@@ -750,6 +781,8 @@ impl AppState {
         for stale in [
             wal_path(&self.0.data_dir, &stem),
             sources_path(&self.0.data_dir, &stem),
+            passages_path(&self.0.data_dir, &stem),
+            passages_wal_path(&self.0.data_dir, &stem),
             vectors_path(&self.0.data_dir, &stem),
         ] {
             if let Err(error) = fs::remove_file(&stale)
@@ -790,7 +823,9 @@ impl AppState {
         in_flight.slot = Slot::Deleted;
         self.recount_entry(&mut in_flight);
         entry.dirty.store(false, Ordering::Relaxed);
-        // Lock order: `inner` before `vectors`, as documented on Entry.
+        // Lock order: `inner` before `passages` before `vectors`, as
+        // documented on Entry.
+        *entry.passages.lock().unwrap() = None;
         *entry.vectors.lock().unwrap() = None;
         let stem = file_stem(name);
         let mut outcome = Ok(());
@@ -798,6 +833,8 @@ impl AppState {
             format!("{stem}.ctx"),
             format!("{stem}.meta.json"),
             format!("{stem}.sources.json"),
+            format!("{stem}.passages.bin"),
+            format!("{stem}.passages.wal.jsonl"),
             format!("{stem}.vectors.bin"),
             format!("{stem}.wal.jsonl"),
         ] {
@@ -823,49 +860,76 @@ impl AppState {
         passages: BTreeMap<String, String>,
     ) -> Option<io::Result<usize>> {
         let entry = self.lookup(name)?;
-        // The entry lock only serializes read-modify-write on the
-        // passages file; the context itself is never loaded for this.
-        let _guard = entry.lock_unless_deleted()?;
-        let path = sources_path(&self.0.data_dir, &file_stem(name));
-        let mut stored = read_passages(&path);
-        let added = passages.len();
-        stored.extend(passages);
-        let outcome = serde_json::to_vec_pretty(&stored)
-            .map_err(io::Error::from)
-            .and_then(|bytes| write_atomic(&path, &bytes))
-            .map(|()| added);
+        let fence = entry.read_unless_deleted()?;
+        let outcome = match self.entry_passages(&entry, &file_stem(name)) {
+            Ok(store) => store.store(passages),
+            Err(error) => Err(error),
+        };
+        drop(fence);
+        // Passage text is resident now; give the budget a chance to
+        // evict something (possibly this context's own cold graph).
+        self.enforce_budget(name);
         Some(outcome)
     }
 
     /// Dereferences source ids (as found on attributions) back to their
     /// registered passages, reporting the ids that have none.
+    #[allow(clippy::type_complexity)]
     pub fn lookup_passages(
         &self,
         name: &str,
         sources: &[String],
-    ) -> Option<(BTreeMap<String, String>, Vec<String>)> {
+    ) -> Option<io::Result<(BTreeMap<String, String>, Vec<String>)>> {
         let entry = self.lookup(name)?;
-        let _guard = entry.inner.read().unwrap();
-        let stored = read_passages(&sources_path(&self.0.data_dir, &file_stem(name)));
+        let _fence = entry.read_unless_deleted()?;
+        let store = match self.entry_passages(&entry, &file_stem(name)) {
+            Ok(store) => store,
+            Err(error) => return Some(Err(error)),
+        };
         let mut passages = BTreeMap::new();
         let mut missing = Vec::new();
         for source in sources {
-            match stored.get(source) {
+            match store.get(source) {
                 Some(text) => {
-                    passages.insert(source.clone(), text.clone());
+                    passages.insert(source.clone(), text.to_string());
                 }
                 None => missing.push(source.clone()),
             }
         }
-        Some((passages, missing))
+        Some(Ok((passages, missing)))
     }
 
     /// The source ids that currently have a registered passage.
-    pub fn passage_sources(&self, name: &str) -> Option<Vec<String>> {
+    pub fn passage_sources(&self, name: &str) -> Option<io::Result<Vec<String>>> {
         let entry = self.lookup(name)?;
-        let _guard = entry.inner.read().unwrap();
-        let stored = read_passages(&sources_path(&self.0.data_dir, &file_stem(name)));
-        Some(stored.into_keys().collect())
+        let _fence = entry.read_unless_deleted()?;
+        Some(
+            self.entry_passages(&entry, &file_stem(name))
+                .map(|store| store.source_ids()),
+        )
+    }
+
+    /// The resident passage store, loaded on first access (the same
+    /// lazy shape as [`AppState::entry_vectors`]). Callers hold the
+    /// entry's read fence, so the load can never race the delete that
+    /// removes the files. A load failure is an error, not an empty
+    /// store: the snapshot and log hold acknowledged passages.
+    fn entry_passages(
+        &self,
+        entry: &Entry,
+        stem: &str,
+    ) -> io::Result<Arc<crate::passages::PassageStore>> {
+        let mut slot = entry.passages.lock().unwrap();
+        if let Some(store) = slot.as_ref() {
+            return Ok(Arc::clone(store));
+        }
+        let store = Arc::new(crate::passages::PassageStore::load(
+            passages_path(&self.0.data_dir, stem),
+            &sources_path(&self.0.data_dir, stem),
+            passages_wal_path(&self.0.data_dir, stem),
+        )?);
+        *slot = Some(Arc::clone(&store));
+        Ok(store)
     }
 
     /// Name pairs whose GLOSSES sit close in embedding space — the
@@ -979,24 +1043,26 @@ impl AppState {
             // Raced with a delete; there is nothing left to clean up.
             return Ok((touched, false));
         };
-        let Some(_guard) = entry.lock_unless_deleted() else {
+        let Some(_fence) = entry.read_unless_deleted() else {
             // Same race, one step later: the delete beat us to the lock.
             return Ok((touched, false));
         };
-        let path = sources_path(&self.0.data_dir, &file_stem(name));
-        let mut stored = read_passages(&path);
-        let mut passage_removed = false;
-        if stored.remove(source).is_some() {
-            match serde_json::to_vec_pretty(&stored)
-                .map_err(io::Error::from)
-                .and_then(|bytes| write_atomic(&path, &bytes))
-            {
-                Ok(()) => passage_removed = true,
+        // The graph retraction above already succeeded; a passage-side
+        // failure must not turn it into an error, only into an honest
+        // `passage_removed: false`.
+        let passage_removed = match self.entry_passages(&entry, &file_stem(name)) {
+            Ok(store) => match store.retract(source) {
+                Ok(removed) => removed,
                 Err(error) => {
                     tracing::warn!("passage for '{source}' not removed from disk: {error}");
+                    false
                 }
+            },
+            Err(error) => {
+                tracing::warn!("passages for '{name}' unavailable during retract: {error}");
+                false
             }
-        }
+        };
         Ok((touched, passage_removed))
     }
 
@@ -1004,21 +1070,25 @@ impl AppState {
     /// beside the graph, for knowledge that does not decompose into
     /// triples (procedures, conditions, discourse). BM25 over the same
     /// normalization as the entry index with mixed terms (ASCII words,
-    /// character bigrams elsewhere); scores are recomputed per query,
-    /// which is fine at sidecar scale.
+    /// character bigrams elsewhere); scores are recomputed per query
+    /// over the resident store, which is fine at sidecar scale.
+    #[allow(clippy::type_complexity)]
     pub fn search_passages(
         &self,
         name: &str,
         query: &str,
         limit: usize,
-    ) -> Option<Vec<(String, f32, String)>> {
+    ) -> Option<io::Result<Vec<(String, f32, String)>>> {
         const K1: f32 = 1.2;
         const B: f32 = 0.75;
 
         let entry = self.lookup(name)?;
         let stored = {
-            let _guard = entry.inner.read().unwrap();
-            read_passages(&sources_path(&self.0.data_dir, &file_stem(name)))
+            let _fence = entry.read_unless_deleted()?;
+            match self.entry_passages(&entry, &file_stem(name)) {
+                Ok(store) => store.snapshot(),
+                Err(error) => return Some(Err(error)),
+            }
         };
         let query_grams: Vec<u64> = {
             let mut seen = std::collections::HashSet::new();
@@ -1028,11 +1098,11 @@ impl AppState {
                 .collect()
         };
         if stored.is_empty() || query_grams.is_empty() {
-            return Some(Vec::new());
+            return Some(Ok(Vec::new()));
         }
 
         // Term statistics per passage, one normalization pass each.
-        let passages: Vec<(&String, &String, HashMap<u64, f32>, f32)> = stored
+        let passages: Vec<(&String, &str, HashMap<u64, f32>, f32)> = stored
             .iter()
             .map(|(source, text)| {
                 let mut frequencies: HashMap<u64, f32> = HashMap::new();
@@ -1041,7 +1111,7 @@ impl AppState {
                     *frequencies.entry(gram).or_insert(0.0) += 1.0;
                     length += 1.0;
                 }
-                (source, text, frequencies, length)
+                (source, text.as_ref(), frequencies, length)
             })
             .collect();
         let total = passages.len() as f32;
@@ -1075,13 +1145,13 @@ impl AppState {
                     score += idf * (frequency * (K1 + 1.0))
                         / (frequency + K1 * (1.0 - B + B * length / average_length));
                 }
-                ((*source).clone(), score, (*text).clone())
+                ((*source).clone(), score, (*text).to_string())
             })
             .filter(|&(_, score, _)| score > 0.0)
             .collect();
         scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         scored.truncate(limit);
-        Some(scored)
+        Some(Ok(scored))
     }
 
     /// Embeds the GLOSS of every canonical concept and label — the name
@@ -1787,9 +1857,9 @@ impl AppState {
                 Slot::Cold | Slot::Deleted => 0,
             };
             drop(inner);
-            // Cached vector stores count too — a cold entry can hold a
-            // large one after a semantic query.
-            let bytes = resident + entry.vectors_footprint();
+            // Cached vector stores and resident passages count too — a
+            // cold entry can hold plenty of both.
+            let bytes = resident + entry.vectors_footprint() + entry.passages_footprint();
             if bytes == 0 {
                 continue;
             }
@@ -1865,6 +1935,19 @@ impl AppState {
             // global, so a recount's delta would double-count.
             inner.counted_bytes = 0;
             self.0.metrics.record_eviction(true);
+        }
+        // Dropping the passage store loses nothing (its log is fsynced
+        // per batch); a best-effort compaction first just spares the
+        // next load a replay. Failure changes neither.
+        {
+            let mut passages = entry.passages.lock().unwrap();
+            if let Some(store) = passages.as_ref()
+                && store.pending_log_bytes() > 0
+                && let Err(error) = store.compact()
+            {
+                tracing::warn!("passages for '{name}' evicted uncompacted: {error}");
+            }
+            *passages = None;
         }
         *entry.vectors.lock().unwrap() = None;
         true
@@ -2099,6 +2182,14 @@ pub(crate) fn sources_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.sources.json"))
 }
 
+pub(crate) fn passages_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.passages.bin"))
+}
+
+pub(crate) fn passages_wal_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.passages.wal.jsonl"))
+}
+
 pub(crate) fn vectors_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.vectors.bin"))
 }
@@ -2215,18 +2306,6 @@ fn text_terms(text: &str) -> Vec<u64> {
     }
     flush_run(&mut terms, &mut run, &mut run_len);
     terms
-}
-
-/// Reads a passages file, treating any problem as "no passages" — a
-/// corrupt sidecar must not block the graph or new registrations.
-fn read_passages(path: &Path) -> BTreeMap<String, String> {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-            tracing::warn!("ignoring corrupt passages at {}: {error}", path.display());
-            BTreeMap::new()
-        }),
-        Err(_) => BTreeMap::new(),
-    }
 }
 
 fn save_files(
@@ -2776,6 +2855,15 @@ mod tests {
         .unwrap();
         fs::write(sources_path(&dir, &stem), br#"{"ghost":"old passage"}"#).unwrap();
         fs::write(vectors_path(&dir, &stem), b"stale").unwrap();
+        wal::append_batch(
+            &passages_wal_path(&dir, &stem),
+            1,
+            &[crate::passages::PassageOp::Store {
+                source: "ghost".to_string(),
+                text: "前世代の本文".to_string(),
+            }],
+        )
+        .unwrap();
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert_eq!(state.context_count(), 0, "no image, nothing registers");
@@ -2786,6 +2874,10 @@ mod tests {
         assert!(
             !sources_path(&dir, &stem).exists(),
             "stale passages survived the create"
+        );
+        assert!(
+            !passages_wal_path(&dir, &stem).exists(),
+            "the old generation's passage log survived the create"
         );
         assert!(
             !vectors_path(&dir, &stem).exists(),
@@ -2804,6 +2896,10 @@ mod tests {
         assert!(
             recalled.is_empty(),
             "the old generation's WAL replayed into the new context"
+        );
+        assert!(
+            state.passage_sources("sake").unwrap().unwrap().is_empty(),
+            "the old generation's passage log replayed into the new context"
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -3597,15 +3693,118 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let (passages, missing) = state
             .lookup_passages("sake", &["第1段落".to_string(), "第9段落".to_string()])
+            .unwrap()
             .unwrap();
         assert!(passages["第1段落"].starts_with("青嶺酒造は"));
         assert_eq!(missing, vec!["第9段落".to_string()]);
-        assert_eq!(state.passage_sources("sake").unwrap(), vec!["第1段落"]);
+        assert_eq!(
+            state.passage_sources("sake").unwrap().unwrap(),
+            vec!["第1段落"]
+        );
         assert!(state.lookup_passages("nope", &[]).is_none());
 
-        // Deleting the context removes its passages file with it.
+        // Deleting the context removes the whole passage file family:
+        // the log the store just wrote, any snapshot, and a legacy
+        // sources file left over from before the migration.
+        fs::write(
+            sources_path(&dir, &file_stem("sake")),
+            br#"{"legacy":"remnant"}"#,
+        )
+        .unwrap();
         state.delete("sake").unwrap().unwrap();
         assert!(!sources_path(&dir, &file_stem("sake")).exists());
+        assert!(!passages_path(&dir, &file_stem("sake")).exists());
+        assert!(!passages_wal_path(&dir, &file_stem("sake")).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_passage_write_racing_a_delete_backs_off_at_the_tombstone() {
+        let dir = scratch_dir("passage-delete-race");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("第1段落".to_string(), "本文。".to_string());
+        state
+            .store_passages("sake", passages.clone())
+            .unwrap()
+            .unwrap();
+
+        // The racing writer's handle predates the delete — exactly the
+        // window the read fence exists for.
+        let entry = state.lookup("sake").unwrap();
+        state.delete("sake").unwrap().unwrap();
+        assert!(
+            entry.read_unless_deleted().is_none(),
+            "a handle from before the delete must see the tombstone"
+        );
+        assert!(
+            state.store_passages("sake", passages).is_none(),
+            "the name is gone; nothing may recreate it"
+        );
+        assert!(
+            !passages_wal_path(&dir, &file_stem("sake")).exists(),
+            "no passage file rose from the dead"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn eviction_drops_resident_passages_and_a_later_lookup_still_answers() {
+        let dir = scratch_dir("passage-evict");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1段落".to_string(),
+            "仕込み水は雲居山の伏流水。".to_string(),
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        assert!(
+            entry.passages.lock().unwrap().is_none(),
+            "eviction must drop the resident passage store"
+        );
+        // Durability never depended on residency: the next access
+        // reloads from the log (or the snapshot the eviction wrote).
+        let (found, missing) = state
+            .lookup_passages("sake", &["第1段落".to_string()])
+            .unwrap()
+            .unwrap();
+        assert!(found["第1段落"].starts_with("仕込み水"));
+        assert!(missing.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cache_budget_accounts_for_resident_passage_text() {
+        let dir = scratch_dir("passage-budget");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let before = state.gauge_snapshot().resident_bytes;
+        let mut passages = BTreeMap::new();
+        passages.insert("大きな段落".to_string(), "あ".repeat(300_000));
+        state.store_passages("sake", passages).unwrap().unwrap();
+        let after = state.gauge_snapshot().resident_bytes;
+        assert!(
+            after >= before + 900_000,
+            "resident passage text must count against the budget \
+             (before {before}, after {after})"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -3690,6 +3889,7 @@ mod tests {
         // must still hand back the passage that answers it, first.
         let hits = state
             .search_passages("sake", "精米歩合はどこまで磨く?", 3)
+            .unwrap()
             .unwrap();
         assert_eq!(hits[0].0, "第2段落");
         assert!(hits[0].1 > 0.0);
@@ -3698,6 +3898,7 @@ mod tests {
         assert!(
             state
                 .search_passages("sake", "unrelated english words", 3)
+                .unwrap()
                 .unwrap()
                 .is_empty()
         );
@@ -3740,6 +3941,7 @@ mod tests {
 
         let hits = state
             .search_passages("papers", "ambition must be made to counteract ambition", 2)
+            .unwrap()
             .unwrap();
         assert_eq!(hits[0].0, "第51篇");
         assert!(
@@ -3768,7 +3970,7 @@ mod tests {
         state.store_passages("code", passages).unwrap().unwrap();
 
         for query in ["state", "State", "app", "path"] {
-            let hits = state.search_passages("code", query, 3).unwrap();
+            let hits = state.search_passages("code", query, 3).unwrap().unwrap();
             assert_eq!(
                 hits.first().map(|hit| hit.0.as_str()),
                 Some("src/registry.rs:AppState"),
