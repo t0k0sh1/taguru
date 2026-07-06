@@ -25,6 +25,8 @@ TAGURU_EXTRACT_TIMEOUT_SECS  per-completion budget; 0 = no limit (300)
 --dry-run           list what would extract or skip; call nothing
 --force             re-extract documents the manifest says are unchanged
 --no-passage        omit the document text from the batch (facts only)
+--questions N       doc2query: also propose up to N search questions per
+                    paragraph (1..=8; incompatible with --no-passage)
 --context NAME      the context every batch file targets
 --description TEXT  add a create block (used only if the context is absent)
 --config F          read KEY=VALUE environment from F (same dialect as serve)
@@ -120,6 +122,21 @@ fact whose evidence spans a chunk boundary can be missed; the cap
 leans large for that reason. The passage is never chunked: the batch
 carries the verbatim document. Documents over 8 MiB are refused — a
 batch passage could not carry them; split the document.
+
+## Questions (doc2query)
+
+With `--questions N` the same extraction calls also propose up to N
+realistic search questions per paragraph — questions a user might
+type whose answer is that paragraph, phrased away from its wording —
+and the batch carries them as question lines. The prompt shows the
+document with every paragraph numbered by the SERVER'S own splitter
+(blank-line boundaries over the whole document, not per chunk), so
+the emitted indexes are exactly the ones the server validates against
+and can never drift. Generation rides the extraction call on purpose:
+there is no cheaper questions-only pass, so changing N re-extracts
+(the manifest records it as a computation input). Servers running
+`TAGURU_EMBED_PASSAGES` embed each question beside its paragraph;
+servers without it store and ignore them.
 
 ## The manifest: skip what is already extracted
 
