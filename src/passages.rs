@@ -98,6 +98,13 @@ pub(crate) struct PassageStore {
     /// successful compaction — its contents are in the snapshot from
     /// that moment, and only then may the old file go.
     legacy_path: PathBuf,
+    /// Backstop ceiling on the pending log (0 = unlimited). A healthy
+    /// store compacts at RATIO × snapshot, so the log legitimately
+    /// reaches that size; the ceiling exists for a compaction that is
+    /// failing outright and engages only past BOTH this value and 2×
+    /// the last snapshot — a big context near its natural trigger is
+    /// never refused.
+    max_log_bytes: u64,
 }
 
 impl PassageStore {
@@ -118,6 +125,7 @@ impl PassageStore {
         snapshot_path: PathBuf,
         legacy_path: &Path,
         log_path: PathBuf,
+        max_log_bytes: usize,
     ) -> io::Result<Self> {
         let (sources, watermark, snapshot_bytes) = match fs::read(&snapshot_path) {
             Ok(bytes) => {
@@ -183,6 +191,7 @@ impl PassageStore {
             snapshot_path,
             log_path,
             legacy_path: legacy_path.to_path_buf(),
+            max_log_bytes: max_log_bytes as u64,
         })
     }
 
@@ -196,9 +205,31 @@ impl PassageStore {
             .map(|(source, text)| PassageOp::Store { source, text })
             .collect();
         let count = ops.len();
-        if count > 0 {
-            self.append_and_apply(&ops)?;
+        if count == 0 {
+            return Ok(0);
         }
+        let writer = self.writer.lock().unwrap();
+        // The backstop, checked under `writer` so it is exact: refuse
+        // growth only when the log is past the operator ceiling AND
+        // past 2× the last snapshot — the second condition keeps a big
+        // context approaching its NATURAL ratio trigger from being
+        // refused; both together mean compaction has demonstrably been
+        // failing (each failure already warned). Retractions stay
+        // allowed: they are how an operator shrinks the store.
+        {
+            let inner = self.inner.read().unwrap();
+            if self.max_log_bytes > 0
+                && inner.log_bytes >= self.max_log_bytes
+                && inner.log_bytes >= 2 * inner.snapshot_bytes
+            {
+                return Err(io::Error::other(format!(
+                    "the passage log is at {} bytes (cap {}) with compaction failing — \
+                     check disk space and the server log",
+                    inner.log_bytes, self.max_log_bytes
+                )));
+            }
+        }
+        self.append_and_apply_locked(&writer, &ops)?;
         Ok(count)
     }
 
@@ -215,11 +246,6 @@ impl PassageStore {
         }];
         self.append_and_apply_locked(&writer, &ops)?;
         Ok(true)
-    }
-
-    fn append_and_apply(&self, ops: &[PassageOp]) -> io::Result<()> {
-        let writer = self.writer.lock().unwrap();
-        self.append_and_apply_locked(&writer, ops)
     }
 
     fn append_and_apply_locked(
@@ -434,10 +460,15 @@ mod tests {
     }
 
     fn open(dir: &Path) -> PassageStore {
+        open_capped(dir, 0)
+    }
+
+    fn open_capped(dir: &Path, max_log_bytes: usize) -> PassageStore {
         PassageStore::load(
             dir.join("t.passages.bin"),
             &dir.join("t.sources.json"),
             dir.join("t.passages.wal.jsonl"),
+            max_log_bytes,
         )
         .unwrap()
     }
@@ -654,8 +685,32 @@ mod tests {
             dir.join("t.passages.bin"),
             &dir.join("t.sources.json"),
             dir.join("t.passages.wal.jsonl"),
+            0,
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn the_log_backstop_refuses_stores_but_not_retracts_and_recovers_after_compaction() {
+        let dir = scratch_dir("backstop");
+        let store = open_capped(&dir, 1);
+        store
+            .store(batch(&[("a", "本文A"), ("b", "本文B")]))
+            .unwrap();
+
+        // Log is past the (absurdly low) cap with no snapshot at all —
+        // the "compaction stuck" shape. Growth is refused; shrinking
+        // and reading are not.
+        let error = store.store(batch(&[("c", "本文C")])).unwrap_err();
+        assert!(error.to_string().contains("cap 1"), "{error}");
+        assert!(store.retract("b").unwrap(), "retracts must stay allowed");
+        assert_eq!(store.get("a").as_deref(), Some("本文A"));
+
+        // A compaction that finally lands truncates the log; stores flow
+        // again (the snapshot also lifts the 2× condition).
+        store.compact().unwrap();
+        store.store(batch(&[("c", "本文C")])).unwrap();
+        assert_eq!(store.get("c").as_deref(), Some("本文C"));
     }
 }

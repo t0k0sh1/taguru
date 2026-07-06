@@ -254,6 +254,7 @@ async fn serve() {
         flush_secs,
         wal_enabled = config.wal_enabled,
         wal_max_mib = config.wal_max_bytes / (1024 * 1024),
+        passages_wal_max_mib = config.passages_wal_max_bytes / (1024 * 1024),
         max_body_mib = max_body_bytes / (1024 * 1024),
         timeout_secs,
         auth_enabled = auth_configured,
