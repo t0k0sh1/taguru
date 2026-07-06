@@ -28,7 +28,34 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+use crate::paragraph::{self, ParagraphSpan};
 use crate::wal;
+
+/// One source's resident passage: the byte-exact text and its
+/// paragraph spans, computed once per residency (never persisted —
+/// the split function is deterministic, so the spans are as durable
+/// as the text they index). Handed out as `Arc`, so search and the
+/// index/vector lanes walk paragraphs without holding the store lock
+/// and without copying text.
+#[derive(Debug)]
+pub(crate) struct PassageRecord {
+    pub(crate) text: Arc<str>,
+    pub(crate) paragraphs: Vec<ParagraphSpan>,
+}
+
+impl PassageRecord {
+    fn new(text: Arc<str>) -> Arc<Self> {
+        let paragraphs = paragraph::split(&text);
+        Arc::new(Self { text, paragraphs })
+    }
+
+    /// The paragraph texts behind the spans, in order.
+    pub(crate) fn paragraph_texts(&self) -> impl Iterator<Item = (&ParagraphSpan, &str)> {
+        self.paragraphs
+            .iter()
+            .map(|span| (span, &self.text[span.start as usize..span.end as usize]))
+    }
+}
 
 /// One passage mutation — this log's whole vocabulary. Same
 /// internally-tagged shape as the graph's `WalOp`, but its own enum in
@@ -59,10 +86,10 @@ const SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS1";
 
 #[derive(Debug)]
 struct PassageStoreInner {
-    /// source id → original text, byte-exact as stored. `Arc<str>` so
-    /// a bulk reader (search, a future index build) clones handles, not
-    /// text, and walks them without holding this lock.
-    sources: BTreeMap<String, Arc<str>>,
+    /// source id → resident record (byte-exact text + paragraph
+    /// spans). `Arc` so a bulk reader clones handles, not text, and
+    /// walks them without holding this lock.
+    sources: BTreeMap<String, Arc<PassageRecord>>,
     /// The next log sequence this store hands out. Lives INSIDE this
     /// lock, beside the map it numbers: compaction must read "the map
     /// and how far the log got" as one consistent snapshot, or it could
@@ -147,7 +174,7 @@ impl PassageStore {
                 (
                     legacy
                         .into_iter()
-                        .map(|(source, text)| (source, Arc::from(text)))
+                        .map(|(source, text)| (source, PassageRecord::new(Arc::from(text))))
                         .collect(),
                     0,
                     0,
@@ -156,12 +183,12 @@ impl PassageStore {
             Err(error) => return Err(error),
         };
 
-        let mut sources: BTreeMap<String, Arc<str>> = sources;
+        let mut sources: BTreeMap<String, Arc<PassageRecord>> = sources;
         let (ops, top) = wal::replay::<PassageOp>(&log_path, watermark)?;
         for op in ops {
             match op {
                 PassageOp::Store { source, text } => {
-                    sources.insert(source, Arc::from(text));
+                    sources.insert(source, PassageRecord::new(Arc::from(text)));
                 }
                 PassageOp::Retract { source } => {
                     sources.remove(&source);
@@ -174,7 +201,7 @@ impl PassageStore {
         };
         let resident_bytes = sources
             .iter()
-            .map(|(source, text)| source.len() + text.len() + SOURCE_OVERHEAD)
+            .map(|(source, record)| record_bytes(source, record))
             .sum();
 
         Ok(Self {
@@ -260,18 +287,15 @@ impl PassageStore {
             for op in ops {
                 match op {
                     PassageOp::Store { source, text } => {
-                        let added = source.len() + text.len() + SOURCE_OVERHEAD;
-                        if let Some(previous) = inner
-                            .sources
-                            .insert(source.clone(), Arc::from(text.as_str()))
-                        {
-                            inner.resident_bytes -= source.len() + previous.len() + SOURCE_OVERHEAD;
+                        let record = PassageRecord::new(Arc::from(text.as_str()));
+                        inner.resident_bytes += record_bytes(source, &record);
+                        if let Some(previous) = inner.sources.insert(source.clone(), record) {
+                            inner.resident_bytes -= record_bytes(source, &previous);
                         }
-                        inner.resident_bytes += added;
                     }
                     PassageOp::Retract { source } => {
                         if let Some(previous) = inner.sources.remove(source) {
-                            inner.resident_bytes -= source.len() + previous.len() + SOURCE_OVERHEAD;
+                            inner.resident_bytes -= record_bytes(source, &previous);
                         }
                     }
                 }
@@ -353,7 +377,7 @@ impl PassageStore {
         self.inner.read().unwrap().log_bytes
     }
 
-    pub(crate) fn get(&self, source: &str) -> Option<Arc<str>> {
+    pub(crate) fn get(&self, source: &str) -> Option<Arc<PassageRecord>> {
         self.inner.read().unwrap().sources.get(source).cloned()
     }
 
@@ -361,16 +385,16 @@ impl PassageStore {
         self.inner.read().unwrap().sources.keys().cloned().collect()
     }
 
-    /// Every passage as (source, text-handle) — the bulk reader's
-    /// entrance. The lock is held for the clone only; the text rides
-    /// out as `Arc<str>` handles, never copies.
-    pub(crate) fn snapshot(&self) -> Vec<(String, Arc<str>)> {
+    /// Every passage as (source, record-handle) — the bulk reader's
+    /// entrance. The lock is held for the clone only; text and spans
+    /// ride out as `Arc` handles, never copies.
+    pub(crate) fn snapshot(&self) -> Vec<(String, Arc<PassageRecord>)> {
         self.inner
             .read()
             .unwrap()
             .sources
             .iter()
-            .map(|(source, text)| (source.clone(), Arc::clone(text)))
+            .map(|(source, record)| (source.clone(), Arc::clone(record)))
             .collect()
     }
 
@@ -402,20 +426,30 @@ fn read_legacy(path: &Path) -> BTreeMap<String, String> {
     }
 }
 
-fn snapshot_to_bytes(sources: &BTreeMap<String, Arc<str>>, watermark: u64) -> Vec<u8> {
+/// What one resident record costs, for the running footprint: key,
+/// text, spans, and the per-entry overhead constant.
+fn record_bytes(source: &str, record: &PassageRecord) -> usize {
+    source.len()
+        + record.text.len()
+        + record.paragraphs.len() * std::mem::size_of::<ParagraphSpan>()
+        + SOURCE_OVERHEAD
+}
+
+fn snapshot_to_bytes(sources: &BTreeMap<String, Arc<PassageRecord>>, watermark: u64) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(SNAPSHOT_MAGIC);
     out.extend_from_slice(&watermark.to_le_bytes());
     out.extend_from_slice(&(sources.len() as u32).to_le_bytes());
     // BTreeMap iterates sorted: identical content is byte-identical.
-    for (source, text) in sources {
+    // Only the text lands on disk — spans are recomputed on load.
+    for (source, record) in sources {
         write_chunk(&mut out, source.as_bytes());
-        write_chunk(&mut out, text.as_bytes());
+        write_chunk(&mut out, record.text.as_bytes());
     }
     out
 }
 
-fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<str>>, u64)> {
+fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageRecord>>, u64)> {
     let mut pos = 0usize;
     if bytes.get(..8)? != SNAPSHOT_MAGIC {
         return None;
@@ -429,7 +463,7 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<str>>, u64)
     for _ in 0..count {
         let source = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
         let text = std::str::from_utf8(read_chunk(bytes, &mut pos)?).ok()?;
-        sources.insert(source, Arc::from(text));
+        sources.insert(source, PassageRecord::new(Arc::from(text)));
     }
     (pos == bytes.len()).then_some((sources, watermark))
 }
@@ -480,6 +514,11 @@ mod tests {
             .collect()
     }
 
+    /// The stored text behind a source, for assertions.
+    fn text(store: &PassageStore, source: &str) -> Option<String> {
+        store.get(source).map(|record| record.text.to_string())
+    }
+
     #[test]
     fn passage_store_upsert_is_idempotent_last_write_wins() {
         let dir = scratch_dir("upsert");
@@ -492,8 +531,8 @@ mod tests {
             2,
             "the return value counts the batch, not just new keys"
         );
-        assert_eq!(store.get("第1段落").as_deref(), Some("新版"));
-        assert_eq!(store.get("第2段落").as_deref(), Some("追加"));
+        assert_eq!(text(&store, "第1段落").as_deref(), Some("新版"));
+        assert_eq!(text(&store, "第2段落").as_deref(), Some("追加"));
         assert_eq!(store.source_ids(), vec!["第1段落", "第2段落"]);
     }
 
@@ -526,7 +565,7 @@ mod tests {
         }
         let reborn = open(&dir);
         assert!(reborn.get("a").is_none());
-        assert_eq!(reborn.get("b").as_deref(), Some("第二"));
+        assert_eq!(text(&reborn, "b").as_deref(), Some("第二"));
     }
 
     #[test]
@@ -549,9 +588,9 @@ mod tests {
             store.store(batch(&[("c", "本文C")])).unwrap();
         }
         let reborn = open(&dir);
-        assert_eq!(reborn.get("a").as_deref(), Some("本文A"));
-        assert_eq!(reborn.get("b").as_deref(), Some("本文B"));
-        assert_eq!(reborn.get("c").as_deref(), Some("本文C"));
+        assert_eq!(text(&reborn, "a").as_deref(), Some("本文A"));
+        assert_eq!(text(&reborn, "b").as_deref(), Some("本文B"));
+        assert_eq!(text(&reborn, "c").as_deref(), Some("本文C"));
     }
 
     #[test]
@@ -619,7 +658,7 @@ mod tests {
         .unwrap();
         {
             let store = open(&dir);
-            assert_eq!(store.get("old").as_deref(), Some("旧ファイルの本文"));
+            assert_eq!(text(&store, "old").as_deref(), Some("旧ファイルの本文"));
             store
                 .store(batch(&[("both", "新版"), ("new", "追記")]))
                 .unwrap();
@@ -627,9 +666,9 @@ mod tests {
         // A crash here leaves the legacy base plus a pending log; the
         // reload replays the log over the legacy base, watermark 0.
         let reborn = open(&dir);
-        assert_eq!(reborn.get("old").as_deref(), Some("旧ファイルの本文"));
-        assert_eq!(reborn.get("both").as_deref(), Some("新版"));
-        assert_eq!(reborn.get("new").as_deref(), Some("追記"));
+        assert_eq!(text(&reborn, "old").as_deref(), Some("旧ファイルの本文"));
+        assert_eq!(text(&reborn, "both").as_deref(), Some("新版"));
+        assert_eq!(text(&reborn, "new").as_deref(), Some("追記"));
     }
 
     #[test]
@@ -654,18 +693,20 @@ mod tests {
         );
         drop(store);
         let reborn = open(&dir);
-        assert_eq!(reborn.get("old").as_deref(), Some("旧本文"));
-        assert_eq!(reborn.get("new").as_deref(), Some("新本文"));
+        assert_eq!(text(&reborn, "old").as_deref(), Some("旧本文"));
+        assert_eq!(text(&reborn, "new").as_deref(), Some("新本文"));
     }
 
     #[test]
     fn passage_snapshot_rejects_truncated_or_garbage_bytes() {
-        let sources: BTreeMap<String, Arc<str>> =
-            [("a".to_string(), Arc::from("text"))].into_iter().collect();
+        let sources: BTreeMap<String, Arc<PassageRecord>> =
+            [("a".to_string(), PassageRecord::new(Arc::from("text")))]
+                .into_iter()
+                .collect();
         let bytes = snapshot_to_bytes(&sources, 7);
         let (parsed, watermark) = snapshot_from_bytes(&bytes).unwrap();
         assert_eq!(watermark, 7);
-        assert_eq!(parsed["a"].as_ref(), "text");
+        assert_eq!(parsed["a"].text.as_ref(), "text");
 
         assert!(snapshot_from_bytes(b"garbage").is_none());
         assert!(snapshot_from_bytes(&bytes[..bytes.len() - 1]).is_none());
@@ -705,12 +746,12 @@ mod tests {
         let error = store.store(batch(&[("c", "本文C")])).unwrap_err();
         assert!(error.to_string().contains("cap 1"), "{error}");
         assert!(store.retract("b").unwrap(), "retracts must stay allowed");
-        assert_eq!(store.get("a").as_deref(), Some("本文A"));
+        assert_eq!(text(&store, "a").as_deref(), Some("本文A"));
 
         // A compaction that finally lands truncates the log; stores flow
         // again (the snapshot also lifts the 2× condition).
         store.compact().unwrap();
         store.store(batch(&[("c", "本文C")])).unwrap();
-        assert_eq!(store.get("c").as_deref(), Some("本文C"));
+        assert_eq!(text(&store, "c").as_deref(), Some("本文C"));
     }
 }

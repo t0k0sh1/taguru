@@ -1071,11 +1071,15 @@ pub struct SearchPassagesRequest {
     pub limit: Option<usize>,
 }
 
-/// One passage matched by full-text search: the second retrieval lane,
-/// for knowledge that never decomposed into triples.
+/// One PARAGRAPH matched by full-text search: the second retrieval
+/// lane, for knowledge that never decomposed into triples. `index` is
+/// the paragraph's position within its source (0-based, this split);
+/// `text` is that paragraph alone — cite it, or dereference the whole
+/// source through the lookup endpoint.
 #[derive(Serialize)]
 pub struct PassageHit {
     pub source: String,
+    pub index: u32,
     pub score: f32,
     pub text: String,
 }
@@ -1102,14 +1106,15 @@ pub async fn search_passages(
                     op = "search_passages",
                     cue = %request.query,
                     hits = hits.len(),
-                    top_score = hits.first().map_or(0.0, |&(_, score, _)| f64::from(score)),
+                    top_score = hits.first().map_or(0.0, |&(_, _, score, _)| f64::from(score)),
                     "search",
                 );
             }
             ok(
                 hits.into_iter()
-                    .map(|(source, score, text)| PassageHit {
+                    .map(|(source, index, score, text)| PassageHit {
                         source,
+                        index,
                         score,
                         text,
                     })
