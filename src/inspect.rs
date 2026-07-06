@@ -109,7 +109,7 @@ fn inspect_directory(dir: &Path) -> i32 {
         // The same parse a boot-time replay would run; records at or
         // below the image's watermark are inert, the ones above it are
         // acknowledged writes the image does not carry yet.
-        let pending = match wal::replay(&wal_path(dir, stem), context.applied_seq()) {
+        let pending = match wal::replay::<wal::WalOp>(&wal_path(dir, stem), context.applied_seq()) {
             Ok((ops, _)) => ops.len(),
             Err(error) => {
                 println!("{name}: CORRUPT WAL — {error}");
