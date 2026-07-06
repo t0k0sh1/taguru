@@ -2279,6 +2279,91 @@ fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
 }
 
 #[test]
+fn aliases_withdraw_and_the_spelling_is_reusable() {
+    let server = Server::start("alias-remove");
+    server.ok("PUT", "/contexts/c", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts/c/associations",
+        Some(json!([
+            {"subject": "X", "label": "l", "object": "Z", "weight": 1.0},
+            {"subject": "Y", "label": "l", "object": "Z", "weight": 1.0},
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/c/aliases",
+        Some(json!({"concepts": {"A": "X"}})),
+    );
+
+    let removed = server.ok(
+        "DELETE",
+        "/contexts/c/aliases",
+        Some(json!({"concepts": ["A"]})),
+    );
+    assert_eq!(removed, json!(1));
+    let listing = server.ok("GET", "/contexts/c/aliases", None);
+    assert_eq!(listing["concepts"], json!({}));
+
+    // The spelling is free to point elsewhere — the un-wedging move.
+    server.ok(
+        "POST",
+        "/contexts/c/aliases",
+        Some(json!({"concepts": {"A": "Y"}})),
+    );
+    let via = server.ok("POST", "/contexts/c/query", Some(json!({"subject": "A"})));
+    assert_eq!(via["matches"][0]["subject"], json!("Y"));
+
+    // Refusals: absent spellings and canonical names are conflicts,
+    // and an empty withdrawal is malformed rather than a silent no-op.
+    let (status, body) = server.call(
+        "DELETE",
+        "/contexts/c/aliases",
+        Some(json!({"concepts": ["ghost"]})),
+    );
+    assert_eq!(status, 409, "{body}");
+    let (status, _) = server.call(
+        "DELETE",
+        "/contexts/c/aliases",
+        Some(json!({"concepts": ["X"]})),
+    );
+    assert_eq!(status, 409);
+    let (status, _) = server.call("DELETE", "/contexts/c/aliases", Some(json!({})));
+    assert_eq!(status, 400);
+}
+
+#[test]
+fn an_import_alias_conflict_heals_with_a_withdrawal_then_reimport() {
+    let server = Server::start("alias-heal");
+    let (status, _) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s1\", \"create\": {}}\n\
+         {\"subject\": \"X\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
+         {\"alias\": \"A\", \"canonical\": \"X\", \"kind\": \"concept\"}\n",
+        None,
+    );
+    assert_eq!(status, 200);
+    let revised = "{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s2\"}\n\
+         {\"subject\": \"Y\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
+         {\"alias\": \"A\", \"canonical\": \"Y\", \"kind\": \"concept\"}\n";
+    let (status, _) = post_import(&server, revised, None);
+    assert_eq!(status, 409);
+
+    // The heal the import docs prescribe: withdraw the old
+    // registration deliberately, then re-import — retract-then-apply
+    // makes the second attempt exact.
+    server.ok(
+        "DELETE",
+        "/contexts/c/aliases",
+        Some(json!({"concepts": ["A"]})),
+    );
+    let (status, body) = post_import(&server, revised, None);
+    assert_eq!(status, 200, "{body}");
+    let listing = server.ok("GET", "/contexts/c/aliases", None);
+    assert_eq!(listing["concepts"]["A"], json!("Y"));
+}
+
+#[test]
 fn importing_into_an_absent_context_needs_a_create_block() {
     let batches = batch_dir("import-nocreate");
     let file = batches.join("orphan.jsonl");

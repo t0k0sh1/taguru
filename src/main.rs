@@ -250,7 +250,9 @@ async fn serve() {
         .route("/contexts/{name}/labels", get(api::labels))
         .route(
             "/contexts/{name}/aliases",
-            get(api::list_aliases).post(api::add_aliases),
+            get(api::list_aliases)
+                .post(api::add_aliases)
+                .delete(api::remove_aliases),
         )
         .route(
             "/contexts/{name}/sources",

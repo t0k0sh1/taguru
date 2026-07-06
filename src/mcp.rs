@@ -345,6 +345,18 @@ pub fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "remove_aliases",
+            "Withdraw mis-registered alias spellings (exact spellings, per namespace). The spelling stops resolving and is free to re-register; canonicals and their knowledge are untouched. Canonical names are refused — removal cannot unname a record.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "concepts": { "type": "array", "items": { "type": "string" }, "description": "alias spellings to withdraw" },
+                    "labels": { "type": "array", "items": { "type": "string" } }
+                }),
+                &["context"],
+            ),
+        ),
+        (
             "retract_source",
             "Withdraw one source's (document's) contributions from graph and passage store. Diff sync for updated documents: retract the old version, then re-ingest the new. Concepts and edges remain; only weights come down.",
             object_schema(
@@ -491,6 +503,11 @@ pub fn route_tool(
         "get_aliases" => ("GET", format!("{}/aliases", context_path("context")?), None),
         "add_aliases" => (
             "POST",
+            format!("{}/aliases", context_path("context")?),
+            Some(pick(arguments, &["concepts", "labels"])),
+        ),
+        "remove_aliases" => (
+            "DELETE",
             format!("{}/aliases", context_path("context")?),
             Some(pick(arguments, &["concepts", "labels"])),
         ),

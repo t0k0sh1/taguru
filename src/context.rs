@@ -1543,6 +1543,77 @@ impl Context {
         )
     }
 
+    /// Withdraws one alias spelling from the concept namespace — the
+    /// undo for a mis-registered alias. The spelling stops resolving
+    /// and becomes free to register again; the canonical record, its
+    /// edges, and every other spelling stay untouched. Returns the
+    /// canonical name the alias pointed at, or `None` when the exact
+    /// spelling is not a concept alias — in particular a CANONICAL
+    /// name is refused this way, because removal must never be able
+    /// to unname a record. The spelling's arena bytes stay behind as
+    /// slack (append-only storage; a few bytes per removal).
+    pub fn remove_concept_alias(&mut self, alias: &str) -> Option<String> {
+        let position = self
+            .concept_aliases
+            .iter()
+            .position(|record| self.arena_str(record.name_offset, record.name_len) == alias)?;
+        let record = self.concept_aliases.remove(position);
+        self.concept_ids.remove(alias);
+        self.rebuild_concept_index();
+        Some(self.concept_name(record.target).to_string())
+    }
+
+    /// [`Context::remove_concept_alias`] for relation labels.
+    pub fn remove_label_alias(&mut self, alias: &str) -> Option<String> {
+        let position = self
+            .label_aliases
+            .iter()
+            .position(|record| self.arena_str(record.name_offset, record.name_len) == alias)?;
+        let record = self.label_aliases.remove(position);
+        self.label_ids.remove(alias);
+        self.rebuild_label_index();
+        Some(self.label_name(record.target).to_string())
+    }
+
+    /// Rebuilds the concept entry index from the records. The index is
+    /// append-only (arena + bigram postings), so removal is a rebuild
+    /// by design: alias curation is rare, a rebuild costs milliseconds,
+    /// and resolve keeps a structure with no dead entries to skip.
+    fn rebuild_concept_index(&mut self) {
+        let mut index = EntryIndex::default();
+        for (id, record) in self.concepts.iter().enumerate() {
+            index.push(
+                self.arena_str(record.name_offset, record.name_len),
+                id as u32,
+            );
+        }
+        for record in &self.concept_aliases {
+            index.push(
+                self.arena_str(record.name_offset, record.name_len),
+                record.target,
+            );
+        }
+        self.concept_index = index;
+    }
+
+    /// [`Context::rebuild_concept_index`] for the label namespace.
+    fn rebuild_label_index(&mut self) {
+        let mut index = EntryIndex::default();
+        for (id, record) in self.labels.iter().enumerate() {
+            index.push(
+                self.arena_str(record.name_offset, record.name_len),
+                id as u32,
+            );
+        }
+        for record in &self.label_aliases {
+            index.push(
+                self.arena_str(record.name_offset, record.name_len),
+                record.target,
+            );
+        }
+        self.label_index = index;
+    }
+
     /// Withdraws one source's contributions: every attribution it made
     /// is removed from its edge's chain and its weight subtracted from
     /// the edge's total — the differential-sync move when a document
@@ -3415,6 +3486,49 @@ mod tests {
             context.concept_aliases(),
             vec![("機構", "情報処理推進機構"), ("kikou", "情報処理推進機構")]
         );
+    }
+
+    #[test]
+    fn a_removed_alias_stops_resolving_and_frees_its_spelling() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "創業年", "1907年", 1.0)
+            .unwrap();
+        context.associate("高瀬", "役職", "杜氏", 1.0).unwrap();
+        context.add_concept_alias("Aomine", "青嶺酒造").unwrap();
+        context.add_label_alias("設立年", "創業年").unwrap();
+
+        // Withdrawal names what the alias pointed at; the spelling
+        // stops resolving while the canonical keeps its knowledge.
+        assert_eq!(
+            context.remove_concept_alias("Aomine").as_deref(),
+            Some("青嶺酒造")
+        );
+        assert!(context.query(Some("Aomine"), None, None).is_empty());
+        assert!(context.resolve("aomine").is_empty());
+        assert!(context.concept_aliases().is_empty());
+        assert_eq!(context.recall("青嶺酒造").len(), 1);
+
+        // Not-an-alias refusals: unknown spellings, and canonical
+        // names — removal must never be able to unname a record.
+        assert_eq!(context.remove_concept_alias("Aomine"), None);
+        assert_eq!(context.remove_concept_alias("青嶺酒造"), None);
+
+        // The spelling is free again, pointing elsewhere this time —
+        // the un-wedging move a mis-registration needs.
+        context.add_concept_alias("Aomine", "高瀬").unwrap();
+        assert_eq!(context.describe("Aomine").unwrap().concept, "高瀬");
+
+        // Labels mirror, and the removal survives an image roundtrip
+        // (the rebuilt entry indexes included).
+        assert_eq!(
+            context.remove_label_alias("設立年").as_deref(),
+            Some("創業年")
+        );
+        let reborn = Context::from_bytes(&context.to_bytes()).unwrap();
+        assert_eq!(reborn.describe("Aomine").unwrap().concept, "高瀬");
+        assert!(reborn.label_aliases().is_empty());
+        assert_eq!(reborn.resolve("青嶺")[0].name, "青嶺酒造");
     }
 
     #[test]

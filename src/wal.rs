@@ -27,6 +27,13 @@ pub enum WalOp {
     Associate(crate::registry::AssocOp),
     AliasConcept { alias: String, canonical: String },
     AliasLabel { alias: String, canonical: String },
+    // Additive variants keep old logs replayable forever (the tag
+    // form ignores nothing it knows); a DOWNGRADED binary reading a
+    // log that holds one of the newer ops refuses the boot as
+    // corruption — which is the right refusal for records it cannot
+    // apply.
+    UnaliasConcept { alias: String },
+    UnaliasLabel { alias: String },
     RetractSource { source: String },
 }
 

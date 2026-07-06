@@ -83,7 +83,10 @@ answers back into prose are your job.
 6. When live wording misses, register alternate spellings:
    `POST /contexts/{name}/aliases`. Aliases are entry-only; results
    always return the canonical. An alias cannot join two existing
-   concepts (that would be a merge — rebuild territory).
+   concepts (that would be a merge — rebuild territory). A
+   mis-registered spelling is withdrawn with `DELETE` on the same
+   path (exact spellings; canonical names are refused — removal
+   cannot unname a record), which frees it to point elsewhere.
 7. **Document updated? Sync the diff**:
    `POST /contexts/{name}/sources/retract` withdraws the old version's
    contributions (weights, attributions, passage), then ingest the new
@@ -188,7 +191,7 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?, semantic_floor?}` → `[{name, score, tier}]` relation candidates |
 | POST | `/contexts/{name}/embeddings/refresh` | re-embed new/changed concept and label glosses (run after ingest) |
 | GET | `/contexts/{name}/labels` | relation vocabulary (canonical only) |
-| GET/POST | `/contexts/{name}/aliases` | export / `{concepts:{alias:canonical}, labels:{...}}` |
+| GET/POST/DELETE | `/contexts/{name}/aliases` | export / register `{concepts:{alias:canonical}, labels:{...}}` / withdraw `{concepts:[alias], labels:[...]}` |
 | GET/POST | `/contexts/{name}/sources` | registered source list / `{passages:{source:text}}` |
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
 | POST | `/contexts/{name}/sources/search` | `{query, limit?=5}` → `[{source, score, text}]` full-text over passages |

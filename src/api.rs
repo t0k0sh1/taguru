@@ -699,6 +699,61 @@ pub async fn add_aliases(
     }
 }
 
+/// Alias withdrawals — the exact registered spellings, per namespace.
+/// Withdrawal is the undo for a mis-registered alias: the spelling
+/// stops resolving and is free to register again; canonicals and
+/// edges are untouched, and a canonical name is refused (removal
+/// must never unname a record).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RemoveAliasesRequest {
+    pub concepts: Vec<String>,
+    pub labels: Vec<String>,
+}
+
+pub async fn remove_aliases(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    AppJson(request): AppJson<RemoveAliasesRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    // An empty withdrawal is a malformed request, not a silent no-op.
+    if request.concepts.is_empty() && request.labels.is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "the request names no aliases to remove",
+            started_at,
+        );
+    }
+    match state.remove_aliases(&name, &request.concepts, &request.labels) {
+        Err(failure) => access_error(&state, failure, &name, started_at),
+        Ok(Ok(removed)) => {
+            state.note_write(&name);
+            ok(removed, started_at)
+        }
+        Ok(Err(partial)) => {
+            if partial.applied > 0 {
+                state.note_write(&name);
+            }
+            // `full` is unreachable for removals (they free, never
+            // fill), but the shared mapping stays uniform.
+            let status = if partial.full {
+                StatusCode::INSUFFICIENT_STORAGE
+            } else {
+                StatusCode::CONFLICT
+            };
+            error(
+                status,
+                format!(
+                    "removed {} aliases, then {}",
+                    partial.applied, partial.message
+                ),
+                started_at,
+            )
+        }
+    }
+}
+
 pub async fn list_aliases(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     let started_at = Instant::now();
     match state.read_context(&name, |context| AliasExport {

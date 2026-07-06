@@ -1670,6 +1670,31 @@ impl AppState {
         self.logged_write(name, &wal_ops, |context| apply_in_order(context, &wal_ops))
     }
 
+    /// Withdraws alias registrations (concept spellings then label
+    /// spellings, in the order given), staged in the WAL first — the
+    /// same partial semantics as every batch write. `Ok(Ok(n))`
+    /// counts spellings withdrawn; canonical names and unknown
+    /// spellings are refused as conflicts, never applied silently.
+    pub fn remove_aliases(
+        &self,
+        name: &str,
+        concepts: &[String],
+        labels: &[String],
+    ) -> Result<Result<usize, PartialWrite>, AccessError> {
+        let mut wal_ops = Vec::with_capacity(concepts.len() + labels.len());
+        for alias in concepts {
+            wal_ops.push(WalOp::UnaliasConcept {
+                alias: alias.clone(),
+            });
+        }
+        for alias in labels {
+            wal_ops.push(WalOp::UnaliasLabel {
+                alias: alias.clone(),
+            });
+        }
+        self.logged_write(name, &wal_ops, |context| apply_in_order(context, &wal_ops))
+    }
+
     /// The entry's vector store, loaded from its sidecar on first use
     /// and held until refresh replaces it or eviction clears it.
     fn entry_vectors(&self, entry: &Entry, stem: &str) -> Arc<VectorStore> {
@@ -1951,6 +1976,29 @@ fn apply_op(context: &mut Context, op: &WalOp) -> Result<(), (String, bool)> {
                     matches!(error, AliasError::Full(_)),
                 )
             }),
+        // A withdrawal of an absent spelling is a client mistake on
+        // the live path (409, like every conflict), and on replay the
+        // usual logged skip. Never a capacity error: removal frees.
+        WalOp::UnaliasConcept { alias } => match context.remove_concept_alias(alias) {
+            Some(_) => Ok(()),
+            None => Err((
+                format!(
+                    "'{alias}' is not a concept alias (canonical names cannot be \
+                     removed this way)"
+                ),
+                false,
+            )),
+        },
+        WalOp::UnaliasLabel { alias } => match context.remove_label_alias(alias) {
+            Some(_) => Ok(()),
+            None => Err((
+                format!(
+                    "'{alias}' is not a label alias (canonical names cannot be \
+                     removed this way)"
+                ),
+                false,
+            )),
+        },
         WalOp::RetractSource { source } => {
             context.retract_source(source);
             Ok(())
@@ -3037,6 +3085,50 @@ mod tests {
             );
             let _ = fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn alias_removal_survives_a_restart_via_the_wal() {
+        let dir = scratch_dir("unalias-wal");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "創業年", "1907年", 1.0, None)],
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .add_aliases(
+                    "sake",
+                    &BTreeMap::from([("Aomine".to_string(), "青嶺酒造".to_string())]),
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+                .unwrap();
+            // Bake the alias into the image; the removal that follows
+            // lives only in the WAL when the process dies.
+            state.flush_dirty();
+            assert_eq!(
+                state
+                    .remove_aliases("sake", &["Aomine".to_string()], &[])
+                    .unwrap()
+                    .unwrap(),
+                1
+            );
+        }
+        let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let aliases = reborn
+            .read_context("sake", |context| context.concept_aliases().len())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(aliases, 0, "the un-flushed removal must replay");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
