@@ -1387,32 +1387,9 @@ fn resolve_with_fallback(
     let served = if confident {
         lexical_tier(lexical)
     } else {
-        // The provider round trip can take hundreds of milliseconds;
-        // tell the runtime this thread will block so other tasks
-        // migrate off it.
-        match tokio::task::block_in_place(|| {
-            state.semantic_resolve(name, &request.cue, labels, request.semantic_floor)
-        }) {
-            None => return not_found(name, started_at),
-            Some(Ok(semantic)) => merge_tiers(lexical, semantic),
-            // The semantic tier is enrichment once ANY lexical
-            // candidate exists: degrade to the weak lexical results
-            // and log, rather than failing an answerable request over
-            // a provider hiccup.
-            Some(Err(message)) if !lexical.is_empty() => {
-                tracing::warn!("semantic entry failed (serving weak lexical results): {message}");
-                lexical_tier(lexical)
-            }
-            Some(Err(message)) => {
-                tracing::warn!(
-                    "semantic entry failed with nothing lexical to fall back on: {message}"
-                );
-                return error(
-                    StatusCode::BAD_GATEWAY,
-                    format!("semantic entry failed: {message}"),
-                    started_at,
-                );
-            }
+        match semantic_fallback(state, name, request, labels, lexical, started_at) {
+            Ok(served) => served,
+            Err(response) => return response,
         }
     };
     let op = if labels {
@@ -1436,6 +1413,43 @@ fn resolve_with_fallback(
         );
     }
     ok(served, started_at)
+}
+
+/// The semantic tier, entered when the lexical tiers came back empty
+/// or fragment-weak. `Err` is a response to serve immediately: unknown
+/// context, or a provider failure with nothing lexical to degrade to.
+#[allow(clippy::result_large_err)] // the Err IS the response served next
+fn semantic_fallback(
+    state: &AppState,
+    name: &str,
+    request: &ResolveRequest,
+    labels: bool,
+    lexical: Vec<Resolution>,
+    started_at: Instant,
+) -> Result<Vec<TieredResolution>, Response> {
+    // The provider round trip can take hundreds of milliseconds; tell
+    // the runtime this thread will block so other tasks migrate off it.
+    match tokio::task::block_in_place(|| {
+        state.semantic_resolve(name, &request.cue, labels, request.semantic_floor)
+    }) {
+        None => Err(not_found(name, started_at)),
+        Some(Ok(semantic)) => Ok(merge_tiers(lexical, semantic)),
+        // The semantic tier is enrichment once ANY lexical candidate
+        // exists: degrade to the weak lexical results and log, rather
+        // than failing an answerable request over a provider hiccup.
+        Some(Err(message)) if !lexical.is_empty() => {
+            tracing::warn!("semantic entry failed (serving weak lexical results): {message}");
+            Ok(lexical_tier(lexical))
+        }
+        Some(Err(message)) => {
+            tracing::warn!("semantic entry failed with nothing lexical to fall back on: {message}");
+            Err(error(
+                StatusCode::BAD_GATEWAY,
+                format!("semantic entry failed: {message}"),
+                started_at,
+            ))
+        }
+    }
 }
 
 /// Classifies a resolve by what was actually served, so every serve
