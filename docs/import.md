@@ -7,7 +7,9 @@ advisory flock, dependable on local disks; the README notes the
 network-filesystem caveats). It is
 the bulk path: initial loads, migrations between instances, replaying
 the output of an extraction pipeline. Live, incremental writing stays
-on the HTTP API / MCP tools.
+on the HTTP API / MCP tools — and a **running** server accepts the
+same batch contract at `POST /import`, one file per request, so live
+systems take bulk loads without a downtime window (section below).
 
 ```sh
 taguru import batch/                  # every *.jsonl under batch/, name order
@@ -140,6 +142,47 @@ the end of the run — the same idempotent refresh the server's
 failure does not undo anything: the graph is imported and durable,
 and the run exits 1 naming the recovery
 (`POST /contexts/{name}/embeddings/refresh` on the running server).
+
+## The same contract over HTTP: `POST /import`
+
+A running server serves the whole contract above on one endpoint:
+the request body IS one batch file, and one request states one
+source's complete truth — validated first (a malformed line is a
+line-numbered 400 and nothing applies), then retract-then-apply, so
+re-posting a batch replaces its source exactly like re-running the
+CLI. The response carries the same numbers the CLI prints:
+
+```sh
+# --data-binary, not -d: curl's -d strips newlines, and newlines are
+# the format.
+curl -X POST localhost:8248/import \
+  -H 'Authorization: Bearer <key>' \
+  --data-binary @docs-aomine.jsonl
+# → {"result": {"context": "sake", "source": "docs/aomine.md",
+#    "created": false, "retracted": 12, "associations": 14,
+#    "aliases": 2, "passage_stored": true}, "status": "ok", ...}
+```
+
+Everything that governs any endpoint governs this one: bearer auth,
+the body cap (`TAGURU_MAX_BODY_BYTES`, 8 MiB default — a larger batch
+wants the offline CLI or a raised cap), the request timeout, the
+per-key rate limit. Statuses follow the API's conventions: `400`
+malformed batch (line-numbered) · `404` the context does not exist
+and the batch has no create block · `409` / `507` a partial write
+(conflict / capacity), with what landed named in the message — the
+retraction makes a corrected retry exact · `500` a write the WAL or
+disk refused. Embeddings are not refreshed in-request; they ride the
+next flush when `TAGURU_EMBED_AUTO` is on, like every live write.
+
+Two batches for **different** sources may be posted concurrently —
+each write inside a batch serializes on the context. Do not race two
+imports of the **same** source: the retract and apply of one request
+can interleave with the other's, and the union of both batches
+survives. One source, one writer at a time.
+
+Choosing an entrance: no server yet, or a mass initial load →
+`taguru import` (no per-request cap, one flush at the end). A live
+system that must keep answering → `POST /import`.
 
 ## Producing batch files
 

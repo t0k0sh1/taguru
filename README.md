@@ -272,7 +272,17 @@ Validation is a separate pass: a malformed line refuses the whole run
 (with its line number) before anything is written, and `--dry-run`
 stops there on purpose. The data directory lock makes import and a
 running server mutually exclusive — no torn state, just a refusal.
-Full contract: [docs/import.md](docs/import.md).
+
+A **running** server takes the same contract at `POST /import` (one
+request = one batch file, same validation, same replace-a-source
+semantics), so live systems bulk-load without a downtime window:
+
+```sh
+curl -X POST localhost:8248/import -H 'Authorization: Bearer <key>' \
+  --data-binary @docs-aomine.jsonl   # --data-binary: -d strips the newlines
+```
+
+Full contract for both entrances: [docs/import.md](docs/import.md).
 
 ## Using it from an LLM agent (MCP)
 
