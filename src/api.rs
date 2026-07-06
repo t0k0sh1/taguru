@@ -545,6 +545,16 @@ pub(crate) const MAX_CONTEXT_NAME_BYTES: usize = 64;
 /// directory listing.
 pub(crate) const MAX_DESCRIPTION_BYTES: usize = 4096;
 
+/// Byte cap on one doc2query question — a search phrase, not a
+/// document; anything longer is misuse of the field.
+pub(crate) const MAX_QUESTION_BYTES: usize = 512;
+
+/// How many stored questions one paragraph may carry (shared with
+/// `taguru extract --questions`, whose N cannot exceed it). Each
+/// question is an embedded row spending the vector-limit budget;
+/// past a handful they stop adding recall and start crowding it out.
+pub(crate) const MAX_QUESTIONS_PER_PARAGRAPH: usize = 8;
+
 /// The optional-body contract of create and audit: an ABSENT body
 /// means defaults, but a PRESENT body must parse as JSON — whatever
 /// the Content-Type header says. `Option<Json<T>>` answered a
@@ -774,10 +784,22 @@ pub async fn list_aliases(State(state): State<AppState>, Path(name): Path<String
 }
 
 /// Original text passages keyed by source id — the same opaque ids that
-/// appear on attributions.
+/// appear on attributions — plus, optionally, doc2query questions per
+/// source, each naming a paragraph of that source's text IN THIS
+/// REQUEST (a question cannot attach to text the request does not
+/// carry: storage replaces per source, wholesale).
 #[derive(Debug, Deserialize)]
 pub struct StorePassagesRequest {
     pub passages: BTreeMap<String, String>,
+    #[serde(default)]
+    pub questions: BTreeMap<String, Vec<QuestionSpec>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionSpec {
+    pub paragraph: u32,
+    pub question: String,
 }
 
 /// What a passage store accomplished. `stored` counts the batch (the
@@ -805,10 +827,64 @@ pub async fn store_passages(
             return refusal;
         }
     }
+    // Question structure is the request's to get right: sources must
+    // name passages in THIS request, sizes and per-paragraph counts
+    // stay under the shared caps. (Whether a paragraph index exists in
+    // the text is settled at store time, one rule for every entrance.)
+    for (source, questions) in &request.questions {
+        if !request.passages.contains_key(source) {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "questions for '{source}' arrived without a passage for it in this request"
+                ),
+                started_at,
+            );
+        }
+        let mut per_paragraph: BTreeMap<u32, usize> = BTreeMap::new();
+        for spec in questions {
+            if spec.question.len() > MAX_QUESTION_BYTES {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "a question for '{source}' is {} bytes; questions are capped at \
+                         {MAX_QUESTION_BYTES} bytes",
+                        spec.question.len()
+                    ),
+                    started_at,
+                );
+            }
+            let count = per_paragraph.entry(spec.paragraph).or_insert(0);
+            *count += 1;
+            if *count > MAX_QUESTIONS_PER_PARAGRAPH {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "paragraph {} of '{source}' carries more than \
+                         {MAX_QUESTIONS_PER_PARAGRAPH} questions",
+                        spec.paragraph
+                    ),
+                    started_at,
+                );
+            }
+        }
+    }
+    let mut questions = request.questions;
     let passages: BTreeMap<String, crate::passages::PassageSubmission> = request
         .passages
         .into_iter()
-        .map(|(source, text)| (source, crate::passages::PassageSubmission::plain(text)))
+        .map(|(source, text)| {
+            let questions = questions
+                .remove(&source)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|spec| (spec.paragraph, spec.question))
+                .collect();
+            (
+                source,
+                crate::passages::PassageSubmission { text, questions },
+            )
+        })
         .collect();
     // Off the async worker: the store fsyncs its log, and folding the
     // new paragraphs into a resident index tokenizes them.
@@ -1025,6 +1101,8 @@ pub struct ImportOutcome {
     pub associations: usize,
     pub aliases: usize,
     pub passage_stored: bool,
+    pub questions_stored: usize,
+    pub questions_dropped: usize,
 }
 
 /// `POST /import` — the batch-file contract (docs/import.md) over
@@ -1052,6 +1130,8 @@ pub async fn import_batch(State(state): State<AppState>, body: axum::body::Bytes
                 associations: applied.associations,
                 aliases: applied.aliases,
                 passage_stored: applied.passage_stored,
+                questions_stored: applied.questions_stored,
+                questions_dropped: applied.questions_dropped,
             },
             started_at,
         ),
