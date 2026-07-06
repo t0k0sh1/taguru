@@ -242,9 +242,10 @@ collector configuration, not a Taguru change.
 — it recovers by itself one flush interval after the disk does.
 
 Backups: one context is the whole file family — `{stem}.ctx`,
-`.meta.json`, `.passages.bin`, `.passages.wal.jsonl`, `.vectors.bin`,
-`.wal.jsonl` (plus a legacy `.sources.json` until the first passage
-compaction retires it) — back them up together, never partially. Every writer is fsync + rename, so
+`.meta.json`, `.passages.bin`, `.passages.wal.jsonl`, `.bm25.bin`,
+`.vectors.bin`, `.wal.jsonl` (plus a legacy `.sources.json` until the
+first passage compaction retires it) — back them up together, never
+partially. Every writer is fsync + rename, so
 a filesystem-level point-in-time snapshot (ZFS/Btrfs/LVM) of the data
 directory is safe at any moment; a file-by-file copy of a *running*
 server (plain `rsync`/`cp`) is not guaranteed consistent across files

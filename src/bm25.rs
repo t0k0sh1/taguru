@@ -15,10 +15,13 @@
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::passages::PassageRecord;
 use crate::registry::passage_terms;
+
+const INDEX_MAGIC: &[u8; 8] = b"TAGURUB1";
 
 /// BM25 constants, shared with nothing: the paragraph is the document.
 const K1: f32 = 1.2;
@@ -244,6 +247,178 @@ impl Bm25Index {
         hits
     }
 
+    /// Per-source digest over (paragraph index, paragraph hash) of the
+    /// LIVE slots, in index order — the load-time drift detector: a
+    /// source whose digest disagrees with the passage store's current
+    /// record gets re-upserted instead of costing a full rebuild.
+    pub(crate) fn source_digests(&self) -> HashMap<String, u64> {
+        let mut digests = HashMap::new();
+        for (&source_id, slot_list) in &self.by_source {
+            let mut digest = DIGEST_OFFSET;
+            let mut any = false;
+            for &slot in slot_list {
+                let slot = &self.slots[slot as usize];
+                if slot.alive {
+                    digest = digest_fold(digest, slot.index, slot.hash);
+                    any = true;
+                }
+            }
+            if any {
+                digests.insert(self.sources[source_id as usize].clone(), digest);
+            }
+        }
+        digests
+    }
+
+    /// Reads the sidecar, `None` on any problem — a corrupt or missing
+    /// index costs a rebuild, never an outage.
+    pub(crate) fn load(path: &Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        let parsed = Self::from_bytes(&bytes);
+        if parsed.is_none() {
+            tracing::warn!("ignoring corrupt BM25 index at {}", path.display());
+        }
+        parsed
+    }
+
+    /// Serializes the LIVE slots in canonical order (sources sorted,
+    /// slots by (source, index), terms sorted, postings slot-ascending)
+    /// — byte-stable for identical content, and saving IS a compaction:
+    /// tombstones never reach the disk.
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        // Canonical live view: sorted source names, renumbered ids.
+        let mut live_sources: Vec<&String> = self
+            .by_source
+            .iter()
+            .filter(|(_, slots)| slots.iter().any(|&slot| self.slots[slot as usize].alive))
+            .map(|(&id, _)| &self.sources[id as usize])
+            .collect();
+        live_sources.sort();
+        let new_source_id: HashMap<&String, u32> = live_sources
+            .iter()
+            .enumerate()
+            .map(|(id, name)| (*name, id as u32))
+            .collect();
+
+        // Live slots in canonical order, and old-slot → new-slot map.
+        let mut order: Vec<u32> = (0..self.slots.len() as u32)
+            .filter(|&slot| self.slots[slot as usize].alive)
+            .collect();
+        order.sort_by_key(|&slot| {
+            let slot = &self.slots[slot as usize];
+            (&self.sources[slot.source_id as usize], slot.index)
+        });
+        let new_slot: HashMap<u32, u32> = order
+            .iter()
+            .enumerate()
+            .map(|(new, &old)| (old, new as u32))
+            .collect();
+
+        let mut out = Vec::new();
+        out.extend_from_slice(INDEX_MAGIC);
+        out.extend_from_slice(&(live_sources.len() as u32).to_le_bytes());
+        for source in &live_sources {
+            out.extend_from_slice(&(source.len() as u32).to_le_bytes());
+            out.extend_from_slice(source.as_bytes());
+        }
+        out.extend_from_slice(&(order.len() as u32).to_le_bytes());
+        for &old in &order {
+            let slot = &self.slots[old as usize];
+            out.extend_from_slice(
+                &new_source_id[&self.sources[slot.source_id as usize]].to_le_bytes(),
+            );
+            out.extend_from_slice(&slot.index.to_le_bytes());
+            out.extend_from_slice(&slot.length.to_le_bytes());
+            out.extend_from_slice(&slot.hash.to_le_bytes());
+        }
+        let mut terms: Vec<u64> = self
+            .postings
+            .iter()
+            .filter(|(_, list)| {
+                list.iter()
+                    .any(|posting| self.slots[posting.slot as usize].alive)
+            })
+            .map(|(&term, _)| term)
+            .collect();
+        terms.sort_unstable();
+        out.extend_from_slice(&(terms.len() as u32).to_le_bytes());
+        for term in terms {
+            let list = &self.postings[&term];
+            let mut live: Vec<(u32, f32)> = list
+                .iter()
+                .filter(|posting| self.slots[posting.slot as usize].alive)
+                .map(|posting| (new_slot[&posting.slot], posting.tf))
+                .collect();
+            live.sort_by_key(|&(slot, _)| slot);
+            out.extend_from_slice(&term.to_le_bytes());
+            out.extend_from_slice(&(live.len() as u32).to_le_bytes());
+            for (slot, tf) in live {
+                out.extend_from_slice(&slot.to_le_bytes());
+                out.extend_from_slice(&tf.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut pos = 0usize;
+        if bytes.get(..8)? != INDEX_MAGIC {
+            return None;
+        }
+        pos += 8;
+        let source_count = read_u32(bytes, &mut pos)? as usize;
+        let mut index = Self::empty();
+        for _ in 0..source_count {
+            let len = read_u32(bytes, &mut pos)? as usize;
+            let slice = bytes.get(pos..pos.checked_add(len)?)?;
+            pos += len;
+            let name = std::str::from_utf8(slice).ok()?;
+            // intern() assigns ids in insertion order = file order.
+            index.intern(name);
+        }
+        let slot_count = read_u32(bytes, &mut pos)? as usize;
+        for _ in 0..slot_count {
+            let source_id = read_u32(bytes, &mut pos)?;
+            if source_id as usize >= index.sources.len() {
+                return None;
+            }
+            let paragraph = read_u32(bytes, &mut pos)?;
+            let length = f32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+            pos += 4;
+            let hash = u64::from_le_bytes(bytes.get(pos..pos + 8)?.try_into().ok()?);
+            pos += 8;
+            let slot = index.slots.len() as u32;
+            index.slots.push(Slot {
+                source_id,
+                index: paragraph,
+                length,
+                hash,
+                alive: true,
+            });
+            index.by_source.entry(source_id).or_default().push(slot);
+            index.live_count += 1;
+            index.live_total_length += f64::from(length);
+        }
+        let term_count = read_u32(bytes, &mut pos)? as usize;
+        for _ in 0..term_count {
+            let term = u64::from_le_bytes(bytes.get(pos..pos + 8)?.try_into().ok()?);
+            pos += 8;
+            let posting_count = read_u32(bytes, &mut pos)? as usize;
+            let mut list = Vec::with_capacity(posting_count.min(1 << 20));
+            for _ in 0..posting_count {
+                let slot = read_u32(bytes, &mut pos)?;
+                if slot as usize >= index.slots.len() {
+                    return None;
+                }
+                let tf = f32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                pos += 4;
+                list.push(Posting { slot, tf });
+            }
+            index.postings.insert(term, list);
+        }
+        (pos == bytes.len()).then_some(index)
+    }
+
     /// Rough resident bytes, for the cache budget and the gauges.
     pub(crate) fn footprint(&self) -> usize {
         const POSTING: usize = std::mem::size_of::<Posting>();
@@ -266,6 +441,36 @@ impl Bm25Index {
         self.source_ids.insert(source.to_string(), id);
         id
     }
+}
+
+const DIGEST_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// One (paragraph index, paragraph hash) step of a source digest —
+/// FNV-1a-shaped so the fold depends on order and content both.
+fn digest_fold(digest: u64, index: u32, hash: u64) -> u64 {
+    let mut digest = digest;
+    for byte in index.to_le_bytes().into_iter().chain(hash.to_le_bytes()) {
+        digest ^= u64::from(byte);
+        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    digest
+}
+
+/// The passage store's side of the drift comparison: the digest the
+/// index WOULD have for this record if it were fresh.
+pub(crate) fn record_digest(record: &PassageRecord) -> u64 {
+    record
+        .paragraphs
+        .iter()
+        .fold(DIGEST_OFFSET, |digest, span| {
+            digest_fold(digest, span.index, span.hash)
+        })
+}
+
+fn read_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    let slice = bytes.get(*pos..*pos + 4)?;
+    *pos += 4;
+    Some(u32::from_le_bytes(slice.try_into().ok()?))
 }
 
 #[cfg(test)]
@@ -468,6 +673,55 @@ mod tests {
         assert!(index.needs_reclaim());
         index.live_count = (COMPACT_DEAD_FLOOR + 1) * 4;
         assert!(!index.needs_reclaim(), "a big live set earns more slack");
+    }
+
+    #[test]
+    fn index_round_trips_through_bytes_and_tombstones_stay_behind() {
+        let records = corpus();
+        let mut index = Bm25Index::build(&records);
+        index.remove_source("docs/takase.md");
+
+        let bytes = index.to_bytes();
+        let reborn = Bm25Index::from_bytes(&bytes).unwrap();
+        assert_eq!(reborn.dead_count, 0, "saving IS a compaction");
+        for query in ["精米歩合はどこまで磨く?", "state", "杜氏の経験"] {
+            let grams = grams(query);
+            assert_eq!(
+                reborn.search(&grams, 10),
+                index.search(&grams, 10),
+                "the reborn index must answer exactly like the live one (query {query:?})"
+            );
+        }
+        assert_eq!(
+            index.source_digests(),
+            reborn.source_digests(),
+            "digests survive the round trip — the drift detector depends on it"
+        );
+        // Canonical serialization: same content, same bytes.
+        assert_eq!(bytes, reborn.to_bytes());
+
+        assert!(Bm25Index::from_bytes(b"garbage").is_none());
+        assert!(Bm25Index::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+        let mut padded = bytes.clone();
+        padded.push(0);
+        assert!(
+            Bm25Index::from_bytes(&padded).is_none(),
+            "trailing bytes are corruption, not slack"
+        );
+    }
+
+    #[test]
+    fn record_digest_matches_the_index_side_fold() {
+        let records = corpus();
+        let index = Bm25Index::build(&records);
+        let digests = index.source_digests();
+        for (source, record) in &records {
+            assert_eq!(
+                digests[source],
+                record_digest(record),
+                "both sides of the drift comparison must compute the same digest ({source})"
+            );
+        }
     }
 
     #[test]

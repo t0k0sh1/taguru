@@ -258,6 +258,12 @@ pub struct Entry {
     /// READING the store is fine and is how a build works; the reverse
     /// nesting would deadlock against it).
     bm25: RwLock<Option<crate::bm25::Bm25Index>>,
+    /// Set when the resident index diverges from its `{stem}.bm25.bin`
+    /// sidecar (a build, a repair, an in-place update); the flush tick
+    /// persists and clears it, eviction saves best-effort. The sidecar
+    /// spares the next residency a full re-tokenization — it is still
+    /// derived data, so a failed save only warns.
+    bm25_dirty: AtomicBool,
     /// The paragraph vector sidecar, resident after first use — the
     /// vector lane's mirror of `vectors`, in its own slot so resolve's
     /// small hot gloss store never shares a fate with this big one.
@@ -303,6 +309,7 @@ impl Entry {
             vectors: Mutex::new(None),
             passages: Mutex::new(None),
             bm25: RwLock::new(None),
+            bm25_dirty: AtomicBool::new(false),
             passage_vectors: Mutex::new(None),
             passages_embed_dirty: AtomicBool::new(false),
             passage_refresh: Mutex::new(()),
@@ -971,6 +978,7 @@ impl AppState {
             passages_path(&self.0.data_dir, &stem),
             passages_wal_path(&self.0.data_dir, &stem),
             pvectors_path(&self.0.data_dir, &stem),
+            bm25_path(&self.0.data_dir, &stem),
             vectors_path(&self.0.data_dir, &stem),
         ] {
             if let Err(error) = fs::remove_file(&stale)
@@ -1041,6 +1049,7 @@ impl AppState {
             format!("{stem}.passages.bin"),
             format!("{stem}.passages.wal.jsonl"),
             format!("{stem}.pvectors.bin"),
+            format!("{stem}.bm25.bin"),
             format!("{stem}.vectors.bin"),
             format!("{stem}.wal.jsonl"),
         ] {
@@ -1394,12 +1403,43 @@ impl AppState {
             if rebuild {
                 let records = store.snapshot();
                 let built_at = std::time::Instant::now();
-                *guard = Some(crate::bm25::Bm25Index::build(&records));
+                let index = if guard.take().is_some() {
+                    // Tombstone reclamation: rebuild fresh from the store.
+                    entry.bm25_dirty.store(true, Ordering::Relaxed);
+                    crate::bm25::Bm25Index::build(&records)
+                } else if let Some(mut loaded) =
+                    crate::bm25::Bm25Index::load(&bm25_path(&self.0.data_dir, &file_stem(name)))
+                {
+                    // A sidecar spares the re-tokenization, but its save
+                    // cadence is the flush tick — repair whatever drifted
+                    // (per source, both directions) instead of trusting
+                    // or rebuilding wholesale.
+                    let mut disk = loaded.source_digests();
+                    let mut drifted = 0usize;
+                    for (source, record) in &records {
+                        if disk.remove(source) != Some(crate::bm25::record_digest(record)) {
+                            loaded.upsert_source(source, record);
+                            drifted += 1;
+                        }
+                    }
+                    drifted += disk.len();
+                    for source in disk.keys() {
+                        loaded.remove_source(source);
+                    }
+                    if drifted > 0 {
+                        entry.bm25_dirty.store(true, Ordering::Relaxed);
+                    }
+                    loaded
+                } else {
+                    entry.bm25_dirty.store(true, Ordering::Relaxed);
+                    crate::bm25::Bm25Index::build(&records)
+                };
+                *guard = Some(index);
                 tracing::info!(
                     context = %name,
                     sources = records.len(),
                     ms = built_at.elapsed().as_millis() as u64,
-                    "BM25 index built",
+                    "BM25 index ready",
                 );
             }
         }
@@ -1559,6 +1599,34 @@ impl AppState {
                 Some(record) => index.upsert_source(source, &record),
                 None => index.remove_source(source),
             }
+        }
+        if !sources.is_empty() {
+            entry.bm25_dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Persists a dirty resident index. Derived data: a failed save
+    /// re-marks and warns — the next tick retries, and the worst case
+    /// is one re-tokenization on some future load. The fence keeps a
+    /// racing delete from finding its file recreated.
+    fn flush_bm25(&self, name: &str, entry: &Entry) {
+        if !entry.bm25_dirty.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let Some(_fence) = entry.read_unless_deleted() else {
+            return;
+        };
+        let bytes = {
+            let guard = entry.bm25.read().unwrap();
+            match &*guard {
+                Some(index) => index.to_bytes(),
+                // Dropped since (eviction): its own save path ran.
+                None => return,
+            }
+        };
+        if let Err(error) = write_atomic(&bm25_path(&self.0.data_dir, &file_stem(name)), &bytes) {
+            entry.bm25_dirty.store(true, Ordering::Relaxed);
+            tracing::warn!("BM25 index for '{name}' not persisted (will retry): {error}");
         }
     }
 
@@ -2063,6 +2131,7 @@ impl AppState {
     pub fn flush_dirty(&self) -> Vec<String> {
         let mut flushed = Vec::new();
         for (name, entry) in self.snapshot() {
+            self.flush_bm25(&name, &entry);
             if self.flush_entry(&name, &entry) {
                 flushed.push(name);
             }
@@ -2500,7 +2569,22 @@ impl AppState {
             }
             *passages = None;
         }
-        *entry.bm25.write().unwrap() = None;
+        // Same best-effort posture for a dirty index: saving it spares
+        // the next residency a re-tokenization, and the entry lock held
+        // above keeps a racing delete away from the file.
+        {
+            let mut bm25 = entry.bm25.write().unwrap();
+            if let Some(index) = bm25.as_ref()
+                && entry.bm25_dirty.swap(false, Ordering::Relaxed)
+                && let Err(error) = write_atomic(
+                    &bm25_path(&self.0.data_dir, &file_stem(name)),
+                    &index.to_bytes(),
+                )
+            {
+                tracing::warn!("BM25 index for '{name}' evicted unpersisted: {error}");
+            }
+            *bm25 = None;
+        }
         *entry.passage_vectors.lock().unwrap() = None;
         *entry.vectors.lock().unwrap() = None;
         true
@@ -2745,6 +2829,10 @@ pub(crate) fn passages_wal_path(dir: &Path, stem: &str) -> PathBuf {
 
 pub(crate) fn pvectors_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.pvectors.bin"))
+}
+
+pub(crate) fn bm25_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.bm25.bin"))
 }
 
 pub(crate) fn vectors_path(dir: &Path, stem: &str) -> PathBuf {
@@ -4670,6 +4758,149 @@ mod tests {
                 .all(|hit| hit.source != "第2章"),
             "a retracted source must leave the index too"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn passage_search_survives_a_restart_without_retokenizing() {
+        let dir = scratch_dir("bm25-persist");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert("第1章".to_string(), "青嶺酒造の創業は1907年。".to_string());
+            state.store_passages("sake", passages).unwrap().unwrap();
+            // First search builds and marks dirty; the tick persists.
+            state
+                .search_passages("sake", "創業はいつ", 3)
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+            assert!(bm25_path(&dir, &file_stem("sake")).exists());
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let hits = state
+            .search_passages("sake", "創業はいつ", 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits[0].source, "第1章");
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            !entry.bm25_dirty.load(Ordering::Relaxed),
+            "a clean sidecar loads as-is — nothing drifted, nothing re-tokenized"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_stale_index_sidecar_is_repaired_by_the_source_digest_mismatch() {
+        let dir = scratch_dir("bm25-stale");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
+            passages.insert("第2章".to_string(), "仕込み水は伏流水。".to_string());
+            state.store_passages("sake", passages).unwrap().unwrap();
+            state.search_passages("sake", "杜氏", 3).unwrap().unwrap();
+            state.flush_dirty(); // the sidecar now says 高瀬
+        }
+
+        // A new run edits 第1章 and searches BEFORE any flush: the
+        // sidecar on disk still carries the old paragraph.
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let mut edited = BTreeMap::new();
+        edited.insert("第1章".to_string(), "杜氏は佐伯に交代した。".to_string());
+        state.store_passages("sake", edited).unwrap().unwrap();
+        let hits = state
+            .search_passages("sake", "杜氏は誰", 3)
+            .unwrap()
+            .unwrap();
+        assert!(
+            hits[0].text.contains("佐伯"),
+            "the digest mismatch must repair 第1章 from the store, got {:?}",
+            hits[0].text
+        );
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            entry.bm25_dirty.load(Ordering::Relaxed),
+            "a repair leaves the sidecar stale until the next tick"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_corrupt_index_sidecar_falls_back_to_a_full_rebuild_not_an_outage() {
+        let dir = scratch_dir("bm25-corrupt");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1章".to_string(),
+            "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+        fs::write(bm25_path(&dir, &file_stem("sake")), b"not an index").unwrap();
+
+        let hits = state
+            .search_passages("sake", "蔵開きの祭り", 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits[0].source, "第1章");
+        state.flush_dirty();
+        assert!(
+            crate::bm25::Bm25Index::load(&bm25_path(&dir, &file_stem("sake"))).is_some(),
+            "the tick replaces the corpse with a valid sidecar"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn eviction_persists_a_dirty_index_for_the_next_residency() {
+        let dir = scratch_dir("bm25-evict-save");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1章".to_string(),
+            "麹室の湿度は五十パーセント。".to_string(),
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+        state
+            .search_passages("sake", "麹室の湿度", 3)
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        assert!(
+            bm25_path(&dir, &file_stem("sake")).exists(),
+            "a dirty index rides out with the eviction"
+        );
+        // The next residency loads it clean instead of re-tokenizing.
+        state
+            .search_passages("sake", "麹室の湿度", 3)
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        assert!(!entry.bm25_dirty.load(Ordering::Relaxed));
 
         let _ = fs::remove_dir_all(dir);
     }

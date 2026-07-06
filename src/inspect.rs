@@ -11,8 +11,8 @@ use taguru::context::Context;
 
 use crate::cli::fmt_bytes;
 use crate::registry::{
-    meta_path, name_from_stem, passages_path, passages_wal_path, pvectors_path, sources_path,
-    vectors_path, wal_path,
+    bm25_path, meta_path, name_from_stem, passages_path, passages_wal_path, pvectors_path,
+    sources_path, vectors_path, wal_path,
 };
 use crate::wal;
 
@@ -87,6 +87,7 @@ fn inspect_directory(dir: &Path) -> i32 {
     let mut footprint_total = 0u64;
     let mut wal_total = 0u64;
     let mut vectors_total = 0u64;
+    let mut index_total = 0u64;
     let mut passages_total = 0u64;
 
     for stem in &stems {
@@ -150,18 +151,21 @@ fn inspect_directory(dir: &Path) -> i32 {
         };
 
         let wal_bytes = file_size(&wal_path(dir, stem));
-        // Both vector sidecars are derived caches — size-only here.
+        // The vector sidecars and the BM25 index are derived caches —
+        // size-only here.
         let vector_bytes =
             file_size(&vectors_path(dir, stem)) + file_size(&pvectors_path(dir, stem));
+        let index_bytes = file_size(&bm25_path(dir, stem));
         let passage_bytes = file_size(&passages_path(dir, stem))
             + file_size(&passages_wal_path(dir, stem))
             + file_size(&sources_path(dir, stem));
         println!(
-            "{name}: ok  {} · WAL {} ({pending} pending) · vectors {} · passages {} \
+            "{name}: ok  {} · WAL {} ({pending} pending) · vectors {} · index {} · passages {} \
              ({passage_count} sources){meta_note}",
             stats_line(&context, image_bytes),
             fmt_bytes(wal_bytes),
             fmt_bytes(vector_bytes),
+            fmt_bytes(index_bytes),
             fmt_bytes(passage_bytes),
         );
 
@@ -170,15 +174,17 @@ fn inspect_directory(dir: &Path) -> i32 {
         footprint_total += context.footprint() as u64;
         wal_total += wal_bytes;
         vectors_total += vector_bytes;
+        index_total += index_bytes;
         passages_total += passage_bytes;
     }
 
     println!(
-        "total: {contexts} contexts · images {} · WAL {} · vectors {} · passages {} · \
+        "total: {contexts} contexts · images {} · WAL {} · vectors {} · index {} · passages {} · \
          footprint if all resident {}",
         fmt_bytes(image_total),
         fmt_bytes(wal_total),
         fmt_bytes(vectors_total),
+        fmt_bytes(index_total),
         fmt_bytes(passages_total),
         fmt_bytes(footprint_total),
     );
