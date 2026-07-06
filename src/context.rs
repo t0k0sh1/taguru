@@ -2401,10 +2401,19 @@ impl Context {
 
     /// Validates a freshly loaded image and rebuilds the derived indexes
     /// from the flat buffers. Called only by `from_bytes`, on a `Context`
-    /// whose index maps are still empty.
+    /// whose index maps are still empty. The `index_` phases build maps
+    /// as they check; the `validate_` phases only check.
     fn rebuild_indexes(&mut self) -> Result<(), CorruptImage> {
-        // Strings: every name range must be a valid arena slice, and names
-        // must be unique per namespace or lookups would be ambiguous.
+        self.index_names()?;
+        self.index_aliases()?;
+        self.index_edges()?;
+        self.validate_chains()?;
+        self.validate_attributions()
+    }
+
+    /// Strings: every name range must be a valid arena slice, and names
+    /// must be unique per namespace or lookups would be ambiguous.
+    fn index_names(&mut self) -> Result<(), CorruptImage> {
         for (id, record) in self.concepts.iter().enumerate() {
             let name = checked_arena_str(&self.arena, record.name_offset, record.name_len)?;
             self.concept_index.push(name, id as u32);
@@ -2433,9 +2442,12 @@ impl Context {
                 return Err(CorruptImage("two source records share one name"));
             }
         }
+        Ok(())
+    }
 
-        // Aliases join the lookup maps after the canonical names, so any
-        // spelling collision — with a name or another alias — surfaces.
+    /// Aliases join the lookup maps after the canonical names, so any
+    /// spelling collision — with a name or another alias — surfaces.
+    fn index_aliases(&mut self) -> Result<(), CorruptImage> {
         for record in &self.concept_aliases {
             let alias = checked_arena_str(&self.arena, record.name_offset, record.name_len)?;
             if record.target as usize >= self.concepts.len() {
@@ -2464,9 +2476,12 @@ impl Context {
                 return Err(CorruptImage("label alias collides with another spelling"));
             }
         }
+        Ok(())
+    }
 
-        // Edges: endpoints must exist, and triples must be unique — the
-        // accumulate-on-repeat contract depends on it.
+    /// Edges: endpoints must exist, and triples must be unique — the
+    /// accumulate-on-repeat contract depends on it.
+    fn index_edges(&mut self) -> Result<(), CorruptImage> {
         for (id, edge) in self.edges.iter().enumerate() {
             if edge.subject as usize >= self.concepts.len()
                 || edge.object as usize >= self.concepts.len()
@@ -2479,11 +2494,14 @@ impl Context {
                 return Err(CorruptImage("two edge records share one triple"));
             }
         }
+        Ok(())
+    }
 
-        // Chains: each must contain exactly its stored count of edges, all
-        // owned by the anchoring record, ending at the stored tail, with
-        // no cycles — and together the chains of a kind must cover every
-        // edge, or some knowledge would be silently unreachable.
+    /// Chains: each must contain exactly its stored count of edges, all
+    /// owned by the anchoring record, ending at the stored tail, with
+    /// no cycles — and together the chains of a kind must cover every
+    /// edge, or some knowledge would be silently unreachable.
+    fn validate_chains(&self) -> Result<(), CorruptImage> {
         for (id, record) in self.concepts.iter().enumerate() {
             let id = id as u32;
             validate_edge_chain(
@@ -2532,13 +2550,16 @@ impl Context {
         {
             return Err(CorruptImage("edge chains do not cover the edge table"));
         }
+        Ok(())
+    }
 
-        // Attribution chains: in range, sources known, acyclic, ending at
-        // the stored tail, and disjoint across edges — a shared record
-        // would let one edge's accumulation corrupt another's. Records
-        // claimed by NO chain are legal: retraction unlinks records in
-        // place and leaves them behind as dead space in the append-only
-        // table.
+    /// Attribution chains: in range, sources known, acyclic, ending at
+    /// the stored tail, and disjoint across edges — a shared record
+    /// would let one edge's accumulation corrupt another's. Records
+    /// claimed by NO chain are legal: retraction unlinks records in
+    /// place and leaves them behind as dead space in the append-only
+    /// table.
+    fn validate_attributions(&self) -> Result<(), CorruptImage> {
         let mut claimed = vec![false; self.attributions.len()];
         for edge in &self.edges {
             let mut cursor = edge.first_attribution;
