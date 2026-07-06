@@ -352,6 +352,18 @@ fn inspect_flags_a_corrupt_image_and_a_corrupt_wal() {
         String::from_utf8_lossy(&output.stdout)
     );
 
+    // Same strictness for the passage store: its snapshot holds
+    // acknowledged text, so garbage there is a failure, not a shrug.
+    std::fs::remove_file(dir.join("sake.wal.jsonl")).unwrap();
+    std::fs::write(dir.join("sake.passages.bin"), b"not a snapshot").unwrap();
+    let output = run(&["inspect", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("CORRUPT passages"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
