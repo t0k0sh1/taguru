@@ -370,6 +370,56 @@ pub struct PartialWrite {
 /// new writes rather than grow without bound.
 pub const DEFAULT_WAL_MAX_BYTES: usize = 256 * 1024 * 1024;
 
+/// The boot knobs `taguru serve` and `taguru import` read identically —
+/// one reading, so the two entrances cannot drift. The values stay
+/// visible (rather than being swallowed by [`AppState::boot_with`])
+/// because serve's "server ready" line reports them.
+pub struct BootConfig {
+    pub data_dir: PathBuf,
+    pub cache_bytes: usize,
+    pub wal_enabled: bool,
+    pub wal_max_bytes: usize,
+    pub semantic_floor: Option<f32>,
+}
+
+impl BootConfig {
+    pub fn from_env() -> Self {
+        Self {
+            data_dir: PathBuf::from(
+                std::env::var("TAGURU_DATA_DIR").unwrap_or_else(|_| "data".into()),
+            ),
+            cache_bytes: crate::env_number("TAGURU_CACHE_BYTES", 512 * 1024 * 1024),
+            // The WAL closes the flush-interval loss window; opting out
+            // (TAGURU_WAL=0) restores the old posture for benchmarks or
+            // explicit risk acceptance.
+            wal_enabled: std::env::var("TAGURU_WAL")
+                .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+                .unwrap_or(true),
+            // Backstop for a persistently failing flush: past this,
+            // writes are refused rather than growing the log without
+            // bound (0 = no cap).
+            wal_max_bytes: crate::env_number("TAGURU_WAL_MAX_BYTES", DEFAULT_WAL_MAX_BYTES),
+            // The right semantic floor is a property of the embedding
+            // model (cosine bands differ per model), so its
+            // recalibration lives beside TAGURU_EMBED_MODEL rather
+            // than on every context.
+            semantic_floor: crate::env_floor("TAGURU_SEMANTIC_FLOOR"),
+        }
+    }
+
+    /// [`AppState::boot_with`], parameterized by this configuration.
+    pub fn boot(&self, embedder: Option<Arc<dyn EmbeddingProvider>>) -> io::Result<AppState> {
+        AppState::boot_with(
+            self.data_dir.clone(),
+            self.cache_bytes,
+            embedder,
+            self.wal_enabled,
+            self.wal_max_bytes,
+            self.semantic_floor,
+        )
+    }
+}
+
 /// Shared server state: the data directory, the cache budget, and the
 /// context registry.
 #[derive(Clone)]

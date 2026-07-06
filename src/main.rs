@@ -16,7 +16,6 @@ mod remote_mcp;
 mod trace;
 mod wal;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -80,9 +79,7 @@ async fn serve() {
     // silently (tracing has no default subscriber and no buffering).
     let tracer_provider = init_telemetry();
 
-    let data_dir =
-        PathBuf::from(std::env::var("TAGURU_DATA_DIR").unwrap_or_else(|_| "data".into()));
-    let cache_bytes = env_number("TAGURU_CACHE_BYTES", 512 * 1024 * 1024);
+    let config = registry::BootConfig::from_env();
     let flush_secs = env_number("TAGURU_FLUSH_SECS", 5);
     let max_body_bytes = env_number("TAGURU_MAX_BODY_BYTES", 8 * 1024 * 1024);
     let timeout_secs = env_number("TAGURU_REQUEST_TIMEOUT_SECS", 30);
@@ -128,7 +125,7 @@ async fn serve() {
                 );
                 std::process::exit(1);
             }
-            let oauth = Arc::new(oauth::Oauth::open(&url, &data_dir));
+            let oauth = Arc::new(oauth::Oauth::open(&url, &config.data_dir));
             info!(issuer = %oauth.public_url(), "oauth enabled for remote MCP");
             Some(oauth)
         }
@@ -156,32 +153,11 @@ async fn serve() {
     // MCP initialize hands out exactly what GET /protocol serves —
     // both transports, one manual.
     let mcp_instructions = Arc::new(api::protocol_text(protocol_trailer.as_deref()));
-    // The right semantic floor is a property of the embedding model
-    // (cosine bands differ per model), so its recalibration lives here
-    // beside TAGURU_EMBED_MODEL rather than on every context.
-    let semantic_floor = env_floor("TAGURU_SEMANTIC_FLOOR");
-    if let Some(floor) = semantic_floor {
+    if let Some(floor) = config.semantic_floor {
         info!(floor, "semantic floor default recalibrated");
     }
 
-    // The WAL closes the flush-interval loss window; opting out
-    // (TAGURU_WAL=0) restores the old posture for benchmarks or
-    // explicit risk acceptance.
-    let wal_enabled = std::env::var("TAGURU_WAL")
-        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
-        .unwrap_or(true);
-    // Backstop for a persistently failing flush: past this, writes are
-    // refused rather than growing the log without bound (0 = no cap).
-    let wal_max_bytes = env_number("TAGURU_WAL_MAX_BYTES", registry::DEFAULT_WAL_MAX_BYTES);
-
-    let state = match AppState::boot_with(
-        data_dir.clone(),
-        cache_bytes,
-        embedder,
-        wal_enabled,
-        wal_max_bytes,
-        semantic_floor,
-    ) {
+    let state = match config.boot(embedder) {
         Ok(state) => state,
         // A held lock or an unreadable directory is an operator
         // problem, not a bug: one line, no backtrace.
@@ -191,103 +167,9 @@ async fn serve() {
         }
     };
 
-    let flusher = state.clone();
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(flush_secs as u64));
-        ticker.tick().await; // the first tick fires immediately; skip it
-        loop {
-            ticker.tick().await;
-            // Serialization and fsyncs are blocking work; keep the
-            // async workers free while images land on disk.
-            let flushed = tokio::task::block_in_place(|| flusher.flush_dirty());
-            // Opt-in: a flushed context just changed on disk, so its
-            // glosses may have changed too — re-embed the difference.
-            // Best effort: a failed refresh is retried the next time a
-            // write dirties the context (the gloss diff is idempotent),
-            // and the manual endpoint always remains.
-            if auto_embed && !flushed.is_empty() {
-                tokio::task::block_in_place(|| {
-                    for name in &flushed {
-                        match flusher.refresh_embeddings(name) {
-                            None | Some(Ok((0, _))) => {}
-                            Some(Ok((embedded, _))) => {
-                                info!(context = %name, embedded, "auto-embedded glosses");
-                            }
-                            Some(Err(error)) => {
-                                warn!(context = %name, error, "auto embedding refresh failed");
-                            }
-                        }
-                    }
-                });
-            }
-        }
-    });
+    spawn_flusher(state.clone(), flush_secs, auto_embed);
 
-    let app = Router::new()
-        .route("/health", get(metrics::health))
-        .route("/metrics", get(metrics::render))
-        .route(
-            "/protocol",
-            get(move || api::protocol(protocol_trailer.clone())),
-        )
-        .route("/flush", post(api::flush_all))
-        .route("/import", post(api::import_batch))
-        .route("/contexts", get(api::list_contexts))
-        .route(
-            "/contexts/{name}",
-            get(api::get_context)
-                .put(api::create_context)
-                .patch(api::update_context)
-                .delete(api::delete_context),
-        )
-        .route("/contexts/{name}/associations", post(api::add_associations))
-        .route("/contexts/{name}/recall", post(api::recall))
-        .route("/contexts/{name}/query", post(api::query))
-        .route("/contexts/{name}/describe", post(api::describe))
-        .route("/contexts/{name}/explore", post(api::explore))
-        .route("/contexts/{name}/activate", post(api::activate))
-        .route("/contexts/{name}/resolve", post(api::resolve))
-        .route("/contexts/{name}/resolve_label", post(api::resolve_label))
-        .route("/contexts/{name}/labels", get(api::labels))
-        .route(
-            "/contexts/{name}/aliases",
-            get(api::list_aliases)
-                .post(api::add_aliases)
-                .delete(api::remove_aliases),
-        )
-        .route(
-            "/contexts/{name}/sources",
-            get(api::list_sources).post(api::store_passages),
-        )
-        .route(
-            "/contexts/{name}/sources/lookup",
-            post(api::lookup_passages),
-        )
-        .route(
-            "/contexts/{name}/sources/search",
-            post(api::search_passages),
-        )
-        .route(
-            "/contexts/{name}/sources/retract",
-            post(api::retract_source),
-        )
-        .route(
-            "/contexts/{name}/embeddings/refresh",
-            post(api::refresh_embeddings),
-        )
-        .route(
-            "/contexts/{name}/unreachable_from",
-            post(api::unreachable_from),
-        )
-        .route(
-            "/contexts/{name}/vocabulary/audit",
-            post(api::audit_vocabulary),
-        )
-        // Off-axis errors answer in the ApiError shape too: unknown
-        // paths, and known paths hit with the wrong verb.
-        .fallback(api::unknown_path)
-        .method_not_allowed_fallback(api::method_not_allowed)
-        .with_state(state.clone());
+    let app = routes(protocol_trailer).with_state(state.clone());
 
     // POST /mcp speaks the MCP Streamable HTTP transport over these
     // same routes. The dispatch handle is captured BEFORE the
@@ -366,11 +248,11 @@ async fn serve() {
     info!(
         addr = %listener.local_addr().unwrap(),
         contexts = state.context_count(),
-        data_dir = %data_dir.display(),
-        cache_mib = cache_bytes / (1024 * 1024),
+        data_dir = %config.data_dir.display(),
+        cache_mib = config.cache_bytes / (1024 * 1024),
         flush_secs,
-        wal_enabled,
-        wal_max_mib = wal_max_bytes / (1024 * 1024),
+        wal_enabled = config.wal_enabled,
+        wal_max_mib = config.wal_max_bytes / (1024 * 1024),
         max_body_mib = max_body_bytes / (1024 * 1024),
         timeout_secs,
         auth_enabled = auth_configured,
@@ -394,6 +276,110 @@ async fn serve() {
     {
         warn!(error = %error, "trace export flush on shutdown failed");
     }
+}
+
+/// Every HTTP route the server answers, mapped to its api:: handler —
+/// the same table `POST /mcp` dispatches into. Off-axis errors answer
+/// in the ApiError shape too: unknown paths, and known paths hit with
+/// the wrong verb.
+fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
+    Router::new()
+        .route("/health", get(metrics::health))
+        .route("/metrics", get(metrics::render))
+        .route(
+            "/protocol",
+            get(move || api::protocol(protocol_trailer.clone())),
+        )
+        .route("/flush", post(api::flush_all))
+        .route("/import", post(api::import_batch))
+        .route("/contexts", get(api::list_contexts))
+        .route(
+            "/contexts/{name}",
+            get(api::get_context)
+                .put(api::create_context)
+                .patch(api::update_context)
+                .delete(api::delete_context),
+        )
+        .route("/contexts/{name}/associations", post(api::add_associations))
+        .route("/contexts/{name}/recall", post(api::recall))
+        .route("/contexts/{name}/query", post(api::query))
+        .route("/contexts/{name}/describe", post(api::describe))
+        .route("/contexts/{name}/explore", post(api::explore))
+        .route("/contexts/{name}/activate", post(api::activate))
+        .route("/contexts/{name}/resolve", post(api::resolve))
+        .route("/contexts/{name}/resolve_label", post(api::resolve_label))
+        .route("/contexts/{name}/labels", get(api::labels))
+        .route(
+            "/contexts/{name}/aliases",
+            get(api::list_aliases)
+                .post(api::add_aliases)
+                .delete(api::remove_aliases),
+        )
+        .route(
+            "/contexts/{name}/sources",
+            get(api::list_sources).post(api::store_passages),
+        )
+        .route(
+            "/contexts/{name}/sources/lookup",
+            post(api::lookup_passages),
+        )
+        .route(
+            "/contexts/{name}/sources/search",
+            post(api::search_passages),
+        )
+        .route(
+            "/contexts/{name}/sources/retract",
+            post(api::retract_source),
+        )
+        .route(
+            "/contexts/{name}/embeddings/refresh",
+            post(api::refresh_embeddings),
+        )
+        .route(
+            "/contexts/{name}/unreachable_from",
+            post(api::unreachable_from),
+        )
+        .route(
+            "/contexts/{name}/vocabulary/audit",
+            post(api::audit_vocabulary),
+        )
+        .fallback(api::unknown_path)
+        .method_not_allowed_fallback(api::method_not_allowed)
+}
+
+/// The periodic flusher: every `flush_secs`, persist what is dirty —
+/// and, when auto embedding is on, refresh what just flushed. Best
+/// effort: a failed refresh is retried the next time a write dirties
+/// the context (the gloss diff is idempotent), and the manual endpoint
+/// always remains.
+fn spawn_flusher(state: AppState, flush_secs: usize, auto_embed: bool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(flush_secs as u64));
+        ticker.tick().await; // the first tick fires immediately; skip it
+        loop {
+            ticker.tick().await;
+            // Serialization and fsyncs are blocking work; keep the
+            // async workers free while images land on disk.
+            let flushed = tokio::task::block_in_place(|| state.flush_dirty());
+            // Opt-in: a flushed context just changed on disk, so its
+            // glosses may have changed too — re-embed the difference.
+            if auto_embed && !flushed.is_empty() {
+                tokio::task::block_in_place(|| {
+                    for name in &flushed {
+                        match state.refresh_embeddings(name) {
+                            None | Some(Ok((0, _))) => {}
+                            Some(Ok((embedded, _))) => {
+                                info!(context = %name, embedded, "auto-embedded glosses");
+                            }
+                            Some(Err(error)) => {
+                                warn!(context = %name, error, "auto embedding refresh failed");
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    });
 }
 
 /// Installs the global tracing subscriber: `RUST_LOG` filtering

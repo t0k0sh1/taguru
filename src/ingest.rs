@@ -170,30 +170,15 @@ pub fn run(args: &[String]) -> i32 {
     // Registry warnings (WAL replay notes, load errors) must reach the
     // operator; stdout stays reserved for the report lines.
     init_logging();
-    let data_dir =
-        PathBuf::from(std::env::var("TAGURU_DATA_DIR").unwrap_or_else(|_| "data".into()));
     let embedder: Option<std::sync::Arc<dyn crate::embedding::EmbeddingProvider>> = if no_embed {
         None
     } else {
         crate::embedding::HttpEmbeddings::from_env()
             .map(|provider| std::sync::Arc::new(provider) as _)
     };
-    // Mirrors serve's reading of the same knobs (cli.rs documents them
-    // once for both).
-    let wal_enabled = std::env::var("TAGURU_WAL")
-        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
-        .unwrap_or(true);
-    let state = match AppState::boot_with(
-        data_dir,
-        crate::env_number("TAGURU_CACHE_BYTES", 512 * 1024 * 1024),
-        embedder,
-        wal_enabled,
-        crate::env_number(
-            "TAGURU_WAL_MAX_BYTES",
-            crate::registry::DEFAULT_WAL_MAX_BYTES,
-        ),
-        crate::env_floor("TAGURU_SEMANTIC_FLOOR"),
-    ) {
+    // The same knobs serve boots with — one reading for both entrances
+    // (cli.rs documents them once).
+    let state = match crate::registry::BootConfig::from_env().boot(embedder) {
         Ok(state) => state,
         Err(error) => {
             eprintln!("taguru: import: {error}");
