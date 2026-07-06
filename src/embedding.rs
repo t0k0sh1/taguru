@@ -232,18 +232,29 @@ impl VectorStore {
     }
 }
 
-/// One embedded paragraph's identity: the source id attributions
-/// carry, the paragraph's position within that source's current split,
-/// and the FNV-1a hash of exactly its bytes — the staleness detector,
-/// same as gloss vectors.
+/// One embedded row's identity: the source id attributions carry, the
+/// paragraph's position within that source's current split, and the
+/// FNV-1a hash of exactly its bytes — the staleness detector, same as
+/// gloss vectors. `question_hash` discriminates doc2query rows: a
+/// paragraph can carry several vectors (its own text plus each stored
+/// question, all pointing AT the paragraph), and without the
+/// discriminator they would share one key and collapse into a single
+/// carried-forward row on refresh.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PassageKey {
     pub source: String,
     pub index: u32,
     pub hash: u64,
+    /// `None` = the paragraph text's own row; `Some(fnv1a(question))`
+    /// = a question row for that paragraph.
+    pub question_hash: Option<u64>,
 }
 
-const PASSAGE_VECTOR_MAGIC: &[u8; 8] = b"TAGURUP1";
+const PASSAGE_VECTOR_MAGIC: &[u8; 8] = b"TAGURUP2";
+/// The pre-doc2query row format. Discarded politely on load — the same
+/// wholesale-discard contract as a model change: the next refresh
+/// re-embeds, nothing is lost but provider spend.
+const LEGACY_PASSAGE_VECTOR_MAGIC: &[u8; 8] = b"TAGURUP1";
 
 /// Paragraph vectors for one context, `{stem}.pvectors.bin`. Unlike
 /// the gloss [`VectorStore`] this is a FLAT table — one contiguous
@@ -338,14 +349,23 @@ impl PassageVectorStore {
     }
 
     /// Reads the sidecar, returning an empty store on any problem — a
-    /// corrupt vector cache costs a re-embed, never an outage.
+    /// corrupt vector cache costs a re-embed, never an outage. A
+    /// pre-doc2query file (TAGURUP1) is discarded the same way, minus
+    /// the alarm: it is an upgrade, not corruption.
     pub fn load(path: &Path) -> Self {
         match std::fs::read(path) {
             Ok(bytes) => Self::from_bytes(&bytes).unwrap_or_else(|| {
-                tracing::warn!(
-                    "ignoring corrupt passage vector store at {}",
-                    path.display()
-                );
+                if bytes.get(..8) == Some(LEGACY_PASSAGE_VECTOR_MAGIC.as_slice()) {
+                    tracing::info!(
+                        "passage vectors at {} predate doc2query; re-embedding",
+                        path.display()
+                    );
+                } else {
+                    tracing::warn!(
+                        "ignoring corrupt passage vector store at {}",
+                        path.display()
+                    );
+                }
                 Self::default()
             }),
             Err(_) => Self::default(),
@@ -366,6 +386,13 @@ impl PassageVectorStore {
             write_string(&mut out, &key.source);
             out.extend_from_slice(&key.index.to_le_bytes());
             out.extend_from_slice(&key.hash.to_le_bytes());
+            match key.question_hash {
+                Some(question_hash) => {
+                    out.push(1);
+                    out.extend_from_slice(&question_hash.to_le_bytes());
+                }
+                None => out.push(0),
+            }
         }
         for value in &self.data {
             out.extend_from_slice(&value.to_le_bytes());
@@ -394,10 +421,24 @@ impl PassageVectorStore {
             let hash_bytes = bytes.get(pos..pos + 8)?;
             pos += 8;
             let hash = u64::from_le_bytes(hash_bytes.try_into().ok()?);
+            let question_hash = match bytes.get(pos)? {
+                0 => {
+                    pos += 1;
+                    None
+                }
+                1 => {
+                    pos += 1;
+                    let question_bytes = bytes.get(pos..pos + 8)?;
+                    pos += 8;
+                    Some(u64::from_le_bytes(question_bytes.try_into().ok()?))
+                }
+                _ => return None,
+            };
             keys.push(PassageKey {
                 source,
                 index,
                 hash,
+                question_hash,
             });
         }
         let mut data = Vec::with_capacity((count * dim).min(1 << 26));
@@ -562,14 +603,28 @@ mod tests {
                 source: "docs/aomine.md".into(),
                 index: 0,
                 hash: 7,
+                question_hash: None,
             },
             vec![1.0, 0.0],
+        );
+        // A doc2query question row: SAME paragraph key, its own
+        // discriminator — two rows for one paragraph must both survive
+        // the round trip.
+        store.push(
+            PassageKey {
+                source: "docs/aomine.md".into(),
+                index: 0,
+                hash: 7,
+                question_hash: Some(41),
+            },
+            vec![0.6, 0.8],
         );
         store.push(
             PassageKey {
                 source: "docs/aomine.md".into(),
                 index: 1,
                 hash: 9,
+                question_hash: None,
             },
             vec![0.0, 1.0],
         );
@@ -579,20 +634,24 @@ mod tests {
                 source: "bad".into(),
                 index: 0,
                 hash: 1,
+                question_hash: None,
             },
             vec![1.0, 0.0, 0.0],
         );
-        assert_eq!(store.len(), 2);
+        assert_eq!(store.len(), 3);
 
         let bytes = store.to_bytes();
         let loaded = PassageVectorStore::from_bytes(&bytes).unwrap();
         assert_eq!(loaded.model, "test-model");
-        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.len(), 3);
         let rows: Vec<(&PassageKey, &[f32])> = loaded.iter().collect();
         assert_eq!(rows[0].0.index, 0);
+        assert_eq!(rows[0].0.question_hash, None);
         assert_eq!(rows[0].1, &[1.0, 0.0]);
-        assert_eq!(rows[1].0.hash, 9);
-        assert_eq!(rows[1].1, &[0.0, 1.0]);
+        assert_eq!(rows[1].0.question_hash, Some(41));
+        assert_eq!(rows[1].1, &[0.6, 0.8]);
+        assert_eq!(rows[2].0.hash, 9);
+        assert_eq!(rows[2].1, &[0.0, 1.0]);
 
         assert!(PassageVectorStore::from_bytes(b"garbage").is_none());
         assert!(PassageVectorStore::from_bytes(&bytes[..bytes.len() - 1]).is_none());
