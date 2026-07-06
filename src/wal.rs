@@ -17,6 +17,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// One graph mutation, in the same vocabulary the `Context` write API
@@ -37,11 +38,16 @@ pub enum WalOp {
     RetractSource { source: String },
 }
 
+/// The machinery below is generic over the op vocabulary: the graph
+/// logs [`WalOp`] into `{stem}.wal.jsonl`, and any other store with its
+/// own log supplies its own op enum (same internally-tagged shape) and
+/// its own file. Each log is one vocabulary — mixing two op types in
+/// one file would make every replay of it fail as corruption.
 #[derive(Serialize, Deserialize)]
-struct WalRecord {
+struct WalRecord<Op> {
     seq: u64,
     #[serde(flatten)]
-    op: WalOp,
+    op: Op,
 }
 
 /// Appends `ops` numbered from `first_seq`, one line each, with a
@@ -52,12 +58,12 @@ struct WalRecord {
 /// applied anything yet (write-ahead: log, sync, THEN apply). Callers
 /// serialize appends per log (the context's entry lock), so only
 /// crashes race this function, never other appenders.
-pub fn append_batch(path: &Path, first_seq: u64, ops: &[WalOp]) -> io::Result<u64> {
+pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> io::Result<u64> {
     let mut buffer = Vec::new();
     for (offset, op) in ops.iter().enumerate() {
         let record = WalRecord {
             seq: first_seq + offset as u64,
-            op: op.clone(),
+            op,
         };
         serde_json::to_writer(&mut buffer, &record)?;
         buffer.push(b'\n');
@@ -113,7 +119,7 @@ pub fn append_batch(path: &Path, first_seq: u64, ops: &[WalOp]) -> io::Result<u6
 /// warning. Any OTHER undecodable line is real corruption: unlike the
 /// sidecars, this file holds acknowledged writes that exist nowhere
 /// else, so skipping past it would be silent loss — it errors instead.
-pub fn replay(path: &Path, watermark: u64) -> io::Result<(Vec<WalOp>, u64)> {
+pub fn replay<Op: DeserializeOwned>(path: &Path, watermark: u64) -> io::Result<(Vec<Op>, u64)> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -139,7 +145,7 @@ pub fn replay(path: &Path, watermark: u64) -> io::Result<(Vec<WalOp>, u64)> {
     let mut ops = Vec::new();
     let mut top = watermark;
     for (index, line) in segments.iter().enumerate() {
-        let record: WalRecord = serde_json::from_slice(line).map_err(|error| {
+        let record: WalRecord<Op> = serde_json::from_slice(line).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -220,7 +226,7 @@ mod tests {
         assert_eq!(tail.iter().map(subject_of).collect::<Vec<_>>(), vec!["c"]);
 
         // Fully covered: nothing to replay, top sticks to the watermark.
-        let (none, top) = replay(&path, 9).unwrap();
+        let (none, top) = replay::<WalOp>(&path, 9).unwrap();
         assert!(none.is_empty());
         assert_eq!(top, 9);
     }
@@ -249,7 +255,7 @@ mod tests {
         fs::write(&path, bytes).unwrap();
         append_batch(&path, 2, &[associate("b")]).unwrap();
 
-        let error = replay(&path, 0).unwrap_err();
+        let error = replay::<WalOp>(&path, 0).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("line 2"), "{error}");
     }
@@ -257,7 +263,7 @@ mod tests {
     #[test]
     fn a_missing_file_replays_to_nothing() {
         let path = scratch_wal("missing");
-        let (ops, top) = replay(&path, 5).unwrap();
+        let (ops, top) = replay::<WalOp>(&path, 5).unwrap();
         assert!(ops.is_empty());
         assert_eq!(top, 5);
     }
@@ -270,7 +276,7 @@ mod tests {
         reset(&path).unwrap();
         assert_eq!(fs::metadata(&path).unwrap().len(), 0);
         // An emptied log replays to nothing and keeps the numbering.
-        let (ops, top) = replay(&path, 4).unwrap();
+        let (ops, top) = replay::<WalOp>(&path, 4).unwrap();
         assert!(ops.is_empty());
         assert_eq!(top, 4);
     }
