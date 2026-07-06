@@ -83,78 +83,18 @@ const DEFAULT_TIMEOUT_SECS: usize = 300;
 const MANIFEST_NAME: &str = ".extract-manifest.json";
 
 pub fn run(args: &[String]) -> i32 {
-    let mut dry_run = false;
-    let mut force = false;
-    let mut no_passage = false;
-    let mut config: Option<PathBuf> = None;
-    let mut context: Option<String> = None;
-    let mut description: Option<String> = None;
-    let mut out: Option<PathBuf> = None;
-    let mut paths: Vec<String> = Vec::new();
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        match arg.as_str() {
-            "--help" | "-h" => {
-                print!("{USAGE}");
-                return 0;
-            }
-            "--dry-run" => dry_run = true,
-            "--force" => force = true,
-            "--no-passage" => no_passage = true,
-            "--config" => match rest.next() {
-                Some(path) => config = Some(PathBuf::from(path)),
-                None => return usage_error("--config needs a file path"),
-            },
-            "--context" => match rest.next() {
-                Some(name) => context = Some(name.clone()),
-                None => return usage_error("--context needs a name"),
-            },
-            "--description" => match rest.next() {
-                Some(text) => description = Some(text.clone()),
-                None => return usage_error("--description needs a text"),
-            },
-            "--out" => match rest.next() {
-                Some(dir) => out = Some(PathBuf::from(dir)),
-                None => return usage_error("--out needs a directory"),
-            },
-            other if other.starts_with('-') => {
-                return usage_error(&format!("unknown flag '{other}'"));
-            }
-            path => paths.push(path.to_string()),
-        }
-    }
-    let Some(context) = context else {
-        return usage_error("--context NAME is required");
+    let args = match Args::parse(args) {
+        Ok(args) => args,
+        Err(code) => return code,
     };
-    let Some(out) = out else {
-        return usage_error("--out DIR is required");
-    };
-    if context.len() > MAX_CONTEXT_NAME_BYTES {
-        return usage_error(&format!(
-            "context name of {} bytes exceeds the {MAX_CONTEXT_NAME_BYTES}-byte cap",
-            context.len()
-        ));
-    }
-    if let Some(text) = &description
-        && text.len() > MAX_DESCRIPTION_BYTES
-    {
-        return usage_error(&format!(
-            "description of {} bytes exceeds the {MAX_DESCRIPTION_BYTES}-byte cap",
-            text.len()
-        ));
-    }
-    if paths.is_empty() {
-        eprint!("{USAGE}");
-        return 2;
-    }
     // SAFETY (same contract as serve and import): applied while the
     // process is still single-threaded — extract never starts a
     // runtime at all.
-    if let Some(path) = &config {
+    if let Some(path) = &args.config {
         crate::cli::load_config(path);
     }
 
-    let files = match expand_documents(&paths) {
+    let files = match expand_documents(&args.paths) {
         Ok(files) => files,
         Err(message) => return usage_error(&message),
     };
@@ -163,7 +103,7 @@ pub fn run(args: &[String]) -> i32 {
     // up skipped: a run whose environment cannot extract should say so
     // before it reports success. --dry-run alone calls nothing and
     // needs nothing.
-    let client = if dry_run {
+    let client = if args.dry_run {
         None
     } else {
         match ChatClient::from_env() {
@@ -179,150 +119,287 @@ pub fn run(args: &[String]) -> i32 {
         None => std::env::var("TAGURU_EXTRACT_MODEL").unwrap_or_default(),
     };
 
-    if !dry_run && let Err(error) = fs::create_dir_all(&out) {
-        eprintln!("taguru: extract: creating {}: {error}", out.display());
+    if !args.dry_run
+        && let Err(error) = fs::create_dir_all(&args.out)
+    {
+        eprintln!("taguru: extract: creating {}: {error}", args.out.display());
         return 1;
     }
-    let manifest_path = out.join(MANIFEST_NAME);
-    let mut manifest = Manifest::load(&manifest_path);
+    let manifest_path = args.out.join(MANIFEST_NAME);
+    let mut run = Run {
+        context: args.context,
+        description: args.description,
+        force: args.force,
+        dry_run: args.dry_run,
+        no_passage: args.no_passage,
+        out: args.out,
+        client,
+        model_name,
+        manifest: Manifest::load(&manifest_path),
+        vocabulary: BTreeSet::new(),
+        claimed: BTreeMap::new(),
+    };
 
-    // Relation spellings settled so far in this run — offered to every
-    // later document's prompt, the offline stand-in for the live
-    // check-before-mint discipline.
-    let mut vocabulary: BTreeSet<String> = BTreeSet::new();
-    // Flattened output names must stay unique; two colliding sources
-    // would silently overwrite each other's truth.
-    let mut claimed: BTreeMap<String, String> = BTreeMap::new();
     let mut written = 0usize;
     let mut skipped = 0usize;
     let mut failures = 0usize;
-
     for path in &files {
         let source = path.to_string_lossy().into_owned();
+        match run.extract_document(path, &source) {
+            Ok(Outcome::Written) => written += 1,
+            Ok(Outcome::Unchanged) => skipped += 1,
+            Ok(Outcome::Planned) => {}
+            Err(message) => {
+                eprintln!("taguru: extract: {source}: {message}");
+                failures += 1;
+            }
+        }
+    }
+
+    if !run.dry_run
+        && let Err(error) = run.manifest.save(&manifest_path)
+    {
+        eprintln!(
+            "taguru: extract: saving the manifest: {error} — the batches are written; \
+             the next run re-extracts"
+        );
+    }
+    println!(
+        "extract: {written} written, {skipped} unchanged, {failures} failed of {} document(s)",
+        files.len()
+    );
+    if failures > 0 { 1 } else { 0 }
+}
+
+/// The flags and paths one invocation settled on. `Err` from
+/// [`Args::parse`] is the process exit code — 0 after `--help`, 2 for
+/// a usage error (already reported on stderr).
+struct Args {
+    dry_run: bool,
+    force: bool,
+    no_passage: bool,
+    config: Option<PathBuf>,
+    context: String,
+    description: Option<String>,
+    out: PathBuf,
+    paths: Vec<String>,
+}
+
+impl Args {
+    fn parse(args: &[String]) -> Result<Self, i32> {
+        let mut dry_run = false;
+        let mut force = false;
+        let mut no_passage = false;
+        let mut config: Option<PathBuf> = None;
+        let mut context: Option<String> = None;
+        let mut description: Option<String> = None;
+        let mut out: Option<PathBuf> = None;
+        let mut paths: Vec<String> = Vec::new();
+        let mut rest = args.iter();
+        while let Some(arg) = rest.next() {
+            match arg.as_str() {
+                "--help" | "-h" => {
+                    print!("{USAGE}");
+                    return Err(0);
+                }
+                "--dry-run" => dry_run = true,
+                "--force" => force = true,
+                "--no-passage" => no_passage = true,
+                "--config" => match rest.next() {
+                    Some(path) => config = Some(PathBuf::from(path)),
+                    None => return Err(usage_error("--config needs a file path")),
+                },
+                "--context" => match rest.next() {
+                    Some(name) => context = Some(name.clone()),
+                    None => return Err(usage_error("--context needs a name")),
+                },
+                "--description" => match rest.next() {
+                    Some(text) => description = Some(text.clone()),
+                    None => return Err(usage_error("--description needs a text")),
+                },
+                "--out" => match rest.next() {
+                    Some(dir) => out = Some(PathBuf::from(dir)),
+                    None => return Err(usage_error("--out needs a directory")),
+                },
+                other if other.starts_with('-') => {
+                    return Err(usage_error(&format!("unknown flag '{other}'")));
+                }
+                path => paths.push(path.to_string()),
+            }
+        }
+        let Some(context) = context else {
+            return Err(usage_error("--context NAME is required"));
+        };
+        let Some(out) = out else {
+            return Err(usage_error("--out DIR is required"));
+        };
+        if context.len() > MAX_CONTEXT_NAME_BYTES {
+            return Err(usage_error(&format!(
+                "context name of {} bytes exceeds the {MAX_CONTEXT_NAME_BYTES}-byte cap",
+                context.len()
+            )));
+        }
+        if let Some(text) = &description
+            && text.len() > MAX_DESCRIPTION_BYTES
+        {
+            return Err(usage_error(&format!(
+                "description of {} bytes exceeds the {MAX_DESCRIPTION_BYTES}-byte cap",
+                text.len()
+            )));
+        }
+        if paths.is_empty() {
+            eprint!("{USAGE}");
+            return Err(2);
+        }
+        Ok(Self {
+            dry_run,
+            force,
+            no_passage,
+            config,
+            context,
+            description,
+            out,
+            paths,
+        })
+    }
+}
+
+/// What one document's pipeline concluded; [`run`] only counts these
+/// into the summary line.
+enum Outcome {
+    /// A fresh batch file is on disk and recorded in the manifest.
+    Written,
+    /// The manifest proved the computation inputs unchanged; nothing
+    /// was called.
+    Unchanged,
+    /// `--dry-run` reported what would happen without calling anything.
+    Planned,
+}
+
+/// One extract run: the settled flags, the provider, and everything
+/// that accumulates across documents — the manifest, the label
+/// vocabulary offered to later prompts, and the output names already
+/// claimed. One run targets one context on purpose (docs/extract.md).
+struct Run {
+    context: String,
+    description: Option<String>,
+    force: bool,
+    dry_run: bool,
+    no_passage: bool,
+    out: PathBuf,
+    /// `None` exactly under `--dry-run`, which must call nothing.
+    client: Option<ChatClient>,
+    model_name: String,
+    manifest: Manifest,
+    vocabulary: BTreeSet<String>,
+    claimed: BTreeMap<String, String>,
+}
+
+impl Run {
+    /// The whole per-document pipeline: caps, the manifest skip, the
+    /// chunk loop, merge, self-validation, the atomic write, the
+    /// report line. `Err` is one document failing — the caller prints
+    /// it after `taguru: extract: {source}: ` and the run continues.
+    fn extract_document(&mut self, path: &Path, source: &str) -> Result<Outcome, String> {
         if source.len() > MAX_NAME_BYTES {
-            eprintln!(
-                "taguru: extract: {source}: the path is {} bytes, over the {MAX_NAME_BYTES}-byte \
-                 source cap",
+            return Err(format!(
+                "the path is {} bytes, over the {MAX_NAME_BYTES}-byte source cap",
                 source.len()
-            );
-            failures += 1;
-            continue;
+            ));
         }
-        let file_name = batch_file_name(&source);
-        if let Some(other) = claimed.get(&file_name) {
-            eprintln!(
-                "taguru: extract: {source}: its batch file name collides with '{other}' — \
-                 rename one of the documents"
-            );
-            failures += 1;
-            continue;
+        let file_name = batch_file_name(source);
+        if let Some(other) = self.claimed.get(&file_name) {
+            return Err(format!(
+                "its batch file name collides with '{other}' — rename one of the documents"
+            ));
         }
-        claimed.insert(file_name.clone(), source.clone());
-        let out_path = out.join(&file_name);
+        self.claimed.insert(file_name.clone(), source.to_string());
+        let out_path = self.out.join(&file_name);
 
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                eprintln!("taguru: extract: {source}: {error}");
-                failures += 1;
-                continue;
-            }
-        };
-        if bytes.len() > MAX_PASSAGE_BYTES {
-            eprintln!(
-                "taguru: extract: {source}: {} bytes exceeds the {MAX_PASSAGE_BYTES}-byte \
-                 document cap — split the document",
-                bytes.len()
-            );
-            failures += 1;
-            continue;
-        }
-        let text = match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(_) => {
-                eprintln!("taguru: extract: {source}: not UTF-8");
-                failures += 1;
-                continue;
-            }
-        };
+        let text = read_document(path)?;
         let hash = sha256_hex(text.as_bytes());
-
-        if !force && manifest.matches(&source, &hash, &model_name, &context) && out_path.is_file() {
-            // A skipped document still contributes its labels, so
-            // later documents keep reusing the same vocabulary.
-            if let Ok(batch) = fs::File::open(&out_path)
-                .map_err(|error| error.to_string())
-                .and_then(|file| crate::ingest::parse_batch(std::io::BufReader::new(file)))
-            {
-                vocabulary.extend(batch.label_vocabulary());
-            }
+        if !self.force
+            && self
+                .manifest
+                .matches(source, &hash, &self.model_name, &self.context)
+            && out_path.is_file()
+        {
+            self.absorb_vocabulary(&out_path);
             println!("{source}: unchanged, skipped (--force re-extracts)");
-            skipped += 1;
-            continue;
+            return Ok(Outcome::Unchanged);
         }
 
         let chunks = chunk(&text, CHUNK_BYTES);
-        if dry_run {
+        if self.dry_run {
             println!(
                 "{source}: would extract ({} bytes, {} chunk(s)) → {}",
                 text.len(),
                 chunks.len(),
                 out_path.display()
             );
-            continue;
+            return Ok(Outcome::Planned);
         }
-        let client = client.as_ref().expect("a non-dry run built the client");
 
+        let extraction = merge(self.extract_chunks(source, &chunks)?);
+        let body = render_batch(
+            &self.context,
+            source,
+            self.description.as_deref(),
+            &extraction,
+            (!self.no_passage).then_some(text.as_str()),
+        );
+        if let Err(message) = crate::ingest::parse_batch(Cursor::new(body.as_bytes())) {
+            return Err(format!(
+                "the emitted batch failed self-validation \
+                 ({message}) — a bug in taguru, not in the document"
+            ));
+        }
+        if let Err(error) = crate::registry::write_atomic(&out_path, body.as_bytes()) {
+            return Err(format!("writing {}: {error}", out_path.display()));
+        }
+        self.manifest
+            .record(source, &hash, &self.model_name, &self.context, &file_name);
+        self.vocabulary.extend(extraction.label_vocabulary());
+        self.report(source, &extraction, &out_path);
+        Ok(Outcome::Written)
+    }
+
+    /// Every chunk through the model, in order. The system prompt is
+    /// fixed for the whole document: the vocabulary grows only when a
+    /// document lands, so all of one document's chunks are offered the
+    /// same spellings.
+    fn extract_chunks(&self, source: &str, chunks: &[String]) -> Result<Vec<ModelOutput>, String> {
+        let client = self
+            .client
+            .as_ref()
+            .expect("a non-dry run built the client");
+        let system = system_prompt(&self.vocabulary);
         let mut outputs = Vec::new();
-        let mut failed = false;
         for (index, piece) in chunks.iter().enumerate() {
-            let system = system_prompt(&vocabulary);
-            let user = user_message(&source, index, chunks.len(), piece);
+            let user = user_message(source, index, chunks.len(), piece);
             match extract_chunk(client, &system, &user) {
                 Ok(output) => outputs.push(output),
                 Err(message) => {
-                    eprintln!(
-                        "taguru: extract: {source}: chunk {}/{}: {message}",
-                        index + 1,
-                        chunks.len()
-                    );
-                    failed = true;
-                    break;
+                    return Err(format!("chunk {}/{}: {message}", index + 1, chunks.len()));
                 }
             }
         }
-        if failed {
-            failures += 1;
-            continue;
-        }
+        Ok(outputs)
+    }
 
-        let extraction = merge(outputs);
-        let body = render_batch(
-            &context,
-            &source,
-            description.as_deref(),
-            &extraction,
-            (!no_passage).then_some(text.as_str()),
-        );
-        if let Err(message) = crate::ingest::parse_batch(Cursor::new(body.as_bytes())) {
-            eprintln!(
-                "taguru: extract: {source}: the emitted batch failed self-validation \
-                 ({message}) — a bug in taguru, not in the document"
-            );
-            failures += 1;
-            continue;
+    /// A skipped document still contributes its labels, so later
+    /// documents keep reusing the same vocabulary.
+    fn absorb_vocabulary(&mut self, out_path: &Path) {
+        if let Ok(batch) = fs::File::open(out_path)
+            .map_err(|error| error.to_string())
+            .and_then(|file| crate::ingest::parse_batch(std::io::BufReader::new(file)))
+        {
+            self.vocabulary.extend(batch.label_vocabulary());
         }
-        if let Err(error) = crate::registry::write_atomic(&out_path, body.as_bytes()) {
-            eprintln!(
-                "taguru: extract: {source}: writing {}: {error}",
-                out_path.display()
-            );
-            failures += 1;
-            continue;
-        }
-        manifest.record(&source, &hash, &model_name, &context, &file_name);
-        vocabulary.extend(extraction.label_vocabulary());
+    }
 
+    /// The one report line a written document earns.
+    fn report(&self, source: &str, extraction: &Extraction, out_path: &Path) {
         let mut notes = String::new();
         if extraction.duplicates > 0 {
             notes.push_str(&format!(", {} duplicate(s) folded", extraction.duplicates));
@@ -334,23 +411,24 @@ pub fn run(args: &[String]) -> i32 {
             "{source}: {} association(s), {} alias(es){}{notes} → {}",
             extraction.associations.len(),
             extraction.concepts.len() + extraction.labels.len(),
-            if no_passage { "" } else { ", passage" },
+            if self.no_passage { "" } else { ", passage" },
             out_path.display()
         );
-        written += 1;
     }
+}
 
-    if !dry_run && let Err(error) = manifest.save(&manifest_path) {
-        eprintln!(
-            "taguru: extract: saving the manifest: {error} — the batches are written; \
-             the next run re-extracts"
-        );
+/// The document's text, refused early when it could never ride as a
+/// batch passage: unreadable, over the 8 MiB passage cap, or not UTF-8.
+fn read_document(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_PASSAGE_BYTES {
+        return Err(format!(
+            "{} bytes exceeds the {MAX_PASSAGE_BYTES}-byte \
+             document cap — split the document",
+            bytes.len()
+        ));
     }
-    println!(
-        "extract: {written} written, {skipped} unchanged, {failures} failed of {} document(s)",
-        files.len()
-    );
-    if failures > 0 { 1 } else { 0 }
+    String::from_utf8(bytes).map_err(|_| "not UTF-8".to_string())
 }
 
 fn usage_error(message: &str) -> i32 {
