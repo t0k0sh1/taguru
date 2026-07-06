@@ -7,6 +7,8 @@ mod inspect;
 mod limits;
 mod mcp;
 mod metrics;
+mod oauth;
+mod oauth_http;
 mod registry;
 mod remote_mcp;
 mod trace;
@@ -111,6 +113,25 @@ async fn serve() {
              (fine on localhost, never on an exposed address)"
         );
     }
+
+    // TAGURU_PUBLIC_URL turns on OAuth for the remote MCP transport —
+    // the URL doubles as issuer and audience, so OAuth without it
+    // would mint tokens for an address nobody can verify.
+    let oauth = match std::env::var("TAGURU_PUBLIC_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            if !auth_configured {
+                tracing::error!(
+                    "TAGURU_PUBLIC_URL is set but no API key is: the OAuth consent \
+                     step delegates an EXISTING key, so configure TAGURU_API_TOKEN(S) first"
+                );
+                std::process::exit(1);
+            }
+            let oauth = Arc::new(oauth::Oauth::open(&url, &data_dir));
+            info!(issuer = %oauth.public_url(), "oauth enabled for remote MCP");
+            Some(oauth)
+        }
+        _ => None,
+    };
 
     let embedder = embedding::HttpEmbeddings::from_env();
     if let Some(embedder) = &embedder {
@@ -262,13 +283,27 @@ async fn serve() {
     // auth, the timeout, and the body cap at /mcp is not re-charged
     // inside — one client request, one budget, one log line.
     let mcp_dispatch = app.clone();
+    let app = app.route(
+        "/mcp",
+        post(move |body: axum::body::Bytes| {
+            remote_mcp::serve(mcp_dispatch.clone(), Arc::clone(&mcp_instructions), body)
+        }),
+    );
+    // OAuth's discovery and grant endpoints ride the same stack (rate
+    // limited, logged) but are exempted from bearer auth inside the
+    // gate — they exist to create credentials.
+    let app = match &oauth {
+        Some(oauth) => app.merge(oauth_http::router(oauth_http::OauthState {
+            oauth: Arc::clone(oauth),
+            keyring: Arc::clone(&keyring),
+        })),
+        None => app,
+    };
+    let gate = Arc::new(auth::Gate {
+        keyring,
+        oauth: oauth.clone(),
+    });
     let app = app
-        .route(
-            "/mcp",
-            post(move |body: axum::body::Bytes| {
-                remote_mcp::serve(mcp_dispatch.clone(), Arc::clone(&mcp_instructions), body)
-            }),
-        )
         // Layers wrap only the routes registered above and nest by
         // call order — later .layer() calls sit outside earlier ones.
         // Body limit innermost, then the per-key rate gate (inside
@@ -282,7 +317,7 @@ async fn serve() {
             limits::enforce_rate_limit,
         ))
         .layer(axum::middleware::from_fn_with_state(
-            keyring,
+            gate,
             auth::require_bearer,
         ))
         .layer(axum::middleware::from_fn_with_state(

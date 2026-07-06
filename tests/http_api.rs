@@ -47,6 +47,7 @@ impl Server {
             .env_remove("TAGURU_API_TOKEN") // unauthenticated unless a test opts in
             .env_remove("TAGURU_API_TOKENS")
             .env_remove("TAGURU_RATE_LIMIT_PER_MIN")
+            .env_remove("TAGURU_PUBLIC_URL") // no OAuth unless a test opts in
             // No tracing unless a test opts in — a developer shell
             // with a live OTel setup must not flip every test here
             // into export mode.
@@ -244,6 +245,180 @@ fn named_api_tokens_authenticate_alongside_the_default() {
     }
     let (status, _) = server.call_with_token("GET", "/contexts", None, Some("tok-c"));
     assert_eq!(status, 401);
+}
+
+/// The full OAuth dance a claude.ai custom connector performs:
+/// discovery → dynamic registration → consent (the operator delegates
+/// an existing key) → PKCE code exchange → tokens that open /mcp and
+/// nothing else → refresh rotation. PKCE material is the RFC 7636
+/// appendix B vector, so no hashing happens in the test.
+#[test]
+fn oauth_flow_delegates_a_key_to_a_remote_mcp_client() {
+    const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+    const CALLBACK: &str = "https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback";
+
+    let server = Server::start_with_env(
+        "oauth",
+        &[
+            ("TAGURU_API_TOKENS", "laptop:tok-op"),
+            ("TAGURU_PUBLIC_URL", "http://taguru.test"),
+        ],
+    );
+    let no_redirect = ureq::AgentBuilder::new().redirects(0).build();
+
+    // An anonymous /mcp names the discovery document (RFC 9728)...
+    let www_authenticate = match no_redirect
+        .post(&format!("{}/mcp", server.base))
+        .set("Content-Type", "application/json")
+        .send_string("{}")
+    {
+        Err(ureq::Error::Status(401, response)) => response
+            .header("www-authenticate")
+            .expect("401 must carry WWW-Authenticate")
+            .to_string(),
+        other => panic!("anonymous /mcp must be a 401, got {other:?}"),
+    };
+    assert!(
+        www_authenticate.contains(
+            "resource_metadata=\"http://taguru.test/.well-known/oauth-protected-resource\""
+        ),
+        "{www_authenticate}"
+    );
+
+    // ...and both metadata spellings answer without credentials.
+    let (status, resource_metadata) =
+        server.call("GET", "/.well-known/oauth-protected-resource", None);
+    assert_eq!(status, 200);
+    assert_eq!(resource_metadata["resource"], "http://taguru.test/mcp");
+    let (_, path_inserted) = server.call("GET", "/.well-known/oauth-protected-resource/mcp", None);
+    assert_eq!(path_inserted["resource"], "http://taguru.test/mcp");
+    let (_, authorization_server) =
+        server.call("GET", "/.well-known/oauth-authorization-server", None);
+    assert_eq!(authorization_server["issuer"], "http://taguru.test");
+    assert_eq!(
+        authorization_server["code_challenge_methods_supported"],
+        json!(["S256"])
+    );
+
+    // Dynamic registration (RFC 7591).
+    let (status, registered) = server.call(
+        "POST",
+        "/oauth/register",
+        Some(json!({
+            "client_name": "claude",
+            "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+        })),
+    );
+    assert_eq!(status, 201);
+    let client_id = registered["client_id"].as_str().unwrap().to_string();
+
+    // The consent page names the client; a wrong key re-asks (200, no
+    // redirect, no code).
+    let authorize_query = format!(
+        "response_type=code&client_id={client_id}&redirect_uri={CALLBACK}\
+         &state=st4te&code_challenge={CHALLENGE}&code_challenge_method=S256"
+    );
+    let (status, consent) =
+        server.call("GET", &format!("/oauth/authorize?{authorize_query}"), None);
+    assert_eq!(status, 200);
+    assert!(consent.as_str().unwrap().contains("claude"));
+    let (status, retry) = server.call_raw(
+        "POST",
+        "/oauth/authorize",
+        Some(&format!("{authorize_query}&key=wrong")),
+        Some("application/x-www-form-urlencoded"),
+    );
+    assert_eq!(status, 200);
+    assert!(retry.as_str().unwrap().contains("not accepted"));
+
+    // The real key approves: back to the callback with code and state.
+    let approved = no_redirect
+        .post(&format!("{}/oauth/authorize", server.base))
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .send_string(&format!("{authorize_query}&key=tok-op"))
+        .expect("approval must answer with a redirect");
+    assert_eq!(approved.status(), 303);
+    let location = approved.header("location").unwrap().to_string();
+    assert!(
+        location.starts_with("https://claude.ai/api/mcp/auth_callback?code="),
+        "{location}"
+    );
+    assert!(location.contains("state=st4te"), "{location}");
+    let code = location
+        .split("code=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // PKCE exchange mints the Bearer pair.
+    let (status, minted) = server.call_raw(
+        "POST",
+        "/oauth/token",
+        Some(&format!(
+            "grant_type=authorization_code&client_id={client_id}&code={code}\
+             &code_verifier={VERIFIER}&redirect_uri={CALLBACK}"
+        )),
+        Some("application/x-www-form-urlencoded"),
+    );
+    assert_eq!(status, 200, "{minted}");
+    assert_eq!(minted["token_type"], "Bearer");
+    let access = minted["access_token"].as_str().unwrap().to_string();
+    let refresh = minted["refresh_token"].as_str().unwrap().to_string();
+
+    // The delegation opens /mcp...
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+    let (status, _) = server.call_with_token("POST", "/mcp", Some(ping.clone()), Some(&access));
+    assert_eq!(status, 200);
+    // ...and nothing else — the raw API stays key-only.
+    let (status, _) = server.call_with_token("GET", "/contexts", None, Some(&access));
+    assert_eq!(status, 401);
+    let (status, _) = server.call_with_token("GET", "/contexts", None, Some("tok-op"));
+    assert_eq!(status, 200);
+
+    // The code is single-use.
+    let (status, replayed) = server.call_raw(
+        "POST",
+        "/oauth/token",
+        Some(&format!(
+            "grant_type=authorization_code&client_id={client_id}&code={code}\
+             &code_verifier={VERIFIER}&redirect_uri={CALLBACK}"
+        )),
+        Some("application/x-www-form-urlencoded"),
+    );
+    assert_eq!(
+        (status, replayed["error"].as_str()),
+        (400, Some("invalid_grant"))
+    );
+
+    // Refresh rotates: the new pair works, the presented token is dead.
+    let (status, rotated) = server.call_raw(
+        "POST",
+        "/oauth/token",
+        Some(&format!(
+            "grant_type=refresh_token&client_id={client_id}&refresh_token={refresh}"
+        )),
+        Some("application/x-www-form-urlencoded"),
+    );
+    assert_eq!(status, 200);
+    let fresh_access = rotated["access_token"].as_str().unwrap().to_string();
+    let (status, _) = server.call_with_token("POST", "/mcp", Some(ping), Some(&fresh_access));
+    assert_eq!(status, 200);
+    let (status, dead) = server.call_raw(
+        "POST",
+        "/oauth/token",
+        Some(&format!(
+            "grant_type=refresh_token&client_id={client_id}&refresh_token={refresh}"
+        )),
+        Some("application/x-www-form-urlencoded"),
+    );
+    assert_eq!(
+        (status, dead["error"].as_str()),
+        (400, Some("invalid_grant"))
+    );
 }
 
 /// The request budget is spent per key: one key exhausts alone while

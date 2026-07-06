@@ -105,7 +105,7 @@ pub async fn enforce_rate_limit(
     request: Request,
     next: Next,
 ) -> Response {
-    if limiter.is_disabled() || auth::EXEMPT.contains(&request.uri().path()) {
+    if limiter.is_disabled() || auth::PROBE_EXEMPT.contains(&request.uri().path()) {
         return next.run(request).await;
     }
     let started_at = Instant::now();
@@ -234,6 +234,10 @@ mod tests {
     #[tokio::test]
     async fn the_rate_limited_answer_is_a_429_with_retry_after() {
         let keyring = Arc::new(auth::Keyring::parse(Some("tok".to_string()), None).unwrap());
+        let gate = Arc::new(auth::Gate {
+            keyring,
+            oauth: None,
+        });
         let limiter = Arc::new(RateLimiter::new(2));
         let app = Router::new()
             .route("/contexts", get(|| async { "hi" }))
@@ -242,7 +246,7 @@ mod tests {
                 enforce_rate_limit,
             ))
             .layer(axum::middleware::from_fn_with_state(
-                keyring,
+                gate,
                 auth::require_bearer,
             ));
         let send = |authorization: &'static str| {

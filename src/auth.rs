@@ -23,7 +23,16 @@ use crate::api;
 /// content), and exempting it keeps scrape configs trivial. The rate
 /// limiter honors the same list: probes and scrapes must not starve
 /// behind a chatty client.
-pub(crate) const EXEMPT: [&str; 2] = ["/health", "/metrics"];
+pub(crate) const PROBE_EXEMPT: [&str; 2] = ["/health", "/metrics"];
+
+/// What answers without a bearer token. With OAuth enabled, its
+/// discovery and grant endpoints join the probes — they exist to
+/// CREATE credentials — but unlike the probes they stay rate-limited.
+fn is_auth_exempt(path: &str, oauth_enabled: bool) -> bool {
+    PROBE_EXEMPT.contains(&path)
+        || (oauth_enabled
+            && (path.starts_with("/oauth/") || path.starts_with("/.well-known/oauth-")))
+}
 
 /// The authenticated key's name, attached to the RESPONSE: the access
 /// log middleware sits outside this one, so response extensions are
@@ -95,8 +104,9 @@ impl Keyring {
 
     /// Constant-shape scan: EVERY key is compared even after a match,
     /// so response timing says nothing about which key (if any) a
-    /// guess grazed.
-    fn authenticate(&self, presented: &str) -> Option<Arc<str>> {
+    /// guess grazed. `pub(crate)`: the OAuth consent step validates
+    /// the delegated key through the same scan.
+    pub(crate) fn authenticate(&self, presented: &str) -> Option<Arc<str>> {
         let mut matched = None;
         for (name, token) in &self.keys {
             if bool::from(presented.as_bytes().ct_eq(token.as_bytes())) {
@@ -107,19 +117,28 @@ impl Keyring {
     }
 }
 
+/// Everything the bearer gate consults: the static keyring, and the
+/// OAuth subsystem when the operator enabled it.
+pub struct Gate {
+    pub keyring: Arc<Keyring>,
+    pub oauth: Option<Arc<crate::oauth::Oauth>>,
+}
+
 /// Refuses any non-exempt request whose `Authorization: Bearer` token
-/// matches no configured key. An empty keyring disables the gate
-/// entirely — development mode. On success the key's NAME rides the
-/// response out to the access log.
+/// matches no configured credential. An empty keyring disables the
+/// gate entirely — development mode. Static keys open everything;
+/// OAuth access tokens open `/mcp` only — the delegation is scoped to
+/// the MCP surface, never the raw API. On success the credential's
+/// NAME rides the response out to the access log.
 pub async fn require_bearer(
-    State(keyring): State<Arc<Keyring>>,
+    State(gate): State<Arc<Gate>>,
     request: Request,
     next: Next,
 ) -> Response {
-    if keyring.is_disabled() {
+    if gate.keyring.is_disabled() {
         return next.run(request).await;
     }
-    if EXEMPT.contains(&request.uri().path()) {
+    if is_auth_exempt(request.uri().path(), gate.oauth.is_some()) {
         return next.run(request).await;
     }
 
@@ -129,7 +148,15 @@ pub async fn require_bearer(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    if let Some(key) = presented.and_then(|token| keyring.authenticate(token)) {
+    let key = presented.and_then(|token| {
+        gate.keyring
+            .authenticate(token)
+            .or_else(|| match (&gate.oauth, request.uri().path()) {
+                (Some(oauth), "/mcp") => oauth.authenticate(token, crate::oauth::now_secs()),
+                _ => None,
+            })
+    });
+    if let Some(key) = key {
         let mut request = request;
         // Inner layers (the rate limiter) key their work on WHO; the
         // response copy below feeds the access log on the way out.
@@ -144,9 +171,19 @@ pub async fn require_bearer(
         "missing or invalid bearer token (send Authorization: Bearer <token>)",
         started_at,
     );
+    // With OAuth on, the 401 names the discovery document — the hint
+    // MCP clients key their authorization flow on (RFC 9728).
+    let challenge = match &gate.oauth {
+        Some(oauth) => HeaderValue::from_str(&format!(
+            "Bearer resource_metadata=\"{}\"",
+            oauth.resource_metadata_url()
+        ))
+        .unwrap_or_else(|_| HeaderValue::from_static("Bearer")),
+        None => HeaderValue::from_static("Bearer"),
+    };
     response
         .headers_mut()
-        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        .insert(header::WWW_AUTHENTICATE, challenge);
     response
 }
 
@@ -164,14 +201,17 @@ mod tests {
     }
 
     fn app(keyring: Arc<Keyring>) -> Router {
+        gate_app(keyring, None)
+    }
+
+    fn gate_app(keyring: Arc<Keyring>, oauth: Option<Arc<crate::oauth::Oauth>>) -> Router {
+        let gate = Arc::new(Gate { keyring, oauth });
         Router::new()
             .route("/health", get(|| async { "ok" }))
             .route("/metrics", get(|| async { "counts" }))
             .route("/contexts", get(|| async { "secret" }))
-            .layer(axum::middleware::from_fn_with_state(
-                keyring,
-                require_bearer,
-            ))
+            .route("/mcp", get(|| async { "tools" }))
+            .layer(axum::middleware::from_fn_with_state(gate, require_bearer))
     }
 
     async fn respond(app: Router, path: &str, authorization: Option<&str>) -> Response {
@@ -277,6 +317,62 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    /// OAuth access tokens are a scoped delegation: they open /mcp,
+    /// nothing else — and anonymous 401s advertise the discovery
+    /// document OAuth clients key their flow on.
+    #[tokio::test]
+    async fn oauth_tokens_open_mcp_only_and_401s_advertise_discovery() {
+        let dir = std::env::temp_dir().join(format!("taguru-authoauth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let oauth = Arc::new(crate::oauth::Oauth::open("https://memory.example", &dir));
+        let client = oauth
+            .register_client("claude", vec!["https://claude.ai/cb".to_string()])
+            .unwrap();
+        let now = crate::oauth::now_secs();
+        let verifier = "0123456789012345678901234567890123456789012345";
+        let code = oauth.issue_code(
+            &client,
+            "https://claude.ai/cb",
+            &crate::oauth::s256_challenge(verifier),
+            "laptop",
+            now,
+        );
+        let grant = oauth
+            .exchange_code(
+                &client.client_id,
+                &code,
+                verifier,
+                "https://claude.ai/cb",
+                now,
+            )
+            .unwrap();
+
+        let keyring = ring(Some("s3cret"), None);
+        let bearer = format!("Bearer {}", grant.access_token);
+        let app = || gate_app(Arc::clone(&keyring), Some(Arc::clone(&oauth)));
+        assert_eq!(status_of(app(), "/mcp", Some(&bearer)).await, 200);
+        assert_eq!(status_of(app(), "/contexts", Some(&bearer)).await, 401);
+        // The static key keeps opening everything.
+        assert_eq!(
+            status_of(app(), "/contexts", Some("Bearer s3cret")).await,
+            200
+        );
+        // Anonymous callers learn where to start the OAuth dance.
+        let refused = respond(app(), "/mcp", None).await;
+        let challenge = refused.headers()[header::WWW_AUTHENTICATE]
+            .to_str()
+            .unwrap();
+        assert!(
+            challenge.contains(
+                "resource_metadata=\"https://memory.example/.well-known/oauth-protected-resource\""
+            ),
+            "{challenge}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
