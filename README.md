@@ -228,6 +228,18 @@ fully validating load the server boots with, every WAL through the
 same replay parser, with per-context stats — nonzero exit means
 something holding acknowledged data is corrupt.
 
+The data directory admits one taguru process at a time — a serve or
+an import — via an advisory lock (`.taguru.lock`); the second comer
+is refused with a message naming the conflict, instead of two live
+registries silently overwriting each other's flushes. Two notes for
+operators. The lock is `flock`-style: dependable on local disks, NOT
+on network filesystems (NFS/EFS/FUSE mounts may grant it to both
+sides) — shared-storage deployments must enforce single-attachment
+themselves. And a rolling deploy that starts the new server while
+the old still holds the volume will see the new one exit — correct
+(it is what prevents a split-brain), but it means stop-then-start
+(Kubernetes `strategy: Recreate` on a shared volume), not overlap.
+
 ```sh
 curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \
   -d '{"description":"青嶺酒造という架空の酒蔵の知識"}'

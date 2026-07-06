@@ -2,7 +2,9 @@
 
 `taguru import` applies batch files straight to the data directory,
 without (and never beside) a running server — the directory lock
-refuses to run while one holds the directory, and vice versa. It is
+refuses to run while one holds the directory, and vice versa (an
+advisory flock, dependable on local disks; the README notes the
+network-filesystem caveats). It is
 the bulk path: initial loads, migrations between instances, replaying
 the output of an extraction pipeline. Live, incremental writing stays
 on the HTTP API / MCP tools.
@@ -36,6 +38,17 @@ header's source is stamped on every association in the file.
 
 A file with a header and no op lines is a **pure retraction**: "this
 source now asserts nothing."
+
+The retract-then-apply order has one sharp edge: when the apply stage
+fails *persistently* — capacity is the realistic case — the source
+sits empty (old facts retracted, new ones refused) until a re-import
+succeeds. Retraction frees a source's attributions but never
+un-interns vocabulary: a concept or label, once minted, holds its id
+for the context's lifetime, so a pipeline that keeps re-importing
+revised files under churning names grows the context monotonically.
+Watch the counts with `taguru inspect`, size headroom with `taguru
+estimate`, and treat a context that has crept near its caps to a
+rebuild rather than another revision.
 
 ## File format
 
@@ -110,6 +123,13 @@ The writes go through the same registry as the server's — WAL-staged
 and fsynced, budget-enforced, flushed at the end — so `taguru
 inspect` and a subsequent boot see exactly what a live ingest would
 have produced. Import counts as writes in each context's usage stats.
+
+Validating everything first has a cost: every parsed file stays in
+memory until the run applies, so a run's footprint tracks the
+**total** size of its files, not the largest one. Feed a
+million-document migration as several invocations (one directory
+slice each) — slicing costs nothing, since imports are idempotent
+and every file carries its own source.
 
 ## Embeddings
 
