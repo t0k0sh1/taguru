@@ -172,6 +172,43 @@ pub struct Activation {
 pub struct Resolution {
     pub name: String,
     pub score: f64,
+    /// The string relation that earned the score — see [`MatchKind`].
+    pub kind: MatchKind,
+}
+
+/// How a cue lexically met one of a record's spellings. The score alone
+/// hides this: a containment hit on a lookalike (possible inside
+/// impossible scores 0.8, 京都 inside 東京都 scores 0.67) reads like a
+/// strong match while being a different thing entirely. Naming the
+/// relation lets a caller weigh "this IS a stored spelling" (exact,
+/// alias) against "this merely overlaps one" (containment, fuzzy)
+/// before adopting a candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchKind {
+    /// The cue is the record's own name (normalized).
+    Exact,
+    /// The cue is one of the record's alias spellings — the same
+    /// certainty as `Exact`, and why the returned name differs from
+    /// the cue.
+    Alias,
+    /// The cue contains a spelling or is contained by one; the score
+    /// is character coverage of the longer side.
+    Containment,
+    /// The cue merely shares informative bigrams with a spelling (the
+    /// near-miss tier); the score is the Dice overlap.
+    Fuzzy,
+}
+
+impl MatchKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MatchKind::Exact => "exact",
+            MatchKind::Alias => "alias",
+            MatchKind::Containment => "containment",
+            MatchKind::Fuzzy => "fuzzy",
+        }
+    }
 }
 
 /// How often one relation label appears on a concept's edges — one row of
@@ -1167,7 +1204,9 @@ impl Context {
 
     /// The shared scoring behind both resolve entry points: score the
     /// cue against one namespace's entry index, materialize the winning
-    /// records as named resolutions, best first.
+    /// records as named resolutions, best first. An exact hit whose
+    /// record answers to a different canonical spelling was an alias
+    /// match — refined here, where the names are known.
     fn scored_resolutions(
         &self,
         index: &EntryIndex,
@@ -1175,12 +1214,18 @@ impl Context {
         cue: &str,
         dice_floor: f64,
     ) -> Vec<Resolution> {
+        let needle = normalize(cue);
         let mut resolutions: Vec<Resolution> = index
             .resolve(cue, dice_floor.clamp(0.0, 1.0))
             .into_iter()
-            .map(|(id, score)| Resolution {
-                name: name_of(self, id).to_string(),
-                score,
+            .map(|(id, (score, kind))| {
+                let name = name_of(self, id).to_string();
+                let kind = if kind == MatchKind::Exact && normalize(&name) != needle {
+                    MatchKind::Alias
+                } else {
+                    kind
+                };
+                Resolution { name, score, kind }
             })
             .collect();
         sort_resolutions(&mut resolutions);
@@ -1987,24 +2032,30 @@ impl EntryIndex {
     }
 
     /// Scores every spelling against `cue` and returns the best score per
-    /// target record. Two tiers share the [0, 1] scale: exact normalized
-    /// match is 1.0 and containment either way scores by character
-    /// coverage of the longer string; spellings that fail containment can
-    /// still match by bigram Dice overlap (near-misses like 青嶺酒蔵 for
-    /// 青嶺酒造), floored at `dice_floor`. A target keeps the best score
-    /// any of its spellings earned.
-    fn resolve(&self, cue: &str, dice_floor: f64) -> HashMap<u32, f64> {
+    /// target record, with the [`MatchKind`] that earned it. Two tiers
+    /// share the [0, 1] scale: exact normalized match is 1.0 and
+    /// containment either way scores by character coverage of the longer
+    /// string; spellings that fail containment can still match by bigram
+    /// Dice overlap (near-misses like 青嶺酒蔵 for 青嶺酒造), floored at
+    /// `dice_floor`. A target keeps the best score any of its spellings
+    /// earned. Exact means "some spelling" — whether that spelling was
+    /// the canonical name or an alias is the caller's refinement, since
+    /// only it knows the names.
+    fn resolve(&self, cue: &str, dice_floor: f64) -> HashMap<u32, (f64, MatchKind)> {
         let needle = normalize(cue);
         if needle.is_empty() {
             return HashMap::new();
         }
         let needle_chars = needle.chars().count();
 
-        let mut best: HashMap<u32, f64> = HashMap::new();
-        let record = |target: u32, score: f64, best: &mut HashMap<u32, f64>| {
-            let slot = best.entry(target).or_insert(0.0);
-            if score > *slot {
-                *slot = score;
+        let mut best: HashMap<u32, (f64, MatchKind)> = HashMap::new();
+        let record = |target: u32,
+                      score: f64,
+                      kind: MatchKind,
+                      best: &mut HashMap<u32, (f64, MatchKind)>| {
+            let slot = best.entry(target).or_insert((0.0, kind));
+            if score > slot.0 {
+                *slot = (score, kind);
             }
         };
 
@@ -2016,18 +2067,18 @@ impl EntryIndex {
         let mut exact = false;
         for (span_index, span) in self.spans.iter().enumerate() {
             let haystack = &self.arena[span.start..span.end];
-            let score = if haystack == needle {
+            let (score, kind) = if haystack == needle {
                 exact = true;
-                1.0
+                (1.0, MatchKind::Exact)
             } else if haystack.contains(needle.as_str()) || needle.contains(haystack) {
                 let shorter = needle_chars.min(span.chars);
                 let longer = needle_chars.max(span.chars);
-                shorter as f64 / longer as f64
+                (shorter as f64 / longer as f64, MatchKind::Containment)
             } else {
                 continue;
             };
             contained.insert(span_index as u32);
-            record(span.target, score, &mut best);
+            record(span.target, score, kind, &mut best);
         }
         // An exact hit means the entry job is done: the cue IS a stored
         // spelling. Near-miss hunting would only spend posting-list time
@@ -2087,7 +2138,7 @@ impl EntryIndex {
                 let dice =
                     2.0 * f64::from(count) / (informative_needle + informative_span.len()) as f64;
                 if dice >= dice_floor {
-                    record(span.target, dice, &mut best);
+                    record(span.target, dice, MatchKind::Fuzzy, &mut best);
                 }
             }
         }
@@ -3852,6 +3903,39 @@ mod tests {
         // Below the Dice floor nothing surfaces: an unrelated spelling
         // sharing no bigrams stays out entirely.
         assert!(context.resolve("辛口純米").is_empty());
+    }
+
+    #[test]
+    fn resolutions_name_the_string_relation_behind_each_score() {
+        let mut context = Context::default();
+        context.associate("東京都", "分類", "首都", 1.0).unwrap();
+        context.associate("京都", "所在", "関西", 1.0).unwrap();
+        context.associate("青嶺酒造", "分類", "酒蔵", 1.0).unwrap();
+        context.add_concept_alias("Kyoto", "京都").unwrap();
+
+        // The cue IS a stored name: exact. The lookalike containing it
+        // scores a strong-looking 2/3 — and says it is only containment.
+        let hits = context.resolve("京都");
+        assert_eq!(
+            (hits[0].name.as_str(), hits[0].kind),
+            ("京都", MatchKind::Exact)
+        );
+        assert_eq!(
+            (hits[1].name.as_str(), hits[1].kind),
+            ("東京都", MatchKind::Containment)
+        );
+
+        // An alias hit carries exact's certainty and explains why the
+        // returned spelling differs from the cue.
+        let via_alias = context.resolve("Kyoto");
+        assert_eq!(via_alias[0].name, "京都");
+        assert_eq!(via_alias[0].score, 1.0);
+        assert_eq!(via_alias[0].kind, MatchKind::Alias);
+
+        // A near-miss lands through the bigram tier and is labeled so.
+        let typo = context.resolve("青嶺酒蔵");
+        assert_eq!(typo[0].name, "青嶺酒造");
+        assert_eq!(typo[0].kind, MatchKind::Fuzzy);
     }
 
     #[test]

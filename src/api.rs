@@ -1320,6 +1320,13 @@ pub struct TieredResolution {
     pub name: String,
     pub score: f64,
     pub tier: &'static str,
+    /// The lexical string relation behind the score (exact / alias /
+    /// containment / fuzzy) — the caller's warning that a high score
+    /// may be a lookalike, not the thing (possible inside impossible
+    /// scores 0.8). Absent on semantic candidates, whose score is a
+    /// cosine, not a string overlap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
 }
 
 fn lexical_tier(resolutions: Vec<Resolution>) -> Vec<TieredResolution> {
@@ -1329,6 +1336,7 @@ fn lexical_tier(resolutions: Vec<Resolution>) -> Vec<TieredResolution> {
             name: resolution.name,
             score: resolution.score,
             tier: "lexical",
+            kind: Some(resolution.kind.as_str()),
         })
         .collect()
 }
@@ -1356,6 +1364,7 @@ fn merge_tiers(lexical: Vec<Resolution>, semantic: Vec<(String, f32)>) -> Vec<Ti
             name,
             score: f64::from(score),
             tier: "semantic",
+            kind: None,
         });
     }
     merged
@@ -1558,6 +1567,7 @@ pub async fn unreachable_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use taguru::context::MatchKind;
 
     #[test]
     fn protocol_trailer_names_the_model_and_the_refresh_owner() {
@@ -1589,6 +1599,7 @@ mod tests {
             name: "n".to_string(),
             score,
             tier,
+            kind: None,
         };
 
         assert_eq!(resolve_tier_of(&[]), ResolveTier::Miss);
@@ -1660,10 +1671,12 @@ mod tests {
             Resolution {
                 name: "杜氏の職".to_string(),
                 score: 0.33,
+                kind: MatchKind::Containment,
             },
             Resolution {
                 name: "蔵".to_string(),
                 score: 0.25,
+                kind: MatchKind::Fuzzy,
             },
         ];
         let semantic = vec![
