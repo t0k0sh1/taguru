@@ -94,6 +94,10 @@ pub(crate) struct PassageStore {
     inner: RwLock<PassageStoreInner>,
     snapshot_path: PathBuf,
     log_path: PathBuf,
+    /// The pre-migration `.sources.json`, retired by the first
+    /// successful compaction — its contents are in the snapshot from
+    /// that moment, and only then may the old file go.
+    legacy_path: PathBuf,
 }
 
 impl PassageStore {
@@ -178,6 +182,7 @@ impl PassageStore {
             }),
             snapshot_path,
             log_path,
+            legacy_path: legacy_path.to_path_buf(),
         })
     }
 
@@ -278,6 +283,21 @@ impl PassageStore {
         };
         let bytes = snapshot_to_bytes(&sources, seen_seq - 1);
         crate::registry::write_atomic(&self.snapshot_path, &bytes)?;
+
+        // The snapshot's rename is durable, so the legacy file's
+        // contents live there now (any base it fed is baked in) and the
+        // loader will never consult it again — retire it. Ordering is
+        // the whole point: removing it BEFORE a durable snapshot exists
+        // would strand the passages of a crash in between. A failed
+        // unlink lingers harmlessly and retries next compaction.
+        if let Err(error) = fs::remove_file(&self.legacy_path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                "legacy passages at {} not retired (will retry): {error}",
+                self.legacy_path.display()
+            );
+        }
 
         let mut inner = self.inner.write().unwrap();
         inner.snapshot_bytes = bytes.len() as u64;
@@ -579,6 +599,32 @@ mod tests {
         assert_eq!(reborn.get("old").as_deref(), Some("旧ファイルの本文"));
         assert_eq!(reborn.get("both").as_deref(), Some("新版"));
         assert_eq!(reborn.get("new").as_deref(), Some("追記"));
+    }
+
+    #[test]
+    fn legacy_sources_json_is_retired_only_after_the_first_compaction_succeeds() {
+        let dir = scratch_dir("legacy-retire");
+        let legacy_path = dir.join("t.sources.json");
+        let legacy: BTreeMap<&str, &str> = [("old", "旧本文")].into_iter().collect();
+        fs::write(&legacy_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let store = open(&dir);
+        store.store(batch(&[("new", "新本文")])).unwrap();
+        assert!(
+            legacy_path.exists(),
+            "before any compaction the legacy file IS the base — removing \
+             it early would strand its passages across a crash"
+        );
+
+        store.compact().unwrap();
+        assert!(
+            !legacy_path.exists(),
+            "a durable snapshot carries the legacy contents; the old file retires"
+        );
+        drop(store);
+        let reborn = open(&dir);
+        assert_eq!(reborn.get("old").as_deref(), Some("旧本文"));
+        assert_eq!(reborn.get("new").as_deref(), Some("新本文"));
     }
 
     #[test]
