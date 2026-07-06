@@ -4320,6 +4320,32 @@ mod tests {
     }
 
     #[test]
+    fn one_distinctness_edge_warns_in_both_lookalikes_glosses() {
+        // The ingest protocol adjudicates lookalike twins that are NOT
+        // the same thing by recording the distinction as an ordinary
+        // fact. That advice leans on glosses carrying incoming edges:
+        // one directed edge must surface in BOTH names' evidence, even
+        // when neither concept has any other fact yet.
+        let mut context = Context::default();
+        context
+            .associate("株式会社青嶺", "別物", "青嶺株式会社", 1.0)
+            .unwrap();
+
+        assert_eq!(
+            context
+                .concept_gloss("株式会社青嶺", Context::GLOSS_FACTS)
+                .unwrap(),
+            "株式会社青嶺。株式会社青嶺の別物は青嶺株式会社。"
+        );
+        assert_eq!(
+            context
+                .concept_gloss("青嶺株式会社", Context::GLOSS_FACTS)
+                .unwrap(),
+            "青嶺株式会社。株式会社青嶺の別物は青嶺株式会社。"
+        );
+    }
+
+    #[test]
     fn footprint_grows_with_content() {
         let mut context = Context::default();
         let empty = context.footprint();
