@@ -67,9 +67,12 @@ source-scoped: a re-import re-registers them (a no-op for an
 unchanged pair), and retraction never removes them. Registering an
 alias whose canonical is only introduced by this file's associations
 works — associations apply first. Re-pointing an existing alias at a
-*different* canonical is a conflict and fails the file (heal it
-through the API deliberately; an import must not silently re-wire a
-vocabulary).
+*different* canonical is a conflict and fails the file — an import
+must not silently re-wire a vocabulary. Be aware that an alias, once
+registered, is permanent for the context's lifetime (nothing removes
+one, the API included): the ways out of a conflict are keeping the
+old canonical, choosing a different alias spelling in the revised
+file, or rebuilding the context.
 
 **Passage** — the source's original text, at most one per file,
 stored behind the same source id (`sources/lookup` and
