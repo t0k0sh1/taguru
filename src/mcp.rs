@@ -366,7 +366,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "search_passages",
-            "Full-text search over registered passages (bigram BM25). The second lane, for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short.",
+            "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. Each hit names its paragraph (source + index) and reports per-lane rank/score in `lanes`; a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see.",
             object_schema(
                 json!({
                     "context": context,
@@ -378,7 +378,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "refresh_embeddings",
-            "After ingesting, re-embed the glosses (name + graph context) of new or changed concepts and labels (servers with embeddings only). Makes paraphrases and question-shaped cues land through resolve's semantic fallback.",
+            "After ingesting, re-embed what changed (servers with embeddings only): the glosses (name + graph context) of new or changed concepts and labels, and — where the server opted in — the stored paragraphs. Makes paraphrases and question-shaped cues land through resolve's semantic fallback and search_passages' vector lane.",
             object_schema(json!({ "context": context }), &["context"]),
         ),
         (

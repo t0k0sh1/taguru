@@ -1074,17 +1074,43 @@ pub struct SearchPassagesRequest {
     pub limit: Option<usize>,
 }
 
-/// One PARAGRAPH matched by full-text search: the second retrieval
-/// lane, for knowledge that never decomposed into triples. `index` is
-/// the paragraph's position within its source (0-based, this split);
+/// One PARAGRAPH matched by passage search: the text lane, for
+/// knowledge that never decomposed into triples. `index` is the
+/// paragraph's position within its source (0-based, this split);
 /// `text` is that paragraph alone — cite it, or dereference the whole
-/// source through the lookup endpoint.
+/// source through the lookup endpoint. `score` is the fused
+/// reciprocal-rank number when the semantic lane ran, the raw BM25
+/// score otherwise; `lanes` carries each lane's own rank and raw score
+/// — evidence for the reading LLM, the same posture as resolve's tiers.
 #[derive(Serialize)]
 pub struct PassageHit {
     pub source: String,
     pub index: u32,
     pub score: f32,
     pub text: String,
+    pub lanes: PassageLanes,
+}
+
+#[derive(Serialize)]
+pub struct PassageLanes {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bm25: Option<LaneEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector: Option<LaneEvidence>,
+}
+
+/// Where one lane put this hit: 1-based rank within the lane's own
+/// candidate pool, and that lane's raw score (BM25, or cosine).
+#[derive(Serialize)]
+pub struct LaneEvidence {
+    pub rank: usize,
+    pub score: f32,
+}
+
+impl LaneEvidence {
+    fn from_lane(lane: Option<(usize, f32)>) -> Option<Self> {
+        lane.map(|(rank, score)| Self { rank, score })
+    }
 }
 
 pub async fn search_passages(
@@ -1107,6 +1133,11 @@ pub async fn search_passages(
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(hits)) => {
             state.note_search(SearchOp::SearchPassages, &name, hits.is_empty());
+            for hit in &hits {
+                state
+                    .metrics()
+                    .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
+            }
             if search_log_enabled() {
                 tracing::info!(
                     target: "taguru::search",
@@ -1114,17 +1145,21 @@ pub async fn search_passages(
                     op = "search_passages",
                     cue = %request.query,
                     hits = hits.len(),
-                    top_score = hits.first().map_or(0.0, |&(_, _, score, _)| f64::from(score)),
+                    top_score = hits.first().map_or(0.0, |hit| f64::from(hit.score)),
                     "search",
                 );
             }
             ok(
                 hits.into_iter()
-                    .map(|(source, index, score, text)| PassageHit {
-                        source,
-                        index,
-                        score,
-                        text,
+                    .map(|hit| PassageHit {
+                        source: hit.source,
+                        index: hit.index,
+                        score: hit.score,
+                        text: hit.text,
+                        lanes: PassageLanes {
+                            bm25: LaneEvidence::from_lane(hit.bm25),
+                            vector: LaneEvidence::from_lane(hit.vector),
+                        },
                     })
                     .collect::<Vec<_>>(),
                 started_at,

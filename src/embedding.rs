@@ -316,6 +316,27 @@ impl PassageVectorStore {
                 .sum::<usize>()
     }
 
+    /// Top `limit` rows by cosine against a unit query (a linear sweep
+    /// — the flat layout IS the index at this store's scale). Ties
+    /// break by (source, index) ascending for deterministic output; a
+    /// query of the wrong dimension matches nothing.
+    pub fn top_matches(&self, query: &[f32], limit: usize) -> Vec<(&PassageKey, f32)> {
+        if self.dim == 0 || query.len() != self.dim {
+            return Vec::new();
+        }
+        let mut scored: Vec<(&PassageKey, f32)> = self
+            .iter()
+            .map(|(key, row)| (key, similarity(query, row)))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then_with(|| a.0.source.cmp(&b.0.source))
+                .then_with(|| a.0.index.cmp(&b.0.index))
+        });
+        scored.truncate(limit);
+        scored
+    }
+
     /// Reads the sidecar, returning an empty store on any problem — a
     /// corrupt vector cache costs a re-embed, never an outage.
     pub fn load(path: &Path) -> Self {

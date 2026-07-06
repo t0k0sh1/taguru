@@ -111,6 +111,11 @@ pub struct Metrics {
     /// `[op][outcome]`, outcome 0 = hit, 1 = empty.
     searches: [[AtomicU64; 2]; SearchOp::ALL.len()],
     resolve_tiers: [AtomicU64; ResolveTier::ALL.len()],
+    /// Passage-search hits by which lane(s) surfaced them — the pulse
+    /// of what the vector lane actually adds. Fixed three labels.
+    passage_hits_bm25_only: AtomicU64,
+    passage_hits_vector_only: AtomicU64,
+    passage_hits_both_lanes: AtomicU64,
     /// Set while the most recent flush attempt failed; cleared by the
     /// next success. Drives /health: the flusher retries every tick,
     /// so this is a self-healing signal, never a latched one.
@@ -357,6 +362,19 @@ impl Metrics {
         self.resolve_tiers[tier as usize].fetch_add(1, Ordering::Relaxed);
     }
 
+    /// One served passage-search hit, by which lane(s) put it there. A
+    /// hit carries at least one lane by construction; anything else is
+    /// counted nowhere rather than inventing a fourth label.
+    pub fn record_passage_hit(&self, bm25: bool, vector: bool) {
+        match (bm25, vector) {
+            (true, true) => &self.passage_hits_both_lanes,
+            (true, false) => &self.passage_hits_bm25_only,
+            (false, true) => &self.passage_hits_vector_only,
+            (false, false) => return,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The full Prometheus text-exposition body. Deterministic: the
     /// dynamic keys (routes, statuses) are sorted before emission, so
     /// identical state renders byte-identical output.
@@ -514,6 +532,25 @@ impl Metrics {
                 "taguru_resolves_total{{tier=\"{}\"}} {}\n",
                 tier.as_str(),
                 self.resolve_tiers[tier as usize].load(Ordering::Relaxed)
+            ));
+        }
+
+        push_header(
+            &mut out,
+            "taguru_passage_lane_contributions_total",
+            "counter",
+            "Served passage-search hits by which lane surfaced them: vector_only \
+             is what the semantic lane adds beyond BM25; a persistent zero there \
+             means the embedding spend buys nothing this corpus needed.",
+        );
+        for (lane, counter) in [
+            ("bm25_only", &self.passage_hits_bm25_only),
+            ("both_lanes", &self.passage_hits_both_lanes),
+            ("vector_only", &self.passage_hits_vector_only),
+        ] {
+            out.push_str(&format!(
+                "taguru_passage_lane_contributions_total{{lane=\"{lane}\"}} {}\n",
+                counter.load(Ordering::Relaxed)
             ));
         }
 
@@ -905,6 +942,22 @@ mod tests {
         assert!(rendered.contains("taguru_resolves_total{tier=\"semantic\"} 2"));
         assert!(rendered.contains("taguru_resolves_total{tier=\"weak_lexical\"} 0"));
         assert!(rendered.contains("taguru_resolves_total{tier=\"miss\"} 1"));
+    }
+
+    #[test]
+    fn passage_lane_contributions_expose_all_three_labels_from_zero() {
+        let metrics = Metrics::default();
+        metrics.record_passage_hit(true, false);
+        metrics.record_passage_hit(true, true);
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(rendered.contains("taguru_passage_lane_contributions_total{lane=\"bm25_only\"} 1"));
+        assert!(
+            rendered.contains("taguru_passage_lane_contributions_total{lane=\"both_lanes\"} 1")
+        );
+        assert!(
+            rendered.contains("taguru_passage_lane_contributions_total{lane=\"vector_only\"} 0"),
+            "the label a dashboard alerts on must exist at zero"
+        );
     }
 
     #[test]
