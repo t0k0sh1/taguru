@@ -601,7 +601,10 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         state
             .store_passages(
                 &batch.context,
-                BTreeMap::from([(batch.source.clone(), text.clone())]),
+                BTreeMap::from([(
+                    batch.source.clone(),
+                    crate::passages::PassageSubmission::plain(text.clone()),
+                )]),
             )
             .ok_or(ApplyRefusal::Access(AccessError::NotFound))?
             .map_err(|io_error| ApplyRefusal::Io(format!("passage not persisted: {io_error}")))?;
