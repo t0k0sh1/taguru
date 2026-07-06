@@ -382,6 +382,36 @@ fn spawn_flusher(state: AppState, flush_secs: usize, auto_embed: bool) {
                     }
                 });
             }
+            // Passages ride their own dirty flag: storing text never
+            // marks the GRAPH dirty, so the flush list alone would
+            // miss passage-only ingest.
+            if auto_embed && state.passage_embedding_enabled() {
+                let stale = state.passage_embed_dirty_names();
+                if !stale.is_empty() {
+                    tokio::task::block_in_place(|| {
+                        for name in &stale {
+                            match state.refresh_passage_embeddings(name) {
+                                None => {}
+                                Some(Ok(outcome)) if outcome.embedded == 0 => {}
+                                Some(Ok(outcome)) => {
+                                    info!(
+                                        context = %name,
+                                        embedded = outcome.embedded,
+                                        "auto-embedded paragraphs"
+                                    );
+                                }
+                                Some(Err(error)) => {
+                                    warn!(
+                                        context = %name,
+                                        error,
+                                        "auto passage embedding failed"
+                                    );
+                                }
+                            }
+                        }
+                    });
+                }
+            }
         }
     });
 }
