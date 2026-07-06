@@ -20,6 +20,7 @@ taguru import batches/               # offline — or POST each file to /import
 TAGURU_EXTRACT_URL      OpenAI-compatible /chat/completions endpoint (required)
 TAGURU_EXTRACT_MODEL    model name (required)
 TAGURU_EXTRACT_API_KEY  bearer credential (optional)
+TAGURU_EXTRACT_TIMEOUT_SECS  per-completion budget; 0 = no limit (300)
 
 --dry-run           list what would extract or skip; call nothing
 --force             re-extract documents the manifest says are unchanged
@@ -47,6 +48,35 @@ as-is; so does a local server (Ollama, llama.cpp, vLLM). Bedrock and
 native Anthropic bridge through LiteLLM or any proxy speaking
 `/chat/completions` — the same bridge pattern [bedrock.md](bedrock.md)
 shows for embeddings.
+
+## Local models: four field notes
+
+Everything below was learned running the pipeline for real against
+Ollama on a laptop.
+
+- **Turn thinking OFF.** Reasoning-mode models spend their whole time
+  budget on invisible reasoning tokens before the first byte of JSON:
+  the same 10 KB document that extracts in ~30 s with thinking off
+  blew a 300 s timeout with it on. The extractor speaks plain
+  OpenAI-compatible chat and does not toggle vendor thinking flags —
+  pick a non-thinking model, or disable thinking on the serving side.
+  The symptom is `timed out reading response` while the GPU sits
+  busy.
+- **Give the server a real context window.** A 24 KiB chunk is
+  roughly 6 k tokens; a serving default of 4 k silently truncates the
+  request — no error, just quietly worse output. On Ollama, bake the
+  window into a derived model:
+  `FROM <base>` + `PARAMETER num_ctx 16384` → `ollama create`.
+- **Size the timeout to the hardware.** `TAGURU_EXTRACT_TIMEOUT_SECS`
+  bounds each chat completion (default 300; `0` = no limit). Each of
+  the two attempts gets the full budget, so a stalled provider costs
+  at most twice it per chunk.
+- **The manifest trusts the model NAME.** Re-pointing a serving alias
+  (`ollama create my-extractor` over a different base) changes
+  nothing the manifest can see, so documents stay "unchanged" under
+  what is really a new model. Name models honestly, or `--force`
+  after re-pointing — the same caveat as the embedding vector cache,
+  likewise keyed by model name.
 
 ## What the model is asked, and what is enforced anyway
 
@@ -134,3 +164,14 @@ scratch directory, `taguru import` them into a scratch
 `activate`, `resolve`). If answers miss, a stronger model or smaller
 documents usually move more than prompt tinkering — and the manifest
 makes trying either cheap.
+
+What to expect by model class, measured: small local models (≤ ~10 B)
+hold the format but not the discipline — labels come back
+sentence-shaped and barely repeat (one run: 106 distinct labels
+across 113 associations), and concepts multiply as noun phrases
+instead of converging on entities. The system degrades the way it was
+designed to: the lexical entry still absorbs much of the drift,
+`sources/search` answers what the graph fumbles, and
+`vocabulary/audit` lists the twins for the alias loop to heal. That
+is workable when passages carry the load — but if the *graph* is the
+product, spend on a stronger model.

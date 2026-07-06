@@ -70,6 +70,8 @@ ENVIRONMENT (every knob; unset = the shown default):
                                read only by 'taguru extract' (off)
   TAGURU_EXTRACT_MODEL         extraction model name
   TAGURU_EXTRACT_API_KEY       extraction provider credential
+  TAGURU_EXTRACT_TIMEOUT_SECS  extract's per-completion budget; local models
+                               may need more; 0 = no limit (300)
   RUST_LOG                     log filter, EnvFilter syntax (info)
   TAGURU_LOG_FORMAT            json for JSON log lines (pretty)
   TAGURU_LOG_SEARCHES          1 = per-search event log; cues are memory
@@ -226,7 +228,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 23] = [
+const KNOWN_KEYS: [&str; 24] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -247,6 +249,7 @@ const KNOWN_KEYS: [&str; 23] = [
     "TAGURU_EXTRACT_URL",
     "TAGURU_EXTRACT_MODEL",
     "TAGURU_EXTRACT_API_KEY",
+    "TAGURU_EXTRACT_TIMEOUT_SECS",
     "TAGURU_LOG_FORMAT",
     "TAGURU_LOG_SEARCHES",
     "TAGURU_CONFIG",

@@ -2457,6 +2457,7 @@ fn run_extract(
         .env_remove("TAGURU_EXTRACT_URL")
         .env_remove("TAGURU_EXTRACT_MODEL")
         .env_remove("TAGURU_EXTRACT_API_KEY")
+        .env_remove("TAGURU_EXTRACT_TIMEOUT_SECS")
         .env_remove("TAGURU_CONFIG");
     for (key, value) in env {
         command.env(key, value);
@@ -2647,6 +2648,52 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
     assert!(stdout.contains("2 written"), "{stdout}");
     assert_eq!(requests.join().unwrap().len(), 2);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn the_extract_timeout_knob_bounds_a_stalled_provider() {
+    let docs = batch_dir("extract-stall-docs");
+    let doc = docs.join("slow.md");
+    std::fs::write(&doc, "content").unwrap();
+
+    // A provider that accepts and never answers — the local-model
+    // failure mode (a thinking model grinding away) as seen from the
+    // client. Both attempts' connections are held open, unanswered.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            if let Ok((stream, _)) = listener.accept() {
+                held.push(stream);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(15));
+    });
+
+    let out = batch_dir("extract-stall-out");
+    let started = std::time::Instant::now();
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_TIMEOUT_SECS", "1"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("timed out"), "{stderr}");
+    // Two 1-second attempts plus the retry pause — nowhere near the
+    // 300-second default this knob overrides.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "took {:?}",
+        started.elapsed()
+    );
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

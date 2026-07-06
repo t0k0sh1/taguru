@@ -48,6 +48,7 @@ chat endpoint:
   TAGURU_EXTRACT_URL      /chat/completions endpoint (required)
   TAGURU_EXTRACT_MODEL    model name (required)
   TAGURU_EXTRACT_API_KEY  bearer credential (optional)
+  TAGURU_EXTRACT_TIMEOUT_SECS  per-completion budget; 0 = none (300)
 
   --dry-run           list what would extract or skip; call nothing
   --force             re-extract documents the manifest says are unchanged
@@ -73,9 +74,11 @@ const CHUNK_BYTES: usize = 24 * 1024;
 /// stays bounded however long the run gets.
 const VOCABULARY_CAP: usize = 200;
 
-/// A document must survive one whole chat completion; big documents
-/// mean many chunks, and 5xx/429 already earn their own retry.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// One chat completion's default budget. Local models can be slower
+/// than any cloud default assumes — thinking-mode models
+/// pathologically so — hence the knob (TAGURU_EXTRACT_TIMEOUT_SECS,
+/// 0 = no limit).
+const DEFAULT_TIMEOUT_SECS: usize = 300;
 
 const MANIFEST_NAME: &str = ".extract-manifest.json";
 
@@ -408,11 +411,16 @@ impl ChatClient {
         })?;
         let model = std::env::var("TAGURU_EXTRACT_MODEL")
             .map_err(|_| "TAGURU_EXTRACT_MODEL is not set".to_string())?;
+        let timeout = crate::env_number("TAGURU_EXTRACT_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
+        let mut agent = ureq::AgentBuilder::new();
+        if timeout > 0 {
+            agent = agent.timeout(Duration::from_secs(timeout as u64));
+        }
         Ok(Self {
             url,
             model,
             api_key: std::env::var("TAGURU_EXTRACT_API_KEY").ok(),
-            agent: ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build(),
+            agent: agent.build(),
         })
     }
 
