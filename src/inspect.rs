@@ -10,7 +10,10 @@ use std::path::Path;
 use taguru::context::Context;
 
 use crate::cli::fmt_bytes;
-use crate::registry::{meta_path, name_from_stem, sources_path, vectors_path, wal_path};
+use crate::registry::{
+    meta_path, name_from_stem, passages_path, passages_wal_path, sources_path, vectors_path,
+    wal_path,
+};
 use crate::wal;
 
 const USAGE: &str = "usage: taguru inspect PATH   (a data directory, or one .ctx image)\n";
@@ -118,6 +121,25 @@ fn inspect_directory(dir: &Path) -> i32 {
             }
         };
 
+        // The passage snapshot and its log hold acknowledged text that
+        // exists nowhere else — run the same strict load the server
+        // uses (legacy .sources.json keeps its lenient contract inside
+        // it). Vectors stay a size: a derived cache's corruption costs
+        // a re-embed, never data.
+        let passage_count = match crate::passages::PassageStore::load(
+            passages_path(dir, stem),
+            &sources_path(dir, stem),
+            passages_wal_path(dir, stem),
+            0,
+        ) {
+            Ok(store) => store.source_ids().len(),
+            Err(error) => {
+                println!("{name}: CORRUPT passages — {error}");
+                failures += 1;
+                continue;
+            }
+        };
+
         // Meta is self-healing on the server side (defaults + warning),
         // so a broken one is reported without failing the inspection.
         let meta_note = match std::fs::read(meta_path(dir, stem)) {
@@ -129,9 +151,12 @@ fn inspect_directory(dir: &Path) -> i32 {
 
         let wal_bytes = file_size(&wal_path(dir, stem));
         let vector_bytes = file_size(&vectors_path(dir, stem));
-        let passage_bytes = file_size(&sources_path(dir, stem));
+        let passage_bytes = file_size(&passages_path(dir, stem))
+            + file_size(&passages_wal_path(dir, stem))
+            + file_size(&sources_path(dir, stem));
         println!(
-            "{name}: ok  {} · WAL {} ({pending} pending) · vectors {} · passages {}{meta_note}",
+            "{name}: ok  {} · WAL {} ({pending} pending) · vectors {} · passages {} \
+             ({passage_count} sources){meta_note}",
             stats_line(&context, image_bytes),
             fmt_bytes(wal_bytes),
             fmt_bytes(vector_bytes),
