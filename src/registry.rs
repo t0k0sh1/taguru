@@ -1208,7 +1208,15 @@ impl AppState {
                 Some(index) => index.needs_reclaim(),
             };
             if rebuild {
-                *guard = Some(crate::bm25::Bm25Index::build(&store.snapshot()));
+                let records = store.snapshot();
+                let built_at = std::time::Instant::now();
+                *guard = Some(crate::bm25::Bm25Index::build(&records));
+                tracing::info!(
+                    context = %name,
+                    sources = records.len(),
+                    ms = built_at.elapsed().as_millis() as u64,
+                    "BM25 index built",
+                );
             }
         }
         let raw = {

@@ -794,7 +794,10 @@ pub async fn store_passages(
             return refusal;
         }
     }
-    match state.store_passages(&name, request.passages) {
+    // Off the async worker: the store fsyncs its log, and folding the
+    // new paragraphs into a resident index tokenizes them.
+    let outcome = tokio::task::block_in_place(|| state.store_passages(&name, request.passages));
+    match outcome {
         None => not_found(&name, started_at),
         Some(Ok(stored)) => {
             state.note_write(&name);
@@ -1090,11 +1093,16 @@ pub async fn search_passages(
     AppJson(request): AppJson<SearchPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.search_passages(
-        &name,
-        &request.query,
-        clamp(request.limit, 5, MAX_MATCH_LIMIT),
-    ) {
+    // Off the async worker: a residency's first search tokenizes the
+    // whole corpus into the index (the audit endpoints' rule).
+    let outcome = tokio::task::block_in_place(|| {
+        state.search_passages(
+            &name,
+            &request.query,
+            clamp(request.limit, 5, MAX_MATCH_LIMIT),
+        )
+    });
+    match outcome {
         None => not_found(&name, started_at),
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(hits)) => {
