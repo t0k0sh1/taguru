@@ -1486,7 +1486,14 @@ impl AppState {
             accumulated.entry((source, index)).or_default().bm25 = Some((rank + 1, score, hash));
         }
         for (rank, (source, index, hash, score)) in semantic.into_iter().enumerate() {
-            accumulated.entry((source, index)).or_default().vector = Some((rank + 1, score, hash));
+            // A paragraph can hit this lane several times (its own text
+            // row plus its doc2query question rows); ranks ascend, so
+            // the first arrival is its best showing and later ones must
+            // not overwrite it.
+            let slot = accumulated.entry((source, index)).or_default();
+            if slot.vector.is_none() {
+                slot.vector = Some((rank + 1, score, hash));
+            }
         }
 
         let rrf =
@@ -1832,37 +1839,51 @@ impl AppState {
         let path = pvectors_path(&self.0.data_dir, &file_stem(name));
         let existing = PassageVectorStore::load(&path);
         let fresh_model = existing.model != embedder.model();
-        let carried: HashMap<(&str, u32, u64), &[f32]> = if fresh_model {
+        let carried: HashMap<(&str, u32, u64, Option<u64>), &[f32]> = if fresh_model {
             HashMap::new()
         } else {
             existing
                 .iter()
-                .map(|(key, row)| ((key.source.as_str(), key.index, key.hash), row))
+                .map(|(key, row)| {
+                    (
+                        (key.source.as_str(), key.index, key.hash, key.question_hash),
+                        row,
+                    )
+                })
                 .collect()
         };
 
-        // Deterministic (source, index) walk — snapshot() is sorted by
-        // source — so the same paragraphs win the limit run after run.
+        // Deterministic walk — snapshot() is sorted by source, spans by
+        // position, questions by paragraph — so the same rows win the
+        // limit run after run. Each paragraph offers its own text row
+        // and then one row per stored question, every one keyed to the
+        // PARAGRAPH (hash included) with the question's own hash as the
+        // discriminator.
         let mut fresh = PassageVectorStore::new(embedder.model());
-        let mut to_embed: Vec<(String, u32, u64, String)> = Vec::new();
+        let mut to_embed: Vec<(PassageKey, String)> = Vec::new();
         let mut skipped_over_limit = 0usize;
         for (source, record) in &records {
             for (span, text) in record.paragraph_texts() {
-                if fresh.len() + to_embed.len() >= self.0.passage_vector_limit {
-                    skipped_over_limit += 1;
-                    continue;
-                }
-                match carried.get(&(source.as_str(), span.index, span.hash)) {
-                    Some(row) => fresh.push(
-                        PassageKey {
-                            source: source.clone(),
-                            index: span.index,
-                            hash: span.hash,
-                        },
-                        row.to_vec(),
-                    ),
-                    None => {
-                        to_embed.push((source.clone(), span.index, span.hash, text.to_string()));
+                let question_rows = record
+                    .questions
+                    .iter()
+                    .filter(|&&(paragraph, _)| paragraph == span.index)
+                    .map(|(_, question)| (Some(fnv1a(question)), question.as_str()));
+                for (question_hash, row_text) in std::iter::once((None, text)).chain(question_rows)
+                {
+                    if fresh.len() + to_embed.len() >= self.0.passage_vector_limit {
+                        skipped_over_limit += 1;
+                        continue;
+                    }
+                    let key = PassageKey {
+                        source: source.clone(),
+                        index: span.index,
+                        hash: span.hash,
+                        question_hash,
+                    };
+                    match carried.get(&(source.as_str(), span.index, span.hash, question_hash)) {
+                        Some(row) => fresh.push(key, row.to_vec()),
+                        None => to_embed.push((key, row_text.to_string())),
                     }
                 }
             }
@@ -1871,19 +1892,12 @@ impl AppState {
         let mut embedded = 0usize;
         let mut failure: Option<String> = None;
         for chunk in to_embed.chunks(128) {
-            let texts: Vec<&str> = chunk.iter().map(|(.., text)| text.as_str()).collect();
+            let texts: Vec<&str> = chunk.iter().map(|(_, text)| text.as_str()).collect();
             match embedder.embed(&texts, EmbedPurpose::Index) {
                 Ok(vectors) => {
                     self.0.metrics.record_embed_refresh(true);
-                    for ((source, index, hash, _), vector) in chunk.iter().zip(vectors) {
-                        fresh.push(
-                            PassageKey {
-                                source: source.clone(),
-                                index: *index,
-                                hash: *hash,
-                            },
-                            vector,
-                        );
+                    for ((key, _), vector) in chunk.iter().zip(vectors) {
+                        fresh.push(key.clone(), vector);
                         embedded += 1;
                     }
                 }
@@ -5242,6 +5256,124 @@ mod tests {
         // The next refresh buys only the missing paragraph.
         let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
         assert_eq!((outcome.embedded, outcome.total), (1, 129));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_stored_question_row_answers_a_question_shaped_query_at_its_paragraph() {
+        let dir = scratch_dir("doc2query-hit");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc".to_string(),
+            crate::passages::PassageSubmission {
+                text: "りんごは真っ赤に実った。".to_string(),
+                questions: vec![(0, "アップルはどんな色?".to_string())],
+            },
+        );
+        state.store_passages("fruit", passages).unwrap().unwrap();
+        let outcome = state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        assert_eq!(
+            (outcome.embedded, outcome.total),
+            (2, 2),
+            "the paragraph row and its question row both embed"
+        );
+
+        // The query matches the QUESTION row's wording, not the text's;
+        // both rows point at the same paragraph, so the lane must fold
+        // them into one hit at the question row's better rank.
+        let hits = state
+            .search_passages("fruit", "アップル", 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits.len(), 1, "one paragraph, one hit — never a dup");
+        assert_eq!((hits[0].source.as_str(), hits[0].index), ("doc", 0));
+        assert!(
+            hits[0].text.contains("りんご"),
+            "the text served is the PARAGRAPH"
+        );
+        let (rank, cosine) = hits[0].vector.expect("found via the question row");
+        assert_eq!(rank, 1);
+        assert!(cosine > 0.99, "{cosine}");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_re_embeds_only_the_question_whose_text_changed() {
+        let dir = scratch_dir("doc2query-diff");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let submission = |question: &str| {
+            let mut passages = BTreeMap::new();
+            passages.insert(
+                "doc".to_string(),
+                crate::passages::PassageSubmission {
+                    text: "りんごは真っ赤に実った。".to_string(),
+                    questions: vec![(0, question.to_string())],
+                },
+            );
+            passages
+        };
+        state
+            .store_passages("fruit", submission("アップルはどんな色?"))
+            .unwrap()
+            .unwrap();
+        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+
+        state
+            .store_passages("fruit", submission("アップルは何色ですか?"))
+            .unwrap()
+            .unwrap();
+        let outcome = state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        assert_eq!(
+            (outcome.embedded, outcome.total),
+            (1, 2),
+            "the unchanged paragraph row is carried; only the reworded question re-embeds"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_counts_question_rows_against_the_vector_limit() {
+        let dir = scratch_dir("doc2query-limit");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 2);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc".to_string(),
+            crate::passages::PassageSubmission {
+                text: "りんごは真っ赤に実った。".to_string(),
+                questions: vec![
+                    (0, "アップルはどんな色?".to_string()),
+                    (0, "みかんとの違いは?".to_string()),
+                ],
+            },
+        );
+        state.store_passages("fruit", passages).unwrap().unwrap();
+        let outcome = state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        assert_eq!(
+            (outcome.embedded, outcome.total, outcome.skipped_over_limit),
+            (2, 2, 1),
+            "a question row spends the same budget a paragraph row does"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
