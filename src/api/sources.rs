@@ -1,0 +1,208 @@
+use std::collections::BTreeMap;
+use std::time::Instant;
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::Response;
+use serde::{Deserialize, Serialize};
+
+use crate::metrics::{ErrorKind, SearchOp};
+use crate::registry::AppState;
+
+use super::{
+    AppJson, MAX_MATCH_LIMIT, access_error, clamp, error, not_found, ok, search_log_enabled,
+};
+
+#[derive(Debug, Deserialize)]
+pub struct LookupPassagesRequest {
+    pub sources: Vec<String>,
+}
+
+/// The dereference half of "find with the graph, answer from the text":
+/// attributions name sources, this returns the original passages behind
+/// them (and which sources have none registered).
+#[derive(Serialize)]
+pub struct PassageLookup {
+    pub passages: BTreeMap<String, String>,
+    pub missing: Vec<String>,
+}
+
+pub async fn lookup_passages(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    AppJson(request): AppJson<LookupPassagesRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match state.lookup_passages(&name, &request.sources) {
+        None => not_found(&name, started_at),
+        Some(Ok((passages, missing))) => {
+            state.note_read(&name, passages.is_empty());
+            ok(PassageLookup { passages, missing }, started_at)
+        }
+        Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
+    }
+}
+
+pub async fn list_sources(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    let started_at = Instant::now();
+    match state.passage_sources(&name) {
+        None => not_found(&name, started_at),
+        Some(Ok(sources)) => ok(sources, started_at),
+        Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
+    }
+}
+
+/// The passage store exists but could not be loaded — its snapshot and
+/// log hold acknowledged writes, so this is a 500 pointing at disk,
+/// never a silent empty answer.
+fn passages_unreadable(
+    state: &AppState,
+    io_error: std::io::Error,
+    started_at: Instant,
+) -> Response {
+    state.metrics().record_error(ErrorKind::Io);
+    error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("passages could not be read: {io_error}"),
+        started_at,
+    )
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RetractSourceRequest {
+    pub source: String,
+}
+
+/// What one retraction accomplished: how many associations lost this
+/// source's contribution, and whether its passage went with it.
+#[derive(Serialize)]
+pub struct RetractOutcome {
+    pub associations_touched: usize,
+    pub passage_removed: bool,
+}
+
+pub async fn retract_source(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    AppJson(request): AppJson<RetractSourceRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match state.retract_source(&name, &request.source) {
+        Err(failure) => access_error(&state, failure, &name, started_at),
+        Ok((associations_touched, passage_removed)) => {
+            // A retraction that found nothing changed nothing; only an
+            // effective one counts as a write.
+            if associations_touched > 0 || passage_removed {
+                state.note_write(&name);
+            }
+            ok(
+                RetractOutcome {
+                    associations_touched,
+                    passage_removed,
+                },
+                started_at,
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchPassagesRequest {
+    pub query: String,
+    /// Omitted means 5.
+    pub limit: Option<usize>,
+}
+
+/// One PARAGRAPH matched by passage search: the text lane, for
+/// knowledge that never decomposed into triples. `index` is the
+/// paragraph's position within its source (0-based, this split);
+/// `text` is that paragraph alone — cite it, or dereference the whole
+/// source through the lookup endpoint. `score` is the fused
+/// reciprocal-rank number when the semantic lane ran, the raw BM25
+/// score otherwise; `lanes` carries each lane's own rank and raw score
+/// — evidence for the reading LLM, the same posture as resolve's tiers.
+#[derive(Serialize)]
+pub struct PassageHit {
+    pub source: String,
+    pub index: u32,
+    pub score: f32,
+    pub text: String,
+    pub lanes: PassageLanes,
+}
+
+#[derive(Serialize)]
+pub struct PassageLanes {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bm25: Option<LaneEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector: Option<LaneEvidence>,
+}
+
+/// Where one lane put this hit: 1-based rank within the lane's own
+/// candidate pool, and that lane's raw score (BM25, or cosine).
+#[derive(Serialize)]
+pub struct LaneEvidence {
+    pub rank: usize,
+    pub score: f32,
+}
+
+impl LaneEvidence {
+    fn from_lane(lane: Option<(usize, f32)>) -> Option<Self> {
+        lane.map(|(rank, score)| Self { rank, score })
+    }
+}
+
+pub async fn search_passages(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    AppJson(request): AppJson<SearchPassagesRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    // Off the async worker: a residency's first search tokenizes the
+    // whole corpus into the index (the audit endpoints' rule).
+    let outcome = tokio::task::block_in_place(|| {
+        state.search_passages(
+            &name,
+            &request.query,
+            clamp(request.limit, 5, MAX_MATCH_LIMIT),
+        )
+    });
+    match outcome {
+        None => not_found(&name, started_at),
+        Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
+        Some(Ok(hits)) => {
+            state.note_search(SearchOp::SearchPassages, &name, hits.is_empty());
+            for hit in &hits {
+                state
+                    .metrics()
+                    .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
+            }
+            if search_log_enabled() {
+                tracing::info!(
+                    target: "taguru::search",
+                    context = %name,
+                    op = "search_passages",
+                    cue = %request.query,
+                    hits = hits.len(),
+                    top_score = hits.first().map_or(0.0, |hit| f64::from(hit.score)),
+                    "search",
+                );
+            }
+            ok(
+                hits.into_iter()
+                    .map(|hit| PassageHit {
+                        source: hit.source,
+                        index: hit.index,
+                        score: hit.score,
+                        text: hit.text,
+                        lanes: PassageLanes {
+                            bm25: LaneEvidence::from_lane(hit.bm25),
+                            vector: LaneEvidence::from_lane(hit.vector),
+                        },
+                    })
+                    .collect::<Vec<_>>(),
+                started_at,
+            )
+        }
+    }
+}
