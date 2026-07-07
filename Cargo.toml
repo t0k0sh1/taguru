@@ -34,3 +34,6 @@ tower = { version = "0.5.3", features = ["util"] }
 # and already ubiquitous in the wider tree.
 sha2 = "0.10"
 getrandom = "0.3"
+# Already in the tree through axum; made direct so the loopback
+# redirect-URI check parses the host instead of matching a prefix.
+url = "2.5"

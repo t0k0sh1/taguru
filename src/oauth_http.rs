@@ -153,9 +153,18 @@ fn checked_redirect(
 fn error_redirect(params: &AuthorizeParams, error: &str) -> Response {
     let mut target = format!("{}?error={error}", params.redirect_uri);
     if !params.state.is_empty() {
-        target.push_str(&format!("&state={}", params.state));
+        target.push_str(&format!("&state={}", encode_query_value(&params.state)));
     }
     Redirect::to(&target).into_response()
+}
+
+/// `state` is opaque, attacker-controlled data that gets spliced
+/// straight into a redirect's query string (here and in `approve`
+/// below) — percent-encode it so a value like `evil&code=injected`
+/// round-trips as one opaque field instead of opening a second query
+/// parameter.
+fn encode_query_value(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 /// Anything wrong with the code/PKCE/resource parameters, or nothing.
@@ -215,7 +224,7 @@ async fn approve(State(state): State<OauthState>, Form(params): Form<AuthorizePa
     );
     let mut target = format!("{}?code={code}", params.redirect_uri);
     if !params.state.is_empty() {
-        target.push_str(&format!("&state={}", params.state));
+        target.push_str(&format!("&state={}", encode_query_value(&params.state)));
     }
     Redirect::to(&target).into_response()
 }

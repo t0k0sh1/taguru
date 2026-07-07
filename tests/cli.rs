@@ -374,6 +374,128 @@ fn inspect_refuses_a_nonexistent_path() {
 }
 
 #[test]
+fn inspect_help_flag_prints_usage_and_exits_zero() {
+    for flag in ["--help", "-h"] {
+        let output = run(&["inspect", flag]);
+        assert_eq!(output.status.code(), Some(0), "{flag}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("usage: taguru inspect PATH"),
+            "{flag}: {stdout}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).is_empty(),
+            "{flag}"
+        );
+    }
+}
+
+#[test]
+fn inspect_refuses_the_wrong_number_of_arguments() {
+    for args in [&["inspect"][..], &["inspect", "a", "b"][..]] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("usage: taguru inspect PATH"),
+            "{args:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).is_empty(),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn inspect_reports_no_images_under_an_empty_directory() {
+    let dir =
+        std::env::temp_dir().join(format!("taguru-cli-inspect-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains(&format!("no .ctx images under {}", dir.display())),
+        "{stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn inspect_warns_on_an_undecodable_stem_but_does_not_fail() {
+    let dir =
+        std::env::temp_dir().join(format!("taguru-cli-inspect-badstem-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // "%zz" is not valid hex — file_stem's own encoding can never
+    // produce it, so this is a backup file the server would skip too.
+    std::fs::write(dir.join("%zz.ctx"), b"never parsed as an image").unwrap();
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("%zz.ctx: WARNING — stem does not decode"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("total: 1 contexts"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn inspect_warns_on_unparseable_meta_json_but_does_not_fail() {
+    let dir =
+        std::env::temp_dir().join(format!("taguru-cli-inspect-badmeta-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(dir.join("sake.meta.json"), b"not json").unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Self-healing on the server side: a broken sidecar is noted, not fatal.
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("WARNING: meta.json unparseable"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("total: 1 contexts"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn inspect_refuses_a_single_corrupt_image_file() {
+    let dir =
+        std::env::temp_dir().join(format!("taguru-cli-inspect-badfile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let file = dir.join("sake.ctx");
+    std::fs::write(&file, b"not a context image").unwrap();
+
+    let output = run(&["inspect", &file.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stdout).is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("CORRUPT"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn estimate_reports_memory_and_disk_for_a_target_shape() {
     let output = run(&[
         "estimate",

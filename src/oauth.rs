@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use url::{Host, Url};
 
 pub const ACCESS_TTL_SECS: u64 = 3600;
 pub const REFRESH_TTL_SECS: u64 = 30 * 24 * 3600;
@@ -227,9 +228,7 @@ impl Oauth {
             return Err("redirect_uris must not be empty".to_string());
         }
         for uri in &redirect_uris {
-            let loopback =
-                uri.starts_with("http://127.0.0.1") || uri.starts_with("http://localhost");
-            if !uri.starts_with("https://") && !loopback {
+            if !uri.starts_with("https://") && !is_loopback_redirect(uri) {
                 return Err(format!("redirect uri '{uri}' must be https or loopback"));
             }
         }
@@ -401,6 +400,26 @@ impl Oauth {
         if let Err(error) = crate::registry::write_atomic(&self.store_path, &bytes) {
             tracing::warn!(%error, "could not persist the OAuth store");
         }
+    }
+}
+
+/// RFC 8252 loopback interface redirection: `http://` to the loopback
+/// address or `localhost`, any port. Parses the URI and checks the
+/// decoded host, never a string prefix — `http://127.0.0.1.evil.example`
+/// and `http://localhost.evil.example` both start with the loopback
+/// text but resolve to an attacker's domain, not the loopback interface.
+fn is_loopback_redirect(uri: &str) -> bool {
+    let Ok(parsed) = Url::parse(uri) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host() {
+        Some(Host::Domain(domain)) => domain == "localhost",
+        Some(Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(Host::Ipv6(addr)) => addr.is_loopback(),
+        None => false,
     }
 }
 
@@ -644,6 +663,24 @@ mod tests {
             oauth
                 .register_client("x", vec!["http://127.0.0.1:7777/cb".to_string()])
                 .is_ok()
+        );
+        assert!(
+            oauth
+                .register_client("x", vec!["http://localhost:7777/cb".to_string()])
+                .is_ok()
+        );
+        // A substring match on the prefix would wrongly accept these:
+        // the host is an attacker-controlled domain, not the loopback
+        // interface, even though it starts with the loopback text.
+        assert!(
+            oauth
+                .register_client("x", vec!["http://127.0.0.1.evil.example/cb".to_string()])
+                .is_err()
+        );
+        assert!(
+            oauth
+                .register_client("x", vec!["http://localhost.evil.example/cb".to_string()])
+                .is_err()
         );
         for i in 0..CLIENT_CAP {
             let _ = oauth.register_client(&format!("c{i}"), vec!["https://ok.example".to_string()]);

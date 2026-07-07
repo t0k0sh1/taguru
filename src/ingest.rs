@@ -488,6 +488,7 @@ fn parse_op(batch: &mut Batch, line: &str, number: usize) -> Result<(), String> 
             ("object", &op.object),
         ] {
             check_size(number, field, text, MAX_NAME_BYTES)?;
+            check_nonempty(number, field, text)?;
         }
         batch.associations.push(AssocOp {
             subject: op.subject,
@@ -563,6 +564,16 @@ fn check_size(number: usize, field: &str, text: &str, cap: usize) -> Result<(), 
             "line {number}: {field} of {} bytes exceeds the {cap}-byte cap",
             text.len()
         ));
+    }
+    Ok(())
+}
+
+/// Companion to `check_size`, at the other end of the range: an empty
+/// subject/label/object is not a degenerate name, it is no name — see
+/// `api::empty`, which guards the same triple at the HTTP boundary.
+fn check_nonempty(number: usize, field: &str, text: &str) -> Result<(), String> {
+    if text.is_empty() {
+        return Err(format!("line {number}: {field} must not be empty"));
     }
     Ok(())
 }
@@ -922,6 +933,37 @@ mod tests {
         ))
         .unwrap_err();
         assert!(error.contains("context"), "{error}");
+    }
+
+    #[test]
+    fn empty_subject_label_or_object_is_refused() {
+        for (field, line) in [
+            (
+                "subject",
+                r#"{"subject": "", "label": "l", "object": "b", "weight": 1.0}"#,
+            ),
+            (
+                "label",
+                r#"{"subject": "a", "label": "", "object": "b", "weight": 1.0}"#,
+            ),
+            (
+                "object",
+                r#"{"subject": "a", "label": "l", "object": "", "weight": 1.0}"#,
+            ),
+        ] {
+            let error = parse(&format!("{HEADER}\n{line}\n")).unwrap_err();
+            assert!(
+                error.contains("line 2") && error.contains(field) && error.contains("empty"),
+                "{field}: {error}"
+            );
+        }
+
+        // Every field non-empty still parses fine.
+        let batch = parse(&format!(
+            "{HEADER}\n{{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
+        ))
+        .unwrap();
+        assert_eq!(batch.associations.len(), 1);
     }
 
     #[test]

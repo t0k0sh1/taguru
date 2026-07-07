@@ -424,6 +424,253 @@ fn oauth_flow_delegates_a_key_to_a_remote_mcp_client() {
     );
 }
 
+/// `state` is opaque client data (RFC 6749 §4.1.2) that must round-trip
+/// verbatim — but it is attacker-controlled, and the authorize endpoint
+/// splices it straight into the redirect's query string. A `state` of
+/// `evil&code=injected` must come back percent-encoded as one opaque
+/// value, never as a raw `&code=injected` that opens a second `code`
+/// parameter ahead of the real one.
+#[test]
+fn oauth_authorize_percent_encodes_state_in_redirects() {
+    const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+    const CALLBACK: &str = "https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback";
+    // "evil&code=injected", pre-escaped so the test's own request line
+    // carries it as a single `state` field rather than splitting it.
+    const INJECTED_STATE: &str = "evil%26code%3Dinjected";
+
+    let server = Server::start_with_env(
+        "oauth-state-escape",
+        &[
+            ("TAGURU_API_TOKENS", "laptop:tok-op"),
+            ("TAGURU_PUBLIC_URL", "http://taguru.test"),
+        ],
+    );
+    let no_redirect = ureq::AgentBuilder::new().redirects(0).build();
+
+    let (_, registered) = server.call(
+        "POST",
+        "/oauth/register",
+        Some(json!({
+            "client_name": "claude",
+            "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+        })),
+    );
+    let client_id = registered["client_id"].as_str().unwrap().to_string();
+
+    let authorize_query = format!(
+        "response_type=code&client_id={client_id}&redirect_uri={CALLBACK}\
+         &state={INJECTED_STATE}&code_challenge={CHALLENGE}&code_challenge_method=S256"
+    );
+
+    // The success redirect (consent approved)...
+    let approved = no_redirect
+        .post(&format!("{}/oauth/authorize", server.base))
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .send_string(&format!("{authorize_query}&key=tok-op"))
+        .expect("approval must answer with a redirect");
+    assert_eq!(approved.status(), 303);
+    let location = approved.header("location").unwrap().to_string();
+    assert_eq!(
+        location.matches("code=").count(),
+        1,
+        "state must not inject a second query parameter: {location}"
+    );
+    assert!(
+        location.contains("state=evil%26code%3Dinjected"),
+        "state must round-trip percent-encoded, not splice raw query syntax: {location}"
+    );
+
+    // ...and the error redirect (a bad code_challenge_method) both take
+    // the same splicing path in oauth_http.rs.
+    let bad_query = format!(
+        "response_type=code&client_id={client_id}&redirect_uri={CALLBACK}\
+         &state={INJECTED_STATE}&code_challenge={CHALLENGE}&code_challenge_method=plain"
+    );
+    let (status, _) = server.call("GET", &format!("/oauth/authorize?{bad_query}"), None);
+    assert_eq!(status, 200); // consent page — error surfaces on POST
+    let refused = no_redirect
+        .post(&format!("{}/oauth/authorize", server.base))
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .send_string(&format!("{bad_query}&key=tok-op"))
+        .expect("a bad code_challenge_method must still redirect with ?error=");
+    assert_eq!(refused.status(), 303);
+    let error_location = refused.header("location").unwrap().to_string();
+    assert_eq!(
+        error_location.matches("error=").count(),
+        1,
+        "state must not inject a second query parameter: {error_location}"
+    );
+    assert!(
+        error_location.contains("state=evil%26code%3Dinjected"),
+        "state must round-trip percent-encoded, not splice raw query syntax: {error_location}"
+    );
+}
+
+/// HTTP-layer refusals the grant-store's own tests (oauth.rs) cannot
+/// reach, since they never go through `oauth_http.rs` at all: bad
+/// registration metadata, an authorize call whose (client, redirect)
+/// pair is not verified — a 400 page, never a redirect, since the
+/// target itself is unproven — and, once that pair IS verified, each
+/// individual parameter mistake landing back on the client as its own
+/// distinct `?error=...` redirect. Plus the token endpoint's fallback
+/// arm for a grant_type it does not speak.
+#[test]
+fn oauth_http_layer_refuses_bad_client_redirect_and_grant_parameters() {
+    let server = Server::start_with_env(
+        "oauth-errors",
+        &[
+            ("TAGURU_API_TOKENS", "op:tok-op"),
+            ("TAGURU_PUBLIC_URL", "http://taguru.test"),
+        ],
+    );
+
+    // register(): bad metadata refuses before anything is stored.
+    let (status, empty_redirects) = server.call(
+        "POST",
+        "/oauth/register",
+        Some(json!({"client_name": "c", "redirect_uris": []})),
+    );
+    assert_eq!(status, 400);
+    assert_eq!(empty_redirects["error"], "invalid_client_metadata");
+
+    let (status, insecure_redirect) = server.call(
+        "POST",
+        "/oauth/register",
+        Some(json!({"client_name": "c", "redirect_uris": ["http://evil.example/cb"]})),
+    );
+    assert_eq!(status, 400);
+    assert_eq!(insecure_redirect["error"], "invalid_client_metadata");
+    assert!(
+        insecure_redirect["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("https or loopback"),
+        "{insecure_redirect}"
+    );
+
+    // A real client, to exercise the checks that only apply once
+    // registration itself is not in question.
+    let (status, registered) = server.call(
+        "POST",
+        "/oauth/register",
+        Some(json!({
+            "client_name": "claude",
+            "redirect_uris": ["https://claude.ai/cb"],
+        })),
+    );
+    assert_eq!(status, 201);
+    let client_id = registered["client_id"].as_str().unwrap().to_string();
+    const REDIRECT: &str = "https%3A%2F%2Fclaude.ai%2Fcb";
+
+    // checked_redirect refusals: a 400 page, never a redirect.
+    let (status, page) = server.call(
+        "GET",
+        &format!(
+            "/oauth/authorize?response_type=code&client_id=nonesuch&redirect_uri={REDIRECT}\
+             &code_challenge=abc&code_challenge_method=S256"
+        ),
+        None,
+    );
+    assert_eq!(status, 400);
+    assert!(
+        page.as_str().unwrap().contains("unknown client_id"),
+        "{page}"
+    );
+
+    let (status, page) = server.call(
+        "GET",
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={client_id}&code_challenge=abc\
+             &code_challenge_method=S256&redirect_uri=https%3A%2F%2Fevil.example%2Fcb"
+        ),
+        None,
+    );
+    assert_eq!(status, 400);
+    assert!(
+        page.as_str()
+            .unwrap()
+            .contains("redirect_uri is not registered"),
+        "{page}"
+    );
+
+    // Past that check, each individual parameter mistake comes back as
+    // its own OAuth error redirect to the (now verified) client.
+    let no_redirect = ureq::AgentBuilder::new().redirects(0).build();
+    let authorize = |query: &str| -> (u16, String) {
+        match no_redirect
+            .get(&format!("{}/oauth/authorize?{query}", server.base))
+            .call()
+        {
+            Ok(response) => (
+                response.status(),
+                response.header("location").unwrap_or_default().to_string(),
+            ),
+            Err(ureq::Error::Status(status, response)) => (
+                status,
+                response.header("location").unwrap_or_default().to_string(),
+            ),
+            Err(error) => panic!("GET /oauth/authorize failed: {error}"),
+        }
+    };
+
+    // response_type must be "code".
+    let (status, location) = authorize(&format!(
+        "response_type=token&client_id={client_id}&redirect_uri={REDIRECT}&state=s1\
+         &code_challenge=abc&code_challenge_method=S256"
+    ));
+    assert_eq!(status, 303);
+    assert!(
+        location.starts_with("https://claude.ai/cb?error=invalid_request"),
+        "{location}"
+    );
+    assert!(location.contains("state=s1"), "{location}");
+
+    // code_challenge must be present.
+    let (status, location) = authorize(&format!(
+        "response_type=code&client_id={client_id}&redirect_uri={REDIRECT}&state=s2\
+         &code_challenge_method=S256"
+    ));
+    assert_eq!(status, 303);
+    assert!(
+        location.starts_with("https://claude.ai/cb?error=invalid_request"),
+        "{location}"
+    );
+
+    // code_challenge_method must be S256 — "plain" is not offered.
+    let (status, location) = authorize(&format!(
+        "response_type=code&client_id={client_id}&redirect_uri={REDIRECT}&state=s3\
+         &code_challenge=abc&code_challenge_method=plain"
+    ));
+    assert_eq!(status, 303);
+    assert!(
+        location.starts_with("https://claude.ai/cb?error=invalid_request"),
+        "{location}"
+    );
+
+    // A resource that does not name this server's own /mcp is a
+    // distinct failure: invalid_target, not invalid_request.
+    let (status, location) = authorize(&format!(
+        "response_type=code&client_id={client_id}&redirect_uri={REDIRECT}&state=s4\
+         &code_challenge=abc&code_challenge_method=S256&resource=https%3A%2F%2Fother.example%2Fmcp"
+    ));
+    assert_eq!(status, 303);
+    assert!(
+        location.starts_with("https://claude.ai/cb?error=invalid_target"),
+        "{location}"
+    );
+    assert!(location.contains("state=s4"), "{location}");
+
+    // token(): a grant_type this server does not speak.
+    let (status, unsupported) = server.call_raw(
+        "POST",
+        "/oauth/token",
+        Some(&format!("grant_type=password&client_id={client_id}")),
+        Some("application/x-www-form-urlencoded"),
+    );
+    assert_eq!(status, 400);
+    assert_eq!(unsupported["error"], "unsupported_grant_type");
+}
+
 /// The request budget is spent per key: one key exhausts alone while
 /// the other keeps working, and the probes stay exempt.
 #[test]
@@ -564,6 +811,46 @@ fn mcp_endpoint_honors_bearer_auth_end_to_end() {
     let (status, reply) = server.call_with_token("POST", "/mcp", Some(call), Some("mcp-secret"));
     assert_eq!(status, 200);
     assert!(reply["result"].get("isError").is_none(), "{reply}");
+}
+
+/// Two ways a POSTed body can fail to be one JSON-RPC request before
+/// `classify` ever runs a method through: a batch array (the framing
+/// the 2025-06 spec dropped) and an object with no "method" at all.
+/// Both are -32600, distinguished only by message text, so the
+/// assertions must read the text — not just the shared code.
+#[test]
+fn mcp_rejects_batches_and_undecodable_messages() {
+    let server = Server::start("mcp-malformed");
+
+    let (status, batch) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!([
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+        ])),
+    );
+    assert_eq!(status, 400);
+    assert_eq!(batch["error"]["code"], -32600);
+    assert!(
+        batch["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("batch messages are not part of MCP"),
+        "{batch}"
+    );
+
+    let (status, undecodable) =
+        server.call("POST", "/mcp", Some(json!({"jsonrpc": "2.0", "id": 1})));
+    assert_eq!(status, 400);
+    assert_eq!(undecodable["error"]["code"], -32600);
+    assert!(
+        undecodable["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a JSON-RPC message (no method)"),
+        "{undecodable}"
+    );
 }
 
 #[test]
@@ -1110,6 +1397,46 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
 }
 
 #[test]
+fn empty_names_are_rejected_at_the_write_boundary() {
+    let server = Server::start("emptyname");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+
+    // An empty subject/label/object is not a degenerate name, it is no
+    // name — each must be refused on its own, naming the offending
+    // field.
+    for (field, triple) in [
+        ("subject", json!({"subject": "", "label": "l", "object": "o", "weight": 1.0})),
+        ("label", json!({"subject": "s", "label": "", "object": "o", "weight": 1.0})),
+        ("object", json!({"subject": "s", "label": "l", "object": "", "weight": 1.0})),
+    ] {
+        let (status, body) = server.call(
+            "POST",
+            "/contexts/sake/associations",
+            Some(json!([triple])),
+        );
+        assert_eq!(status, 400, "{field}: {body}");
+        assert!(
+            body["error"].as_str().unwrap().contains(&format!(
+                "associations[0].{field}"
+            )),
+            "the message must point at the offending field: {body}"
+        );
+    }
+
+    // An omitted source is the ordinary unsourced-association case,
+    // not a missing name — it must NOT be swept up by the same check.
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([{"subject": "s", "label": "l", "object": "o", "weight": 1.0}])),
+    );
+
+    // Only the one, deliberately unsourced association landed.
+    let directory = server.ok("GET", "/contexts", None);
+    assert_eq!(directory["contexts"][0]["stats"]["associations"], json!(1));
+}
+
+#[test]
 fn unreachable_from_pages_like_recall_and_query() {
     let server = Server::start("orphanpage");
     server.ok("PUT", "/contexts/sake", Some(json!({})));
@@ -1574,6 +1901,45 @@ fn usage_counters_track_reads_writes_and_empties_per_context() {
     assert_eq!(idle["usage"]["reads"], json!(0), "{idle}");
     assert_eq!(idle["usage"]["writes"], json!(0), "{idle}");
     assert_eq!(idle["usage"]["last_read_epoch"], json!(0), "{idle}");
+}
+
+/// An empty associations or aliases batch applies nothing (`applied ==
+/// 0`), so it must not bump the write counter — the same rule the
+/// partial-write arm already applies via `partial.applied > 0`.
+#[test]
+fn empty_association_and_alias_batches_do_not_bump_the_write_counter() {
+    let server = Server::start("empty-batch-writes");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+
+    let applied = server.ok("POST", "/contexts/sake/associations", Some(json!([])));
+    assert_eq!(applied, json!(0));
+
+    let applied = server.ok(
+        "POST",
+        "/contexts/sake/aliases",
+        Some(json!({"concepts": {}, "labels": {}})),
+    );
+    assert_eq!(applied, json!(0));
+
+    let entry = server.ok("GET", "/contexts/sake", None);
+    assert_eq!(
+        entry["usage"]["writes"],
+        json!(0),
+        "empty batches must not count as writes: {entry}"
+    );
+
+    // A non-empty batch still counts — proving the counter isn't just
+    // stuck at zero regardless of what reaches it.
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([{
+            "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
+            "weight": 1.0, "source": "p1"
+        }])),
+    );
+    let entry = server.ok("GET", "/contexts/sake", None);
+    assert_eq!(entry["usage"]["writes"], json!(1), "{entry}");
 }
 
 #[test]
@@ -2165,6 +2531,53 @@ fn an_offline_import_lands_facts_passage_and_aliases_the_server_serves() {
         passages["passages"]["doc-guide"],
         json!("青嶺酒造の杜氏は高瀬。1907年創業。")
     );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// `apply_batch`'s question bookkeeping (src/ingest.rs) had no coverage
+/// of its own — only the direct `POST .../sources` path (see
+/// `store_passages_accepts_questions_and_reports_the_bookkeeping`) was
+/// exercised. This drives the same stored/dropped counters through a
+/// batch file and confirms a stored question actually rides the
+/// passage into the search index under the paragraph it names.
+#[test]
+fn an_offline_import_carries_questions_through_to_the_search_index() {
+    let batches = batch_dir("import-questions");
+    let file = batches.join("guide.jsonl");
+    std::fs::write(
+        &file,
+        r#"{"taguru_batch": 1, "context": "sake", "source": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+{"passage": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。"}
+{"question": "杜氏は誰?", "paragraph": 1}
+{"question": "存在しない段落への質問?", "paragraph": 9}
+"#,
+    )
+    .unwrap();
+
+    let data_dir = std::env::temp_dir().join(format!(
+        "taguru-http-import-questions-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("+1 question(s) (1 dropped: no such paragraph)"),
+        "{stdout}"
+    );
+
+    // The stored question rides the passage into the search index: a
+    // query using the QUESTION's wording, not the paragraph's own,
+    // still finds the paragraph it names.
+    let server = Server::start_on("import-questions", data_dir);
+    let hits = server.ok(
+        "POST",
+        "/contexts/sake/sources/search",
+        Some(json!({"query": "杜氏は誰?", "limit": 3})),
+    );
+    let hit = &hits[0];
+    assert_eq!(hit["source"], "doc-guide");
+    assert_eq!(hit["index"], 1, "the hit names the answering PARAGRAPH");
     let _ = std::fs::remove_dir_all(&batches);
 }
 

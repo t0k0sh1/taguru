@@ -244,6 +244,14 @@ pub struct Entry {
     /// by refresh, cleared by eviction, and counted against the cache
     /// budget. Lock order: `inner` before `vectors`, never the reverse.
     vectors: Mutex<Option<Arc<VectorStore>>>,
+    /// Serializes whole gloss-embedding refreshes — the same reason as
+    /// `passage_refresh` below: a diff computed outside the entry lock
+    /// (provider round trips can take seconds) races on which of two
+    /// overlapping refreshes' provider calls lands first, not on which
+    /// one read the newer gloss. Held for the whole refresh, not just
+    /// the merge, so a slower refresh of an older gloss can never
+    /// finish after — and clobber — a faster refresh of a newer one.
+    vectors_refresh: Mutex<()>,
     /// The passage store, resident after first use (see
     /// [`crate::passages::PassageStore`]) and counted against the cache
     /// budget like `vectors`. Lock order: `inner` (the tombstone fence,
@@ -307,6 +315,7 @@ impl Entry {
             dirty: AtomicBool::new(false),
             last_touch: AtomicU64::new(0),
             vectors: Mutex::new(None),
+            vectors_refresh: Mutex::new(()),
             passages: Mutex::new(None),
             bm25: RwLock::new(None),
             bm25_dirty: AtomicBool::new(false),
@@ -1262,9 +1271,13 @@ impl AppState {
         let op = WalOp::RetractSource {
             source: source.to_string(),
         };
-        let touched = self.logged_write(name, std::slice::from_ref(&op), |context| {
-            context.retract_source(source).unwrap_or(0)
-        })?;
+        let touched = self.logged_write(
+            name,
+            std::slice::from_ref(&op),
+            |context| context.retract_source(source).unwrap_or(0),
+            // The single RetractSource op never fails to apply.
+            |_| 1,
+        )?;
 
         let Some(entry) = self.lookup(name) else {
             // Raced with a delete; there is nothing left to clean up.
@@ -1654,6 +1667,12 @@ impl AppState {
                     .to_string(),
             ));
         };
+        let entry = self.lookup(name)?;
+        // One refresh per context at a time (see Entry::vectors_refresh
+        // for why); held across the gloss read too, not just the embed
+        // and merge, so no overlapping refresh can be mid-flight against
+        // a gloss state this one hasn't seen yet.
+        let _serial = entry.vectors_refresh.lock().unwrap();
         let glosses = match self.read_context(name, |context| {
             let concepts: Vec<(String, String)> = context
                 .concept_names()
@@ -1684,12 +1703,14 @@ impl AppState {
             }
         };
         let (concepts, labels) = glosses;
-        let entry = self.lookup(name)?;
         let path = vectors_path(&self.0.data_dir, &file_stem(name));
 
-        // Diff and embed without holding the entry lock — provider round
-        // trips can take seconds. Concurrent refreshes at worst re-embed
-        // the same names; the merge below stays correct.
+        // Diff and embed while still holding `_serial`, not the entry's
+        // data lock — provider round trips can take seconds and must
+        // not block graph reads/writes. `_serial` (not this) is what
+        // keeps two overlapping refreshes from racing: only one can be
+        // here at a time, so the diff below always runs against
+        // whatever the previous refresh (if any) already published.
         let existing = VectorStore::load(&path);
         let fresh_model = existing.model != embedder.model();
         let embedded_concepts =
@@ -1704,9 +1725,10 @@ impl AppState {
             };
         let newly_embedded = embedded_concepts.len() + embedded_labels.len();
 
-        // Merge under the entry lock so concurrent refreshes serialize
-        // on the read-modify-write of the sidecar. A `None` means a
-        // delete won the lock first: don't recreate the sidecar.
+        // Publish under the entry lock (a delete that may have won it
+        // must not see its sidecar recreated) — `_serial` above, held
+        // since before the gloss read, is what makes this
+        // read-modify-write race-free, not this lock by itself.
         let _guard = entry.lock_unless_deleted()?;
         let mut store = VectorStore::load(&path);
         if store.model != embedder.model() {
@@ -2004,6 +2026,11 @@ impl AppState {
             // recreate the sidecar it just removed.
             let mut guard = entry.lock_unless_deleted()?;
             let inner = &mut *guard;
+            // Saved so a load or persist failure below can restore the
+            // pre-call state — without it, memory would hold fields
+            // that never reached the sidecar, and a later, unrelated
+            // successful update would persist them as a side effect.
+            let previous = inner.meta.clone();
             if let Some(description) = description {
                 inner.meta.description = description;
             }
@@ -2026,20 +2053,26 @@ impl AppState {
             if inner.meta.pinned
                 && let Err(error) = ensure_hot(&self.0.data_dir, name, inner, &self.0.metrics)
             {
+                rollback_meta(inner, previous);
+                self.recount_entry(inner);
                 return Some(Err(io::Error::other(error)));
             }
             // A pin toggle moves the entry into or out of the budget's
             // world; the estimate must follow.
             self.recount_entry(inner);
-            let inner = &*inner;
-            write_meta(
+            let result = write_meta(
                 &self.0.data_dir,
                 &file_stem(name),
                 &inner.meta,
                 &inner.stats,
                 &entry.usage.snapshot(),
             )
-            .map(|()| inner.meta.clone())
+            .map(|()| inner.meta.clone());
+            if result.is_err() {
+                rollback_meta(inner, previous);
+                self.recount_entry(inner);
+            }
+            result
         };
         self.enforce_budget(name);
         Some(outcome)
@@ -2313,11 +2346,22 @@ impl AppState {
     /// nothing applied): the client must never hold an acknowledgment
     /// the disk cannot replay. With the WAL disabled the staging step
     /// is skipped and durability falls back to the flush interval.
+    /// `operate` may apply fewer than `ops.len()` — `apply_in_order`
+    /// stops at the first rejection, but the WAL above was already
+    /// appended in full (durability can't wait on a result it doesn't
+    /// have yet). Left alone, the untried tail would sit on disk
+    /// looking exactly like an applied record: `ensure_hot`'s replay
+    /// (`replay_op`) continues past a rejection where the live path
+    /// stopped at the first one, so that tail would be tried
+    /// independently — and could succeed — next time this context
+    /// goes cold. `applied` reports how many ops actually landed so
+    /// the excess can be trimmed back out before this returns.
     fn logged_write<T>(
         &self,
         name: &str,
         ops: &[WalOp],
         operate: impl FnOnce(&mut Context) -> T,
+        applied: impl FnOnce(&T) -> usize,
     ) -> Result<T, AccessError> {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let result = {
@@ -2327,6 +2371,8 @@ impl AppState {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
                 .map_err(AccessError::Load)?;
+            let first_seq = inner.wal_seq;
+            let mut staged = None;
             if self.0.wal_enabled {
                 // Backstop against unbounded growth: the log only
                 // truncates after a successful image save, so a
@@ -2346,6 +2392,7 @@ impl AppState {
                     )));
                 }
                 let path = wal_path(&self.0.data_dir, &file_stem(name));
+                let len_before = inner.wal_bytes;
                 match wal::append_batch(&path, inner.wal_seq, ops) {
                     Ok(appended) => {
                         self.0.metrics.record_wal_append(true);
@@ -2361,6 +2408,7 @@ impl AppState {
                         return Err(AccessError::Unpersisted(error.to_string()));
                     }
                 }
+                staged = Some((path, len_before));
             }
             let Slot::Hot(context) = &mut inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
@@ -2368,6 +2416,45 @@ impl AppState {
             let result = operate(context);
             entry.dirty.store(true, Ordering::Relaxed);
             self.recount_entry(&mut inner);
+
+            if let Some((path, len_before)) = staged {
+                let landed = applied(&result);
+                if landed < ops.len() {
+                    match wal::truncate_to(&path, len_before) {
+                        Ok(()) if landed > 0 => {
+                            match wal::append_batch(&path, first_seq, &ops[..landed]) {
+                                Ok(appended) => {
+                                    inner.wal_bytes = len_before + appended;
+                                    inner.wal_seq = first_seq + landed as u64;
+                                }
+                                Err(error) => {
+                                    // The applied prefix already happened
+                                    // in memory and will not be undone;
+                                    // the log is now behind it until the
+                                    // next successful write or flush.
+                                    tracing::warn!(
+                                        context = %name, %error,
+                                        "WAL re-append after a partial apply failed; the log now trails memory"
+                                    );
+                                    inner.wal_bytes = len_before;
+                                    inner.wal_seq = first_seq;
+                                }
+                            }
+                        }
+                        Ok(()) => {
+                            inner.wal_bytes = len_before;
+                            inner.wal_seq = first_seq;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                context = %name, %error,
+                                "WAL truncate after a partial apply failed; the untried tail may replay independently later"
+                            );
+                        }
+                    }
+                }
+            }
+
             result
         };
         self.touch(&entry);
@@ -2385,7 +2472,12 @@ impl AppState {
         ops: Vec<AssocOp>,
     ) -> Result<Result<usize, PartialWrite>, AccessError> {
         let wal_ops: Vec<WalOp> = ops.into_iter().map(WalOp::Associate).collect();
-        self.logged_write(name, &wal_ops, |context| apply_in_order(context, &wal_ops))
+        self.logged_write(
+            name,
+            &wal_ops,
+            |context| apply_in_order(context, &wal_ops),
+            applied_count,
+        )
     }
 
     /// Registers alias batches (concepts then labels, in map order),
@@ -2411,7 +2503,12 @@ impl AppState {
                 canonical: canonical.clone(),
             });
         }
-        self.logged_write(name, &wal_ops, |context| apply_in_order(context, &wal_ops))
+        self.logged_write(
+            name,
+            &wal_ops,
+            |context| apply_in_order(context, &wal_ops),
+            applied_count,
+        )
     }
 
     /// Withdraws alias registrations (concept spellings then label
@@ -2436,7 +2533,12 @@ impl AppState {
                 alias: alias.clone(),
             });
         }
-        self.logged_write(name, &wal_ops, |context| apply_in_order(context, &wal_ops))
+        self.logged_write(
+            name,
+            &wal_ops,
+            |context| apply_in_order(context, &wal_ops),
+            applied_count,
+        )
     }
 
     /// The entry's vector store, loaded from its sidecar on first use
@@ -2663,6 +2765,17 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<HashMap<String, Arc<Entry>>> {
     Ok(registry)
 }
 
+/// Restores `inner.meta` to `previous` after a load or persist failure
+/// partway through `update_meta`. Also un-applies the floor from any
+/// already-loaded context, matching the one place `update_meta` pushes
+/// a field straight into the hot context instead of just the sidecar.
+fn rollback_meta(inner: &mut EntryInner, previous: ContextMeta) {
+    if let Slot::Hot(context) = &mut inner.slot {
+        context.set_dice_floor(previous.dice_floor);
+    }
+    inner.meta = previous;
+}
+
 /// Loads the image behind a cold slot and replays whatever the WAL
 /// holds above the image's watermark; hot slots pass through. On
 /// success the slot is hot, the stats are fresh, and `wal_seq`
@@ -2740,6 +2853,17 @@ fn apply_in_order(context: &mut Context, ops: &[WalOp]) -> Result<usize, Partial
         applied += 1;
     }
     Ok(applied)
+}
+
+/// How many ops an `apply_in_order` result actually landed — the full
+/// count on success, the prefix on a partial write. Feeds
+/// `logged_write`'s WAL trim: it never inspects `T` itself, only how
+/// far the batch got.
+fn applied_count(result: &Result<usize, PartialWrite>) -> usize {
+    match result {
+        Ok(applied) => *applied,
+        Err(partial) => partial.applied,
+    }
 }
 
 /// Re-applies one replayed op. A deterministic library rejection here
@@ -3015,7 +3139,17 @@ fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
 /// contents reached disk.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let staged = stage_bytes(path, bytes)?;
-    commit_staged(&staged, path)
+    let result = commit_staged(&staged, path);
+    if result.is_err() {
+        // A failed rename leaves `staged` sitting under its temporary
+        // name — clean it up rather than leave it for unbounded disk
+        // litter until the next boot's sweep. (A failed parent fsync
+        // after a successful rename finds nothing here: the file is
+        // already `path`, and removing the stale `staged` name is a
+        // harmless no-op.)
+        let _ = fs::remove_file(&staged);
+    }
+    result
 }
 
 /// A unique per-process staging name beside `path`. Concurrent
@@ -3036,10 +3170,21 @@ fn stage_bytes(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     use std::io::Write;
 
     let staged = staging_path(path);
-    let mut file = fs::File::create(&staged)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(staged)
+    let write = fs::File::create(&staged).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    match write {
+        Ok(()) => Ok(staged),
+        Err(error) => {
+            // The file (if it even got created) never held valid
+            // content and was never handed to a caller — remove it
+            // rather than leave a partial write behind under its
+            // temporary name.
+            let _ = fs::remove_file(&staged);
+            Err(error)
+        }
+    }
 }
 
 /// The cheap half of [`write_atomic`]: atomically publishes a staged
@@ -3774,6 +3919,48 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_failed_persist_does_not_leave_the_failed_change_in_memory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("meta-rollback");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        // A clean update lands on disk.
+        let meta = state
+            .update_meta("sake", Some("A".to_string()), None, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.description, "A");
+
+        // The disk goes bad: this update must be refused...
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = state
+            .update_meta("sake", Some("B".to_string()), None, None, None)
+            .unwrap();
+        assert!(failed.is_err(), "a persist failure must surface as Err");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // ...and must not have left "B" sitting in memory — a later,
+        // unrelated successful update must still see and persist "A",
+        // not silently resurrect the failed change.
+        let meta = state
+            .update_meta("sake", None, Some(true), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            meta.description, "A",
+            "the failed update to \"B\" must not have survived in memory"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn concurrent_reads_of_one_hot_context_do_not_serialize() {
         use std::sync::atomic::AtomicUsize;
         use std::thread;
@@ -4066,6 +4253,89 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// `apply_in_order` stops at the first rejection, but durability
+    /// appends the whole batch to the WAL before `operate` even runs.
+    /// Without trimming, the untried tail sits on disk indistinguishable
+    /// from an applied record, and `ensure_hot`'s replay (`replay_op`,
+    /// which continues past a rejection instead of stopping) would try
+    /// it independently on the next cold load — applying an op the
+    /// client was told never ran.
+    #[test]
+    fn replay_does_not_apply_ops_a_partial_batch_never_tried() {
+        let dir = scratch_dir("wal-partial-tail");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .add_aliases(
+                    "sake",
+                    &BTreeMap::from([
+                        ("Aomine".to_string(), "青嶺酒造".to_string()),
+                        ("AomineShuzo".to_string(), "青嶺酒造".to_string()),
+                    ]),
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+                .unwrap();
+
+            // A 3-op batch whose middle op is a guaranteed, deterministic
+            // rejection (withdrawing an alias that was never registered):
+            // `apply_in_order` applies "Aomine", stops at "NONEXISTENT",
+            // and never even attempts "AomineShuzo".
+            let outcome = state
+                .remove_aliases(
+                    "sake",
+                    &[
+                        "Aomine".to_string(),
+                        "NONEXISTENT".to_string(),
+                        "AomineShuzo".to_string(),
+                    ],
+                    &[],
+                )
+                .unwrap();
+            let partial = outcome.unwrap_err();
+            assert_eq!(partial.applied, 1, "only the leading op ran");
+            assert!(!partial.full, "an absent alias is a conflict, not a capacity error");
+            // No flush — the WAL, not the image, must carry this state
+            // into the restart below.
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let untried = state
+            .read_context("sake", |context| {
+                context.query(Some("AomineShuzo"), Some("代表銘柄"), None)
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(
+            untried.len(),
+            1,
+            "the untried alias must survive: the live batch never touched it, so replay must not either"
+        );
+        let removed = state
+            .read_context("sake", |context| {
+                context.query(Some("Aomine"), Some("代表銘柄"), None)
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(
+            removed.is_empty(),
+            "the removal that did apply live must still hold after replay"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_wal_that_cannot_be_written_refuses_the_write() {
         let dir = scratch_dir("wal-refuse");
@@ -4159,6 +4429,44 @@ mod tests {
             })
             .count();
         assert_eq!(leftovers, 0, "staging files must not survive a commit");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_atomic_cleans_up_its_staging_file_when_the_commit_fails() {
+        let dir = scratch_dir("atomic-commit-fail");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file.bin");
+        // Renaming a plain file onto a non-empty directory fails on
+        // every platform this project targets — staging (a distinctly
+        // named file) still succeeds, so this isolates a commit-phase
+        // failure without touching stage_bytes.
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("occupied"), b"x").unwrap();
+
+        let result = write_atomic(&path, b"payload");
+        assert!(
+            result.is_err(),
+            "renaming a file onto a non-empty directory must fail"
+        );
+
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.starts_with("tmp"))
+            })
+            .map(|entry| entry.path())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed commit must not leave its staging file behind: {leftovers:?}"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -5713,6 +6021,87 @@ mod tests {
         assert!(!refresh_calls.is_empty());
         assert!(refresh_calls.iter().all(|p| *p == EmbedPurpose::Index));
         assert_eq!(*cue_call, EmbedPurpose::Query);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `existing`/`embed_stale` run before the entry's data lock is
+    /// ever taken — provider round trips can take seconds and must not
+    /// block graph reads — so two concurrent first-time refreshes would
+    /// both diff against the same empty sidecar and both call the
+    /// provider. Unless `vectors_refresh` excludes them for the whole
+    /// refresh (not just the merge), those two provider calls overlap;
+    /// whichever refresh then merges last silently wins over the
+    /// other's, with no ordering guarantee that the winner saw the
+    /// newer gloss. This pins the observable down directly: the
+    /// provider must never see two calls in flight at once.
+    #[test]
+    fn concurrent_gloss_refreshes_serialize_their_provider_calls() {
+        use std::sync::atomic::AtomicUsize;
+        use std::thread;
+        use std::time::Duration;
+
+        struct SlowEmbeddings {
+            in_flight: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
+        impl EmbeddingProvider for SlowEmbeddings {
+            fn model(&self) -> &str {
+                "slow"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                // Long enough that two unserialized refreshes' provider
+                // calls MUST overlap unless `vectors_refresh` excludes them.
+                thread::sleep(Duration::from_millis(150));
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            }
+        }
+
+        let dir = scratch_dir("refresh-serialize");
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let embedder = Some(Arc::new(SlowEmbeddings {
+            in_flight: Arc::clone(&in_flight),
+            peak: Arc::clone(&peak),
+        }) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("fruit", |context| {
+                context.associate("りんご", "分類", "果物", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+
+        let mut refreshers = Vec::new();
+        for _ in 0..2 {
+            let state = state.clone();
+            refreshers.push(thread::spawn(move || {
+                state.refresh_embeddings("fruit").unwrap().unwrap();
+            }));
+        }
+        for refresher in refreshers {
+            refresher.join().unwrap();
+        }
+
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            1,
+            "two first-time refreshes both diff against an empty sidecar; without \
+             vectors_refresh serializing the whole refresh, their provider calls \
+             overlap and whichever merges last can clobber a fresher gloss with a \
+             staler one"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

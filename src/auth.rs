@@ -34,6 +34,15 @@ fn is_auth_exempt(path: &str, oauth_enabled: bool) -> bool {
             && (path.starts_with("/oauth/") || path.starts_with("/.well-known/oauth-")))
 }
 
+/// Strips the `Bearer` auth-scheme, RFC 7235 §2.1's case-insensitively
+/// (`bearer`, `BEARER`, `Bearer` alike) — only the scheme, never the
+/// token that follows it.
+fn strip_bearer_prefix(value: &str) -> Option<&str> {
+    let prefix_len = "Bearer ".len();
+    let (scheme, rest) = value.split_at_checked(prefix_len)?;
+    scheme.eq_ignore_ascii_case("Bearer ").then_some(rest)
+}
+
 /// The authenticated key's name, attached to the RESPONSE: the access
 /// log middleware sits outside this one, so response extensions are
 /// the channel that reaches it.
@@ -147,7 +156,7 @@ pub async fn require_bearer(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+        .and_then(strip_bearer_prefix);
     let key = presented.and_then(|token| {
         gate.keyring
             .authenticate(token)
@@ -239,6 +248,25 @@ mod tests {
             .await,
             200
         );
+    }
+
+    /// RFC 7235 §2.1: auth-scheme is case-insensitive — `bearer`,
+    /// `BEARER`, and `Bearer` must all introduce the same credentials.
+    #[tokio::test]
+    async fn the_bearer_scheme_is_case_insensitive() {
+        let keyring = ring(Some("s3cret"), None);
+        for scheme in ["Bearer", "bearer", "BEARER", "BeArEr"] {
+            assert_eq!(
+                status_of(
+                    app(Arc::clone(&keyring)),
+                    "/contexts",
+                    Some(&format!("{scheme} s3cret"))
+                )
+                .await,
+                200,
+                "scheme {scheme} must authenticate"
+            );
+        }
     }
 
     /// Every named key opens the gate, and the response carries WHICH —

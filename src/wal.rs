@@ -168,14 +168,25 @@ pub fn replay<Op: DeserializeOwned>(path: &Path, watermark: u64) -> io::Result<(
 /// watermark comparison, never on what this file still contains, so a
 /// failure here just leaves the log longer than necessary.
 pub fn reset(path: &Path) -> io::Result<()> {
-    match fs::OpenOptions::new().write(true).open(path) {
-        Ok(file) => {
-            file.set_len(0)?;
-            file.sync_all()
-        }
+    match truncate_to(path, 0) {
+        Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+/// Rewinds the log to exactly `len` bytes — same in-place, no-rename
+/// shape as `reset`, but to an arbitrary prior length rather than
+/// zero. The caller for this is a batch write whose live apply stopped
+/// short of what was staged: durability appends the whole batch before
+/// running it, so a partial apply leaves the tail describing ops that
+/// were never actually tried. Left on disk, that tail is
+/// indistinguishable from an applied record, and replay would try it
+/// independently next time this context goes cold.
+pub fn truncate_to(path: &Path, len: u64) -> io::Result<()> {
+    let file = fs::OpenOptions::new().write(true).open(path)?;
+    file.set_len(len)?;
+    file.sync_all()
 }
 
 #[cfg(test)]
@@ -279,5 +290,24 @@ mod tests {
         let (ops, top) = replay::<WalOp>(&path, 4).unwrap();
         assert!(ops.is_empty());
         assert_eq!(top, 4);
+    }
+
+    #[test]
+    fn truncate_to_rewinds_to_an_arbitrary_prior_length() {
+        let path = scratch_wal("truncate");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        let len_before = fs::metadata(&path).unwrap().len();
+        append_batch(&path, 2, &[associate("b"), associate("c")]).unwrap();
+
+        truncate_to(&path, len_before).unwrap();
+
+        assert_eq!(fs::metadata(&path).unwrap().len(), len_before);
+        let (ops, top) = replay(&path, 0).unwrap();
+        assert_eq!(
+            ops.iter().map(subject_of).collect::<Vec<_>>(),
+            vec!["a"],
+            "the rewound tail must not survive"
+        );
+        assert_eq!(top, 1);
     }
 }

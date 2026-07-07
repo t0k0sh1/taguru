@@ -83,7 +83,7 @@ async fn serve() {
     let tracer_provider = init_telemetry();
 
     let config = registry::BootConfig::from_env();
-    let flush_secs = env_number("TAGURU_FLUSH_SECS", 5);
+    let flush_secs = resolve_flush_secs(env_number("TAGURU_FLUSH_SECS", 5));
     let max_body_bytes = env_number("TAGURU_MAX_BODY_BYTES", 8 * 1024 * 1024);
     let timeout_secs = env_number("TAGURU_REQUEST_TIMEOUT_SECS", 30);
     let rate_per_minute = env_number("TAGURU_RATE_LIMIT_PER_MIN", 0);
@@ -508,5 +508,31 @@ pub(crate) fn env_floor(key: &str) -> Option<f32> {
             warn!("ignoring {key}={value}: not a number between 0 and 1");
             None
         }
+    }
+}
+
+/// `tokio::time::interval` panics on a zero period — with
+/// `TAGURU_FLUSH_SECS=0` that panic fires inside the spawned flusher
+/// task, not the main thread, so the server keeps listening and
+/// answering requests while dirty contexts silently stop persisting
+/// forever. Floor to 1 instead, loudly, the same "never silent" rule
+/// `env_number` already applies to unparseable input.
+pub(crate) fn resolve_flush_secs(requested: usize) -> usize {
+    if requested == 0 {
+        warn!("TAGURU_FLUSH_SECS=0 would never fire (and would panic the flusher task); using 1");
+        1
+    } else {
+        requested
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flush_secs_zero_is_floored_to_one_instead_of_panicking_the_flusher() {
+        assert_eq!(resolve_flush_secs(0), 1);
+        assert_eq!(resolve_flush_secs(5), 5);
     }
 }

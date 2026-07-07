@@ -473,12 +473,31 @@ pub async fn add_associations(
                 return refusal;
             }
         }
+        // subject/label/object name the triple itself and must carry
+        // something; source is deliberately excluded — an omitted
+        // source is the ordinary unsourced-association case, not a
+        // missing name (see AssocOp::source).
+        for (field, value) in [
+            ("subject", op.subject.as_str()),
+            ("label", op.label.as_str()),
+            ("object", op.object.as_str()),
+        ] {
+            if let Some(refusal) = empty(&format!("associations[{index}].{field}"), value, started_at)
+            {
+                return refusal;
+            }
+        }
     }
     let total = associations.len();
     match state.add_associations(&name, associations) {
         Err(failure) => access_error(&state, failure, &name, started_at),
         Ok(Ok(applied)) => {
-            state.note_write(&name);
+            // An empty batch reaches here as `applied == 0`: nothing
+            // was written, so the counter must not move either — the
+            // same rule the partial-write arm below already applies.
+            if applied > 0 {
+                state.note_write(&name);
+            }
             ok(applied, started_at)
         }
         // Items before the failing one are applied (each item is
@@ -595,6 +614,21 @@ fn oversized(what: &str, value: &str, cap: usize, started_at: Instant) -> Option
     })
 }
 
+/// Companion to `oversized`, at the other end of the range: `Some(400)`
+/// when `value` is empty. An empty subject/label/object is not a
+/// degenerate name, it is no name — silently interning it would seed
+/// the graph with an unaddressable concept that every future listing
+/// and export carries but no query can usefully name.
+fn empty(what: &str, value: &str, started_at: Instant) -> Option<Response> {
+    value.is_empty().then(|| {
+        error(
+            StatusCode::BAD_REQUEST,
+            format!("{what} must not be empty; nothing was applied"),
+            started_at,
+        )
+    })
+}
+
 /// The one clamp every numeric cap in this file goes through: an
 /// omitted value takes the default, and nothing exceeds the ceiling.
 fn clamp(value: Option<usize>, default: usize, ceiling: usize) -> usize {
@@ -685,7 +719,11 @@ pub async fn add_aliases(
     match state.add_aliases(&name, &request.concepts, &request.labels) {
         Err(failure) => access_error(&state, failure, &name, started_at),
         Ok(Ok(applied)) => {
-            state.note_write(&name);
+            // Same rule as add_associations: an empty batch applies
+            // nothing, so it must not bump the write counter either.
+            if applied > 0 {
+                state.note_write(&name);
+            }
             ok(applied, started_at)
         }
         Ok(Err(partial)) => {

@@ -462,11 +462,21 @@ pub fn route_tool(
             )),
         ),
         "delete_context" => ("DELETE", context_path("name")?, None),
-        "add_associations" => (
-            "POST",
-            format!("{}/associations", context_path("context")?),
-            Some(arguments.get("associations").cloned().unwrap_or(json!([]))),
-        ),
+        "add_associations" => {
+            // Schema-required: an omitted (or null) argument must
+            // refuse, not fall back to an empty batch — that would
+            // route a caller's mistake into a silent, do-nothing 200.
+            let associations = arguments
+                .get("associations")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .ok_or_else(|| "missing required argument 'associations'".to_string())?;
+            (
+                "POST",
+                format!("{}/associations", context_path("context")?),
+                Some(associations),
+            )
+        }
         "store_passages" => (
             "POST",
             format!("{}/sources", context_path("context")?),
@@ -594,6 +604,30 @@ mod tests {
             route_tool("describe", &json!({"concept": "x"})),
             Err("missing required argument 'context'".to_string())
         );
+    }
+
+    /// `associations` is schema-required (unlike, say, `add_aliases`'s
+    /// concepts/labels, which default to empty maps server-side). A
+    /// caller that omits it made a mistake, not an empty-batch request
+    /// — omission must refuse, not silently route as `[]` and come
+    /// back a do-nothing 200.
+    #[test]
+    fn add_associations_without_the_associations_argument_is_refused() {
+        assert_eq!(
+            route_tool("add_associations", &json!({"context": "ctx"})),
+            Err("missing required argument 'associations'".to_string())
+        );
+        // Explicit null is the same omission, not a value.
+        assert_eq!(
+            route_tool(
+                "add_associations",
+                &json!({"context": "ctx", "associations": null})
+            ),
+            Err("missing required argument 'associations'".to_string())
+        );
+        // A deliberate empty batch is a value, not an omission — it
+        // still routes.
+        assert!(route_tool("add_associations", &json!({"context": "ctx", "associations": []})).is_ok());
     }
 
     /// Context names arrive as URL path segments; anything outside the
