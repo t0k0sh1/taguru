@@ -481,13 +481,30 @@ fn oauth_authorize_percent_encodes_state_in_redirects() {
     );
 
     // ...and the error redirect (a bad code_challenge_method) both take
-    // the same splicing path in oauth_http.rs.
+    // the same splicing path in oauth_http.rs — consent_page and approve
+    // both run params_error before rendering anything, so GET redirects
+    // just like POST. Use no_redirect here too: server.call's default
+    // agent follows redirects, which would leak this request to the
+    // real external host named in redirect_uri (claude.ai).
     let bad_query = format!(
         "response_type=code&client_id={client_id}&redirect_uri={CALLBACK}\
          &state={INJECTED_STATE}&code_challenge={CHALLENGE}&code_challenge_method=plain"
     );
-    let (status, _) = server.call("GET", &format!("/oauth/authorize?{bad_query}"), None);
-    assert_eq!(status, 200); // consent page — error surfaces on POST
+    let refused_get = no_redirect
+        .get(&format!("{}/oauth/authorize?{bad_query}", server.base))
+        .call()
+        .expect("a bad code_challenge_method must still redirect with ?error=");
+    assert_eq!(refused_get.status(), 303);
+    let get_error_location = refused_get.header("location").unwrap().to_string();
+    assert_eq!(
+        get_error_location.matches("error=").count(),
+        1,
+        "state must not inject a second query parameter: {get_error_location}"
+    );
+    assert!(
+        get_error_location.contains("state=evil%26code%3Dinjected"),
+        "state must round-trip percent-encoded, not splice raw query syntax: {get_error_location}"
+    );
     let refused = no_redirect
         .post(&format!("{}/oauth/authorize", server.base))
         .set("Content-Type", "application/x-www-form-urlencoded")
