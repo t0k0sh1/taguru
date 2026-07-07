@@ -4305,7 +4305,10 @@ mod tests {
                 .unwrap();
             let partial = outcome.unwrap_err();
             assert_eq!(partial.applied, 1, "only the leading op ran");
-            assert!(!partial.full, "an absent alias is a conflict, not a capacity error");
+            assert!(
+                !partial.full,
+                "an absent alias is a conflict, not a capacity error"
+            );
             // No flush — the WAL, not the image, must carry this state
             // into the restart below.
         }

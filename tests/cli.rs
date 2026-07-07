@@ -383,10 +383,7 @@ fn inspect_help_flag_prints_usage_and_exits_zero() {
             stdout.contains("usage: taguru inspect PATH"),
             "{flag}: {stdout}"
         );
-        assert!(
-            String::from_utf8_lossy(&output.stderr).is_empty(),
-            "{flag}"
-        );
+        assert!(String::from_utf8_lossy(&output.stderr).is_empty(), "{flag}");
     }
 }
 
@@ -408,8 +405,7 @@ fn inspect_refuses_the_wrong_number_of_arguments() {
 
 #[test]
 fn inspect_reports_no_images_under_an_empty_directory() {
-    let dir =
-        std::env::temp_dir().join(format!("taguru-cli-inspect-empty-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("taguru-cli-inspect-empty-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 

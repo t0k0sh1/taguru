@@ -482,7 +482,8 @@ pub async fn add_associations(
             ("label", op.label.as_str()),
             ("object", op.object.as_str()),
         ] {
-            if let Some(refusal) = empty(&format!("associations[{index}].{field}"), value, started_at)
+            if let Some(refusal) =
+                empty(&format!("associations[{index}].{field}"), value, started_at)
             {
                 return refusal;
             }

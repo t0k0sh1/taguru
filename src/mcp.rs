@@ -627,7 +627,13 @@ mod tests {
         );
         // A deliberate empty batch is a value, not an omission — it
         // still routes.
-        assert!(route_tool("add_associations", &json!({"context": "ctx", "associations": []})).is_ok());
+        assert!(
+            route_tool(
+                "add_associations",
+                &json!({"context": "ctx", "associations": []})
+            )
+            .is_ok()
+        );
     }
 
     /// Context names arrive as URL path segments; anything outside the

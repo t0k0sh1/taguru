@@ -1405,20 +1405,27 @@ fn empty_names_are_rejected_at_the_write_boundary() {
     // name — each must be refused on its own, naming the offending
     // field.
     for (field, triple) in [
-        ("subject", json!({"subject": "", "label": "l", "object": "o", "weight": 1.0})),
-        ("label", json!({"subject": "s", "label": "", "object": "o", "weight": 1.0})),
-        ("object", json!({"subject": "s", "label": "l", "object": "", "weight": 1.0})),
+        (
+            "subject",
+            json!({"subject": "", "label": "l", "object": "o", "weight": 1.0}),
+        ),
+        (
+            "label",
+            json!({"subject": "s", "label": "", "object": "o", "weight": 1.0}),
+        ),
+        (
+            "object",
+            json!({"subject": "s", "label": "l", "object": "", "weight": 1.0}),
+        ),
     ] {
-        let (status, body) = server.call(
-            "POST",
-            "/contexts/sake/associations",
-            Some(json!([triple])),
-        );
+        let (status, body) =
+            server.call("POST", "/contexts/sake/associations", Some(json!([triple])));
         assert_eq!(status, 400, "{field}: {body}");
         assert!(
-            body["error"].as_str().unwrap().contains(&format!(
-                "associations[0].{field}"
-            )),
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("associations[0].{field}")),
             "the message must point at the offending field: {body}"
         );
     }
