@@ -1,4 +1,4 @@
 ## Top-Level Rules
 
-- Investigating and fixing are different categories of work. Crossing from one into the other — e.g., asked to investigate, then also applying a fix — always requires asking first, no matter how small the fix. "Handle everything" never extends across that boundary.
-- Within a single category, pick up any related problems found along the way without asking first; don't drift into unrelated ones. An explicit scope from the user (e.g., "just this one") always overrides that default.
+- Only an explicit fix instruction authorizes fixing. Investigating never rolls into fixing on its own — not because the fix is small, not because a command or skill you ran also fixes. Asked to investigate: stop at findings, ask before changing anything.
+- Once fixing is authorized, fix every problem you find by default — whatever its source (your own discovery, the user, a PR review, a review tool) and whatever its scope. Handle obvious ones silently; for anything large or out of scope, list them as checkboxes and have the user deselect what to defer. Default is fix, not defer.
