@@ -510,6 +510,17 @@ pub struct PassageSearchHit {
     pub vector: Option<(usize, f32)>,
 }
 
+/// The outcome of resolving one `(source, paragraph index)` citation:
+/// found, or which half of the lookup missed. Kept distinct from the
+/// outer `Option<io::Result<_>>` (context-absent / I/O failure), which
+/// stays reserved for the store itself being unreachable.
+#[derive(Debug)]
+pub(crate) enum CitationLookup {
+    Found(String),
+    UnknownSource,
+    IndexOutOfRange,
+}
+
 /// Accumulator behind the fusion: each lane keeps the (rank, score,
 /// paragraph hash) it actually scored, so staleness settles per lane
 /// against the store's current text.
@@ -1134,6 +1145,32 @@ impl AppState {
         Some(Ok((passages, missing)))
     }
 
+    /// Resolves one `(source, paragraph index)` pair to its verbatim
+    /// excerpt — the located counterpart of `lookup_passages`'
+    /// whole-document dereference. Reuses `PassageRecord::paragraph`,
+    /// the same slice `search_passages` goes through for its hits, so
+    /// the two can never disagree about what a paragraph's text is.
+    pub fn citation(
+        &self,
+        name: &str,
+        source: &str,
+        index: u32,
+    ) -> Option<io::Result<CitationLookup>> {
+        let entry = self.lookup(name)?;
+        let _fence = entry.read_unless_deleted()?;
+        let store = match self.entry_passages(&entry, &file_stem(name)) {
+            Ok(store) => store,
+            Err(error) => return Some(Err(error)),
+        };
+        let Some(record) = store.get(source) else {
+            return Some(Ok(CitationLookup::UnknownSource));
+        };
+        let Some((_, text)) = record.paragraph(index as usize) else {
+            return Some(Ok(CitationLookup::IndexOutOfRange));
+        };
+        Some(Ok(CitationLookup::Found(text.to_string())))
+    }
+
     /// The source ids that currently have a registered passage.
     pub fn passage_sources(&self, name: &str) -> Option<io::Result<Vec<String>>> {
         let entry = self.lookup(name)?;
@@ -1516,7 +1553,7 @@ impl AppState {
             let Some(record) = store.get(&source) else {
                 continue;
             };
-            let Some(span) = record.paragraphs.get(index as usize) else {
+            let Some((span, text)) = record.paragraph(index as usize) else {
                 continue;
             };
             let bm25 = lanes
@@ -1539,7 +1576,7 @@ impl AppState {
                 source,
                 index,
                 score,
-                text: record.text[span.start as usize..span.end as usize].to_string(),
+                text: text.to_string(),
                 bm25,
                 vector,
             });
