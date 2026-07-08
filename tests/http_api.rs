@@ -870,6 +870,74 @@ fn mcp_rejects_batches_and_undecodable_messages() {
     );
 }
 
+/// cite_passage over tools/call: the MCP-layer counterpart of the
+/// citation HTTP tests above, proving the manifest + dispatch wiring
+/// (not just the HTTP handler) carries a request end to end.
+#[test]
+fn cite_passage_tool_executes_end_to_end_through_mcp() {
+    let server = Server::start("mcp-citation");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {
+            "docs/aomine.md": "青嶺酒造は雲居県霧沢町の蔵元である。\n\n\
+                原料米には山田錦を使い、精米歩合は50パーセントまで磨く。"
+        }})),
+    );
+
+    // Acceptance criterion 1: the tool is advertised in the manifest with
+    // a schema matching #5's request shape, not just reachable by name.
+    let (_, tools) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})),
+    );
+    let manifest = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "cite_passage")
+        .expect("tools/list must advertise cite_passage");
+    assert_eq!(
+        manifest["inputSchema"]["required"],
+        json!(["context", "source", "index"])
+    );
+    assert!(manifest["inputSchema"]["properties"]["source"].is_object());
+    assert!(manifest["inputSchema"]["properties"]["index"].is_object());
+
+    let (status, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "cite_passage",
+                               "arguments": {"context": "sake", "source": "docs/aomine.md", "index": 1}}})),
+    );
+    assert_eq!(status, 200);
+    assert!(reply["result"].get("isError").is_none(), "{reply}");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\"source\":\"docs/aomine.md\""), "{text}");
+    assert!(text.contains("\"section\":null"), "{text}");
+
+    // Same failure convention as the `describe` case above: the tool
+    // call still succeeds as JSON-RPC, but the result carries isError.
+    let (status, failed) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "cite_passage",
+                               "arguments": {"context": "sake", "source": "docs/ghost.md", "index": 0}}})),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(failed["result"]["isError"], true);
+    let error_text = failed["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(error_text.contains("docs/ghost.md"), "{error_text}");
+}
+
 #[test]
 fn full_retrieval_loop_over_http() {
     let server = Server::start("loop");
