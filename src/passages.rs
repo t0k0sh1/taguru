@@ -67,23 +67,36 @@ pub(crate) struct StoreOutcome {
 /// One source's resident passage: the byte-exact text, its paragraph
 /// spans (computed once per residency, never persisted — the split
 /// function is deterministic, so the spans are as durable as the text
-/// they index), and its stored questions, validated against those
-/// spans and sorted by paragraph. Handed out as `Arc`, so search and
-/// the index/vector lanes walk paragraphs without holding the store
-/// lock and without copying text.
+/// they index), its stored questions, and its stored section markers
+/// — both validated against those spans and sorted by paragraph.
+/// Handed out as `Arc`, so search and the index/vector lanes walk
+/// paragraphs without holding the store lock and without copying
+/// text.
 #[derive(Debug)]
 pub(crate) struct PassageRecord {
     pub(crate) text: Arc<str>,
     pub(crate) paragraphs: Vec<ParagraphSpan>,
     pub(crate) questions: Vec<(u32, String)>,
+    /// (paragraph index of section start, label) pairs, sorted by
+    /// paragraph — a section implicitly extends until the next
+    /// marker or the end of the passage. No producer populates this
+    /// yet; it exists so ingest-time section attribution has
+    /// somewhere durable to land.
+    pub(crate) sections: Vec<(u32, String)>,
 }
 
 impl PassageRecord {
-    /// Builds the record, keeping only questions whose paragraph
-    /// exists in THIS text's split — the one validation point both the
-    /// live path and replay go through, so they can never disagree.
-    /// Returns how many were dropped.
-    fn new(text: Arc<str>, questions: Vec<(u32, String)>) -> (Arc<Self>, usize) {
+    /// Builds the record, keeping only questions and section markers
+    /// whose paragraph exists in THIS text's split — the one
+    /// validation point both the live path and replay go through, so
+    /// they can never disagree. Returns how many questions were
+    /// dropped; sections have no producer yet, so there is nothing to
+    /// report a drop count for.
+    fn new(
+        text: Arc<str>,
+        questions: Vec<(u32, String)>,
+        sections: Vec<(u32, String)>,
+    ) -> (Arc<Self>, usize) {
         let paragraphs = paragraph::split(&text);
         let offered = questions.len();
         let mut questions: Vec<(u32, String)> = questions
@@ -92,11 +105,17 @@ impl PassageRecord {
             .collect();
         questions.sort_by_key(|&(paragraph, _)| paragraph);
         let dropped = offered - questions.len();
+        let mut sections: Vec<(u32, String)> = sections
+            .into_iter()
+            .filter(|&(paragraph, _)| (paragraph as usize) < paragraphs.len())
+            .collect();
+        sections.sort_by_key(|&(paragraph, _)| paragraph);
         (
             Arc::new(Self {
                 text,
                 paragraphs,
                 questions,
+                sections,
             }),
             dropped,
         )
@@ -105,7 +124,7 @@ impl PassageRecord {
     /// Constructor for sibling modules' unit tests.
     #[cfg(test)]
     pub(crate) fn for_tests(text: &str) -> Arc<Self> {
-        Self::new(Arc::from(text), Vec::new()).0
+        Self::new(Arc::from(text), Vec::new(), Vec::new()).0
     }
 
     /// The paragraph texts behind the spans, in order.
@@ -124,6 +143,22 @@ impl PassageRecord {
             .get(index)
             .map(|span| (span, &self.text[span.start as usize..span.end as usize]))
     }
+
+    /// The section governing a paragraph — the nearest start marker at
+    /// or before `index`, extending until the next marker or the end
+    /// of the passage. `None` before the first marker, past the end,
+    /// or when the record carries no sections at all. No caller yet
+    /// (see the module doc); test-only until one lands.
+    #[cfg(test)]
+    pub(crate) fn section_for(&self, index: usize) -> Option<&str> {
+        if index >= self.paragraphs.len() {
+            return None;
+        }
+        let pos = self
+            .sections
+            .partition_point(|&(start, _)| (start as usize) <= index);
+        pos.checked_sub(1).map(|i| self.sections[i].1.as_str())
+    }
 }
 
 /// One passage mutation — this log's whole vocabulary. Same
@@ -132,9 +167,10 @@ impl PassageRecord {
 /// Both ops are last-write-wins, so a replay overlapping the snapshot
 /// re-applies harmlessly — the watermark still gates it, but a bug
 /// there degrades to wasted work, not corruption (unlike `associate`,
-/// which accumulates). `questions` is additive (older logs simply have
-/// none) and carries the submission AS OFFERED — validation happens in
-/// `PassageRecord::new`, identically on the live path and on replay.
+/// which accumulates). `questions` and `sections` are both additive
+/// (older logs simply have none) and carry the submission AS OFFERED —
+/// validation happens in `PassageRecord::new`, identically on the live
+/// path and on replay.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum PassageOp {
@@ -143,6 +179,8 @@ pub(crate) enum PassageOp {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         questions: Vec<(u32, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sections: Vec<(u32, String)>,
     },
     Retract {
         source: String,
@@ -160,9 +198,12 @@ const COMPACT_FLOOR_BYTES: u64 = 4 * 1024 * 1024;
 /// (see the module doc for why a ratio, never a fixed threshold).
 const COMPACT_RATIO: u64 = 1;
 
-const SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS2";
-/// The pre-doc2query snapshot format: same layout minus the per-source
-/// question blocks. Read forever, written never again.
+const SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS3";
+/// The pre-sections snapshot format: same layout minus the per-source
+/// section blocks. Read forever, written never again.
+const S2_SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS2";
+/// The pre-doc2query snapshot format: same layout minus both the
+/// question and section blocks. Read forever, written never again.
 const LEGACY_SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS1";
 
 #[derive(Debug)]
@@ -256,7 +297,10 @@ impl PassageStore {
                     legacy
                         .into_iter()
                         .map(|(source, text)| {
-                            (source, PassageRecord::new(Arc::from(text), Vec::new()).0)
+                            (
+                                source,
+                                PassageRecord::new(Arc::from(text), Vec::new(), Vec::new()).0,
+                            )
                         })
                         .collect(),
                     0,
@@ -274,8 +318,12 @@ impl PassageStore {
                     source,
                     text,
                     questions,
+                    sections,
                 } => {
-                    sources.insert(source, PassageRecord::new(Arc::from(text), questions).0);
+                    sources.insert(
+                        source,
+                        PassageRecord::new(Arc::from(text), questions, sections).0,
+                    );
                 }
                 PassageOp::Retract { source } => {
                     sources.remove(&source);
@@ -341,6 +389,7 @@ impl PassageStore {
                 source,
                 text: submission.text,
                 questions: submission.questions,
+                sections: Vec::new(),
             })
             .collect();
         let count = ops.len();
@@ -408,9 +457,13 @@ impl PassageStore {
                         source,
                         text,
                         questions,
+                        sections,
                     } => {
-                        let (record, dropped) =
-                            PassageRecord::new(Arc::from(text.as_str()), questions.clone());
+                        let (record, dropped) = PassageRecord::new(
+                            Arc::from(text.as_str()),
+                            questions.clone(),
+                            sections.clone(),
+                        );
                         questions_stored += record.questions.len();
                         questions_dropped += dropped;
                         inner.resident_bytes += record_bytes(source, &record);
@@ -552,7 +605,8 @@ fn read_legacy(path: &Path) -> BTreeMap<String, String> {
 }
 
 /// What one resident record costs, for the running footprint: key,
-/// text, spans, questions, and the per-entry overhead constant.
+/// text, spans, questions, sections, and the per-entry overhead
+/// constant.
 fn record_bytes(source: &str, record: &PassageRecord) -> usize {
     source.len()
         + record.text.len()
@@ -562,6 +616,11 @@ fn record_bytes(source: &str, record: &PassageRecord) -> usize {
             .iter()
             .map(|(_, question)| question.len() + 8)
             .sum::<usize>()
+        + record
+            .sections
+            .iter()
+            .map(|(_, label)| label.len() + 8)
+            .sum::<usize>()
         + SOURCE_OVERHEAD
 }
 
@@ -570,9 +629,10 @@ fn snapshot_to_bytes(sources: &BTreeMap<String, Arc<PassageRecord>>, watermark: 
     out.extend_from_slice(SNAPSHOT_MAGIC);
     out.extend_from_slice(&watermark.to_le_bytes());
     out.extend_from_slice(&(sources.len() as u32).to_le_bytes());
-    // BTreeMap iterates sorted (and a record's questions are sorted by
-    // paragraph at construction): identical content is byte-identical.
-    // Text and questions land on disk — spans are recomputed on load.
+    // BTreeMap iterates sorted (and a record's questions/sections are
+    // sorted by paragraph at construction): identical content is
+    // byte-identical. Text, questions, and sections land on disk —
+    // spans are recomputed on load.
     for (source, record) in sources {
         write_chunk(&mut out, source.as_bytes());
         write_chunk(&mut out, record.text.as_bytes());
@@ -581,6 +641,11 @@ fn snapshot_to_bytes(sources: &BTreeMap<String, Arc<PassageRecord>>, watermark: 
             out.extend_from_slice(&paragraph.to_le_bytes());
             write_chunk(&mut out, question.as_bytes());
         }
+        out.extend_from_slice(&(record.sections.len() as u32).to_le_bytes());
+        for (paragraph, label) in &record.sections {
+            out.extend_from_slice(&paragraph.to_le_bytes());
+            write_chunk(&mut out, label.as_bytes());
+        }
     }
     out
 }
@@ -588,12 +653,15 @@ fn snapshot_to_bytes(sources: &BTreeMap<String, Arc<PassageRecord>>, watermark: 
 fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageRecord>>, u64)> {
     let mut pos = 0usize;
     let magic = bytes.get(..8)?;
-    // TAGURUS1 predates questions; its layout is S2 minus the question
-    // blocks, so one parser reads both.
-    let questions_on_disk = if magic == SNAPSHOT_MAGIC {
-        true
+    // TAGURUS1 predates questions and sections; TAGURUS2 predates only
+    // sections. Each older layout is the newest one minus its trailing
+    // per-source blocks, so one parser reads all three.
+    let (questions_on_disk, sections_on_disk) = if magic == SNAPSHOT_MAGIC {
+        (true, true)
+    } else if magic == S2_SNAPSHOT_MAGIC {
+        (true, false)
     } else if magic == LEGACY_SNAPSHOT_MAGIC {
-        false
+        (false, false)
     } else {
         return None;
     };
@@ -620,7 +688,22 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
                 questions.push((paragraph, question));
             }
         }
-        sources.insert(source, PassageRecord::new(Arc::from(text), questions).0);
+        let mut sections = Vec::new();
+        if sections_on_disk {
+            let section_count =
+                u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
+            pos += 4;
+            for _ in 0..section_count {
+                let paragraph = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                pos += 4;
+                let label = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
+                sections.push((paragraph, label));
+            }
+        }
+        sources.insert(
+            source,
+            PassageRecord::new(Arc::from(text), questions, sections).0,
+        );
     }
     (pos == bytes.len()).then_some((sources, watermark))
 }
@@ -897,6 +980,57 @@ mod tests {
     }
 
     #[test]
+    fn passage_record_keeps_sections_validated_and_sorted_by_start() {
+        let record = PassageRecord::new(
+            Arc::from("一つ目。\n\n二つ目。"),
+            Vec::new(),
+            vec![
+                (1, "後編".to_string()),
+                (0, "前編".to_string()),
+                (9, "存在しない段落への見出し".to_string()),
+            ],
+        )
+        .0;
+        assert_eq!(
+            record.sections,
+            vec![(0, "前編".to_string()), (1, "後編".to_string())],
+            "the out-of-range section drops and the rest sort by paragraph"
+        );
+    }
+
+    #[test]
+    fn a_stored_section_survives_a_restart_via_wal_replay() {
+        // PassageSubmission carries no sections yet (a later issue wires
+        // an ingest surface for that), so this constructs the WAL op
+        // directly — the same shape `registry.rs`'s generation tests use
+        // to drive `PassageOp` without going through `store()`.
+        let dir = scratch_dir("sections-wal");
+        let log_path = dir.join("t.passages.wal.jsonl");
+        wal::append_batch(
+            &log_path,
+            1,
+            &[PassageOp::Store {
+                source: "doc".to_string(),
+                text: "導入。\n\n本編。".to_string(),
+                questions: Vec::new(),
+                sections: vec![(1, "本編".to_string())],
+            }],
+        )
+        .unwrap();
+        let store = PassageStore::load(
+            dir.join("t.passages.bin"),
+            &dir.join("t.sources.json"),
+            log_path,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            store.get("doc").unwrap().sections,
+            vec![(1, "本編".to_string())]
+        );
+    }
+
+    #[test]
     fn a_legacy_s1_snapshot_loads_with_empty_questions_and_upgrades_on_compaction() {
         let dir = scratch_dir("s1-upgrade");
         // S1 byte-for-byte: magic, watermark, count, [key, text] chunks
@@ -919,7 +1053,41 @@ mod tests {
         drop(store);
 
         let head = fs::read(dir.join("t.passages.bin")).unwrap();
-        assert_eq!(&head[..8], b"TAGURUS2", "the rewrite upgrades the format");
+        assert_eq!(&head[..8], b"TAGURUS3", "the rewrite upgrades the format");
+        let reborn = open(&dir);
+        assert_eq!(text(&reborn, "old-doc").as_deref(), Some("旧本文。"));
+    }
+
+    #[test]
+    fn a_legacy_s2_snapshot_loads_with_empty_sections_and_upgrades_on_compaction() {
+        let dir = scratch_dir("s2-upgrade");
+        // S2 byte-for-byte: magic, watermark, count, [key, text,
+        // question block] — the S3 layout minus the section blocks.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"TAGURUS2");
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        for chunk in ["old-doc", "旧本文。"] {
+            bytes.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(chunk.as_bytes());
+        }
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // one question
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // at paragraph 0
+        let question = "旧本文とは?".as_bytes();
+        bytes.extend_from_slice(&(question.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(question);
+        fs::write(dir.join("t.passages.bin"), &bytes).unwrap();
+
+        let store = open(&dir);
+        let record = store.get("old-doc").unwrap();
+        assert_eq!(record.text.as_ref(), "旧本文。");
+        assert_eq!(record.questions, vec![(0, "旧本文とは?".to_string())]);
+        assert!(record.sections.is_empty());
+        store.compact().unwrap();
+        drop(store);
+
+        let head = fs::read(dir.join("t.passages.bin")).unwrap();
+        assert_eq!(&head[..8], b"TAGURUS3", "the rewrite upgrades the format");
         let reborn = open(&dir);
         assert_eq!(text(&reborn, "old-doc").as_deref(), Some("旧本文。"));
     }
@@ -928,7 +1096,12 @@ mod tests {
     fn passage_snapshot_rejects_truncated_or_garbage_bytes() {
         let sources: BTreeMap<String, Arc<PassageRecord>> = [(
             "a".to_string(),
-            PassageRecord::new(Arc::from("text"), vec![(0, "何のtext?".to_string())]).0,
+            PassageRecord::new(
+                Arc::from("text"),
+                vec![(0, "何のtext?".to_string())],
+                Vec::new(),
+            )
+            .0,
         )]
         .into_iter()
         .collect();
@@ -946,6 +1119,25 @@ mod tests {
             snapshot_from_bytes(&padded).is_none(),
             "trailing bytes are corruption, not slack"
         );
+    }
+
+    #[test]
+    fn passage_snapshot_round_trips_populated_sections() {
+        let sources: BTreeMap<String, Arc<PassageRecord>> = [(
+            "a".to_string(),
+            PassageRecord::new(
+                Arc::from("導入。\n\n本編。"),
+                Vec::new(),
+                vec![(1, "本編".to_string())],
+            )
+            .0,
+        )]
+        .into_iter()
+        .collect();
+        let bytes = snapshot_to_bytes(&sources, 3);
+        let (parsed, watermark) = snapshot_from_bytes(&bytes).unwrap();
+        assert_eq!(watermark, 3);
+        assert_eq!(parsed["a"].sections, vec![(1, "本編".to_string())]);
     }
 
     #[test]
@@ -996,6 +1188,29 @@ mod tests {
         assert_eq!(text, "次の段落。");
         assert!(
             record.paragraph(2).is_none(),
+            "past the end is None, not a panic"
+        );
+    }
+
+    #[test]
+    fn section_for_resolves_the_governing_start_marker_or_none() {
+        let record = PassageRecord::new(
+            Arc::from("序。\n\n本編一。\n\n本編二。\n\n結び。"),
+            Vec::new(),
+            vec![(1, "本編".to_string()), (3, "結び".to_string())],
+        )
+        .0;
+        assert_eq!(record.section_for(0), None, "before the first marker");
+        assert_eq!(record.section_for(1), Some("本編"), "right on a marker");
+        assert_eq!(
+            record.section_for(2),
+            Some("本編"),
+            "extends until the next marker"
+        );
+        assert_eq!(record.section_for(3), Some("結び"));
+        assert_eq!(
+            record.section_for(4),
+            None,
             "past the end is None, not a panic"
         );
     }

@@ -3703,6 +3703,7 @@ mod tests {
                 source: "ghost".to_string(),
                 text: "前世代の本文".to_string(),
                 questions: Vec::new(),
+                sections: Vec::new(),
             }],
         )
         .unwrap();
