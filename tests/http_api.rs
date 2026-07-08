@@ -3283,6 +3283,96 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
     assert_eq!(none.as_array().unwrap().len(), 0);
 }
 
+/// The citation endpoint's wire contract: given a known (source,
+/// index), it returns the exact verbatim excerpt `search_passages`
+/// would show for that same paragraph — sliced through the one shared
+/// `PassageRecord::paragraph` accessor, so the two can never disagree —
+/// plus the source, and `section` always present as `null` (never
+/// omitted; section detection is a separate, future concern).
+#[test]
+fn citation_returns_the_verbatim_paragraph_named_by_source_and_index() {
+    let server = Server::start("citation-hit");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {
+            "docs/aomine.md": "青嶺酒造は雲居県霧沢町の蔵元である。\n\n\
+                原料米には山田錦を使い、精米歩合は50パーセントまで磨く。"
+        }})),
+    );
+
+    let citation = server.ok(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "docs/aomine.md", "index": 1})),
+    );
+    assert_eq!(
+        citation["text"], "原料米には山田錦を使い、精米歩合は50パーセントまで磨く。",
+        "{citation}"
+    );
+    assert_eq!(citation["source"], "docs/aomine.md");
+    assert!(
+        citation.as_object().unwrap().contains_key("section") && citation["section"].is_null(),
+        "section is present and null, never omitted: {citation}"
+    );
+}
+
+/// Unknown source, an out-of-range paragraph index, and an unknown
+/// context all speak the same `ApiError` shape (never a panic), each
+/// with a message naming what was not found.
+#[test]
+fn citation_reports_clear_errors_for_unknown_source_index_and_context() {
+    let server = Server::start("citation-miss");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"docs/aomine.md": "一段落だけ。"}})),
+    );
+
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "docs/ghost.md", "index": 0})),
+    );
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["status"], json!("error"), "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("docs/ghost.md"),
+        "{body}"
+    );
+
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "docs/aomine.md", "index": 9})),
+    );
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["status"], json!("error"), "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("docs/aomine.md"),
+        "{body}"
+    );
+
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/ghost/citations",
+        Some(json!({"source": "docs/aomine.md", "index": 0})),
+    );
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["status"], json!("error"), "{body}");
+    assert!(body["error"].as_str().unwrap().contains("ghost"), "{body}");
+}
+
 /// doc2query over HTTP: questions ride the store request per source,
 /// out-of-range ones are dropped with their count reported (never
 /// failing the passage), and questions for a source the request does

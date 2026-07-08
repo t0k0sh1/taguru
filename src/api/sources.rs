@@ -7,7 +7,7 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
 use crate::metrics::{ErrorKind, SearchOp};
-use crate::registry::AppState;
+use crate::registry::{AppState, CitationLookup};
 
 use super::{
     AppJson, MAX_MATCH_LIMIT, access_error, clamp, error, not_found, ok, search_log_enabled,
@@ -40,6 +40,66 @@ pub async fn lookup_passages(
             ok(PassageLookup { passages, missing }, started_at)
         }
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CitationRequest {
+    pub source: String,
+    pub index: u32,
+}
+
+/// One located, verbatim excerpt: the citation counterpart of
+/// `PassageLookup`'s whole-document dereference — text plus exactly
+/// enough provenance to attribute it. `section` is always `null` until
+/// section detection lands (tracked separately); it is never omitted,
+/// so callers can rely on the key always being present.
+#[derive(Serialize)]
+pub struct Citation {
+    pub text: String,
+    pub source: String,
+    pub section: Option<String>,
+}
+
+pub async fn citation(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    AppJson(request): AppJson<CitationRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    match state.citation(&name, &request.source, request.index) {
+        None => not_found(&name, started_at),
+        Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
+        Some(Ok(CitationLookup::UnknownSource)) => {
+            state.note_read(&name, true);
+            error(
+                StatusCode::NOT_FOUND,
+                format!("source '{}' not found in context '{name}'", request.source),
+                started_at,
+            )
+        }
+        Some(Ok(CitationLookup::IndexOutOfRange)) => {
+            state.note_read(&name, true);
+            error(
+                StatusCode::NOT_FOUND,
+                format!(
+                    "paragraph {} out of range for source '{}' in context '{name}'",
+                    request.index, request.source
+                ),
+                started_at,
+            )
+        }
+        Some(Ok(CitationLookup::Found(text))) => {
+            state.note_read(&name, false);
+            ok(
+                Citation {
+                    text,
+                    source: request.source,
+                    section: None,
+                },
+                started_at,
+            )
+        }
     }
 }
 

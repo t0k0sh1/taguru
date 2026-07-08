@@ -114,6 +114,16 @@ impl PassageRecord {
             .iter()
             .map(|span| (span, &self.text[span.start as usize..span.end as usize]))
     }
+
+    /// One paragraph's span and text by its index — the single-lookup
+    /// counterpart of `paragraph_texts`, and the slice both
+    /// `search_passages` and the citation endpoint share so their
+    /// excerpts can never drift apart.
+    pub(crate) fn paragraph(&self, index: usize) -> Option<(&ParagraphSpan, &str)> {
+        self.paragraphs
+            .get(index)
+            .map(|span| (span, &self.text[span.start as usize..span.end as usize]))
+    }
 }
 
 /// One passage mutation — this log's whole vocabulary. Same
@@ -973,5 +983,20 @@ mod tests {
         store.compact().unwrap();
         store.store(batch(&[("c", "本文C")])).unwrap();
         assert_eq!(text(&store, "c").as_deref(), Some("本文C"));
+    }
+
+    #[test]
+    fn paragraph_returns_the_span_and_text_by_index_and_none_past_the_end() {
+        let record = PassageRecord::for_tests("最初の段落。\n\n次の段落。");
+        let (span, text) = record.paragraph(0).unwrap();
+        assert_eq!(span.index, 0);
+        assert_eq!(text, "最初の段落。");
+        let (span, text) = record.paragraph(1).unwrap();
+        assert_eq!(span.index, 1);
+        assert_eq!(text, "次の段落。");
+        assert!(
+            record.paragraph(2).is_none(),
+            "past the end is None, not a panic"
+        );
     }
 }

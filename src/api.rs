@@ -18,7 +18,7 @@ use crate::metrics::{ErrorKind, ResolveTier, SearchOp};
 use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 
 mod sources;
-pub use sources::{list_sources, lookup_passages, retract_source, search_passages};
+pub use sources::{citation, list_sources, lookup_passages, retract_source, search_passages};
 
 #[derive(Serialize)]
 pub struct ApiResponse<T> {

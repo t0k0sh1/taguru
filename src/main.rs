@@ -335,6 +335,7 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
             "/contexts/{name}/sources/retract",
             post(api::retract_source),
         )
+        .route("/contexts/{name}/citations", post(api::citation))
         .route(
             "/contexts/{name}/embeddings/refresh",
             post(api::refresh_embeddings),
