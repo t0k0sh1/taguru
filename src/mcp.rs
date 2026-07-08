@@ -391,6 +391,18 @@ pub fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "cite_passage",
+            "Fetch one located, verbatim excerpt from a registered source by paragraph index: the citation counterpart of lookup_passages' whole-document dereference. Returns the exact paragraph text plus source and section provenance.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "source": { "type": "string" },
+                    "index": { "type": "integer", "description": "zero-based paragraph index" }
+                }),
+                &["context", "source", "index"],
+            ),
+        ),
+        (
             "refresh_embeddings",
             "After ingesting, re-embed what changed (servers with embeddings only): the glosses (name + graph context) of new or changed concepts and labels, and — where the server opted in — the stored paragraphs. Makes paraphrases and question-shaped cues land through resolve's semantic fallback and search_passages' vector lane.",
             object_schema(json!({ "context": context }), &["context"]),
@@ -545,6 +557,11 @@ pub fn route_tool(
             format!("{}/sources/search", context_path("context")?),
             Some(pick(arguments, &["query", "limit"])),
         ),
+        "cite_passage" => (
+            "POST",
+            format!("{}/citations", context_path("context")?),
+            Some(pick(arguments, &["source", "index"])),
+        ),
         "refresh_embeddings" => (
             "POST",
             format!("{}/embeddings/refresh", context_path("context")?),
@@ -577,7 +594,7 @@ mod tests {
         let arguments = json!({
             "name": "ctx", "context": "ctx", "cue": "x", "concept": "x",
             "origins": ["x"], "associations": [], "passages": {},
-            "sources": ["s"], "source": "s", "query": "q",
+            "sources": ["s"], "source": "s", "query": "q", "index": 0,
         });
         for tool in tool_definitions() {
             let name = tool["name"].as_str().expect("definitions carry names");
@@ -657,6 +674,18 @@ mod tests {
             pick(&arguments, &["cue", "limit", "absent"]),
             json!({"cue": "x"})
         );
+    }
+
+    #[test]
+    fn cite_passage_routes_to_the_citations_endpoint() {
+        let (method, path, body) = route_tool(
+            "cite_passage",
+            &json!({"context": "sake", "source": "docs/aomine.md", "index": 1}),
+        )
+        .unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/contexts/sake/citations");
+        assert_eq!(body, Some(json!({"source": "docs/aomine.md", "index": 1})));
     }
 
     /// The framing rules both transports rely on: requests carry ids,
