@@ -5625,6 +5625,7 @@ mod tests {
             crate::passages::PassageSubmission {
                 text: "りんごは真っ赤に実った。".to_string(),
                 questions: vec![(0, "アップルはどんな色?".to_string())],
+                sections: Vec::new(),
             },
         );
         state.store_passages("fruit", passages).unwrap().unwrap();
@@ -5672,6 +5673,7 @@ mod tests {
                 crate::passages::PassageSubmission {
                     text: "りんごは真っ赤に実った。".to_string(),
                     questions: vec![(0, question.to_string())],
+                    sections: Vec::new(),
                 },
             );
             passages
@@ -5714,6 +5716,7 @@ mod tests {
                     (0, "アップルはどんな色?".to_string()),
                     (0, "みかんとの違いは?".to_string()),
                 ],
+                sections: Vec::new(),
             },
         );
         state.store_passages("fruit", passages).unwrap().unwrap();

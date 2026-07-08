@@ -578,6 +578,12 @@ pub(crate) const MAX_QUESTION_BYTES: usize = 512;
 /// past a handful they stop adding recall and start crowding it out.
 pub(crate) const MAX_QUESTIONS_PER_PARAGRAPH: usize = 8;
 
+/// Byte cap on one section label — a heading, not a document; same
+/// bound as a question since both are short strings riding a
+/// paragraph index. Unlike questions, sections are never embedded, so
+/// there is no per-paragraph cap to match `MAX_QUESTIONS_PER_PARAGRAPH`.
+pub(crate) const MAX_SECTION_BYTES: usize = 512;
+
 /// The optional-body contract of create and audit: an ABSENT body
 /// means defaults, but a PRESENT body must parse as JSON — whatever
 /// the Content-Type header says. `Option<Json<T>>` answered a
@@ -924,7 +930,11 @@ pub async fn store_passages(
                 .collect();
             (
                 source,
-                crate::passages::PassageSubmission { text, questions },
+                crate::passages::PassageSubmission {
+                    text,
+                    questions,
+                    sections: Vec::new(),
+                },
             )
         })
         .collect();
@@ -1052,6 +1062,8 @@ pub struct ImportOutcome {
     pub passage_stored: bool,
     pub questions_stored: usize,
     pub questions_dropped: usize,
+    pub sections_stored: usize,
+    pub sections_dropped: usize,
 }
 
 /// `POST /import` — the batch-file contract (docs/import.md) over
@@ -1081,6 +1093,8 @@ pub async fn import_batch(State(state): State<AppState>, body: axum::body::Bytes
                 passage_stored: applied.passage_stored,
                 questions_stored: applied.questions_stored,
                 questions_dropped: applied.questions_dropped,
+                sections_stored: applied.sections_stored,
+                sections_dropped: applied.sections_dropped,
             },
             started_at,
         ),

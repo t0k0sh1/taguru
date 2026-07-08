@@ -61,6 +61,7 @@ is the header; every later line is one operation.
 {"taguru_batch": 1, "context": "sake", "source": "docs/aomine.md", "create": {"description": "酒蔵の知識"}}
 {"passage": "青嶺酒造は1907年創業。杜氏は高瀬。"}
 {"paragraph": 0, "question": "青嶺酒造の酒造りの責任者は誰?"}
+{"paragraph": 0, "section": "沿革"}
 {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0}
 {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0}
 {"alias": "Aomine Brewery", "canonical": "青嶺酒造", "kind": "concept"}
@@ -107,6 +108,21 @@ usual cause is a producer's split drifting from the server's;
 `taguru extract --questions N` uses the server's own splitter and
 cannot drift.
 
+**Section** — `paragraph` / `section`: a heading marking where a
+named section of THIS file's passage begins (`paragraph` is the
+0-based position under the server's blank-line split, exactly like
+Question's; a file with section lines but no passage line is
+refused). A section implicitly extends from its paragraph through
+every following paragraph up to the next section's start, or the end
+of the passage — there is no separate "end" line. A section naming a
+paragraph the passage's split does not have is dropped at store time
+and counted in the response (`sections_dropped`), the same convention
+and likely cause as `questions_dropped`. No read API exposes a
+paragraph's section yet — search hits and the citation endpoint
+continue to report `section: null` regardless of what an import
+stores; the field exists so this producer surface and a future reader
+never disagree on shape.
+
 Unknown fields and unrecognized line shapes are refused with the line
 number.
 
@@ -121,6 +137,7 @@ number.
 | passage | 8 MiB (the HTTP default body cap) |
 | one question | 512 bytes |
 | questions per paragraph | 8 |
+| one section | 512 bytes |
 | any one line | 16 MiB |
 
 Files themselves have no op-count cap; applies are chunked at the
