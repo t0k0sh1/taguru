@@ -850,6 +850,8 @@ struct Fact {
     label: String,
     object: String,
     weight: f64,
+    #[allow(dead_code)] // read by tests only — a follow-up issue surfaces it beyond merge()
+    chunk_index: usize,
 }
 
 impl Extraction {
@@ -880,7 +882,7 @@ fn merge(outputs: Vec<ModelOutput>, questions_cap: usize, paragraph_count: usize
     let mut seen_questions: HashSet<(u32, String)> = HashSet::new();
     let mut per_paragraph: BTreeMap<u32, usize> = BTreeMap::new();
     let mut aliases: Vec<ModelAlias> = Vec::new();
-    for output in outputs {
+    for (chunk_index, output) in outputs.into_iter().enumerate() {
         for item in output.questions {
             let paragraph = item.paragraph;
             let question = item.question.unwrap_or_default();
@@ -936,6 +938,7 @@ fn merge(outputs: Vec<ModelOutput>, questions_cap: usize, paragraph_count: usize
                 label,
                 object,
                 weight,
+                chunk_index,
             });
         }
         aliases.extend(output.aliases);
@@ -1275,6 +1278,7 @@ mod tests {
         assert_eq!(merged.associations.len(), 1);
         // An omitted weight is a plain assertion.
         assert_eq!(merged.associations[0].weight, 1.0);
+        assert_eq!(merged.associations[0].chunk_index, 0);
         assert!(merged.concepts.is_empty());
         assert_eq!(merged.dropped, 3);
     }
@@ -1332,6 +1336,8 @@ mod tests {
         );
         assert_eq!(merged.associations.len(), 2);
         assert_eq!(merged.associations[0].weight, 1.0);
+        assert_eq!(merged.associations[0].chunk_index, 0); // the surviving copy is chunk 0's, not chunk 1's duplicate
+        assert_eq!(merged.associations[1].chunk_index, 1);
         assert_eq!(merged.concepts.len(), 1);
         assert_eq!(merged.concepts["Aomine"], "青嶺酒造");
         assert_eq!(merged.labels["設立年"], "創業年");
