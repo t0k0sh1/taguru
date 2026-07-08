@@ -32,14 +32,17 @@ use crate::paragraph::{self, ParagraphSpan};
 use crate::wal;
 
 /// One source's submitted passage: the text, and optionally the
-/// doc2query questions riding with it — (paragraph index, question)
-/// pairs a producer (`taguru extract --questions`, or any client)
-/// attached so question-shaped queries can land on answer-shaped
-/// paragraphs from the index side too.
+/// doc2query questions and section markers riding with it —
+/// (paragraph index, question) and (paragraph index, label) pairs a
+/// producer (`taguru extract --questions`, the ingest batch format,
+/// or any client) attached so question-shaped queries can land on
+/// answer-shaped paragraphs, and paragraphs can carry a section
+/// label, from the index side too.
 #[derive(Debug, Clone)]
 pub(crate) struct PassageSubmission {
     pub(crate) text: String,
     pub(crate) questions: Vec<(u32, String)>,
+    pub(crate) sections: Vec<(u32, String)>,
 }
 
 impl PassageSubmission {
@@ -49,19 +52,22 @@ impl PassageSubmission {
         Self {
             text: text.into(),
             questions: Vec::new(),
+            sections: Vec::new(),
         }
     }
 }
 
-/// What one store call accomplished, question bookkeeping included:
-/// out-of-range questions are dropped one by one (the paragraph they
-/// name does not exist in the text they rode in with), never failing
-/// the passages they accompanied.
+/// What one store call accomplished, question and section bookkeeping
+/// included: out-of-range questions and sections are dropped one by
+/// one (the paragraph they name does not exist in the text they rode
+/// in with), never failing the passages they accompanied.
 #[derive(Debug, Default)]
 pub(crate) struct StoreOutcome {
     pub(crate) stored: usize,
     pub(crate) questions_stored: usize,
     pub(crate) questions_dropped: usize,
+    pub(crate) sections_stored: usize,
+    pub(crate) sections_dropped: usize,
 }
 
 /// One source's resident passage: the byte-exact text, its paragraph
@@ -79,9 +85,9 @@ pub(crate) struct PassageRecord {
     pub(crate) questions: Vec<(u32, String)>,
     /// (paragraph index of section start, label) pairs, sorted by
     /// paragraph — a section implicitly extends until the next
-    /// marker or the end of the passage. No producer populates this
-    /// yet; it exists so ingest-time section attribution has
-    /// somewhere durable to land.
+    /// marker or the end of the passage. Populated by the ingest
+    /// batch format's `section` line (see `ingest.rs`); no reader
+    /// exposes it yet (see `section_for`'s doc comment).
     pub(crate) sections: Vec<(u32, String)>,
 }
 
@@ -89,27 +95,28 @@ impl PassageRecord {
     /// Builds the record, keeping only questions and section markers
     /// whose paragraph exists in THIS text's split — the one
     /// validation point both the live path and replay go through, so
-    /// they can never disagree. Returns how many questions were
-    /// dropped; sections have no producer yet, so there is nothing to
-    /// report a drop count for.
+    /// they can never disagree. Returns how many questions and how
+    /// many sections were dropped.
     fn new(
         text: Arc<str>,
         questions: Vec<(u32, String)>,
         sections: Vec<(u32, String)>,
-    ) -> (Arc<Self>, usize) {
+    ) -> (Arc<Self>, usize, usize) {
         let paragraphs = paragraph::split(&text);
-        let offered = questions.len();
+        let questions_offered = questions.len();
         let mut questions: Vec<(u32, String)> = questions
             .into_iter()
             .filter(|&(paragraph, _)| (paragraph as usize) < paragraphs.len())
             .collect();
         questions.sort_by_key(|&(paragraph, _)| paragraph);
-        let dropped = offered - questions.len();
+        let questions_dropped = questions_offered - questions.len();
+        let sections_offered = sections.len();
         let mut sections: Vec<(u32, String)> = sections
             .into_iter()
             .filter(|&(paragraph, _)| (paragraph as usize) < paragraphs.len())
             .collect();
         sections.sort_by_key(|&(paragraph, _)| paragraph);
+        let sections_dropped = sections_offered - sections.len();
         (
             Arc::new(Self {
                 text,
@@ -117,7 +124,8 @@ impl PassageRecord {
                 questions,
                 sections,
             }),
-            dropped,
+            questions_dropped,
+            sections_dropped,
         )
     }
 
@@ -256,6 +264,18 @@ pub(crate) struct PassageStore {
     max_log_bytes: u64,
 }
 
+/// Tally from one `append_and_apply_locked` call. A named struct
+/// rather than a same-typed `usize` tuple — four positional counts
+/// this size apart are easy to transpose without the compiler
+/// noticing.
+#[derive(Debug, Default)]
+struct AppliedCounts {
+    questions_stored: usize,
+    questions_dropped: usize,
+    sections_stored: usize,
+    sections_dropped: usize,
+}
+
 impl PassageStore {
     /// Loads a context's passages, `ensure_hot`-shaped: pick the base —
     /// the snapshot if one exists, else the legacy `.sources.json`
@@ -389,7 +409,7 @@ impl PassageStore {
                 source,
                 text: submission.text,
                 questions: submission.questions,
-                sections: Vec::new(),
+                sections: submission.sections,
             })
             .collect();
         let count = ops.len();
@@ -417,11 +437,13 @@ impl PassageStore {
                 )));
             }
         }
-        let (questions_stored, questions_dropped) = self.append_and_apply_locked(&writer, &ops)?;
+        let counts = self.append_and_apply_locked(&writer, &ops)?;
         Ok(StoreOutcome {
             stored: count,
-            questions_stored,
-            questions_dropped,
+            questions_stored: counts.questions_stored,
+            questions_dropped: counts.questions_dropped,
+            sections_stored: counts.sections_stored,
+            sections_dropped: counts.sections_dropped,
         })
     }
 
@@ -444,11 +466,10 @@ impl PassageStore {
         &self,
         _writer: &std::sync::MutexGuard<'_, ()>,
         ops: &[PassageOp],
-    ) -> io::Result<(usize, usize)> {
+    ) -> io::Result<AppliedCounts> {
         let first_seq = self.inner.read().unwrap().next_seq;
         let appended = wal::append_batch(&self.log_path, first_seq, ops)?;
-        let mut questions_stored = 0usize;
-        let mut questions_dropped = 0usize;
+        let mut counts = AppliedCounts::default();
         let over_ratio = {
             let mut inner = self.inner.write().unwrap();
             for op in ops {
@@ -459,13 +480,15 @@ impl PassageStore {
                         questions,
                         sections,
                     } => {
-                        let (record, dropped) = PassageRecord::new(
+                        let (record, questions_dropped, sections_dropped) = PassageRecord::new(
                             Arc::from(text.as_str()),
                             questions.clone(),
                             sections.clone(),
                         );
-                        questions_stored += record.questions.len();
-                        questions_dropped += dropped;
+                        counts.questions_stored += record.questions.len();
+                        counts.questions_dropped += questions_dropped;
+                        counts.sections_stored += record.sections.len();
+                        counts.sections_dropped += sections_dropped;
                         inner.resident_bytes += record_bytes(source, &record);
                         if let Some(previous) = inner.sources.insert(source.clone(), record) {
                             inner.resident_bytes -= record_bytes(source, &previous);
@@ -494,7 +517,7 @@ impl PassageStore {
                 );
             }
         }
-        Ok((questions_stored, questions_dropped))
+        Ok(counts)
     }
 
     /// Rewrites the snapshot from the current map and truncates the
@@ -956,6 +979,7 @@ mod tests {
                         (0, "最初は何?".to_string()),
                         (9, "存在しない段落への質問?".to_string()),
                     ],
+                    sections: Vec::new(),
                 },
             );
             let outcome = store.store(passages).unwrap();
@@ -981,7 +1005,7 @@ mod tests {
 
     #[test]
     fn passage_record_keeps_sections_validated_and_sorted_by_start() {
-        let record = PassageRecord::new(
+        let (record, _questions_dropped, sections_dropped) = PassageRecord::new(
             Arc::from("一つ目。\n\n二つ目。"),
             Vec::new(),
             vec![
@@ -989,21 +1013,59 @@ mod tests {
                 (0, "前編".to_string()),
                 (9, "存在しない段落への見出し".to_string()),
             ],
-        )
-        .0;
+        );
         assert_eq!(
             record.sections,
             vec![(0, "前編".to_string()), (1, "後編".to_string())],
             "the out-of-range section drops and the rest sort by paragraph"
         );
+        assert_eq!(sections_dropped, 1);
+    }
+
+    #[test]
+    fn a_passage_store_accepts_sections_and_reports_the_bookkeeping() {
+        let dir = scratch_dir("sections-store");
+        {
+            let store = open(&dir);
+            let mut passages = BTreeMap::new();
+            passages.insert(
+                "doc".to_string(),
+                PassageSubmission {
+                    text: "導入。\n\n本編。".to_string(),
+                    questions: Vec::new(),
+                    sections: vec![
+                        (1, "本編".to_string()),
+                        (9, "存在しない段落への見出し".to_string()),
+                    ],
+                },
+            );
+            let outcome = store.store(passages).unwrap();
+            assert_eq!(
+                (
+                    outcome.stored,
+                    outcome.sections_stored,
+                    outcome.sections_dropped
+                ),
+                (1, 1, 1),
+                "the out-of-range section drops without failing its passage"
+            );
+            let record = store.get("doc").unwrap();
+            assert_eq!(record.sections, vec![(1, "本編".to_string())]);
+        }
+        // Sections are acknowledged writes: the log replays them.
+        let reborn = open(&dir);
+        assert_eq!(
+            reborn.get("doc").unwrap().sections,
+            vec![(1, "本編".to_string())]
+        );
     }
 
     #[test]
     fn a_stored_section_survives_a_restart_via_wal_replay() {
-        // PassageSubmission carries no sections yet (a later issue wires
-        // an ingest surface for that), so this constructs the WAL op
-        // directly — the same shape `registry.rs`'s generation tests use
-        // to drive `PassageOp` without going through `store()`.
+        // Constructs the WAL op directly rather than through
+        // `store()` — the same shape `registry.rs`'s generation tests
+        // use to drive `PassageOp` without a live store, exercising
+        // `load()`'s replay path on its own.
         let dir = scratch_dir("sections-wal");
         let log_path = dir.join("t.passages.wal.jsonl");
         wal::append_batch(

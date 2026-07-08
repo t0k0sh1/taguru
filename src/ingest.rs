@@ -288,6 +288,9 @@ pub(crate) struct Batch {
     /// index exists in the passage's split is settled at store time,
     /// one rule for every entrance.
     questions: Vec<(u32, String)>,
+    /// Section start markers, (paragraph index, label) — same
+    /// structure-here/range-at-store-time split as `questions`.
+    sections: Vec<(u32, String)>,
     associations: Vec<AssocOp>,
     concepts: BTreeMap<String, String>,
     labels: BTreeMap<String, String>,
@@ -311,7 +314,7 @@ impl Batch {
 
     fn describe(&self) -> String {
         format!(
-            "context '{}' ← source '{}': {} association(s), {} alias(es){}{}",
+            "context '{}' ← source '{}': {} association(s), {} alias(es){}{}{}",
             self.context,
             self.source,
             self.associations.len(),
@@ -325,6 +328,11 @@ impl Batch {
                 String::new()
             } else {
                 format!(", {} question(s)", self.questions.len())
+            },
+            if self.sections.is_empty() {
+                String::new()
+            } else {
+                format!(", {} section(s)", self.sections.len())
             }
         )
     }
@@ -388,6 +396,13 @@ struct QuestionLine {
     question: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SectionLine {
+    paragraph: u32,
+    section: String,
+}
+
 /// Parses one batch file completely, or says which line refused and
 /// why. Blank lines are skipped; the first non-blank line must be the
 /// header.
@@ -421,6 +436,15 @@ pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
             "{} question line(s) but no passage line — questions attach to this \
              file's passage",
             batch.questions.len()
+        ));
+    }
+    // Sections attach to paragraphs the same way questions do, and need
+    // the same passage-to-attach-to guard.
+    if !batch.sections.is_empty() && batch.passage.is_none() {
+        return Err(format!(
+            "{} section line(s) but no passage line — sections attach to this \
+             file's passage",
+            batch.sections.len()
         ));
     }
     Ok(batch)
@@ -457,6 +481,7 @@ fn parse_header(line: &str, number: usize) -> Result<Batch, String> {
         }),
         passage: None,
         questions: Vec::new(),
+        sections: Vec::new(),
         associations: Vec::new(),
         concepts: BTreeMap::new(),
         labels: BTreeMap::new(),
@@ -549,10 +574,21 @@ fn parse_op(batch: &mut Batch, line: &str, number: usize) -> Result<(), String> 
             ));
         }
         batch.questions.push((op.paragraph, op.question));
+    } else if object.contains_key("section") {
+        let op: SectionLine = serde_json::from_value(value)
+            .map_err(|error| format!("line {number}: section: {error}"))?;
+        check_size(
+            number,
+            "section",
+            &op.section,
+            crate::api::MAX_SECTION_BYTES,
+        )?;
+        batch.sections.push((op.paragraph, op.section));
     } else {
         return Err(format!(
             "line {number}: not an association (subject/label/object/weight), an alias \
-             (alias/canonical/kind), a passage line, or a question (paragraph/question) line"
+             (alias/canonical/kind), a passage line, a question (paragraph/question) line, \
+             or a section (paragraph/section) line"
         ));
     }
     Ok(())
@@ -591,6 +627,11 @@ pub(crate) struct Applied {
     /// have — most often a producer's index drifting from the server's
     /// canonical split.
     pub(crate) questions_dropped: usize,
+    pub(crate) sections_stored: usize,
+    /// Sections naming a paragraph their passage's split does not
+    /// have — same convention and same likely cause as
+    /// `questions_dropped`.
+    pub(crate) sections_dropped: usize,
 }
 
 /// Why a batch did not (fully) apply — one shape for both entrances:
@@ -667,6 +708,8 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
 
     let mut questions_stored = 0;
     let mut questions_dropped = 0;
+    let mut sections_stored = 0;
+    let mut sections_dropped = 0;
     if let Some(text) = &batch.passage {
         let outcome = state
             .store_passages(
@@ -676,6 +719,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
                     crate::passages::PassageSubmission {
                         text: text.clone(),
                         questions: batch.questions.clone(),
+                        sections: batch.sections.clone(),
                     },
                 )]),
             )
@@ -683,6 +727,8 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
             .map_err(|io_error| ApplyRefusal::Io(format!("passage not persisted: {io_error}")))?;
         questions_stored = outcome.questions_stored;
         questions_dropped = outcome.questions_dropped;
+        sections_stored = outcome.sections_stored;
+        sections_dropped = outcome.sections_dropped;
     }
 
     let mut associations = 0;
@@ -736,6 +782,8 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         passage_stored: batch.passage.is_some(),
         questions_stored,
         questions_dropped,
+        sections_stored,
+        sections_dropped,
     })
 }
 
@@ -743,7 +791,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
 fn report(batch: &Batch, applied: &Applied) -> String {
     format!(
         "context '{}'{} ← source '{}' ({} association(s) retracted): +{} \
-         association(s), +{} alias(es){}{}",
+         association(s), +{} alias(es){}{}{}",
         batch.context,
         if applied.created { " (created)" } else { "" },
         batch.source,
@@ -760,6 +808,13 @@ fn report(batch: &Batch, applied: &Applied) -> String {
             (stored, 0) => format!(", +{stored} question(s)"),
             (stored, dropped) => {
                 format!(", +{stored} question(s) ({dropped} dropped: no such paragraph)")
+            }
+        },
+        match (applied.sections_stored, applied.sections_dropped) {
+            (0, 0) => String::new(),
+            (stored, 0) => format!(", +{stored} section(s)"),
+            (stored, dropped) => {
+                format!(", +{stored} section(s) ({dropped} dropped: no such paragraph)")
             }
         }
     )
@@ -905,6 +960,54 @@ mod tests {
     }
 
     #[test]
+    fn a_section_line_rides_the_batch_and_needs_a_passage_to_attach_to() {
+        let batch = parse(&format!(
+            "{HEADER}\n\
+             {{\"passage\": \"導入。\\n\\n本編。\"}}\n\
+             {{\"paragraph\": 1, \"section\": \"本編\"}}\n"
+        ))
+        .unwrap();
+        assert_eq!(batch.sections, vec![(1, "本編".to_string())]);
+        assert!(
+            batch.describe().contains("1 section(s)"),
+            "{}",
+            batch.describe()
+        );
+
+        // The same section line without a passage has nothing to name.
+        let error = parse(&format!(
+            "{HEADER}\n{{\"paragraph\": 1, \"section\": \"本編\"}}\n"
+        ))
+        .unwrap_err();
+        assert!(error.contains("no passage line"), "{error}");
+    }
+
+    #[test]
+    fn a_section_beyond_the_byte_cap_is_refused() {
+        let long = "s".repeat(crate::api::MAX_SECTION_BYTES + 1);
+        let error = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\"}}\n{{\"paragraph\": 0, \"section\": \"{long}\"}}\n"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("section") && error.contains("cap"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_section_line_is_refused_by_line_number() {
+        let error = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\"}}\n{{\"paragraph\": \"zero\", \"section\": \"見出し\"}}\n"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("line 3") && error.contains("section"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn weights_and_name_sizes_are_capped_like_the_api() {
         let error = parse(&format!(
             "{HEADER}\n\
@@ -967,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn a_line_that_is_no_known_shape_names_the_three_shapes() {
+    fn a_line_that_is_no_known_shape_names_the_known_shapes() {
         let error = parse(&format!("{HEADER}\n{{\"foo\": 1}}\n")).unwrap_err();
         assert!(
             error.contains("line 2") && error.contains("association"),

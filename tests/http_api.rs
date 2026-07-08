@@ -2675,6 +2675,37 @@ fn an_offline_import_carries_questions_through_to_the_search_index() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// Sections have no read API yet (docs/import.md) — the bookkeeping
+/// itself is the only thing to check here, the same drop-and-count
+/// convention as questions.
+#[test]
+fn an_offline_import_carries_sections_through_and_drops_out_of_range_ones() {
+    let batches = batch_dir("import-sections");
+    let file = batches.join("guide.jsonl");
+    std::fs::write(
+        &file,
+        r#"{"taguru_batch": 1, "context": "sake", "source": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+{"passage": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。"}
+{"paragraph": 1, "section": "杜氏"}
+{"paragraph": 9, "section": "存在しない段落"}
+"#,
+    )
+    .unwrap();
+
+    let data_dir = std::env::temp_dir().join(format!(
+        "taguru-http-import-sections-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("+1 section(s) (1 dropped: no such paragraph)"),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 #[test]
 fn reimporting_a_source_replaces_it_instead_of_doubling() {
     let batches = batch_dir("import-idem");
@@ -2828,6 +2859,21 @@ fn the_import_endpoint_applies_batches_to_a_live_server() {
     );
     assert_eq!(status, 200);
     assert_eq!(edge["result"]["matches"][0]["weight"], json!(2.0));
+}
+
+#[test]
+fn the_import_endpoint_reports_section_bookkeeping() {
+    let server = Server::start("http-import-sections");
+    let batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-sections\", \
+                 \"create\": {\"description\": \"d\"}}\n\
+                 {\"passage\": \"蔵の杜氏は高瀬。\\n\\n創業は1907年。\"}\n\
+                 {\"paragraph\": 1, \"section\": \"沿革\"}\n\
+                 {\"paragraph\": 9, \"section\": \"存在しない段落\"}\n";
+
+    let (status, result) = post_import(&server, batch, None);
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["result"]["sections_stored"], json!(1), "{result}");
+    assert_eq!(result["result"]["sections_dropped"], json!(1), "{result}");
 }
 
 #[test]
