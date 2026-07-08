@@ -994,6 +994,9 @@ mod tests {
         let (span, text) = record.paragraph(1).unwrap();
         assert_eq!(span.index, 1);
         assert_eq!(text, "次の段落。");
-        assert!(record.paragraph(2).is_none(), "past the end is None, not a panic");
+        assert!(
+            record.paragraph(2).is_none(),
+            "past the end is None, not a panic"
+        );
     }
 }
