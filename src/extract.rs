@@ -67,7 +67,7 @@ Contract and discipline: docs/extract.md.
 /// Stamped into every manifest entry; bump when the system prompt
 /// changes so already-extracted documents re-extract under the new
 /// discipline.
-const PROMPT_VERSION: u32 = 1;
+const PROMPT_VERSION: u32 = 2;
 
 /// Document bytes per model call. Chunks split at paragraph
 /// boundaries; facts spanning a boundary can be missed, so the cap
@@ -363,15 +363,12 @@ impl Run {
             return Ok(Outcome::Unchanged);
         }
 
-        // Question prompts see the server's own paragraph numbering
-        // (prompt input only — the passage stays verbatim); without
-        // questions the prompt is byte-identical to what it always was.
+        // The model sees the server's own paragraph numbering (prompt
+        // input only — the passage stays verbatim) so every returned
+        // association and question can cite an index the server
+        // itself validates against.
         let canonical_paragraphs = crate::paragraph::split(&text).len();
-        let chunks = if self.questions > 0 {
-            chunk(&labeled_document(&text), CHUNK_BYTES)
-        } else {
-            chunk(&text, CHUNK_BYTES)
-        };
+        let chunks = chunk(&labeled_document(&text), CHUNK_BYTES);
         if self.dry_run {
             println!(
                 "{source}: would extract ({} bytes, {} chunk(s)) → {}",
@@ -682,12 +679,13 @@ fn system_prompt(vocabulary: &BTreeSet<String>, questions: usize) -> String {
         "You extract knowledge from one document into an association graph.\n\
          Answer with a single JSON object and nothing else:\n\
          {\"associations\": [{\"subject\": \"…\", \"label\": \"…\", \"object\": \"…\", \
-         \"weight\": 1.0}],\n \
+         \"weight\": 1.0, \"paragraph\": 0}],\n \
          \"aliases\": [{\"alias\": \"…\", \"canonical\": \"…\", \"kind\": \"concept\"}]}\n\
          \n\
          The discipline:\n\
          - One association per fact the document states. Keep names SHORT \
-         (headings, not sentences); keep the document's language; never translate names.\n\
+         (headings, not sentences); keep the document's language; never translate names. \
+         Tag it with the bracketed paragraph number, shown in the text, that states the fact.\n\
          - weight 1.0 for a plain assertion, up to 2.0 when the document itself \
          emphasizes, NEGATIVE for negation (\"does not X\" → label X, weight -1.0). \
          Weight is evidence mass, never effect size — sizes and figures go in the object.\n\
@@ -769,6 +767,8 @@ struct ModelAssociation {
     object: Option<String>,
     #[serde(default)]
     weight: Option<f64>,
+    #[serde(default)]
+    paragraph: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -852,6 +852,8 @@ struct Fact {
     weight: f64,
     #[allow(dead_code)] // read by tests only — a follow-up issue surfaces it beyond merge()
     chunk_index: usize,
+    #[allow(dead_code)] // read by tests only — a follow-up issue surfaces it beyond merge()
+    paragraph: Option<u32>,
 }
 
 impl Extraction {
@@ -933,12 +935,19 @@ fn merge(outputs: Vec<ModelOutput>, questions_cap: usize, paragraph_count: usize
                 extraction.duplicates += 1;
                 continue;
             }
+            // A missing or out-of-range self-report costs only the
+            // paragraph tag, never the fact — the item still carries
+            // the model's judgment about subject/label/object/weight.
+            let paragraph = item
+                .paragraph
+                .filter(|&paragraph| (paragraph as usize) < paragraph_count);
             extraction.associations.push(Fact {
                 subject,
                 label,
                 object,
                 weight,
                 chunk_index,
+                paragraph,
             });
         }
         aliases.extend(output.aliases);
@@ -1289,6 +1298,7 @@ mod tests {
             label: Some(label.into()),
             object: Some(object.into()),
             weight: Some(weight),
+            paragraph: None,
         }
     }
 
@@ -1306,7 +1316,10 @@ mod tests {
             vec![
                 ModelOutput {
                     associations: vec![
-                        association("青嶺酒造", "杜氏", "高瀬", 1.0),
+                        ModelAssociation {
+                            paragraph: Some(0),
+                            ..association("青嶺酒造", "杜氏", "高瀬", 1.0)
+                        },
                         association("", "杜氏", "高瀬", 1.0), // empty name
                         association("蔵", "重い", "石", 1e300), // over the weight cap
                         association("蔵", "無", "石", 0.0),   // zero asserts nothing
@@ -1318,7 +1331,10 @@ mod tests {
                     associations: vec![
                         // The exact triple again: folded, first weight kept.
                         association("青嶺酒造", "杜氏", "高瀬", 2.0),
-                        association("青嶺酒造", "創業年", "1907年", 1.0),
+                        ModelAssociation {
+                            paragraph: Some(99), // out of range for a 2-paragraph document
+                            ..association("青嶺酒造", "創業年", "1907年", 1.0)
+                        },
                     ],
                     aliases: vec![
                         alias("Aomine", "青嶺酒造", "concept"),   // same pair again
@@ -1332,12 +1348,15 @@ mod tests {
                 },
             ],
             0,
-            0,
+            2,
         );
         assert_eq!(merged.associations.len(), 2);
         assert_eq!(merged.associations[0].weight, 1.0);
         assert_eq!(merged.associations[0].chunk_index, 0); // the surviving copy is chunk 0's, not chunk 1's duplicate
+        assert_eq!(merged.associations[0].paragraph, Some(0));
         assert_eq!(merged.associations[1].chunk_index, 1);
+        // Out-of-range self-reports cost only the tag: the fact survives.
+        assert_eq!(merged.associations[1].paragraph, None);
         assert_eq!(merged.concepts.len(), 1);
         assert_eq!(merged.concepts["Aomine"], "青嶺酒造");
         assert_eq!(merged.labels["設立年"], "創業年");
@@ -1510,6 +1529,75 @@ mod tests {
         );
         assert_eq!(merged.duplicates, 1);
         assert_eq!(merged.dropped, 4);
+    }
+
+    #[test]
+    fn merge_tags_associations_with_their_paragraph_but_never_drops_for_it() {
+        let output = ModelOutput {
+            associations: vec![
+                ModelAssociation {
+                    paragraph: Some(1),
+                    ..association("青嶺酒造", "杜氏", "高瀬", 1.0)
+                },
+                ModelAssociation {
+                    paragraph: Some(9), // out of range for a 2-paragraph document
+                    ..association("青嶺酒造", "創業年", "1907年", 1.0)
+                },
+                ModelAssociation {
+                    paragraph: None, // omitted entirely
+                    ..association("青嶺酒造", "業種", "酒造", 1.0)
+                },
+            ],
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        };
+        let merged = merge(vec![output], 0, 2);
+        // A bad or missing self-report costs only the tag — unlike
+        // questions, the fact itself always survives.
+        assert_eq!(merged.associations.len(), 3);
+        assert_eq!(merged.associations[0].paragraph, Some(1));
+        assert_eq!(merged.associations[1].paragraph, None);
+        assert_eq!(merged.associations[2].paragraph, None);
+        assert_eq!(merged.dropped, 0);
+    }
+
+    #[test]
+    fn merge_tags_associations_with_a_paragraph_matching_the_source_text() {
+        // The same two-paragraph document the http_api integration test
+        // extracts from. Unlike the test above (which proves the tag
+        // survives merge() mechanically, with placeholder paragraph
+        // numbers), this proves the surviving tag actually names the
+        // paragraph its fact's content sits in — checked here by slicing
+        // the real source text at the real paragraph spans, the same
+        // spans labeled_document() numbers for the model.
+        let text = "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。大量生産は行わない。";
+        let spans = crate::paragraph::split(text);
+        assert_eq!(spans.len(), 2);
+        let paragraph_text =
+            |index: usize| &text[spans[index].start as usize..spans[index].end as usize];
+        assert!(paragraph_text(0).contains("1907年"));
+        assert!(paragraph_text(1).contains("高瀬"));
+
+        let output = ModelOutput {
+            associations: vec![
+                ModelAssociation {
+                    paragraph: Some(0),
+                    ..association("青嶺酒造", "創業年", "1907年", 1.0)
+                },
+                ModelAssociation {
+                    paragraph: Some(1),
+                    ..association("青嶺酒造", "杜氏", "高瀬", 1.0)
+                },
+            ],
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        };
+        let merged = merge(vec![output], 0, spans.len());
+        assert_eq!(merged.associations.len(), 2);
+        assert_eq!(merged.associations[0].object, "1907年");
+        assert_eq!(merged.associations[0].paragraph, Some(0));
+        assert_eq!(merged.associations[1].object, "高瀬");
+        assert_eq!(merged.associations[1].paragraph, Some(1));
     }
 
     #[test]

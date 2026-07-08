@@ -88,7 +88,12 @@ The system prompt distills the /protocol ingest loop for a producer
 with no live server to `resolve` against: one association per fact,
 SHORT names in the document's language, one spelling per referent,
 negation as negative weight, no paraphrase re-assertion, membership
-edges made explicit, procedures chained with one next-step label.
+edges made explicit, procedures chained with one next-step label. The
+document is shown with every paragraph numbered (blank-line boundaries
+over the whole document, not per chunk — the same numbering
+`--questions` uses, see below), and each association is asked to tag
+itself with the paragraph it came from. That tag rides along with the
+fact in memory; nothing downstream persists it yet.
 Relation labels settle **across the run**: each document's labels are
 offered to every later document's prompt (the offline stand-in for
 check-before-mint), so a run converges on one vocabulary instead of
@@ -101,6 +106,9 @@ enforced on this side of the wire:
   paraphrase rule, applied mechanically),
 - malformed items — empty names, over-cap names, zero / non-finite /
   over-cap weights, unknown alias kinds — are dropped and counted,
+- a missing or out-of-range paragraph tag costs only the tag, never
+  the fact — the association keeps the model's subject/label/object/
+  weight judgment regardless,
 - aliases are kept only when their canonical is a name the same
   file's associations intern, and never when the alias spelling is
   itself such a name (either would fail the batch at apply time),
@@ -128,11 +136,10 @@ batch passage could not carry them; split the document.
 With `--questions N` the same extraction calls also propose up to N
 realistic search questions per paragraph — questions a user might
 type whose answer is that paragraph, phrased away from its wording —
-and the batch carries them as question lines. The prompt shows the
-document with every paragraph numbered by the SERVER'S own splitter
-(blank-line boundaries over the whole document, not per chunk), so
-the emitted indexes are exactly the ones the server validates against
-and can never drift. Generation rides the extraction call on purpose:
+and the batch carries them as question lines. Questions ride the same
+server-numbered paragraphs associations do (see above), so the
+emitted indexes are exactly the ones the server validates against and
+can never drift. Generation rides the extraction call on purpose:
 there is no cheaper questions-only pass, so changing N re-extracts
 (the manifest records it as a computation input). Servers running
 `TAGURU_EMBED_PASSAGES` embed each question beside its paragraph;

@@ -3152,13 +3152,16 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     // whose canonical exists nowhere, and one null-valued item — real
     // models emit all three. takase answers garbage first — one
     // corrective turn — then a valid object with weight omitted.
+    // Paragraph 0 is the founding sentence; paragraph 1 is the brewer
+    // and no-mass-production sentence — the tagged values below match
+    // where each fact actually sits in the source text above.
     let aomine_reply = json!({
         "associations": [
-            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0},
-            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0},
-            {"subject": "青嶺酒造", "label": "行う", "object": "大量生産", "weight": -1.0},
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "paragraph": 0},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "paragraph": 1},
+            {"subject": "青嶺酒造", "label": "行う", "object": "大量生産", "weight": -1.0, "paragraph": 1},
             {"subject": "青嶺酒造", "label": "所在地", "object": null},
-            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0}
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "paragraph": 1}
         ],
         "aliases": [
             {"alias": "Aomine", "canonical": "青嶺酒造", "kind": "concept"},
@@ -3166,6 +3169,9 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
         ]
     })
     .to_string();
+    // takase's reply omits paragraph entirely — the missing-tag path
+    // must still leave the fact in place (asserted below via the
+    // server responses, since a dropped fact wouldn't come back at all).
     let takase_reply =
         json!({"associations": [{"subject": "高瀬", "label": "所属", "object": "青嶺酒造"}]})
             .to_string();
@@ -3202,6 +3208,19 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     assert!(requests[0].contains("Bearer sekrit"), "{}", requests[0]);
     assert!(
         requests[0].contains("青嶺酒造は1907年に創業した。"),
+        "{}",
+        requests[0]
+    );
+    // Every paragraph is numbered for the model now, questions or not
+    // — the same indexes aomine_reply's associations tag themselves
+    // with above.
+    assert!(
+        requests[0].contains("[0] 青嶺酒造は1907年に創業した。"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[0].contains("[1] 杜氏は高瀬。大量生産は行わない。"),
         "{}",
         requests[0]
     );
