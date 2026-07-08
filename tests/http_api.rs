@@ -918,6 +918,8 @@ fn full_retrieval_loop_over_http() {
             "第2段落": "青嶺酒造は、仕込み水に雲居山の伏流水を使う。杜氏は高瀬である。",
         }})),
     );
+    let sources = server.ok("GET", "/contexts/sake/sources", None);
+    assert_eq!(sources, json!(["第2段落"]));
 
     // recall/query pages carry totals; query takes OR-sets per position.
     let page = server.ok(
