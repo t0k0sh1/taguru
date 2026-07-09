@@ -3,7 +3,7 @@
 //! around the library — never retrieval semantics of its own — so each
 //! handler is a lock, a library call, and a serialized reply.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use axum::Json;
@@ -12,7 +12,7 @@ use axum::extract::{FromRequest, Path, Request, State};
 use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use taguru::context::{Association, Context, Recollection, Resolution};
+use taguru::context::{Activation, Association, Attribution, Context, Recollection, Resolution};
 
 use crate::metrics::{ErrorKind, ResolveTier, SearchOp};
 use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
@@ -651,21 +651,182 @@ fn clamp(value: Option<usize>, default: usize, ceiling: usize) -> usize {
 #[derive(Serialize)]
 pub struct MatchPage {
     pub total: usize,
-    pub matches: Vec<Association>,
+    pub matches: Vec<AssociationOut>,
 }
 
 /// Bounds a match list: within the limit the library's insertion order
 /// is preserved; past it, the strongest knowledge (|weight|, the same
 /// magnitude-ranks philosophy as activate) survives the cut, ties in
-/// insertion order.
-fn page(mut matches: Vec<Association>, limit: Option<usize>) -> MatchPage {
+/// insertion order. Returns the raw library `Association`s, not yet
+/// resolved to their wire shape — callers still need to run them
+/// through `resolve_sections`/`association_out`, and `page` itself has
+/// no context name to resolve against.
+fn page(mut matches: Vec<Association>, limit: Option<usize>) -> (usize, Vec<Association>) {
     let total = matches.len();
     let limit = clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT);
     if total > limit {
         matches.sort_by(|a, b| b.weight.abs().total_cmp(&a.weight.abs()));
         matches.truncate(limit);
     }
-    MatchPage { total, matches }
+    (total, matches)
+}
+
+/// `Attribution`'s wire shape: everything the library exposes, plus the
+/// section label the server resolves from `paragraph` via
+/// `AppState::resolve_sections`. `null` when the attribution carries no
+/// paragraph locator, or when the locator falls outside every section
+/// marker the ingest batch recorded for that source — never a
+/// fabricated label.
+#[derive(Serialize)]
+pub struct AttributionOut {
+    pub source: String,
+    pub weight: f64,
+    pub paragraph: Option<u32>,
+    pub section: Option<String>,
+}
+
+/// `Association`'s wire shape: identical, except its attributions carry
+/// a resolved section label (see [`AttributionOut`]).
+#[derive(Serialize)]
+pub struct AssociationOut {
+    pub subject: String,
+    pub label: String,
+    pub object: String,
+    pub weight: f64,
+    pub attributions: Vec<AttributionOut>,
+}
+
+fn attribution_out(
+    attribution: Attribution,
+    sections: &HashMap<(String, u32), String>,
+) -> AttributionOut {
+    let section = attribution
+        .paragraph
+        .and_then(|paragraph| sections.get(&(attribution.source.clone(), paragraph)))
+        .cloned();
+    AttributionOut {
+        source: attribution.source,
+        weight: attribution.weight,
+        paragraph: attribution.paragraph,
+        section,
+    }
+}
+
+fn association_out(
+    association: Association,
+    sections: &HashMap<(String, u32), String>,
+) -> AssociationOut {
+    AssociationOut {
+        subject: association.subject,
+        label: association.label,
+        object: association.object,
+        weight: association.weight,
+        attributions: association
+            .attributions
+            .into_iter()
+            .map(|attribution| attribution_out(attribution, sections))
+            .collect(),
+    }
+}
+
+/// `Recollection`'s wire shape: identical, with `association` reshaped
+/// to carry resolved section labels (see [`AssociationOut`]).
+#[derive(Serialize)]
+pub struct RecollectionOut {
+    pub distance: usize,
+    pub path: Vec<String>,
+    pub association: AssociationOut,
+}
+
+fn recollection_out(
+    recollection: Recollection,
+    sections: &HashMap<(String, u32), String>,
+) -> RecollectionOut {
+    RecollectionOut {
+        distance: recollection.distance,
+        path: recollection.path,
+        association: association_out(recollection.association, sections),
+    }
+}
+
+/// `Activation`'s wire shape: identical, with `association` reshaped to
+/// carry resolved section labels (see [`AssociationOut`]).
+#[derive(Serialize)]
+pub struct ActivationOut {
+    pub strength: f64,
+    pub path: Vec<String>,
+    pub association: AssociationOut,
+}
+
+fn activation_out(
+    activation: Activation,
+    sections: &HashMap<(String, u32), String>,
+) -> ActivationOut {
+    ActivationOut {
+        strength: activation.strength,
+        path: activation.path,
+        association: association_out(activation.association, sections),
+    }
+}
+
+/// Every `(source, paragraph)` locator across a batch of associations'
+/// attributions — the key set for one `resolve_sections` call, so a
+/// page of N matches loads the passage store once rather than once per
+/// attribution. Attributions without a paragraph locator contribute
+/// nothing; they can never resolve to a section.
+fn locator_keys<'a>(
+    associations: impl Iterator<Item = &'a Association> + 'a,
+) -> impl Iterator<Item = (String, u32)> + 'a {
+    associations.flat_map(|association| {
+        association.attributions.iter().filter_map(|attribution| {
+            attribution
+                .paragraph
+                .map(|paragraph| (attribution.source.clone(), paragraph))
+        })
+    })
+}
+
+/// Resolve section labels for a page of associations and convert each
+/// to its wire shape — the `resolve_sections` + `locator_keys` + map
+/// sequence every association-returning endpoint needs.
+fn associations_out(
+    state: &AppState,
+    name: &str,
+    matches: Vec<Association>,
+) -> Vec<AssociationOut> {
+    let sections = state.resolve_sections(name, locator_keys(matches.iter()));
+    matches
+        .into_iter()
+        .map(|association| association_out(association, &sections))
+        .collect()
+}
+
+/// Same as [`associations_out`], for recollections (explore's results).
+fn recollections_out(
+    state: &AppState,
+    name: &str,
+    matches: Vec<Recollection>,
+) -> Vec<RecollectionOut> {
+    let sections = state.resolve_sections(
+        name,
+        locator_keys(matches.iter().map(|recollection| &recollection.association)),
+    );
+    matches
+        .into_iter()
+        .map(|recollection| recollection_out(recollection, &sections))
+        .collect()
+}
+
+/// Same as [`associations_out`], for activations (activate's results).
+fn activations_out(state: &AppState, name: &str, matches: Vec<Activation>) -> Vec<ActivationOut> {
+    let sections = state.resolve_sections(
+        name,
+        locator_keys(matches.iter().map(|activation| &activation.association)),
+    );
+    matches
+        .into_iter()
+        .map(|activation| activation_out(activation, &sections))
+        .collect()
 }
 
 /// One name or several: query positions accept `"住所"` and
@@ -1148,19 +1309,20 @@ pub async fn recall(
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.recall(&request.cue)) {
         Ok(result) => {
-            let paged = page(result, request.limit);
-            state.note_search(SearchOp::Recall, &name, paged.total == 0);
+            let (total, matches) = page(result, request.limit);
+            state.note_search(SearchOp::Recall, &name, total == 0);
             if search_log_enabled() {
                 tracing::info!(
                     target: "taguru::search",
                     context = %name,
                     op = "recall",
                     cue = %request.cue,
-                    hits = paged.total,
+                    hits = total,
                     "search",
                 );
             }
-            ok(paged, started_at)
+            let matches = associations_out(&state, &name, matches);
+            ok(MatchPage { total, matches }, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
@@ -1189,8 +1351,8 @@ pub async fn query(
         )
     }) {
         Ok(result) => {
-            let paged = page(result, request.limit);
-            state.note_search(SearchOp::Query, &name, paged.total == 0);
+            let (total, matches) = page(result, request.limit);
+            state.note_search(SearchOp::Query, &name, total == 0);
             if search_log_enabled() {
                 tracing::info!(
                     target: "taguru::search",
@@ -1199,11 +1361,12 @@ pub async fn query(
                     subject = %as_refs(&request.subject).join(","),
                     label = %as_refs(&request.label).join(","),
                     object = %as_refs(&request.object).join(","),
-                    hits = paged.total,
+                    hits = total,
                     "search",
                 );
             }
-            ok(paged, started_at)
+            let matches = associations_out(&state, &name, matches);
+            ok(MatchPage { total, matches }, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
@@ -1252,7 +1415,7 @@ pub struct ExploreRequest {
 #[derive(Serialize)]
 pub struct ExplorePage {
     pub total: usize,
-    pub matches: Vec<Recollection>,
+    pub matches: Vec<RecollectionOut>,
 }
 
 pub async fn explore(
@@ -1287,6 +1450,7 @@ pub async fn explore(
                     "search",
                 );
             }
+            let matches = recollections_out(&state, &name, matches);
             ok(ExplorePage { total, matches }, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -1328,6 +1492,7 @@ pub async fn activate(
                     "search",
                 );
             }
+            let result = activations_out(&state, &name, result);
             ok(result, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -1701,7 +1866,11 @@ pub async fn unreachable_from(
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         context.unreachable_from(&origins)
     }) {
-        Ok(result) => ok(page(result, request.limit), started_at),
+        Ok(result) => {
+            let (total, matches) = page(result, request.limit);
+            let matches = associations_out(&state, &name, matches);
+            ok(MatchPage { total, matches }, started_at)
+        }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
@@ -1822,9 +1991,9 @@ mod tests {
         let matches: Vec<Association> = (0..MAX_MATCH_LIMIT + 5)
             .map(|i| assoc(&format!("o{i}"), 1.0))
             .collect();
-        let paged = page(matches, Some(1_000_000_000));
-        assert_eq!(paged.total, MAX_MATCH_LIMIT + 5);
-        assert_eq!(paged.matches.len(), MAX_MATCH_LIMIT);
+        let (total, matches) = page(matches, Some(1_000_000_000));
+        assert_eq!(total, MAX_MATCH_LIMIT + 5);
+        assert_eq!(matches.len(), MAX_MATCH_LIMIT);
     }
 
     #[test]
@@ -1832,20 +2001,16 @@ mod tests {
         let matches = vec![assoc("a", 1.0), assoc("b", -3.0), assoc("c", 2.0)];
 
         // Within the limit nothing is reordered or dropped.
-        let within = page(matches.clone(), Some(3));
-        assert_eq!(within.total, 3);
-        let objects: Vec<&str> = within.matches.iter().map(|m| m.object.as_str()).collect();
+        let (total, within) = page(matches.clone(), Some(3));
+        assert_eq!(total, 3);
+        let objects: Vec<&str> = within.iter().map(|m| m.object.as_str()).collect();
         assert_eq!(objects, vec!["a", "b", "c"]);
 
         // Past it, magnitude ranks — the negative fact is the strongest
         // knowledge — and total still reports the untruncated count.
-        let truncated = page(matches, Some(2));
-        assert_eq!(truncated.total, 3);
-        let objects: Vec<&str> = truncated
-            .matches
-            .iter()
-            .map(|m| m.object.as_str())
-            .collect();
+        let (total, truncated) = page(matches, Some(2));
+        assert_eq!(total, 3);
+        let objects: Vec<&str> = truncated.iter().map(|m| m.object.as_str()).collect();
         assert_eq!(objects, vec!["b", "c"]);
     }
 

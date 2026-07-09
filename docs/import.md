@@ -117,11 +117,16 @@ every following paragraph up to the next section's start, or the end
 of the passage — there is no separate "end" line. A section naming a
 paragraph the passage's split does not have is dropped at store time
 and counted in the response (`sections_dropped`), the same convention
-and likely cause as `questions_dropped`. No read API exposes a
-paragraph's section yet — search hits and the citation endpoint
-continue to report `section: null` regardless of what an import
-stores; the field exists so this producer surface and a future reader
-never disagree on shape.
+and likely cause as `questions_dropped`. An association whose
+attribution carries a matching paragraph locator (the `paragraph`
+field on an Association line here, or on an item posted to
+`/contexts/{name}/associations`) reports the section on that
+attribution: `recall`, `query`, `explore`, `activate`, and
+`unreachable_from` all resolve `attributions[].section` from it,
+`null` when the locator falls outside every section an import stored.
+Passage search hits and the citation endpoint do not read this field
+yet and continue to report `section: null` regardless of what an
+import stores — separate follow-ups.
 
 Unknown fields and unrecognized line shapes are refused with the line
 number.

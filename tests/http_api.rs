@@ -2675,9 +2675,10 @@ fn an_offline_import_carries_questions_through_to_the_search_index() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
-/// Sections have no read API yet (docs/import.md) — the bookkeeping
-/// itself is the only thing to check here, the same drop-and-count
-/// convention as questions.
+/// The import-time bookkeeping for storing/dropping section markers —
+/// the same drop-and-count convention as questions. Resolving a stored
+/// section back out through recall/query is covered separately by
+/// `an_attributions_section_label_resolves_on_read_but_is_never_fabricated`.
 #[test]
 fn an_offline_import_carries_sections_through_and_drops_out_of_range_ones() {
     let batches = batch_dir("import-sections");
@@ -2759,6 +2760,164 @@ fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_f
         json!(null),
         "an out-of-range paragraph must be cleared, not left dangling: {brewer}"
     );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// Issue #11: an attribution whose paragraph locator falls inside a
+/// stored section resolves that section's label on read — recall,
+/// query, and (through the same conversion) explore, activate, and
+/// unreachable_from all carry it. A paragraph that exists but sits
+/// before every marker, and an attribution with no paragraph locator
+/// at all, must both report `section: null` — resolution never
+/// fabricates a label. Those two null outcomes come out of the one
+/// shared `attribution_out` conversion every endpoint routes through,
+/// so recall and query (which exhaust them) are sufficient — repeating
+/// them per endpoint would not catch a broken wiring the way a
+/// resolved assertion does (null passes whether or not resolution ran
+/// at all).
+#[test]
+fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
+    let batches = batch_dir("import-section-resolution");
+    let file = batches.join("guide.jsonl");
+    std::fs::write(
+        &file,
+        r#"{"taguru_batch": 1, "context": "sake", "source": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+{"passage": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。\n\n仕込み水は雲居山の伏流水である。"}
+{"paragraph": 1, "section": "杜氏"}
+{"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "paragraph": 0}
+{"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "paragraph": 1}
+{"subject": "青嶺酒造", "label": "仕込み水源", "object": "雲居山", "weight": 1.0}
+{"subject": "廻船問屋", "label": "取引先", "object": "山田", "weight": 1.0, "paragraph": 1}
+"#,
+    )
+    .unwrap();
+
+    let data_dir = std::env::temp_dir().join(format!(
+        "taguru-http-import-section-resolution-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let server = Server::start_on("import-section-resolution", data_dir);
+
+    // Paragraph 1 sits inside the "杜氏" section (which starts at
+    // paragraph 1 and runs to the passage's end): recall must resolve
+    // it, matching what a manual read of the source would show.
+    let recalled = server.ok(
+        "POST",
+        "/contexts/sake/recall",
+        Some(json!({"cue": "青嶺酒造", "limit": 10})),
+    );
+    let brewer = recalled["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["label"] == "杜氏")
+        .expect("the 杜氏 association must recall from its subject");
+    assert_eq!(
+        brewer["attributions"][0]["section"],
+        json!("杜氏"),
+        "a paragraph inside a stored section must resolve its label: {brewer}"
+    );
+
+    // Paragraph 0 exists but sits BEFORE the first section marker: no
+    // section governs it, so resolution must report null rather than
+    // guessing at the nearest one.
+    let founding = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造", "label": "創業年"})),
+    );
+    assert_eq!(
+        founding["matches"][0]["attributions"][0]["paragraph"],
+        json!(0),
+        "sanity: the paragraph locator itself must still be present: {founding}"
+    );
+    assert_eq!(
+        founding["matches"][0]["attributions"][0]["section"],
+        json!(null),
+        "a paragraph before every marker must not resolve to a section: {founding}"
+    );
+
+    // No paragraph locator at all: section is null with nothing to
+    // resolve from.
+    let water = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造", "label": "仕込み水源"})),
+    );
+    assert_eq!(
+        water["matches"][0]["attributions"][0]["paragraph"],
+        json!(null),
+        "sanity: this attribution carries no locator: {water}"
+    );
+    assert_eq!(
+        water["matches"][0]["attributions"][0]["section"],
+        json!(null),
+        "an attribution without a paragraph must not resolve to a section: {water}"
+    );
+
+    // explore nests associations one level deeper
+    // (matches[].association.attributions[]) — check the same
+    // resolution reaches that shape too.
+    let explored = server.ok(
+        "POST",
+        "/contexts/sake/explore",
+        Some(json!({"origins": ["青嶺酒造"], "max_depth": 1})),
+    );
+    let brewer_hop = explored["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["association"]["label"] == "杜氏")
+        .expect("the 杜氏 association must be one hop from 青嶺酒造");
+    assert_eq!(
+        brewer_hop["association"]["attributions"][0]["section"],
+        json!("杜氏"),
+        "explore's nested association must resolve sections too: {brewer_hop}"
+    );
+
+    // activate returns a bare array (no `matches` wrapper) — check the
+    // same resolution reaches its nested association shape too.
+    let activated = server.ok(
+        "POST",
+        "/contexts/sake/activate",
+        Some(json!({"origins": ["青嶺酒造"], "limit": 10})),
+    );
+    let brewer_activation = activated
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["association"]["label"] == "杜氏")
+        .expect("the 杜氏 association must activate from 青嶺酒造");
+    assert_eq!(
+        brewer_activation["association"]["attributions"][0]["section"],
+        json!("杜氏"),
+        "activate's nested association must resolve sections too: {brewer_activation}"
+    );
+
+    // unreachable_from returns associations no walk from the origin can
+    // reach — 廻船問屋 is isolated from 青嶺酒造's graph, so it
+    // qualifies; check its section resolves too.
+    let orphaned = server.ok(
+        "POST",
+        "/contexts/sake/unreachable_from",
+        Some(json!({"origins": ["青嶺酒造"]})),
+    );
+    let orphan_match = orphaned["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["subject"] == "廻船問屋")
+        .expect("the isolated association must be unreachable from 青嶺酒造");
+    assert_eq!(
+        orphan_match["attributions"][0]["section"],
+        json!("杜氏"),
+        "unreachable_from's associations must resolve sections too: {orphan_match}"
+    );
+
     let _ = std::fs::remove_dir_all(&batches);
 }
 

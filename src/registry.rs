@@ -1176,6 +1176,56 @@ impl AppState {
         Some(Ok(CitationLookup::Found(text.to_string())))
     }
 
+    /// Resolves `(source, paragraph)` locators — as found on
+    /// attributions — to the section label governing each, batching
+    /// every pair an association-bearing response needs into one
+    /// passage-store load rather than one per attribution. Best-effort:
+    /// an unknown context, a deleted entry, or a passage-store load
+    /// failure all resolve to an empty map rather than an error.
+    /// Association reads (recall, query, explore, activate,
+    /// unreachable_from) are graph reads first; a section label is
+    /// enrichment on top, not a hard dependency the way `citation`'s
+    /// text lookup is. A pair with no covering marker is simply absent
+    /// from the map — the same null-means-nothing contract
+    /// `Attribution::paragraph` already makes, never a fabricated
+    /// label. An empty `locators` skips the passage-store load
+    /// entirely, so a graph-only response (no attribution carries a
+    /// paragraph) never touches passages.
+    pub fn resolve_sections(
+        &self,
+        name: &str,
+        locators: impl Iterator<Item = (String, u32)>,
+    ) -> HashMap<(String, u32), String> {
+        let mut locators = locators.peekable();
+        if locators.peek().is_none() {
+            return HashMap::new();
+        }
+        let Some(entry) = self.lookup(name) else {
+            return HashMap::new();
+        };
+        let Some(_fence) = entry.read_unless_deleted() else {
+            return HashMap::new();
+        };
+        let store = match self.entry_passages(&entry, &file_stem(name)) {
+            Ok(store) => store,
+            Err(error) => {
+                tracing::warn!(
+                    context = %name,
+                    %error,
+                    "section resolution: passage store load failed; continuing without section labels"
+                );
+                return HashMap::new();
+            }
+        };
+        locators
+            .filter_map(|(source, paragraph)| {
+                let record = store.get(&source)?;
+                let section = record.section_for(paragraph as usize)?;
+                Some(((source, paragraph), section.to_string()))
+            })
+            .collect()
+    }
+
     /// The source ids that currently have a registered passage.
     pub fn passage_sources(&self, name: &str) -> Option<io::Result<Vec<String>>> {
         let entry = self.lookup(name)?;
