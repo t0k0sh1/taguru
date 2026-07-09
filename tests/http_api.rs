@@ -2765,10 +2765,16 @@ fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_f
 
 /// Issue #11: an attribution whose paragraph locator falls inside a
 /// stored section resolves that section's label on read — recall,
-/// query, and (through the same conversion) explore all carry it. A
-/// paragraph that exists but sits before every marker, and an
-/// attribution with no paragraph locator at all, must both report
-/// `section: null` — resolution never fabricates a label.
+/// query, and (through the same conversion) explore, activate, and
+/// unreachable_from all carry it. A paragraph that exists but sits
+/// before every marker, and an attribution with no paragraph locator
+/// at all, must both report `section: null` — resolution never
+/// fabricates a label. Those two null outcomes come out of the one
+/// shared `attribution_out` conversion every endpoint routes through,
+/// so recall and query (which exhaust them) are sufficient — repeating
+/// them per endpoint would not catch a broken wiring the way a
+/// resolved assertion does (null passes whether or not resolution ran
+/// at all).
 #[test]
 fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
     let batches = batch_dir("import-section-resolution");
@@ -2781,6 +2787,7 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
 {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "paragraph": 0}
 {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "paragraph": 1}
 {"subject": "青嶺酒造", "label": "仕込み水源", "object": "雲居山", "weight": 1.0}
+{"subject": "廻船問屋", "label": "取引先", "object": "山田", "weight": 1.0, "paragraph": 1}
 "#,
     )
     .unwrap();
@@ -2870,6 +2877,45 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
         brewer_hop["association"]["attributions"][0]["section"],
         json!("杜氏"),
         "explore's nested association must resolve sections too: {brewer_hop}"
+    );
+
+    // activate returns a bare array (no `matches` wrapper) — check the
+    // same resolution reaches its nested association shape too.
+    let activated = server.ok(
+        "POST",
+        "/contexts/sake/activate",
+        Some(json!({"origins": ["青嶺酒造"], "limit": 10})),
+    );
+    let brewer_activation = activated
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["association"]["label"] == "杜氏")
+        .expect("the 杜氏 association must activate from 青嶺酒造");
+    assert_eq!(
+        brewer_activation["association"]["attributions"][0]["section"],
+        json!("杜氏"),
+        "activate's nested association must resolve sections too: {brewer_activation}"
+    );
+
+    // unreachable_from returns associations no walk from the origin can
+    // reach — 廻船問屋 is isolated from 青嶺酒造's graph, so it
+    // qualifies; check its section resolves too.
+    let orphaned = server.ok(
+        "POST",
+        "/contexts/sake/unreachable_from",
+        Some(json!({"origins": ["青嶺酒造"]})),
+    );
+    let orphan_match = orphaned["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["subject"] == "廻船問屋")
+        .expect("the isolated association must be unreachable from 青嶺酒造");
+    assert_eq!(
+        orphan_match["attributions"][0]["section"],
+        json!("杜氏"),
+        "unreachable_from's associations must resolve sections too: {orphan_match}"
     );
 
     let _ = std::fs::remove_dir_all(&batches);
