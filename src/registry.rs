@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
-use taguru::context::{AliasError, Context};
+use taguru::context::{AliasError, Context, LabelUsage};
 
 use crate::embedding::{
     EmbedPurpose, EmbeddingProvider, PassageKey, PassageVectorStore, VectorStore, VectorTable,
@@ -86,10 +86,38 @@ pub struct ContextStats {
     pub sources: usize,
     pub footprint_bytes: usize,
     /// Most connected concepts with their degree, most connected first.
-    pub top_concepts: Vec<(String, usize)>,
+    /// Same `{label, count}` shape as `describe`'s `as_subject`/`as_object`.
+    #[serde(deserialize_with = "deserialize_top_concepts")]
+    pub top_concepts: Vec<LabelUsage>,
     /// The first labels of the relation vocabulary (capped; the full
     /// list is at `GET /contexts/{name}/labels`).
     pub label_sample: Vec<String>,
+}
+
+/// Accepts both the current `{label, count}` object shape and the
+/// pre-#36 `[name, count]` tuple shape, so a `.meta.json` sidecar
+/// written before the shape change still loads its saved description,
+/// policy, and usage counters instead of a corrupt-sidecar fallback to
+/// `MetaFile::default()`.
+fn deserialize_top_concepts<'de, D>(deserializer: D) -> Result<Vec<LabelUsage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Entry {
+        Object(LabelUsage),
+        Tuple(String, usize),
+    }
+    Vec::<Entry>::deserialize(deserializer).map(|entries| {
+        entries
+            .into_iter()
+            .map(|entry| match entry {
+                Entry::Object(usage) => usage,
+                Entry::Tuple(label, count) => LabelUsage { label, count },
+            })
+            .collect()
+    })
 }
 
 impl ContextStats {
@@ -106,7 +134,10 @@ impl ContextStats {
             top_concepts: context
                 .top_concepts(Self::TOP_CONCEPTS)
                 .into_iter()
-                .map(|(name, degree)| (name.to_string(), degree))
+                .map(|(name, degree)| LabelUsage {
+                    label: name.to_string(),
+                    count: degree,
+                })
                 .collect(),
             label_sample: context
                 .labels()
@@ -3467,6 +3498,43 @@ mod tests {
         assert_eq!(file.stats.associations, 3);
         assert_eq!(file.usage.reads, 0);
         assert_eq!(file.usage.last_read_epoch, 0);
+    }
+
+    #[test]
+    fn meta_sidecar_with_tuple_top_concepts_loads_the_pre_36_shape() {
+        // A sidecar written before #36 switched top_concepts from
+        // [name, count] tuples to {label, count} objects.
+        let json = br#"{"description":"d","pinned":false,"stats":{"associations":3,
+            "top_concepts":[["sake brewery",6],["brewing",5]]}}"#;
+        let file: MetaFile = serde_json::from_slice(json).unwrap();
+        assert_eq!(file.meta.description, "d");
+        assert_eq!(
+            file.stats.top_concepts,
+            vec![
+                LabelUsage {
+                    label: "sake brewery".to_string(),
+                    count: 6
+                },
+                LabelUsage {
+                    label: "brewing".to_string(),
+                    count: 5
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn meta_sidecar_with_object_top_concepts_loads_the_current_shape() {
+        let json = br#"{"description":"d","pinned":false,"stats":{"associations":3,
+            "top_concepts":[{"label":"sake brewery","count":6}]}}"#;
+        let file: MetaFile = serde_json::from_slice(json).unwrap();
+        assert_eq!(
+            file.stats.top_concepts,
+            vec![LabelUsage {
+                label: "sake brewery".to_string(),
+                count: 6
+            }]
+        );
     }
 
     #[test]

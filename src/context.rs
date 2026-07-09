@@ -4,7 +4,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 mod image;
 
@@ -221,8 +221,10 @@ impl MatchKind {
 }
 
 /// How often one relation label appears on a concept's edges — one row of
-/// a [`ConceptDescription`].
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// a [`ConceptDescription`]. Also the wire shape for [`Context::top_concepts`]
+/// as served by the routing directory, so "name plus occurrence count" has
+/// one JSON representation across the whole surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LabelUsage {
     pub label: String,
     pub count: usize,

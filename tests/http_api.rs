@@ -1172,6 +1172,12 @@ fn full_retrieval_loop_over_http() {
     assert_eq!(listed[0]["pinned"], json!(true));
     assert_eq!(listed[0]["semantic_floor"], json!(0.2));
     assert_eq!(listed[0]["stats"]["associations"], json!(5));
+    // top_concepts uses the same {label, count} object shape as describe's
+    // as_subject/as_object, not a positional [name, count] tuple.
+    assert_eq!(
+        listed[0]["stats"]["top_concepts"][0],
+        json!({"label": "青嶺酒造", "count": 4})
+    );
     // The single-context row says the same thing without the listing.
     let single = server.ok("GET", "/contexts/sake", None);
     assert_eq!(single["name"], json!("sake"));
