@@ -158,8 +158,8 @@ impl PassageRecord {
     /// or when the record carries no sections at all. Used by
     /// `AppState::resolve_sections` to label attributions on
     /// association reads (recall, query, explore, activate,
-    /// unreachable_from); the citation endpoint does not call this yet
-    /// (tracked separately).
+    /// unreachable_from), and by `AppState::citation` to label its
+    /// single excerpt.
     pub(crate) fn section_for(&self, index: usize) -> Option<&str> {
         if index >= self.paragraphs.len() {
             return None;

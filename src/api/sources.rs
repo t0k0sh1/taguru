@@ -51,9 +51,11 @@ pub struct CitationRequest {
 
 /// One located, verbatim excerpt: the citation counterpart of
 /// `PassageLookup`'s whole-document dereference — text plus exactly
-/// enough provenance to attribute it. `section` is always `null` until
-/// section detection lands (tracked separately); it is never omitted,
-/// so callers can rely on the key always being present.
+/// enough provenance to attribute it. `section` is the label governing
+/// this paragraph (see `PassageRecord::section_for`), `null` when the
+/// index falls outside every section the source's import stored, or
+/// when it stored none at all; the key is never omitted, so callers
+/// can rely on it always being present.
 #[derive(Serialize)]
 pub struct Citation {
     pub text: String,
@@ -89,13 +91,13 @@ pub async fn citation(
                 started_at,
             )
         }
-        Some(Ok(CitationLookup::Found(text))) => {
+        Some(Ok(CitationLookup::Found(text, section))) => {
             state.note_read(&name, false);
             ok(
                 Citation {
                     text,
                     source: request.source,
-                    section: None,
+                    section,
                 },
                 started_at,
             )
