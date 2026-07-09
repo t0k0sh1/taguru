@@ -852,7 +852,6 @@ struct Fact {
     weight: f64,
     #[allow(dead_code)] // read by tests only — a follow-up issue surfaces it beyond merge()
     chunk_index: usize,
-    #[allow(dead_code)] // read by tests only — a follow-up issue surfaces it beyond merge()
     paragraph: Option<u32>,
 }
 
@@ -1028,15 +1027,16 @@ fn render_batch(
         }
     }
     for fact in &extraction.associations {
-        lines.push(
-            serde_json::json!({
-                "subject": fact.subject,
-                "label": fact.label,
-                "object": fact.object,
-                "weight": fact.weight,
-            })
-            .to_string(),
-        );
+        let mut line = serde_json::json!({
+            "subject": fact.subject,
+            "label": fact.label,
+            "object": fact.object,
+            "weight": fact.weight,
+        });
+        if let Some(paragraph) = fact.paragraph {
+            line["paragraph"] = serde_json::json!(paragraph);
+        }
+        lines.push(line.to_string());
     }
     for (alias, canonical) in &extraction.concepts {
         lines.push(
@@ -1414,6 +1414,52 @@ mod tests {
         assert_eq!(batch.context, "sake");
         assert_eq!(batch.source, "docs/aomine.md");
         assert!(batch.label_vocabulary().contains("杜氏"));
+    }
+
+    #[test]
+    fn a_paragraph_survives_extract_through_ingest_into_a_queried_attribution() {
+        let extraction = merge(
+            vec![ModelOutput {
+                associations: vec![ModelAssociation {
+                    paragraph: Some(1),
+                    ..association("私", "好き", "りんご", 1.0)
+                }],
+                aliases: Vec::new(),
+                questions: Vec::new(),
+            }],
+            0,
+            2,
+        );
+        let body = render_batch(
+            "e2e",
+            "docs/e2e.md",
+            Some("配線テスト"),
+            &extraction,
+            Some("一段落目。\n\n二段落目。"),
+        );
+        let batch = crate::ingest::parse_batch(Cursor::new(body.as_bytes()))
+            .expect("extract must never emit what import refuses");
+
+        let dir = std::env::temp_dir().join(format!("taguru-extract-e2e-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let state = crate::registry::AppState::boot(dir, usize::MAX, None).unwrap();
+        if let Err(refusal) = crate::ingest::apply_batch(&state, &batch) {
+            panic!("the rendered batch must apply cleanly: {}", refusal.text());
+        }
+
+        let attributions = state
+            .read_context("e2e", |context| {
+                context.recall("私")[0].attributions.clone()
+            })
+            .expect("apply_batch's create header must have stood up the context");
+        assert_eq!(
+            attributions,
+            vec![taguru::context::Attribution {
+                source: "docs/e2e.md".to_string(),
+                weight: 1.0,
+                paragraph: Some(1),
+            }]
+        );
     }
 
     #[test]

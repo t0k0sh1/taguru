@@ -366,6 +366,8 @@ struct AssociationLine {
     label: String,
     object: String,
     weight: f64,
+    #[serde(default)]
+    paragraph: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -521,6 +523,7 @@ fn parse_op(batch: &mut Batch, line: &str, number: usize) -> Result<(), String> 
             object: op.object,
             weight: op.weight,
             source: Some(batch.source.clone()),
+            paragraph: op.paragraph,
         });
     } else if object.contains_key("alias") {
         let op: AliasLine = serde_json::from_value(value)
@@ -731,8 +734,35 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         sections_dropped = outcome.sections_dropped;
     }
 
+    // Same rule as questions/sections above, applied silently: a
+    // paragraph naming a spot this batch's own passage does not have
+    // is meaningless, so it is dropped rather than persisted — the
+    // association itself (subject/label/object/weight) still lands.
+    // Only checked against a passage this same batch carries; an
+    // associations-only batch has nothing to check against, exactly
+    // like questions/sections above.
+    let corrected_associations: Vec<AssocOp>;
+    let associations_to_apply: &[AssocOp] = match &batch.passage {
+        Some(text) => {
+            let paragraph_count = crate::paragraph::split(text).len();
+            corrected_associations = batch
+                .associations
+                .iter()
+                .cloned()
+                .map(|mut op| {
+                    if op.paragraph.is_some_and(|p| p as usize >= paragraph_count) {
+                        op.paragraph = None;
+                    }
+                    op
+                })
+                .collect();
+            &corrected_associations
+        }
+        None => &batch.associations,
+    };
+
     let mut associations = 0;
-    for chunk in batch.associations.chunks(MAX_ASSOCIATIONS_PER_REQUEST) {
+    for chunk in associations_to_apply.chunks(MAX_ASSOCIATIONS_PER_REQUEST) {
         match state
             .add_associations(&batch.context, chunk.to_vec())
             .map_err(ApplyRefusal::Access)?

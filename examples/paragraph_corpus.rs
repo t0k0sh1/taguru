@@ -54,118 +54,118 @@ fn main() {
 
     // 第1段落 (概要)
     context
-        .associate_from("青嶺酒造", "業種", "日本酒の蔵元", 1.0, P1)
+        .associate_from("青嶺酒造", "業種", "日本酒の蔵元", 1.0, P1, None)
         .unwrap();
     context
-        .associate_from("青嶺酒造", "所在地", "霧沢町", 1.0, P1)
+        .associate_from("青嶺酒造", "所在地", "霧沢町", 1.0, P1, None)
         .unwrap();
     context
-        .associate_from("霧沢町", "所在する県", "雲居県", 1.0, P1)
+        .associate_from("霧沢町", "所在する県", "雲居県", 1.0, P1, None)
         .unwrap();
     context
-        .associate_from("青嶺酒造", "創業年", "1907年", 1.0, P1)
+        .associate_from("青嶺酒造", "創業年", "1907年", 1.0, P1, None)
         .unwrap();
     context
-        .associate_from("青嶺酒造", "当主", "六代目当主", 1.0, P1)
+        .associate_from("青嶺酒造", "当主", "六代目当主", 1.0, P1, None)
         .unwrap();
     context
-        .associate_from("青嶺酒造", "代表銘柄", "青嶺", 1.0, P1)
+        .associate_from("青嶺酒造", "代表銘柄", "青嶺", 1.0, P1, None)
         .unwrap();
     context
-        .associate_from("青嶺", "出荷先", "全国", 1.0, P1)
+        .associate_from("青嶺", "出荷先", "全国", 1.0, P1, None)
         .unwrap();
 
     // 第2段落 (製法)
     context
-        .associate_from("青嶺酒造", "仕込み水", "雲居山の伏流水", 1.0, P2)
+        .associate_from("青嶺酒造", "仕込み水", "雲居山の伏流水", 1.0, P2, None)
         .unwrap();
     context
-        .associate_from("青嶺酒造", "原料米", "山田錦", 1.0, P2)
+        .associate_from("青嶺酒造", "原料米", "山田錦", 1.0, P2, None)
         .unwrap();
     context
-        .associate_from("山田錦", "精米歩合", "50パーセント", 1.0, P2)
+        .associate_from("山田錦", "精米歩合", "50パーセント", 1.0, P2, None)
         .unwrap();
     context
-        .associate_from("高瀬", "監督する", "麹造り", 1.0, P2)
+        .associate_from("高瀬", "監督する", "麹造り", 1.0, P2, None)
         .unwrap();
     context
-        .associate_from("蔵人", "手作業で行う", "麹造り", 1.0, P2)
+        .associate_from("蔵人", "手作業で行う", "麹造り", 1.0, P2, None)
         .unwrap();
     context
-        .associate_from("青嶺酒造", "行う", "大量生産", -1.0, P2)
+        .associate_from("青嶺酒造", "行う", "大量生産", -1.0, P2, None)
         .unwrap();
     // 「杜氏の高瀬」「蔵人」 are mentions inside the brewery's own 製法
     // paragraph — the membership is implicit in the prose but must become
     // explicit edges, or their cluster is a disconnected island.
     context
-        .associate_from("青嶺酒造", "杜氏", "高瀬", 1.0, P2)
+        .associate_from("青嶺酒造", "杜氏", "高瀬", 1.0, P2, None)
         .unwrap();
     context
-        .associate_from("蔵人", "所属", "青嶺酒造", 1.0, P2)
+        .associate_from("蔵人", "所属", "青嶺酒造", 1.0, P2, None)
         .unwrap();
 
     // 第3段落 (人)
     context
-        .associate_from("高瀬", "役職", "杜氏", 1.0, P3)
+        .associate_from("高瀬", "役職", "杜氏", 1.0, P3, None)
         .unwrap();
     context
-        .associate_from("高瀬", "出身", "南部杜氏", 1.0, P3)
+        .associate_from("高瀬", "出身", "南部杜氏", 1.0, P3, None)
         .unwrap();
     context
-        .associate_from("高瀬", "経験年数", "30年以上", 1.0, P3)
+        .associate_from("高瀬", "経験年数", "30年以上", 1.0, P3, None)
         .unwrap();
     context
-        .associate_from("蔵人", "住み込む場所", "蔵", 1.0, P3)
+        .associate_from("蔵人", "住み込む場所", "蔵", 1.0, P3, None)
         .unwrap();
     context
-        .associate_from("蔵人", "住み込む期間", "冬の仕込み期間", 1.0, P3)
+        .associate_from("蔵人", "住み込む期間", "冬の仕込み期間", 1.0, P3, None)
         .unwrap();
     context
-        .associate_from("六代目当主", "担う", "経営", 1.0, P3)
+        .associate_from("六代目当主", "担う", "経営", 1.0, P3, None)
         .unwrap();
     context
-        .associate_from("六代目当主", "担う", "販売", 1.0, P3)
+        .associate_from("六代目当主", "担う", "販売", 1.0, P3, None)
         .unwrap();
     context
-        .associate_from("六代目当主", "口を出す", "造り", -1.0, P3)
+        .associate_from("六代目当主", "口を出す", "造り", -1.0, P3, None)
         .unwrap();
 
     // 第4段落 (製品と評価)
     context
-        .associate_from("青嶺", "分類", "辛口の純米酒", 1.0, P4)
+        .associate_from("青嶺", "分類", "辛口の純米酒", 1.0, P4, None)
         .unwrap();
     context
-        .associate_from("青嶺", "受賞する", "金賞", 1.0, P4)
+        .associate_from("青嶺", "受賞する", "金賞", 1.0, P4, None)
         .unwrap();
     context
-        .associate_from("金賞", "授与元", "全国新酒鑑評会", 1.0, P4)
+        .associate_from("金賞", "授与元", "全国新酒鑑評会", 1.0, P4, None)
         .unwrap();
     context
-        .associate_from("金賞", "要因", "雲居山の伏流水", 1.0, P4)
+        .associate_from("金賞", "要因", "雲居山の伏流水", 1.0, P4, None)
         .unwrap();
     context
-        .associate_from("金賞", "要因", "山田錦", 1.0, P4)
+        .associate_from("金賞", "要因", "山田錦", 1.0, P4, None)
         .unwrap();
 
     // 第5段落 (地域)
     context
-        .associate_from("霧沢町", "力を入れる", "酒蔵観光", 1.0, P5)
+        .associate_from("霧沢町", "力を入れる", "酒蔵観光", 1.0, P5, None)
         .unwrap();
     context
-        .associate_from("青嶺酒造", "開く", "蔵開きの祭り", 1.0, P5)
+        .associate_from("青嶺酒造", "開く", "蔵開きの祭り", 1.0, P5, None)
         .unwrap();
     context
-        .associate_from("蔵開きの祭り", "開催時期", "毎年春", 1.0, P5)
+        .associate_from("蔵開きの祭り", "開催時期", "毎年春", 1.0, P5, None)
         .unwrap();
     context
-        .associate_from("蔵開きの祭り", "ふるまう", "新酒", 1.0, P5)
+        .associate_from("蔵開きの祭り", "ふるまう", "新酒", 1.0, P5, None)
         .unwrap();
     context
-        .associate_from("新酒", "仕込み水", "雲居山の伏流水", 1.0, P5)
+        .associate_from("新酒", "仕込み水", "雲居山の伏流水", 1.0, P5, None)
         .unwrap();
     // 第5段落 re-derives a fact 第2段落 already asserted — corroboration.
     context
-        .associate_from("青嶺酒造", "仕込み水", "雲居山の伏流水", 1.0, P5)
+        .associate_from("青嶺酒造", "仕込み水", "雲居山の伏流水", 1.0, P5, None)
         .unwrap();
 
     println!(
