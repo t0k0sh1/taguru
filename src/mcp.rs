@@ -423,14 +423,20 @@ pub fn tool_definitions() -> Vec<Value> {
         (
             "cite_passage",
             "Fetch one located, verbatim excerpt from a registered source by paragraph position: the citation counterpart of lookup_passages' whole-document dereference. Returns the exact paragraph text plus source and section provenance.",
-            object_schema(
-                json!({
+            json!({
+                "type": "object",
+                "properties": {
                     "context": context,
                     "source": { "type": "string" },
-                    "paragraph": { "type": "integer", "description": "zero-based paragraph position" }
-                }),
-                &["context", "source", "paragraph"],
-            ),
+                    "paragraph": { "type": "integer", "description": "zero-based paragraph position" },
+                    "index": { "type": "integer", "description": "deprecated alias for `paragraph`; kept for pre-#35 callers, prefer `paragraph`" }
+                },
+                "required": ["context", "source"],
+                "anyOf": [
+                    { "required": ["paragraph"] },
+                    { "required": ["index"] }
+                ]
+            }),
         ),
         (
             "refresh_embeddings",
@@ -757,6 +763,28 @@ mod tests {
         assert_eq!(
             body,
             Some(json!({"source": "docs/aomine.md", "paragraph": 1}))
+        );
+    }
+
+    /// The advertised contract matches what `route_tool` actually accepts:
+    /// `index` is a documented deprecated alias, and the schema requires
+    /// one of `paragraph`/`index` rather than unconditionally demanding
+    /// `paragraph`.
+    #[test]
+    fn cite_passage_schema_advertises_index_as_a_deprecated_alias() {
+        let tool = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "cite_passage")
+            .expect("cite_passage is defined");
+        let schema = &tool["inputSchema"];
+        assert!(
+            schema["properties"]["index"]["type"] == "integer",
+            "schema should advertise `index` as an integer: {schema}"
+        );
+        assert_eq!(schema["required"], json!(["context", "source"]));
+        assert_eq!(
+            schema["anyOf"],
+            json!([{ "required": ["paragraph"] }, { "required": ["index"] }])
         );
     }
 

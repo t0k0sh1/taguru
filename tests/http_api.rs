@@ -905,10 +905,18 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         .expect("tools/list must advertise cite_passage");
     assert_eq!(
         manifest["inputSchema"]["required"],
-        json!(["context", "source", "paragraph"])
+        json!(["context", "source"])
     );
     assert!(manifest["inputSchema"]["properties"]["source"].is_object());
     assert!(manifest["inputSchema"]["properties"]["paragraph"].is_object());
+    // Deprecated alias for pre-#35 callers: still advertised, so the
+    // schema and `paragraph`/`index` `anyOf` requirement agree that
+    // either name satisfies the call.
+    assert!(manifest["inputSchema"]["properties"]["index"].is_object());
+    assert_eq!(
+        manifest["inputSchema"]["anyOf"],
+        json!([{ "required": ["paragraph"] }, { "required": ["index"] }])
+    );
 
     let (status, reply) = server.call(
         "POST",
@@ -936,6 +944,20 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
     assert_eq!(failed["result"]["isError"], true);
     let error_text = failed["result"]["content"][0]["text"].as_str().unwrap();
     assert!(error_text.contains("docs/ghost.md"), "{error_text}");
+
+    // Acceptance criterion 2: a pre-#35 caller still on `index` gets a
+    // citation back through the full MCP path, not a schema rejection.
+    let (status, via_index) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": {"name": "cite_passage",
+                               "arguments": {"context": "sake", "source": "docs/aomine.md", "index": 1}}})),
+    );
+    assert_eq!(status, 200);
+    assert!(via_index["result"].get("isError").is_none(), "{via_index}");
+    let text = via_index["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\"source\":\"docs/aomine.md\""), "{text}");
 }
 
 #[test]

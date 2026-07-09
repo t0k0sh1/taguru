@@ -285,6 +285,22 @@ mod tests {
         assert_eq!(request.paragraph, 3);
     }
 
+    /// `#[serde(alias)]` maps both names onto one field, not onto a
+    /// "prefer paragraph" merge: sending both is a duplicate-field error,
+    /// same as sending `paragraph` twice. The MCP path's `pick_with_alias`
+    /// resolves a same-request clash by preference instead; direct HTTP
+    /// callers get this stricter, but still well-defined, rejection.
+    #[test]
+    fn citation_request_rejects_both_names_at_once_as_a_duplicate_field() {
+        let result: Result<CitationRequest, _> =
+            serde_json::from_value(serde_json::json!({"source": "s", "paragraph": 1, "index": 2}));
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("duplicate field"),
+            "expected a duplicate-field error, got: {error}"
+        );
+    }
+
     /// An absent lane must OMIT its key, never serialize as null:
     /// lane consumers test key presence.
     #[test]
