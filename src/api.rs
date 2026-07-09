@@ -639,6 +639,24 @@ fn empty(what: &str, value: &str, started_at: Instant) -> Option<Response> {
     })
 }
 
+/// Companion to `oversized`/`empty`: `Some(400)` when `source` names a
+/// passage the request itself does not carry alongside it — a question
+/// or section cannot attach to text the request does not carry.
+fn orphaned_source(
+    what: &str,
+    source: &str,
+    passages: &BTreeMap<String, String>,
+    started_at: Instant,
+) -> Option<Response> {
+    (!passages.contains_key(source)).then(|| {
+        error(
+            StatusCode::BAD_REQUEST,
+            format!("{what} for '{source}' arrived without a passage for it in this request"),
+            started_at,
+        )
+    })
+}
+
 /// The one clamp every numeric cap in this file goes through: an
 /// omitted value takes the default, and nothing exceeds the ceiling.
 fn clamp(value: Option<usize>, default: usize, ceiling: usize) -> usize {
@@ -1054,14 +1072,8 @@ pub async fn store_passages(
     // stay under the shared caps. (Whether a paragraph index exists in
     // the text is settled at store time, one rule for every entrance.)
     for (source, questions) in &request.questions {
-        if !request.passages.contains_key(source) {
-            return error(
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "questions for '{source}' arrived without a passage for it in this request"
-                ),
-                started_at,
-            );
+        if let Some(refusal) = orphaned_source("questions", source, &request.passages, started_at) {
+            return refusal;
         }
         let mut per_paragraph: BTreeMap<u32, usize> = BTreeMap::new();
         for spec in questions {
@@ -1097,12 +1109,8 @@ pub async fn store_passages(
     // store time, same as questions; ingest's batch format has no
     // per-paragraph section count limit either, so neither does this.)
     for (source, sections) in &request.sections {
-        if !request.passages.contains_key(source) {
-            return error(
-                StatusCode::BAD_REQUEST,
-                format!("sections for '{source}' arrived without a passage for it in this request"),
-                started_at,
-            );
+        if let Some(refusal) = orphaned_source("sections", source, &request.passages, started_at) {
+            return refusal;
         }
         for spec in sections {
             if spec.section.len() > MAX_SECTION_BYTES {
