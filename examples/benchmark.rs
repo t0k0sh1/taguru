@@ -62,7 +62,7 @@ fn main() {
             if rng.below(10) < 3 {
                 let source = sources[rng.below(1000) as usize].as_str();
                 context
-                    .associate_from(subject, label, object, 1.0, source)
+                    .associate_from(subject, label, object, 1.0, source, None)
                     .unwrap();
             } else {
                 context.associate(subject, label, object, 1.0).unwrap();

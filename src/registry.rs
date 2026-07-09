@@ -445,6 +445,11 @@ pub struct AssocOp {
     pub weight: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Locates the fact within `source` (e.g. a paragraph index).
+    /// Meaningless without a source, so it is only ever honored when
+    /// `source` is also present — see [`apply_op`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paragraph: Option<u32>,
 }
 
 /// A batch write that got partway before the library rejected an
@@ -2926,6 +2931,7 @@ fn apply_op(context: &mut Context, op: &WalOp) -> Result<(), (String, bool)> {
                     op.object.as_str(),
                     op.weight,
                     source.as_str(),
+                    op.paragraph,
                 ),
                 None => context.associate(
                     op.subject.as_str(),
@@ -3563,6 +3569,7 @@ mod tests {
             object: object.to_string(),
             weight,
             source: source.map(String::from),
+            paragraph: None,
         }
     }
 

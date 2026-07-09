@@ -107,10 +107,17 @@ impl Error for AliasError {}
 /// `source` is an opaque identifier chosen by the caller — a document id, a
 /// URL, a chunk reference — that lets whoever retrieved the association go
 /// fetch the original text behind it. The `Context` never interprets it.
+/// `paragraph` optionally locates the fact within `source` (e.g. the
+/// paragraph index it was read from); it is `null` rather than omitted
+/// when absent, so callers can rely on the key always being present —
+/// the same contract the citation endpoint's `section` field makes. It
+/// reflects only the first assertion of this source (first-write-wins);
+/// later re-assertions accumulate into `weight` but never change it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Attribution {
     pub source: String,
     pub weight: f64,
+    pub paragraph: Option<u32>,
 }
 
 /// A single subject-label-object association, its signed weight, and the
@@ -342,6 +349,22 @@ struct AttributionRecord {
     weight: f64,
 }
 
+/// One paragraph locator for an attribution record, in fixed-width form.
+/// A sparse side table: present only for attributions given a locator
+/// when first asserted. Always sorted by `attribution` ascending — a
+/// locator is only ever appended alongside a brand-new `AttributionRecord`
+/// push, and attribution ids are monotonically increasing, so append
+/// order is sort order for free; lookups are a binary search rather than
+/// a dense parallel `Vec` with a sentinel.
+///
+/// Layout: 2 × u32 = 8 bytes, alignment 4, no padding.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct AttributionLocatorRecord {
+    attribution: AttributionId,
+    paragraph: u32,
+}
+
 /// Error returned by [`Context::from_bytes`] when an image is truncated,
 /// wrongly versioned, or internally inconsistent. The message names the
 /// first check that failed.
@@ -383,15 +406,16 @@ impl Error for CorruptImage {}
 ///
 /// # Storage layout
 ///
-/// Everything a `Context` knows lives in eight flat buffers: one UTF-8
-/// string arena plus seven tables of fixed-width, naturally aligned,
+/// Everything a `Context` knows lives in nine flat buffers: one UTF-8
+/// string arena plus eight tables of fixed-width, naturally aligned,
 /// pointer-free `#[repr(C)]` records (u32 ids and offsets, f64 weights) —
-/// concepts, labels, sources, edges, attributions, and the two alias
-/// tables. Variable-length structure is expressed inside the fixed
-/// widths: strings live in the arena and records hold (offset, len)
-/// pairs; adjacency lists are intrusive singly-linked chains threaded
-/// through the edge records (`next_outgoing` / `next_incoming` /
-/// `next_labeled`, terminated by a `NIL` sentinel) and appended at the
+/// concepts, labels, sources, edges, attributions, the two alias tables,
+/// and the sparse attribution-locator table. Variable-length structure is
+/// expressed inside the fixed widths: strings live in the arena and
+/// records hold (offset, len) pairs; adjacency lists are intrusive
+/// singly-linked chains threaded through the edge records
+/// (`next_outgoing` / `next_incoming` / `next_labeled`, terminated by a
+/// `NIL` sentinel) and appended at the
 /// tail, which is what preserves the insertion-order guarantees of the
 /// read API. Every mutation is an append or an in-place field update —
 /// records never move — so the whole state dumps and restores as one
@@ -422,6 +446,9 @@ pub struct Context {
     concept_aliases: Vec<AliasRecord>,
     /// Alternative label spellings. Persisted.
     label_aliases: Vec<AliasRecord>,
+    /// Sparse paragraph locators, one per attribution that was given one
+    /// when first asserted. Sorted by `attribution` ascending. Persisted.
+    attribution_locators: Vec<AttributionLocatorRecord>,
     /// Derived index: interned name → concept id, aliases included. Not
     /// persisted.
     concept_ids: HashMap<String, ConceptId>,
@@ -502,7 +529,14 @@ impl Context {
         object: impl Into<String>,
         weight: f64,
     ) -> Result<(), ContextFull> {
-        self.upsert(subject.into(), label.into(), object.into(), weight, None)
+        self.upsert(
+            subject.into(),
+            label.into(),
+            object.into(),
+            weight,
+            None,
+            None,
+        )
     }
 
     /// Like [`Context::associate`], but records which source asserted the
@@ -519,6 +553,12 @@ impl Context {
     /// independence should count distinct attributions rather than trust
     /// raw weight.
     ///
+    /// `paragraph` optionally locates the fact within `source` (e.g. a
+    /// paragraph index) and is first-write-wins: it is only recorded the
+    /// first time this source is attributed to this edge, so a later
+    /// re-assertion of the same source cannot change where the first one
+    /// pointed.
+    ///
     /// # Errors
     ///
     /// Returns [`ContextFull`] exactly as [`Context::associate`] does; a
@@ -531,6 +571,7 @@ impl Context {
         object: impl Into<String>,
         weight: f64,
         source: impl Into<String>,
+        paragraph: Option<u32>,
     ) -> Result<(), ContextFull> {
         self.upsert(
             subject.into(),
@@ -538,6 +579,7 @@ impl Context {
             object.into(),
             weight,
             Some(source.into()),
+            paragraph,
         )
     }
 
@@ -548,6 +590,7 @@ impl Context {
         object: String,
         weight: f64,
         source: Option<String>,
+        paragraph: Option<u32>,
     ) -> Result<(), ContextFull> {
         self.ensure_room(&subject, &label, &object, source.as_deref())?;
 
@@ -610,7 +653,7 @@ impl Context {
         };
 
         if let Some(source_id) = source_id {
-            self.attribute(edge_id, source_id, weight);
+            self.attribute(edge_id, source_id, weight, paragraph);
         }
         Ok(())
     }
@@ -665,7 +708,7 @@ impl Context {
             let already_attributed = existing_edge.is_some_and(|edge_id| {
                 self.source_ids.get(name).is_some_and(|&source_id| {
                     self.attribution_chain(self.edges[edge_id as usize].first_attribution)
-                        .any(|record| record.source == source_id)
+                        .any(|(_, record)| record.source == source_id)
                 })
             });
             if !already_attributed && !ids_left(self.attributions.len(), 1) {
@@ -695,7 +738,16 @@ impl Context {
     /// Adds `weight` onto the edge's existing attribution for `source_id`,
     /// or appends a new one at the chain's tail — one record per distinct
     /// source, however often it re-asserts, in first-assertion order.
-    fn attribute(&mut self, edge_id: EdgeId, source_id: SourceId, weight: f64) {
+    /// `paragraph` locates the new record within its source and is only
+    /// ever used here, on creation: a weight-only merge into an existing
+    /// record never touches its locator (first-write-wins).
+    fn attribute(
+        &mut self,
+        edge_id: EdgeId,
+        source_id: SourceId,
+        weight: f64,
+        paragraph: Option<u32>,
+    ) {
         let mut cursor = self.edges[edge_id as usize].first_attribution;
         while cursor != NIL {
             let record = &mut self.attributions[cursor as usize];
@@ -712,6 +764,12 @@ impl Context {
             next: NIL,
             weight,
         });
+        if let Some(paragraph) = paragraph {
+            self.attribution_locators.push(AttributionLocatorRecord {
+                attribution: attribution_id,
+                paragraph,
+            });
+        }
         let edge = &mut self.edges[edge_id as usize];
         let tail = edge.last_attribution;
         if tail == NIL {
@@ -1485,7 +1543,8 @@ impl Context {
             + self.sources.len() * size_of::<SourceRecord>()
             + self.edges.len() * size_of::<EdgeRecord>()
             + self.attributions.len() * size_of::<AttributionRecord>()
-            + (self.concept_aliases.len() + self.label_aliases.len()) * size_of::<AliasRecord>();
+            + (self.concept_aliases.len() + self.label_aliases.len()) * size_of::<AliasRecord>()
+            + self.attribution_locators.len() * size_of::<AttributionLocatorRecord>();
 
         const MAP_ENTRY_OVERHEAD: usize = 48;
         let name_entries = self.concepts.len() + self.labels.len() + self.sources.len();
@@ -1869,12 +1928,31 @@ impl Context {
         })
     }
 
-    /// Walks one edge's attribution chain in first-assertion order.
-    fn attribution_chain(&self, first: AttributionId) -> impl Iterator<Item = &AttributionRecord> {
+    /// Walks one edge's attribution chain in first-assertion order,
+    /// paired with each record's id so callers can look up its locator.
+    fn attribution_chain(
+        &self,
+        first: AttributionId,
+    ) -> impl Iterator<Item = (AttributionId, &AttributionRecord)> {
         std::iter::successors(
-            (first != NIL).then(|| &self.attributions[first as usize]),
-            |record| (record.next != NIL).then(|| &self.attributions[record.next as usize]),
+            (first != NIL).then(|| (first, &self.attributions[first as usize])),
+            |&(_, record)| {
+                (record.next != NIL)
+                    .then(|| (record.next, &self.attributions[record.next as usize]))
+            },
         )
+    }
+
+    /// Looks up the paragraph locator recorded for one attribution, if
+    /// any. `attribution_locators` is sorted by `attribution` ascending —
+    /// a locator is only ever appended alongside a brand-new
+    /// `AttributionRecord`, and attribution ids are monotonically
+    /// increasing — so a binary search finds it in O(log n).
+    fn locator_for(&self, attribution: AttributionId) -> Option<u32> {
+        self.attribution_locators
+            .binary_search_by_key(&attribution, |record| record.attribution)
+            .ok()
+            .map(|index| self.attribution_locators[index].paragraph)
     }
 
     /// Materializes one edge back into owned strings for the caller.
@@ -1887,9 +1965,10 @@ impl Context {
             weight: edge.weight,
             attributions: self
                 .attribution_chain(edge.first_attribution)
-                .map(|record| Attribution {
+                .map(|(attribution_id, record)| Attribution {
                     source: self.source_name(record.source).to_string(),
                     weight: record.weight,
+                    paragraph: self.locator_for(attribution_id),
                 })
                 .collect(),
         }
@@ -2613,10 +2692,10 @@ mod tests {
     fn associate_from_records_which_source_contributed_what() {
         let mut context = Context::default();
         context
-            .associate_from("決定", "手段", "投票", 1.0, "IPA公式")
+            .associate_from("決定", "手段", "投票", 1.0, "IPA公式", None)
             .unwrap();
         context
-            .associate_from("決定", "手段", "投票", 1.0, "解説記事")
+            .associate_from("決定", "手段", "投票", 1.0, "解説記事", None)
             .unwrap();
 
         let recalled = context.recall("投票");
@@ -2628,10 +2707,12 @@ mod tests {
                 Attribution {
                     source: "IPA公式".to_string(),
                     weight: 1.0,
+                    paragraph: None,
                 },
                 Attribution {
                     source: "解説記事".to_string(),
                     weight: 1.0,
+                    paragraph: None,
                 },
             ]
         );
@@ -2641,9 +2722,15 @@ mod tests {
     fn attributions_tell_corroboration_apart_from_single_source_emphasis() {
         let mut context = Context::default();
         // Same total weight, different evidence story.
-        context.associate_from("a", "r", "b", 1.0, "文書1").unwrap();
-        context.associate_from("a", "r", "b", 1.0, "文書2").unwrap();
-        context.associate_from("x", "r", "y", 2.0, "文書1").unwrap();
+        context
+            .associate_from("a", "r", "b", 1.0, "文書1", None)
+            .unwrap();
+        context
+            .associate_from("a", "r", "b", 1.0, "文書2", None)
+            .unwrap();
+        context
+            .associate_from("x", "r", "y", 2.0, "文書1", None)
+            .unwrap();
 
         let corroborated = &context.query(Some("a"), None, None)[0];
         let emphatic = &context.query(Some("x"), None, None)[0];
@@ -2655,8 +2742,12 @@ mod tests {
     #[test]
     fn repeated_assertions_from_one_source_accumulate_into_one_attribution() {
         let mut context = Context::default();
-        context.associate_from("a", "r", "b", 1.0, "文書1").unwrap();
-        context.associate_from("a", "r", "b", 0.5, "文書1").unwrap();
+        context
+            .associate_from("a", "r", "b", 1.0, "文書1", None)
+            .unwrap();
+        context
+            .associate_from("a", "r", "b", 0.5, "文書1", None)
+            .unwrap();
 
         let recalled = context.recall("a");
         assert_eq!(recalled[0].weight, 1.5);
@@ -2665,6 +2756,32 @@ mod tests {
             vec![Attribution {
                 source: "文書1".to_string(),
                 weight: 1.5,
+                paragraph: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn first_locator_wins_on_repeated_assertions_from_one_source() {
+        let mut context = Context::default();
+        context
+            .associate_from("a", "r", "b", 1.0, "文書1", Some(2))
+            .unwrap();
+        // A later re-assertion from the same source accumulates weight
+        // but must not overwrite the paragraph the source was first
+        // located at.
+        context
+            .associate_from("a", "r", "b", 0.5, "文書1", Some(9))
+            .unwrap();
+
+        let recalled = context.recall("a");
+        assert_eq!(recalled[0].weight, 1.5);
+        assert_eq!(
+            recalled[0].attributions,
+            vec![Attribution {
+                source: "文書1".to_string(),
+                weight: 1.5,
+                paragraph: Some(2),
             }]
         );
     }
@@ -2673,7 +2790,9 @@ mod tests {
     fn unsourced_and_sourced_assertions_mix_on_one_association() {
         let mut context = Context::default();
         context.associate("a", "r", "b", 1.0).unwrap();
-        context.associate_from("a", "r", "b", 0.5, "文書1").unwrap();
+        context
+            .associate_from("a", "r", "b", 0.5, "文書1", None)
+            .unwrap();
 
         // Total weight counts both; only the sourced part is attributed.
         let recalled = context.recall("a");
@@ -2683,6 +2802,7 @@ mod tests {
             vec![Attribution {
                 source: "文書1".to_string(),
                 weight: 0.5,
+                paragraph: None,
             }]
         );
     }
@@ -3103,20 +3223,21 @@ mod tests {
         );
 
         // A version-1 image is the current image minus the watermark
-        // (8 header bytes) and the two alias sections. For this
-        // aliasless context: header 24 (magic 8, version 4, padding 4,
-        // watermark 8), edges 8+40, attributions 8, concepts 8+64,
-        // labels 8+20, sources 8 → the alias counts sit at 188..204.
-        // Keep the 16-byte v1 header, cut the watermark and the alias
-        // counts, set the version back to 1; the image must load with
-        // no aliases.
+        // (8 header bytes), the two alias sections, and the attribution-
+        // locator section. For this aliasless context: header 24 (magic
+        // 8, version 4, padding 4, watermark 8), edges 8+40, attributions
+        // 8, concepts 8+64, labels 8+20, sources 8 → the alias counts sit
+        // at 188..204, and the (empty) locator count sits at 204..212.
+        // Keep the 16-byte v1 header, cut the watermark, the alias
+        // counts, and the locator count, set the version back to 1; the
+        // image must load with no aliases.
         let mut aliasless = Context::default();
         aliasless.associate("私", "好き", "りんご", 1.0).unwrap();
         let v3 = aliasless.to_bytes();
         let mut v1 = Vec::new();
         v1.extend_from_slice(&v3[..16]);
         v1.extend_from_slice(&v3[24..188]);
-        v1.extend_from_slice(&v3[204..]);
+        v1.extend_from_slice(&v3[212..]);
         v1[8..12].copy_from_slice(&1u32.to_le_bytes());
         let loaded = Context::from_bytes(&v1).expect("v1 image must still load");
         assert_eq!(loaded.recall("私").len(), 1);
@@ -3148,10 +3269,16 @@ mod tests {
 
     #[test]
     fn v2_images_load_with_a_zero_watermark() {
-        // A v2 image is the current image minus the 8 watermark bytes,
-        // with the version field set back to 2 — this pins BOTH the
+        // A v2 image is the current image minus the 8 watermark bytes
+        // and the attribution-locator section (v2 predates both), with
+        // the version field set back to 2 — this pins BOTH the
         // backward-compat read and the version RANGE check (a two-value
         // check like `!=1 && !=current` would reject exactly this).
+        // Section math for this context (1 edge, 1 concept alias, no
+        // sources, no locators): header 24, edges 8+40, attributions 8,
+        // concepts 8+64, labels 8+20, sources 8, concept_aliases 8+12,
+        // label_aliases 8 → the alias tables end at 216, and the
+        // (empty) locator count occupies 216..224.
         let mut context = Context::default();
         context.associate("私", "好き", "りんご", 1.0).unwrap();
         context.add_concept_alias("わたし", "私").unwrap();
@@ -3159,7 +3286,8 @@ mod tests {
         let v3 = context.to_bytes();
         let mut v2 = Vec::new();
         v2.extend_from_slice(&v3[..16]);
-        v2.extend_from_slice(&v3[24..]);
+        v2.extend_from_slice(&v3[24..216]);
+        v2.extend_from_slice(&v3[224..]);
         v2[8..12].copy_from_slice(&2u32.to_le_bytes());
 
         let loaded = Context::from_bytes(&v2).expect("v2 image must load");
@@ -3168,14 +3296,52 @@ mod tests {
     }
 
     #[test]
+    fn v3_images_load_with_no_locators() {
+        // A v3 image is the current image minus only the attribution-
+        // locator section (v3 already has the watermark and both alias
+        // tables — it just predates locators). Section math for this
+        // context (1 edge, 1 sourced attribution, no aliases): header
+        // 24, edges 8+40, attributions 8+16, concepts 8+64, labels
+        // 8+20, sources 8+8, concept_aliases 8, label_aliases 8 → the
+        // (empty) locator count occupies 228..236.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        let v4 = context.to_bytes();
+        let mut v3 = Vec::new();
+        v3.extend_from_slice(&v4[..228]);
+        v3.extend_from_slice(&v4[236..]);
+        v3[8..12].copy_from_slice(&3u32.to_le_bytes());
+
+        let loaded = Context::from_bytes(&v3).expect("v3 image must load");
+        assert_eq!(
+            loaded.recall("私")[0].attributions,
+            vec![Attribution {
+                source: "文書1".to_string(),
+                weight: 1.0,
+                paragraph: None,
+            }]
+        );
+    }
+
+    #[test]
     fn retract_source_withdraws_its_contributions() {
         let mut context = Context::default();
-        context.associate_from("a", "r", "b", 1.0, "旧版").unwrap();
-        context.associate_from("a", "r", "b", 2.0, "新版").unwrap();
         context
-            .associate_from("a", "r", "b", 0.5, "第三者")
+            .associate_from("a", "r", "b", 1.0, "旧版", None)
             .unwrap();
-        context.associate_from("a", "r", "c", 1.0, "旧版").unwrap();
+        // 新版 and 第三者 carry locators, so their retraction/round-trip
+        // below also exercises the attribution-locator side table.
+        context
+            .associate_from("a", "r", "b", 2.0, "新版", Some(4))
+            .unwrap();
+        context
+            .associate_from("a", "r", "b", 0.5, "第三者", Some(7))
+            .unwrap();
+        context
+            .associate_from("a", "r", "c", 1.0, "旧版", None)
+            .unwrap();
         context.associate("a", "r", "d", 1.0).unwrap(); // unsourced stays
 
         // 旧版 contributed to two edges; both lose exactly its share.
@@ -3187,10 +3353,12 @@ mod tests {
                 Attribution {
                     source: "新版".to_string(),
                     weight: 2.0,
+                    paragraph: Some(4),
                 },
                 Attribution {
                     source: "第三者".to_string(),
                     weight: 0.5,
+                    paragraph: Some(7),
                 },
             ]
         );
@@ -3209,7 +3377,9 @@ mod tests {
         // now carrying orphaned attribution records — must round-trip.
         assert_eq!(context.retract_source("第三者"), Some(1));
         assert_eq!(weight_between(&context, "a", "r", "b"), 2.0);
-        context.associate_from("a", "r", "b", 0.5, "旧版").unwrap();
+        context
+            .associate_from("a", "r", "b", 0.5, "旧版", None)
+            .unwrap();
         assert_eq!(weight_between(&context, "a", "r", "b"), 2.5);
         let restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
         assert_eq!(
@@ -3471,10 +3641,10 @@ mod tests {
         associate_examples(&mut context);
         context.associate("りんご", "分類", "果物", 1.5).unwrap();
         context
-            .associate_from("決定", "手段", "投票", 1.0, "IPA公式")
+            .associate_from("決定", "手段", "投票", 1.0, "IPA公式", None)
             .unwrap();
         context
-            .associate_from("決定", "手段", "投票", 0.5, "解説記事")
+            .associate_from("決定", "手段", "投票", 0.5, "解説記事", None)
             .unwrap();
         context.associate("犬", "好き", "骨", 1.0).unwrap(); // separate component
 
@@ -3509,7 +3679,9 @@ mod tests {
     #[test]
     fn image_roundtrip_keeps_accepting_writes() {
         let mut context = Context::default();
-        context.associate_from("a", "r", "b", 1.0, "文書1").unwrap();
+        context
+            .associate_from("a", "r", "b", 1.0, "文書1", None)
+            .unwrap();
 
         let mut restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
 
@@ -3517,7 +3689,7 @@ mod tests {
         // attribution — the rebuilt indexes and chain tails must all point
         // at the right records.
         restored
-            .associate_from("a", "r", "b", 0.5, "文書1")
+            .associate_from("a", "r", "b", 0.5, "文書1", None)
             .unwrap();
         assert_eq!(weight_between(&restored, "a", "r", "b"), 1.5);
         assert_eq!(
@@ -3525,6 +3697,7 @@ mod tests {
             vec![Attribution {
                 source: "文書1".to_string(),
                 weight: 1.5,
+                paragraph: None,
             }]
         );
 
@@ -3533,6 +3706,37 @@ mod tests {
         restored.associate("d", "r2", "a", 1.0).unwrap();
         assert_eq!(restored.recall("a").len(), 3);
         assert_eq!(restored.labels(), vec!["r", "r2"]);
+    }
+
+    #[test]
+    fn attribution_locators_survive_the_image_roundtrip() {
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", Some(3))
+            .unwrap();
+        // A second, unlocated source on the same edge must round-trip
+        // as `None` alongside the first source's `Some`.
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書2", None)
+            .unwrap();
+
+        let restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
+        assert_eq!(restored.recall("私"), context.recall("私"));
+        assert_eq!(
+            restored.recall("私")[0].attributions,
+            vec![
+                Attribution {
+                    source: "文書1".to_string(),
+                    weight: 1.0,
+                    paragraph: Some(3),
+                },
+                Attribution {
+                    source: "文書2".to_string(),
+                    weight: 1.0,
+                    paragraph: None,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -3549,7 +3753,7 @@ mod tests {
 
         let mut context = Context::default();
         context
-            .associate_from("私", "好き", "りんご", 1.0, "文書1")
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
             .unwrap();
         let image = context.to_bytes();
 
@@ -3597,7 +3801,7 @@ mod tests {
         let mut context = Context::default();
         assert_eq!(context.associate("私", "好き", "りんご", 1.0), Ok(()));
         assert_eq!(
-            context.associate_from("私", "好き", "りんご", 1.0, "文書1"),
+            context.associate_from("私", "好き", "りんご", 1.0, "文書1", None),
             Ok(())
         );
     }
@@ -3627,7 +3831,7 @@ mod tests {
         let mut context = Context::default();
         associate_examples(&mut context);
         context
-            .associate_from("私", "食べられる", "りんご", -0.2, "文書1")
+            .associate_from("私", "食べられる", "りんご", -0.2, "文書1", None)
             .unwrap();
 
         assert_eq!(context.association_count(), 4);

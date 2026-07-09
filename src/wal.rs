@@ -209,6 +209,7 @@ mod tests {
             object: "りんご".to_string(),
             weight: 1.0,
             source: None,
+            paragraph: None,
         })
     }
 

@@ -31,6 +31,7 @@ fn main() {
             "10大脅威選考会",
             1.0,
             IPA,
+            None,
         )
         .unwrap();
     context
@@ -40,10 +41,11 @@ fn main() {
             "情報セキュリティ10大脅威",
             1.0,
             IPA,
+            None,
         )
         .unwrap();
     context
-        .associate_from("10大脅威選考会", "選出する", "脅威候補", 1.0, IPA)
+        .associate_from("10大脅威選考会", "選出する", "脅威候補", 1.0, IPA, None)
         .unwrap();
     context
         .associate_from(
@@ -52,6 +54,7 @@ fn main() {
             "脅威候補",
             1.0,
             IPA,
+            None,
         )
         .unwrap();
     context
@@ -61,6 +64,7 @@ fn main() {
             "前年",
             1.0,
             IPA,
+            None,
         )
         .unwrap();
     context
@@ -70,21 +74,22 @@ fn main() {
             "大きい",
             1.0,
             IPA,
+            None,
         )
         .unwrap();
     context
-        .associate_from("10大脅威選考会", "決定する", "個人向け脅威", 1.0, IPA)
+        .associate_from("10大脅威選考会", "決定する", "個人向け脅威", 1.0, IPA, None)
         .unwrap();
     context
-        .associate_from("10大脅威選考会", "決定する", "組織向け脅威", 1.0, IPA)
+        .associate_from("10大脅威選考会", "決定する", "組織向け脅威", 1.0, IPA, None)
         .unwrap();
     context
-        .associate_from("決定", "手段", "投票", 1.0, IPA)
+        .associate_from("決定", "手段", "投票", 1.0, IPA, None)
         .unwrap();
 
     // A second, independent document corroborates two of the facts.
     context
-        .associate_from("決定", "手段", "投票", 1.0, NEWS)
+        .associate_from("決定", "手段", "投票", 1.0, NEWS, None)
         .unwrap();
     context
         .associate_from(
@@ -93,6 +98,7 @@ fn main() {
             "情報セキュリティ10大脅威",
             1.0,
             NEWS,
+            None,
         )
         .unwrap();
 

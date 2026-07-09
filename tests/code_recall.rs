@@ -25,7 +25,9 @@ use taguru::context::Context;
 fn corpus() -> Context {
     let mut context = Context::default();
     let mut fact = |s: &str, l: &str, o: &str| {
-        context.associate_from(s, l, o, 1.0, "code-walk").unwrap();
+        context
+            .associate_from(s, l, o, 1.0, "code-walk", None)
+            .unwrap();
     };
 
     // src/store.rs

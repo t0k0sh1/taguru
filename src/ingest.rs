@@ -366,6 +366,8 @@ struct AssociationLine {
     label: String,
     object: String,
     weight: f64,
+    #[serde(default)]
+    paragraph: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -521,6 +523,7 @@ fn parse_op(batch: &mut Batch, line: &str, number: usize) -> Result<(), String> 
             object: op.object,
             weight: op.weight,
             source: Some(batch.source.clone()),
+            paragraph: op.paragraph,
         });
     } else if object.contains_key("alias") {
         let op: AliasLine = serde_json::from_value(value)

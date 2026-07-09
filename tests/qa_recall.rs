@@ -20,7 +20,7 @@ use taguru::context::Context;
 fn corpus() -> Context {
     let mut context = Context::default();
     let mut assert_from = |s: &str, l: &str, o: &str, w: f64, p: &str| {
-        context.associate_from(s, l, o, w, p).unwrap();
+        context.associate_from(s, l, o, w, p, None).unwrap();
     };
 
     // 第1段落 (概要)

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use super::{
-    AliasRecord, AttributionRecord, ConceptRecord, Context, CorruptImage, EdgeId, EdgeRecord,
-    EntryIndex, LabelRecord, NIL, SourceRecord,
+    AliasRecord, AttributionId, AttributionLocatorRecord, AttributionRecord, ConceptRecord,
+    Context, CorruptImage, EdgeId, EdgeRecord, EntryIndex, LabelRecord, NIL, SourceRecord,
 };
 
 // The persistence format depends on these exact widths. A field added to
@@ -18,6 +18,10 @@ const _: () = {
             && align_of::<AttributionRecord>() == 8
     );
     assert!(size_of::<AliasRecord>() == AliasRecord::SIZE && align_of::<AliasRecord>() == 4);
+    assert!(
+        size_of::<AttributionLocatorRecord>() == AttributionLocatorRecord::SIZE
+            && align_of::<AttributionLocatorRecord>() == 4
+    );
 };
 
 // ---------------------------------------------------------------------------
@@ -29,16 +33,17 @@ const IMAGE_MAGIC: [u8; 8] = *b"TAGURUC\0";
 /// Format version; bump whenever any record layout or section changes.
 /// Version history: 1 = the original six sections; 2 adds the concept
 /// and label alias tables between the sources and the arena; 3 adds
-/// the u64 durability watermark to the header. Older images still
-/// load (empty alias tables, watermark 0); writing always produces
-/// the current version.
-const IMAGE_VERSION: u32 = 3;
+/// the u64 durability watermark to the header; 4 adds the sparse
+/// attribution-locator table between the label aliases and the arena.
+/// Older images still load (empty alias/locator tables, watermark 0);
+/// writing always produces the current version.
+const IMAGE_VERSION: u32 = 4;
 /// Magic + version + 4 bytes of padding (so what follows is 8-byte
 /// aligned) + the u64 durability watermark.
 const IMAGE_HEADER_SIZE: usize = 24;
-/// Seven record tables plus the arena, each section prefixed by a u64
+/// Eight record tables plus the arena, each section prefixed by a u64
 /// length.
-const IMAGE_SECTIONS: usize = 8;
+const IMAGE_SECTIONS: usize = 9;
 
 impl Context {
     /// Serializes the whole network into one contiguous byte image.
@@ -61,6 +66,7 @@ impl Context {
                 + self.labels.len() * LabelRecord::SIZE
                 + self.sources.len() * SourceRecord::SIZE
                 + (self.concept_aliases.len() + self.label_aliases.len()) * AliasRecord::SIZE
+                + self.attribution_locators.len() * AttributionLocatorRecord::SIZE
                 + self.arena.len(),
         );
         image.extend_from_slice(&IMAGE_MAGIC);
@@ -74,6 +80,7 @@ impl Context {
         store_table(&self.sources, &mut image);
         store_table(&self.concept_aliases, &mut image);
         store_table(&self.label_aliases, &mut image);
+        store_table(&self.attribution_locators, &mut image);
         image.extend_from_slice(&(self.arena.len() as u64).to_le_bytes());
         image.extend_from_slice(&self.arena);
         image
@@ -126,6 +133,15 @@ impl Context {
         } else {
             (Vec::new(), Vec::new())
         };
+        // Version 4 adds attribution locators; older images have none, so
+        // every attribution's paragraph resolves to `None` — exactly the
+        // "no locator" state a same-version write with no paragraph data
+        // would also produce.
+        let attribution_locators = if version >= 4 {
+            load_table::<AttributionLocatorRecord>(&mut reader)?
+        } else {
+            Vec::new()
+        };
         let arena_len = usize::try_from(reader.read_u64()?)
             .map_err(|_| CorruptImage("arena length overflows this platform"))?;
         let arena = reader.take(arena_len)?.to_vec();
@@ -142,6 +158,7 @@ impl Context {
             attributions,
             concept_aliases,
             label_aliases,
+            attribution_locators,
             concept_ids: HashMap::new(),
             label_ids: HashMap::new(),
             source_ids: HashMap::new(),
@@ -164,7 +181,8 @@ impl Context {
         self.index_aliases()?;
         self.index_edges()?;
         self.validate_chains()?;
-        self.validate_attributions()
+        self.validate_attributions()?;
+        self.validate_locators()
     }
 
     /// Strings: every name range must be a valid arena slice, and names
@@ -337,6 +355,26 @@ impl Context {
             if tail != edge.last_attribution {
                 return Err(CorruptImage("attribution chain does not end at its tail"));
             }
+        }
+        Ok(())
+    }
+
+    /// Locators: each must name a real attribution record, and the table
+    /// must be strictly increasing by `attribution` — the invariant
+    /// `Context`'s binary-search lookup depends on. This crate's own
+    /// writer always upholds it (a locator is only ever appended
+    /// alongside a brand-new, higher-numbered attribution record), so a
+    /// violation here means a tampered or hand-built image.
+    fn validate_locators(&self) -> Result<(), CorruptImage> {
+        let mut previous: Option<AttributionId> = None;
+        for record in &self.attribution_locators {
+            if record.attribution as usize >= self.attributions.len() {
+                return Err(CorruptImage("locator references an unknown attribution"));
+            }
+            if previous.is_some_and(|prev| prev >= record.attribution) {
+                return Err(CorruptImage("locator table is not sorted by attribution"));
+            }
+            previous = Some(record.attribution);
         }
         Ok(())
     }
@@ -570,6 +608,22 @@ impl Record for AttributionRecord {
             source: reader.read_u32()?,
             next: reader.read_u32()?,
             weight: reader.read_f64()?,
+        })
+    }
+}
+
+impl Record for AttributionLocatorRecord {
+    const SIZE: usize = 8;
+
+    fn store(&self, image: &mut Vec<u8>) {
+        image.extend_from_slice(&self.attribution.to_le_bytes());
+        image.extend_from_slice(&self.paragraph.to_le_bytes());
+    }
+
+    fn load(reader: &mut Reader) -> Result<Self, CorruptImage> {
+        Ok(Self {
+            attribution: reader.read_u32()?,
+            paragraph: reader.read_u32()?,
         })
     }
 }

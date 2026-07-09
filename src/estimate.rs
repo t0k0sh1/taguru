@@ -259,7 +259,7 @@ fn synthesize(
         let label = synthetic_name('l', label_index, name_bytes);
         let source = synthetic_name('s', i % sources, name_bytes);
         context
-            .associate_from(&subject, &label, &object, 1.0, &source)
+            .associate_from(&subject, &label, &object, 1.0, &source, None)
             .expect("a synthetic corpus stays far under u32 capacity");
     }
     context
