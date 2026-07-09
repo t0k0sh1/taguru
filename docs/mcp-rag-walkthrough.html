@@ -758,7 +758,7 @@
                 <pre><code>{
   <span class="k">"context"</span>: <span class="s">"sake"</span>,
   <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>,
-  <span class="k">"index"</span>: <span class="nu">1</span>
+  <span class="k">"paragraph"</span>: <span class="nu">1</span>
 }</code></pre>
               </div>
               <div class="io-block">
@@ -770,7 +770,7 @@
 }</code></pre>
               </div>
             </div>
-            <p class="step-note"><code>index</code>はactivateのattributionsに載っていた<code>paragraph: 1</code>をそのまま渡しただけ。連想は「杜氏＝高瀬」という骨格だけを持ち、「先代から技術を受け継ぎ」という肉付けは骨格化されずに原文側に残っている——だからこそ引用して初めて手に入る。</p>
+            <p class="step-note"><code>paragraph</code>にはactivateのattributionsに載っていた<code>paragraph: 1</code>の値をそのまま渡しただけ。連想は「杜氏＝高瀬」という骨格だけを持ち、「先代から技術を受け継ぎ」という肉付けは骨格化されずに原文側に残っている——だからこそ引用して初めて手に入る。</p>
           </div>
         </div>
       </div>
@@ -861,13 +861,13 @@
                 <h4>Response</h4>
                 <pre><code>[{
   <span class="k">"source"</span>: <span class="s">"docs/process.md"</span>,
-  <span class="k">"index"</span>: <span class="nu">1</span>,
+  <span class="k">"paragraph"</span>: <span class="nu">1</span>,
   <span class="k">"score"</span>: <span class="nu">10.93</span>,
   <span class="k">"text"</span>: <span class="s">"洗米の後は浸漬を行う。浸漬は米に適切な水分を吸わせる工程で、当蔵では夏場は40分、冬場は90分を目安に浸漬時間を調整している。気温や米の状態によって毎回微調整する。"</span>,
   <span class="k">"lanes"</span>: {
     <span class="hl"><span class="k">"bm25"</span>: {<span class="k">"rank"</span>:<span class="nu">1</span>,<span class="k">"score"</span>:<span class="nu">10.93</span>}</span>
   }
-}, { <span style="color:var(--ink-faint)">// index 2, score 1.02 …</span> }]</code></pre>
+}, { <span style="color:var(--ink-faint)">// paragraph 2, score 1.02 …</span> }]</code></pre>
               </div>
             </div>
             <p class="step-note"><code>lanes</code>に<code>bm25</code>しか無いのは、このサーバーが埋め込み未設定＝字句レーンのみで動いているため（<code>TAGURU_EMBED_URL</code>を設定すれば<code>vector</code>レーンも並走し、言い換えにも強くなる）。今回は「浸漬」「40分」「90分」という語そのものが原文にあるので、BM25だけで一発当選している。</p>
@@ -882,7 +882,7 @@
         <div class="bubble">
           <p>浸漬は、夏場は40分、冬場は90分を目安に行っているとのことです。ただし固定値ではなく、気温や米の状態に応じて毎回微調整するそうです。</p>
           <div class="citation-block">
-            <span class="cite-src">出典：docs/process.md（index 1）</span>
+            <span class="cite-src">出典：docs/process.md（paragraph 1）</span>
             「洗米の後は浸漬を行う。浸漬は米に適切な水分を吸わせる工程で、当蔵では夏場は40分、冬場は90分を目安に浸漬時間を調整している。気温や米の状態によって毎回微調整する。」
           </div>
         </div>

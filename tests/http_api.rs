@@ -905,17 +905,17 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         .expect("tools/list must advertise cite_passage");
     assert_eq!(
         manifest["inputSchema"]["required"],
-        json!(["context", "source", "index"])
+        json!(["context", "source", "paragraph"])
     );
     assert!(manifest["inputSchema"]["properties"]["source"].is_object());
-    assert!(manifest["inputSchema"]["properties"]["index"].is_object());
+    assert!(manifest["inputSchema"]["properties"]["paragraph"].is_object());
 
     let (status, reply) = server.call(
         "POST",
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                     "params": {"name": "cite_passage",
-                               "arguments": {"context": "sake", "source": "docs/aomine.md", "index": 1}}})),
+                               "arguments": {"context": "sake", "source": "docs/aomine.md", "paragraph": 1}}})),
     );
     assert_eq!(status, 200);
     assert!(reply["result"].get("isError").is_none(), "{reply}");
@@ -930,7 +930,7 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                     "params": {"name": "cite_passage",
-                               "arguments": {"context": "sake", "source": "docs/ghost.md", "index": 0}}})),
+                               "arguments": {"context": "sake", "source": "docs/ghost.md", "paragraph": 0}}})),
     );
     assert_eq!(status, 200);
     assert_eq!(failed["result"]["isError"], true);
@@ -2671,7 +2671,7 @@ fn an_offline_import_carries_questions_through_to_the_search_index() {
     );
     let hit = &hits[0];
     assert_eq!(hit["source"], "doc-guide");
-    assert_eq!(hit["index"], 1, "the hit names the answering PARAGRAPH");
+    assert_eq!(hit["paragraph"], 1, "the hit names the answering PARAGRAPH");
     let _ = std::fs::remove_dir_all(&batches);
 }
 
@@ -3667,7 +3667,7 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
     );
     let hit = &hits[0];
     assert_eq!(hit["source"], "docs/aomine.md");
-    assert_eq!(hit["index"], 1, "the hit names the answering PARAGRAPH");
+    assert_eq!(hit["paragraph"], 1, "the hit names the answering PARAGRAPH");
     assert!(hit["text"].as_str().unwrap().starts_with("原料米"), "{hit}");
     assert_eq!(hit["lanes"]["bm25"]["rank"], 1, "{hit}");
     assert_eq!(
@@ -3689,7 +3689,7 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
 }
 
 /// The citation endpoint's wire contract: given a known (source,
-/// index), it returns the exact verbatim excerpt `search_passages`
+/// paragraph), it returns the exact verbatim excerpt `search_passages`
 /// would show for that same paragraph — sliced through the one shared
 /// `PassageRecord::paragraph` accessor, so the two can never disagree —
 /// plus the source, and `section` always present as a key (never
@@ -3697,7 +3697,7 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
 /// `citation_resolves_the_section_governing_its_paragraph` covers the
 /// case where a section is actually stored.
 #[test]
-fn citation_returns_the_verbatim_paragraph_named_by_source_and_index() {
+fn citation_returns_the_verbatim_paragraph_named_by_source_and_paragraph() {
     let server = Server::start("citation-hit");
     server.ok(
         "PUT",
@@ -3716,7 +3716,7 @@ fn citation_returns_the_verbatim_paragraph_named_by_source_and_index() {
     let citation = server.ok(
         "POST",
         "/contexts/sake/citations",
-        Some(json!({"source": "docs/aomine.md", "index": 1})),
+        Some(json!({"source": "docs/aomine.md", "paragraph": 1})),
     );
     assert_eq!(
         citation["text"], "原料米には山田錦を使い、精米歩合は50パーセントまで磨く。",
@@ -3729,11 +3729,11 @@ fn citation_returns_the_verbatim_paragraph_named_by_source_and_index() {
     );
 }
 
-/// Unknown source, an out-of-range paragraph index, and an unknown
+/// Unknown source, an out-of-range paragraph position, and an unknown
 /// context all speak the same `ApiError` shape (never a panic), each
 /// with a message naming what was not found.
 #[test]
-fn citation_reports_clear_errors_for_unknown_source_index_and_context() {
+fn citation_reports_clear_errors_for_unknown_source_paragraph_and_context() {
     let server = Server::start("citation-miss");
     server.ok(
         "PUT",
@@ -3749,7 +3749,7 @@ fn citation_reports_clear_errors_for_unknown_source_index_and_context() {
     let (status, body) = server.call(
         "POST",
         "/contexts/sake/citations",
-        Some(json!({"source": "docs/ghost.md", "index": 0})),
+        Some(json!({"source": "docs/ghost.md", "paragraph": 0})),
     );
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
@@ -3761,7 +3761,7 @@ fn citation_reports_clear_errors_for_unknown_source_index_and_context() {
     let (status, body) = server.call(
         "POST",
         "/contexts/sake/citations",
-        Some(json!({"source": "docs/aomine.md", "index": 9})),
+        Some(json!({"source": "docs/aomine.md", "paragraph": 9})),
     );
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
@@ -3773,7 +3773,7 @@ fn citation_reports_clear_errors_for_unknown_source_index_and_context() {
     let (status, body) = server.call(
         "POST",
         "/contexts/ghost/citations",
-        Some(json!({"source": "docs/aomine.md", "index": 0})),
+        Some(json!({"source": "docs/aomine.md", "paragraph": 0})),
     );
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
@@ -3799,7 +3799,7 @@ fn citation_resolves_the_section_governing_its_paragraph() {
     let before = server.ok(
         "POST",
         "/contexts/sake/citations",
-        Some(json!({"source": "doc-sections", "index": 0})),
+        Some(json!({"source": "doc-sections", "paragraph": 0})),
     );
     assert_eq!(before["text"], "蔵の杜氏は高瀬。", "{before}");
     assert!(
@@ -3810,7 +3810,7 @@ fn citation_resolves_the_section_governing_its_paragraph() {
     let after = server.ok(
         "POST",
         "/contexts/sake/citations",
-        Some(json!({"source": "doc-sections", "index": 1})),
+        Some(json!({"source": "doc-sections", "paragraph": 1})),
     );
     assert_eq!(after["text"], "創業は1907年。", "{after}");
     assert_eq!(after["section"], json!("沿革"), "{after}");
@@ -3919,7 +3919,7 @@ fn a_section_stored_via_store_passages_resolves_on_citation() {
     let before = server.ok(
         "POST",
         "/contexts/sake/citations",
-        Some(json!({"source": "doc-sections", "index": 0})),
+        Some(json!({"source": "doc-sections", "paragraph": 0})),
     );
     assert_eq!(before["text"], "蔵の杜氏は高瀬。", "{before}");
     assert!(
@@ -3930,7 +3930,7 @@ fn a_section_stored_via_store_passages_resolves_on_citation() {
     let after = server.ok(
         "POST",
         "/contexts/sake/citations",
-        Some(json!({"source": "doc-sections", "index": 1})),
+        Some(json!({"source": "doc-sections", "paragraph": 1})),
     );
     assert_eq!(after["text"], "創業は1907年。", "{after}");
     assert_eq!(after["section"], json!("沿革"), "{after}");

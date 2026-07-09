@@ -46,14 +46,14 @@ pub async fn lookup_passages(
 #[derive(Debug, Deserialize)]
 pub struct CitationRequest {
     pub source: String,
-    pub index: u32,
+    pub paragraph: u32,
 }
 
 /// One located, verbatim excerpt: the citation counterpart of
 /// `PassageLookup`'s whole-document dereference — text plus exactly
 /// enough provenance to attribute it. `section` is the label governing
 /// this paragraph (see `PassageRecord::section_for`), `null` when the
-/// index falls outside every section the source has stored, or when
+/// paragraph falls outside every section the source has stored, or when
 /// it stored none at all; the key is never omitted, so callers can
 /// rely on it always being present.
 #[derive(Serialize)]
@@ -69,7 +69,7 @@ pub async fn citation(
     AppJson(request): AppJson<CitationRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.citation(&name, &request.source, request.index) {
+    match state.citation(&name, &request.source, request.paragraph) {
         None => not_found(&name, started_at),
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(CitationLookup::UnknownSource)) => {
@@ -86,7 +86,7 @@ pub async fn citation(
                 StatusCode::NOT_FOUND,
                 format!(
                     "paragraph {} out of range for source '{}' in context '{name}'",
-                    request.index, request.source
+                    request.paragraph, request.source
                 ),
                 started_at,
             )
@@ -176,17 +176,17 @@ pub struct SearchPassagesRequest {
 }
 
 /// One PARAGRAPH matched by passage search: the text lane, for
-/// knowledge that never decomposed into triples. `index` is the
-/// paragraph's position within its source (0-based, this split);
-/// `text` is that paragraph alone — cite it, or dereference the whole
-/// source through the lookup endpoint. `score` is the fused
-/// reciprocal-rank number when the semantic lane ran, the raw BM25
-/// score otherwise; `lanes` carries each lane's own rank and raw score
-/// — evidence for the reading LLM, the same posture as resolve's tiers.
+/// knowledge that never decomposed into triples. `paragraph` is its
+/// position within the source (0-based, this split); `text` is that
+/// paragraph alone — cite it, or dereference the whole source through
+/// the lookup endpoint. `score` is the fused reciprocal-rank number
+/// when the semantic lane ran, the raw BM25 score otherwise; `lanes`
+/// carries each lane's own rank and raw score — evidence for the
+/// reading LLM, the same posture as resolve's tiers.
 #[derive(Serialize)]
 pub struct PassageHit {
     pub source: String,
-    pub index: u32,
+    pub paragraph: u32,
     pub score: f32,
     pub text: String,
     pub lanes: PassageLanes,
@@ -254,7 +254,7 @@ pub async fn search_passages(
                 hits.into_iter()
                     .map(|hit| PassageHit {
                         source: hit.source,
-                        index: hit.index,
+                        paragraph: hit.index,
                         score: hit.score,
                         text: hit.text,
                         lanes: PassageLanes {

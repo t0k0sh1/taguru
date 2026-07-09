@@ -395,7 +395,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "search_passages",
-            "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. Each hit names its paragraph (source + index) and reports per-lane rank/score in `lanes`; a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see.",
+            "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. Each hit names its paragraph (source + paragraph) and reports per-lane rank/score in `lanes`; a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see.",
             object_schema(
                 json!({
                     "context": context,
@@ -407,14 +407,14 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "cite_passage",
-            "Fetch one located, verbatim excerpt from a registered source by paragraph index: the citation counterpart of lookup_passages' whole-document dereference. Returns the exact paragraph text plus source and section provenance.",
+            "Fetch one located, verbatim excerpt from a registered source by paragraph position: the citation counterpart of lookup_passages' whole-document dereference. Returns the exact paragraph text plus source and section provenance.",
             object_schema(
                 json!({
                     "context": context,
                     "source": { "type": "string" },
-                    "index": { "type": "integer", "description": "zero-based paragraph index" }
+                    "paragraph": { "type": "integer", "description": "zero-based paragraph position" }
                 }),
-                &["context", "source", "index"],
+                &["context", "source", "paragraph"],
             ),
         ),
         (
@@ -575,7 +575,7 @@ pub fn route_tool(
         "cite_passage" => (
             "POST",
             format!("{}/citations", context_path("context")?),
-            Some(pick(arguments, &["source", "index"])),
+            Some(pick(arguments, &["source", "paragraph"])),
         ),
         "refresh_embeddings" => (
             "POST",
@@ -609,7 +609,7 @@ mod tests {
         let arguments = json!({
             "name": "ctx", "context": "ctx", "cue": "x", "concept": "x",
             "origins": ["x"], "associations": [], "passages": {},
-            "sources": ["s"], "source": "s", "query": "q", "index": 0,
+            "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
         });
         for tool in tool_definitions() {
             let name = tool["name"].as_str().expect("definitions carry names");
@@ -695,12 +695,15 @@ mod tests {
     fn cite_passage_routes_to_the_citations_endpoint() {
         let (method, path, body) = route_tool(
             "cite_passage",
-            &json!({"context": "sake", "source": "docs/aomine.md", "index": 1}),
+            &json!({"context": "sake", "source": "docs/aomine.md", "paragraph": 1}),
         )
         .unwrap();
         assert_eq!(method, "POST");
         assert_eq!(path, "/contexts/sake/citations");
-        assert_eq!(body, Some(json!({"source": "docs/aomine.md", "index": 1})));
+        assert_eq!(
+            body,
+            Some(json!({"source": "docs/aomine.md", "paragraph": 1}))
+        );
     }
 
     /// The framing rules both transports rely on: requests carry ids,
