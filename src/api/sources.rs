@@ -46,6 +46,9 @@ pub async fn lookup_passages(
 #[derive(Debug, Deserialize)]
 pub struct CitationRequest {
     pub source: String,
+    /// `index` is the pre-#35 name; still accepted so direct HTTP callers
+    /// who haven't migrated aren't broken by the rename.
+    #[serde(alias = "index")]
     pub paragraph: u32,
 }
 
@@ -272,6 +275,15 @@ pub async fn search_passages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Direct HTTP callers still on the pre-#35 field name aren't broken by
+    /// the rename to `paragraph`.
+    #[test]
+    fn citation_request_accepts_the_pre_35_index_field_name() {
+        let request: CitationRequest =
+            serde_json::from_value(serde_json::json!({"source": "s", "index": 3})).unwrap();
+        assert_eq!(request.paragraph, 3);
+    }
 
     /// An absent lane must OMIT its key, never serialize as null:
     /// lane consumers test key presence.

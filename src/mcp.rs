@@ -144,6 +144,21 @@ fn pick(arguments: &Value, keys: &[&str]) -> Value {
     Value::Object(body)
 }
 
+/// Like `pick`, but a value under `alias` counts for `canonical` when
+/// `canonical` itself is absent — request-side back-compat for an argument
+/// renamed after clients had already adopted the old name.
+fn pick_with_alias(arguments: &Value, keys: &[&str], canonical: &str, alias: &str) -> Value {
+    let mut body = pick(arguments, keys);
+    if let Value::Object(map) = &mut body
+        && !map.contains_key(canonical)
+        && let Some(value) = arguments.get(alias)
+        && !value.is_null()
+    {
+        map.insert(canonical.to_string(), value.clone());
+    }
+    body
+}
+
 pub fn tool_definitions() -> Vec<Value> {
     let context = json!({ "type": "string", "description": "Context name (from list_contexts)" });
     let tools = vec![
@@ -575,7 +590,12 @@ pub fn route_tool(
         "cite_passage" => (
             "POST",
             format!("{}/citations", context_path("context")?),
-            Some(pick(arguments, &["source", "paragraph"])),
+            Some(pick_with_alias(
+                arguments,
+                &["source", "paragraph"],
+                "paragraph",
+                "index",
+            )),
         ),
         "refresh_embeddings" => (
             "POST",
@@ -692,6 +712,24 @@ mod tests {
     }
 
     #[test]
+    fn pick_with_alias_falls_back_to_the_old_key_name() {
+        let arguments = json!({"source": "s", "index": 3});
+        assert_eq!(
+            pick_with_alias(&arguments, &["source", "paragraph"], "paragraph", "index"),
+            json!({"source": "s", "paragraph": 3})
+        );
+    }
+
+    #[test]
+    fn pick_with_alias_prefers_the_canonical_key_when_both_are_present() {
+        let arguments = json!({"source": "s", "paragraph": 1, "index": 99});
+        assert_eq!(
+            pick_with_alias(&arguments, &["source", "paragraph"], "paragraph", "index"),
+            json!({"source": "s", "paragraph": 1})
+        );
+    }
+
+    #[test]
     fn cite_passage_routes_to_the_citations_endpoint() {
         let (method, path, body) = route_tool(
             "cite_passage",
@@ -700,6 +738,22 @@ mod tests {
         .unwrap();
         assert_eq!(method, "POST");
         assert_eq!(path, "/contexts/sake/citations");
+        assert_eq!(
+            body,
+            Some(json!({"source": "docs/aomine.md", "paragraph": 1}))
+        );
+    }
+
+    /// MCP clients written against the pre-#35 argument name still work:
+    /// `pick` alone would silently drop `index` since it only whitelists
+    /// `paragraph`, so this exercises the alias fallback end to end.
+    #[test]
+    fn cite_passage_accepts_the_pre_35_index_argument_name() {
+        let (_, _, body) = route_tool(
+            "cite_passage",
+            &json!({"context": "sake", "source": "docs/aomine.md", "index": 1}),
+        )
+        .unwrap();
         assert_eq!(
             body,
             Some(json!({"source": "docs/aomine.md", "paragraph": 1}))
