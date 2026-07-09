@@ -107,7 +107,8 @@ pub fn error_response(id: Value, code: i64, message: String) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-/// Percent-encodes a context name for use as one URL path segment.
+/// Percent-encodes text into the unreserved-only RFC 3986 set — safe
+/// both as one URL path segment and as a query-string value.
 fn segment(name: &str) -> String {
     name.bytes()
         .map(|byte| match byte {
@@ -144,13 +145,43 @@ fn pick(arguments: &Value, keys: &[&str]) -> Value {
     Value::Object(body)
 }
 
+/// Builds a `?a=1&b=2` query string from the listed keys, skipping
+/// absent/null ones — the GET-request counterpart of `pick`, for tools
+/// that carry no body. Numbers pass through their JSON text; strings
+/// are percent-encoded.
+fn query_string(arguments: &Value, keys: &[&str]) -> String {
+    let pairs: Vec<String> = keys
+        .iter()
+        .filter_map(|&key| {
+            let value = arguments.get(key).filter(|value| !value.is_null())?;
+            let text = match value {
+                Value::String(text) => segment(text),
+                Value::Number(number) => number.to_string(),
+                _ => return None,
+            };
+            Some(format!("{key}={text}"))
+        })
+        .collect();
+    if pairs.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", pairs.join("&"))
+    }
+}
+
 pub fn tool_definitions() -> Vec<Value> {
     let context = json!({ "type": "string", "description": "Context name (from list_contexts)" });
     let tools = vec![
         (
             "list_contexts",
             "Routing directory: every context's name, description, stats (counts, top concepts, label sample), and usage counters (reads/empty_reads/writes, last-used times). Pick the search/ingest target here yourself.",
-            object_schema(json!({}), &[]),
+            object_schema(
+                json!({
+                    "limit": { "type": "integer", "description": "page size, keyset-paged by name (default/ceiling 1000)" },
+                    "after": { "type": "string", "description": "only contexts whose name sorts strictly after this one" }
+                }),
+                &[],
+            ),
         ),
         (
             "create_context",
@@ -471,7 +502,11 @@ pub fn route_tool(
     };
     Ok(match name {
         "get_protocol" => ("GET", "/protocol".to_string(), None),
-        "list_contexts" => ("GET", "/contexts".to_string(), None),
+        "list_contexts" => (
+            "GET",
+            format!("/contexts{}", query_string(arguments, &["limit", "after"])),
+            None,
+        ),
         "create_context" => (
             "PUT",
             context_path("name")?,
@@ -689,6 +724,58 @@ mod tests {
             pick(&arguments, &["cue", "limit", "absent"]),
             json!({"cue": "x"})
         );
+    }
+
+    #[test]
+    fn query_string_encodes_present_keys_and_skips_absent_or_null_ones() {
+        let arguments = json!({"limit": 50, "after": null, "extra": "x"});
+        assert_eq!(
+            query_string(&arguments, &["limit", "after", "absent"]),
+            "?limit=50"
+        );
+    }
+
+    #[test]
+    fn query_string_percent_encodes_string_values() {
+        let arguments = json!({"after": "日本 語"});
+        assert_eq!(
+            query_string(&arguments, &["after"]),
+            "?after=%E6%97%A5%E6%9C%AC%20%E8%AA%9E"
+        );
+    }
+
+    #[test]
+    fn query_string_is_empty_when_no_keys_are_present() {
+        assert_eq!(query_string(&json!({}), &["limit", "after"]), "");
+    }
+
+    /// list_contexts advertises limit/after and, when the caller
+    /// supplies them, routes them onto the GET request's query string
+    /// — the wiring the issue tracked was missing entirely.
+    #[test]
+    fn list_contexts_schema_advertises_limit_and_after() {
+        let list_contexts = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "list_contexts")
+            .expect("list_contexts is defined");
+        let properties = &list_contexts["inputSchema"]["properties"];
+        assert_eq!(properties["limit"]["type"], "integer");
+        assert_eq!(properties["after"]["type"], "string");
+    }
+
+    #[test]
+    fn list_contexts_routes_limit_and_after_onto_the_query_string() {
+        let (method, path, body) =
+            route_tool("list_contexts", &json!({"limit": 50, "after": "sake"})).unwrap();
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/contexts?limit=50&after=sake");
+        assert_eq!(body, None);
+    }
+
+    #[test]
+    fn list_contexts_without_arguments_has_no_query_string() {
+        let (_, path, _) = route_tool("list_contexts", &json!({})).unwrap();
+        assert_eq!(path, "/contexts");
     }
 
     #[test]
