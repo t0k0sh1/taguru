@@ -221,7 +221,7 @@ Source code takes the same discipline; only the naming changes.
 | PUT | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → create |
 | PATCH | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → update metadata |
 | DELETE | `/contexts/{name}` | delete, files included |
-| POST | `/contexts/{name}/associations` | `[{subject,label,object,weight,source?}]` → applied count |
+| POST | `/contexts/{name}/associations` | `[{subject,label,object,weight,source?,paragraph?}]` → applied count (`paragraph` locates the fact within `source` and is ignored without one) |
 | POST | `/contexts/{name}/recall` | `{cue, limit?}` → `{total, matches}` |
 | POST | `/contexts/{name}/query` | `{subject?, label?, object?, limit?}` — each position a string or an array → `{total, matches}` |
 | POST | `/contexts/{name}/describe` | `{concept}` → label outline (counts per role) / null |

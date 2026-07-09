@@ -86,8 +86,8 @@ pub(crate) struct PassageRecord {
     /// (paragraph index of section start, label) pairs, sorted by
     /// paragraph — a section implicitly extends until the next
     /// marker or the end of the passage. Populated by the ingest
-    /// batch format's `section` line (see `ingest.rs`); no reader
-    /// exposes it yet (see `section_for`'s doc comment).
+    /// batch format's `section` line (see `ingest.rs`); resolved
+    /// through `section_for`.
     pub(crate) sections: Vec<(u32, String)>,
 }
 
@@ -155,9 +155,11 @@ impl PassageRecord {
     /// The section governing a paragraph — the nearest start marker at
     /// or before `index`, extending until the next marker or the end
     /// of the passage. `None` before the first marker, past the end,
-    /// or when the record carries no sections at all. No caller yet
-    /// (see the module doc); test-only until one lands.
-    #[cfg(test)]
+    /// or when the record carries no sections at all. Used by
+    /// `AppState::resolve_sections` to label attributions on
+    /// association reads (recall, query, explore, activate,
+    /// unreachable_from); the citation endpoint does not call this yet
+    /// (tracked separately).
     pub(crate) fn section_for(&self, index: usize) -> Option<&str> {
         if index >= self.paragraphs.len() {
             return None;
