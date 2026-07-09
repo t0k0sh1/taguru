@@ -1,0 +1,933 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>Taguru MCPで手繰るRAG</title>
+  <style>
+  :root {
+    --bg: #f6f3ec;
+    --surface: #ffffff;
+    --surface-alt: #ede7d9;
+    --code-bg: #2a2f3a;
+    --code-ink: #dfe3ea;
+    --code-key: #9fc2e8;
+    --code-str: #d9c98a;
+    --code-num: #e0a172;
+    --ink: #22262e;
+    --ink-soft: #5b6570;
+    --ink-faint: #8b93a0;
+    --accent: #2c4a73;
+    --accent-strong: #1c3252;
+    --accent-soft: #dce6f0;
+    --thread: #a8402f;
+    --thread-soft: #f3e1dc;
+    --line: #d8d2c4;
+    --shadow: 0 1px 2px rgba(34, 38, 46, 0.06), 0 6px 20px rgba(34, 38, 46, 0.05);
+    --font-heading: "Hiragino Mincho ProN", "YuMincho", "Yu Mincho", "HGS明朝E", serif;
+    --font-body: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "YuGothic", "Yu Gothic", "Meiryo", "Noto Sans JP", sans-serif;
+    --font-mono: "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Noto Sans Mono CJK JP", monospace;
+  }
+  :root[data-theme="dark"] {
+    --bg: #14171e;
+    --surface: #1b2029;
+    --surface-alt: #232a36;
+    --code-bg: #10141c;
+    --code-ink: #d7dce4;
+    --code-key: #8fb8e4;
+    --code-str: #d7c78a;
+    --code-num: #dd9a6c;
+    --ink: #e7e4da;
+    --ink-soft: #a8b0bc;
+    --ink-faint: #6d7684;
+    --accent: #8fb1d8;
+    --accent-strong: #b7d0ec;
+    --accent-soft: #232f43;
+    --thread: #dd8064;
+    --thread-soft: #34241f;
+    --line: #2b3140;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.35);
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f3ec;
+    --surface: #ffffff;
+    --surface-alt: #ede7d9;
+    --code-bg: #2a2f3a;
+    --code-ink: #dfe3ea;
+    --code-key: #9fc2e8;
+    --code-str: #d9c98a;
+    --code-num: #e0a172;
+    --ink: #22262e;
+    --ink-soft: #5b6570;
+    --ink-faint: #8b93a0;
+    --accent: #2c4a73;
+    --accent-strong: #1c3252;
+    --accent-soft: #dce6f0;
+    --thread: #a8402f;
+    --thread-soft: #f3e1dc;
+    --line: #d8d2c4;
+    --shadow: 0 1px 2px rgba(34, 38, 46, 0.06), 0 6px 20px rgba(34, 38, 46, 0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14171e;
+      --surface: #1b2029;
+      --surface-alt: #232a36;
+      --code-bg: #10141c;
+      --code-ink: #d7dce4;
+      --code-key: #8fb8e4;
+      --code-str: #d7c78a;
+      --code-num: #dd9a6c;
+      --ink: #e7e4da;
+      --ink-soft: #a8b0bc;
+      --ink-faint: #6d7684;
+      --accent: #8fb1d8;
+      --accent-strong: #b7d0ec;
+      --accent-soft: #232f43;
+      --thread: #dd8064;
+      --thread-soft: #34241f;
+      --line: #2b3140;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-body);
+    line-height: 1.85;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--accent-soft); }
+
+  .page {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 4rem 1.5rem 6rem;
+  }
+
+  /* ---------- Header ---------- */
+  header.hero {
+    margin-bottom: 3.5rem;
+  }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--thread);
+    display: flex;
+    align-items: center;
+    gap: 0.6em;
+    margin-bottom: 1.1rem;
+  }
+  .eyebrow::before {
+    content: "";
+    display: inline-block;
+    width: 2.2em;
+    height: 1px;
+    background: var(--thread);
+  }
+  h1 {
+    font-family: var(--font-heading);
+    font-weight: 600;
+    font-size: clamp(1.9rem, 4vw, 2.5rem);
+    line-height: 1.4;
+    margin: 0 0 0.9rem;
+    text-wrap: balance;
+    color: var(--ink);
+  }
+  .lede {
+    font-size: 1.05rem;
+    color: var(--ink-soft);
+    max-width: 60ch;
+    margin: 0 0 1.6rem;
+  }
+  .hero-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.8rem;
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+    color: var(--ink-faint);
+    border-top: 1px solid var(--line);
+    padding-top: 1rem;
+  }
+  .hero-meta span { white-space: nowrap; }
+  .hero-meta b { color: var(--ink-soft); font-weight: 600; }
+
+  /* ---------- Section framing ---------- */
+  section { margin-bottom: 3.6rem; }
+  h2 {
+    font-family: var(--font-heading);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--ink);
+    margin: 0 0 0.3rem;
+    text-wrap: balance;
+  }
+  .section-sub {
+    color: var(--ink-soft);
+    font-size: 0.95rem;
+    margin: 0 0 1.6rem;
+    max-width: 62ch;
+  }
+  p { max-width: 66ch; }
+
+  /* ---------- Model explainer ---------- */
+  .model-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1.6rem 1.8rem;
+    box-shadow: var(--shadow);
+  }
+  .model-card p { margin: 0 0 0.9rem; font-size: 0.96rem; color: var(--ink); max-width: none; }
+  .model-card p:last-child { margin-bottom: 0; }
+  .tuple {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    padding: 0.15em 0.5em;
+    border-radius: 5px;
+  }
+
+  /* ---------- Tool chips ---------- */
+  .tool-groups {
+    display: grid;
+    gap: 0.9rem;
+    margin-top: 1.4rem;
+  }
+  .tool-group {
+    display: grid;
+    grid-template-columns: 9.5rem 1fr;
+    gap: 0.9rem;
+    align-items: start;
+    padding: 0.7rem 0;
+    border-top: 1px solid var(--line);
+  }
+  .tool-group:first-child { border-top: none; padding-top: 0; }
+  .tool-group-label {
+    font-size: 0.78rem;
+    color: var(--ink-faint);
+    letter-spacing: 0.04em;
+    padding-top: 0.35rem;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .chip {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    background: var(--surface-alt);
+    color: var(--ink);
+    padding: 0.32em 0.62em;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+  }
+  .chip.used {
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    border-color: transparent;
+    font-weight: 600;
+  }
+  .chip.used-text {
+    background: var(--thread-soft);
+    color: var(--thread);
+    border-color: transparent;
+    font-weight: 600;
+  }
+
+  /* ---------- Loop diagram ---------- */
+  .loop {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+    gap: 0;
+    margin-top: 1.4rem;
+  }
+  .loop-step {
+    position: relative;
+    padding: 1rem 1.1rem 1rem 0;
+    border-bottom: 2px solid var(--line);
+  }
+  .loop-step .n {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--thread);
+    display: block;
+    margin-bottom: 0.35rem;
+  }
+  .loop-step .t {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--ink);
+    display: block;
+    margin-bottom: 0.2rem;
+  }
+  .loop-step .d {
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+  }
+
+  /* ---------- Chat turns ---------- */
+  .chat-turn { display: flex; margin: 1.6rem 0; }
+  .chat-turn.user { justify-content: flex-end; }
+  .chat-turn.assistant { justify-content: flex-start; }
+  .bubble {
+    max-width: 34rem;
+    padding: 0.95rem 1.2rem;
+    border-radius: 14px;
+    font-size: 0.98rem;
+  }
+  .chat-turn.user .bubble {
+    background: var(--accent);
+    color: #fff;
+    border-bottom-right-radius: 3px;
+  }
+  .chat-turn.assistant .bubble {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-bottom-left-radius: 3px;
+    box-shadow: var(--shadow);
+    color: var(--ink);
+  }
+  .bubble p { margin: 0 0 0.7rem; max-width: none; }
+  .bubble p:last-child { margin-bottom: 0; }
+  .who {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0.2rem 0.4rem;
+  }
+  .chat-turn.user .who { text-align: right; color: var(--ink-faint); }
+  .citation-block {
+    margin-top: 0.9rem;
+    padding: 0.75rem 0.9rem;
+    background: var(--thread-soft);
+    border-left: 3px solid var(--thread);
+    border-radius: 0 6px 6px 0;
+    font-size: 0.86rem;
+    color: var(--ink);
+  }
+  .citation-block .cite-src {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--thread);
+    margin-bottom: 0.3rem;
+  }
+
+  /* ---------- Timeline (the thread) ---------- */
+  .timeline {
+    position: relative;
+    margin: 2rem 0;
+    padding-left: 1.9rem;
+    border-left: 2px solid var(--accent-soft);
+  }
+  .timeline[data-lane="text"] { border-left-color: var(--thread-soft); }
+  .step {
+    position: relative;
+    margin-bottom: 1.6rem;
+  }
+  .step:last-child { margin-bottom: 0; }
+  .step::before {
+    content: "";
+    position: absolute;
+    left: -2.42rem;
+    top: 1.5rem;
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px var(--bg);
+  }
+  .step.lane-text::before { background: var(--thread); }
+
+  .step-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .step-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+    padding: 0.85rem 1.1rem;
+    background: var(--surface-alt);
+    border-bottom: 1px solid var(--line);
+  }
+  .step-tool {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 0.92rem;
+    color: var(--accent-strong);
+  }
+  .step.lane-text .step-tool { color: var(--thread); }
+  .step-route {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--ink-faint);
+  }
+  .step-body { padding: 1rem 1.1rem 1.15rem; }
+  .step-why {
+    margin: 0 0 0.9rem;
+    font-size: 0.92rem;
+    color: var(--ink-soft);
+    max-width: none;
+  }
+  .io {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.8rem;
+  }
+  @media (max-width: 640px) {
+    .io { grid-template-columns: 1fr; }
+    .tool-group { grid-template-columns: 1fr; }
+  }
+  .io-block h4 {
+    margin: 0 0 0.4rem;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  pre {
+    margin: 0;
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 0.75rem 0.85rem;
+    border-radius: 7px;
+    overflow-x: auto;
+    font-size: 0.78rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  code { font-family: var(--font-mono); }
+  .k { color: var(--code-key); }
+  .s { color: var(--code-str); }
+  .nu { color: var(--code-num); }
+  .hl { background: rgba(255,255,255,0.14); border-radius: 3px; padding: 0 0.15em; }
+  .step-note {
+    margin: 0.9rem 0 0;
+    font-size: 0.88rem;
+    color: var(--ink-soft);
+    max-width: none;
+    padding-top: 0.8rem;
+    border-top: 1px dashed var(--line);
+  }
+  .step-note b { color: var(--ink); }
+
+  /* ---------- Callouts ---------- */
+  .note {
+    font-size: 0.88rem;
+    color: var(--ink-soft);
+    background: var(--surface-alt);
+    border-radius: 8px;
+    padding: 0.85rem 1.05rem;
+    margin: 1.2rem 0;
+    max-width: none;
+  }
+  .note b { color: var(--ink); }
+
+  /* ---------- Summary ---------- */
+  .principles {
+    display: grid;
+    gap: 0.9rem;
+    margin-top: 1.4rem;
+  }
+  .principle {
+    display: grid;
+    grid-template-columns: 1.6rem 1fr;
+    gap: 0.8rem;
+    padding-bottom: 0.9rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .principle:last-child { border-bottom: none; }
+  .principle .mark {
+    font-family: var(--font-heading);
+    font-size: 1.1rem;
+    color: var(--thread);
+  }
+  .principle h3 {
+    margin: 0 0 0.25rem;
+    font-size: 0.98rem;
+    font-family: var(--font-body);
+    font-weight: 700;
+    color: var(--ink);
+  }
+  .principle p { margin: 0; font-size: 0.88rem; color: var(--ink-soft); max-width: none; }
+
+  footer.colophon {
+    margin-top: 4rem;
+    padding-top: 1.4rem;
+    border-top: 1px solid var(--line);
+    font-size: 0.78rem;
+    color: var(--ink-faint);
+    font-family: var(--font-mono);
+  }
+</style>
+
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">taguru mcp · retrieval walkthrough</div>
+    <h1>手繰る（たぐる）——<br>Taguru MCPでLLMが知識を引き出すまで</h1>
+    <p class="lede">
+      AIチャットボットがユーザーの質問に答えるとき、裏側でLLMはTaguru MCPのツールを何度も呼び出し、
+      構造化された知識グラフと元の文章を手繰り寄せてから返答している。
+      その一往復を、実際に動かしたサーバーへの本物のリクエストとレスポンスで追う。
+    </p>
+    <div class="hero-meta">
+      <span><b>実行方法：</b>ローカルのTaguruサーバーへ <code>POST /mcp</code>（Streamable HTTP）</span>
+      <span><b>構成：</b>埋め込み未設定＝字句レーンのみ</span>
+      <span><b>題材：</b>架空の酒蔵「青嶺酒造」</span>
+    </div>
+  </header>
+
+  <section id="model">
+    <h2>まず全体像</h2>
+    <p class="section-sub">Taguru MCPが何を保持し、どう検索するかの最小限の説明。</p>
+    <div class="model-card">
+      <p>
+        Taguruは知識を <span class="tuple">(subject, label, object, weight, source)</span> の連想（アソシエーション）として溜め込む、LLM向けの長期記憶サーバーだ。
+        「青嶺酒造の杜氏は高瀬」であれば <span class="tuple">(青嶺酒造, 杜氏, 高瀬, 1.0, docs/aomine.md)</span> という一本の連想になる。
+      </p>
+      <p>
+        検索はベクトル類似度から始めない。まず「何についての質問か」という手がかり（cue）から概念名を<b>解決</b>し、そこを起点に連想のグラフを<b>辿る</b>——これが「手繰る」の名の由来であり、第一の検索レーンになる。
+        元の文章（パッセージ）はもう一本のレーンとして並走し、BM25と（設定されていれば）埋め込みの類似検索で段落ごとに引ける。三段論法や条件・手順のようにグラフの三つ組に収まらなかった知識は、こちらでしか見つからない。
+      </p>
+      <p>
+        知識を分解して連想に変換すること、検索結果を文章に組み立て直すことは、サーバーの仕事ではなくLLM＝MCPクライアントの仕事。サーバーは構造の保管と探索だけを引き受ける。
+      </p>
+    </div>
+
+    <div class="tool-groups">
+      <div class="tool-group">
+        <div class="tool-group-label">コンテキスト</div>
+        <div class="chips">
+          <span class="chip used">list_contexts</span>
+          <span class="chip">create_context</span>
+          <span class="chip">update_context</span>
+          <span class="chip">delete_context</span>
+        </div>
+      </div>
+      <div class="tool-group">
+        <div class="tool-group-label">書き込み（ingest）</div>
+        <div class="chips">
+          <span class="chip">add_associations</span>
+          <span class="chip">store_passages</span>
+          <span class="chip">lookup_passages</span>
+          <span class="chip">list_sources</span>
+        </div>
+      </div>
+      <div class="tool-group">
+        <div class="tool-group-label">検索・読み出し</div>
+        <div class="chips">
+          <span class="chip used">resolve</span>
+          <span class="chip">resolve_label</span>
+          <span class="chip used">describe</span>
+          <span class="chip">query</span>
+          <span class="chip">recall</span>
+          <span class="chip used">activate</span>
+          <span class="chip">explore</span>
+          <span class="chip used-text">search_passages</span>
+          <span class="chip used">cite_passage</span>
+        </div>
+      </div>
+      <div class="tool-group">
+        <div class="tool-group-label">語彙・保守</div>
+        <div class="chips">
+          <span class="chip">list_labels</span>
+          <span class="chip">get_aliases</span>
+          <span class="chip">add_aliases</span>
+          <span class="chip">remove_aliases</span>
+          <span class="chip">retract_source</span>
+          <span class="chip">refresh_embeddings</span>
+          <span class="chip">audit_vocabulary</span>
+          <span class="chip">audit_coverage</span>
+          <span class="chip">get_protocol</span>
+        </div>
+      </div>
+    </div>
+    <p class="note">全26ツールのうち、色付きの6つ（<span class="chip used" style="padding:0.1em 0.4em;">藍</span> がグラフレーン、<span class="chip used-text" style="padding:0.1em 0.4em;">朱</span> がテキストレーン）を、このあとの2つのシナリオで実際に呼び出す。</p>
+
+    <div class="loop">
+      <div class="loop-step"><span class="n">01</span><span class="t">選ぶ</span><span class="d">list_contexts で対象を選定</span></div>
+      <div class="loop-step"><span class="n">02</span><span class="t">解決する</span><span class="d">resolve / resolve_label でcueを正規名に</span></div>
+      <div class="loop-step"><span class="n">03</span><span class="t">見取る</span><span class="d">describe→query で絞り込む</span></div>
+      <div class="loop-step"><span class="n">04</span><span class="t">広げる</span><span class="d">activate / explore で関連知識を収集</span></div>
+      <div class="loop-step"><span class="n">05</span><span class="t">裏取りする</span><span class="d">cite_passage で原文を確認</span></div>
+      <div class="loop-step" style="border-bottom-color: var(--thread-soft);"><span class="n" style="color:var(--thread)">06</span><span class="t">網を張る</span><span class="d">グラフで届かなければ search_passages</span></div>
+    </div>
+  </section>
+
+  <section id="scenario-1">
+    <h2>シナリオ1：知っていることを聞かれる</h2>
+    <p class="section-sub">グラフに構造化済みの事実で答えが組み立てられるケース。resolve → describe → activate → cite_passage と手繰っていく。</p>
+
+    <div class="chat-turn user">
+      <div>
+        <div class="who">ユーザー</div>
+        <div class="bubble"><p>青嶺酒造について教えて。根拠も教えて。</p></div>
+      </div>
+    </div>
+
+    <div class="note">
+      接続直後、LLMは <code>initialize</code> の応答で <code>instructions</code> フィールドを受け取る。これは <code>GET /protocol</code> の全文そのもので、ここまでの「まず全体像」に書いた検索ループの規律が、会話が始まる前にLLMへ手渡されている。以降はその規律に沿ってツールを呼ぶだけでよい。
+    </div>
+
+    <div class="timeline" data-lane="graph">
+
+      <div class="step lane-graph">
+        <div class="step-card">
+          <div class="step-head">
+            <span class="step-tool">list_contexts</span>
+            <span class="step-route">GET /contexts</span>
+          </div>
+          <div class="step-body">
+            <p class="step-why">どのコンテキスト（＝どの「文脈」の知識ベース）を検索すべきか、まず一覧から選ぶ。</p>
+            <div class="io">
+              <div class="io-block">
+                <h4>Request</h4>
+                <pre><code>tools/call
+  name: <span class="s">"list_contexts"</span>
+  arguments: {}</code></pre>
+              </div>
+              <div class="io-block">
+                <h4>Response</h4>
+                <pre><code>{
+  <span class="k">"total"</span>: <span class="nu">1</span>,
+  <span class="k">"contexts"</span>: [{
+    <span class="k">"name"</span>: <span class="s">"sake"</span>,
+    <span class="k">"description"</span>: <span class="s">"青嶺酒造という架空の酒蔵の知識（沿革・杜氏・方針・醸造工程）"</span>,
+    <span class="k">"stats"</span>: {
+      <span class="k">"associations"</span>: <span class="nu">12</span>,
+      <span class="k">"top_concepts"</span>: [
+        [<span class="s">"青嶺酒造"</span>, <span class="nu">6</span>],
+        [<span class="s">"日本酒の醸造"</span>, <span class="nu">5</span>]
+      ]
+    }
+  }]
+}</code></pre>
+              </div>
+            </div>
+            <p class="step-note"><b>人が書いた説明文</b>と<b>機械集計の統計</b>が同じ行に並ぶ。LLMはこの一覧だけで「sakeコンテキストに聞けばよさそうだ」と判断できる。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="step lane-graph">
+        <div class="step-card">
+          <div class="step-head">
+            <span class="step-tool">resolve</span>
+            <span class="step-route">POST /contexts/sake/resolve</span>
+          </div>
+          <div class="step-body">
+            <p class="step-why">質問文から抜き出した「青嶺酒造」という手がかり（cue）を、グラフ上の正式な概念名に解決する。</p>
+            <div class="io">
+              <div class="io-block">
+                <h4>Request</h4>
+                <pre><code>{
+  <span class="k">"context"</span>: <span class="s">"sake"</span>,
+  <span class="k">"cue"</span>: <span class="s">"青嶺酒造"</span>
+}</code></pre>
+              </div>
+              <div class="io-block">
+                <h4>Response</h4>
+                <pre><code>[{
+  <span class="k">"name"</span>: <span class="s">"青嶺酒造"</span>,
+  <span class="k">"score"</span>: <span class="hl nu">1.0</span>,
+  <span class="k">"tier"</span>: <span class="s">"lexical"</span>,
+  <span class="k">"kind"</span>: <span class="hl s">"exact"</span>,
+  <span class="k">"gloss"</span>: <span class="s">"青嶺酒造。青嶺酒造の代表銘柄は青嶺。青嶺酒造の創業年は1907年。青嶺酒造の所在地は長野県。青嶺酒造の杜氏は高瀬。"</span>
+}, {
+  <span class="k">"name"</span>: <span class="s">"青嶺"</span>,
+  <span class="k">"score"</span>: <span class="nu">0.5</span>,
+  <span class="k">"kind"</span>: <span class="s">"containment"</span>,
+  <span class="k">"gloss"</span>: <span class="s">"青嶺。青嶺酒造の代表銘柄は青嶺。"</span>
+}]</code></pre>
+              </div>
+            </div>
+            <p class="step-note"><code>kind: "exact"</code> はcueがそのまま登録済みの綴りだった印。<code>gloss</code>にはその概念の主要な事実が要約されており、この時点で答えの下書きはほぼ見えている——ただしまだ裏取りしていない。2件目の「青嶺」は文字列として重なっているだけの<code>containment</code>候補で、スコア0.5と低く、正しく脇に残る。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="step lane-graph">
+        <div class="step-card">
+          <div class="step-head">
+            <span class="step-tool">describe</span>
+            <span class="step-route">POST /contexts/sake/describe</span>
+          </div>
+          <div class="step-body">
+            <p class="step-why">「青嶺酒造」という概念が、どんなラベルで何件の事実を持つかをまず見取る。プロフィール全体を勘で引く前の下見。</p>
+            <div class="io">
+              <div class="io-block">
+                <h4>Request</h4>
+                <pre><code>{
+  <span class="k">"context"</span>: <span class="s">"sake"</span>,
+  <span class="k">"concept"</span>: <span class="s">"青嶺酒造"</span>
+}</code></pre>
+              </div>
+              <div class="io-block">
+                <h4>Response</h4>
+                <pre><code>{
+  <span class="k">"concept"</span>: <span class="s">"青嶺酒造"</span>,
+  <span class="k">"as_subject"</span>: [
+    {<span class="k">"label"</span>:<span class="s">"代表銘柄"</span>,<span class="k">"count"</span>:<span class="nu">1</span>},
+    {<span class="k">"label"</span>:<span class="s">"創業年"</span>,<span class="k">"count"</span>:<span class="nu">1</span>},
+    {<span class="k">"label"</span>:<span class="s">"所在地"</span>,<span class="k">"count"</span>:<span class="nu">1</span>},
+    {<span class="k">"label"</span>:<span class="s">"杜氏"</span>,<span class="k">"count"</span>:<span class="nu">1</span>},
+    {<span class="k">"label"</span>:<span class="s">"行う"</span>,<span class="k">"count"</span>:<span class="nu">1</span>},
+    {<span class="k">"label"</span>:<span class="s">"醸造工程"</span>,<span class="k">"count"</span>:<span class="nu">1</span>}
+  ],
+  <span class="k">"as_object"</span>: []
+}</code></pre>
+              </div>
+            </div>
+            <p class="step-note">6種のラベルが見え、「全部聞けば足りる」規模だと分かる（大きなハブ概念ならここで<code>label</code>を絞ってから <code>query</code> するところ）。<code>行う</code>ラベルの存在は次のactivateで否定の事実として効いてくる。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="step lane-graph">
+        <div class="step-card">
+          <div class="step-head">
+            <span class="step-tool">activate</span>
+            <span class="step-route">POST /contexts/sake/activate</span>
+          </div>
+          <div class="step-body">
+            <p class="step-why">「青嶺酒造」を起点に拡散し、直接の事実と、そこから連なる関連知識を強さ順に集める。関連知識収集の主力ツール。</p>
+            <div class="io">
+              <div class="io-block">
+                <h4>Request</h4>
+                <pre><code>{
+  <span class="k">"context"</span>: <span class="s">"sake"</span>,
+  <span class="k">"origins"</span>: [<span class="s">"青嶺酒造"</span>]
+}</code></pre>
+              </div>
+              <div class="io-block">
+                <h4>Response（抜粋）</h4>
+                <pre><code>[
+ {<span class="k">"strength"</span>:<span class="hl nu">0.5</span>,<span class="k">"path"</span>:[<span class="s">"青嶺酒造"</span>],
+  <span class="k">"association"</span>:{<span class="k">"label"</span>:<span class="s">"杜氏"</span>,
+   <span class="k">"object"</span>:<span class="s">"高瀬"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,
+   <span class="k">"attributions"</span>:[{<span class="k">"source"</span>:
+    <span class="s">"docs/aomine.md"</span>,<span class="k">"paragraph"</span>:<span class="nu">1</span>,
+    <span class="k">"section"</span>:<span class="s">"概要"</span>}]}},
+ {<span class="k">"strength"</span>:<span class="nu">0.5</span>,<span class="k">"path"</span>:[<span class="s">"青嶺酒造"</span>],
+  <span class="k">"association"</span>:{<span class="k">"label"</span>:<span class="s">"行う"</span>,
+   <span class="k">"object"</span>:<span class="s">"大量生産"</span>,<span class="hl"><span class="k">"weight"</span>:<span class="nu">-1.0</span></span>,
+   <span class="k">"attributions"</span>:[{<span class="k">"source"</span>:
+    <span class="s">"docs/aomine.md"</span>,<span class="k">"section"</span>:
+    <span class="s">"経営方針"</span>}]}},
+ <span style="color:var(--ink-faint)">… 代表銘柄・創業年・所在地も strength 0.5 で同様に</span>
+ {<span class="k">"strength"</span>:<span class="nu">0.0417</span>,<span class="k">"path"</span>:
+  [<span class="s">"青嶺酒造"</span>,<span class="s">"日本酒の醸造"</span>],
+  <span class="k">"association"</span>:{<span class="k">"label"</span>:<span class="s">"最初の工程"</span>,
+   <span class="k">"object"</span>:<span class="s">"洗米"</span>, …}}
+ <span style="color:var(--ink-faint)">… 醸造工程の連鎖が2ホップ先まで、より弱く続く</span>
+]</code></pre>
+              </div>
+            </div>
+            <p class="step-note">直接つながる事実は<code>strength 0.5</code>で並び、<code>path</code>が1ホップの<code>["青嶺酒造"]</code>。醸造工程（別の連想の連鎖）は<code>path</code>が2ホップに伸びるぶん<code>strength</code>が減衰して混ざり込む——「青嶺酒造は何をしているか」まで自然に広がる一方、遠い情報ほど弱く扱われる。負の<code>weight: -1.0</code>は「大量生産を<b>行わない</b>」という否定の事実で、そのままプラスの主張と読み違えないための符号。<code>attributions</code>には<code>section</code>まで解決済みで付いてくるので、この時点で「概要／経営方針のどちらに書かれているか」も分かる。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="step lane-graph">
+        <div class="step-card">
+          <div class="step-head">
+            <span class="step-tool">cite_passage</span>
+            <span class="step-route">POST /contexts/sake/citations</span>
+          </div>
+          <div class="step-body">
+            <p class="step-why">「杜氏は高瀬」の根拠を、要約や連想ではなく元の文章そのもので裏取りする。</p>
+            <div class="io">
+              <div class="io-block">
+                <h4>Request</h4>
+                <pre><code>{
+  <span class="k">"context"</span>: <span class="s">"sake"</span>,
+  <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>,
+  <span class="k">"index"</span>: <span class="nu">1</span>
+}</code></pre>
+              </div>
+              <div class="io-block">
+                <h4>Response</h4>
+                <pre><code>{
+  <span class="k">"text"</span>: <span class="s">"杜氏は高瀬が務めている。高瀬は先代から技術を受け継ぎ、伝統製法を守り続けている。"</span>,
+  <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>,
+  <span class="k">"section"</span>: <span class="s">"概要"</span>
+}</code></pre>
+              </div>
+            </div>
+            <p class="step-note"><code>index</code>はactivateのattributionsに載っていた<code>paragraph: 1</code>をそのまま渡しただけ。連想は「杜氏＝高瀬」という骨格だけを持ち、「先代から技術を受け継ぎ」という肉付けは骨格化されずに原文側に残っている——だからこそ引用して初めて手に入る。</p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="chat-turn assistant">
+      <div>
+        <div class="who">アシスタント</div>
+        <div class="bubble">
+          <p>青嶺酒造は1907年に長野県で創業した蔵元で、代表銘柄は「青嶺」です。杜氏は高瀬さんが務めており、先代から技術を受け継いで伝統製法を守っています。大量生産は行わず、仕込み規模を抑えて一つひとつの工程に手間をかける方針とのことです。</p>
+          <div class="citation-block">
+            <span class="cite-src">出典：docs/aomine.md ／ 概要</span>
+            「杜氏は高瀬が務めている。高瀬は先代から技術を受け継ぎ、伝統製法を守り続けている。」
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="scenario-2">
+    <h2>シナリオ2：グラフに無い知識を聞かれる</h2>
+    <p class="section-sub">三つ組に収まらない手順の細部（条件・数量）は、そもそもグラフに書かれていない。describeで空振りを確認してから、テキストレーンに切り替える。</p>
+
+    <div class="chat-turn user">
+      <div>
+        <div class="who">ユーザー</div>
+        <div class="bubble"><p>浸漬はどのくらいの時間行いますか？</p></div>
+      </div>
+    </div>
+
+    <div class="timeline" data-lane="graph">
+      <div class="step lane-graph">
+        <div class="step-card">
+          <div class="step-head">
+            <span class="step-tool">describe</span>
+            <span class="step-route">POST /contexts/sake/describe</span>
+          </div>
+          <div class="step-body">
+            <p class="step-why"><code>resolve</code>で「浸漬」を解決した後、まずグラフ側にどんな事実があるかを確認する。</p>
+            <div class="io">
+              <div class="io-block">
+                <h4>Request</h4>
+                <pre><code>{
+  <span class="k">"context"</span>: <span class="s">"sake"</span>,
+  <span class="k">"concept"</span>: <span class="s">"浸漬"</span>
+}</code></pre>
+              </div>
+              <div class="io-block">
+                <h4>Response</h4>
+                <pre><code>{
+  <span class="k">"concept"</span>: <span class="s">"浸漬"</span>,
+  <span class="k">"as_subject"</span>: [
+    {<span class="k">"label"</span>:<span class="s">"次の工程"</span>,<span class="k">"count"</span>:<span class="nu">1</span>}
+  ],
+  <span class="k">"as_object"</span>: [
+    {<span class="k">"label"</span>:<span class="s">"次の工程"</span>,<span class="k">"count"</span>:<span class="nu">1</span>},
+    {<span class="k">"label"</span>:<span class="s">"工程"</span>,<span class="k">"count"</span>:<span class="nu">1</span>}
+  ]
+}</code></pre>
+              </div>
+            </div>
+            <p class="step-note">「浸漬の次は麹造り」という<b>順序</b>はあっても、「何分」という<b>数量</b>のラベルは無い——手順の骨格は連想として書かれているが、条件や分量のような細部は最初から三つ組に押し込めず、文章側に残す設計だからだ。ここでグラフを追うのを打ち切り、テキストレーンに切り替える。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="timeline" data-lane="text">
+      <div class="step lane-text">
+        <div class="step-card">
+          <div class="step-head">
+            <span class="step-tool">search_passages</span>
+            <span class="step-route">POST /contexts/sake/sources/search</span>
+          </div>
+          <div class="step-body">
+            <p class="step-why">質問文をそのまま投げず、あり得る<b>答えの文</b>に言い換えて検索する——「浸漬は何分？」ではなく「浸漬は夏場40分、冬場90分ほど行う」。当たる保証は要らない、探している文と同じ<i>形</i>であればよい。</p>
+            <div class="io">
+              <div class="io-block">
+                <h4>Request</h4>
+                <pre><code>{
+  <span class="k">"context"</span>: <span class="s">"sake"</span>,
+  <span class="k">"query"</span>: <span class="s">"浸漬は夏場40分、冬場90分ほど行う"</span>,
+  <span class="k">"limit"</span>: <span class="nu">3</span>
+}</code></pre>
+              </div>
+              <div class="io-block">
+                <h4>Response</h4>
+                <pre><code>[{
+  <span class="k">"source"</span>: <span class="s">"docs/process.md"</span>,
+  <span class="k">"index"</span>: <span class="nu">1</span>,
+  <span class="k">"score"</span>: <span class="nu">10.93</span>,
+  <span class="k">"text"</span>: <span class="s">"洗米の後は浸漬を行う。浸漬は米に適切な水分を吸わせる工程で、当蔵では夏場は40分、冬場は90分を目安に浸漬時間を調整している。気温や米の状態によって毎回微調整する。"</span>,
+  <span class="k">"lanes"</span>: {
+    <span class="hl"><span class="k">"bm25"</span>: {<span class="k">"rank"</span>:<span class="nu">1</span>,<span class="k">"score"</span>:<span class="nu">10.93</span>}</span>
+  }
+}, { <span style="color:var(--ink-faint)">// index 2, score 1.02 …</span> }]</code></pre>
+              </div>
+            </div>
+            <p class="step-note"><code>lanes</code>に<code>bm25</code>しか無いのは、このサーバーが埋め込み未設定＝字句レーンのみで動いているため（<code>TAGURU_EMBED_URL</code>を設定すれば<code>vector</code>レーンも並走し、言い換えにも強くなる）。今回は「浸漬」「40分」「90分」という語そのものが原文にあるので、BM25だけで一発当選している。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-turn assistant">
+      <div>
+        <div class="who">アシスタント</div>
+        <div class="bubble">
+          <p>浸漬は、夏場は40分、冬場は90分を目安に行っているとのことです。ただし固定値ではなく、気温や米の状態に応じて毎回微調整するそうです。</p>
+          <div class="citation-block">
+            <span class="cite-src">出典：docs/process.md（index 1）</span>
+            「洗米の後は浸漬を行う。浸漬は米に適切な水分を吸わせる工程で、当蔵では夏場は40分、冬場は90分を目安に浸漬時間を調整している。気温や米の状態によって毎回微調整する。」
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <p class="note">この質問はグラフの連想を1件も使わなかった。<b>グラフが本線、テキスト検索は安全網</b>——三つ組に落とせた事実はグラフから素早く正確に、落とせなかった細部はテキストレーンから拾う、という役割分担がそのまま表れている。</p>
+  </section>
+
+  <section id="wrap">
+    <h2>この往復から読み取れる設計</h2>
+    <div class="principles">
+      <div class="principle">
+        <span class="mark">一</span>
+        <div>
+          <h3>ベクトル類似度は入口ではない</h3>
+          <p><code>resolve</code>はまず正規化された文字列一致（表記ゆれ・かな/カナ・軽い誤字を吸収）で解決し、埋め込みが無ければそれで完結する。似ている文字列と同じものは別概念として扱われ、<code>gloss</code>が両者の違いを教えてくれる。</p>
+        </div>
+      </div>
+      <div class="principle">
+        <span class="mark">二</span>
+        <div>
+          <h3>答えは常に原文まで手繰れる</h3>
+          <p>グラフ経由でもテキスト経由でも、最終的な一文は<code>attributions</code>や検索結果の<code>source</code>／<code>paragraph</code>から<code>cite_passage</code>で裏取りできる。今回の2つの最終回答は、どちらも要約ではなく実在する段落を引用して締めている。</p>
+        </div>
+      </div>
+      <div class="principle">
+        <span class="mark">三</span>
+        <div>
+          <h3>グラフとテキストは役割が違う</h3>
+          <p>「誰が」「いつ」のような骨格はグラフが速く正確に答え、「どのくらい」「どんな条件で」のような細部は文章のまま残る。LLMは<code>describe</code>で空振りを検知したら、質問文ではなく答えらしい一文に言い換えて<code>search_passages</code>に切り替える。</p>
+        </div>
+      </div>
+      <div class="principle">
+        <span class="mark">四</span>
+        <div>
+          <h3>規律はツール定義とinstructionsに同梱される</h3>
+          <p>この一連の手順をLLMがどこかで学習している必要はない。<code>initialize</code>の<code>instructions</code>と各ツールの説明文自体が検索ループの規律を運んでくるので、接続した時点でLLMは正しい順番を知っている。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    taguru serve（ローカル, embeddings未設定）に対する実際の POST /mcp 呼び出しより採取 / context: sake（架空データ）
+  </footer>
+
+</div>
