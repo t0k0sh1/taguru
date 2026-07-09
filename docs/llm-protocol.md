@@ -51,10 +51,19 @@ answers back into prose are your job.
    first, `path` shows the route; strength is an ordering within one
    call — never compare across calls). `explore` walks structure
    exhaustively with hop-distance annotations.
-5. **Answer from the originals**: feed the attributions' source ids to
-   `POST /contexts/{name}/sources/lookup` and ground your wording in
-   the passages. Reflect negative weights as negation and attribution
-   counts as strength of support.
+5. **Answer from the originals**: attributions from `recall`, `query`,
+   `explore`, `activate`, and `unreachable_from` already carry a
+   resolved `section` label — enrichment on the graph read, not
+   something you need to fetch (`null` with no `paragraph` locator, or
+   when the locator falls outside every section the source has
+   stored). For the verbatim text itself, call
+   `POST /contexts/{name}/citations` with `{source, index: paragraph}`
+   when a `paragraph` locator is present — one excerpt, with the same
+   `section` alongside it. Without a `paragraph`, there is no located
+   excerpt; feed the source id to `POST /contexts/{name}/sources/lookup`
+   instead and ground your wording in the whole passage. Reflect
+   negative weights as negation and attribution counts as strength of
+   support.
 6. **Switch to the text lane**: knowledge that never fit a triple
    (procedural detail, conditions, discourse) was never in the graph.
    When graph results can't compose the answer, run
@@ -235,7 +244,7 @@ Source code takes the same discipline; only the naming changes.
 | GET/POST | `/contexts/{name}/sources` | registered source list / `{passages:{source:text}, questions?:{source:[{paragraph, question}]}, sections?:{source:[{paragraph, section}]}}` → `{stored, questions_stored, questions_dropped, sections_stored, sections_dropped}` (a dropped question or section named a paragraph its text's blank-line split does not have) |
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
 | POST | `/contexts/{name}/sources/search` | `{query, limit?=5}` → `[{source, index, score, text, lanes}]` best PARAGRAPHS across passages (`index` = paragraph position in its source; `text` = that paragraph alone; `lanes.bm25`/`lanes.vector` = per-lane `{rank, score}`; `score` is rank-fused when the vector lane ran, raw BM25 otherwise) |
-| POST | `/contexts/{name}/citations` | `{source, index}` → `{text, source, section}` one verbatim paragraph by source and index — the same paragraph `sources/search` would show at that index (`section` is the label governing that paragraph, `null` outside every section the source has stored) |
+| POST | `/contexts/{name}/citations` | `{source, index}` → `{text, source, section}` one verbatim paragraph by source and index — the same paragraph `sources/search` would show at that index (`section` is the label governing that paragraph, `null` outside every section the source has stored; `recall`/`query`/`explore`/`activate`/`unreachable_from` resolve the same label onto each attribution as `attributions[].section`) |
 | POST | `/contexts/{name}/sources/retract` | `{source}` → withdraw that source's contributions (diff sync) |
 | POST | `/contexts/{name}/unreachable_from` | `{origins, limit?}` → `{total, matches}` unreachable associations |
 | POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?=0.6, cosine_floor?=0.6}` → spelling/synonym fork candidates |
