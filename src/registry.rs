@@ -2567,6 +2567,7 @@ impl AppState {
         name: &str,
         ops: Vec<AssocOp>,
     ) -> Result<Result<usize, PartialWrite>, AccessError> {
+        let ops = self.clamp_out_of_range_paragraphs(name, ops);
         let wal_ops: Vec<WalOp> = ops.into_iter().map(WalOp::Associate).collect();
         self.logged_write(
             name,
@@ -2574,6 +2575,51 @@ impl AppState {
             |context| apply_in_order(context, &wal_ops),
             applied_count,
         )
+    }
+
+    /// Drops a paragraph locator that falls outside its source's
+    /// stored passage, the same silent-drop posture `StoreOutcome`
+    /// already applies to out-of-range questions and sections. This
+    /// is the general-purpose backstop: callers that hand the batch's
+    /// passage text to the ingest pipeline get a cheaper, unconditional
+    /// clamp there, but a bare HTTP call or a later `add_associations`
+    /// against an already-stored source has no such text in hand, so
+    /// this checks the resident passage store instead.
+    ///
+    /// Best-effort like [`AppState::resolve_sections`]: an unknown
+    /// context, a deleted entry, a source with no stored passage, or a
+    /// store load failure all leave `paragraph` as given rather than
+    /// fail the write — an unresolved locator is still meaningful
+    /// (just without a section label), so this only removes locators
+    /// it can positively prove are out of range.
+    fn clamp_out_of_range_paragraphs(&self, name: &str, mut ops: Vec<AssocOp>) -> Vec<AssocOp> {
+        if !ops.iter().any(|op| op.paragraph.is_some()) {
+            return ops;
+        }
+        let Some(entry) = self.lookup(name) else {
+            return ops;
+        };
+        let Some(_fence) = entry.read_unless_deleted() else {
+            return ops;
+        };
+        let Ok(store) = self.entry_passages(&entry, &file_stem(name)) else {
+            return ops;
+        };
+        for op in &mut ops {
+            let Some(paragraph) = op.paragraph else {
+                continue;
+            };
+            let Some(source) = op.source.as_deref() else {
+                continue;
+            };
+            let Some(record) = store.get(source) else {
+                continue;
+            };
+            if paragraph as usize >= record.paragraphs.len() {
+                op.paragraph = None;
+            }
+        }
+        ops
     }
 
     /// Registers alias batches (concepts then labels, in map order),

@@ -2763,6 +2763,63 @@ fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_f
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// The same silent clamp, reached through the direct HTTP path instead
+/// of an import batch: nothing between `store_passages` and
+/// `associations` has the passage text in hand, so
+/// `AppState::add_associations` must check the resident passage store
+/// itself before honoring a paragraph locator.
+#[test]
+fn http_associations_drops_an_out_of_range_paragraph_against_a_stored_passage() {
+    let server = Server::start("http-assoc-paragraph");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "酒蔵の記憶"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {"doc-guide": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。"}
+        })),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "doc-guide", "paragraph": 0},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "doc-guide", "paragraph": 9},
+        ])),
+    );
+
+    let founding = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造", "label": "創業年"})),
+    );
+    assert_eq!(
+        founding["matches"][0]["attributions"][0]["paragraph"],
+        json!(0),
+        "an in-range paragraph must survive: {founding}"
+    );
+
+    let brewer = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造", "label": "杜氏"})),
+    );
+    assert_eq!(
+        brewer["matches"][0]["weight"],
+        json!(1.0),
+        "the fact itself must survive even though its locator did not: {brewer}"
+    );
+    assert_eq!(
+        brewer["matches"][0]["attributions"][0]["paragraph"],
+        json!(null),
+        "an out-of-range paragraph must be cleared, not left dangling: {brewer}"
+    );
+}
+
 /// Issue #11: an attribution whose paragraph locator falls inside a
 /// stored section resolves that section's label on read — recall,
 /// query, and (through the same conversion) explore, activate, and
