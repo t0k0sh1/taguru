@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
-use taguru::context::{AliasError, Context};
+use taguru::context::{AliasError, Context, LabelUsage};
 
 use crate::embedding::{
     EmbedPurpose, EmbeddingProvider, PassageKey, PassageVectorStore, VectorStore, VectorTable,
@@ -86,7 +86,8 @@ pub struct ContextStats {
     pub sources: usize,
     pub footprint_bytes: usize,
     /// Most connected concepts with their degree, most connected first.
-    pub top_concepts: Vec<(String, usize)>,
+    /// Same `{label, count}` shape as `describe`'s `as_subject`/`as_object`.
+    pub top_concepts: Vec<LabelUsage>,
     /// The first labels of the relation vocabulary (capped; the full
     /// list is at `GET /contexts/{name}/labels`).
     pub label_sample: Vec<String>,
@@ -106,7 +107,10 @@ impl ContextStats {
             top_concepts: context
                 .top_concepts(Self::TOP_CONCEPTS)
                 .into_iter()
-                .map(|(name, degree)| (name.to_string(), degree))
+                .map(|(name, degree)| LabelUsage {
+                    label: name.to_string(),
+                    count: degree,
+                })
                 .collect(),
             label_sample: context
                 .labels()
