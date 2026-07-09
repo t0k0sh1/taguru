@@ -123,11 +123,11 @@ field on an Association line here, or on an item posted to
 `/contexts/{name}/associations`) reports the section on that
 attribution: `recall`, `query`, `explore`, `activate`, and
 `unreachable_from` all resolve `attributions[].section` from it,
-`null` when the locator falls outside every section an import stored.
-`POST /contexts/{name}/citations` resolves the same way for its one
-paragraph. Passage search hits do not read this field yet and
-continue to omit it regardless of what an import stores — a separate
-follow-up.
+`null` when the locator falls outside every section the source has
+stored. `POST /contexts/{name}/citations` resolves the same way for
+its one paragraph. Passage search hits do not read this field yet and
+continue to omit it regardless of what the source has stored — a
+separate follow-up.
 
 Unknown fields and unrecognized line shapes are refused with the line
 number.

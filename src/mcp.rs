@@ -211,7 +211,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "store_passages",
-            "Register the original text behind each source id. Always finish an ingest with this; answers ground in originals looked up from attributions. Optionally attach doc2query questions per source ({source: [{paragraph, question}]}, paragraph = 0-based blank-line-separated position in THAT text): questions a user might type whose answer is that paragraph, phrased away from its wording — they embed beside the paragraph and catch question-shaped queries the text's own vector misses.",
+            "Register the original text behind each source id. Always finish an ingest with this; answers ground in originals looked up from attributions. Optionally attach doc2query questions per source ({source: [{paragraph, question}]}, paragraph = 0-based blank-line-separated position in THAT text): questions a user might type whose answer is that paragraph, phrased away from its wording — they embed beside the paragraph and catch question-shaped queries the text's own vector misses. Optionally attach section markers per source ({source: [{paragraph, section}]}, same paragraph numbering): a marker names where its section starts and the section implicitly governs every paragraph after it until the next marker or the passage's end — citation and every association read label their paragraph with the section that governs it.",
             object_schema(
                 json!({
                     "context": context,
@@ -227,6 +227,20 @@ pub fn tool_definitions() -> Vec<Value> {
                                     "question": { "type": "string" }
                                 },
                                 "required": ["paragraph", "question"]
+                            }
+                        }
+                    },
+                    "sections": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "paragraph": { "type": "integer" },
+                                    "section": { "type": "string" }
+                                },
+                                "required": ["paragraph", "section"]
                             }
                         }
                     }
@@ -492,7 +506,7 @@ pub fn route_tool(
         "store_passages" => (
             "POST",
             format!("{}/sources", context_path("context")?),
-            Some(pick(arguments, &["passages", "questions"])),
+            Some(pick(arguments, &["passages", "questions", "sections"])),
         ),
         "lookup_passages" => (
             "POST",

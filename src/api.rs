@@ -993,15 +993,18 @@ pub async fn list_aliases(State(state): State<AppState>, Path(name): Path<String
 }
 
 /// Original text passages keyed by source id — the same opaque ids that
-/// appear on attributions — plus, optionally, doc2query questions per
-/// source, each naming a paragraph of that source's text IN THIS
-/// REQUEST (a question cannot attach to text the request does not
-/// carry: storage replaces per source, wholesale).
+/// appear on attributions — plus, optionally, doc2query questions and
+/// section markers per source, each naming a paragraph of that
+/// source's text IN THIS REQUEST (a question or section cannot attach
+/// to text the request does not carry: storage replaces per source,
+/// wholesale).
 #[derive(Debug, Deserialize)]
 pub struct StorePassagesRequest {
     pub passages: BTreeMap<String, String>,
     #[serde(default)]
     pub questions: BTreeMap<String, Vec<QuestionSpec>>,
+    #[serde(default)]
+    pub sections: BTreeMap<String, Vec<SectionSpec>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1011,15 +1014,25 @@ pub struct QuestionSpec {
     pub question: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SectionSpec {
+    pub paragraph: u32,
+    pub section: String,
+}
+
 /// What a passage store accomplished. `stored` counts the batch (the
-/// historical number, now named); the question tallies report doc2query
-/// bookkeeping — a dropped question named a paragraph that does not
-/// exist in the text it rode in with.
+/// historical number, now named); the question and section tallies
+/// report doc2query/section bookkeeping — a dropped question or
+/// section named a paragraph that does not exist in the text it rode
+/// in with.
 #[derive(Serialize)]
 pub struct StoredPassages {
     pub stored: usize,
     pub questions_stored: usize,
     pub questions_dropped: usize,
+    pub sections_stored: usize,
+    pub sections_dropped: usize,
 }
 
 pub async fn store_passages(
@@ -1078,7 +1091,35 @@ pub async fn store_passages(
             }
         }
     }
+    // Section structure follows questions' rule: sources must name
+    // passages in THIS request, sizes stay under the shared cap.
+    // (Whether a paragraph index exists in the text is settled at
+    // store time, same as questions; ingest's batch format has no
+    // per-paragraph section count limit either, so neither does this.)
+    for (source, sections) in &request.sections {
+        if !request.passages.contains_key(source) {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!("sections for '{source}' arrived without a passage for it in this request"),
+                started_at,
+            );
+        }
+        for spec in sections {
+            if spec.section.len() > MAX_SECTION_BYTES {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "a section label for '{source}' is {} bytes; section labels are \
+                         capped at {MAX_SECTION_BYTES} bytes",
+                        spec.section.len()
+                    ),
+                    started_at,
+                );
+            }
+        }
+    }
     let mut questions = request.questions;
+    let mut sections = request.sections;
     let passages: BTreeMap<String, crate::passages::PassageSubmission> = request
         .passages
         .into_iter()
@@ -1089,12 +1130,18 @@ pub async fn store_passages(
                 .into_iter()
                 .map(|spec| (spec.paragraph, spec.question))
                 .collect();
+            let sections = sections
+                .remove(&source)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|spec| (spec.paragraph, spec.section))
+                .collect();
             (
                 source,
                 crate::passages::PassageSubmission {
                     text,
                     questions,
-                    sections: Vec::new(),
+                    sections,
                 },
             )
         })
@@ -1111,6 +1158,8 @@ pub async fn store_passages(
                     stored: outcome.stored,
                     questions_stored: outcome.questions_stored,
                     questions_dropped: outcome.questions_dropped,
+                    sections_stored: outcome.sections_stored,
+                    sections_dropped: outcome.sections_dropped,
                 },
                 started_at,
             )
