@@ -3635,8 +3635,10 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
 /// index), it returns the exact verbatim excerpt `search_passages`
 /// would show for that same paragraph — sliced through the one shared
 /// `PassageRecord::paragraph` accessor, so the two can never disagree —
-/// plus the source, and `section` always present as `null` (never
-/// omitted; section detection is a separate, future concern).
+/// plus the source, and `section` always present as a key (never
+/// omitted). This source stored no sections, so it resolves to `null`;
+/// `citation_resolves_the_section_governing_its_paragraph` covers the
+/// case where a section is actually stored.
 #[test]
 fn citation_returns_the_verbatim_paragraph_named_by_source_and_index() {
     let server = Server::start("citation-hit");
@@ -3719,6 +3721,42 @@ fn citation_reports_clear_errors_for_unknown_source_index_and_context() {
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
     assert!(body["error"].as_str().unwrap().contains("ghost"), "{body}");
+}
+
+/// A section stored via import resolves on the citation endpoint too:
+/// `AppState::citation` reads it off the very same `PassageRecord` via
+/// `section_for`, the accessor `resolve_sections` uses for association
+/// attributions, so both report the same label for the same paragraph.
+/// The paragraph preceding the first marker still resolves to `null`.
+#[test]
+fn citation_resolves_the_section_governing_its_paragraph() {
+    let server = Server::start("citation-section");
+    let batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-sections\", \
+                 \"create\": {\"description\": \"d\"}}\n\
+                 {\"passage\": \"蔵の杜氏は高瀬。\\n\\n創業は1907年。\"}\n\
+                 {\"paragraph\": 1, \"section\": \"沿革\"}\n";
+    let (status, result) = post_import(&server, batch, None);
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["result"]["sections_stored"], json!(1), "{result}");
+
+    let before = server.ok(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "doc-sections", "index": 0})),
+    );
+    assert_eq!(before["text"], "蔵の杜氏は高瀬。", "{before}");
+    assert!(
+        before["section"].is_null(),
+        "paragraph 0 precedes the first marker: {before}"
+    );
+
+    let after = server.ok(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "doc-sections", "index": 1})),
+    );
+    assert_eq!(after["text"], "創業は1907年。", "{after}");
+    assert_eq!(after["section"], json!("沿革"), "{after}");
 }
 
 /// doc2query over HTTP: questions ride the store request per source,

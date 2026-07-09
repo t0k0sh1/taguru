@@ -521,7 +521,7 @@ pub struct PassageSearchHit {
 /// stays reserved for the store itself being unreachable.
 #[derive(Debug)]
 pub(crate) enum CitationLookup {
-    Found(String),
+    Found(String, Option<String>),
     UnknownSource,
     IndexOutOfRange,
 }
@@ -1155,6 +1155,9 @@ impl AppState {
     /// whole-document dereference. Reuses `PassageRecord::paragraph`,
     /// the same slice `search_passages` goes through for its hits, so
     /// the two can never disagree about what a paragraph's text is.
+    /// The section label comes from the same resident record via
+    /// `section_for`, `None` when the index falls outside every
+    /// section the source's import stored.
     pub fn citation(
         &self,
         name: &str,
@@ -1173,7 +1176,8 @@ impl AppState {
         let Some((_, text)) = record.paragraph(index as usize) else {
             return Some(Ok(CitationLookup::IndexOutOfRange));
         };
-        Some(Ok(CitationLookup::Found(text.to_string())))
+        let section = record.section_for(index as usize).map(str::to_string);
+        Some(Ok(CitationLookup::Found(text.to_string(), section)))
     }
 
     /// Resolves `(source, paragraph)` locators — as found on
