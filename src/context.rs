@@ -2784,6 +2784,25 @@ mod tests {
                 paragraph: Some(2),
             }]
         );
+
+        // The same rule holds in the other direction: a first assertion
+        // with no locator stays unlocated even when a later re-assertion
+        // from the same source supplies one.
+        let mut unlocated_first = Context::default();
+        unlocated_first
+            .associate_from("c", "r", "d", 1.0, "文書1", None)
+            .unwrap();
+        unlocated_first
+            .associate_from("c", "r", "d", 0.5, "文書1", Some(9))
+            .unwrap();
+        assert_eq!(
+            unlocated_first.recall("c")[0].attributions,
+            vec![Attribution {
+                source: "文書1".to_string(),
+                weight: 1.5,
+                paragraph: None,
+            }]
+        );
     }
 
     #[test]
@@ -3737,6 +3756,45 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn from_bytes_rejects_corrupt_locators() {
+        // One sourced, located attribution: header 24, edges 8+40,
+        // attributions 8+16, concepts 8+64, labels 8+20, sources 8+8,
+        // concept_aliases 8, label_aliases 8 → the locator table starts
+        // at 228 (its count, 8 bytes), and the lone record's
+        // `attribution` field sits at 236..240 (same math as
+        // `v3_images_load_with_no_locators`, which strips this same
+        // section). Pointing it at a nonexistent attribution must be
+        // caught.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", Some(3))
+            .unwrap();
+        let mut dangling = context.to_bytes();
+        dangling[236..240].copy_from_slice(&u32::MAX.to_le_bytes());
+        let error = Context::from_bytes(&dangling).unwrap_err();
+        assert!(error.to_string().contains("unknown attribution"), "{error}");
+
+        // Two sourced, located attributions from two distinct sources on
+        // the same edge (two attribution records, two locator records):
+        // the extra 8-byte source and 16-byte attribution record shift
+        // the locator table to 252..276, putting the second record's
+        // `attribution` field at 268..272. Setting it to 0 — equal to
+        // the first record's — breaks the strictly-increasing invariant
+        // without pointing outside the attribution table.
+        let mut two_sources = Context::default();
+        two_sources
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", Some(3))
+            .unwrap();
+        two_sources
+            .associate_from("私", "好き", "りんご", 1.0, "文書2", Some(5))
+            .unwrap();
+        let mut unsorted = two_sources.to_bytes();
+        unsorted[268..272].copy_from_slice(&0u32.to_le_bytes());
+        let error = Context::from_bytes(&unsorted).unwrap_err();
+        assert!(error.to_string().contains("not sorted"), "{error}");
     }
 
     #[test]

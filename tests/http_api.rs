@@ -2706,6 +2706,62 @@ fn an_offline_import_carries_sections_through_and_drops_out_of_range_ones() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// Unlike questions/sections above, an association's paragraph is
+/// incidental metadata, not its reason for existing — so an
+/// out-of-range one is cleared silently (no counter, no report line)
+/// rather than dropping the whole fact.
+#[test]
+fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_fact() {
+    let batches = batch_dir("import-assoc-paragraph");
+    let file = batches.join("guide.jsonl");
+    std::fs::write(
+        &file,
+        r#"{"taguru_batch": 1, "context": "sake", "source": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+{"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "paragraph": 0}
+{"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "paragraph": 9}
+{"passage": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。"}
+"#,
+    )
+    .unwrap();
+
+    let data_dir = std::env::temp_dir().join(format!(
+        "taguru-http-import-assoc-paragraph-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("+2 association(s)"), "{stdout}");
+
+    let server = Server::start_on("import-assoc-paragraph", data_dir);
+    let founding = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造", "label": "創業年"})),
+    );
+    assert_eq!(
+        founding["matches"][0]["attributions"][0]["paragraph"],
+        json!(0),
+        "an in-range paragraph must survive: {founding}"
+    );
+    let brewer = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造", "label": "杜氏"})),
+    );
+    assert_eq!(
+        brewer["matches"][0]["weight"],
+        json!(1.0),
+        "the fact itself must survive even though its locator did not: {brewer}"
+    );
+    assert_eq!(
+        brewer["matches"][0]["attributions"][0]["paragraph"],
+        json!(null),
+        "an out-of-range paragraph must be cleared, not left dangling: {brewer}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 #[test]
 fn reimporting_a_source_replaces_it_instead_of_doubling() {
     let batches = batch_dir("import-idem");
