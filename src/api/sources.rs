@@ -46,14 +46,17 @@ pub async fn lookup_passages(
 #[derive(Debug, Deserialize)]
 pub struct CitationRequest {
     pub source: String,
-    pub index: u32,
+    /// `index` is the pre-#35 name; still accepted so direct HTTP callers
+    /// who haven't migrated aren't broken by the rename.
+    #[serde(alias = "index")]
+    pub paragraph: u32,
 }
 
 /// One located, verbatim excerpt: the citation counterpart of
 /// `PassageLookup`'s whole-document dereference — text plus exactly
 /// enough provenance to attribute it. `section` is the label governing
 /// this paragraph (see `PassageRecord::section_for`), `null` when the
-/// index falls outside every section the source has stored, or when
+/// paragraph falls outside every section the source has stored, or when
 /// it stored none at all; the key is never omitted, so callers can
 /// rely on it always being present.
 #[derive(Serialize)]
@@ -69,7 +72,7 @@ pub async fn citation(
     AppJson(request): AppJson<CitationRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.citation(&name, &request.source, request.index) {
+    match state.citation(&name, &request.source, request.paragraph) {
         None => not_found(&name, started_at),
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(CitationLookup::UnknownSource)) => {
@@ -86,7 +89,7 @@ pub async fn citation(
                 StatusCode::NOT_FOUND,
                 format!(
                     "paragraph {} out of range for source '{}' in context '{name}'",
-                    request.index, request.source
+                    request.paragraph, request.source
                 ),
                 started_at,
             )
@@ -176,17 +179,17 @@ pub struct SearchPassagesRequest {
 }
 
 /// One PARAGRAPH matched by passage search: the text lane, for
-/// knowledge that never decomposed into triples. `index` is the
-/// paragraph's position within its source (0-based, this split);
-/// `text` is that paragraph alone — cite it, or dereference the whole
-/// source through the lookup endpoint. `score` is the fused
-/// reciprocal-rank number when the semantic lane ran, the raw BM25
-/// score otherwise; `lanes` carries each lane's own rank and raw score
-/// — evidence for the reading LLM, the same posture as resolve's tiers.
+/// knowledge that never decomposed into triples. `paragraph` is its
+/// position within the source (0-based, this split); `text` is that
+/// paragraph alone — cite it, or dereference the whole source through
+/// the lookup endpoint. `score` is the fused reciprocal-rank number
+/// when the semantic lane ran, the raw BM25 score otherwise; `lanes`
+/// carries each lane's own rank and raw score — evidence for the
+/// reading LLM, the same posture as resolve's tiers.
 #[derive(Serialize)]
 pub struct PassageHit {
     pub source: String,
-    pub index: u32,
+    pub paragraph: u32,
     pub score: f32,
     pub text: String,
     pub lanes: PassageLanes,
@@ -254,7 +257,7 @@ pub async fn search_passages(
                 hits.into_iter()
                     .map(|hit| PassageHit {
                         source: hit.source,
-                        index: hit.index,
+                        paragraph: hit.index,
                         score: hit.score,
                         text: hit.text,
                         lanes: PassageLanes {
@@ -272,6 +275,31 @@ pub async fn search_passages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Direct HTTP callers still on the pre-#35 field name aren't broken by
+    /// the rename to `paragraph`.
+    #[test]
+    fn citation_request_accepts_the_pre_35_index_field_name() {
+        let request: CitationRequest =
+            serde_json::from_value(serde_json::json!({"source": "s", "index": 3})).unwrap();
+        assert_eq!(request.paragraph, 3);
+    }
+
+    /// `#[serde(alias)]` maps both names onto one field, not onto a
+    /// "prefer paragraph" merge: sending both is a duplicate-field error,
+    /// same as sending `paragraph` twice. The MCP path's `pick_with_alias`
+    /// resolves a same-request clash by preference instead; direct HTTP
+    /// callers get this stricter, but still well-defined, rejection.
+    #[test]
+    fn citation_request_rejects_both_names_at_once_as_a_duplicate_field() {
+        let result: Result<CitationRequest, _> =
+            serde_json::from_value(serde_json::json!({"source": "s", "paragraph": 1, "index": 2}));
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("duplicate field"),
+            "expected a duplicate-field error, got: {error}"
+        );
+    }
 
     /// An absent lane must OMIT its key, never serialize as null:
     /// lane consumers test key presence.
