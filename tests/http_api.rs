@@ -3796,3 +3796,85 @@ fn store_passages_accepts_questions_and_reports_the_bookkeeping() {
     );
     assert_eq!(status, 400, "{body}");
 }
+
+/// Section markers over HTTP: they ride the store request per source
+/// exactly like questions, out-of-range ones are dropped with their
+/// count reported (never failing the passage), and sections for a
+/// source the request does not carry are refused outright.
+#[test]
+fn store_passages_accepts_sections_and_reports_the_bookkeeping() {
+    let server = Server::start("passage-sections");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    let result = server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {"doc": "一つ目。\n\n二つ目。"},
+            "sections": {"doc": [
+                {"paragraph": 1, "section": "沿革"},
+                {"paragraph": 9, "section": "存在しない段落"}
+            ]}
+        })),
+    );
+    assert_eq!(result["stored"], 1, "{result}");
+    assert_eq!(result["sections_stored"], 1, "{result}");
+    assert_eq!(result["sections_dropped"], 1, "{result}");
+
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {},
+            "sections": {"ghost": [{"paragraph": 0, "section": "幽霊"}]}
+        })),
+    );
+    assert_eq!(status, 400, "{body}");
+}
+
+/// The live path proves the same resolution as import: a section set
+/// via `POST /sources` (not the batch importer) governs its paragraph
+/// on the citation endpoint too, the same way
+/// `citation_resolves_the_section_governing_its_paragraph` proves it
+/// for import — and the paragraph preceding the first marker still
+/// resolves to `null`.
+#[test]
+fn a_section_stored_via_store_passages_resolves_on_citation() {
+    let server = Server::start("store-passages-citation-section");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    let result = server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {"doc-sections": "蔵の杜氏は高瀬。\n\n創業は1907年。"},
+            "sections": {"doc-sections": [{"paragraph": 1, "section": "沿革"}]}
+        })),
+    );
+    assert_eq!(result["sections_stored"], 1, "{result}");
+
+    let before = server.ok(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "doc-sections", "index": 0})),
+    );
+    assert_eq!(before["text"], "蔵の杜氏は高瀬。", "{before}");
+    assert!(
+        before["section"].is_null(),
+        "paragraph 0 precedes the first marker: {before}"
+    );
+
+    let after = server.ok(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "doc-sections", "index": 1})),
+    );
+    assert_eq!(after["text"], "創業は1907年。", "{after}");
+    assert_eq!(after["section"], json!("沿革"), "{after}");
+}

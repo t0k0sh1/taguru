@@ -53,9 +53,9 @@ pub struct CitationRequest {
 /// `PassageLookup`'s whole-document dereference — text plus exactly
 /// enough provenance to attribute it. `section` is the label governing
 /// this paragraph (see `PassageRecord::section_for`), `null` when the
-/// index falls outside every section the source's import stored, or
-/// when it stored none at all; the key is never omitted, so callers
-/// can rely on it always being present.
+/// index falls outside every section the source has stored, or when
+/// it stored none at all; the key is never omitted, so callers can
+/// rely on it always being present.
 #[derive(Serialize)]
 pub struct Citation {
     pub text: String,
