@@ -200,7 +200,8 @@ pub fn tool_definitions() -> Vec<Value> {
                                 "label": { "type": "string" },
                                 "object": { "type": "string" },
                                 "weight": { "type": "number" },
-                                "source": { "type": "string" }
+                                "source": { "type": "string" },
+                                "paragraph": { "type": "integer" }
                             },
                             "required": ["subject", "label", "object", "weight"]
                         }
