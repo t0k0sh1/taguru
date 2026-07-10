@@ -572,27 +572,51 @@ mod tests {
         assert!(similarity(&a, &b).abs() < 1e-6);
     }
 
+    /// Reads one whole HTTP request — headers plus the Content-Length
+    /// body. Replying after the headers alone races the reply (and the
+    /// close behind it) against the client's body write; under parallel
+    /// test load that surfaces as a connection reset inside `embed`.
+    fn read_full_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            if let Some(header_end) = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|at| at + 4)
+            {
+                let headers = String::from_utf8_lossy(&request[..header_end]).to_lowercase();
+                let body_len = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= header_end + body_len {
+                    return request;
+                }
+            }
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                return request;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+    }
+
     /// The HTTP provider must tell a bridging proxy WHY it is embedding
     /// (Cohere-style asymmetric models need `input_type`), and must
     /// normalize whatever comes back. One stub round trip checks both.
     #[test]
     fn http_embeddings_sends_the_purpose_header_and_normalizes() {
-        use std::io::{Read, Write};
+        use std::io::Write;
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let served = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 4096];
-            // The request is tiny; read until the header block is in.
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let read = stream.read(&mut buffer).unwrap();
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..read]);
-            }
+            let request = read_full_request(&mut stream);
             let body = br#"{"data":[{"embedding":[3.0,4.0]}]}"#;
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
@@ -630,21 +654,13 @@ mod tests {
     /// every embedding would pair with the wrong text.
     #[test]
     fn http_embeddings_realigns_a_reordered_response_by_index() {
-        use std::io::{Read, Write};
+        use std::io::Write;
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let served = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 4096];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let read = stream.read(&mut buffer).unwrap();
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..read]);
-            }
+            let _ = read_full_request(&mut stream);
             // Wire order is the REVERSE of the input order: index 1 first.
             let body = br#"{"data":[{"index":1,"embedding":[0.0,2.0]},{"index":0,"embedding":[3.0,4.0]}]}"#;
             let head = format!(
