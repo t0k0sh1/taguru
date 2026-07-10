@@ -34,8 +34,9 @@ pub enum Call {
 }
 
 /// Sorts one decoded message into [`Message`]. Never fails: garbage is
-/// [`Message::Undecodable`], which the stdio transport ignores and the
-/// HTTP transport answers with a JSON-RPC error.
+/// [`Message::Undecodable`], which both transports answer with a
+/// JSON-RPC error — the sender may be waiting on an id this function
+/// could not even find.
 pub fn classify(message: &Value) -> Message {
     let Some(method) = message.get("method").and_then(Value::as_str) else {
         return Message::Undecodable;

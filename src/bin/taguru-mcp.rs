@@ -107,11 +107,26 @@ fn main() {
                     Err(_) => break,
                 }
             }
-            eprintln!("taguru-mcp: ignoring over-long line");
+            // The line may have carried an id a client now waits on;
+            // its bytes are gone, so a null-id parse error is all this
+            // transport can say — but silence would hang that client.
+            eprintln!("taguru-mcp: refusing over-long line");
+            emit(
+                &stdout,
+                &mcp::error_response(
+                    Value::Null,
+                    -32700,
+                    format!("line exceeds the {MAX_LINE_BYTES}-byte frame cap"),
+                ),
+            );
             continue;
         }
         let Ok(text) = std::str::from_utf8(&raw) else {
-            eprintln!("taguru-mcp: ignoring undecodable line");
+            eprintln!("taguru-mcp: refusing undecodable line");
+            emit(
+                &stdout,
+                &mcp::error_response(Value::Null, -32700, "line is not UTF-8".to_string()),
+            );
             continue;
         };
         let text = text.trim();
@@ -119,22 +134,52 @@ fn main() {
             continue;
         }
         let Ok(message) = serde_json::from_str::<Value>(text) else {
-            eprintln!("taguru-mcp: ignoring undecodable line");
+            eprintln!("taguru-mcp: refusing undecodable line");
+            emit(
+                &stdout,
+                &mcp::error_response(Value::Null, -32700, "line is not JSON".to_string()),
+            );
             continue;
         };
         if let Some(response) = handle(&bridge, &instructions, &message) {
-            let mut out = stdout.lock();
-            let _ = writeln!(out, "{response}");
-            let _ = out.flush();
+            emit(&stdout, &response);
         }
     }
 }
 
-/// Dispatches one JSON-RPC message; notifications (and anything that is
-/// not a request) get no reply on this transport.
+/// One response line out, flushed — stdio's answer must not sit in a
+/// buffer while the client waits on it.
+fn emit(stdout: &std::io::Stdout, response: &Value) {
+    let mut out = stdout.lock();
+    let _ = writeln!(out, "{response}");
+    let _ = out.flush();
+}
+
+/// Dispatches one JSON-RPC message. Notifications get no reply (correct
+/// JSON-RPC — nothing is waiting); everything else that cannot be
+/// dispatched gets a JSON-RPC error, exactly like the HTTP transport
+/// (`remote_mcp`) — a client that sent an id must never hang on
+/// silence.
 fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value> {
-    let mcp::Message::Request { id, call } = mcp::classify(message) else {
-        return None;
+    // JSON-RPC batching left the MCP spec in 2025-06; refuse it plainly
+    // rather than answering half a contract.
+    if message.is_array() {
+        return Some(mcp::error_response(
+            Value::Null,
+            -32600,
+            "batch messages are not part of MCP; send one message per line".to_string(),
+        ));
+    }
+    let (id, call) = match mcp::classify(message) {
+        mcp::Message::Notification => return None,
+        mcp::Message::Undecodable => {
+            return Some(mcp::error_response(
+                Value::Null,
+                -32600,
+                "not a JSON-RPC message (no method)".to_string(),
+            ));
+        }
+        mcp::Message::Request { id, call } => (id, call),
     };
     Some(match call {
         mcp::Call::Initialize { protocol_version } => mcp::response(
@@ -187,5 +232,54 @@ impl Bridge {
             }
             Err(error) => Err(format!("server unreachable at {}: {error}", self.base)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No network is touched: every input below is answered (or
+    /// silenced) before dispatch would reach the bridge.
+    fn bridge() -> Bridge {
+        Bridge {
+            base: "http://127.0.0.1:9".to_string(),
+            token: None,
+            agent: ureq::AgentBuilder::new().build(),
+        }
+    }
+
+    #[test]
+    fn undispatchable_messages_get_an_error_reply_not_silence() {
+        // A message with an id but no method: its sender waits on that
+        // id, so silence hangs it forever. The HTTP transport answers
+        // -32600 (mcp::classify calls it Undecodable); stdio must too.
+        let reply = handle(
+            &bridge(),
+            "",
+            &serde_json::json!({"jsonrpc": "2.0", "id": 1}),
+        )
+        .expect("an undecodable message must be answered");
+        assert_eq!(reply["error"]["code"], -32600, "{reply}");
+
+        // A batch — even one wrapping a single well-formed request — is
+        // refused with an error on both transports, never dropped.
+        let reply = handle(
+            &bridge(),
+            "",
+            &serde_json::json!([{"jsonrpc": "2.0", "id": 1, "method": "ping"}]),
+        )
+        .expect("a batch must be answered");
+        assert_eq!(reply["error"]["code"], -32600, "{reply}");
+
+        // Notifications stay silent — correct JSON-RPC: nothing waits.
+        assert!(
+            handle(
+                &bridge(),
+                "",
+                &serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            )
+            .is_none()
+        );
     }
 }
