@@ -492,7 +492,8 @@ pub fn tool_definitions() -> Vec<Value> {
             object_schema(
                 json!({
                     "context": context,
-                    "origins": { "type": "array", "items": { "type": "string" } }
+                    "origins": { "type": "array", "items": { "type": "string" } },
+                    "limit": { "type": "integer" }
                 }),
                 &["context", "origins"],
             ),
@@ -651,7 +652,7 @@ pub fn route_tool(
         "audit_coverage" => (
             "POST",
             format!("{}/unreachable_from", context_path("context")?),
-            Some(pick(arguments, &["origins"])),
+            Some(pick(arguments, &["origins", "limit"])),
         ),
         _ => return Err(format!("unknown tool '{name}'")),
     })
@@ -802,6 +803,31 @@ mod tests {
     fn list_contexts_without_arguments_has_no_query_string() {
         let (_, path, _) = route_tool("list_contexts", &json!({})).unwrap();
         assert_eq!(path, "/contexts");
+    }
+
+    /// #39: the schema had no `limit` and `route_tool` whitelisted only
+    /// `origins`, so there was no way to raise the cap through this tool
+    /// at all.
+    #[test]
+    fn audit_coverage_schema_advertises_limit() {
+        let audit_coverage = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "audit_coverage")
+            .expect("audit_coverage is defined");
+        let properties = &audit_coverage["inputSchema"]["properties"];
+        assert_eq!(properties["limit"]["type"], "integer");
+    }
+
+    #[test]
+    fn audit_coverage_routes_limit_into_the_request_body() {
+        let (method, path, body) = route_tool(
+            "audit_coverage",
+            &json!({"context": "sake", "origins": ["x"], "limit": 500}),
+        )
+        .unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/contexts/sake/unreachable_from");
+        assert_eq!(body, Some(json!({"origins": ["x"], "limit": 500})));
     }
 
     #[test]
