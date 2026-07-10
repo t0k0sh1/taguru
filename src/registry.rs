@@ -264,10 +264,27 @@ enum Slot {
 
 pub struct Entry {
     inner: RwLock<EntryInner>,
-    /// Set on every write, cleared when the image is persisted. Only
-    /// ever changed while `inner` is write-locked; the atomic just lets
-    /// the flusher skip clean entries without locking them.
+    /// Set on every write; cleared by a flush the moment it CLAIMS the
+    /// entry — under `inner`, before the image is staged, not after it
+    /// commits. Only ever changed while `inner` is write-locked; the
+    /// atomic just lets the flusher skip clean entries without locking
+    /// them. A write that lands while a flush stages its bytes re-sets
+    /// the flag under the same lock, so it flushes into an image of its
+    /// own next tick — the reason clearing early loses nothing, WAL on
+    /// or off. The window this opens — `dirty` clear but the bytes not
+    /// yet on disk — is covered by `flushing`.
     dirty: AtomicBool,
+    /// A flush is staging this entry right now: set at claim (under
+    /// `inner`, alongside clearing `dirty`) and released when the flush
+    /// ends. Two jobs. It dedups flushers — a concurrent `flush_dirty`
+    /// (a tick against the shutdown flush) skips an entry already in
+    /// flight instead of staging the same image twice. And it fences a
+    /// racing eviction: because the claim clears `dirty`, an evict that
+    /// locks mid-stage would read "clean" and drop the entry, losing a
+    /// write that (with the WAL off) lives nowhere else — so eviction
+    /// saves on `dirty || flushing`, and this flag is what stays true
+    /// across the staging window `dirty` no longer marks.
+    flushing: AtomicBool,
     /// Logical timestamp of the last operation, for LRU eviction.
     last_touch: AtomicU64,
     /// The vector sidecar, held after first use so the semantic
@@ -344,6 +361,7 @@ impl Entry {
                 counted_bytes: 0,
             }),
             dirty: AtomicBool::new(false),
+            flushing: AtomicBool::new(false),
             last_touch: AtomicU64::new(0),
             vectors: Mutex::new(None),
             vectors_refresh: Mutex::new(()),
@@ -2335,20 +2353,35 @@ impl AppState {
     /// bytes land; before this, every flush stalled them for the whole
     /// write.
     fn flush_entry(&self, name: &str, entry: &Entry) -> bool {
-        // Claim the flag: one flusher per entry at a time, so
-        // concurrent flush_dirty calls (a tick against the shutdown
-        // flush) can never stage the same image twice.
-        if !entry.dirty.swap(false, Ordering::Relaxed) {
+        // Skip a clean entry without locking it (the flusher's one
+        // sanctioned lock-free read of `dirty`).
+        if !entry.dirty.load(Ordering::Relaxed) {
             return false;
         }
         let (bytes, meta, stats, watermark) = {
             let mut guard = entry.inner.write().unwrap();
             let inner = &mut *guard;
+            // Claim the flush UNDER the lock. `flushing` gates concurrent
+            // flushers (a tick against the shutdown flush) so the same
+            // image is never staged twice, and — set before `dirty` is
+            // cleared, both under this lock — it tells a racing eviction
+            // "a flush of this entry is in flight, its bytes are not on
+            // disk yet, persist me before dropping me." Clearing `dirty`
+            // here (not out of the lock, as before) is what makes that
+            // hand-off atomic: an evict that locks next sees `flushing`
+            // set, never a bare "clean". A write that lands while we stage
+            // re-sets `dirty`, so nothing is lost even with the WAL off,
+            // where `wal_seq` does not move to flag the race.
+            if entry.flushing.swap(true, Ordering::Relaxed) {
+                return false;
+            }
+            entry.dirty.store(false, Ordering::Relaxed);
             let watermark = inner.wal_seq - 1;
             // Cold has nothing to write; Deleted must write nothing —
             // that snapshot predates a delete and the files are gone
             // for good.
             let Slot::Hot(context) = &mut inner.slot else {
+                entry.flushing.store(false, Ordering::Relaxed);
                 return false;
             };
             // The image about to be written reflects everything logged
@@ -2367,6 +2400,7 @@ impl AppState {
             Err(error) => {
                 tracing::warn!("flush of context '{name}' failed (will retry): {error}");
                 entry.dirty.store(true, Ordering::Relaxed);
+                entry.flushing.store(false, Ordering::Relaxed);
                 self.0.metrics.record_flush(false);
                 return false;
             }
@@ -2378,9 +2412,21 @@ impl AppState {
         // were staging must find us backing off, not recreating.
         let Some(mut guard) = entry.lock_unless_deleted() else {
             let _ = fs::remove_file(&staged);
+            entry.flushing.store(false, Ordering::Relaxed);
             return false;
         };
         let inner = &mut *guard;
+        // An eviction cooled us to Cold while we staged. Seeing `flushing`
+        // it persisted this entry itself, so our staged snapshot is at
+        // best a duplicate of what it wrote and, if a write beat the
+        // evict, a step behind — publishing it would regress the image.
+        // Drop the staged bytes and leave `dirty` as the evict (and any
+        // racing write) left it.
+        if !matches!(inner.slot, Slot::Hot(_)) {
+            let _ = fs::remove_file(&staged);
+            entry.flushing.store(false, Ordering::Relaxed);
+            return false;
+        }
         // Claim the usage flag before snapshotting: an increment racing
         // this write either lands in the snapshot or re-marks the flag —
         // never both lost. (Advisory counters; a failed write re-marks.)
@@ -2394,19 +2440,17 @@ impl AppState {
                 &entry.usage.snapshot(),
             )
         });
-        match outcome {
+        let published = match outcome {
             Ok(()) => {
                 inner.stats = stats;
                 self.0.metrics.record_flush(true);
-                // Truncation is only sound if the image just published
-                // covers the whole log: a write that landed while the
-                // bytes were in flight sits PAST our watermark, and its
-                // records must survive until the next flush bakes them
-                // into an image of their own.
+                // `dirty` stays as claimed: clear (nothing raced) means the
+                // image is current; a racing write re-set it and will
+                // re-flush. Truncation is sound only when the image covers
+                // the whole log — a write that landed mid-stage sits past
+                // our watermark and its records must survive.
                 if inner.wal_seq - 1 == watermark {
                     self.truncate_wal(name, inner);
-                } else {
-                    entry.dirty.store(true, Ordering::Relaxed);
                 }
                 true
             }
@@ -2418,7 +2462,9 @@ impl AppState {
                 self.0.metrics.record_flush(false);
                 false
             }
-        }
+        };
+        entry.flushing.store(false, Ordering::Relaxed);
+        published
     }
 
     /// Truncates a context's log once an image covering everything in
@@ -2826,7 +2872,15 @@ impl AppState {
         }
         let watermark = inner.wal_seq - 1;
         if let Slot::Hot(context) = &mut inner.slot {
-            if entry.dirty.load(Ordering::Relaxed) {
+            // Persist before dropping if the image is stale (`dirty`) OR a
+            // flush is mid-stage (`flushing`). A flush claims its entry by
+            // clearing `dirty` under this same lock, then stages the image
+            // with the lock dropped; in that window `dirty` reads clean
+            // though the write is NOT yet on disk. Saving on `flushing`
+            // too means we never drop a hot context whose only un-imaged
+            // write lives in a flush that has not committed — the write
+            // that, with the WAL off, exists nowhere else.
+            if entry.dirty.load(Ordering::Relaxed) || entry.flushing.load(Ordering::Relaxed) {
                 context.set_applied_seq(watermark);
                 let stats = ContextStats::of(context);
                 if let Err(error) = save_files(
@@ -4631,6 +4685,75 @@ mod tests {
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(count, 0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// With the WAL off, an entry's image is its ONLY durable home. A
+    /// flush must therefore not clear `dirty` before it has published that
+    /// image: if it did, an eviction racing the flush would read "clean",
+    /// drop the hot context WITHOUT saving, and lose the acknowledged
+    /// write outright. Two contexts thrash a one-byte budget — each write
+    /// evicts the other while it is still dirty — as a flusher runs flat
+    /// out, so staging (unlocked) and eviction interleave every which way.
+    /// Every acknowledged write must still be readable, with no restart
+    /// and no log to fall back on.
+    #[test]
+    fn a_flush_racing_an_eviction_loses_no_write_with_the_wal_off() {
+        use std::thread;
+
+        let dir = scratch_dir("flush-evict-race");
+        let state = AppState::boot_with(
+            dir.clone(),
+            1, // one byte: only a single context stays resident at a time
+            None,
+            BootOptions {
+                wal_enabled: false,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        for name in ["sake", "wine"] {
+            state
+                .create(name, ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+        }
+
+        const WRITES: usize = 200;
+        let writers: Vec<_> = ["sake", "wine"]
+            .into_iter()
+            .map(|name| {
+                let state = state.clone();
+                thread::spawn(move || {
+                    for index in 0..WRITES {
+                        state
+                            .add_associations(
+                                name,
+                                vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
+                            )
+                            .unwrap()
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        while writers.iter().any(|writer| !writer.is_finished()) {
+            state.flush_dirty();
+        }
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        // Whatever survives lives in the images the flushes and evictions
+        // wrote — there is no WAL to replay. Every write must be there.
+        for name in ["sake", "wine"] {
+            let count = state
+                .read_context(name, |context| context.association_count())
+                .map_err(|_| "read")
+                .unwrap();
+            assert_eq!(count, WRITES, "context '{name}' lost writes to the race");
+        }
 
         let _ = fs::remove_dir_all(dir);
     }
