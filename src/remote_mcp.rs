@@ -102,7 +102,12 @@ async fn call_inner(
             .body(Body::from(body.to_string())),
         None => builder.body(Body::empty()),
     }
-    .expect("in-process request parts are static and valid");
+    // The method and body are static, but `path` carries caller-supplied
+    // arguments (a context name, a subject/label/object) percent-encoded
+    // into the URL. A long enough one exceeds `http::Uri`'s length limit,
+    // which the builder reports here — fail this one call gracefully
+    // rather than panic the task.
+    .map_err(|error| format!("could not build the in-process request: {error}"))?;
     let response = match dispatch.oneshot(request).await {
         Ok(response) => response,
         Err(never) => match never {},
@@ -121,4 +126,45 @@ async fn call_inner(
 
 fn rpc_over_http(status: StatusCode, reply: Value) -> Response {
     (status, axum::Json(reply)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A context name long enough that its percent-encoded path exceeds
+    /// `http::Uri`'s length limit must come back as a JSON-RPC tool
+    /// error, never panic the task that builds the in-process request.
+    #[tokio::test]
+    async fn an_overlong_argument_fails_the_call_without_panicking() {
+        let giant = "a".repeat(100_000);
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "create_context", "arguments": { "name": giant } },
+        });
+        let response = serve(
+            Router::new(),
+            Arc::new(String::new()),
+            Bytes::from(body.to_string()),
+        )
+        .await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        // The RPC round trip itself succeeds; the tool result carries the
+        // failure, marked `isError`, instead of the process aborting.
+        assert_eq!(status, 200);
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        assert!(
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("could not build"),
+            "{reply}"
+        );
+    }
 }
