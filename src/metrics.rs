@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -666,7 +666,10 @@ fn push_outcomes(out: &mut String, name: &str, help: &str, ok: &AtomicU64, faile
 /// `MatchedPath` comes as `Option` deliberately: the required form
 /// rejects before the fallback runs and would hijack 404 handling.
 /// Unmatched requests all land in one `<unmatched>` series so a path
-/// scanner cannot mint unbounded label values.
+/// scanner cannot mint unbounded label values — and the method is
+/// folded to a fixed allowlist ([`normalized_method`]) for the same
+/// reason: an extension-method token is just as attacker-chosen as a
+/// path, and this middleware runs ahead of auth.
 ///
 /// With span export configured this is also where the request span is
 /// born — parented from the inbound trace context, named per HTTP
@@ -679,7 +682,7 @@ pub async fn track_http(
     request: Request,
     next: Next,
 ) -> Response {
-    let method = request.method().as_str().to_string();
+    let method = normalized_method(request.method());
     let route = matched
         .as_ref()
         .map(|matched| matched.as_str().to_string())
@@ -687,16 +690,14 @@ pub async fn track_http(
     let started = Instant::now();
 
     let (response, trace_id) = if crate::trace::enabled() {
-        traced_request(&method, &route, request, next).await
+        traced_request(method, &route, request, next).await
     } else {
         (next.run(request).await, None)
     };
 
     let elapsed = started.elapsed();
     let status = response.status().as_u16();
-    state
-        .metrics()
-        .record_http(&method, &route, status, elapsed);
+    state.metrics().record_http(method, &route, status, elapsed);
     // Which credential made the request — stamped on the response by
     // the auth layer. "-" = unauthenticated (exempt path, auth off, or
     // a rejection).
@@ -731,6 +732,27 @@ pub async fn track_http(
 /// attributes follow HTTP semconv (`{method} {route}`, method only
 /// when unmatched); a 5xx marks the span as an error, a 4xx does not —
 /// for a server, a client's mistake is a normal outcome.
+/// Folds a request method to a fixed set of `&'static str` labels. RFC
+/// 9110 leaves the method an open token, so an unauthenticated client
+/// can send an unbounded stream of distinct extension methods; keyed
+/// straight into the metrics map (or a span name) each would mint a new
+/// series. Anything outside the standard set collapses to `<other>`,
+/// mirroring how the route collapses to `<unmatched>`.
+fn normalized_method(method: &Method) -> &'static str {
+    match *method {
+        Method::GET => "GET",
+        Method::POST => "POST",
+        Method::PUT => "PUT",
+        Method::DELETE => "DELETE",
+        Method::PATCH => "PATCH",
+        Method::HEAD => "HEAD",
+        Method::OPTIONS => "OPTIONS",
+        Method::TRACE => "TRACE",
+        Method::CONNECT => "CONNECT",
+        _ => "<other>",
+    }
+}
+
 async fn traced_request(
     method: &str,
     route: &str,
@@ -873,6 +895,20 @@ mod tests {
             ),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn nonstandard_methods_fold_to_a_single_label() {
+        // Standard methods keep their identity...
+        assert_eq!(normalized_method(&Method::GET), "GET");
+        assert_eq!(normalized_method(&Method::DELETE), "DELETE");
+        // ...but an extension-method token — which a client can mint
+        // without bound, ahead of auth — collapses to one series rather
+        // than growing the metrics map per distinct value.
+        let weird = Method::from_bytes(b"M0001").unwrap();
+        assert_eq!(normalized_method(&weird), "<other>");
+        let also = Method::from_bytes(b"FROBNICATE").unwrap();
+        assert_eq!(normalized_method(&also), "<other>");
     }
 
     #[test]
