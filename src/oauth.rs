@@ -36,6 +36,14 @@ pub const CODE_TTL_SECS: u64 = 60;
 /// Registration is unauthenticated by design (RFC 7591 as MCP clients
 /// practice it), so the store must be bounded by us, not by callers.
 pub const CLIENT_CAP: usize = 100;
+/// Every caller-controlled field of a registration is bounded too, not
+/// just the client count: without these, one unauthenticated call could
+/// carry a body-sized name or a flood of redirect URIs, and `CLIENT_CAP`
+/// such registrations would bloat `oauth.json` without limit. Generous
+/// ceilings — a display label and a short list of real callback URLs.
+pub const MAX_CLIENT_NAME_BYTES: usize = 256;
+pub const MAX_REDIRECT_URIS: usize = 10;
+pub const MAX_REDIRECT_URI_BYTES: usize = 2048;
 
 pub fn now_secs() -> u64 {
     SystemTime::now()
@@ -227,10 +235,29 @@ impl Oauth {
         if redirect_uris.is_empty() {
             return Err("redirect_uris must not be empty".to_string());
         }
+        if redirect_uris.len() > MAX_REDIRECT_URIS {
+            return Err(format!(
+                "too many redirect_uris ({}, max {MAX_REDIRECT_URIS})",
+                redirect_uris.len()
+            ));
+        }
         for uri in &redirect_uris {
+            if uri.len() > MAX_REDIRECT_URI_BYTES {
+                return Err(format!(
+                    "a redirect uri is too long ({} bytes, max {MAX_REDIRECT_URI_BYTES})",
+                    uri.len()
+                ));
+            }
             if !uri.starts_with("https://") && !is_loopback_redirect(uri) {
                 return Err(format!("redirect uri '{uri}' must be https or loopback"));
             }
+        }
+        let client_name = client_name.trim();
+        if client_name.len() > MAX_CLIENT_NAME_BYTES {
+            return Err(format!(
+                "client_name is too long ({} bytes, max {MAX_CLIENT_NAME_BYTES})",
+                client_name.len()
+            ));
         }
         let mut clients = self.clients.lock().unwrap();
         if clients.len() >= CLIENT_CAP {
@@ -240,7 +267,7 @@ impl Oauth {
         }
         let client = Client {
             client_id: random_token(),
-            client_name: client_name.trim().to_string(),
+            client_name: client_name.to_string(),
             redirect_uris,
             created_at: now_secs(),
         };
@@ -689,6 +716,35 @@ mod tests {
             oauth
                 .register_client("one-too-many", vec!["https://ok.example".to_string()])
                 .is_err()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn registration_bounds_name_and_redirect_sizes() {
+        let (oauth, dir) = scratch_oauth("register-bounds");
+        let ok = vec!["https://ok.example/cb".to_string()];
+
+        // Unauthenticated input must not carry a body-sized label into
+        // the persisted store.
+        assert!(
+            oauth
+                .register_client(&"n".repeat(MAX_CLIENT_NAME_BYTES + 1), ok.clone())
+                .is_err()
+        );
+        // Too many redirect URIs, even when each is valid.
+        let flood: Vec<String> = (0..=MAX_REDIRECT_URIS)
+            .map(|i| format!("https://ok.example/cb{i}"))
+            .collect();
+        assert!(oauth.register_client("x", flood).is_err());
+        // A single over-long redirect URI.
+        let long_uri = format!("https://ok.example/{}", "p".repeat(MAX_REDIRECT_URI_BYTES));
+        assert!(oauth.register_client("x", vec![long_uri]).is_err());
+        // The generous ceilings still admit an ordinary registration.
+        assert!(
+            oauth
+                .register_client(&"n".repeat(MAX_CLIENT_NAME_BYTES), ok)
+                .is_ok()
         );
         let _ = std::fs::remove_dir_all(dir);
     }

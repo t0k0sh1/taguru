@@ -70,7 +70,10 @@ async fn register(State(state): State<OauthState>, Json(body): Json<Value>) -> R
                 .collect()
         })
         .unwrap_or_default();
-    match state.oauth.register_client(client_name, redirect_uris) {
+    // `register_client` serializes the whole client store and fsyncs it
+    // (via `persist`), so keep that off the async worker like every other
+    // write path does.
+    match tokio::task::block_in_place(|| state.oauth.register_client(client_name, redirect_uris)) {
         Ok(client) => (
             StatusCode::CREATED,
             Json(json!({
@@ -290,19 +293,24 @@ struct TokenParams {
 /// the standard error codes with a 400.
 async fn token(State(state): State<OauthState>, Form(params): Form<TokenParams>) -> Response {
     let now = now_secs();
+    // Both grant paths mint a token, which serializes and fsyncs the
+    // OAuth store (via `persist`); wrap each in `block_in_place` so the
+    // synchronous write never stalls the async worker.
     let outcome = match params.grant_type.as_str() {
-        "authorization_code" => state.oauth.exchange_code(
-            &params.client_id,
-            &params.code,
-            &params.code_verifier,
-            &params.redirect_uri,
-            now,
-        ),
-        "refresh_token" => {
+        "authorization_code" => tokio::task::block_in_place(|| {
+            state.oauth.exchange_code(
+                &params.client_id,
+                &params.code,
+                &params.code_verifier,
+                &params.redirect_uri,
+                now,
+            )
+        }),
+        "refresh_token" => tokio::task::block_in_place(|| {
             state
                 .oauth
                 .exchange_refresh(&params.client_id, &params.refresh_token, now)
-        }
+        }),
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
