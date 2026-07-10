@@ -626,7 +626,11 @@ fn store_table<T: Record>(records: &[T], image: &mut Vec<u8>) {
 /// by the bytes actually present so a hostile count cannot balloon memory.
 fn load_table<T: Record>(reader: &mut Reader) -> Result<Vec<T>, CorruptImage> {
     let count = reader.read_u64()?;
-    if count >= u64::from(NIL) {
+    // Ids run 0..count and `NIL` (u32::MAX) is the reserved sentinel, so a
+    // table holds at most `NIL` records — its highest id is then NIL-1, one
+    // below the sentinel. Only a count STRICTLY past NIL overflows the id
+    // space; `>=` wrongly rejected a legitimately maximal table.
+    if count > u64::from(NIL) {
         return Err(CorruptImage("table exceeds the u32 id space"));
     }
     let count = count as usize;
