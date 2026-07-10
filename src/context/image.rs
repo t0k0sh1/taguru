@@ -443,9 +443,19 @@ impl Context {
     /// claimed by NO chain are legal: retraction unlinks records in
     /// place and leaves them behind as dead space in the append-only
     /// table.
+    ///
+    /// Also re-establishes the numeric guarantees the write path
+    /// enforces but the flat buffer cannot: every consumed weight `sum`
+    /// is finite (a tampered `NaN`/`Inf` would sort as the maximum under
+    /// `total_cmp` and permanently occupy every ranked result), and the
+    /// combined chain `count` does not overflow `u64` (which would wrap
+    /// past the `edge.count` floor and silently defeat the check below).
     fn validate_attributions(&self) -> Result<(), CorruptImage> {
         let mut claimed = vec![false; self.attributions.len()];
         for edge in &self.edges {
+            if !edge.sum.is_finite() {
+                return Err(CorruptImage("edge weight sum is not finite"));
+            }
             let mut cursor = edge.first_attribution;
             let mut tail = NIL;
             let mut chain_count: u64 = 0;
@@ -460,7 +470,12 @@ impl Context {
                 if record.source as usize >= self.sources.len() {
                     return Err(CorruptImage("attribution references an unknown source"));
                 }
-                chain_count += record.count;
+                if !record.sum.is_finite() {
+                    return Err(CorruptImage("attribution weight sum is not finite"));
+                }
+                chain_count = chain_count
+                    .checked_add(record.count)
+                    .ok_or(CorruptImage("attribution chain count overflows u64"))?;
                 tail = cursor;
                 cursor = record.next;
             }

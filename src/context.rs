@@ -3967,6 +3967,56 @@ mod tests {
     }
 
     #[test]
+    fn from_bytes_rejects_non_finite_weights_and_count_overflow() {
+        // Same single-edge layout as the test above: the edge's `sum`
+        // (its tenth field, an f64) follows `count` at 72..80. A tampered
+        // non-finite sum sorts as the maximum under `total_cmp` and would
+        // permanently occupy every ranked result, so it must be rejected.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        let mut nan_edge = context.to_bytes();
+        nan_edge[72..80].copy_from_slice(&f64::NAN.to_le_bytes());
+        let error = Context::from_bytes(&nan_edge).unwrap_err();
+        assert!(
+            error.to_string().contains("edge weight sum is not finite"),
+            "{error}"
+        );
+
+        // The lone attribution record follows the edge table (table count
+        // at 80..88, record 0 at 88..112); its `sum` — after source u32,
+        // next u32, count u64 — sits at 104..112.
+        let mut inf_record = context.to_bytes();
+        inf_record[104..112].copy_from_slice(&f64::INFINITY.to_le_bytes());
+        let error = Context::from_bytes(&inf_record).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("attribution weight sum is not finite"),
+            "{error}"
+        );
+
+        // Two sources on one edge give two attribution records (record 0
+        // at 88..112, record 1 at 112..136); their `count` u64s sit at
+        // 96..104 and 120..128. Two maxed counts overflow the running
+        // chain total, which must fail rather than wrap past the floor the
+        // `combined count` check downstream relies on.
+        let mut two_sources = Context::default();
+        two_sources
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        two_sources
+            .associate_from("私", "好き", "りんご", 1.0, "文書2", None)
+            .unwrap();
+        let mut overflow = two_sources.to_bytes();
+        overflow[96..104].copy_from_slice(&u64::MAX.to_le_bytes());
+        overflow[120..128].copy_from_slice(&u64::MAX.to_le_bytes());
+        let error = Context::from_bytes(&overflow).unwrap_err();
+        assert!(error.to_string().contains("overflows u64"), "{error}");
+    }
+
+    #[test]
     fn empty_context_roundtrips() {
         let restored =
             Context::from_bytes(&Context::default().to_bytes()).expect("image must load");
