@@ -585,8 +585,10 @@ struct FusedHit {
 }
 
 /// What one passage embedding refresh accomplished: rows newly
-/// embedded, rows now in the sidecar, and paragraphs left without a
-/// vector because the per-context limit cut them off.
+/// embedded, rows now in the sidecar, and rows the per-context limit
+/// cut off. Text rows and doc2query question rows count alike in all
+/// three — the limit itself is row-denominated, so `skipped_over_limit`
+/// is exactly how far it fell short, not a paragraph count.
 #[derive(Debug)]
 pub struct PassageRefreshOutcome {
     pub embedded: usize,
