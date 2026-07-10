@@ -314,20 +314,15 @@ impl PassageStore {
                 (sources, watermark, size)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let legacy = read_legacy(legacy_path);
-                (
-                    legacy
-                        .into_iter()
-                        .map(|(source, text)| {
-                            (
-                                source,
-                                PassageRecord::new(Arc::from(text), Vec::new(), Vec::new()).0,
-                            )
-                        })
-                        .collect(),
-                    0,
-                    0,
-                )
+                let mut sources = BTreeMap::new();
+                for (source, text) in read_legacy(legacy_path) {
+                    let text = bounded_text(&source, text, "the legacy sources file")?;
+                    sources.insert(
+                        source,
+                        PassageRecord::new(Arc::from(text), Vec::new(), Vec::new()).0,
+                    );
+                }
+                (sources, 0, 0)
             }
             Err(error) => return Err(error),
         };
@@ -342,6 +337,7 @@ impl PassageStore {
                     questions,
                     sections,
                 } => {
+                    let text = bounded_text(&source, text, "the passages WAL")?;
                     sources.insert(
                         source,
                         PassageRecord::new(Arc::from(text), questions, sections).0,
@@ -614,6 +610,26 @@ impl PassageStore {
         let inner = self.inner.read().unwrap();
         (inner.compactions, inner.snapshot_bytes_written)
     }
+}
+
+/// The u32-offset bound `store()` enforces on the live path, re-checked
+/// on what disk hands back. The WAL's records and the legacy sources
+/// file are JSON with no inherent length bound; no live write can
+/// produce an oversized text (`store()` refuses first), but a tampered
+/// or corrupted file could, and it would otherwise sail into the
+/// splitter's assert and panic the whole load. Corruption is this
+/// module's `InvalidData` error, never a panic.
+fn bounded_text(source: &str, text: String, origin: &str) -> io::Result<String> {
+    if text.len() > u32::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "passage '{source}' from {origin} is {} bytes; passages are capped at 4 GiB",
+                text.len()
+            ),
+        ));
+    }
+    Ok(text)
 }
 
 /// The legacy whole-file JSON map. Unreadable or absent means empty —
