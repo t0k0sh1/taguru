@@ -1255,7 +1255,13 @@ impl Context {
                     edge.subject != edge.object
                 }))
                 .map(|edge_id| self.edges[edge_id as usize].sum.abs())
-                .sum();
+                .fold(0.0, |mut acc, magnitude| {
+                    // Individually-finite magnitudes can sum past f64's
+                    // range; an infinite total would zero every flow and
+                    // silently stop propagation through this concept.
+                    accumulate_saturating(&mut acc, magnitude);
+                    acc
+                });
             if total == 0.0 {
                 continue;
             }
@@ -1902,7 +1908,10 @@ impl Context {
 
             let next = self.attributions[cursor as usize].next;
             let edge = &mut self.edges[edge_index];
-            edge.sum -= sum;
+            // Subtraction accumulates too: a saturated edge sum minus a
+            // saturated attribution sum can overshoot the representable
+            // range just like two additions can.
+            accumulate_saturating(&mut edge.sum, -sum);
             edge.count = edge.count.saturating_sub(count);
             if previous == NIL {
                 edge.first_attribution = next;
@@ -2631,6 +2640,58 @@ mod tests {
         assert_eq!(
             weight_between(&restored, "a", "r", "b"),
             weight_between(&context, "a", "r", "b"),
+        );
+    }
+
+    #[test]
+    fn retracting_an_extreme_source_saturates_instead_of_reaching_infinity() {
+        // Retraction subtracts an attribution sum from the edge sum; with
+        // saturated magnitudes on both sides that difference can overshoot
+        // f64's range exactly like an addition can. A raw subtraction here
+        // once produced an infinite edge sum — a context that saved but
+        // never loaded again.
+        let mut context = Context::default();
+        context
+            .associate_from("a", "r", "b", -f64::MAX, "源Y", None)
+            .unwrap();
+        context
+            .associate_from("a", "r", "b", -f64::MAX, "源Y", None)
+            .unwrap();
+        // Fold the edge sum back to the positive extreme while 源Y's
+        // attribution stays saturated at -f64::MAX.
+        context
+            .associate_from("a", "r", "b", f64::MAX, "源Z", None)
+            .unwrap();
+        context
+            .associate_from("a", "r", "b", f64::MAX, "源Z", None)
+            .unwrap();
+
+        // edge.sum - (-f64::MAX) would round to +Infinity unsaturated.
+        assert_eq!(context.retract_source("源Y"), Some(1));
+
+        assert!(weight_between(&context, "a", "r", "b").is_finite());
+        Context::from_bytes(&context.to_bytes())
+            .expect("a context whose retraction saturated must still round-trip");
+    }
+
+    #[test]
+    fn activation_still_propagates_through_extreme_fan_out_sums() {
+        // The fan-out normalizer sums |edge.sum| across a concept's
+        // incident edges. Two saturated edges would push an unsaturated
+        // total to +Infinity, zeroing every flow — the hub's own edges
+        // still rank (strength is fan-independent), but nothing beyond
+        // the hub would ever be reached.
+        let mut context = Context::default();
+        context.associate("hub", "r1", "leaf1", f64::MAX).unwrap();
+        context.associate("hub", "r2", "leaf2", f64::MAX).unwrap();
+        context.associate("leaf1", "r3", "far", 1.0).unwrap();
+
+        let (_, activations) = context.activate(&["hub"], 0.5, 10);
+        assert!(
+            activations
+                .iter()
+                .any(|activation| activation.association.object == "far"),
+            "activation must propagate past the hub to leaf1's own association"
         );
     }
 
