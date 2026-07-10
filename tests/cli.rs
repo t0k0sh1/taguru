@@ -655,3 +655,17 @@ fn the_mcp_bridge_answers_initialize_despite_a_stalled_protocol_probe() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[test]
+fn estimate_prints_usage_for_help_in_any_position() {
+    // The other subcommands answer --help wherever it appears; an
+    // operator halfway through composing flags gets the manual, not
+    // "unknown flag '--help'".
+    let output = run(&["estimate", "--associations", "100", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("usage: taguru estimate"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

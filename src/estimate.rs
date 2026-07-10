@@ -38,7 +38,10 @@ struct Plan {
 }
 
 pub fn run(args: &[String]) -> i32 {
-    if args.first().is_some_and(|a| a == "--help" || a == "-h") {
+    // Anywhere in the argument list, like every other subcommand: an
+    // operator halfway through composing flags asks for the manual
+    // without first deleting what they typed.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
         print!("{USAGE}");
         return 0;
     }
