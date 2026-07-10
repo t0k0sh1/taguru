@@ -449,6 +449,21 @@ pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
             batch.sections.len()
         ));
     }
+    // A paragraph locator on an association names a spot in THIS batch's
+    // passage, exactly as a question or section does. With no passage
+    // line there is nothing to name — and `apply_batch` retracts the
+    // source first, so any previously stored passage is gone too. Refuse
+    // rather than persist a locator pointing into a passage that will
+    // not exist (the resident-store clamp cannot catch it: the source is
+    // already retracted, so it has nothing to clamp against).
+    if batch.passage.is_none()
+        && let Some(paragraph) = batch.associations.iter().find_map(|op| op.paragraph)
+    {
+        return Err(format!(
+            "an association names paragraph {paragraph} but the batch has no passage \
+             line — a paragraph locator attaches to this file's passage"
+        ));
+    }
     Ok(batch)
 }
 
@@ -625,6 +640,11 @@ pub(crate) struct Applied {
     pub(crate) associations: usize,
     pub(crate) aliases: usize,
     pub(crate) passage_stored: bool,
+    /// A previously stored passage for this source was retracted and the
+    /// batch carried no replacement. With `passage_stored` this is a
+    /// routine replace; without it, the batch just erased passage text —
+    /// surfaced so that loss is never silent.
+    pub(crate) passage_dropped: bool,
     pub(crate) questions_stored: usize,
     /// Questions naming a paragraph their passage's split does not
     /// have — most often a producer's index drifting from the server's
@@ -705,7 +725,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         }
     }
 
-    let (retracted, _passage_dropped) = state
+    let (retracted, passage_dropped) = state
         .retract_source(&batch.context, &batch.source)
         .map_err(ApplyRefusal::Access)?;
 
@@ -810,6 +830,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         associations,
         aliases,
         passage_stored: batch.passage.is_some(),
+        passage_dropped,
         questions_stored,
         questions_dropped,
         sections_stored,
@@ -828,10 +849,10 @@ fn report(batch: &Batch, applied: &Applied) -> String {
         applied.retracted,
         applied.associations,
         applied.aliases,
-        if applied.passage_stored {
-            ", passage stored"
-        } else {
-            ""
+        match (applied.passage_stored, applied.passage_dropped) {
+            (true, _) => ", passage stored",
+            (false, true) => ", previous passage dropped (batch carried none)",
+            (false, false) => "",
         },
         match (applied.questions_stored, applied.questions_dropped) {
             (0, 0) => String::new(),
@@ -1010,6 +1031,68 @@ mod tests {
         ))
         .unwrap_err();
         assert!(error.contains("no passage line"), "{error}");
+    }
+
+    #[test]
+    fn an_association_with_a_paragraph_needs_a_passage_to_attach_to() {
+        // A paragraph locator on an association resolves against THIS
+        // batch's passage, so it parses fine when the passage is present.
+        let batch = parse(&format!(
+            "{HEADER}\n\
+             {{\"passage\": \"導入。\\n\\n本編。\"}}\n\
+             {{\"subject\": \"青嶺酒造\", \"label\": \"創業年\", \"object\": \"1907年\", \"weight\": 1.0, \"paragraph\": 1}}\n"
+        ))
+        .unwrap();
+        assert_eq!(batch.associations[0].paragraph, Some(1));
+
+        // The same locator with no passage line has nothing to name, and
+        // apply retracts the source first — so it must be refused rather
+        // than persisted into a passage that will not exist.
+        let error = parse(&format!(
+            "{HEADER}\n\
+             {{\"subject\": \"青嶺酒造\", \"label\": \"創業年\", \"object\": \"1907年\", \"weight\": 1.0, \"paragraph\": 1}}\n"
+        ))
+        .unwrap_err();
+        assert!(error.contains("no passage line"), "{error}");
+
+        // A plain association (no locator) still stands on its own.
+        parse(&format!(
+            "{HEADER}\n\
+             {{\"subject\": \"青嶺酒造\", \"label\": \"創業年\", \"object\": \"1907年\", \"weight\": 1.0}}\n"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn report_surfaces_a_dropped_passage_that_was_not_replaced() {
+        let batch = parse(HEADER).unwrap();
+
+        // A passage was retracted and the batch brought no replacement:
+        // the loss must show in the report, never vanish silently.
+        let dropped = Applied {
+            created: false,
+            retracted: 3,
+            associations: 0,
+            aliases: 0,
+            passage_stored: false,
+            passage_dropped: true,
+            questions_stored: 0,
+            questions_dropped: 0,
+            sections_stored: 0,
+            sections_dropped: 0,
+        };
+        let line = report(&batch, &dropped);
+        assert!(line.contains("previous passage dropped"), "{line}");
+
+        // A batch that carries a replacement reads as a store, not a
+        // drop, even though the prior passage was removed to make room.
+        let replaced = Applied {
+            passage_stored: true,
+            ..dropped
+        };
+        let line = report(&batch, &replaced);
+        assert!(line.contains("passage stored"), "{line}");
+        assert!(!line.contains("dropped"), "{line}");
     }
 
     #[test]

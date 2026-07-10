@@ -1287,6 +1287,10 @@ pub struct ImportOutcome {
     pub associations: usize,
     pub aliases: usize,
     pub passage_stored: bool,
+    /// A stored passage for this source was retracted with no replacement
+    /// in the batch — `passage_stored: false` alone cannot tell "never
+    /// had one" from "just erased one", so callers get this explicitly.
+    pub passage_dropped: bool,
     pub questions_stored: usize,
     pub questions_dropped: usize,
     pub sections_stored: usize,
@@ -1318,6 +1322,7 @@ pub async fn import_batch(State(state): State<AppState>, body: axum::body::Bytes
                 associations: applied.associations,
                 aliases: applied.aliases,
                 passage_stored: applied.passage_stored,
+                passage_dropped: applied.passage_dropped,
                 questions_stored: applied.questions_stored,
                 questions_dropped: applied.questions_dropped,
                 sections_stored: applied.sections_stored,
