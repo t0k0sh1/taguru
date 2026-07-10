@@ -1074,9 +1074,12 @@ impl Context {
     }
 
     /// Spreads activation from `origins` through the network and returns
-    /// the `limit` most strongly activated associations, best first. This
-    /// is the ranked counterpart of [`Context::explore`] — the retrieval
-    /// that reads the weights `associate` has been writing.
+    /// the full pre-truncation match count alongside the `limit` most
+    /// strongly activated associations, best first — mirroring what
+    /// `api::page` does for `Vec<Association>`, so a caller can tell a
+    /// complete result from a truncated one. This is the ranked
+    /// counterpart of [`Context::explore`] — the retrieval that reads the
+    /// weights `associate` has been writing.
     ///
     /// Each origin starts with activation 1.0, and a concept's activation
     /// is that of its single strongest incoming path. Two formulas share
@@ -1116,7 +1119,7 @@ impl Context {
     /// where decay and fan-out actually attenuate the signal — with
     /// `decay == 1.0` through dedicated relays, activation barely decays
     /// and the walk still covers whatever stays above the floor.
-    pub fn activate(&self, origins: &[&str], decay: f64, limit: usize) -> Vec<Activation> {
+    pub fn activate(&self, origins: &[&str], decay: f64, limit: usize) -> (usize, Vec<Activation>) {
         let decay = decay.clamp(0.0, 1.0);
 
         let mut best: HashMap<ConceptId, f64> = HashMap::new();
@@ -1198,16 +1201,18 @@ impl Context {
             .map(|(edge_id, (strength, from))| (strength, edge_id, from))
             .collect();
         ranked.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let total = ranked.len();
         ranked.truncate(limit);
 
-        ranked
+        let matches = ranked
             .into_iter()
             .map(|(strength, edge_id, from)| Activation {
                 strength,
                 path: self.path_from(&parents, from),
                 association: self.association(edge_id),
             })
-            .collect()
+            .collect();
+        (total, matches)
     }
 
     /// Maps free-form wording onto stored concept names, returning scored
@@ -2842,7 +2847,7 @@ mod tests {
         context.associate("起点", "強い関係", "A", 3.0).unwrap();
         context.associate("起点", "弱い関係", "B", 1.0).unwrap();
 
-        let ranked = context.activate(&["起点"], 0.5, 10);
+        let (_, ranked) = context.activate(&["起点"], 0.5, 10);
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].association.object, "A");
         assert_eq!(ranked[0].strength, 1.5); // 1.0 * 0.5 * |3.0|
@@ -2857,7 +2862,7 @@ mod tests {
         context.associate("起点", "r", "近い", 1.0).unwrap();
         context.associate("近い", "r", "遠い", 1.0).unwrap();
 
-        let ranked = context.activate(&["起点"], 0.5, 10);
+        let (_, ranked) = context.activate(&["起点"], 0.5, 10);
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].association.object, "近い");
         assert_eq!(ranked[0].strength, 0.5); // 1.0 * 0.5 * |1.0|
@@ -2884,7 +2889,7 @@ mod tests {
         context.associate("ハブ", "r", "雑多2", 1.0).unwrap();
         context.associate("ハブ", "r", "雑多3", 1.0).unwrap();
 
-        let ranked = context.activate(&["起点"], 0.5, 100);
+        let (_, ranked) = context.activate(&["起点"], 0.5, 100);
         let strength_of = |object: &str| {
             ranked
                 .iter()
@@ -2915,7 +2920,7 @@ mod tests {
         context.associate("私", "好き", "バナナ", -2.0).unwrap();
         context.associate("私", "好き", "りんご", 1.0).unwrap();
 
-        let ranked = context.activate(&["私"], 0.5, 10);
+        let (_, ranked) = context.activate(&["私"], 0.5, 10);
         assert_eq!(ranked[0].association.object, "バナナ");
         assert_eq!(ranked[0].association.weight, -2.0);
         assert!(ranked[0].strength > ranked[1].strength);
@@ -2928,7 +2933,7 @@ mod tests {
         context.associate("a", "r", "b", -1.0).unwrap(); // fully contested → 0.0
         context.associate("a", "r", "c", 1.0).unwrap();
 
-        let ranked = context.activate(&["a"], 0.5, 10);
+        let (_, ranked) = context.activate(&["a"], 0.5, 10);
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].association.object, "c");
     }
@@ -2940,7 +2945,8 @@ mod tests {
         context.associate("起点", "r2", "b", 2.0).unwrap();
         context.associate("起点", "r3", "c", 1.0).unwrap();
 
-        let top_two = context.activate(&["起点"], 0.5, 2);
+        let (total, top_two) = context.activate(&["起点"], 0.5, 2);
+        assert_eq!(total, 3, "total must reflect the pre-truncation count");
         assert_eq!(top_two.len(), 2);
         assert_eq!(top_two[0].association.object, "a");
         assert_eq!(top_two[1].association.object, "b");
@@ -2951,9 +2957,9 @@ mod tests {
         let mut context = Context::default();
         context.associate("私", "好き", "りんご", 1.0).unwrap();
 
-        assert!(context.activate(&["存在しない概念"], 0.5, 10).is_empty());
+        assert!(context.activate(&["存在しない概念"], 0.5, 10).1.is_empty());
         assert_eq!(
-            context.activate(&["存在しない概念", "私"], 0.5, 10).len(),
+            context.activate(&["存在しない概念", "私"], 0.5, 10).1.len(),
             1
         );
     }
@@ -3561,7 +3567,7 @@ mod tests {
         context
             .associate("青嶺酒造", "仕込み水", "伏流水", 2.0)
             .unwrap();
-        let before = context.activate(&["青嶺酒造"], 0.5, 10)[0].strength;
+        let before = context.activate(&["青嶺酒造"], 0.5, 10).1[0].strength;
         assert_eq!(before, 1.0); // 1.0 * 0.5 * |2.0|
 
         // Five more facts about the same origin. Under fan-normalized
@@ -3572,7 +3578,7 @@ mod tests {
                 .associate("青嶺酒造", format!("関係{i}"), format!("事実{i}"), 1.0)
                 .unwrap();
         }
-        let after = context.activate(&["青嶺酒造"], 0.5, 10);
+        let (_, after) = context.activate(&["青嶺酒造"], 0.5, 10);
         assert_eq!(after[0].association.object, "伏流水");
         assert_eq!(after[0].strength, before);
     }
@@ -3589,7 +3595,7 @@ mod tests {
         }
         context.associate("寡黙", "r", "y", 2.0).unwrap();
 
-        let ranked = context.activate(&["多弁", "寡黙"], 0.5, 10);
+        let (_, ranked) = context.activate(&["多弁", "寡黙"], 0.5, 10);
         assert_eq!(ranked.len(), 6);
         assert_eq!(ranked[0].association.object, "y");
         assert_eq!(ranked[0].strength, 1.0); // weight wins...
@@ -4184,7 +4190,7 @@ mod tests {
                 .unwrap();
         }
 
-        let ranked = context.activate(&["c0"], 0.5, 100);
+        let (_, ranked) = context.activate(&["c0"], 0.5, 100);
         assert_eq!(ranked.len(), 11);
         assert_eq!(ranked[0].association.subject, "c0");
         assert_eq!(ranked.last().unwrap().association.subject, "c10");

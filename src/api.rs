@@ -1514,6 +1514,16 @@ pub async fn explore(
     }
 }
 
+/// A bounded activation result: the same `{total, matches}` shape as
+/// [`MatchPage`], but `total` comes straight from `Context::activate`,
+/// which already sorts and truncates internally rather than going
+/// through the `page` helper.
+#[derive(Serialize)]
+pub struct ActivationPage {
+    pub total: usize,
+    pub matches: Vec<ActivationOut>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ActivateRequest {
     pub origins: Vec<String>,
@@ -1537,20 +1547,20 @@ pub async fn activate(
             clamp(request.limit, 20, MAX_MATCH_LIMIT),
         )
     }) {
-        Ok(result) => {
-            state.note_search(SearchOp::Activate, &name, result.is_empty());
+        Ok((total, matches)) => {
+            state.note_search(SearchOp::Activate, &name, total == 0);
             if search_log_enabled() {
                 tracing::info!(
                     target: "taguru::search",
                     context = %name,
                     op = "activate",
                     origins = %request.origins.join(","),
-                    hits = result.len(),
+                    hits = total,
                     "search",
                 );
             }
-            let result = activations_out(&state, &name, result);
-            ok(result, started_at)
+            let matches = activations_out(&state, &name, matches);
+            ok(ActivationPage { total, matches }, started_at)
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }

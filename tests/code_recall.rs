@@ -195,6 +195,7 @@ fn retrieve(context: &Context, cues: &[&str]) -> Vec<(String, String, String)> {
     facts.extend(
         context
             .activate(&origin_refs, 0.5, 20)
+            .1
             .into_iter()
             .map(|activation| triple(activation.association)),
     );
