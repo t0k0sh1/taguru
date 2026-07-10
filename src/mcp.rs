@@ -192,7 +192,7 @@ pub fn tool_definitions() -> Vec<Value> {
             "Routing directory: every context's name, description, stats (counts, top concepts, label sample), and usage counters (reads/empty_reads/writes, last-used times). Pick the search/ingest target here yourself.",
             object_schema(
                 json!({
-                    "limit": { "type": "integer", "description": "page size, keyset-paged by name (default/ceiling 1000)" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by name (default/ceiling 1000)" },
                     "after": { "type": "string", "description": "only contexts whose name sorts strictly after this one" }
                 }),
                 &[],
@@ -354,7 +354,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "subject": { "description": "string or array" },
                     "label": { "description": "string or array" },
                     "object": { "description": "string or array" },
-                    "limit": { "type": "integer" }
+                    "limit": { "type": "integer", "minimum": 0 }
                 }),
                 &["context"],
             ),
@@ -366,7 +366,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "cue": { "type": "string" },
-                    "limit": { "type": "integer" }
+                    "limit": { "type": "integer", "minimum": 0 }
                 }),
                 &["context", "cue"],
             ),
@@ -379,7 +379,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
                     "decay": { "type": "number", "description": "default 0.5" },
-                    "limit": { "type": "integer", "description": "default 20" }
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 20" }
                 }),
                 &["context", "origins"],
             ),
@@ -392,7 +392,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
                     "max_depth": { "type": "integer" },
-                    "limit": { "type": "integer" }
+                    "limit": { "type": "integer", "minimum": 0 }
                 }),
                 &["context", "origins"],
             ),
@@ -446,7 +446,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "query": { "type": "string" },
-                    "limit": { "type": "integer", "description": "default 5" }
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 5" }
                 }),
                 &["context", "query"],
             ),
@@ -493,7 +493,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
-                    "limit": { "type": "integer" }
+                    "limit": { "type": "integer", "minimum": 0 }
                 }),
                 &["context", "origins"],
             ),
@@ -683,6 +683,24 @@ mod tests {
                 "tool '{name}' uses unknown method {method}"
             );
             assert!(path.starts_with('/'), "tool '{name}' path: {path}");
+        }
+    }
+
+    /// The HTTP layer deserializes every `limit` as `Option<usize>`, so a
+    /// negative value should be refused at MCP schema validation instead
+    /// of surfacing as a later deserialization failure.
+    #[test]
+    fn every_limit_property_has_a_minimum_of_zero() {
+        for tool in tool_definitions() {
+            let properties = &tool["inputSchema"]["properties"];
+            if let Some(limit) = properties.get("limit") {
+                assert_eq!(
+                    limit["minimum"],
+                    json!(0),
+                    "tool '{}' limit lacks minimum: 0",
+                    tool["name"]
+                );
+            }
         }
     }
 
