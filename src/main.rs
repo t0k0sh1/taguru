@@ -87,19 +87,21 @@ async fn serve() {
     let max_body_bytes =
         resolve_body_bytes(env_number("TAGURU_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES));
     let timeout_secs = resolve_timeout_secs(env_number("TAGURU_REQUEST_TIMEOUT_SECS", 30));
-    let rate_per_minute = env_number("TAGURU_RATE_LIMIT_PER_MIN", 0);
-    let rate_limiter = Arc::new(limits::RateLimiter::new(
-        u32::try_from(rate_per_minute).unwrap_or(u32::MAX),
-    ));
+    let rate_per_minute = resolve_per_minute(
+        "TAGURU_RATE_LIMIT_PER_MIN",
+        env_number("TAGURU_RATE_LIMIT_PER_MIN", 0),
+    );
+    let rate_limiter = Arc::new(limits::RateLimiter::new(rate_per_minute));
     if !rate_limiter.is_disabled() {
         info!(per_minute = rate_per_minute, "per-key rate limit enabled");
     }
     // Failed-auth attempts are throttled per source IP so the gate
     // cannot be brute-forced for free (default 10/min; 0 disables).
-    let auth_fail_per_minute = env_number("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", 10);
-    let fail_limiter = Arc::new(limits::RateLimiter::new(
-        u32::try_from(auth_fail_per_minute).unwrap_or(u32::MAX),
-    ));
+    let auth_fail_per_minute = resolve_per_minute(
+        "TAGURU_AUTH_FAIL_LIMIT_PER_MIN",
+        env_number("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", 10),
+    );
+    let fail_limiter = Arc::new(limits::RateLimiter::new(auth_fail_per_minute));
     if !fail_limiter.is_disabled() {
         info!(
             per_minute = auth_fail_per_minute,
@@ -554,6 +556,21 @@ pub(crate) fn resolve_flush_secs(requested: usize) -> usize {
     }
 }
 
+/// The limiter holds its budget in a u32; a bigger env value would be
+/// silently clamped inside the constructor while the boot line logged
+/// the raw number — the logged limit and the enforced limit must be
+/// the same number, and the clamp must be loud like every other
+/// out-of-range env here.
+pub(crate) fn resolve_per_minute(name: &str, requested: usize) -> u32 {
+    u32::try_from(requested).unwrap_or_else(|_| {
+        warn!(
+            "{name}={requested} exceeds the limiter's ceiling; clamping to {}",
+            u32::MAX
+        );
+        u32::MAX
+    })
+}
+
 const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// `TAGURU_REQUEST_TIMEOUT_SECS=0` reads as "no timeout" — its
@@ -608,5 +625,12 @@ mod tests {
         assert_eq!(resolve_timeout_secs(30), 30);
         assert_eq!(resolve_body_bytes(0), DEFAULT_MAX_BODY_BYTES);
         assert_eq!(resolve_body_bytes(1024), 1024);
+    }
+
+    #[test]
+    fn per_minute_rates_clamp_at_the_limiter_ceiling() {
+        assert_eq!(resolve_per_minute("X", 0), 0);
+        assert_eq!(resolve_per_minute("X", 600), 600);
+        assert_eq!(resolve_per_minute("X", u32::MAX as usize + 1), u32::MAX);
     }
 }
