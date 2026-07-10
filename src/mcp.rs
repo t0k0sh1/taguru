@@ -124,12 +124,16 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": properties, "required": required })
 }
 
-/// Pulls a required string argument or explains what is missing.
+/// Pulls a required string argument, telling an absent one apart from a
+/// present-but-wrong-typed one — folding both into "missing" sends a
+/// caller who passed `{"name": 42}` hunting for an argument they did
+/// supply.
 fn need<'a>(arguments: &'a Value, key: &str) -> Result<&'a str, String> {
-    arguments
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("missing required argument '{key}'"))
+    match arguments.get(key) {
+        Some(Value::String(text)) => Ok(text),
+        Some(Value::Null) | None => Err(format!("missing required argument '{key}'")),
+        Some(_) => Err(format!("argument '{key}' must be a string")),
+    }
 }
 
 /// Copies the listed keys into a request body, skipping absent ones.
@@ -557,6 +561,10 @@ pub fn route_tool(
         ),
         "delete_context" => ("DELETE", context_path("name")?, None),
         "add_associations" => {
+            // Resolve `context` first so a caller who omitted BOTH hears
+            // about the primary argument, not the secondary one, in the
+            // order the schema lists them.
+            let path = format!("{}/associations", context_path("context")?);
             // Schema-required: an omitted (or null) argument must
             // refuse, not fall back to an empty batch — that would
             // route a caller's mistake into a silent, do-nothing 200.
@@ -565,11 +573,7 @@ pub fn route_tool(
                 .filter(|value| !value.is_null())
                 .cloned()
                 .ok_or_else(|| "missing required argument 'associations'".to_string())?;
-            (
-                "POST",
-                format!("{}/associations", context_path("context")?),
-                Some(associations),
-            )
+            ("POST", path, Some(associations))
         }
         "store_passages" => (
             "POST",
@@ -755,6 +759,28 @@ mod tests {
                 &json!({"context": "ctx", "associations": []})
             )
             .is_ok()
+        );
+    }
+
+    /// A required string argument present with the wrong JSON type is a
+    /// caller mistake distinct from omission — say so, rather than blame a
+    /// "missing" argument that was in fact supplied.
+    #[test]
+    fn a_required_argument_of_the_wrong_type_names_the_type_error() {
+        assert_eq!(
+            route_tool("describe", &json!({"context": 7, "concept": "x"})),
+            Err("argument 'context' must be a string".to_string())
+        );
+    }
+
+    /// When both context and its payload are missing, the context — the
+    /// path segment resolved first — is the one reported, so the caller
+    /// fixes the outer error before the inner one.
+    #[test]
+    fn add_associations_reports_the_missing_context_before_the_missing_payload() {
+        assert_eq!(
+            route_tool("add_associations", &json!({})),
+            Err("missing required argument 'context'".to_string())
         );
     }
 
