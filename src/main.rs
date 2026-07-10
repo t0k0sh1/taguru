@@ -84,8 +84,9 @@ async fn serve() {
 
     let config = registry::BootConfig::from_env();
     let flush_secs = resolve_flush_secs(env_number("TAGURU_FLUSH_SECS", 5));
-    let max_body_bytes = env_number("TAGURU_MAX_BODY_BYTES", 8 * 1024 * 1024);
-    let timeout_secs = env_number("TAGURU_REQUEST_TIMEOUT_SECS", 30);
+    let max_body_bytes =
+        resolve_body_bytes(env_number("TAGURU_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES));
+    let timeout_secs = resolve_timeout_secs(env_number("TAGURU_REQUEST_TIMEOUT_SECS", 30));
     let rate_per_minute = env_number("TAGURU_RATE_LIMIT_PER_MIN", 0);
     let rate_limiter = Arc::new(limits::RateLimiter::new(
         u32::try_from(rate_per_minute).unwrap_or(u32::MAX),
@@ -533,6 +534,44 @@ pub(crate) fn resolve_flush_secs(requested: usize) -> usize {
     }
 }
 
+const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// `TAGURU_REQUEST_TIMEOUT_SECS=0` reads as "no timeout" — its
+/// neighbor in the usage text documents 0 = off — but would wrap every
+/// request in a zero-length budget: anything that doesn't resolve on
+/// its very first poll (most writes, under real network latency)
+/// answers 408 while the server boots and logs as if healthy. Floor to
+/// 1, loudly; a huge value is how to effectively disable the budget.
+pub(crate) fn resolve_timeout_secs(requested: usize) -> usize {
+    if requested == 0 {
+        warn!(
+            "TAGURU_REQUEST_TIMEOUT_SECS=0 would 408 every request; using 1 \
+             (set a large value to effectively disable the budget)"
+        );
+        1
+    } else {
+        requested
+    }
+}
+
+/// The same trap for `TAGURU_MAX_BODY_BYTES=0`: by analogy with the
+/// WAL ceilings' "0 = off" it reads as "no cap", but a zero
+/// DefaultBodyLimit refuses every request that carries a body — all
+/// writes 413, no startup complaint. And a truly uncapped body would
+/// hand an allocation lever to whoever can reach the port, so 0 gets
+/// the default back instead, loudly.
+pub(crate) fn resolve_body_bytes(requested: usize) -> usize {
+    if requested == 0 {
+        warn!(
+            "TAGURU_MAX_BODY_BYTES=0 would refuse every write; using the 8 MiB default \
+             (set an explicit larger cap for bigger bodies)"
+        );
+        DEFAULT_MAX_BODY_BYTES
+    } else {
+        requested
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,5 +580,13 @@ mod tests {
     fn flush_secs_zero_is_floored_to_one_instead_of_panicking_the_flusher() {
         assert_eq!(resolve_flush_secs(0), 1);
         assert_eq!(resolve_flush_secs(5), 5);
+    }
+
+    #[test]
+    fn zero_timeout_and_body_cap_are_floored_loudly_not_obeyed() {
+        assert_eq!(resolve_timeout_secs(0), 1);
+        assert_eq!(resolve_timeout_secs(30), 30);
+        assert_eq!(resolve_body_bytes(0), DEFAULT_MAX_BODY_BYTES);
+        assert_eq!(resolve_body_bytes(1024), 1024);
     }
 }
