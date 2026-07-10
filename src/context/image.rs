@@ -289,6 +289,7 @@ impl Context {
             label_ids: HashMap::new(),
             source_ids: HashMap::new(),
             edge_ids: HashMap::new(),
+            attribution_ids: HashMap::new(),
             concept_index: EntryIndex::default(),
             label_index: EntryIndex::default(),
             dice_floor: None,
@@ -307,7 +308,7 @@ impl Context {
         self.index_aliases()?;
         self.index_edges()?;
         self.validate_chains()?;
-        self.validate_attributions()?;
+        self.index_attributions()?;
         self.validate_locators()
     }
 
@@ -460,15 +461,23 @@ impl Context {
     /// place and leaves them behind as dead space in the append-only
     /// table.
     ///
+    /// While walking each chain — the one pass that already visits every
+    /// live attribution — this also builds the derived `(edge, source)`
+    /// index the write path relies on. That folds the one-source-per-edge
+    /// invariant into validation: the write path never links a source
+    /// twice onto one edge, so a duplicate here is a tampered chain and is
+    /// rejected rather than silently collapsed in the index.
+    ///
     /// Also re-establishes the numeric guarantees the write path
     /// enforces but the flat buffer cannot: every consumed weight `sum`
     /// is finite (a tampered `NaN`/`Inf` would sort as the maximum under
     /// `total_cmp` and permanently occupy every ranked result), and the
     /// combined chain `count` does not overflow `u64` (which would wrap
     /// past the `edge.count` floor and silently defeat the check below).
-    fn validate_attributions(&self) -> Result<(), CorruptImage> {
+    fn index_attributions(&mut self) -> Result<(), CorruptImage> {
         let mut claimed = vec![false; self.attributions.len()];
-        for edge in &self.edges {
+        for edge_id in 0..self.edges.len() as u32 {
+            let edge = self.edges[edge_id as usize];
             if !edge.sum.is_finite() {
                 return Err(CorruptImage("edge weight sum is not finite"));
             }
@@ -476,7 +485,7 @@ impl Context {
             let mut tail = NIL;
             let mut chain_count: u64 = 0;
             while cursor != NIL {
-                let record = self
+                let record = *self
                     .attributions
                     .get(cursor as usize)
                     .ok_or(CorruptImage("attribution link is out of range"))?;
@@ -488,6 +497,13 @@ impl Context {
                 }
                 if !record.sum.is_finite() {
                     return Err(CorruptImage("attribution weight sum is not finite"));
+                }
+                if self
+                    .attribution_ids
+                    .insert((edge_id, record.source), cursor)
+                    .is_some()
+                {
+                    return Err(CorruptImage("one edge attributes a source twice"));
                 }
                 chain_count = chain_count
                     .checked_add(record.count)
@@ -543,7 +559,7 @@ fn checked_arena_str(arena: &[u8], offset: u32, len: u32) -> Result<&str, Corrup
 
 /// Counts one legacy edge's attribution chain length for the v5 migration
 /// in [`Context::from_bytes`]. Defensive rather than trusting: this runs
-/// before `validate_attributions` has ever looked at the chain, so a
+/// before `index_attributions` has ever looked at the chain, so a
 /// hostile or truncated pre-v5 image must not send it out of bounds or
 /// looping forever on a cycle.
 fn legacy_attribution_chain_len(

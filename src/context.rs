@@ -480,6 +480,14 @@ pub struct Context {
     /// into the existing edge instead of growing a parallel one. Not
     /// persisted.
     edge_ids: HashMap<(ConceptId, LabelId, ConceptId), EdgeId>,
+    /// Derived index: (edge, source) → that source's attribution record on
+    /// that edge. One entry per LIVE (on-chain) attribution, so the write
+    /// path finds — or rules out — an existing attribution in O(1) instead
+    /// of walking the edge's whole chain; without it, asserting S sources
+    /// onto one edge one at a time is O(S²). Retraction drops the entry as
+    /// it unlinks the record, keeping the map from pointing at dead space.
+    /// Not persisted — rebuilt from the chains on load.
+    attribution_ids: HashMap<(EdgeId, SourceId), AttributionId>,
     /// Derived entry index over concept spellings — normalized forms and
     /// a bigram posting index behind `resolve`. Not persisted.
     concept_index: EntryIndex,
@@ -734,12 +742,12 @@ impl Context {
         }
 
         // A sourced write appends an attribution record unless this source
-        // already attributes this exact edge.
+        // already attributes this exact edge — an O(1) index hit, not a
+        // walk of the edge's attribution chain.
         if let Some(name) = source {
             let already_attributed = existing_edge.is_some_and(|edge_id| {
                 self.source_ids.get(name).is_some_and(|&source_id| {
-                    self.attribution_chain(self.edges[edge_id as usize].first_attribution)
-                        .any(|(_, record)| record.source == source_id)
+                    self.attribution_ids.contains_key(&(edge_id, source_id))
                 })
             });
             if !already_attributed && !ids_left(self.attributions.len(), 1) {
@@ -779,15 +787,13 @@ impl Context {
         weight: f64,
         paragraph: Option<u32>,
     ) {
-        let mut cursor = self.edges[edge_id as usize].first_attribution;
-        while cursor != NIL {
-            let record = &mut self.attributions[cursor as usize];
-            if record.source == source_id {
-                record.sum += weight;
-                record.count += 1;
-                return;
-            }
-            cursor = record.next;
+        // The (edge, source) index finds this source's existing record in
+        // O(1); folding into it leaves the chain and the locator untouched.
+        if let Some(&existing) = self.attribution_ids.get(&(edge_id, source_id)) {
+            let record = &mut self.attributions[existing as usize];
+            record.sum += weight;
+            record.count += 1;
+            return;
         }
 
         let attribution_id = claim_id(self.attributions.len(), "attribution");
@@ -797,6 +803,8 @@ impl Context {
             count: 1,
             sum: weight,
         });
+        self.attribution_ids
+            .insert((edge_id, source_id), attribution_id);
         if let Some(paragraph) = paragraph {
             self.attribution_locators.push(AttributionLocatorRecord {
                 attribution: attribution_id,
@@ -1584,10 +1592,11 @@ impl Context {
     /// Rough resident-memory estimate: exact bytes for the arena and the
     /// five record tables, plus estimates for the derived indexes (the
     /// name → id maps own a second copy of every interned name, the
-    /// triple index costs its key and value, and each hash-map entry
-    /// carries bookkeeping overhead; the lowercase shadows mirror the
-    /// arena again). Intended for cache budgeting — deciding what stays
-    /// in memory — not accounting-grade measurement.
+    /// triple index and the (edge, source) attribution index each cost
+    /// their key and value, and each hash-map entry carries bookkeeping
+    /// overhead; the lowercase shadows mirror the arena again). Intended
+    /// for cache budgeting — deciding what stays in memory — not
+    /// accounting-grade measurement.
     pub fn footprint(&self) -> usize {
         let tables = self.arena.len()
             + self.concepts.len() * size_of::<ConceptRecord>()
@@ -1601,9 +1610,11 @@ impl Context {
         const MAP_ENTRY_OVERHEAD: usize = 48;
         let name_entries = self.concepts.len() + self.labels.len() + self.sources.len();
         let triple_entry = size_of::<(ConceptId, LabelId, ConceptId)>() + size_of::<EdgeId>();
+        let attribution_entry = size_of::<(EdgeId, SourceId)>() + size_of::<AttributionId>();
         let derived = self.arena.len() // owned keys of the name → id maps
             + name_entries * MAP_ENTRY_OVERHEAD
             + self.edges.len() * (triple_entry + MAP_ENTRY_OVERHEAD)
+            + self.attribution_ids.len() * (attribution_entry + MAP_ENTRY_OVERHEAD)
             + self.concept_index.footprint()
             + self.label_index.footprint();
 
@@ -1832,6 +1843,11 @@ impl Context {
             if previous != NIL {
                 self.attributions[previous as usize].next = next;
             }
+            // The record is off the chain and now dead space; drop its
+            // index entry too, or a later re-assertion from this source
+            // would fold into the unlinked record instead of appending a
+            // fresh one — resurrecting retracted weight.
+            self.attribution_ids.remove(&(edge_index as u32, source_id));
             touched += 1;
         }
         Some(touched)
@@ -3497,6 +3513,65 @@ mod tests {
         );
     }
 
+    /// The `(edge, source)` index the write path consults is derived, so
+    /// it must be rebuilt from the chains on load — and rebuilt to match
+    /// what retraction left behind: a source's unlinked record is dead
+    /// space and must NOT be indexed, while every live record must be. A
+    /// write after the reload proves both directions at once.
+    #[test]
+    fn the_attribution_index_is_rebuilt_correctly_after_a_reload() {
+        let mut context = Context::default();
+        context
+            .associate_from("x", "r", "y", 2.0, "A", None)
+            .unwrap();
+        context
+            .associate_from("x", "r", "y", 4.0, "B", None)
+            .unwrap();
+        // Retract A: its record leaves the chain as dead space. The edge
+        // keeps only B's 4.0 (count 1).
+        assert_eq!(context.retract_source("A"), Some(1));
+        assert_eq!(weight_between(&context, "x", "r", "y"), 4.0);
+
+        // Round-trip: the reloaded context rebuilds the index from the
+        // live chain alone — B in, A's dead record out.
+        let mut restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
+
+        // Re-assert B: the rebuilt index finds its live record, so this
+        // folds in (count 2) rather than appending a duplicate.
+        restored
+            .associate_from("x", "r", "y", 2.0, "B", None)
+            .unwrap();
+        // Re-assert A: A is absent from the rebuilt index (its old record
+        // is dead), so this appends a FRESH record (count 1) instead of
+        // resurrecting the retracted 2.0.
+        restored
+            .associate_from("x", "r", "y", 6.0, "A", None)
+            .unwrap();
+
+        // Edge: B's 4.0+2.0 plus A's fresh 6.0 = sum 12.0 over count 3 —
+        // an average of 4.0. A resurrected A record would have folded into
+        // dead space and left the edge at 3.0; a duplicated B would show B
+        // twice below.
+        assert_eq!(weight_between(&restored, "x", "r", "y"), 4.0);
+        assert_eq!(
+            restored.query(Some("x"), None, Some("y"))[0].attributions,
+            vec![
+                Attribution {
+                    source: "B".to_string(),
+                    weight: 6.0,
+                    count: 2,
+                    paragraph: None,
+                },
+                Attribution {
+                    source: "A".to_string(),
+                    weight: 6.0,
+                    count: 1,
+                    paragraph: None,
+                },
+            ]
+        );
+    }
+
     #[test]
     fn retract_source_subtracts_its_full_re_assertion_count() {
         // A source that re-asserted the same edge multiple times folds
@@ -4014,6 +4089,30 @@ mod tests {
         overflow[120..128].copy_from_slice(&u64::MAX.to_le_bytes());
         let error = Context::from_bytes(&overflow).unwrap_err();
         assert!(error.to_string().contains("overflows u64"), "{error}");
+    }
+
+    #[test]
+    fn from_bytes_rejects_one_edge_attributing_a_source_twice() {
+        // The write path keeps one attribution record per source per edge,
+        // so the derived (edge, source) index built during load can assume
+        // it. A tampered chain that links one source twice would collapse
+        // silently in that index; catch it instead. Same two-source layout
+        // as the overflow test: record 1's `source` u32 sits at 112..116;
+        // set it to record 0's source (0) so both claim the same one.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書2", None)
+            .unwrap();
+        let mut duplicate = context.to_bytes();
+        duplicate[112..116].copy_from_slice(&0u32.to_le_bytes());
+        let error = Context::from_bytes(&duplicate).unwrap_err();
+        assert!(
+            error.to_string().contains("attributes a source twice"),
+            "{error}"
+        );
     }
 
     #[test]
