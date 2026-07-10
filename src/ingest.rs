@@ -544,7 +544,9 @@ fn parse_op(batch: &mut Batch, line: &str, number: usize) -> Result<(), String> 
         let op: AliasLine = serde_json::from_value(value)
             .map_err(|error| format!("line {number}: alias: {error}"))?;
         check_size(number, "alias", &op.alias, MAX_NAME_BYTES)?;
+        check_nonempty(number, "alias", &op.alias)?;
         check_size(number, "canonical", &op.canonical, MAX_NAME_BYTES)?;
+        check_nonempty(number, "canonical", &op.canonical)?;
         let namespace = match op.kind {
             AliasKind::Concept => &mut batch.concepts,
             AliasKind::Label => &mut batch.labels,
@@ -960,6 +962,23 @@ mod tests {
             error.contains("line 3") && error.contains("passage"),
             "{error}"
         );
+    }
+
+    /// An empty alias spelling would containment-match every future
+    /// cue (`str::contains("")` is always true) — the import surface
+    /// must refuse it just like the HTTP one does.
+    #[test]
+    fn empty_alias_spellings_are_refused() {
+        for line in [
+            "{\"alias\": \"\", \"canonical\": \"x\", \"kind\": \"concept\"}",
+            "{\"alias\": \"a\", \"canonical\": \"\", \"kind\": \"label\"}",
+        ] {
+            let error = parse(&format!("{HEADER}\n{line}\n")).unwrap_err();
+            assert!(
+                error.contains("line 2") && error.contains("must not be empty"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

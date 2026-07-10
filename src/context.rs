@@ -2234,6 +2234,14 @@ impl EntryIndex {
         let mut exact = false;
         for (span_index, span) in self.spans.iter().enumerate() {
             let haystack = &self.arena[span.start..span.end];
+            // A zero-length spelling would containment-match every cue
+            // (`str::contains("")` is always true) and plant a phantom
+            // hit in every resolution. The write paths refuse empty
+            // spellings, but an image written before they did can
+            // still carry one — skip it rather than serve it.
+            if haystack.is_empty() {
+                continue;
+            }
             let (score, kind) = if haystack == needle {
                 exact = true;
                 (1.0, MatchKind::Exact)
@@ -3108,6 +3116,25 @@ mod tests {
 
         assert!(context.resolve("ぶどう").is_empty());
         assert!(context.resolve("").is_empty());
+    }
+
+    /// An empty spelling containment-matches every cue —
+    /// `str::contains("")` is always true. The HTTP and import surfaces
+    /// refuse empty aliases, but an image written before they did can
+    /// still carry one; resolution must treat it as inert, not as a
+    /// phantom hit on every query.
+    #[test]
+    fn an_empty_alias_spelling_never_resolves() {
+        let mut context = Context::default();
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        context.add_concept_alias("", "私").unwrap();
+
+        // Unrelated cues stay empty-handed, and a real cue must not
+        // grow a second resolution through the zero-length span.
+        assert!(context.resolve("ぶどう").is_empty());
+        let hits = context.resolve("りんご");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "りんご");
     }
 
     #[test]

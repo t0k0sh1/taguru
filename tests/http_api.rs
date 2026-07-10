@@ -1566,6 +1566,32 @@ fn empty_names_are_rejected_at_the_write_boundary() {
         );
     }
 
+    // An empty alias spelling is worse than unaddressable:
+    // `str::contains("")` is always true, so once interned it would
+    // containment-match every future cue as a phantom hit. Both roles,
+    // both namespaces.
+    for (name, request) in [
+        (
+            "empty concept alias",
+            json!({"concepts": {"": "x"}, "labels": {}}),
+        ),
+        (
+            "empty concept canonical",
+            json!({"concepts": {"a": ""}, "labels": {}}),
+        ),
+        (
+            "empty label alias",
+            json!({"concepts": {}, "labels": {"": "x"}}),
+        ),
+        (
+            "empty label canonical",
+            json!({"concepts": {}, "labels": {"l": ""}}),
+        ),
+    ] {
+        let (status, body) = server.call("POST", "/contexts/sake/aliases", Some(request));
+        assert_eq!(status, 400, "{name}: {body}");
+    }
+
     // An omitted source is the ordinary unsourced-association case,
     // not a missing name — it must NOT be swept up by the same check.
     server.ok(

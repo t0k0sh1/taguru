@@ -913,6 +913,14 @@ pub async fn add_aliases(
                 ) {
                     return refusal;
                 }
+                // An empty spelling is worse than an unaddressable
+                // name: `str::contains("")` is always true, so a
+                // zero-length alias would containment-match every cue
+                // and plant a phantom hit in every resolution from
+                // then on.
+                if let Some(refusal) = empty(&format!("a {namespace} {role}"), value, started_at) {
+                    return refusal;
+                }
             }
         }
     }
