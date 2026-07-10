@@ -68,11 +68,9 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
         serde_json::to_writer(&mut buffer, &record)?;
         buffer.push(b'\n');
     }
-    // Creating the log adds an entry to the parent directory's own
-    // data: without syncing the directory too, power loss can drop the
-    // whole file even though its contents were fsynced — the same rule
-    // `write_atomic` follows for renames. `create_new` tells the two
-    // cases apart in the open itself.
+    // `create_new` tells "we made the file" from "it was already there"
+    // in the open itself — the distinction the directory sync below turns
+    // on.
     let (mut file, created) = match fs::OpenOptions::new()
         .create_new(true)
         .append(true)
@@ -84,25 +82,31 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
         }
         Err(error) => return Err(error),
     };
+    // A freshly created file adds an entry to the parent directory's own
+    // data: without syncing the directory too, power loss can drop the
+    // whole file even though its contents were fsynced — the same rule
+    // `write_atomic` follows for renames. Sync it right after the create,
+    // before any content, and if that sync fails remove the file: a
+    // lingering file must never outlive its durability, because the next
+    // append finds it via the `AlreadyExists` path above and does NOT
+    // sync the directory again. (Deferring this sync until after the
+    // content write — tied to the same `and_then` chain — let a create
+    // whose content sync then failed leave an un-synced file that every
+    // later append skipped forever.)
+    if created && let Err(error) = crate::registry::fsync_parent_dir(path) {
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
     let length_before = file.metadata()?.len();
-    let outcome = file
-        .write_all(&buffer)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| {
-            if created {
-                crate::registry::fsync_parent_dir(path)
-            } else {
-                Ok(())
-            }
-        });
-    if let Err(error) = outcome {
+    if let Err(error) = file.write_all(&buffer).and_then(|()| file.sync_all()) {
         // The caller refuses the write on `Err` and hands the same seq
         // numbers to the next batch — so any bytes that DID land here
         // would later replay as ghost records beside the real ones,
-        // double-applying their seqs. Put the log back exactly as it
-        // was. Best effort: if even this fails the disk is failing
-        // twice over, and replay's torn-tail rule still absorbs the
-        // common partial-append shape.
+        // double-applying their seqs. Put the log back exactly as it was
+        // (the directory entry is already durable, so an emptied new file
+        // is a harmless, replay-inert leftover). Best effort: if even
+        // this fails the disk is failing twice over, and replay's
+        // torn-tail rule still absorbs the common partial-append shape.
         let _ = file.set_len(length_before);
         return Err(error);
     }
