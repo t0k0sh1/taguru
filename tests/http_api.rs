@@ -2037,6 +2037,48 @@ fn lookalike_candidates_carry_the_evidence_to_tell_them_apart() {
 }
 
 #[test]
+fn resolve_caps_its_candidate_flood_like_every_other_match_endpoint() {
+    let server = Server::start("resolve-cap");
+    server.ok("PUT", "/contexts/flood", Some(json!({"description": "d"})));
+
+    // 1001 concepts all containing the cue: uncapped, resolve would
+    // serve every one of them in a single response body.
+    let batch: Vec<Value> = (0..1001)
+        .map(|i| {
+            json!({
+                "subject": format!("concept{i:04}"),
+                "label": "は",
+                "object": "x",
+                "weight": 1.0
+            })
+        })
+        .collect();
+    server.ok("POST", "/contexts/flood/associations", Some(json!(batch)));
+
+    // The cue is more than half of every stored spelling, so entry is
+    // confident-lexical — no semantic tier, hermetic here. The ceiling
+    // holds even with no limit in the request.
+    let served = server.ok(
+        "POST",
+        "/contexts/flood/resolve",
+        Some(json!({"cue": "concept"})),
+    );
+    assert_eq!(
+        served.as_array().unwrap().len(),
+        1000,
+        "the default is the ceiling, not the whole vocabulary"
+    );
+
+    // An explicit limit picks the page size; best-first survives.
+    let five = server.ok(
+        "POST",
+        "/contexts/flood/resolve",
+        Some(json!({"cue": "concept", "limit": 5})),
+    );
+    assert_eq!(five.as_array().unwrap().len(), 5, "{five}");
+}
+
+#[test]
 fn search_outcomes_and_resolve_tiers_land_in_the_metrics_text() {
     let server = Server::start("searchmetrics");
     server.ok("PUT", "/contexts/sm", Some(json!({"description": "d"})));

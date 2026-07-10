@@ -1648,6 +1648,12 @@ pub struct ResolveRequest {
     pub dice_floor: Option<f64>,
     /// One-call override of the semantic-tier floor, same story.
     pub semantic_floor: Option<f32>,
+    /// Candidate-count cap, clamped to the shared ceiling like every
+    /// other match endpoint. Omitted means the ceiling itself — resolve
+    /// historically served every qualifying candidate, so the default
+    /// only stops the flood a short cue raises against a large
+    /// vocabulary (every name containing it, in one response body).
+    pub limit: Option<usize>,
 }
 
 /// One resolve candidate plus the tier that produced it. Lexical scores
@@ -1717,6 +1723,28 @@ fn merge_tiers(lexical: Vec<Resolution>, semantic: Vec<(String, f32)>) -> Vec<Ti
     merged
 }
 
+/// Enforces the resolve cap after the tiers merge. Semantic candidates
+/// sit at the tail, appended precisely because the lexical tier was
+/// weak — so overflow comes out of the lexical segment's own tail,
+/// never out of the semantic candidates the fallback just earned. Only
+/// a limit smaller than the semantic tier itself cuts into it (from
+/// its tail too; both tiers arrive best-first).
+fn trim_to_limit(mut served: Vec<TieredResolution>, limit: usize) -> Vec<TieredResolution> {
+    let overflow = served.len().saturating_sub(limit);
+    if overflow == 0 {
+        return served;
+    }
+    let semantic = served
+        .iter()
+        .rev()
+        .take_while(|candidate| candidate.tier == "semantic")
+        .count();
+    let lexical = served.len() - semantic;
+    served.drain(lexical - overflow.min(lexical)..lexical);
+    served.truncate(limit);
+    served
+}
+
 /// How many resolve candidates carry their gloss. The head of the list
 /// is where a caller weighs lookalikes against each other; decorating a
 /// long fuzzy tail would only bloat the response it has already
@@ -1771,7 +1799,8 @@ fn resolve_with_fallback(
     labels: bool,
     started_at: Instant,
 ) -> Response {
-    let lexical = match state.read_context(name, |context| match (labels, request.dice_floor) {
+    let limit = clamp(request.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    let mut lexical = match state.read_context(name, |context| match (labels, request.dice_floor) {
         (false, Some(floor)) => context.resolve_with_floor(&request.cue, floor),
         (false, None) => context.resolve(&request.cue),
         (true, Some(floor)) => context.resolve_label_with_floor(&request.cue, floor),
@@ -1780,6 +1809,12 @@ fn resolve_with_fallback(
         Ok(result) => result,
         Err(failure) => return access_error(state, failure, name, started_at),
     };
+    // Resolutions arrive best-first, so bounding the flood right here
+    // keeps the strongest candidates and spares everything downstream
+    // (the semantic dedup scan, gloss reads, serialization) the
+    // pathological tail. The confidence probe below reads only the
+    // first entry, which truncation never touches.
+    lexical.truncate(limit);
     let confident = lexical
         .first()
         .is_some_and(|best| best.score >= LEXICAL_CONFIDENCE);
@@ -1791,7 +1826,7 @@ fn resolve_with_fallback(
             Err(response) => return response,
         }
     };
-    let served = attach_glosses(state, name, labels, served);
+    let served = attach_glosses(state, name, labels, trim_to_limit(served, limit));
     let op = if labels {
         SearchOp::ResolveLabel
     } else {
@@ -2122,6 +2157,46 @@ mod tests {
             resolve_tier_of(&[candidate(0.11, "lexical")]),
             ResolveTier::WeakLexical
         );
+    }
+
+    #[test]
+    fn trim_to_limit_spends_overflow_on_the_lexical_tail_never_the_semantic_one() {
+        let candidate = |name: &str, tier: &'static str| TieredResolution {
+            name: name.to_string(),
+            score: 0.2,
+            tier,
+            kind: None,
+            gloss: None,
+        };
+        let names = |served: &[TieredResolution]| -> Vec<String> {
+            served.iter().map(|c| c.name.clone()).collect()
+        };
+
+        // Overflow comes out of the weak lexical tail; the semantic
+        // candidates the fallback earned all survive.
+        let served = vec![
+            candidate("l1", "lexical"),
+            candidate("l2", "lexical"),
+            candidate("l3", "lexical"),
+            candidate("s1", "semantic"),
+            candidate("s2", "semantic"),
+        ];
+        assert_eq!(names(&trim_to_limit(served, 3)), vec!["l1", "s1", "s2"]);
+
+        // A limit under the semantic tier itself: the lexical segment
+        // goes first, then semantic trims from its own (best-first)
+        // tail.
+        let served = vec![
+            candidate("l1", "lexical"),
+            candidate("s1", "semantic"),
+            candidate("s2", "semantic"),
+            candidate("s3", "semantic"),
+        ];
+        assert_eq!(names(&trim_to_limit(served, 2)), vec!["s1", "s2"]);
+
+        // Under the limit nothing moves.
+        let served = vec![candidate("l1", "lexical"), candidate("s1", "semantic")];
+        assert_eq!(names(&trim_to_limit(served, 2)), vec!["l1", "s1"]);
     }
 
     #[test]

@@ -334,7 +334,8 @@ pub fn tool_definitions() -> Vec<Value> {
                     "context": context,
                     "cue": { "type": "string" },
                     "dice_floor": { "type": "number", "description": "one-call override of the fuzzy floor" },
-                    "semantic_floor": { "type": "number", "description": "one-call override of the semantic floor" }
+                    "semantic_floor": { "type": "number", "description": "one-call override of the semantic floor" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "max candidates (default/ceiling 1000)" }
                 }),
                 &["context", "cue"],
             ),
@@ -347,7 +348,8 @@ pub fn tool_definitions() -> Vec<Value> {
                     "context": context,
                     "cue": { "type": "string" },
                     "dice_floor": { "type": "number", "description": "one-call override of the fuzzy floor" },
-                    "semantic_floor": { "type": "number", "description": "one-call override of the semantic floor" }
+                    "semantic_floor": { "type": "number", "description": "one-call override of the semantic floor" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "max candidates (default/ceiling 1000)" }
                 }),
                 &["context", "cue"],
             ),
@@ -590,12 +592,18 @@ pub fn route_tool(
         "resolve" => (
             "POST",
             format!("{}/resolve", context_path("context")?),
-            Some(pick(arguments, &["cue", "dice_floor", "semantic_floor"])),
+            Some(pick(
+                arguments,
+                &["cue", "dice_floor", "semantic_floor", "limit"],
+            )),
         ),
         "resolve_label" => (
             "POST",
             format!("{}/resolve_label", context_path("context")?),
-            Some(pick(arguments, &["cue", "dice_floor", "semantic_floor"])),
+            Some(pick(
+                arguments,
+                &["cue", "dice_floor", "semantic_floor", "limit"],
+            )),
         ),
         "describe" => (
             "POST",
