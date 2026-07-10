@@ -59,6 +59,13 @@ struct WalRecord<Op> {
 /// serialize appends per log (the context's entry lock), so only
 /// crashes race this function, never other appenders.
 pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> io::Result<u64> {
+    // Nothing to append is nothing to sync: an empty batch would otherwise
+    // create the file (or open it) and fsync it — and its parent directory
+    // on first touch — to land zero bytes. Return before any I/O; the next
+    // real append creates and syncs the file itself.
+    if ops.is_empty() {
+        return Ok(0);
+    }
     let mut buffer = Vec::new();
     for (offset, op) in ops.iter().enumerate() {
         let record = WalRecord {
@@ -343,6 +350,21 @@ mod tests {
         let (ops, top) = replay::<WalOp>(&path, 5).unwrap();
         assert!(ops.is_empty());
         assert_eq!(top, 5);
+    }
+
+    #[test]
+    fn an_empty_batch_creates_no_file_and_appends_nothing() {
+        let path = scratch_wal("empty");
+        // Nothing to append: no bytes, and no file to create or sync.
+        assert_eq!(append_batch::<WalOp>(&path, 1, &[]).unwrap(), 0);
+        assert!(!path.exists(), "an empty batch must not create the log");
+
+        // The next real append still creates and syncs the file itself,
+        // and replays cleanly.
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        let (ops, top) = replay(&path, 0).unwrap();
+        assert_eq!(ops.iter().map(subject_of).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(top, 1);
     }
 
     #[test]
