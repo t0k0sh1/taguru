@@ -3223,15 +3223,20 @@ const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x1_0000_01b3;
 
 /// The terms of one passage or query: [`text_terms`] over the
-/// normalized text, plus a word term per piece of every camelCase run
-/// in the RAW text — normalization lowercases away exactly the
-/// boundaries that let `state` reach `AppState`, so the split must
-/// read the original. One function serves both sides of the search,
-/// so they cannot disagree about what a term is.
+/// normalized text, plus a word term per piece of every camelCase run.
+/// The split reads an NFKC-folded but NOT lowercased view of the input:
+/// lowercasing would erase the very case boundaries that let `state`
+/// reach `AppState`, while the width fold keeps a full-width `Ａ` — which
+/// the normalized whole-word term already folds to ASCII — in the same
+/// run as its ASCII neighbors instead of breaking it (so `ＡpplePie`
+/// yields the `apple` piece, matching a plain `apple` cue). One function
+/// serves both sides of the search, so they cannot disagree about what a
+/// term is.
 pub(crate) fn passage_terms(raw: &str) -> Vec<u64> {
+    use unicode_normalization::UnicodeNormalization;
     let mut terms = text_terms(&taguru::context::normalize_entry(raw));
     let mut run: Vec<char> = Vec::new();
-    for ch in raw.chars() {
+    for ch in raw.nfkc() {
         if ch.is_ascii_alphanumeric() {
             run.push(ch);
         } else {
@@ -4873,6 +4878,14 @@ mod tests {
         let terms = passage_terms("U64Max");
         assert!(terms.contains(&word("u64")));
         assert!(terms.contains(&word("max")));
+
+        // A full-width letter folds to ASCII and stays IN the run, so its
+        // camelCase pieces match the plain-ASCII words. Before the NFKC
+        // fold the full-width 'Ａ' broke the run, the piece read "pple",
+        // and a plain "apple" cue never matched.
+        let terms = passage_terms("ＡpplePie");
+        assert!(terms.contains(&word("apple")));
+        assert!(terms.contains(&word("pie")));
 
         // Runs with no case boundary add nothing: snake_case already
         // splits at the underscore, ALLCAPS and lowercase stay whole.
