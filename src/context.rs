@@ -549,6 +549,15 @@ impl Context {
     /// sign. Nothing about the mechanism treats agreement and contradiction
     /// differently; both are just addition to the underlying sum.
     ///
+    /// # Panics
+    ///
+    /// Panics when `weight` is not finite. A NaN sum would own the top
+    /// gloss slot forever (`f64::total_cmp` sorts it as the maximum)
+    /// and the image would stop round-tripping — `from_bytes` rejects
+    /// non-finite sums as corruption — so the write boundary refuses
+    /// the value outright, exactly as the HTTP layer does before ever
+    /// calling in.
+    ///
     /// # Errors
     ///
     /// Returns [`ContextFull`] when the write would need a record or name
@@ -595,6 +604,10 @@ impl Context {
     /// re-assertion of the same source cannot change where the first one
     /// pointed.
     ///
+    /// # Panics
+    ///
+    /// Panics on a non-finite `weight`, as [`Context::associate`] does.
+    ///
     /// # Errors
     ///
     /// Returns [`ContextFull`] exactly as [`Context::associate`] does; a
@@ -628,6 +641,17 @@ impl Context {
         source: Option<String>,
         paragraph: Option<u32>,
     ) -> Result<(), ContextFull> {
+        // A non-finite weight is a contract violation, not data: one NaN
+        // sum sorts as the maximum under `total_cmp` and owns the top
+        // gloss slot forever, and `from_bytes` (rightly) refuses the
+        // resulting image as corrupt. The HTTP and import layers
+        // validate before calling in; a library caller meets the same
+        // rule here. (WAL replay cannot reach this: JSON has no literal
+        // for NaN/Infinity and serde_json rejects out-of-range floats.)
+        assert!(
+            weight.is_finite(),
+            "association weight must be finite, got {weight}"
+        );
         self.ensure_room(&subject, &label, &object, source.as_deref())?;
 
         // Infallible from here on: every record and arena byte this write
@@ -3043,6 +3067,16 @@ mod tests {
         assert_eq!(top_two.len(), 2);
         assert_eq!(top_two[0].association.object, "a");
         assert_eq!(top_two[1].association.object, "b");
+    }
+
+    /// Non-finite weights corrupt ranking (`total_cmp` sorts NaN as
+    /// the maximum) and break the to_bytes/from_bytes round trip, so
+    /// the write boundary refuses them outright.
+    #[test]
+    #[should_panic(expected = "must be finite")]
+    fn a_non_finite_weight_is_refused_at_the_boundary() {
+        let mut context = Context::default();
+        let _ = context.associate("A", "rel", "B", f64::NAN);
     }
 
     /// A self-loop sits in both the outgoing and the incoming chain of
