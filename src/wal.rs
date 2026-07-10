@@ -109,12 +109,17 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
         // The caller refuses the write on `Err` and hands the same seq
         // numbers to the next batch — so any bytes that DID land here
         // would later replay as ghost records beside the real ones,
-        // double-applying their seqs. Put the log back exactly as it was
-        // (the directory entry is already durable, so an emptied new file
-        // is a harmless, replay-inert leftover). Best effort: if even
-        // this fails the disk is failing twice over, and replay's
-        // torn-tail rule still absorbs the common partial-append shape.
-        let _ = file.set_len(length_before);
+        // double-applying their seqs. And a failed sync leaves the
+        // on-disk state UNKNOWN: the batch may sit there complete, and
+        // a complete batch is not a torn tail, so replay would accept
+        // it. Put the log back exactly as it was and sync the truncate
+        // too — left unsynced, the rollback itself could be lost to a
+        // crash and resurrect the refused batch. (The directory entry
+        // is already durable, so an emptied new file is a harmless,
+        // replay-inert leftover.) Best effort: if even this fails the
+        // disk is failing twice over, and replay's torn-tail rule
+        // still absorbs the common partial-append shape.
+        let _ = file.set_len(length_before).and_then(|()| file.sync_all());
         return Err(error);
     }
     Ok(buffer.len() as u64)
