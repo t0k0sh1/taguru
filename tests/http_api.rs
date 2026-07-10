@@ -1089,8 +1089,8 @@ fn full_retrieval_loop_over_http() {
         "/contexts/sake/activate",
         Some(json!({"origins": ["青嶺酒造"], "limit": 3})),
     );
-    assert_eq!(ranked[0]["association"]["label"], json!("杜氏"));
-    assert_eq!(ranked[0]["path"], json!(["青嶺酒造"]));
+    assert_eq!(ranked["matches"][0]["association"]["label"], json!("杜氏"));
+    assert_eq!(ranked["matches"][0]["path"], json!(["青嶺酒造"]));
     let walked = server.ok(
         "POST",
         "/contexts/sake/explore",
@@ -2968,14 +2968,15 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
         "explore's nested association must resolve sections too: {brewer_hop}"
     );
 
-    // activate returns a bare array (no `matches` wrapper) — check the
-    // same resolution reaches its nested association shape too.
+    // activate nests associations the same one level deep
+    // (matches[].association) — check the same resolution reaches that
+    // shape too.
     let activated = server.ok(
         "POST",
         "/contexts/sake/activate",
         Some(json!({"origins": ["青嶺酒造"], "limit": 10})),
     );
-    let brewer_activation = activated
+    let brewer_activation = activated["matches"]
         .as_array()
         .unwrap()
         .iter()

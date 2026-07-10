@@ -184,6 +184,16 @@ fn pick_with_alias(arguments: &Value, keys: &[&str], canonical: &str, alias: &st
     body
 }
 
+/// Schema property `description` policy (#51): add one when a caller
+/// cannot get the fact from the property's name, its own `type`, or
+/// the tool's own `description` — a non-obvious default/ceiling
+/// applied on omission, an `additionalProperties` map's key → value
+/// shape, a deprecated-alias relationship, or a divergence from a
+/// same-named property on a sibling tool (e.g. create vs update
+/// semantics). Skip it when it would only restate the type or repeat
+/// what the tool description already says. The same property, same
+/// meaning, on two tools gets the same text; a real behavioral
+/// difference gets stated, not silently dropped.
 pub fn tool_definitions() -> Vec<Value> {
     let context = json!({ "type": "string", "description": "Context name (from list_contexts)" });
     let tools = vec![
@@ -214,14 +224,14 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "update_context",
-            "Update description / pinned / dice_floor.",
+            "Update description / pinned / dice_floor / semantic_floor.",
             object_schema(
                 json!({
                     "name": { "type": "string" },
                     "description": { "type": "string" },
-                    "pinned": { "type": "boolean" },
-                    "dice_floor": { "type": "number" },
-                    "semantic_floor": { "type": "number" }
+                    "pinned": { "type": "boolean", "description": "omit to leave unchanged" },
+                    "dice_floor": { "type": "number", "description": "omit to leave unchanged" },
+                    "semantic_floor": { "type": "number", "description": "omit to leave unchanged" }
                 }),
                 &["name"],
             ),
@@ -247,7 +257,7 @@ pub fn tool_definitions() -> Vec<Value> {
                                 "object": { "type": "string" },
                                 "weight": { "type": "number" },
                                 "source": { "type": "string" },
-                                "paragraph": { "type": "integer" }
+                                "paragraph": { "type": "integer", "description": "zero-based paragraph position" }
                             },
                             "required": ["subject", "label", "object", "weight"]
                         }
@@ -262,7 +272,7 @@ pub fn tool_definitions() -> Vec<Value> {
             object_schema(
                 json!({
                     "context": context,
-                    "passages": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "passages": { "type": "object", "additionalProperties": { "type": "string" }, "description": "source → text" },
                     "questions": {
                         "type": "object",
                         "additionalProperties": {
@@ -331,8 +341,8 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "cue": { "type": "string" },
-                    "dice_floor": { "type": "number" },
-                    "semantic_floor": { "type": "number" }
+                    "dice_floor": { "type": "number", "description": "one-call override of the fuzzy floor" },
+                    "semantic_floor": { "type": "number", "description": "one-call override of the semantic floor" }
                 }),
                 &["context", "cue"],
             ),
@@ -351,10 +361,10 @@ pub fn tool_definitions() -> Vec<Value> {
             object_schema(
                 json!({
                     "context": context,
-                    "subject": { "type": ["string", "array"], "description": "string or array" },
-                    "label": { "type": ["string", "array"], "description": "string or array" },
-                    "object": { "type": ["string", "array"], "description": "string or array" },
-                    "limit": { "type": "integer", "minimum": 0 }
+                    "subject": { "type": ["string", "array"] },
+                    "label": { "type": ["string", "array"] },
+                    "object": { "type": ["string", "array"] },
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
                 }),
                 &["context"],
             ),
@@ -366,7 +376,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "cue": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 0 }
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
                 }),
                 &["context", "cue"],
             ),
@@ -386,13 +396,13 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "explore",
-            "Exhaustive structural walk with hop distances, for unranked neighborhood views. limit defaults to 100 (max 1000); truncation keeps the nearest hops (watch total).",
+            "Exhaustive structural walk with hop distances, for unranked neighborhood views. Truncation keeps the nearest hops (watch total).",
             object_schema(
                 json!({
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
-                    "max_depth": { "type": "integer" },
-                    "limit": { "type": "integer", "minimum": 0 }
+                    "max_depth": { "type": "integer", "description": "hop ceiling; default and max 10" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
                 }),
                 &["context", "origins"],
             ),
@@ -414,7 +424,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "concepts": { "type": "object", "additionalProperties": { "type": "string" }, "description": "alias → canonical" },
-                    "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+                    "labels": { "type": "object", "additionalProperties": { "type": "string" }, "description": "alias → canonical" }
                 }),
                 &["context"],
             ),
@@ -426,7 +436,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "concepts": { "type": "array", "items": { "type": "string" }, "description": "alias spellings to withdraw" },
-                    "labels": { "type": "array", "items": { "type": "string" } }
+                    "labels": { "type": "array", "items": { "type": "string" }, "description": "alias spellings to withdraw" }
                 }),
                 &["context"],
             ),
@@ -493,7 +503,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
-                    "limit": { "type": "integer", "minimum": 0 }
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
                 }),
                 &["context", "origins"],
             ),

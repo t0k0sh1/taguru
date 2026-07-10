@@ -125,7 +125,7 @@ fn main() {
     // the once-asserted ones, and 2-hop facts trail with decayed strength —
     // weights and distance both finally matter at read time.
     println!("\n=== activate([\"10大脅威選考会\"], decay 0.5, limit 6) ===");
-    for activation in context.activate(&["10大脅威選考会"], 0.5, 6) {
+    for activation in context.activate(&["10大脅威選考会"], 0.5, 6).1 {
         println!(
             "  [{:.4}] {} -({})-> {}",
             activation.strength,
@@ -146,7 +146,7 @@ fn main() {
 
     let anchor = candidates[0].name.as_str();
     println!("\n=== resolve→activate: activate([\"{anchor}\"], 0.5, 3) ===");
-    for activation in context.activate(&[anchor], 0.5, 3) {
+    for activation in context.activate(&[anchor], 0.5, 3).1 {
         println!(
             "  [{:.4}] {} -({})-> {}",
             activation.strength,

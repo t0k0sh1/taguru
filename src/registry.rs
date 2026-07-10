@@ -1518,7 +1518,7 @@ impl AppState {
         // store throughout — an index built from a handle that predates
         // an eviction would silently hide writes that landed in the
         // freshly reloaded store until the next rebuild.
-        let _fence = entry.read_unless_deleted()?;
+        let fence = entry.read_unless_deleted()?;
         let store = match self.entry_passages(&entry, &file_stem(name)) {
             Ok(store) => store,
             Err(error) => return Some(Err(error)),
@@ -1590,7 +1590,11 @@ impl AppState {
         };
 
         // Semantic lane: sweep the paragraph vectors with the
-        // pre-embedded query.
+        // pre-embedded query, then drop candidates below the same floor
+        // semantic_resolve applies to its own cosine matches — context
+        // setting beats the server default (`fence` is already this
+        // entry's read lock, taken above; search_passages has no
+        // one-call override to slot in ahead of it).
         let semantic: Vec<(String, u32, u64, f32)> = match &cue {
             Some(cue) => {
                 let vectors = self.entry_passage_vectors(&entry, &file_stem(name));
@@ -1602,9 +1606,15 @@ impl AppState {
                 if vectors.is_empty() || !model_matches {
                     Vec::new()
                 } else {
+                    let floor = fence
+                        .meta
+                        .semantic_floor
+                        .unwrap_or(self.0.default_semantic_floor)
+                        .clamp(0.0, 1.0);
                     vectors
                         .top_matches(cue, pool)
                         .into_iter()
+                        .filter(|&(_, score)| score >= floor)
                         .map(|(key, score)| (key.source.clone(), key.index, key.hash, score))
                         .collect()
                 }
@@ -6131,6 +6141,80 @@ mod tests {
         assert_eq!(rank, 1);
         assert_eq!(hits[0].score, bm25_score);
         assert!(hits[0].score > 0.1, "raw BM25, not a tiny RRF quotient");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_passages_vector_lane_drops_candidates_below_the_default_semantic_floor() {
+        // みかん×りんご sits at cosine 0.28 — under the 0.35 default
+        // floor — and the query shares no bigram with the stored text,
+        // so a fusion that ignored the floor would surface a
+        // near-irrelevant paragraph on the vector lane alone.
+        let dir = scratch_dir("passages-floor-default");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+
+        let hits = state
+            .search_passages("fruit", "みかん", 3)
+            .unwrap()
+            .unwrap();
+        assert!(
+            hits.is_empty(),
+            "cosine 0.28 sits under the default floor: {hits:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_passages_vector_lane_honors_a_lowered_context_semantic_floor() {
+        // Same 0.28 cosine as the default-floor test, but the context's
+        // floor is lowered under it: the candidate must now clear the
+        // vector lane and contribute its RRF term, same as
+        // semantic_resolve honors the context setting over the server
+        // default.
+        let dir = scratch_dir("passages-floor-context");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .update_meta("fruit", None, None, None, Some(0.2))
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages("fruit", "みかん", 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].source, "doc-a");
+        let (rank, cosine) = hits[0].vector.expect("cleared the lowered floor");
+        assert_eq!(rank, 1);
+        assert!((cosine - 0.28).abs() < 1e-6, "{cosine}");
 
         let _ = fs::remove_dir_all(dir);
     }
