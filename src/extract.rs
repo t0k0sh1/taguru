@@ -1457,6 +1457,7 @@ mod tests {
             vec![taguru::context::Attribution {
                 source: "docs/e2e.md".to_string(),
                 weight: 1.0,
+                count: 1,
                 paragraph: Some(1),
             }]
         );

@@ -698,7 +698,11 @@ fn page(mut matches: Vec<Association>, limit: Option<usize>) -> (usize, Vec<Asso
 #[derive(Serialize)]
 pub struct AttributionOut {
     pub source: String,
+    /// This source's raw cumulative contribution, NOT averaged — divide
+    /// by `count` for its per-assertion average. Contrast with the
+    /// enclosing [`AssociationOut::weight`], which is averaged.
     pub weight: f64,
+    pub count: u64,
     pub paragraph: Option<u32>,
     pub section: Option<String>,
 }
@@ -710,7 +714,10 @@ pub struct AssociationOut {
     pub subject: String,
     pub label: String,
     pub object: String,
+    /// The averaged weight per assertion (`sum / count`) — unlike
+    /// [`AttributionOut::weight`], which is each source's raw sum.
     pub weight: f64,
+    pub count: u64,
     pub attributions: Vec<AttributionOut>,
 }
 
@@ -725,6 +732,7 @@ fn attribution_out(
     AttributionOut {
         source: attribution.source,
         weight: attribution.weight,
+        count: attribution.count,
         paragraph: attribution.paragraph,
         section,
     }
@@ -739,6 +747,7 @@ fn association_out(
         label: association.label,
         object: association.object,
         weight: association.weight,
+        count: association.count,
         attributions: association
             .attributions
             .into_iter()
@@ -2008,6 +2017,7 @@ mod tests {
             label: "l".to_string(),
             object: object.to_string(),
             weight,
+            count: 1,
             attributions: Vec::new(),
         }
     }

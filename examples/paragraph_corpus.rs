@@ -32,9 +32,10 @@ use taguru::context::Context;
 // - Negated statements ("大量生産を行わない", "口を出さない") become the
 //   affirmative label with a NEGATIVE weight.
 // - Each assertion carries its paragraph as the source, so the same fact
-//   stated by two paragraphs (仕込み水, 第2・第5段落) accumulates to weight
-//   2.0 with two attributions — corroboration, visibly distinct from one
-//   emphatic assertion.
+//   stated by two paragraphs (仕込み水, 第2・第5段落) lands as weight 1.0
+//   (the corroborated average) with count 2 and two attributions —
+//   corroboration, visibly distinct from one emphatic assertion, without
+//   weight alone conflating the two.
 // - Implicit membership must be made explicit: 「杜氏の高瀬」 appears inside
 //   the brewery's own paragraphs, but until 青嶺酒造-杜氏->高瀬 was asserted,
 //   the 高瀬・蔵人 cluster was an island unreachable from the brewery. This
@@ -203,12 +204,13 @@ fn main() {
     for activation in context.activate(&["青嶺酒造"], 0.5, 12).1 {
         let a = &activation.association;
         println!(
-            "  [{:.4}] {} -({})-> {}  weight {:?}  出典[{}]",
+            "  [{:.4}] {} -({})-> {}  weight {:?} (count {})  出典[{}]",
             activation.strength,
             a.subject,
             a.label,
             a.object,
             a.weight,
+            a.count,
             sources(&a.attributions)
         );
     }

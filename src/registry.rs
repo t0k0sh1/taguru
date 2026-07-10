@@ -4417,16 +4417,19 @@ mod tests {
         }
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        let weight = state
+        let (weight, count) = state
             .read_context("sake", |context| {
-                context.query(Some("青嶺酒造"), Some("代表銘柄"), Some("青嶺"))[0].weight
+                let assoc = &context.query(Some("青嶺酒造"), Some("代表銘柄"), Some("青嶺"))[0];
+                (assoc.weight, assoc.count)
             })
             .map_err(|_| "read")
             .unwrap();
-        // associate accumulates: a wrongly replayed record would make
-        // this 2.0 — the silent corruption the watermark exists to
+        // A wrongly replayed record would double both sum and count,
+        // leaving their ratio — weight — unchanged at 1.0; count is what
+        // actually catches the double-apply the watermark exists to
         // prevent.
         assert_eq!(weight, 1.0);
+        assert_eq!(count, 1);
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use super::{
-    AliasRecord, AttributionId, AttributionLocatorRecord, AttributionRecord, ConceptRecord,
-    Context, CorruptImage, EdgeId, EdgeRecord, EntryIndex, LabelRecord, NIL, SourceRecord,
+    AliasRecord, AttributionId, AttributionLocatorRecord, AttributionRecord, ConceptId,
+    ConceptRecord, Context, CorruptImage, EdgeId, EdgeRecord, EntryIndex, LabelId, LabelRecord,
+    NIL, SourceId, SourceRecord,
 };
 
 // The persistence format depends on these exact widths. A field added to
@@ -34,10 +35,15 @@ const IMAGE_MAGIC: [u8; 8] = *b"TAGURUC\0";
 /// Version history: 1 = the original six sections; 2 adds the concept
 /// and label alias tables between the sources and the arena; 3 adds
 /// the u64 durability watermark to the header; 4 adds the sparse
-/// attribution-locator table between the label aliases and the arena.
-/// Older images still load (empty alias/locator tables, watermark 0);
+/// attribution-locator table between the label aliases and the arena;
+/// 5 splits `EdgeRecord`/`AttributionRecord`'s cumulative `weight` into
+/// a `(count, sum)` pair, growing the records to 48 and 24 bytes so the
+/// public `weight` can be derived as `sum / count` (see
+/// [`super::Association`]).
+/// Older images still load (empty alias/locator tables, watermark 0,
+/// legacy edge/attribution rows migrated with a synthesized `count`);
 /// writing always produces the current version.
-const IMAGE_VERSION: u32 = 4;
+const IMAGE_VERSION: u32 = 5;
 /// Magic + version + 4 bytes of padding (so what follows is 8-byte
 /// aligned) + the u64 durability watermark.
 const IMAGE_HEADER_SIZE: usize = 24;
@@ -86,6 +92,69 @@ impl Context {
         image
     }
 
+    /// Test-only counterpart to [`Context::to_bytes`] that writes the
+    /// pre-v5, `weight`-only edge/attribution shape and lets the section
+    /// list be trimmed to an older version. `to_bytes` always writes the
+    /// current version, so the version-compatibility tests need this to
+    /// build a genuine legacy image byte-for-byte instead of slicing
+    /// `to_bytes`'s output — which, since v5, has record widths a legacy
+    /// reader would misparse.
+    #[cfg(test)]
+    pub(super) fn to_bytes_as_version(&self, version: u32) -> Vec<u8> {
+        debug_assert!(
+            version < IMAGE_VERSION,
+            "to_bytes_as_version always writes the legacy, weight-only shape; \
+             version must predate it, or from_bytes will misparse the result"
+        );
+        let legacy_edges: Vec<LegacyEdgeRecord> = self
+            .edges
+            .iter()
+            .map(|edge| LegacyEdgeRecord {
+                subject: edge.subject,
+                label: edge.label,
+                object: edge.object,
+                next_outgoing: edge.next_outgoing,
+                next_incoming: edge.next_incoming,
+                next_labeled: edge.next_labeled,
+                first_attribution: edge.first_attribution,
+                last_attribution: edge.last_attribution,
+                weight: edge.sum,
+            })
+            .collect();
+        let legacy_attributions: Vec<LegacyAttributionRecord> = self
+            .attributions
+            .iter()
+            .map(|record| LegacyAttributionRecord {
+                source: record.source,
+                next: record.next,
+                weight: record.sum,
+            })
+            .collect();
+
+        let mut image = Vec::new();
+        image.extend_from_slice(&IMAGE_MAGIC);
+        image.extend_from_slice(&version.to_le_bytes());
+        image.extend_from_slice(&[0; 4]);
+        if version >= 3 {
+            image.extend_from_slice(&self.applied_seq.to_le_bytes());
+        }
+        store_table(&legacy_edges, &mut image);
+        store_table(&legacy_attributions, &mut image);
+        store_table(&self.concepts, &mut image);
+        store_table(&self.labels, &mut image);
+        store_table(&self.sources, &mut image);
+        if version >= 2 {
+            store_table(&self.concept_aliases, &mut image);
+            store_table(&self.label_aliases, &mut image);
+        }
+        if version >= 4 {
+            store_table(&self.attribution_locators, &mut image);
+        }
+        image.extend_from_slice(&(self.arena.len() as u64).to_le_bytes());
+        image.extend_from_slice(&self.arena);
+        image
+    }
+
     /// Restores a `Context` from an image produced by
     /// [`Context::to_bytes`], rebuilding the derived indexes.
     ///
@@ -119,8 +188,49 @@ impl Context {
         // correct.
         let applied_seq = if version >= 3 { reader.read_u64()? } else { 0 };
 
-        let edges = load_table::<EdgeRecord>(&mut reader)?;
-        let attributions = load_table::<AttributionRecord>(&mut reader)?;
+        // Version 5 splits cumulative `weight` into a `(count, sum)`
+        // pair; older images carry the pre-split shape. `count` is
+        // synthesized as each edge's attribution chain length (floored
+        // at 1 for unsourced edges) so it can never be lower than the
+        // number of sourced contributions a later `retract_source`
+        // subtracts one at a time — the floor that keeps its
+        // `saturating_sub` from ever needing to save a migrated image.
+        let (edges, attributions) = if version >= 5 {
+            (
+                load_table::<EdgeRecord>(&mut reader)?,
+                load_table::<AttributionRecord>(&mut reader)?,
+            )
+        } else {
+            let legacy_edges = load_table::<LegacyEdgeRecord>(&mut reader)?;
+            let legacy_attributions = load_table::<LegacyAttributionRecord>(&mut reader)?;
+            let attributions = legacy_attributions
+                .iter()
+                .map(|legacy| AttributionRecord {
+                    source: legacy.source,
+                    next: legacy.next,
+                    count: 1,
+                    sum: legacy.weight,
+                })
+                .collect();
+            let mut edges = Vec::with_capacity(legacy_edges.len());
+            for legacy in &legacy_edges {
+                let chain_len =
+                    legacy_attribution_chain_len(&legacy_attributions, legacy.first_attribution)?;
+                edges.push(EdgeRecord {
+                    subject: legacy.subject,
+                    label: legacy.label,
+                    object: legacy.object,
+                    next_outgoing: legacy.next_outgoing,
+                    next_incoming: legacy.next_incoming,
+                    next_labeled: legacy.next_labeled,
+                    first_attribution: legacy.first_attribution,
+                    last_attribution: legacy.last_attribution,
+                    count: chain_len.max(1),
+                    sum: legacy.weight,
+                });
+            }
+            (edges, attributions)
+        };
         let concepts = load_table::<ConceptRecord>(&mut reader)?;
         let labels = load_table::<LabelRecord>(&mut reader)?;
         let sources = load_table::<SourceRecord>(&mut reader)?;
@@ -338,6 +448,7 @@ impl Context {
         for edge in &self.edges {
             let mut cursor = edge.first_attribution;
             let mut tail = NIL;
+            let mut chain_count: u64 = 0;
             while cursor != NIL {
                 let record = self
                     .attributions
@@ -349,11 +460,17 @@ impl Context {
                 if record.source as usize >= self.sources.len() {
                     return Err(CorruptImage("attribution references an unknown source"));
                 }
+                chain_count += record.count;
                 tail = cursor;
                 cursor = record.next;
             }
             if tail != edge.last_attribution {
                 return Err(CorruptImage("attribution chain does not end at its tail"));
+            }
+            if edge.count < chain_count {
+                return Err(CorruptImage(
+                    "edge count is lower than its attributions' combined count",
+                ));
             }
         }
         Ok(())
@@ -391,6 +508,33 @@ fn checked_arena_str(arena: &[u8], offset: u32, len: u32) -> Result<&str, Corrup
         .get(start..end)
         .ok_or(CorruptImage("name range escapes the arena"))?;
     std::str::from_utf8(bytes).map_err(|_| CorruptImage("name is not valid UTF-8"))
+}
+
+/// Counts one legacy edge's attribution chain length for the v5 migration
+/// in [`Context::from_bytes`]. Defensive rather than trusting: this runs
+/// before `validate_attributions` has ever looked at the chain, so a
+/// hostile or truncated pre-v5 image must not send it out of bounds or
+/// looping forever on a cycle.
+fn legacy_attribution_chain_len(
+    attributions: &[LegacyAttributionRecord],
+    mut cursor: AttributionId,
+) -> Result<u64, CorruptImage> {
+    let mut len = 0u64;
+    let mut steps: usize = 0;
+    while cursor != NIL {
+        steps += 1;
+        if steps > attributions.len() {
+            return Err(CorruptImage(
+                "legacy attribution chain cycles during migration",
+            ));
+        }
+        let record = attributions
+            .get(cursor as usize)
+            .ok_or(CorruptImage("legacy attribution link is out of range"))?;
+        len += 1;
+        cursor = record.next;
+    }
+    Ok(len)
 }
 
 /// Checks that one linked chain of edges is exactly `count` records long,
@@ -561,6 +705,82 @@ impl Record for AliasRecord {
 }
 
 impl Record for EdgeRecord {
+    const SIZE: usize = 48;
+
+    fn store(&self, image: &mut Vec<u8>) {
+        for field in [
+            self.subject,
+            self.label,
+            self.object,
+            self.next_outgoing,
+            self.next_incoming,
+            self.next_labeled,
+            self.first_attribution,
+            self.last_attribution,
+        ] {
+            image.extend_from_slice(&field.to_le_bytes());
+        }
+        image.extend_from_slice(&self.count.to_le_bytes());
+        image.extend_from_slice(&self.sum.to_le_bytes());
+    }
+
+    fn load(reader: &mut Reader) -> Result<Self, CorruptImage> {
+        Ok(Self {
+            subject: reader.read_u32()?,
+            label: reader.read_u32()?,
+            object: reader.read_u32()?,
+            next_outgoing: reader.read_u32()?,
+            next_incoming: reader.read_u32()?,
+            next_labeled: reader.read_u32()?,
+            first_attribution: reader.read_u32()?,
+            last_attribution: reader.read_u32()?,
+            count: reader.read_u64()?,
+            sum: reader.read_f64()?,
+        })
+    }
+}
+
+impl Record for AttributionRecord {
+    const SIZE: usize = 24;
+
+    fn store(&self, image: &mut Vec<u8>) {
+        image.extend_from_slice(&self.source.to_le_bytes());
+        image.extend_from_slice(&self.next.to_le_bytes());
+        image.extend_from_slice(&self.count.to_le_bytes());
+        image.extend_from_slice(&self.sum.to_le_bytes());
+    }
+
+    fn load(reader: &mut Reader) -> Result<Self, CorruptImage> {
+        Ok(Self {
+            source: reader.read_u32()?,
+            next: reader.read_u32()?,
+            count: reader.read_u64()?,
+            sum: reader.read_f64()?,
+        })
+    }
+}
+
+/// The pre-v5 shape of [`EdgeRecord`] (40 bytes: no `count`, `weight` is
+/// the raw cumulative sum). Exists only so [`Context::from_bytes`] can
+/// still read images written before version 5; every new image is
+/// written in the current [`EdgeRecord`] shape.
+///
+/// Layout: 8 × u32 + 1 × f64 = 40 bytes, alignment 8, no padding.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct LegacyEdgeRecord {
+    subject: ConceptId,
+    label: LabelId,
+    object: ConceptId,
+    next_outgoing: EdgeId,
+    next_incoming: EdgeId,
+    next_labeled: EdgeId,
+    first_attribution: AttributionId,
+    last_attribution: AttributionId,
+    weight: f64,
+}
+
+impl Record for LegacyEdgeRecord {
     const SIZE: usize = 40;
 
     fn store(&self, image: &mut Vec<u8>) {
@@ -594,7 +814,19 @@ impl Record for EdgeRecord {
     }
 }
 
-impl Record for AttributionRecord {
+/// The pre-v5 shape of [`AttributionRecord`] (16 bytes: no `count`,
+/// `weight` is the raw cumulative sum). See [`LegacyEdgeRecord`].
+///
+/// Layout: 2 × u32 + 1 × f64 = 16 bytes, alignment 8, no padding.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct LegacyAttributionRecord {
+    source: SourceId,
+    next: AttributionId,
+    weight: f64,
+}
+
+impl Record for LegacyAttributionRecord {
     const SIZE: usize = 16;
 
     fn store(&self, image: &mut Vec<u8>) {
