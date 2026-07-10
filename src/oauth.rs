@@ -405,6 +405,11 @@ impl Oauth {
             // grant.
             let clients = self.clients.lock().unwrap();
             let mut refresh = self.refresh.lock().unwrap();
+            // The same insert-time sweep as `access` above: grants whose
+            // refresh token was simply never used again would otherwise
+            // sit in the list (and in every oauth.json rewrite) for the
+            // full 30-day TTL.
+            refresh.retain(|token| token.expires_at > now);
             refresh.push(RefreshToken {
                 hash: digest_hex(&refresh_token),
                 key,
@@ -847,6 +852,61 @@ mod tests {
             escape_html(r#"<b a="x">&'"#),
             "&lt;b a=&quot;x&quot;&gt;&amp;&#39;"
         );
+    }
+
+    /// mint() must sweep expired refresh grants before appending, the
+    /// same insert-time pruning every other store here gets — an
+    /// unswept list grows (and is re-persisted on every grant) for the
+    /// full 30-day TTL.
+    #[test]
+    fn expired_refresh_tokens_are_swept_on_the_next_mint() {
+        let (oauth, dir) = scratch_oauth("refresh-sweep");
+        let client = register(&oauth);
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        // One grant at t=0 (its refresh token expires at REFRESH_TTL)…
+        let code = oauth.issue_code(
+            &client,
+            "https://claude.ai/cb",
+            &s256_challenge(verifier),
+            "laptop",
+            0,
+        );
+        oauth
+            .exchange_code(
+                &client.client_id,
+                &code,
+                verifier,
+                "https://claude.ai/cb",
+                0,
+            )
+            .unwrap();
+        // …and a second minted after the first expired.
+        let later = REFRESH_TTL_SECS + 1;
+        let code = oauth.issue_code(
+            &client,
+            "https://claude.ai/cb",
+            &s256_challenge(verifier),
+            "laptop",
+            later,
+        );
+        oauth
+            .exchange_code(
+                &client.client_id,
+                &code,
+                verifier,
+                "https://claude.ai/cb",
+                later,
+            )
+            .unwrap();
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("oauth.json")).unwrap()).unwrap();
+        assert_eq!(
+            stored["refresh"].as_array().unwrap().len(),
+            1,
+            "the expired grant must be swept, not re-persisted"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// `register_client` persists under `clients` + `refresh`; `mint`
