@@ -3233,6 +3233,61 @@ fn reimporting_a_source_replaces_it_instead_of_doubling() {
 }
 
 #[test]
+fn a_partially_applied_import_still_counts_the_context_for_the_refresh_pass() {
+    let batches = batch_dir("import-partial-touch");
+    let setup = batches.join("setup.jsonl");
+    std::fs::write(
+        &setup,
+        r#"{"taguru_batch": 1, "context": "sake", "source": "doc-1", "create": {"description": "d"}}
+{"subject": "青嶺酒造", "label": "所在地", "object": "京都酒造", "weight": 1.0}
+{"alias": "kyo", "canonical": "京都酒造", "kind": "concept"}
+"#,
+    )
+    .unwrap();
+    let data_dir = std::env::temp_dir().join(format!(
+        "taguru-http-import-partial-touch-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, stdout, stderr) = run_import(&data_dir, &[setup.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    // BTreeMap order: "aomine" applies, then "kyo" conflicts by
+    // re-pointing an existing alias — the batch refuses AFTER its
+    // association and first alias landed durably.
+    let partial = batches.join("partial.jsonl");
+    std::fs::write(
+        &partial,
+        r#"{"taguru_batch": 1, "context": "sake", "source": "doc-2"}
+{"subject": "新蔵", "label": "特徴", "object": "辛口", "weight": 1.0}
+{"alias": "aomine", "canonical": "青嶺酒造", "kind": "concept"}
+{"alias": "kyo", "canonical": "青嶺酒造", "kind": "concept"}
+"#,
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run_import(&data_dir, &[partial.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("applied 1 alias(es)"), "{stderr}");
+    // The context took durable writes, so the run's summary (and the
+    // embeddings-refresh pass it mirrors) must cover it — a one-shot
+    // import has no later tick to pick those glosses up.
+    assert!(
+        stdout.contains("across 1 context(s)"),
+        "a partially applied batch still touched the context: {stdout}"
+    );
+
+    // And the writes the summary counts are really there.
+    let server = Server::start_on("import-partial-touch", data_dir);
+    let edge = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "新蔵", "label": "特徴"})),
+    );
+    assert_eq!(edge["matches"][0]["object"], json!("辛口"));
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+#[test]
 fn import_refuses_a_data_directory_a_live_server_holds() {
     let server = Server::start("import-locked");
     let batches = batch_dir("import-locked");

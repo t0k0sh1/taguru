@@ -199,6 +199,15 @@ pub fn run(args: &[String]) -> i32 {
             }
             Err(refusal) => {
                 eprintln!("taguru: import: {}: {}", path.display(), refusal.text());
+                // A refused batch is not necessarily a no-op batch:
+                // everything up to the refusal (the retraction, the
+                // passage, a partial prefix) landed durably, and this
+                // process exits before any server-side tick could pick
+                // the context up — skipping it here would leave those
+                // writes' glosses unembedded for good.
+                if refusal.wrote_anything() {
+                    touched.insert(batch.context.clone());
+                }
                 failures += 1;
             }
         }
@@ -717,6 +726,18 @@ pub(crate) enum ApplyRefusal {
 }
 
 impl ApplyRefusal {
+    /// Whether the batch may have durably written anything before the
+    /// refusal. Only [`ApplyRefusal::NoContext`] provably precedes the
+    /// first write — everything past that point starts with the source
+    /// retraction, itself a durable write, so a later refusal (a
+    /// passage that would not persist, a partial prefix of
+    /// associations or aliases) leaves real changes behind. `Io` from
+    /// a failed create is the one over-approximation; the refresh pass
+    /// answers an absent context with its no-op `None` arm anyway.
+    pub(crate) fn wrote_anything(&self) -> bool {
+        !matches!(self, Self::NoContext(_))
+    }
+
     pub(crate) fn text(&self) -> String {
         match self {
             Self::NoContext(context) => {
