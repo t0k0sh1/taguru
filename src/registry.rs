@@ -2679,6 +2679,7 @@ impl AppState {
         applied: impl FnOnce(&T) -> usize,
     ) -> Result<T, AccessError> {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        let mut wal_behind = false;
         let result = {
             // Same tombstone rule as with_hot: a delete that beat us to
             // this lock owns the name — appending here would recreate
@@ -2761,15 +2762,22 @@ impl AppState {
                                 }
                                 Err(error) => {
                                     // The applied prefix already happened
-                                    // in memory and will not be undone;
-                                    // the log is now behind it until the
-                                    // next successful write or flush.
+                                    // in memory and will not be undone —
+                                    // and the truncate above already threw
+                                    // its records off the disk, so the
+                                    // caller now holds an acknowledgment
+                                    // the log cannot replay. Flush the
+                                    // image below (out of this lock) to
+                                    // close that crash window now rather
+                                    // than waiting out the flush interval.
                                     tracing::warn!(
                                         context = %name, %error,
-                                        "WAL re-append after a partial apply failed; the log now trails memory"
+                                        "WAL re-append after a partial apply failed; \
+                                         flushing the image now to re-cover memory"
                                     );
                                     inner.wal_bytes = len_before;
                                     inner.wal_seq = first_seq;
+                                    wal_behind = true;
                                 }
                             }
                         }
@@ -2789,6 +2797,16 @@ impl AppState {
 
             result
         };
+        // The one state `logged_write` must never return in: ops the
+        // caller is being told succeeded, present in memory only — the
+        // trimmed log no longer holds them and a crash before the next
+        // flush would silently lose them. An immediate image flush
+        // restores the "acknowledged means replayable" contract; if it
+        // fails too, the entry stays dirty, the flusher keeps retrying,
+        // and /health reports the failing flush until one lands.
+        if wal_behind {
+            self.flush_entry(name, &entry);
+        }
         self.touch(&entry);
         self.enforce_budget(name);
         Ok(result)
@@ -4040,6 +4058,83 @@ mod tests {
             "attributions ride the WAL too"
         );
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_reappend_after_a_partial_apply_still_persists_acknowledged_ops() {
+        // A partial apply trims the WAL back and re-appends just the
+        // applied prefix. The trim durably removed the whole batch, so
+        // if that re-append then fails, the ops the caller is being
+        // told succeeded exist in memory only — logged_write must close
+        // that crash window itself (an immediate image flush), not
+        // leave it open until the next flush tick.
+        let dir = scratch_dir("wal-reappend-fault");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            // Two concepts for the aliases to target, and an alias the
+            // batch's second op will re-point — the conflict that makes
+            // the apply partial.
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "所在地", "京都酒造", 1.0, None)],
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .add_aliases(
+                    "sake",
+                    &BTreeMap::from([("kyo".to_string(), "京都酒造".to_string())]),
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+                .unwrap();
+
+            // BTreeMap order: "aomine" applies first, "kyo" then
+            // conflicts (re-pointing an existing alias). The batch
+            // append itself succeeds; the fault fires on the re-append
+            // of the applied prefix, right after the trim.
+            wal::fail_appends_after(1);
+            let partial = state
+                .add_aliases(
+                    "sake",
+                    &BTreeMap::from([
+                        ("aomine".to_string(), "青嶺酒造".to_string()),
+                        ("kyo".to_string(), "青嶺酒造".to_string()),
+                    ]),
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(
+                partial.applied, 1,
+                "the first alias landed before the conflict"
+            );
+            // NO flush_dirty: dropping the state here is the crash.
+        }
+
+        let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let aliases = reborn
+            .read_context("sake", |context| {
+                context
+                    .concept_aliases()
+                    .into_iter()
+                    .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(
+            aliases
+                .iter()
+                .any(|(alias, canonical)| alias == "aomine" && canonical == "青嶺酒造"),
+            "the acknowledged alias must survive the crash: {aliases:?}"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

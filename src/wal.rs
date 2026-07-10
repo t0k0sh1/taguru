@@ -51,6 +51,37 @@ struct WalRecord<Op> {
     op: Op,
 }
 
+/// Test-only fault injection: arms the calling thread so that, after
+/// `successes` more non-empty [`append_batch`] calls succeed normally,
+/// the one after them fails with an injected error and the hook
+/// disarms. This is how tests reach failure points that directory
+/// permissions cannot select — e.g. a re-append failing right after an
+/// append and a truncate on the same file succeeded.
+#[cfg(test)]
+pub(crate) fn fail_appends_after(successes: u32) {
+    APPEND_FAULT.with(|cell| cell.set(Some(successes)));
+}
+
+#[cfg(test)]
+thread_local! {
+    static APPEND_FAULT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn injected_append_failure() -> Option<io::Error> {
+    APPEND_FAULT.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            Some(io::Error::other("injected append failure"))
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            None
+        }
+        None => None,
+    })
+}
+
 /// Appends `ops` numbered from `first_seq`, one line each, with a
 /// single fsync after all of them — the HTTP batch is the natural
 /// group-commit unit (one document, one request, one lock, one sync).
@@ -66,6 +97,10 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
     // real append creates and syncs the file itself.
     if ops.is_empty() {
         return Ok(0);
+    }
+    #[cfg(test)]
+    if let Some(error) = injected_append_failure() {
+        return Err(error);
     }
     let mut buffer = Vec::new();
     for (offset, op) in ops.iter().enumerate() {
