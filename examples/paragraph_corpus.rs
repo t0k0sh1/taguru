@@ -200,7 +200,7 @@ fn main() {
     // must rank first, direct facts next (the negated one among them, sign
     // intact), and the strongest 2-hop fact should just make the cut.
     println!("\n=== activate([\"青嶺酒造\"], decay 0.5, limit 12) ===");
-    for activation in context.activate(&["青嶺酒造"], 0.5, 12) {
+    for activation in context.activate(&["青嶺酒造"], 0.5, 12).1 {
         let a = &activation.association;
         println!(
             "  [{:.4}] {} -({})-> {}  weight {:?}  出典[{}]",
