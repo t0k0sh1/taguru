@@ -763,6 +763,14 @@ struct StateInner {
     /// unlink loop to destroy. Entered in the same critical section
     /// that removes the name, left when the files are gone.
     pending_deletes: Mutex<std::collections::HashSet<String>>,
+    /// Names whose create is still writing files — the create-side twin
+    /// of `pending_deletes`. A create reserves the name here FIRST and
+    /// only then (unlocked) clears leftovers and fsyncs the fresh file
+    /// family; without this set the registry lock would have to stay
+    /// held across that disk work, stalling every operation on every
+    /// context behind one create's fsyncs. Entered under the registry
+    /// guard, left in the critical section that registers the entry.
+    pending_creates: Mutex<std::collections::HashSet<String>>,
     /// Running estimate of unpinned resident graph bytes — the cheap
     /// gate in front of the budget sweep. Adjusted by absolute
     /// per-entry recounts (see `EntryInner::counted_bytes`); the
@@ -861,6 +869,7 @@ impl AppState {
             embed_passages: options.embed_passages,
             passage_vector_limit: options.passage_vector_limit,
             pending_deletes: Mutex::new(std::collections::HashSet::new()),
+            pending_creates: Mutex::new(std::collections::HashSet::new()),
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
         }));
@@ -1024,27 +1033,82 @@ impl AppState {
     /// Registers an empty context and persists it immediately, so its
     /// existence (and description) survives a crash from the moment the
     /// create call returns. A persistence failure fails the create.
+    ///
+    /// The registry lock is NOT held across the disk work (up to seven
+    /// unlinks plus save_files' fsyncs — seconds on slow storage,
+    /// behind which every operation on every context would otherwise
+    /// stall). The name is reserved in `pending_creates` under the
+    /// registry guard, the files are written unlocked, and the entry
+    /// lands in a second critical section — the create twin of
+    /// delete's `pending_deletes` choreography.
     pub fn create(&self, name: &str, meta: ContextMeta) -> Result<(), CreateError> {
-        let mut registry = self.0.registry.write().unwrap();
-        // A name mid-delete is still taken: its delete has left the
-        // registry but is still unlinking files, and a create landing
-        // now would have its fresh generation destroyed by the tail of
-        // that loop. The client sees the same refusal as for a live
-        // name and simply retries after the delete's response.
-        if registry.contains_key(name) || self.0.pending_deletes.lock().unwrap().contains(name) {
-            return Err(CreateError::AlreadyExists);
+        {
+            let registry = self.0.registry.read().unwrap();
+            // A name mid-delete is still taken: its delete has left the
+            // registry but is still unlinking files, and a create landing
+            // now would have its fresh generation destroyed by the tail of
+            // that loop. A name mid-create is equally taken. The client
+            // sees the same refusal as for a live name and simply retries
+            // after the other call's response.
+            if registry.contains_key(name) || self.0.pending_deletes.lock().unwrap().contains(name)
+            {
+                return Err(CreateError::AlreadyExists);
+            }
+            // Reserving while still under the registry guard closes the
+            // gap against a finishing create: reservations leave only
+            // inside the registry's WRITE section below, so "not in the
+            // map, not reserved" cannot be observed between a sibling's
+            // insert and its unreserve.
+            if !self
+                .0
+                .pending_creates
+                .lock()
+                .unwrap()
+                .insert(name.to_string())
+            {
+                return Err(CreateError::AlreadyExists);
+            }
         }
-        // A name can be reused after a delete, and a delete that failed
-        // partway (the name is unregistered first) or a half-restored
-        // backup leaves the old generation's files behind. Nothing may
-        // bleed into the new context — a stale WAL would even replay
-        // the old generation's acknowledged writes into the fresh image
-        // on its next cold load. Clear the slate before writing the
-        // image: a crash in between leaves no image, so nothing
-        // registers and the next attempt clears again; durability of
-        // the unlinks rides on save_files' parent-directory fsync just
-        // below. A leftover that cannot be removed fails the create —
-        // registering on top of it would hand out a haunted context.
+        let created = self.create_files(name, &meta);
+        // Success or failure, the reservation leaves in the same
+        // critical section that (on success) makes the entry visible.
+        let mut registry = self.0.registry.write().unwrap();
+        let outcome = created.map(|(stats, usage, context)| {
+            registry.insert(
+                name.to_string(),
+                Arc::new(Entry::new(
+                    meta,
+                    stats,
+                    Slot::Hot(Box::new(context)),
+                    0,
+                    usage,
+                )),
+            );
+        });
+        self.0.pending_creates.lock().unwrap().remove(name);
+        outcome
+    }
+
+    /// The disk half of [`AppState::create`], run WITHOUT the registry
+    /// lock — the `pending_creates` reservation is what keeps the name
+    /// taken meanwhile.
+    ///
+    /// A name can be reused after a delete, and a delete that failed
+    /// partway (the name is unregistered first) or a half-restored
+    /// backup leaves the old generation's files behind. Nothing may
+    /// bleed into the new context — a stale WAL would even replay
+    /// the old generation's acknowledged writes into the fresh image
+    /// on its next cold load. Clear the slate before writing the
+    /// image: a crash in between leaves no image, so nothing
+    /// registers and the next attempt clears again; durability of
+    /// the unlinks rides on save_files' parent-directory fsync just
+    /// below. A leftover that cannot be removed fails the create —
+    /// registering on top of it would hand out a haunted context.
+    fn create_files(
+        &self,
+        name: &str,
+        meta: &ContextMeta,
+    ) -> Result<(ContextStats, ContextUsage, Context), CreateError> {
         let stem = file_stem(name);
         for stale in [
             wal_path(&self.0.data_dir, &stem),
@@ -1065,19 +1129,9 @@ impl AppState {
         context.set_dice_floor(meta.dice_floor);
         let stats = ContextStats::of(&context);
         let usage = ContextUsage::default();
-        save_files(&self.0.data_dir, name, &meta, &stats, &usage, &context)
+        save_files(&self.0.data_dir, name, meta, &stats, &usage, &context)
             .map_err(CreateError::Io)?;
-        registry.insert(
-            name.to_string(),
-            Arc::new(Entry::new(
-                meta,
-                stats,
-                Slot::Hot(Box::new(context)),
-                0,
-                usage,
-            )),
-        );
-        Ok(())
+        Ok((stats, usage, context))
     }
 
     /// Removes a context from the registry and deletes its files. The
@@ -5080,6 +5134,35 @@ mod tests {
         assert!(!sources_path(&dir, &file_stem("sake")).exists());
         assert!(!passages_path(&dir, &file_stem("sake")).exists());
         assert!(!passages_wal_path(&dir, &file_stem("sake")).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A failed create must release its `pending_creates` reservation —
+    /// otherwise one disk refusal would leave the name reading as taken
+    /// until restart.
+    #[test]
+    fn a_failed_create_releases_the_name() {
+        let dir = scratch_dir("create-release");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        // A directory where create expects at most a stale FILE:
+        // remove_file refuses it with something other than NotFound,
+        // failing the clear-the-slate pass after the name is reserved.
+        let obstruction = wal_path(&dir, &file_stem("sake"));
+        fs::create_dir_all(&obstruction).unwrap();
+        assert!(matches!(
+            state.create("sake", ContextMeta::default()),
+            Err(CreateError::Io(_))
+        ));
+
+        // Obstruction gone, the same name must create cleanly — the
+        // failed attempt's reservation may not linger.
+        fs::remove_dir_all(&obstruction).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
 
         let _ = fs::remove_dir_all(dir);
     }
