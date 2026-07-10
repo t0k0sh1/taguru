@@ -23,7 +23,7 @@
 #[path = "../mcp.rs"]
 mod mcp;
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -72,12 +72,53 @@ fn main() {
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
+    let mut reader = stdin.lock();
+    // One JSON-RPC message per line. A client that never sends a newline
+    // must not make the bridge buffer without bound, so cap each read; a
+    // line past the cap is drained to its newline and skipped, exactly as
+    // an undecodable one is. 16 MiB clears any real message — the server
+    // caps request bodies well below it — while bounding memory.
+    const MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        match (&mut reader)
+            .take(MAX_LINE_BYTES)
+            .read_until(b'\n', &mut raw)
+        {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        // A full cap's worth of bytes with no terminating newline is an
+        // over-long line: drain its remainder so the next read lands on a
+        // message boundary, then skip it. (A shorter unterminated tail is
+        // just the final line before EOF — parse it.)
+        if raw.last() != Some(&b'\n') && raw.len() as u64 == MAX_LINE_BYTES {
+            loop {
+                let mut sink = Vec::new();
+                match (&mut reader)
+                    .take(MAX_LINE_BYTES)
+                    .read_until(b'\n', &mut sink)
+                {
+                    Ok(0) => break,
+                    Ok(_) if sink.last() == Some(&b'\n') => break,
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+            eprintln!("taguru-mcp: ignoring over-long line");
             continue;
         }
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
+        let Ok(text) = std::str::from_utf8(&raw) else {
+            eprintln!("taguru-mcp: ignoring undecodable line");
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let Ok(message) = serde_json::from_str::<Value>(text) else {
             eprintln!("taguru-mcp: ignoring undecodable line");
             continue;
         };
