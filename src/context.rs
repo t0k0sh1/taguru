@@ -1195,7 +1195,13 @@ impl Context {
             }
             let total: f64 = self
                 .outgoing(concept)
-                .chain(self.incoming(concept))
+                .chain(self.incoming(concept).filter(|&edge_id| {
+                    // A self-loop threads BOTH of this concept's chains;
+                    // summed once per chain it would dilute every
+                    // neighbor's share as if the loop were two edges.
+                    let edge = &self.edges[edge_id as usize];
+                    edge.subject != edge.object
+                }))
                 .map(|edge_id| self.edges[edge_id as usize].sum.abs())
                 .sum();
             if total == 0.0 {
@@ -3037,6 +3043,37 @@ mod tests {
         assert_eq!(top_two.len(), 2);
         assert_eq!(top_two[0].association.object, "a");
         assert_eq!(top_two[1].association.object, "b");
+    }
+
+    /// A self-loop sits in both the outgoing and the incoming chain of
+    /// its one endpoint; an unfiltered fan-out sum counted it twice,
+    /// diluting every neighbor's propagated activation as if the loop
+    /// were two edges. It must dilute exactly like one ordinary edge.
+    #[test]
+    fn a_self_loop_dilutes_fan_out_like_one_edge_not_two() {
+        let mut looped = Context::default();
+        looped.associate("X", "係る", "Y", 1.0).unwrap();
+        looped.associate("X", "自己", "X", 1.0).unwrap();
+        looped.associate("Y", "係る", "Z", 1.0).unwrap();
+
+        let mut fanned = Context::default();
+        fanned.associate("X", "係る", "Y", 1.0).unwrap();
+        fanned.associate("X", "分岐", "W", 1.0).unwrap();
+        fanned.associate("Y", "係る", "Z", 1.0).unwrap();
+
+        let z_strength = |ranked: &[Activation]| {
+            ranked
+                .iter()
+                .find(|activation| activation.association.object == "Z")
+                .expect("Z must be reached")
+                .strength
+        };
+        let via_loop = z_strength(&looped.activate(&["X"], 0.5, 10).1);
+        let via_fan = z_strength(&fanned.activate(&["X"], 0.5, 10).1);
+        // a(Y) = (1.0 * 0.5 * |1.0|) / 2 edges = 0.25 in both graphs,
+        // then strength(Y→Z) = 0.25 * 0.5 * |1.0|.
+        assert_eq!(via_loop, 0.125);
+        assert_eq!(via_loop, via_fan);
     }
 
     #[test]
