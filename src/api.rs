@@ -561,6 +561,31 @@ const MAX_EXPLORE_DEPTH: usize = 10;
 /// the offline import chunks its applies at the same size.)
 pub(crate) const MAX_ASSOCIATIONS_PER_REQUEST: usize = 10_000;
 
+/// Per-request cap on list-shaped read inputs: origins, query terms,
+/// source lists. The per-item work happens under the context's lock,
+/// and for `lookup_passages` the response body scales with the list
+/// too — the output-side clamps cannot bound what the request itself
+/// carries, so the input is refused up front like an oversized
+/// association batch. It matches the largest page any read endpoint
+/// serves, so a paged bulk workflow (list_sources → lookup_passages)
+/// fits exactly.
+const MAX_INPUT_ITEMS: usize = 1000;
+
+/// Refuses a list-shaped input field longer than [`MAX_INPUT_ITEMS`],
+/// before any lock is taken. `None` means the length is fine.
+fn overlong(field: &str, len: usize, started_at: Instant) -> Option<Response> {
+    (len > MAX_INPUT_ITEMS).then(|| {
+        error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{field} carries {len} items, past the per-request limit of \
+                 {MAX_INPUT_ITEMS}; split the request"
+            ),
+            started_at,
+        )
+    })
+}
+
 /// Per-op weight ceiling (absolute value). Weights accumulate on an
 /// edge across writes and floats saturate: two f64::MAX writes made an
 /// edge +Infinity, and a later retract minted Inf − Inf = NaN — an
@@ -916,6 +941,20 @@ pub async fn add_aliases(
     AppJson(request): AppJson<AliasRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    // Refused before the write lock like an association batch — each
+    // pair is one WAL op in a single lock-hold/fsync, the same cost
+    // shape MAX_ASSOCIATIONS_PER_REQUEST bounds there.
+    let pairs = request.concepts.len() + request.labels.len();
+    if pairs > MAX_ASSOCIATIONS_PER_REQUEST {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "batch of {pairs} aliases exceeds the per-request limit of \
+                 {MAX_ASSOCIATIONS_PER_REQUEST}; split the ingest"
+            ),
+            started_at,
+        );
+    }
     // Aliases intern names on both sides; the same cap as every other
     // name-shaped write.
     for (namespace, pairs) in [("concepts", &request.concepts), ("labels", &request.labels)] {
@@ -998,6 +1037,18 @@ pub async fn remove_aliases(
         return error(
             StatusCode::BAD_REQUEST,
             "the request names no aliases to remove",
+            started_at,
+        );
+    }
+    // Same WAL-op-per-item cost shape as add_aliases; same cap.
+    let names = request.concepts.len() + request.labels.len();
+    if names > MAX_ASSOCIATIONS_PER_REQUEST {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "batch of {names} alias removals exceeds the per-request limit of \
+                 {MAX_ASSOCIATIONS_PER_REQUEST}; split the request"
+            ),
             started_at,
         );
     }
@@ -1474,6 +1525,15 @@ pub async fn query(
     AppJson(request): AppJson<QueryRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    for (field, position) in [
+        ("subject", &request.subject),
+        ("label", &request.label),
+        ("object", &request.object),
+    ] {
+        if let Some(refusal) = overlong(field, as_refs(position).len(), started_at) {
+            return refusal;
+        }
+    }
     match state.read_context(&name, |context| {
         context.query_any(
             &as_refs(&request.subject),
@@ -1555,6 +1615,9 @@ pub async fn explore(
     AppJson(request): AppJson<ExploreRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = overlong("origins", request.origins.len(), started_at) {
+        return refusal;
+    }
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         // The clamp turns "omitted = the whole component" into
@@ -1613,6 +1676,9 @@ pub async fn activate(
     AppJson(request): AppJson<ActivateRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = overlong("origins", request.origins.len(), started_at) {
+        return refusal;
+    }
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         context.activate(
@@ -2038,6 +2104,9 @@ pub async fn unreachable_from(
     AppJson(request): AppJson<UnreachableFromRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = overlong("origins", request.origins.len(), started_at) {
+        return refusal;
+    }
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         context.unreachable_from(&origins)

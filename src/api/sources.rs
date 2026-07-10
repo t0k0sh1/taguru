@@ -10,7 +10,8 @@ use crate::metrics::{ErrorKind, SearchOp};
 use crate::registry::{AppState, CitationLookup};
 
 use super::{
-    AppJson, MAX_MATCH_LIMIT, access_error, clamp, error, not_found, ok, search_log_enabled,
+    AppJson, MAX_MATCH_LIMIT, access_error, clamp, error, not_found, ok, overlong,
+    search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +34,11 @@ pub async fn lookup_passages(
     AppJson(request): AppJson<LookupPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    // Each requested source returns its whole passage: the response
+    // scales with this list, so the list itself is what gets bounded.
+    if let Some(refusal) = overlong("sources", request.sources.len(), started_at) {
+        return refusal;
+    }
     match state.lookup_passages(&name, &request.sources) {
         None => not_found(&name, started_at),
         Some(Ok((passages, missing))) => {

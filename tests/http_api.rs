@@ -2037,6 +2037,80 @@ fn lookalike_candidates_carry_the_evidence_to_tell_them_apart() {
 }
 
 #[test]
+fn oversized_input_lists_are_refused_before_any_work() {
+    let server = Server::start("input-caps");
+    server.ok("PUT", "/contexts/caps", Some(json!({"description": "d"})));
+
+    // 1001 items trips every list-shaped read input.
+    let over: Vec<String> = (0..1001).map(|i| format!("o{i}")).collect();
+    for (path, body) in [
+        ("/contexts/caps/explore", json!({"origins": over.clone()})),
+        ("/contexts/caps/activate", json!({"origins": over.clone()})),
+        (
+            "/contexts/caps/unreachable_from",
+            json!({"origins": over.clone()}),
+        ),
+        ("/contexts/caps/query", json!({"subject": over.clone()})),
+        (
+            "/contexts/caps/sources/lookup",
+            json!({"sources": over.clone()}),
+        ),
+    ] {
+        let (status, parsed) = server.call("POST", path, Some(body));
+        assert_eq!(status, 400, "{path}: {parsed}");
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap()
+                .contains("per-request limit"),
+            "{path}: {parsed}"
+        );
+    }
+
+    // The cap itself still passes — it matches the largest page
+    // list_sources serves, so a paged bulk workflow fits exactly.
+    let at_cap: Vec<String> = (0..1000).map(|i| format!("o{i}")).collect();
+    server.ok(
+        "POST",
+        "/contexts/caps/explore",
+        Some(json!({"origins": at_cap})),
+    );
+
+    // Alias batches are WAL writes and share the association batch cap.
+    let aliases: serde_json::Map<String, Value> = (0..10_001)
+        .map(|i| (format!("a{i}"), json!("青嶺酒造")))
+        .collect();
+    let (status, parsed) = server.call(
+        "POST",
+        "/contexts/caps/aliases",
+        Some(json!({"concepts": aliases})),
+    );
+    assert_eq!(status, 400, "{parsed}");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("per-request limit"),
+        "{parsed}"
+    );
+
+    let removals: Vec<String> = (0..10_001).map(|i| format!("a{i}")).collect();
+    let (status, parsed) = server.call(
+        "DELETE",
+        "/contexts/caps/aliases",
+        Some(json!({"concepts": removals})),
+    );
+    assert_eq!(status, 400, "{parsed}");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("per-request limit"),
+        "{parsed}"
+    );
+}
+
+#[test]
 fn resolve_caps_its_candidate_flood_like_every_other_match_endpoint() {
     let server = Server::start("resolve-cap");
     server.ok("PUT", "/contexts/flood", Some(json!({"description": "d"})));

@@ -269,7 +269,10 @@ Source code takes the same discipline; only the naming changes.
   (server-side TAGURU_EMBED_*). `502` embedding provider failure
   (refresh, or the semantic fallback inside resolve) — retry later.
 - `400`: association batch over 10,000 per request (nothing applied —
-  split and resend) / weight not finite or |weight| > 1,000,000
+  split and resend; alias batches and removals share the same cap) /
+  list-shaped read input over 1,000 items (origins, query terms,
+  `sources/lookup` sources — split the request) / weight not finite
+  or |weight| > 1,000,000
   (whole batch refused) / name too long (subject, label, object,
   source, alias ≤ 1024 bytes — names are headings, not bodies:
   passages go to sources, long knowledge gets decomposed; context
