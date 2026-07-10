@@ -108,8 +108,33 @@ impl EmbeddingProvider for HttpEmbeddings {
             .get("data")
             .and_then(|d| d.as_array())
             .ok_or("embedding response carries no data array")?;
-        let mut vectors = Vec::with_capacity(data.len());
-        for item in data {
+        if data.len() != texts.len() {
+            return Err(format!(
+                "embedding response returned {} vectors for {} inputs",
+                data.len(),
+                texts.len()
+            ));
+        }
+        // A provider or proxy may return `data` out of input order; each
+        // entry's `index` names the input it belongs to (the OpenAI
+        // embedding contract). Place each vector at its index rather than
+        // trust array order, so a reordered response cannot silently pair
+        // every embedding with the wrong text. An entry that omits `index`
+        // falls back to its array position — the old, order-trusting
+        // behavior, so a provider that never sends `index` still works.
+        let mut slots: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
+        for (position, item) in data.iter().enumerate() {
+            let index = item
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok())
+                .unwrap_or(position);
+            if index >= slots.len() {
+                return Err(format!(
+                    "embedding response index {index} out of range for {} inputs",
+                    texts.len()
+                ));
+            }
             let embedding = item
                 .get("embedding")
                 .and_then(|e| e.as_array())
@@ -119,16 +144,21 @@ impl EmbeddingProvider for HttpEmbeddings {
                 .map(|v| v.as_f64().unwrap_or(0.0) as f32)
                 .collect();
             normalize(&mut vector);
-            vectors.push(vector);
+            if slots[index].replace(vector).is_some() {
+                return Err(format!("embedding response repeated index {index}"));
+            }
         }
-        if vectors.len() != texts.len() {
-            return Err(format!(
-                "embedding response returned {} vectors for {} inputs",
-                vectors.len(),
-                texts.len()
-            ));
-        }
-        Ok(vectors)
+        // No slot can remain empty here — the count matched and no index
+        // repeated — but guard rather than unwrap so a response that both
+        // omits `index` and collides two entries onto one position fails
+        // cleanly instead of panicking.
+        slots
+            .into_iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                slot.ok_or_else(|| format!("embedding response missing index {index}"))
+            })
+            .collect()
     }
 }
 
@@ -593,6 +623,54 @@ mod tests {
             request.contains("x-taguru-embed-purpose: query"),
             "{request}"
         );
+    }
+
+    /// A provider that returns `data` out of input order is realigned by
+    /// each entry's `index`, never trusted in array order — otherwise
+    /// every embedding would pair with the wrong text.
+    #[test]
+    fn http_embeddings_realigns_a_reordered_response_by_index() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            // Wire order is the REVERSE of the input order: index 1 first.
+            let body = br#"{"data":[{"index":1,"embedding":[0.0,2.0]},{"index":0,"embedding":[3.0,4.0]}]}"#;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let provider = HttpEmbeddings {
+            url: format!("http://{addr}"),
+            model: "stub-model".to_string(),
+            api_key: None,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+        let vectors = provider
+            .embed(&["first", "second"], EmbedPurpose::Query)
+            .unwrap();
+        served.join().unwrap();
+        // Input 0 keeps index 0's vector (3-4-5 → 0.6, 0.8); input 1 keeps
+        // index 1's (0, 2 → 0, 1). Trusting array order would swap them.
+        assert_eq!(vectors, vec![vec![0.6, 0.8], vec![0.0, 1.0]]);
     }
 
     #[test]
