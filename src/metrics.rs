@@ -49,10 +49,15 @@ struct Histogram {
 
 impl Histogram {
     fn observe(&self, elapsed: Duration) {
-        let millis = elapsed.as_millis() as u64;
+        // Bucket at microsecond precision: `as_millis` truncates, so a
+        // 1.9 ms observation would land in the `le="0.001"` bucket —
+        // every fractional latency slid one bucket optimistic, and the
+        // low buckets, where this server's common case lives, are
+        // exactly where that skews `histogram_quantile` the most.
+        let micros = elapsed.as_micros();
         if let Some(bin) = LATENCY_BUCKETS
             .iter()
-            .position(|&(bound, _)| millis <= bound)
+            .position(|&(bound, _)| micros <= u128::from(bound) * 1000)
         {
             self.counts[bin].fetch_add(1, Ordering::Relaxed);
         }
@@ -881,6 +886,18 @@ mod tests {
             assert!(value >= previous, "buckets must never decrease");
             previous = value;
         }
+    }
+
+    #[test]
+    fn fractional_milliseconds_bucket_by_true_latency_not_truncation() {
+        let histogram = Histogram::default();
+        // 1.9 ms is OVER the 1 ms bound: `as_millis` truncation would
+        // file it under le="0.001" and skew every low quantile fast.
+        histogram.observe(Duration::from_micros(1_900)); // le 5
+        histogram.observe(Duration::from_micros(1_000)); // le 1, exactly
+        histogram.observe(Duration::from_micros(5_100)); // le 10
+
+        assert_eq!(histogram.cumulative(), [1, 2, 3, 3, 3, 3, 3, 3]);
     }
 
     #[test]
