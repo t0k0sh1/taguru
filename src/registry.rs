@@ -2401,7 +2401,7 @@ impl AppState {
                 tracing::warn!("flush of context '{name}' failed (will retry): {error}");
                 entry.dirty.store(true, Ordering::Relaxed);
                 entry.flushing.store(false, Ordering::Relaxed);
-                self.0.metrics.record_flush(false);
+                self.0.metrics.record_flush(name, false);
                 return false;
             }
         };
@@ -2443,7 +2443,7 @@ impl AppState {
         let published = match outcome {
             Ok(()) => {
                 inner.stats = stats;
-                self.0.metrics.record_flush(true);
+                self.0.metrics.record_flush(name, true);
                 // `dirty` stays as claimed: clear (nothing raced) means the
                 // image is current; a racing write re-set it and will
                 // re-flush. Truncation is sound only when the image covers
@@ -2459,7 +2459,7 @@ impl AppState {
                 let _ = fs::remove_file(&staged);
                 entry.dirty.store(true, Ordering::Relaxed);
                 entry.usage_dirty.store(true, Ordering::Relaxed);
-                self.0.metrics.record_flush(false);
+                self.0.metrics.record_flush(name, false);
                 false
             }
         };

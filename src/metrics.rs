@@ -8,9 +8,9 @@
 //! per-bin counts and defer the cumulative `le` semantics to render
 //! (scrape) time.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{MatchedPath, Request, State};
@@ -116,10 +116,18 @@ pub struct Metrics {
     passage_hits_bm25_only: AtomicU64,
     passage_hits_vector_only: AtomicU64,
     passage_hits_both_lanes: AtomicU64,
-    /// Set while the most recent flush attempt failed; cleared by the
-    /// next success. Drives /health: the flusher retries every tick,
-    /// so this is a self-healing signal, never a latched one.
+    /// Set while ANY context's most recent flush attempt is unhealed;
+    /// cleared once every failing context has flushed clean again. A
+    /// lock-free mirror of `flush_failing.is_empty()` so /health reads it
+    /// without taking the lock. Drives /health: the flusher retries every
+    /// tick, so this is a self-healing signal, never a latched one.
     flush_degraded: AtomicBool,
+    /// The contexts whose latest flush failed, by name. Tracked as a set,
+    /// not a single bit, so one context's success cannot mask another's
+    /// failure (last-write-wins would), and a lone transient failure among
+    /// many healthy contexts does not flip the whole server to 503. A
+    /// context leaves the set when its next flush succeeds.
+    flush_failing: Mutex<HashSet<String>>,
     /// Unix seconds of the last successful image flush (0 = none since
     /// boot). `time() - this` on a dashboard says how stale images are
     /// without knowing the flush interval.
@@ -287,14 +295,27 @@ impl Metrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_flush(&self, ok: bool) {
+    pub fn record_flush(&self, name: &str, ok: bool) {
         let counter = if ok {
             &self.flush_ok
         } else {
             &self.flush_failed
         };
         counter.fetch_add(1, Ordering::Relaxed);
-        self.flush_degraded.store(!ok, Ordering::Relaxed);
+        // Track WHICH contexts are failing, not just the last outcome:
+        // a single global bit let context B's success erase context A's
+        // still-unhealed failure (and one transient failure flip the whole
+        // server to 503). Health stays degraded while the set is non-empty.
+        {
+            let mut failing = self.flush_failing.lock().unwrap();
+            if ok {
+                failing.remove(name);
+            } else {
+                failing.insert(name.to_string());
+            }
+            self.flush_degraded
+                .store(!failing.is_empty(), Ordering::Relaxed);
+        }
         if ok {
             let epoch = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -305,7 +326,7 @@ impl Metrics {
         }
     }
 
-    /// Whether the most recent image-flush attempt succeeded (true
+    /// Whether every context's most recent image flush succeeded (true
     /// when none has run yet — an idle server is a healthy server).
     pub fn flush_is_healthy(&self) -> bool {
         !self.flush_degraded.load(Ordering::Relaxed)
@@ -996,11 +1017,38 @@ mod tests {
         );
     }
 
+    /// One context's successful flush must NOT mask another's still-failing
+    /// one: health tracks the SET of failing contexts, not the last
+    /// outcome. The old single global bit reported healthy after B here.
+    #[test]
+    fn flush_health_tracks_each_context_not_just_the_last() {
+        let metrics = Metrics::default();
+        assert!(metrics.flush_is_healthy(), "an idle server is healthy");
+
+        metrics.record_flush("a", false);
+        assert!(!metrics.flush_is_healthy(), "A's failure degrades health");
+
+        metrics.record_flush("b", true);
+        assert!(
+            !metrics.flush_is_healthy(),
+            "B's success must not mask A's unhealed failure"
+        );
+
+        // A repeated failure for the same context is one entry, not a
+        // tally: the set heals fully on A's first success.
+        metrics.record_flush("a", false);
+        metrics.record_flush("a", true);
+        assert!(
+            metrics.flush_is_healthy(),
+            "health returns once every failing context has flushed clean"
+        );
+    }
+
     #[test]
     fn render_carries_help_and_type_for_every_metric_name() {
         let metrics = Metrics::default();
         metrics.record_http("GET", "/a", 200, Duration::from_millis(1));
-        metrics.record_flush(true);
+        metrics.record_flush("a", true);
         let rendered = metrics.render_prometheus(&GaugeSnapshot {
             contexts_registered: 2,
             contexts_resident: 1,
