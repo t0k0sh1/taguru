@@ -911,14 +911,21 @@ fn merge(outputs: Vec<ModelOutput>, questions_cap: usize, paragraph_count: usize
         }
         for item in output.associations {
             // Absent and null both read as empty; an omitted weight is
-            // a plain assertion.
+            // a plain assertion. Trim before anything else and carry the
+            // trimmed form onward — the graph's normalization does NOT
+            // fold whitespace, so " apple" and "apple" would split into
+            // two concept nodes, and the dedup key below would miss the
+            // duplicate. The question path above trims the same way.
             let subject = item.subject.unwrap_or_default();
+            let subject = subject.trim();
             let label = item.label.unwrap_or_default();
+            let label = label.trim();
             let object = item.object.unwrap_or_default();
+            let object = object.trim();
             let weight = item.weight.unwrap_or(1.0);
-            let names_ok = [&subject, &label, &object]
+            let names_ok = [subject, label, object]
                 .iter()
-                .all(|text| !text.trim().is_empty() && text.len() <= MAX_NAME_BYTES);
+                .all(|text| !text.is_empty() && text.len() <= MAX_NAME_BYTES);
             // A zero weight asserts nothing; refusing it here beats
             // shipping a fact the graph treats as absent.
             if !names_ok
@@ -929,7 +936,7 @@ fn merge(outputs: Vec<ModelOutput>, questions_cap: usize, paragraph_count: usize
                 extraction.dropped += 1;
                 continue;
             }
-            let key = (subject.clone(), label.clone(), object.clone());
+            let key = (subject.to_string(), label.to_string(), object.to_string());
             if !seen.insert(key) {
                 extraction.duplicates += 1;
                 continue;
@@ -941,9 +948,9 @@ fn merge(outputs: Vec<ModelOutput>, questions_cap: usize, paragraph_count: usize
                 .paragraph
                 .filter(|&paragraph| (paragraph as usize) < paragraph_count);
             extraction.associations.push(Fact {
-                subject,
-                label,
-                object,
+                subject: subject.to_string(),
+                label: label.to_string(),
+                object: object.to_string(),
                 weight,
                 chunk_index,
                 paragraph,
@@ -962,8 +969,14 @@ fn merge(outputs: Vec<ModelOutput>, questions_cap: usize, paragraph_count: usize
         label_names.insert(&fact.label);
     }
     for alias in aliases {
+        // Trim to match the association names in `concept_names` /
+        // `label_names`, which are the trimmed subject/label/object
+        // above; an untrimmed spelling or canonical would miss the
+        // `names.contains` checks and split the stored alias.
         let spelling = alias.alias.unwrap_or_default();
+        let spelling = spelling.trim();
         let canonical = alias.canonical.unwrap_or_default();
+        let canonical = canonical.trim();
         let (namespace, names) = match alias.kind.as_deref() {
             Some("concept") => (&mut extraction.concepts, &concept_names),
             Some("label") => (&mut extraction.labels, &label_names),
@@ -972,23 +985,23 @@ fn merge(outputs: Vec<ModelOutput>, questions_cap: usize, paragraph_count: usize
                 continue;
             }
         };
-        let shape_ok = !spelling.trim().is_empty()
+        let shape_ok = !spelling.is_empty()
             && spelling.len() <= MAX_NAME_BYTES
             && canonical.len() <= MAX_NAME_BYTES
             && spelling != canonical;
         // An alias spelling that is itself a name would shadow a real
         // record — the registry refuses that as a conflict, so it
         // never leaves here.
-        if !shape_ok || !names.contains(canonical.as_str()) || names.contains(spelling.as_str()) {
+        if !shape_ok || !names.contains(canonical) || names.contains(spelling) {
             extraction.dropped += 1;
             continue;
         }
-        match namespace.entry(spelling) {
+        match namespace.entry(spelling.to_string()) {
             Entry::Vacant(vacant) => {
-                vacant.insert(canonical);
+                vacant.insert(canonical.to_string());
             }
             Entry::Occupied(existing) => {
-                if *existing.get() == canonical {
+                if existing.get().as_str() == canonical {
                     extraction.duplicates += 1;
                 } else {
                     extraction.dropped += 1;
@@ -1364,6 +1377,35 @@ mod tests {
         assert_eq!(merged.dropped, 7);
         assert!(merged.label_vocabulary().contains("杜氏"));
         assert!(merged.label_vocabulary().contains("創業年"));
+    }
+
+    /// Whitespace-only differences must FOLD, not split: the graph's
+    /// normalization does not trim, so merge has to. A padded subject
+    /// dedups against its trimmed twin and is stored trimmed, and a
+    /// padded alias still matches a trimmed canonical name.
+    #[test]
+    fn merge_trims_names_so_whitespace_variants_fold() {
+        let merged = merge(
+            vec![ModelOutput {
+                associations: vec![
+                    association("  青嶺酒造  ", "杜氏", "高瀬", 1.0),
+                    association("青嶺酒造", "杜氏", "高瀬", 2.0), // the same triple once trimmed
+                ],
+                aliases: vec![alias("  Aomine  ", "  青嶺酒造  ", "concept")],
+                questions: Vec::new(),
+            }],
+            0,
+            0,
+        );
+        // One triple after trimming; the first (weight 1.0) survives.
+        assert_eq!(merged.associations.len(), 1);
+        assert_eq!(merged.associations[0].subject, "青嶺酒造");
+        assert_eq!(merged.associations[0].weight, 1.0);
+        assert_eq!(merged.duplicates, 1);
+        // The padded alias trims on both sides, matches the trimmed
+        // concept name, and is keyed and stored without the padding.
+        assert_eq!(merged.concepts.len(), 1);
+        assert_eq!(merged.concepts["Aomine"], "青嶺酒造");
     }
 
     #[test]
