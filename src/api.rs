@@ -195,8 +195,12 @@ pub struct ListContextsQuery {
     pub after: Option<String>,
 }
 
-/// A bounded directory page: like every other listing, `total` names
-/// the full count so a truncated view is visible.
+/// A bounded directory page. `total` names the whole directory's
+/// count, deliberately cursor-independent — "how many contexts exist",
+/// not "how many remain past `after`" — so a truncated view is visible
+/// and the figure is stable across pages. (The search endpoints' `total`
+/// counts post-filter matches instead: there the query itself defines
+/// the population of interest.)
 #[derive(Serialize)]
 pub struct ContextPage {
     pub total: usize,
