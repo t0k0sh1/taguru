@@ -224,7 +224,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "update_context",
-            "Update description / pinned / dice_floor.",
+            "Update description / pinned / dice_floor / semantic_floor.",
             object_schema(
                 json!({
                     "name": { "type": "string" },
@@ -257,7 +257,7 @@ pub fn tool_definitions() -> Vec<Value> {
                                 "object": { "type": "string" },
                                 "weight": { "type": "number" },
                                 "source": { "type": "string" },
-                                "paragraph": { "type": "integer", "description": "zero-based paragraph position within `source`" }
+                                "paragraph": { "type": "integer", "description": "zero-based paragraph position" }
                             },
                             "required": ["subject", "label", "object", "weight"]
                         }
