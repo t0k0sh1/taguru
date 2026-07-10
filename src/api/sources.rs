@@ -152,7 +152,9 @@ pub async fn retract_source(
     AppJson(request): AppJson<RetractSourceRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.retract_source(&name, &request.source) {
+    // Retraction stages a WAL op and fsyncs before returning; keep that
+    // synchronous write off the async worker like every other write path.
+    match tokio::task::block_in_place(|| state.retract_source(&name, &request.source)) {
         Err(failure) => access_error(&state, failure, &name, started_at),
         Ok((associations_touched, passage_removed)) => {
             // A retraction that found nothing changed nothing; only an

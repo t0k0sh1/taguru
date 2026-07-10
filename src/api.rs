@@ -493,7 +493,9 @@ pub async fn add_associations(
         }
     }
     let total = associations.len();
-    match state.add_associations(&name, associations) {
+    // The write stages ops in the WAL and fsyncs before returning, so
+    // keep it off the async worker like `store_passages` and the flush.
+    match tokio::task::block_in_place(|| state.add_associations(&name, associations)) {
         Err(failure) => access_error(&state, failure, &name, started_at),
         Ok(Ok(applied)) => {
             // An empty batch reaches here as `applied == 0`: nothing
@@ -914,7 +916,11 @@ pub async fn add_aliases(
             }
         }
     }
-    match state.add_aliases(&name, &request.concepts, &request.labels) {
+    // Same fsync-bearing WAL write as add_associations; keep it off the
+    // async worker.
+    match tokio::task::block_in_place(|| {
+        state.add_aliases(&name, &request.concepts, &request.labels)
+    }) {
         Err(failure) => access_error(&state, failure, &name, started_at),
         Ok(Ok(applied)) => {
             // Same rule as add_associations: an empty batch applies
@@ -971,7 +977,10 @@ pub async fn remove_aliases(
             started_at,
         );
     }
-    match state.remove_aliases(&name, &request.concepts, &request.labels) {
+    // Same fsync-bearing WAL write; keep it off the async worker.
+    match tokio::task::block_in_place(|| {
+        state.remove_aliases(&name, &request.concepts, &request.labels)
+    }) {
         Err(failure) => access_error(&state, failure, &name, started_at),
         Ok(Ok(removed)) => {
             state.note_write(&name);
