@@ -160,6 +160,11 @@ pub struct Oauth {
     /// the base of the canonical `{public_url}/mcp` resource.
     public_url: String,
     store_path: PathBuf,
+    // Lock order: a path that needs more than one of these takes them
+    // in field order. `register_client` and `mint` both hold `clients`
+    // and `refresh` together around `persist`, and the one agreed
+    // order is what keeps a concurrent registration and token grant
+    // from deadlocking each other.
     clients: Mutex<Vec<Client>>,
     codes: Mutex<Vec<CodeGrant>>,
     access: Mutex<Vec<AccessToken>>,
@@ -272,7 +277,8 @@ impl Oauth {
             created_at: now_secs(),
         };
         clients.push(client.clone());
-        self.persist(&clients, &self.refresh.lock().unwrap());
+        let refresh = self.refresh.lock().unwrap();
+        self.persist(&clients, &refresh);
         Ok(client)
     }
 
@@ -392,6 +398,12 @@ impl Oauth {
             });
         }
         {
+            // `clients` before `refresh` — the field-order rule on the
+            // struct. Taking `refresh` first here while register_client
+            // takes `clients` first is an AB-BA deadlock between the
+            // (unauthenticated) registration endpoint and every token
+            // grant.
+            let clients = self.clients.lock().unwrap();
             let mut refresh = self.refresh.lock().unwrap();
             refresh.push(RefreshToken {
                 hash: digest_hex(&refresh_token),
@@ -399,7 +411,7 @@ impl Oauth {
                 client_id: client_id.to_string(),
                 expires_at: now + REFRESH_TTL_SECS,
             });
-            self.persist(&self.clients.lock().unwrap(), &refresh);
+            self.persist(&clients, &refresh);
         }
         TokenGrant {
             access_token,
@@ -835,5 +847,70 @@ mod tests {
             escape_html(r#"<b a="x">&'"#),
             "&lt;b a=&quot;x&quot;&gt;&amp;&#39;"
         );
+    }
+
+    /// `register_client` persists under `clients` + `refresh`; `mint`
+    /// (here via the refresh grant) persists under the same pair. If
+    /// the two sides ever disagree on acquisition order again, this
+    /// interleaving deadlocks — the watchdog turns that hang into a
+    /// named failure instead of a suite-wide timeout.
+    #[test]
+    fn concurrent_registration_and_token_grants_do_not_deadlock() {
+        let (oauth, dir) = scratch_oauth("lock-order");
+        let client = register(&oauth);
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let code = oauth.issue_code(
+            &client,
+            "https://claude.ai/cb",
+            &s256_challenge(verifier),
+            "laptop",
+            0,
+        );
+        let seed = oauth
+            .exchange_code(
+                &client.client_id,
+                &code,
+                verifier,
+                "https://claude.ai/cb",
+                0,
+            )
+            .unwrap();
+
+        let oauth = std::sync::Arc::new(oauth);
+        let registrar = {
+            let oauth = std::sync::Arc::clone(&oauth);
+            std::thread::spawn(move || {
+                // Stays under CLIENT_CAP: a capped registration refuses
+                // before touching the lock pair this test exercises.
+                for _ in 0..80 {
+                    oauth
+                        .register_client("claude", vec!["https://claude.ai/cb".to_string()])
+                        .unwrap();
+                }
+            })
+        };
+        let refresher = {
+            let oauth = std::sync::Arc::clone(&oauth);
+            let client_id = client.client_id.clone();
+            std::thread::spawn(move || {
+                let mut token = seed.refresh_token;
+                for _ in 0..80 {
+                    token = oauth
+                        .exchange_refresh(&client_id, &token, 0)
+                        .unwrap()
+                        .refresh_token;
+                }
+            })
+        };
+        let (done, watchdog) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let clean = registrar.join().is_ok() && refresher.join().is_ok();
+            let _ = done.send(clean);
+        });
+        match watchdog.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(clean) => assert!(clean, "a worker thread panicked"),
+            Err(_) => panic!("registration deadlocked against a token grant"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
