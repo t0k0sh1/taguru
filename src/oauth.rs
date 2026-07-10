@@ -174,13 +174,30 @@ pub struct Oauth {
 impl Oauth {
     /// Loads persisted registrations and refresh grants; a missing or
     /// unreadable store starts fresh (the safe direction: connected
-    /// clients re-authorize, nothing is silently trusted).
+    /// clients re-authorize, nothing is silently trusted). Fresh must
+    /// not mean SILENT, though — a store that exists but cannot be
+    /// read is wiping every registration and 30-day refresh grant,
+    /// and the operator staring at the resulting re-authorization
+    /// storm deserves the one log line that explains it.
     pub fn open(public_url: &str, data_dir: &Path) -> Self {
         let store_path = data_dir.join("oauth.json");
-        let persisted: StoreFile = std::fs::read(&store_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let persisted: StoreFile = match std::fs::read(&store_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                tracing::warn!(
+                    path = %store_path.display(), %error,
+                    "oauth store is unreadable; starting empty — every client must re-register and re-authorize"
+                );
+                StoreFile::default()
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoreFile::default(),
+            Err(error) => {
+                tracing::warn!(
+                    path = %store_path.display(), %error,
+                    "oauth store could not be read; starting empty — every client must re-register and re-authorize"
+                );
+                StoreFile::default()
+            }
+        };
         Self {
             public_url: public_url.trim_end_matches('/').to_string(),
             store_path,
@@ -529,6 +546,28 @@ mod tests {
         oauth
             .register_client("claude", vec!["https://claude.ai/cb".to_string()])
             .unwrap()
+    }
+
+    /// A store that exists but does not parse must start empty (the
+    /// safe direction — nothing silently trusted) without failing the
+    /// boot. The warn line it emits is the operator's only clue; the
+    /// behavior this pins is "corrupt store ≠ crash, corrupt store ≠
+    /// trusted store".
+    #[test]
+    fn a_corrupt_store_starts_empty_instead_of_failing_the_boot() {
+        let dir = std::env::temp_dir().join(format!("taguru-oauth-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("oauth.json"), b"{ definitely not json").unwrap();
+
+        let oauth = Oauth::open("https://memory.example", &dir);
+        // No registration survived — a token minted before the
+        // corruption must not authenticate against the empty store.
+        assert!(oauth.authenticate("tg_oauth_anything", 0).is_none());
+        // And the store still works: a fresh registration goes through.
+        register(&oauth);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// RFC 4648 §5 (unpadded) and the RFC 7636 appendix B vector: the
