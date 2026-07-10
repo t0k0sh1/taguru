@@ -274,6 +274,34 @@ fn health_derives_its_target_from_taguru_addr() {
 }
 
 #[test]
+fn health_reads_taguru_addr_from_the_config_file() {
+    // The documented container shape: TAGURU_ADDR lives in a --config
+    // file, serve reads it — and the HEALTHCHECK probe must read the
+    // same file, or it asks the built-in default port forever and
+    // reports a healthy server unhealthy.
+    let (mut child, addr, dir) = spawn_server("health-config");
+    let config = dir.join("probe.env");
+    std::fs::write(&config, format!("TAGURU_ADDR={addr}\n")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .arg("health")
+        .arg("--config")
+        .arg(&config)
+        .env_remove("TAGURU_CONFIG")
+        .env_remove("TAGURU_ADDR")
+        .output()
+        .expect("binary must run");
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a --config deployment's health check must probe the configured port: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn health_exits_nonzero_when_nothing_listens() {
     // Learn a free port, then release it: a brief race, but nothing
     // is likely to grab this exact port before the probe fires.

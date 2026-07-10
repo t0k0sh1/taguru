@@ -17,9 +17,11 @@ const USAGE: &str = concat!(
 USAGE:
   taguru [serve] [--config FILE]        start the HTTP server (the default)
   taguru version                        print the version
-  taguru health [URL]                   exit 0 iff a running server's /health
+  taguru health [--config FILE] [URL]   exit 0 iff a running server's /health
                                         answers 200 — the container
                                         HEALTHCHECK; URL defaults to TAGURU_ADDR
+                                        (the config file is applied first, so a
+                                        --config deployment probes its own port)
   taguru inspect PATH                   verify a data directory or one .ctx
                                         image offline (backup check) — the
                                         same validating load the server runs
@@ -150,20 +152,57 @@ fn parse_serve(args: &[String]) -> ServeArgs {
     ServeArgs { config }
 }
 
-/// `taguru health [URL]`: one GET against a running server's /health,
-/// exit 0 iff it answers 200. This exists for container HEALTHCHECKs —
-/// a scratch image has no curl, but it always has taguru itself.
-/// /health is exempt from bearer auth, so no token is needed here.
+/// `taguru health [--config FILE] [URL]`: one GET against a running
+/// server's /health, exit 0 iff it answers 200. This exists for
+/// container HEALTHCHECKs — a scratch image has no curl, but it always
+/// has taguru itself. /health is exempt from bearer auth, so no token
+/// is needed here.
+///
+/// The config file (`--config`, or `TAGURU_CONFIG` like serve) is
+/// applied before the default URL is resolved: in a deployment whose
+/// TAGURU_ADDR lives in that file, the probe must aim at the port the
+/// server actually bound, not at the built-in default — a health
+/// check that asks the wrong door reports a healthy server unhealthy
+/// forever.
 fn health(args: &[String]) -> i32 {
-    let base = match args {
-        [] => default_base_url(),
-        [flag] if flag == "--help" || flag == "-h" => {
-            println!("usage: taguru health [URL]   exit 0 iff GET URL/health answers 200");
-            return 0;
+    let mut config: Option<PathBuf> = None;
+    let mut explicit_url: Option<String> = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                println!(
+                    "usage: taguru health [--config FILE] [URL]   \
+                     exit 0 iff GET URL/health answers 200"
+                );
+                return 0;
+            }
+            "--config" => match rest.next() {
+                Some(path) if config.is_none() => config = Some(PathBuf::from(path)),
+                Some(_) => usage_error("--config given twice"),
+                None => usage_error("--config needs a file path"),
+            },
+            flag if flag.starts_with('-') => {
+                usage_error(&format!("'health' does not take '{flag}'"))
+            }
+            url => {
+                if explicit_url
+                    .replace(url.trim_end_matches('/').to_string())
+                    .is_some()
+                {
+                    usage_error(&format!("'health' takes one optional URL, got '{url}'"));
+                }
+            }
         }
-        [url] => url.trim_end_matches('/').to_string(),
-        [_, extra, ..] => usage_error(&format!("'health' takes one optional URL, got '{extra}'")),
-    };
+    }
+    // The flag beats the variable, both beat the built-in default —
+    // the same rule serve applies. Sound here for the same reason:
+    // dispatch() runs before any runtime or second thread exists.
+    let config = config.or_else(|| std::env::var("TAGURU_CONFIG").ok().map(PathBuf::from));
+    if let Some(path) = &config {
+        load_config(path);
+    }
+    let base = explicit_url.unwrap_or_else(default_base_url);
     let url = format!("{base}/health");
     // The agent timeout stays under HEALTHCHECK's own 5s deadline so
     // the verdict (and its message) comes from here, not from a kill.
