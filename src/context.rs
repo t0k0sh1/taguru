@@ -113,10 +113,16 @@ impl Error for AliasError {}
 /// the same contract the citation endpoint's `section` field makes. It
 /// reflects only the first assertion of this source (first-write-wins);
 /// later re-assertions accumulate into `weight` but never change it.
+/// `weight` is this source's raw cumulative total (not averaged) — the
+/// invariant `sum(attributions.weight) + unsourced == association.weight *
+/// association.count` holds regardless of how many times this source
+/// re-asserted. `count` is how many times this source asserted the
+/// association.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Attribution {
     pub source: String,
     pub weight: f64,
+    pub count: u64,
     pub paragraph: Option<u32>,
 }
 
@@ -132,13 +138,18 @@ pub struct Association {
     pub subject: String,
     pub label: String,
     pub object: String,
+    /// The average weight per assertion (`sum / count`), not the raw
+    /// cumulative total. Two independent attributions of 1.0 each
+    /// (corroboration) average to a `weight` of 1.0; one attribution
+    /// asserting 2.0 a single time (emphasis) keeps a `weight` of 2.0 —
+    /// the two cases are no longer indistinguishable the way a plain sum
+    /// would make them.
     pub weight: f64,
+    /// How many assertions (sourced and unsourced) contributed to `weight`.
+    pub count: u64,
     /// Which sources asserted this association and how much weight each
-    /// contributed. Total `weight` can exceed the attributed sum when some
-    /// assertions came in unsourced. Two attributions of 1.0 (independent
-    /// corroboration) and one attribution of 2.0 (a single emphatic
-    /// assertion) are distinguishable here even though `weight` is 2.0 in
-    /// both cases.
+    /// contributed. Total `weight * count` can exceed the attributed sum
+    /// when some assertions came in unsourced.
     pub attributions: Vec<Attribution>,
 }
 
@@ -322,8 +333,13 @@ struct AliasRecord {
 /// while every record stays fixed-width. Per-source attributions hang off
 /// the edge the same way, as a chain through the attribution table.
 ///
-/// Layout: 8 × u32 + 1 × f64 = 40 bytes, alignment 8, no padding (the
-/// eight u32 fields put `weight` at offset 32).
+/// `weight` is `sum / count`, not stored directly: the record keeps the
+/// raw cumulative `sum` and the assertion `count` so corroboration
+/// (several assertions of the same weight) can be told apart from a single
+/// emphatic assertion of the same total — see [`Association`].
+///
+/// Layout: 8 × u32 + 1 × u64 + 1 × f64 = 48 bytes, alignment 8, no padding
+/// (the eight u32 fields put `count` at offset 32 and `sum` at offset 40).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct EdgeRecord {
@@ -335,20 +351,22 @@ struct EdgeRecord {
     next_labeled: EdgeId,
     first_attribution: AttributionId,
     last_attribution: AttributionId,
-    weight: f64,
+    count: u64,
+    sum: f64,
 }
 
 /// One source's weight contribution to one edge, in fixed-width form; a
 /// link in that edge's attribution chain, in insertion order, one record
 /// per distinct source.
 ///
-/// Layout: 2 × u32 + 1 × f64 = 16 bytes, alignment 8, no padding.
+/// Layout: 2 × u32 + 1 × u64 + 1 × f64 = 24 bytes, alignment 8, no padding.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct AttributionRecord {
     source: SourceId,
     next: AttributionId,
-    weight: f64,
+    count: u64,
+    sum: f64,
 }
 
 /// One paragraph locator for an attribution record, in fixed-width form.
@@ -606,7 +624,9 @@ impl Context {
         let key = (subject_id, label_id, object_id);
         let edge_id = match self.edge_ids.get(&key).copied() {
             Some(edge_id) => {
-                self.edges[edge_id as usize].weight += weight;
+                let edge = &mut self.edges[edge_id as usize];
+                edge.sum += weight;
+                edge.count += 1;
                 edge_id
             }
             None => {
@@ -621,7 +641,8 @@ impl Context {
                     next_labeled: NIL,
                     first_attribution: NIL,
                     last_attribution: NIL,
-                    weight,
+                    count: 1,
+                    sum: weight,
                 });
                 let node = &mut self.concepts[subject_id as usize];
                 append_to_chain(
@@ -754,7 +775,8 @@ impl Context {
         while cursor != NIL {
             let record = &mut self.attributions[cursor as usize];
             if record.source == source_id {
-                record.weight += weight;
+                record.sum += weight;
+                record.count += 1;
                 return;
             }
             cursor = record.next;
@@ -764,7 +786,8 @@ impl Context {
         self.attributions.push(AttributionRecord {
             source: source_id,
             next: NIL,
-            weight,
+            count: 1,
+            sum: weight,
         });
         if let Some(paragraph) = paragraph {
             self.attribution_locators.push(AttributionLocatorRecord {
@@ -1150,7 +1173,7 @@ impl Context {
             let total: f64 = self
                 .outgoing(concept)
                 .chain(self.incoming(concept))
-                .map(|edge_id| self.edges[edge_id as usize].weight.abs())
+                .map(|edge_id| self.edges[edge_id as usize].sum.abs())
                 .sum();
             if total == 0.0 {
                 continue;
@@ -1160,7 +1183,7 @@ impl Context {
                 // Ranking: fan-independent, so a busy endpoint doesn't
                 // sink its own facts. Netted-out (or zero-decay) signals
                 // carry nothing and are skipped entirely.
-                let score = activation * decay * edge.weight.abs();
+                let score = activation * decay * edge.sum.abs();
                 if score <= 0.0 {
                     continue;
                 }
@@ -1458,9 +1481,9 @@ impl Context {
         let mut edges: Vec<EdgeId> = edges.collect();
         edges.sort_by(|&a, &b| {
             self.edges[b as usize]
-                .weight
+                .sum
                 .abs()
-                .total_cmp(&self.edges[a as usize].weight.abs())
+                .total_cmp(&self.edges[a as usize].sum.abs())
                 .then_with(|| a.cmp(&b))
         });
         edges.truncate(keep);
@@ -1488,7 +1511,7 @@ impl Context {
             gloss.push_str(self.label_name(edge.label));
             gloss.push('は');
             gloss.push_str(self.concept_name(edge.object));
-            if edge.weight < 0.0 {
+            if edge.sum < 0.0 {
                 gloss.push_str("ではない");
             }
             gloss.push('。');
@@ -1767,19 +1790,20 @@ impl Context {
             while cursor != NIL {
                 let record = &self.attributions[cursor as usize];
                 if record.source == source_id {
-                    found = Some((previous, cursor, record.weight));
+                    found = Some((previous, cursor, record.sum, record.count));
                     break;
                 }
                 previous = cursor;
                 cursor = record.next;
             }
-            let Some((previous, cursor, weight)) = found else {
+            let Some((previous, cursor, sum, count)) = found else {
                 continue;
             };
 
             let next = self.attributions[cursor as usize].next;
             let edge = &mut self.edges[edge_index];
-            edge.weight -= weight;
+            edge.sum -= sum;
+            edge.count = edge.count.saturating_sub(count);
             if previous == NIL {
                 edge.first_attribution = next;
             }
@@ -1972,12 +1996,18 @@ impl Context {
             subject: self.concept_name(edge.subject).to_string(),
             label: self.label_name(edge.label).to_string(),
             object: self.concept_name(edge.object).to_string(),
-            weight: edge.weight,
+            weight: if edge.count == 0 {
+                0.0
+            } else {
+                edge.sum / edge.count as f64
+            },
+            count: edge.count,
             attributions: self
                 .attribution_chain(edge.first_attribution)
                 .map(|(attribution_id, record)| Attribution {
                     source: self.source_name(record.source).to_string(),
-                    weight: record.weight,
+                    weight: record.sum,
+                    count: record.count,
                     paragraph: self.locator_for(attribution_id),
                 })
                 .collect(),
@@ -2415,6 +2445,7 @@ mod tests {
             label: label.to_string(),
             object: object.to_string(),
             weight,
+            count: 1,
             attributions: Vec::new(),
         }
     }
@@ -2458,22 +2489,24 @@ mod tests {
     }
 
     #[test]
-    fn repeated_associations_accumulate_additively() {
+    fn repeated_associations_average_rather_than_sum() {
         let mut context = Context::default();
 
         // The first mention seeds the weight directly.
         context.associate("私", "好き", "りんご", 1.0).unwrap();
         assert_eq!(weight_between(&context, "私", "好き", "りんご"), 1.0);
 
-        // Every later agreeing repeat adds its own magnitude onto the
-        // existing weight, so repetition strengthens an association and a
-        // more emphatic restatement (e.g. "大好き" carrying a bigger weight)
-        // moves it further than a mild one would.
+        // A later agreeing repeat of the SAME magnitude leaves weight
+        // unchanged — it's averaged in, not piled on top — which is what
+        // lets a caller tell "this was corroborated again" apart from "this
+        // was asserted once, more emphatically".
         context.associate("私", "好き", "りんご", 1.0).unwrap();
-        assert_eq!(weight_between(&context, "私", "好き", "りんご"), 2.0);
+        assert_eq!(weight_between(&context, "私", "好き", "りんご"), 1.0);
 
+        // A more emphatic restatement (e.g. "大好き" carrying a bigger
+        // weight) still pulls the average toward it.
         context.associate("私", "好き", "りんご", 5.0).unwrap();
-        assert_eq!(weight_between(&context, "私", "好き", "りんご"), 7.0);
+        assert_eq!(weight_between(&context, "私", "好き", "りんご"), 7.0 / 3.0);
     }
 
     #[test]
@@ -2483,11 +2516,11 @@ mod tests {
         context.associate("私", "好き", "りんご", 2.0).unwrap();
         // Contradicts, but not enough to overturn it.
         context.associate("私", "好き", "りんご", -0.5).unwrap();
-        assert_eq!(weight_between(&context, "私", "好き", "りんご"), 1.5);
+        assert_eq!(weight_between(&context, "私", "好き", "りんご"), 1.5 / 2.0);
 
         // Contradicts hard enough this time to flip the sign outright.
         context.associate("私", "好き", "りんご", -3.0).unwrap();
-        assert_eq!(weight_between(&context, "私", "好き", "りんご"), -1.5);
+        assert_eq!(weight_between(&context, "私", "好き", "りんご"), -1.5 / 3.0);
     }
 
     #[test]
@@ -2498,10 +2531,11 @@ mod tests {
         context.associate("私", "好き", "りんご", -1.0).unwrap();
         assert_eq!(weight_between(&context, "私", "好き", "りんご"), 0.0);
 
-        // Landing on exactly 0.0 is just another value to add onto, not a
-        // dead end — the next call accumulates from there like any other.
+        // Landing on exactly 0.0 is just another value to average in, not
+        // a dead end — the next call keeps contributing from there like
+        // any other.
         context.associate("私", "好き", "りんご", 1.0).unwrap();
-        assert_eq!(weight_between(&context, "私", "好き", "りんご"), 1.0);
+        assert_eq!(weight_between(&context, "私", "好き", "りんご"), 1.0 / 3.0);
     }
 
     #[test]
@@ -2710,18 +2744,21 @@ mod tests {
 
         let recalled = context.recall("投票");
         assert_eq!(recalled.len(), 1);
-        assert_eq!(recalled[0].weight, 2.0);
+        assert_eq!(recalled[0].weight, 1.0);
+        assert_eq!(recalled[0].count, 2);
         assert_eq!(
             recalled[0].attributions,
             vec![
                 Attribution {
                     source: "IPA公式".to_string(),
                     weight: 1.0,
+                    count: 1,
                     paragraph: None,
                 },
                 Attribution {
                     source: "解説記事".to_string(),
                     weight: 1.0,
+                    count: 1,
                     paragraph: None,
                 },
             ]
@@ -2731,7 +2768,9 @@ mod tests {
     #[test]
     fn attributions_tell_corroboration_apart_from_single_source_emphasis() {
         let mut context = Context::default();
-        // Same total weight, different evidence story.
+        // Same total, different evidence story: "a" is corroborated by two
+        // independent sources each asserting 1.0; "x" is asserted by one
+        // source emphatically asserting 2.0 a single time.
         context
             .associate_from("a", "r", "b", 1.0, "文書1", None)
             .unwrap();
@@ -2744,7 +2783,11 @@ mod tests {
 
         let corroborated = &context.query(Some("a"), None, None)[0];
         let emphatic = &context.query(Some("x"), None, None)[0];
-        assert_eq!(corroborated.weight, emphatic.weight);
+        // Averaging tells the two stories apart: corroboration settles at
+        // the per-assertion weight (1.0), while a single emphatic
+        // assertion keeps its full weight (2.0).
+        assert_eq!(corroborated.weight, 1.0);
+        assert_eq!(emphatic.weight, 2.0);
         assert_eq!(corroborated.attributions.len(), 2);
         assert_eq!(emphatic.attributions.len(), 1);
     }
@@ -2760,12 +2803,14 @@ mod tests {
             .unwrap();
 
         let recalled = context.recall("a");
-        assert_eq!(recalled[0].weight, 1.5);
+        assert_eq!(recalled[0].weight, 0.75);
+        assert_eq!(recalled[0].count, 2);
         assert_eq!(
             recalled[0].attributions,
             vec![Attribution {
                 source: "文書1".to_string(),
                 weight: 1.5,
+                count: 2,
                 paragraph: None,
             }]
         );
@@ -2785,12 +2830,13 @@ mod tests {
             .unwrap();
 
         let recalled = context.recall("a");
-        assert_eq!(recalled[0].weight, 1.5);
+        assert_eq!(recalled[0].weight, 0.75);
         assert_eq!(
             recalled[0].attributions,
             vec![Attribution {
                 source: "文書1".to_string(),
                 weight: 1.5,
+                count: 2,
                 paragraph: Some(2),
             }]
         );
@@ -2810,6 +2856,7 @@ mod tests {
             vec![Attribution {
                 source: "文書1".to_string(),
                 weight: 1.5,
+                count: 2,
                 paragraph: None,
             }]
         );
@@ -2825,12 +2872,14 @@ mod tests {
 
         // Total weight counts both; only the sourced part is attributed.
         let recalled = context.recall("a");
-        assert_eq!(recalled[0].weight, 1.5);
+        assert_eq!(recalled[0].weight, 0.75);
+        assert_eq!(recalled[0].count, 2);
         assert_eq!(
             recalled[0].attributions,
             vec![Attribution {
                 source: "文書1".to_string(),
                 weight: 0.5,
+                count: 1,
                 paragraph: None,
             }]
         );
@@ -3054,14 +3103,15 @@ mod tests {
         assert_eq!(context.resolve_label("設立")[0].name, "創業年");
 
         // Writes through the alias accumulate into the canonical concept
-        // instead of forking a new one.
+        // instead of forking a new one — two assertions of 1.0 average
+        // to 1.0, not sum to 2.0.
         context
             .associate("Aomine Brewery", "設立年", "1907年", 1.0)
             .unwrap();
         assert_eq!(context.concept_count(), 2);
         assert_eq!(
             weight_between(&context, "青嶺酒造", "創業年", "1907年"),
-            2.0
+            1.0
         );
 
         // Vocabulary views stay canonical-only; aliases live in their
@@ -3251,36 +3301,31 @@ mod tests {
             context.query(Some("Aomine"), Some("設立年"), None)
         );
 
-        // A version-1 image is the current image minus the watermark
-        // (8 header bytes), the two alias sections, and the attribution-
-        // locator section. For this aliasless context: header 24 (magic
-        // 8, version 4, padding 4, watermark 8), edges 8+40, attributions
-        // 8, concepts 8+64, labels 8+20, sources 8 → the alias counts sit
-        // at 188..204, and the (empty) locator count sits at 204..212.
-        // Keep the 16-byte v1 header, cut the watermark, the alias
-        // counts, and the locator count, set the version back to 1; the
-        // image must load with no aliases.
+        // A version-1 image predates the watermark, both alias tables,
+        // and the attribution-locator table; it must still load with no
+        // aliases. `to_bytes_as_version` writes the genuine pre-v5,
+        // weight-only edge/attribution shape a v1 reader expects —
+        // slicing `to_bytes`'s (always-current) output no longer works
+        // now that those records are wider than they were pre-v5.
         let mut aliasless = Context::default();
         aliasless.associate("私", "好き", "りんご", 1.0).unwrap();
-        let v3 = aliasless.to_bytes();
-        let mut v1 = Vec::new();
-        v1.extend_from_slice(&v3[..16]);
-        v1.extend_from_slice(&v3[24..188]);
-        v1.extend_from_slice(&v3[212..]);
-        v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+        let v1 = aliasless.to_bytes_as_version(1);
         let loaded = Context::from_bytes(&v1).expect("v1 image must still load");
         assert_eq!(loaded.recall("私").len(), 1);
         assert!(loaded.concept_aliases().is_empty());
 
         // An alias record pointing at a nonexistent concept is caught.
-        // Same section math, plus one 12-byte alias record whose target
-        // field is its last 4 bytes: 188 + 8 → record at 196, target at
-        // 204..208.
+        // Section math for this (current-version) context (1 unsourced
+        // edge, no attributions, 1 concept alias, no label aliases, no
+        // locators): header 24, edges 8+48, attributions 8, concepts
+        // 8+64, labels 8+20, sources 8 → the concept-alias count sits at
+        // 196..204, its one 12-byte record (name_offset, name_len,
+        // target) follows at 204..216, so target is 212..216.
         let mut with_alias = Context::default();
         with_alias.associate("私", "好き", "りんご", 1.0).unwrap();
         with_alias.add_concept_alias("わたし", "私").unwrap();
         let mut corrupt = with_alias.to_bytes();
-        corrupt[204..208].copy_from_slice(&u32::MAX.to_le_bytes());
+        corrupt[212..216].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(Context::from_bytes(&corrupt).is_err());
     }
 
@@ -3298,26 +3343,17 @@ mod tests {
 
     #[test]
     fn v2_images_load_with_a_zero_watermark() {
-        // A v2 image is the current image minus the 8 watermark bytes
-        // and the attribution-locator section (v2 predates both), with
-        // the version field set back to 2 — this pins BOTH the
-        // backward-compat read and the version RANGE check (a two-value
-        // check like `!=1 && !=current` would reject exactly this).
-        // Section math for this context (1 edge, 1 concept alias, no
-        // sources, no locators): header 24, edges 8+40, attributions 8,
-        // concepts 8+64, labels 8+20, sources 8, concept_aliases 8+12,
-        // label_aliases 8 → the alias tables end at 216, and the
-        // (empty) locator count occupies 216..224.
+        // A v2 image predates the watermark and the attribution-locator
+        // table — this pins BOTH the backward-compat read and the
+        // version RANGE check (a two-value check like `!=1 && !=current`
+        // would reject exactly this). `to_bytes_as_version` also proves
+        // the watermark never round-trips into a version that predates
+        // it: `applied_seq` is set here but must load back as 0.
         let mut context = Context::default();
         context.associate("私", "好き", "りんご", 1.0).unwrap();
         context.add_concept_alias("わたし", "私").unwrap();
         context.set_applied_seq(7); // must NOT survive into the v2 bytes
-        let v3 = context.to_bytes();
-        let mut v2 = Vec::new();
-        v2.extend_from_slice(&v3[..16]);
-        v2.extend_from_slice(&v3[24..216]);
-        v2.extend_from_slice(&v3[224..]);
-        v2[8..12].copy_from_slice(&2u32.to_le_bytes());
+        let v2 = context.to_bytes_as_version(2);
 
         let loaded = Context::from_bytes(&v2).expect("v2 image must load");
         assert_eq!(loaded.applied_seq(), 0);
@@ -3326,22 +3362,15 @@ mod tests {
 
     #[test]
     fn v3_images_load_with_no_locators() {
-        // A v3 image is the current image minus only the attribution-
-        // locator section (v3 already has the watermark and both alias
-        // tables — it just predates locators). Section math for this
-        // context (1 edge, 1 sourced attribution, no aliases): header
-        // 24, edges 8+40, attributions 8+16, concepts 8+64, labels
-        // 8+20, sources 8+8, concept_aliases 8, label_aliases 8 → the
-        // (empty) locator count occupies 228..236.
+        // A v3 image already has the watermark and both alias tables —
+        // it just predates the attribution-locator table, so every
+        // attribution's paragraph must resolve to `None` regardless of
+        // what locator this context recorded.
         let mut context = Context::default();
         context
             .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
             .unwrap();
-        let v4 = context.to_bytes();
-        let mut v3 = Vec::new();
-        v3.extend_from_slice(&v4[..228]);
-        v3.extend_from_slice(&v4[236..]);
-        v3[8..12].copy_from_slice(&3u32.to_le_bytes());
+        let v3 = context.to_bytes_as_version(3);
 
         let loaded = Context::from_bytes(&v3).expect("v3 image must load");
         assert_eq!(
@@ -3349,9 +3378,33 @@ mod tests {
             vec![Attribution {
                 source: "文書1".to_string(),
                 weight: 1.0,
+                count: 1,
                 paragraph: None,
             }]
         );
+    }
+
+    #[test]
+    fn v4_images_synthesize_count_from_the_attribution_chain() {
+        // A v4 image predates the count/sum split entirely — its edge
+        // and attribution records carry only a flat cumulative
+        // `weight`. Two independent sources each asserting once must
+        // synthesize `count` as the attribution chain length (2), not
+        // as a flat 1, so the migrated weight is the corroborated
+        // average (1.5) rather than the old flat sum (3.0).
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 2.0, "文書2", None)
+            .unwrap();
+        let v4 = context.to_bytes_as_version(4);
+
+        let loaded = Context::from_bytes(&v4).expect("v4 image must load");
+        let assoc = &loaded.recall("私")[0];
+        assert_eq!(assoc.count, 2);
+        assert_eq!(assoc.weight, 1.5);
     }
 
     #[test]
@@ -3374,19 +3427,23 @@ mod tests {
         context.associate("a", "r", "d", 1.0).unwrap(); // unsourced stays
 
         // 旧版 contributed to two edges; both lose exactly its share.
+        // "a"-"r"-"b" had sum 3.5 across 3 attributions (1.0 + 2.0 +
+        // 0.5); losing 旧版's (1.0, count 1) leaves sum 2.5, count 2.
         assert_eq!(context.retract_source("旧版"), Some(2));
-        assert_eq!(weight_between(&context, "a", "r", "b"), 2.5);
+        assert_eq!(weight_between(&context, "a", "r", "b"), 1.25);
         assert_eq!(
             context.query(Some("a"), None, Some("b"))[0].attributions,
             vec![
                 Attribution {
                     source: "新版".to_string(),
                     weight: 2.0,
+                    count: 1,
                     paragraph: Some(4),
                 },
                 Attribution {
                     source: "第三者".to_string(),
                     weight: 0.5,
+                    count: 1,
                     paragraph: Some(7),
                 },
             ]
@@ -3404,17 +3461,80 @@ mod tests {
 
         // Unlinking the tail keeps chains appendable, and the image —
         // now carrying orphaned attribution records — must round-trip.
+        // Losing 第三者's (0.5, count 1) leaves sum 2.0, count 1 — a
+        // weight of 2.0 that happens to match the pre-retraction figure.
         assert_eq!(context.retract_source("第三者"), Some(1));
         assert_eq!(weight_between(&context, "a", "r", "b"), 2.0);
         context
             .associate_from("a", "r", "b", 0.5, "旧版", None)
             .unwrap();
-        assert_eq!(weight_between(&context, "a", "r", "b"), 2.5);
+        // Back up to sum 2.5, count 2: weight 1.25, not the old 2.5.
+        assert_eq!(weight_between(&context, "a", "r", "b"), 1.25);
         let restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
         assert_eq!(
             restored.query(Some("a"), None, None),
             context.query(Some("a"), None, None)
         );
+    }
+
+    #[test]
+    fn retract_source_subtracts_its_full_re_assertion_count() {
+        // A source that re-asserted the same edge multiple times folds
+        // into one attribution record whose `count` tracks how many
+        // times it re-asserted. Retracting it must subtract that whole
+        // count, not just 1, or repeated retract/re-assert cycles would
+        // leak count into the edge forever.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "A", None)
+            .unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "A", None)
+            .unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 2.0, "A", None)
+            .unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 2.0, "B", None)
+            .unwrap();
+
+        // A's attribution record: sum 4.0, count 3. B's: sum 2.0, count
+        // 1. Edge: sum 6.0, count 4, weight 1.5.
+        let before = &context.recall("私")[0];
+        assert_eq!(before.count, 4);
+        assert_eq!(before.weight, 1.5);
+
+        // Retracting A drops its whole (sum 4.0, count 3): edge becomes
+        // sum 2.0, count 1, weight 2.0 — B's contribution alone.
+        assert_eq!(context.retract_source("A"), Some(1));
+        let after = &context.recall("私")[0];
+        assert_eq!(after.count, 1);
+        assert_eq!(after.weight, 2.0);
+    }
+
+    #[test]
+    fn retracting_every_source_of_a_migrated_edge_does_not_underflow_count() {
+        // A v4 image's edge count is synthesized as the attribution
+        // chain length (see
+        // `v4_images_synthesize_count_from_the_attribution_chain`), not
+        // as a flat 1 — retracting every one of several sources in turn
+        // must land exactly at 0, never wrap past it via u64 underflow.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 2.0, "文書2", None)
+            .unwrap();
+        let v4 = context.to_bytes_as_version(4);
+        let mut restored = Context::from_bytes(&v4).expect("v4 image must load");
+
+        assert_eq!(restored.retract_source("文書1"), Some(1));
+        assert_eq!(restored.retract_source("文書2"), Some(1));
+
+        let after = &restored.recall("私")[0];
+        assert_eq!(after.count, 0);
+        assert_eq!(after.weight, 0.0);
     }
 
     #[test]
@@ -3720,12 +3840,13 @@ mod tests {
         restored
             .associate_from("a", "r", "b", 0.5, "文書1", None)
             .unwrap();
-        assert_eq!(weight_between(&restored, "a", "r", "b"), 1.5);
+        assert_eq!(weight_between(&restored, "a", "r", "b"), 0.75);
         assert_eq!(
             restored.recall("a")[0].attributions,
             vec![Attribution {
                 source: "文書1".to_string(),
                 weight: 1.5,
+                count: 2,
                 paragraph: None,
             }]
         );
@@ -3757,11 +3878,13 @@ mod tests {
                 Attribution {
                     source: "文書1".to_string(),
                     weight: 1.0,
+                    count: 1,
                     paragraph: Some(3),
                 },
                 Attribution {
                     source: "文書2".to_string(),
                     weight: 1.0,
+                    count: 1,
                     paragraph: None,
                 },
             ]
@@ -3770,28 +3893,26 @@ mod tests {
 
     #[test]
     fn from_bytes_rejects_corrupt_locators() {
-        // One sourced, located attribution: header 24, edges 8+40,
-        // attributions 8+16, concepts 8+64, labels 8+20, sources 8+8,
+        // One sourced, located attribution: header 24, edges 8+48,
+        // attributions 8+24, concepts 8+64, labels 8+20, sources 8+8,
         // concept_aliases 8, label_aliases 8 → the locator table starts
-        // at 228 (its count, 8 bytes), and the lone record's
-        // `attribution` field sits at 236..240 (same math as
-        // `v3_images_load_with_no_locators`, which strips this same
-        // section). Pointing it at a nonexistent attribution must be
-        // caught.
+        // at 244 (its count, 8 bytes), and the lone record's
+        // `attribution` field sits at 252..256. Pointing it at a
+        // nonexistent attribution must be caught.
         let mut context = Context::default();
         context
             .associate_from("私", "好き", "りんご", 1.0, "文書1", Some(3))
             .unwrap();
         let mut dangling = context.to_bytes();
-        dangling[236..240].copy_from_slice(&u32::MAX.to_le_bytes());
+        dangling[252..256].copy_from_slice(&u32::MAX.to_le_bytes());
         let error = Context::from_bytes(&dangling).unwrap_err();
         assert!(error.to_string().contains("unknown attribution"), "{error}");
 
         // Two sourced, located attributions from two distinct sources on
         // the same edge (two attribution records, two locator records):
-        // the extra 8-byte source and 16-byte attribution record shift
-        // the locator table to 252..276, putting the second record's
-        // `attribution` field at 268..272. Setting it to 0 — equal to
+        // the extra 8-byte source and 24-byte attribution record shift
+        // the locator table to 276..300, putting the second record's
+        // `attribution` field at 292..296. Setting it to 0 — equal to
         // the first record's — breaks the strictly-increasing invariant
         // without pointing outside the attribution table.
         let mut two_sources = Context::default();
@@ -3802,9 +3923,27 @@ mod tests {
             .associate_from("私", "好き", "りんご", 1.0, "文書2", Some(5))
             .unwrap();
         let mut unsorted = two_sources.to_bytes();
-        unsorted[268..272].copy_from_slice(&0u32.to_le_bytes());
+        unsorted[292..296].copy_from_slice(&0u32.to_le_bytes());
         let error = Context::from_bytes(&unsorted).unwrap_err();
         assert!(error.to_string().contains("not sorted"), "{error}");
+    }
+
+    #[test]
+    fn from_bytes_rejects_an_edge_count_below_its_attribution_chain() {
+        // header 24, edge-table count 8 → the lone edge record starts
+        // at 32; `count` is its ninth field, after 8 × u32 (32 bytes),
+        // so it sits at 32+32=64..72 as a u64. Setting it below the
+        // one attribution record's own count (1) must be caught, or a
+        // hand-crafted or corrupted image could desynchronize the
+        // derived `weight` from the attributions actually backing it.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        let mut corrupt = context.to_bytes();
+        corrupt[64..72].copy_from_slice(&0u64.to_le_bytes());
+        let error = Context::from_bytes(&corrupt).unwrap_err();
+        assert!(error.to_string().contains("combined count"), "{error}");
     }
 
     #[test]

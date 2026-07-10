@@ -102,14 +102,16 @@ fn main() {
         )
         .unwrap();
 
-    // (1) Provenance: the same weight 2.0 that used to be ambiguous
-    // ("one emphatic assertion, or two independent ones?") now answers
-    // that question itself, and each source id points at original text.
-    println!("=== recall(\"投票\") — 重み2.0の由来が見える ===");
+    // (1) Provenance: `weight` is now the corroborated average (1.0),
+    // no longer confusable with one emphatic assertion of 2.0 — and
+    // `count` plus the attribution list below answer, separately, how
+    // many independent sources agree. Each attribution still carries
+    // its own raw contribution and points at the original text.
+    println!("=== recall(\"投票\") — 重みと裏付け件数が別々に見える ===");
     for a in context.recall("投票") {
         println!(
-            "  {} -({})-> {}  weight {:?}",
-            a.subject, a.label, a.object, a.weight
+            "  {} -({})-> {}  weight {:?} (count {})",
+            a.subject, a.label, a.object, a.weight, a.count
         );
         for attribution in &a.attributions {
             println!(
