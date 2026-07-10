@@ -101,6 +101,11 @@ impl Context {
     /// reader would misparse.
     #[cfg(test)]
     pub(super) fn to_bytes_as_version(&self, version: u32) -> Vec<u8> {
+        debug_assert!(
+            version < IMAGE_VERSION,
+            "to_bytes_as_version always writes the legacy, weight-only shape; \
+             version must predate it, or from_bytes will misparse the result"
+        );
         let legacy_edges: Vec<LegacyEdgeRecord> = self
             .edges
             .iter()

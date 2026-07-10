@@ -1042,8 +1042,10 @@ fn full_retrieval_loop_over_http() {
         Some(json!({"subject": "青嶺酒造", "label": "仕込み水"})),
     );
     // Two sources each asserting 1.0 average to 1.0 — corroboration is
-    // visible via the two attributions below, not via weight alone.
+    // visible via count and the two attributions below, not via weight
+    // alone.
     assert_eq!(water["matches"][0]["weight"], json!(1.0));
+    assert_eq!(water["matches"][0]["count"], json!(2));
     assert_eq!(
         water["matches"][0]["attributions"]
             .as_array()

@@ -516,8 +516,8 @@ impl Context {
     const ACTIVATION_FLOOR: f64 = 1e-6;
 
     /// Adds a directed, labeled, signed edge from `subject` to `object`, or
-    /// accumulates `weight` into an edge already there for the same
-    /// (subject, label, object) key.
+    /// folds `weight` into an edge already there for the same (subject,
+    /// label, object) key.
     ///
     /// This and [`Context::associate_from`] are the only ways facts enter a
     /// `Context`. It takes an already-resolved subject, label, object, and
@@ -530,12 +530,16 @@ impl Context {
     /// `associate("私", "食べられる", "りんご", -0.2)`.
     ///
     /// The first time a (subject, label, object) key is seen, `weight`
-    /// seeds it directly. Every later call for the same key adds `weight`
-    /// onto whatever is already there: repeated agreeing evidence
-    /// accumulates into a stronger weight of the same sign, and
-    /// contradicting evidence nets against it — strong enough contradiction
-    /// can overturn the sign outright. Nothing about the mechanism treats
-    /// agreement and contradiction differently; both are just addition.
+    /// seeds its running sum and [`Association::count`] becomes 1. Every
+    /// later call for the same key folds `weight` into that sum and
+    /// increments `count`; the `weight` a caller sees back is always the
+    /// average `sum / count`. Repeated agreeing evidence of the same
+    /// magnitude therefore leaves the average unchanged — corroboration
+    /// reads as more `count` behind the same weight, not a bigger one —
+    /// while contradicting evidence nets against the sum before it is
+    /// averaged, and strong enough contradiction can still overturn its
+    /// sign. Nothing about the mechanism treats agreement and contradiction
+    /// differently; both are just addition to the underlying sum.
     ///
     /// # Errors
     ///
@@ -560,18 +564,22 @@ impl Context {
     }
 
     /// Like [`Context::associate`], but records which source asserted the
-    /// fact. The same accumulation semantics apply to the edge's total
-    /// weight; in addition, the contribution is tallied per source, so a
-    /// retrieved [`Association`] can show whether its weight came from many
+    /// fact. The same sum/count accumulation applies to the edge's total;
+    /// in addition, the contribution is tallied per source, so a retrieved
+    /// [`Association`] can show whether its weight came from many
     /// independent sources (corroboration) or one source repeating itself,
     /// and the caller can follow any attribution back to the original text.
     ///
     /// Discipline note: paraphrases of one fact inside one document should
-    /// NOT be re-asserted at full weight — that inflates `weight` without
-    /// adding independent evidence. Assert once per document; re-assert
-    /// across documents (real corroboration). Readers that care about
-    /// independence should count distinct attributions rather than trust
-    /// raw weight.
+    /// still NOT be re-asserted — same-magnitude re-assertions leave the
+    /// public `weight` unchanged (it is an average, not a pile-up), but each
+    /// one still inflates `count`, and its source's own attribution count,
+    /// without adding independent evidence. Assert once per document;
+    /// re-assert across documents (real corroboration). Readers that care
+    /// about independence should still look at `count` and the attribution
+    /// list rather than trust weight alone: same-source repetition and
+    /// genuine multi-source corroboration of equal magnitude average out to
+    /// the same weight.
     ///
     /// `paragraph` optionally locates the fact within `source` (e.g. a
     /// paragraph index) and is first-write-wins: it is only recorded the
@@ -1103,30 +1111,34 @@ impl Context {
     ///
     /// Each origin starts with activation 1.0, and a concept's activation
     /// is that of its single strongest incoming path. Two formulas share
-    /// that activation but do different jobs:
+    /// that activation but do different jobs. Both rank on `sum`, the
+    /// edge's raw cumulative total — NOT the averaged [`Association::weight`]
+    /// returned to callers — so that corroboration (more evidence summing
+    /// higher) keeps outranking a single assertion of the same average
+    /// intensity:
     ///
     /// - An association's returned strength is
-    ///   `activation(nearer endpoint) * decay * |weight|` — deliberately
+    ///   `activation(nearer endpoint) * decay * |sum|` — deliberately
     ///   independent of how many OTHER associations its endpoints carry.
     ///   A fact about an anchor must not sink because the anchor is well
     ///   documented, and facts of several origins must compete fairly
     ///   however lopsided the origins' degrees are.
     /// - What flows ON to a neighboring concept is fan-normalized:
-    ///   `activation * decay * |weight| / Σ|weight|` over the concept's
+    ///   `activation * decay * |sum| / Σ|sum|` over the concept's
     ///   associations. A promiscuous hub splits its activation thinly, so
     ///   everything BEYOND a hub fades — connection through a busy concept
-    ///   is weak evidence of relatedness. At equal depth and weight, an
+    ///   is weak evidence of relatedness. At equal depth and sum, an
     ///   association just past a hub therefore ties with one past a
     ///   dedicated relay; the hub's penalty lands on all knowledge beyond.
     ///
-    /// Magnitude ranks, sign is content: weight -2.0 is strong knowledge
+    /// Magnitude ranks, sign is content: sum -2.0 is strong knowledge
     /// ("firmly not the case") and outranks +1.0, while associations
     /// netted out to 0.0 are not returned at all — a fully contested fact
     /// carries no reliable knowledge. `decay` shrinks the signal each hop
     /// (clamped into [0, 1]). Strengths are ordinal: compare them within
     /// one call's results, not across calls or corpus versions. Callers
     /// that care about independent corroboration rather than accumulated
-    /// weight can re-rank the returned associations by their number of
+    /// sum can re-rank the returned associations by their number of
     /// attributions. Results are deterministic — strength descending, then
     /// insertion order — and origins naming unknown concepts contribute
     /// nothing.
