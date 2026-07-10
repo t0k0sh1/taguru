@@ -119,6 +119,16 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
 /// warning. Any OTHER undecodable line is real corruption: unlike the
 /// sidecars, this file holds acknowledged writes that exist nowhere
 /// else, so skipping past it would be silent loss — it errors instead.
+///
+/// Dropping a torn tail from the returned ops is not enough on its own:
+/// the bytes stay on disk, and the next `append_batch` opens with
+/// `O_APPEND` and writes straight after them. The torn fragment and the
+/// new record would then share a line with no `\n` between them, and
+/// that fused line decodes as neither — turning a recoverable torn tail
+/// into the fatal interior-corruption case above. So the tail is healed
+/// in place here too: it was never acknowledged (its writer never got
+/// `Ok`), so truncating it away loses nothing. Healing is best effort —
+/// a failure only leaves the log as it was, to be retried next replay.
 pub fn replay<Op: DeserializeOwned>(path: &Path, watermark: u64) -> io::Result<(Vec<Op>, u64)> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -135,11 +145,20 @@ pub fn replay<Op: DeserializeOwned>(path: &Path, watermark: u64) -> io::Result<(
     if let Some(tail) = segments.pop()
         && !tail.is_empty()
     {
+        // Everything up to and including the last '\n' is intact; the
+        // torn fragment is exactly the trailing `tail.len()` bytes.
+        let healthy_len = (bytes.len() - tail.len()) as u64;
         tracing::warn!(
             "dropping a torn trailing WAL record at {} ({} bytes) — crash mid-append",
             path.display(),
             tail.len(),
         );
+        if let Err(error) = truncate_to(path, healthy_len) {
+            tracing::warn!(
+                "could not heal torn WAL tail at {} (harmless, will retry next replay): {error}",
+                path.display(),
+            );
+        }
     }
 
     let mut ops = Vec::new();
@@ -247,6 +266,7 @@ mod tests {
     fn a_torn_trailing_line_is_dropped_not_fatal() {
         let path = scratch_wal("torn");
         append_batch(&path, 1, &[associate("a")]).unwrap();
+        let healthy_len = fs::metadata(&path).unwrap().len();
         // Simulate a crash mid-append: valid bytes, no final newline.
         let mut bytes = fs::read(&path).unwrap();
         bytes.extend_from_slice(br#"{"seq":2,"op":"associate","subject":"b""#);
@@ -256,6 +276,47 @@ mod tests {
         assert_eq!(ops.len(), 1, "the complete record survives");
         assert_eq!(subject_of(&ops[0]), "a");
         assert_eq!(top, 1);
+        // The torn bytes are healed off disk, not just filtered out of
+        // the returned ops — the file ends back at its last newline.
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            healthy_len,
+            "replay must truncate the torn tail in place"
+        );
+    }
+
+    #[test]
+    fn a_torn_tail_does_not_fuse_with_the_next_append() {
+        // The regression this guards: before healing, replay dropped the
+        // torn record from its result but left the bytes on disk, so the
+        // next O_APPEND write landed straight after them and fused into a
+        // single undecodable line — which the *next* replay then treated
+        // as fatal interior corruption, bricking the context for good.
+        let path = scratch_wal("fuse");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        // Crash mid-append: a partial record with no closing newline.
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.extend_from_slice(br#"{"seq":2,"op":"associate","subject":"b"#);
+        fs::write(&path, bytes).unwrap();
+
+        // Recovery replay heals the tail; numbering resumes from the
+        // last intact record.
+        let (ops, top) = replay(&path, 0).unwrap();
+        assert_eq!(ops.iter().map(subject_of).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(top, 1);
+
+        // A fresh append after recovery lands on a clean newline
+        // boundary, so it stays a record of its own.
+        append_batch(&path, top + 1, &[associate("c")]).unwrap();
+
+        // The decisive check: the second replay succeeds instead of
+        // erroring on a fused line.
+        let (ops, top) = replay(&path, 0).unwrap();
+        assert_eq!(
+            ops.iter().map(subject_of).collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
+        assert_eq!(top, 2);
     }
 
     #[test]
