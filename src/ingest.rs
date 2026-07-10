@@ -608,6 +608,10 @@ fn parse_op(
             &op.question,
             crate::api::MAX_QUESTION_BYTES,
         )?;
+        // An empty question would still be embedded on the next refresh,
+        // and providers refuse zero-length input — failing the whole
+        // refresh pass, every pass, at the same spot.
+        check_nonempty(number, "question", &op.question)?;
         let siblings = question_counts.entry(op.paragraph).or_insert(0);
         if *siblings >= crate::api::MAX_QUESTIONS_PER_PARAGRAPH {
             return Err(format!(
@@ -627,6 +631,7 @@ fn parse_op(
             &op.section,
             crate::api::MAX_SECTION_BYTES,
         )?;
+        check_nonempty(number, "section", &op.section)?;
         batch.sections.push((op.paragraph, op.section));
     } else {
         return Err(format!(
@@ -1024,6 +1029,25 @@ mod tests {
             let error = parse(&format!("{HEADER}\n{line}\n")).unwrap_err();
             assert!(
                 error.contains("line 2") && error.contains("must not be empty"),
+                "{error}"
+            );
+        }
+    }
+
+    /// Empty question or section text is refused like empty names: a
+    /// question row is embedded verbatim on the next refresh, and
+    /// providers refuse zero-length input — one empty row would fail
+    /// its whole chunk (and abandon the pass) on every refresh.
+    #[test]
+    fn empty_question_and_section_text_is_refused() {
+        for line in [
+            "{\"paragraph\": 0, \"question\": \"\"}",
+            "{\"paragraph\": 0, \"section\": \"\"}",
+        ] {
+            let error =
+                parse(&format!("{HEADER}\n{{\"passage\": \"本文。\"}}\n{line}\n")).unwrap_err();
+            assert!(
+                error.contains("line 3") && error.contains("must not be empty"),
                 "{error}"
             );
         }

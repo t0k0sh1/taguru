@@ -486,14 +486,21 @@ pub async fn add_associations(
             }
         }
         // subject/label/object name the triple itself and must carry
-        // something; source is deliberately excluded — an omitted
-        // source is the ordinary unsourced-association case, not a
-        // missing name (see AssocOp::source).
+        // something. A source may be OMITTED — that is the ordinary
+        // unsourced-association case (see AssocOp::source) — but a
+        // source that is PRESENT is a name like any other: an empty
+        // string would intern a real, permanent source id that every
+        // later attribution list displays and that unrelated callers'
+        // mistakes silently merge into.
         for (field, value) in [
-            ("subject", op.subject.as_str()),
-            ("label", op.label.as_str()),
-            ("object", op.object.as_str()),
+            ("subject", Some(op.subject.as_str())),
+            ("label", Some(op.label.as_str())),
+            ("object", Some(op.object.as_str())),
+            ("source", op.source.as_deref()),
         ] {
+            let Some(value) = value else {
+                continue;
+            };
             if let Some(refusal) =
                 empty(&format!("associations[{index}].{field}"), value, started_at)
             {
@@ -1095,10 +1102,15 @@ pub async fn store_passages(
 ) -> Response {
     let started_at = Instant::now();
     // Source ids are names (the passage text itself is a document and
-    // rides under the body cap instead).
+    // rides under the body cap instead) — and like every name, an
+    // empty one is refused: it would list as a blank entry in GET
+    // /sources and answer lookups nothing sensible ever asks.
     for source in request.passages.keys() {
         if let Some(refusal) = oversized("a passage source id", source, MAX_NAME_BYTES, started_at)
         {
+            return refusal;
+        }
+        if let Some(refusal) = empty("a passage source id", source, started_at) {
             return refusal;
         }
     }
@@ -1122,6 +1134,16 @@ pub async fn store_passages(
                     ),
                     started_at,
                 );
+            }
+            // Embedded verbatim on the next refresh, where providers
+            // refuse zero-length input — which would stall the whole
+            // refresh pass at this row, every pass.
+            if let Some(refusal) = empty(
+                &format!("a question for '{source}'"),
+                &spec.question,
+                started_at,
+            ) {
+                return refusal;
             }
             let count = per_paragraph.entry(spec.paragraph).or_insert(0);
             *count += 1;
@@ -1158,6 +1180,13 @@ pub async fn store_passages(
                     ),
                     started_at,
                 );
+            }
+            if let Some(refusal) = empty(
+                &format!("a section label for '{source}'"),
+                &spec.section,
+                started_at,
+            ) {
+                return refusal;
             }
         }
     }

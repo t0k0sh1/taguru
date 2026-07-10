@@ -2180,6 +2180,16 @@ impl AppState {
                     .map(|(_, question)| (Some(fnv1a(question)), question.as_str()));
                 for (question_hash, row_text) in std::iter::once((None, text)).chain(question_rows)
                 {
+                    // Stored before the write surfaces refused empty
+                    // question text, an empty row would be sent to the
+                    // provider verbatim — and providers refuse
+                    // zero-length input, failing that row's whole
+                    // chunk and abandoning the pass at the same spot
+                    // on every retry. Empty text retrieves nothing
+                    // anyway: skip it.
+                    if row_text.is_empty() {
+                        continue;
+                    }
                     if fresh.len() + to_embed.len() >= self.0.passage_vector_limit {
                         skipped_over_limit += 1;
                         continue;

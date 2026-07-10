@@ -1613,6 +1613,47 @@ fn empty_names_are_rejected_at_the_write_boundary() {
         assert_eq!(status, 400, "{name}: {body}");
     }
 
+    // A source that is PRESENT is a name like any other: empty would
+    // intern a real, permanent source id that unrelated callers'
+    // mistakes then silently merge into (and retract together).
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([{"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source": ""}])),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("associations[0].source"),
+        "{body}"
+    );
+
+    // The passage store keys sources the same way, and question and
+    // section text is embedded verbatim on refresh — providers refuse
+    // zero-length input, which would stall the refresh pass for good.
+    for (name, request) in [
+        ("empty passage source id", json!({"passages": {"": "text"}})),
+        (
+            "empty question",
+            json!({
+                "passages": {"doc.md": "text"},
+                "questions": {"doc.md": [{"paragraph": 0, "question": ""}]},
+            }),
+        ),
+        (
+            "empty section",
+            json!({
+                "passages": {"doc.md": "text"},
+                "sections": {"doc.md": [{"paragraph": 0, "section": ""}]},
+            }),
+        ),
+    ] {
+        let (status, body) = server.call("POST", "/contexts/sake/sources", Some(request));
+        assert_eq!(status, 400, "{name}: {body}");
+    }
+
     // An omitted source is the ordinary unsourced-association case,
     // not a missing name — it must NOT be swept up by the same check.
     server.ok(
