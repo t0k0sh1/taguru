@@ -270,12 +270,17 @@ fn consent_form(client_name: &str, params: &AuthorizeParams, error: Option<&str>
          <title>Taguru — authorize</title>\
          <style>body{{font:16px/1.6 system-ui;max-width:34em;margin:4em auto;padding:0 1em}}\
          .err{{color:#b00020}}input[type=password]{{width:100%;font-size:1em;padding:.4em}}\
+         code{{word-break:break-all}}\
+         .detail{{background:#f4f4f4;padding:.6em .8em;border-radius:.3em}}\
          button{{font-size:1em;padding:.4em 1.2em;margin-top:.8em}}</style>\
          <h1>Authorize “{client}”?</h1>\
          <p><strong>{client}</strong> asks to use this Taguru server's memory \
          through MCP (<code>/mcp</code> only). Approving delegates one of your \
          API keys: the connection acts as that key, under the name \
          <code>&lt;key&gt;@{client}</code> in the access log.</p>\
+         <p class=\"detail\">Approving sends a one-time authorization code to this \
+         address — approve only if you recognize it:<br><code>{ruri_text}</code><br>\
+         Client ID: <code>{cid_text}</code></p>\
          {notice}\
          <form method=\"post\" action=\"/oauth/authorize\">\
          {rt}{cid}{ruri}{st}{cc}{ccm}{res}\
@@ -284,6 +289,8 @@ fn consent_form(client_name: &str, params: &AuthorizeParams, error: Option<&str>
          <button type=\"submit\">Approve</button>\
          </form>",
         client = escape_html(client_name),
+        ruri_text = escape_html(&params.redirect_uri),
+        cid_text = escape_html(&params.client_id),
         notice = notice,
         rt = hidden("response_type", &params.response_type),
         cid = hidden("client_id", &params.client_id),
@@ -402,5 +409,26 @@ mod tests {
         let params = params_with("https://app/cb", "");
         let location = location_of(error_redirect(&params, "invalid_request"));
         assert_eq!(location, "https://app/cb?error=invalid_request");
+    }
+
+    /// The consent page renders the redirect target VISIBLY (a `<code>`
+    /// block in the `.detail` panel), not just tucked in a hidden field:
+    /// a delegating operator can catch a spoofed redirect_uri before
+    /// handing over a key. The value is HTML-escaped on the way in.
+    #[tokio::test]
+    async fn the_consent_form_shows_the_redirect_target_where_a_human_sees_it() {
+        let params = params_with("https://claude.ai/cb?x=1&y=2", "");
+        let response = consent_form("claude", &params, None);
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let page = std::str::from_utf8(&bytes).unwrap();
+        assert!(page.contains("class=\"detail\""), "{page}");
+        // Rendered in a visible <code> (escaped), distinct from the
+        // hidden input's value="..." carrying the same string.
+        assert!(
+            page.contains("<code>https://claude.ai/cb?x=1&amp;y=2</code>"),
+            "{page}"
+        );
     }
 }

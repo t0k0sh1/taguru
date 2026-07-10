@@ -468,6 +468,12 @@ struct EntryInner {
 #[derive(Debug)]
 pub enum CreateError {
     AlreadyExists,
+    /// The name is not usable as a context — currently only the empty
+    /// string, which would `file_stem` to `""` and land as a bare
+    /// `.ctx` file that `scan_data_dir` (keying on the `ctx` extension,
+    /// which a leading-dot name has none of) never rediscovers: a
+    /// context that vanishes on the next restart.
+    InvalidName,
     Io(io::Error),
 }
 
@@ -1044,6 +1050,13 @@ impl AppState {
     /// lands in a second critical section — the create twin of
     /// delete's `pending_deletes` choreography.
     pub fn create(&self, name: &str, meta: ContextMeta) -> Result<(), CreateError> {
+        // An empty name has no file stem — it would persist as a bare
+        // `.ctx` and disappear from the registry on the next restart.
+        // Refuse it at the lowest boundary, so no entrance (import,
+        // direct call) can conjure a self-erasing context.
+        if name.is_empty() {
+            return Err(CreateError::InvalidName);
+        }
         {
             let registry = self.0.registry.read().unwrap();
             // A name mid-delete is still taken: its delete has left the
@@ -1100,12 +1113,16 @@ impl AppState {
     /// backup leaves the old generation's files behind. Nothing may
     /// bleed into the new context — a stale WAL would even replay
     /// the old generation's acknowledged writes into the fresh image
-    /// on its next cold load. Clear the slate before writing the
-    /// image: a crash in between leaves no image, so nothing
-    /// registers and the next attempt clears again; durability of
-    /// the unlinks rides on save_files' parent-directory fsync just
-    /// below. A leftover that cannot be removed fails the create —
-    /// registering on top of it would hand out a haunted context.
+    /// on its next cold load. Clear the slate — the OLD IMAGE INCLUDED —
+    /// before writing the new one: `save_files` lands the image last, so
+    /// removing the old image up front means a crash anywhere before the
+    /// new image commits leaves NO image at all. Nothing registers (the
+    /// scan keys on `.ctx`), the next attempt clears again, and the old
+    /// generation's data can never resurface under the new create's
+    /// metadata. Durability of the unlinks rides on save_files'
+    /// parent-directory fsync just below. A leftover that cannot be
+    /// removed fails the create — registering on top of it would hand out
+    /// a haunted context.
     fn create_files(
         &self,
         name: &str,
@@ -1113,6 +1130,7 @@ impl AppState {
     ) -> Result<(ContextStats, ContextUsage, Context), CreateError> {
         let stem = file_stem(name);
         for stale in [
+            image_path(&self.0.data_dir, &stem),
             wal_path(&self.0.data_dir, &stem),
             sources_path(&self.0.data_dir, &stem),
             passages_path(&self.0.data_dir, &stem),
@@ -1359,12 +1377,16 @@ impl AppState {
         if let Some(store) = slot.as_ref() {
             return Ok(Arc::clone(store));
         }
-        let store = Arc::new(crate::passages::PassageStore::load(
+        // The live server heals a torn tail on load; the torn indicator
+        // is for read-only inspection, so drop it here.
+        let (store, _torn) = crate::passages::PassageStore::load(
             passages_path(&self.0.data_dir, stem),
             &sources_path(&self.0.data_dir, stem),
             passages_wal_path(&self.0.data_dir, stem),
             self.0.passages_wal_max_bytes,
-        )?);
+            true,
+        )?;
+        let store = Arc::new(store);
         *slot = Some(Arc::clone(&store));
         Ok(store)
     }
@@ -2664,6 +2686,13 @@ impl AppState {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
                 .map_err(AccessError::Load)?;
+            // Count the promotion NOW, before the WAL-cap and append-failure
+            // early returns below. A Cold→Hot load just added this context's
+            // footprint to resident memory; a refusal that returns without
+            // counting it leaves the resident estimate short, so the budget
+            // sweep never reclaims those bytes. recount_entry is absolute, so
+            // the post-`operate` recount below just refreshes this.
+            self.recount_entry(&mut inner);
             let first_seq = inner.wal_seq;
             let mut staged = None;
             if self.0.wal_enabled {
@@ -2698,6 +2727,16 @@ impl AppState {
                         // failed to engage.
                         self.0.metrics.record_wal_append(false);
                         tracing::warn!(context = %name, %error, "WAL append failed; write refused");
+                        // A failed append may still have leaked complete
+                        // bytes (write landed, sync then failed, rollback
+                        // failed too). Memory is untouched — `operate` never
+                        // ran — so mark the entry dirty: the next flush
+                        // stages this pre-write image at watermark
+                        // `wal_seq - 1` and, since `wal_seq` did not move,
+                        // truncates the log, carrying off the leaked tail
+                        // before a replay can apply it. (`replay` de-dupes
+                        // by seq as the second line of defense.)
+                        entry.dirty.store(true, Ordering::Relaxed);
                         return Err(AccessError::Unpersisted(error.to_string()));
                     }
                 }
@@ -3469,8 +3508,17 @@ fn save_files(
     context: &Context,
 ) -> io::Result<()> {
     let stem = file_stem(name);
-    write_atomic(&image_path(dir, &stem), &context.to_bytes())?;
-    write_meta(dir, &stem, meta, stats, usage)
+    // The image is what `scan_data_dir` keys a context's existence on, so
+    // it lands LAST: each `write_atomic` fully commits (fsync + rename +
+    // parent-dir fsync) before returning, so by the time the `.ctx` is
+    // durably in the directory its `.meta.json` companion already is too.
+    // A crash between the two therefore leaves at worst an orphan sidecar
+    // with no image — invisible to the scan and overwritten by the next
+    // same-name create — never a durable image with a defaulted sidecar,
+    // which would resurrect a context `create` told the client had failed.
+    // (Image-then-meta would do exactly that; see `create`'s doc.)
+    write_meta(dir, &stem, meta, stats, usage)?;
+    write_atomic(&image_path(dir, &stem), &context.to_bytes())
 }
 
 fn write_meta(
@@ -3756,6 +3804,22 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let usage = state.directory_entry("sake").unwrap().usage;
         assert_eq!((usage.reads, usage.empty_reads, usage.writes), (2, 1, 1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An empty context name is refused at the registry boundary — the
+    /// last guard against a bare `.ctx` file that `scan_data_dir` (which
+    /// keys on the file stem) would never rediscover, silently orphaning
+    /// every write to it. Parse and API refuse it earlier; this locks
+    /// the floor beneath them.
+    #[test]
+    fn an_empty_context_name_is_refused_by_create() {
+        let dir = scratch_dir("empty-name");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(matches!(
+            state.create("", ContextMeta::default()),
+            Err(CreateError::InvalidName)
+        ));
         let _ = fs::remove_dir_all(&dir);
     }
 

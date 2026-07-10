@@ -5,16 +5,38 @@
 //! and total request rate per credential.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
 
 use crate::api;
 use crate::auth;
+
+/// The caller's source IP as a bucket key, or `None` when the request
+/// carries no peer address. IP only — the ephemeral source port changes
+/// per connection, so keying on it would give every connection its own
+/// bucket and defeat the limit. Production always has a peer (the server
+/// is built with `into_make_service_with_connect_info`); some tests do
+/// not, and fall back to a shared bucket at the call sites.
+///
+/// Behind a reverse proxy every request arrives from the proxy's own
+/// address, so all callers would share one bucket here — run the
+/// throttles at the proxy, or put taguru on the connection directly,
+/// when per-caller fairness matters. taguru deliberately does NOT read
+/// `X-Forwarded-For`: it is client-settable, and honoring it unverified
+/// would let anyone forge a fresh key per request and slip every
+/// per-IP throttle entirely.
+pub(crate) fn peer_ip(request: &Request) -> Option<Arc<str>> {
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| Arc::from(info.0.ip().to_string().as_str()))
+}
 
 /// Races the rest of the stack against the configured budget; a loss
 /// is a 408 in the ApiError shape — retryable and client-actionable
@@ -45,15 +67,26 @@ pub async fn enforce_timeout(
     }
 }
 
-/// Per-key token buckets (`TAGURU_RATE_LIMIT_PER_MIN`): each credential
-/// gets a minute's allowance as capacity, refilled continuously, so a
-/// client may burst its whole budget and then settle to the sustained
-/// rate. 0 disables the gate. The map is keyed by configured key names
-/// (plus "anon" when auth is off) — bounded by configuration, never by
-/// callers, so it cannot be grown from outside.
+/// Token buckets (`TAGURU_RATE_LIMIT_PER_MIN`): each key gets a minute's
+/// allowance as capacity, refilled continuously, so a client may burst
+/// its whole budget and then settle to the sustained rate. 0 disables
+/// the gate. Also backs the failed-auth throttle
+/// (`TAGURU_AUTH_FAIL_LIMIT_PER_MIN`) with the same mechanics.
+///
+/// Keys are either configured key names or caller source IPs (see
+/// `peer_ip`) — the IP case makes the map caller-driven, not
+/// configuration-bounded, so `admit` reclaims fully-refilled buckets
+/// (an idle bucket is indistinguishable from a fresh one, so dropping
+/// it changes no decision) to keep it from retaining an entry per IP
+/// ever seen.
 pub struct RateLimiter {
     per_minute: u32,
-    buckets: Mutex<HashMap<Arc<str>, Bucket>>,
+    state: Mutex<Buckets>,
+}
+
+struct Buckets {
+    map: HashMap<Arc<str>, Bucket>,
+    last_pruned: Instant,
 }
 
 struct Bucket {
@@ -61,11 +94,20 @@ struct Bucket {
     refreshed: Instant,
 }
 
+/// Prune only once the map is big enough that a per-IP leak could
+/// matter, and at most this often, so the O(n) sweep never runs per
+/// request under a high-cardinality flood.
+const PRUNE_THRESHOLD: usize = 1024;
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
 impl RateLimiter {
     pub fn new(per_minute: u32) -> Self {
         Self {
             per_minute,
-            buckets: Mutex::new(HashMap::new()),
+            state: Mutex::new(Buckets {
+                map: HashMap::new(),
+                last_pruned: Instant::now(),
+            }),
         }
     }
 
@@ -76,11 +118,25 @@ impl RateLimiter {
     /// Admits or refuses one request for `key` at `now`; refusal names
     /// the seconds until a token exists again — the Retry-After value.
     /// `now` is a parameter so tests refill by arithmetic, not sleep.
-    fn admit(&self, key: &Arc<str>, now: Instant) -> Result<(), u64> {
+    pub(crate) fn admit(&self, key: &Arc<str>, now: Instant) -> Result<(), u64> {
         let capacity = f64::from(self.per_minute);
         let per_second = capacity / 60.0;
-        let mut buckets = self.buckets.lock().unwrap();
-        let bucket = buckets.entry(Arc::clone(key)).or_insert(Bucket {
+        let mut state = self.state.lock().unwrap();
+        // Reclaim idle buckets before this insert can grow the map
+        // further: a bucket that would have refilled to capacity by now
+        // holds no state a fresh one wouldn't, so dropping it is free.
+        // Guarded by size and interval so the sweep stays amortized.
+        if state.map.len() >= PRUNE_THRESHOLD
+            && now.duration_since(state.last_pruned) >= PRUNE_INTERVAL
+        {
+            state.map.retain(|_, bucket| {
+                let refilled =
+                    bucket.tokens + now.duration_since(bucket.refreshed).as_secs_f64() * per_second;
+                refilled < capacity
+            });
+            state.last_pruned = now;
+        }
+        let bucket = state.map.entry(Arc::clone(key)).or_insert(Bucket {
             tokens: capacity,
             refreshed: now,
         });
@@ -109,14 +165,20 @@ pub async fn enforce_rate_limit(
         return next.run(request).await;
     }
     let started_at = Instant::now();
-    // Auth (outside) stamped WHO onto the request; without auth
-    // configured, every caller shares the anonymous bucket.
-    let key = request
-        .extensions()
-        .get::<auth::AuthKey>()
-        .map(|key| Arc::clone(&key.0))
-        .unwrap_or_else(|| Arc::from("anon"));
-    match limiter.admit(&key, Instant::now()) {
+    // Auth (outside) stamped WHO onto the request. Without a key —
+    // auth off (dev mode), or an auth-exempt OAuth endpoint — bucket by
+    // source IP so one noisy peer cannot drain a single shared "anon"
+    // allowance for everyone else. The "peer:" prefix keeps an IP from
+    // colliding with a configured key that happens to share its text.
+    // (No peer address, only in tests without ConnectInfo, falls back
+    // to the shared bucket; production always carries one.)
+    let key = match request.extensions().get::<auth::AuthKey>() {
+        Some(key) => Arc::clone(&key.0),
+        None => peer_ip(&request)
+            .map(|ip| Arc::<str>::from(format!("peer:{ip}")))
+            .unwrap_or_else(|| Arc::from("anon")),
+    };
+    match limiter.admit(&key, started_at) {
         Ok(()) => next.run(request).await,
         Err(retry_after) => {
             let mut response = api::error(
@@ -237,6 +299,7 @@ mod tests {
         let gate = Arc::new(auth::Gate {
             keyring,
             oauth: None,
+            fail_limiter: Arc::new(RateLimiter::new(0)),
         });
         let limiter = Arc::new(RateLimiter::new(2));
         let app = Router::new()

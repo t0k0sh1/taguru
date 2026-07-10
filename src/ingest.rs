@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -408,24 +408,44 @@ struct SectionLine {
 /// Parses one batch file completely, or says which line refused and
 /// why. Blank lines are skipped; the first non-blank line must be the
 /// header.
-pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
+pub(crate) fn parse_batch(mut reader: impl BufRead) -> Result<Batch, String> {
     let mut batch: Option<Batch> = None;
-    for (index, line) in reader.lines().enumerate() {
-        let number = index + 1;
-        let line = line.map_err(|error| format!("line {number}: {error}"))?;
-        if line.len() > MAX_LINE_BYTES {
+    // Per-paragraph question tally, carried as we parse so the per-line
+    // cap check is a map lookup instead of a rescan of every question
+    // seen so far — a batch piling questions on one paragraph would
+    // otherwise be quadratic.
+    let mut question_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut raw: Vec<u8> = Vec::new();
+    let mut number = 0usize;
+    loop {
+        number += 1;
+        raw.clear();
+        // Read one line without ever buffering past the cap: a single
+        // newline-free run cannot force an unbounded allocation before
+        // the size check. `read_until` stops at the newline or at the
+        // `take` ceiling, whichever comes first — reaching the ceiling
+        // with no newline is a line past the cap.
+        let read = (&mut reader)
+            .take(MAX_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut raw)
+            .map_err(|error| format!("line {number}: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        if raw.last() != Some(&b'\n') && raw.len() > MAX_LINE_BYTES {
             return Err(format!(
-                "line {number}: {} bytes exceeds the {MAX_LINE_BYTES}-byte line cap",
-                line.len()
+                "line {number}: exceeds the {MAX_LINE_BYTES}-byte line cap"
             ));
         }
-        let line = line.trim();
+        let line = std::str::from_utf8(&raw)
+            .map_err(|error| format!("line {number}: not UTF-8: {error}"))?
+            .trim();
         if line.is_empty() {
             continue;
         }
         match &mut batch {
             None => batch = Some(parse_header(line, number)?),
-            Some(batch) => parse_op(batch, line, number)?,
+            Some(batch) => parse_op(batch, &mut question_counts, line, number)?,
         }
     }
     let batch = batch.ok_or_else(|| "empty file: expected a batch header line".to_string())?;
@@ -478,7 +498,9 @@ fn parse_header(line: &str, number: usize) -> Result<Batch, String> {
         ));
     }
     check_size(number, "context", &header.context, MAX_CONTEXT_NAME_BYTES)?;
+    check_nonempty(number, "context", &header.context)?;
     check_size(number, "source", &header.source, MAX_NAME_BYTES)?;
+    check_nonempty(number, "source", &header.source)?;
     if let Some(create) = &header.create {
         check_size(
             number,
@@ -508,7 +530,12 @@ fn parse_header(line: &str, number: usize) -> Result<Batch, String> {
 /// Classifies an op line by its distinguishing key, then parses the
 /// matching shape strictly — so the error for a stray field names the
 /// field instead of shrugging at every shape at once.
-fn parse_op(batch: &mut Batch, line: &str, number: usize) -> Result<(), String> {
+fn parse_op(
+    batch: &mut Batch,
+    question_counts: &mut BTreeMap<u32, usize>,
+    line: &str,
+    number: usize,
+) -> Result<(), String> {
     let value: serde_json::Value =
         serde_json::from_str(line).map_err(|error| format!("line {number}: not JSON: {error}"))?;
     let Some(object) = value.as_object() else {
@@ -581,18 +608,15 @@ fn parse_op(batch: &mut Batch, line: &str, number: usize) -> Result<(), String> 
             &op.question,
             crate::api::MAX_QUESTION_BYTES,
         )?;
-        let siblings = batch
-            .questions
-            .iter()
-            .filter(|&&(paragraph, _)| paragraph == op.paragraph)
-            .count();
-        if siblings >= crate::api::MAX_QUESTIONS_PER_PARAGRAPH {
+        let siblings = question_counts.entry(op.paragraph).or_insert(0);
+        if *siblings >= crate::api::MAX_QUESTIONS_PER_PARAGRAPH {
             return Err(format!(
                 "line {number}: paragraph {} already carries {} questions (the cap)",
                 op.paragraph,
                 crate::api::MAX_QUESTIONS_PER_PARAGRAPH
             ));
         }
+        *siblings += 1;
         batch.questions.push((op.paragraph, op.question));
     } else if object.contains_key("section") {
         let op: SectionLine = serde_json::from_value(value)
@@ -657,6 +681,12 @@ pub(crate) struct Applied {
     /// have — same convention and same likely cause as
     /// `questions_dropped`.
     pub(crate) sections_dropped: usize,
+    /// Association paragraph locators naming a spot this batch's own
+    /// passage split does not have. Dropped exactly as `questions_dropped`
+    /// and `sections_dropped` are — the association's fact still lands,
+    /// only the paragraph pointer is cleared — and surfaced for the same
+    /// reason: so the loss is a reported number, not a silent one.
+    pub(crate) association_paragraphs_dropped: usize,
 }
 
 /// Why a batch did not (fully) apply — one shape for both entrances:
@@ -718,6 +748,15 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
             // possible on the live server, harmless everywhere: the
             // context exists now, which is all the batch needed.
             Err(CreateError::AlreadyExists) => {}
+            // Unreachable in practice — `parse_header` already refused an
+            // empty context name — but the registry guards it too, so the
+            // match must speak for it.
+            Err(CreateError::InvalidName) => {
+                return Err(ApplyRefusal::Io(format!(
+                    "context name '{}' is not usable (empty)",
+                    batch.context
+                )));
+            }
             Err(CreateError::Io(io_error)) => {
                 return Err(ApplyRefusal::Io(format!(
                     "creating context '{}': {io_error}",
@@ -763,6 +802,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
     // Only checked against a passage this same batch carries; an
     // associations-only batch has nothing to check against, exactly
     // like questions/sections above.
+    let mut association_paragraphs_dropped = 0;
     let corrected_associations: Vec<AssocOp>;
     let associations_to_apply: &[AssocOp] = match &batch.passage {
         Some(text) => {
@@ -774,6 +814,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
                 .map(|mut op| {
                     if op.paragraph.is_some_and(|p| p as usize >= paragraph_count) {
                         op.paragraph = None;
+                        association_paragraphs_dropped += 1;
                     }
                     op
                 })
@@ -837,6 +878,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         questions_dropped,
         sections_stored,
         sections_dropped,
+        association_paragraphs_dropped,
     })
 }
 
@@ -844,7 +886,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
 fn report(batch: &Batch, applied: &Applied) -> String {
     format!(
         "context '{}'{} ← source '{}' ({} association(s) retracted): +{} \
-         association(s), +{} alias(es){}{}{}",
+         association(s), +{} alias(es){}{}{}{}",
         batch.context,
         if applied.created { " (created)" } else { "" },
         batch.source,
@@ -868,6 +910,12 @@ fn report(batch: &Batch, applied: &Applied) -> String {
             (stored, 0) => format!(", +{stored} section(s)"),
             (stored, dropped) => {
                 format!(", +{stored} section(s) ({dropped} dropped: no such paragraph)")
+            }
+        },
+        match applied.association_paragraphs_dropped {
+            0 => String::new(),
+            dropped => {
+                format!(", {dropped} association paragraph locator(s) dropped: no such paragraph")
             }
         }
     )
@@ -979,6 +1027,41 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    /// An empty context name would `file_stem` to a bare `.ctx` the
+    /// server's directory scan never rediscovers; an empty source name
+    /// has no identity to retract a re-import against. Both are refused
+    /// at the header, each naming its own field.
+    #[test]
+    fn an_empty_context_or_source_name_in_the_header_is_refused() {
+        for (field, header) in [
+            (
+                "context",
+                r#"{"taguru_batch": 1, "context": "", "source": "s"}"#,
+            ),
+            (
+                "source",
+                r#"{"taguru_batch": 1, "context": "c", "source": ""}"#,
+            ),
+        ] {
+            let error = parse(header).unwrap_err();
+            assert!(
+                error.contains(field) && error.contains("must not be empty"),
+                "{field}: {error}"
+            );
+        }
+    }
+
+    /// A line longer than the cap is refused at the cap, not buffered
+    /// whole first: the bounded reader stops one byte past the ceiling,
+    /// so a malicious 100 MiB line cannot force a 100 MiB allocation
+    /// before the length check runs.
+    #[test]
+    fn a_line_past_the_byte_cap_is_refused_without_buffering_it_whole() {
+        let giant = "x".repeat(MAX_LINE_BYTES + 1);
+        let error = parse(&format!("{HEADER}\n{giant}")).unwrap_err();
+        assert!(error.contains("line cap"), "{error}");
     }
 
     #[test]
@@ -1099,6 +1182,7 @@ mod tests {
             questions_dropped: 0,
             sections_stored: 0,
             sections_dropped: 0,
+            association_paragraphs_dropped: 0,
         };
         let line = report(&batch, &dropped);
         assert!(line.contains("previous passage dropped"), "{line}");

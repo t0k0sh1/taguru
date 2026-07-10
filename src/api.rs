@@ -354,6 +354,11 @@ pub async fn create_context(
             format!("context '{name}' already exists"),
             started_at,
         ),
+        Err(CreateError::InvalidName) => error(
+            StatusCode::BAD_REQUEST,
+            "the context name must not be empty".to_string(),
+            started_at,
+        ),
         Err(CreateError::Io(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
@@ -1316,6 +1321,10 @@ pub struct ImportOutcome {
     pub questions_dropped: usize,
     pub sections_stored: usize,
     pub sections_dropped: usize,
+    /// Association paragraph locators dropped for naming a spot the
+    /// batch's passage split does not have — the association itself
+    /// still landed. Reported like `questions_dropped`/`sections_dropped`.
+    pub association_paragraphs_dropped: usize,
 }
 
 /// `POST /import` — the batch-file contract (docs/import.md) over
@@ -1348,6 +1357,7 @@ pub async fn import_batch(State(state): State<AppState>, body: axum::body::Bytes
                 questions_dropped: applied.questions_dropped,
                 sections_stored: applied.sections_stored,
                 sections_dropped: applied.sections_dropped,
+                association_paragraphs_dropped: applied.association_paragraphs_dropped,
             },
             started_at,
         ),

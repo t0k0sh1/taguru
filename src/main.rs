@@ -94,6 +94,18 @@ async fn serve() {
     if !rate_limiter.is_disabled() {
         info!(per_minute = rate_per_minute, "per-key rate limit enabled");
     }
+    // Failed-auth attempts are throttled per source IP so the gate
+    // cannot be brute-forced for free (default 10/min; 0 disables).
+    let auth_fail_per_minute = env_number("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", 10);
+    let fail_limiter = Arc::new(limits::RateLimiter::new(
+        u32::try_from(auth_fail_per_minute).unwrap_or(u32::MAX),
+    ));
+    if !fail_limiter.is_disabled() {
+        info!(
+            per_minute = auth_fail_per_minute,
+            "failed-auth throttle enabled (per source IP)"
+        );
+    }
 
     // Misconfigured credentials refuse to boot: a keyring that
     // silently dropped an entry would surface as an auth hole.
@@ -206,6 +218,7 @@ async fn serve() {
     let gate = Arc::new(auth::Gate {
         keyring,
         oauth: oauth.clone(),
+        fail_limiter,
     });
     let app = app
         // Layers wrap only the routes registered above and nest by
@@ -269,10 +282,17 @@ async fn serve() {
         auth_enabled = auth_configured,
         "server ready",
     );
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap();
+    // `with_connect_info` puts each caller's SocketAddr in the request
+    // extensions — the per-source-IP throttles (failed-auth in the gate,
+    // the anonymous request budget) read it from there. Without it those
+    // fall back to a single shared bucket.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .unwrap();
 
     // Nothing dirty may outlive the process: one final flush.
     tokio::task::block_in_place(|| state.flush_dirty());

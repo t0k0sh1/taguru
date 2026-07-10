@@ -49,6 +49,21 @@ fn arena_fits(len: usize, growth: usize) -> bool {
         .is_some_and(|end| end <= u32::MAX as usize)
 }
 
+/// Folds one more finite `weight` into a cumulative sum, saturating at
+/// ±`f64::MAX` instead of overflowing to infinity. The associate
+/// boundary asserts each INDIVIDUAL weight finite, but two finite
+/// values can still sum past the representable range — and a non-finite
+/// sum would sort as the maximum under `total_cmp` forever and make
+/// `from_bytes` refuse the next image as corrupt. Saturation keeps the
+/// invariant the load-time check depends on without turning a pair of
+/// individually-valid library calls into a poisoned context.
+fn accumulate_saturating(sum: &mut f64, weight: f64) {
+    *sum += weight;
+    if !sum.is_finite() {
+        *sum = f64::MAX.copysign(*sum);
+    }
+}
+
 /// Error returned by [`Context::associate`] and [`Context::associate_from`]
 /// when a write would need a record or name bytes beyond the context's u32
 /// id/offset space (~4.29 billion records per table, 4 GiB of interned
@@ -674,7 +689,7 @@ impl Context {
         let edge_id = match self.edge_ids.get(&key).copied() {
             Some(edge_id) => {
                 let edge = &mut self.edges[edge_id as usize];
-                edge.sum += weight;
+                accumulate_saturating(&mut edge.sum, weight);
                 edge.count += 1;
                 edge_id
             }
@@ -824,7 +839,7 @@ impl Context {
         // O(1); folding into it leaves the chain and the locator untouched.
         if let Some(&existing) = self.attribution_ids.get(&(edge_id, source_id)) {
             let record = &mut self.attributions[existing as usize];
-            record.sum += weight;
+            accumulate_saturating(&mut record.sum, weight);
             record.count += 1;
             return;
         }
@@ -2584,6 +2599,39 @@ mod tests {
         assert_eq!(weight_between(&context, "私", "好き", "りんご"), 1.0);
         assert_eq!(weight_between(&context, "私", "好き", "みかん"), 2.0);
         assert_eq!(weight_between(&context, "私", "好き", "バナナ"), -1.0);
+    }
+
+    #[test]
+    fn extreme_weight_sums_saturate_and_the_image_still_round_trips() {
+        // Two individually-finite weights can sum past f64's range. The
+        // sum must saturate rather than reach infinity: a non-finite sum
+        // would make `from_bytes` refuse the very image `to_bytes` just
+        // produced — a context that can be saved but never loaded again.
+        let mut context = Context::default();
+        context.associate("a", "r", "b", f64::MAX).unwrap();
+        context.associate("a", "r", "b", f64::MAX).unwrap();
+        // The sourced path accumulates a second sum in the attribution
+        // record; push it past the range too.
+        context
+            .associate_from("a", "r", "c", f64::MAX, "源", None)
+            .unwrap();
+        context
+            .associate_from("a", "r", "c", f64::MAX, "源", None)
+            .unwrap();
+        // And the negative direction saturates symmetrically.
+        context.associate("a", "r", "d", -f64::MAX).unwrap();
+        context.associate("a", "r", "d", -f64::MAX).unwrap();
+
+        assert!(weight_between(&context, "a", "r", "b").is_finite());
+        assert!(weight_between(&context, "a", "r", "c").is_finite());
+        assert!(weight_between(&context, "a", "r", "d") < 0.0);
+
+        let restored = Context::from_bytes(&context.to_bytes())
+            .expect("a context built from finite weights must round-trip");
+        assert_eq!(
+            weight_between(&restored, "a", "r", "b"),
+            weight_between(&context, "a", "r", "b"),
+        );
     }
 
     #[test]

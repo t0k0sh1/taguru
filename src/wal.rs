@@ -13,6 +13,7 @@
 //! That indifference is the point: `associate` accumulates weight, so
 //! a double-applied record would corrupt silently.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -145,6 +146,16 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
 /// in place here too: it was never acknowledged (its writer never got
 /// `Ok`), so truncating it away loses nothing. Healing is best effort —
 /// a failure only leaves the log as it was, to be retried next replay.
+///
+/// Records above the watermark are keyed by `seq`, and a repeated seq
+/// keeps the LATER one. Appends are seq-monotonic, so no duplicate ever
+/// occurs in normal operation — this is a backstop for the one shape
+/// that can leak one: `append_batch` wrote a complete batch, its sync
+/// failed, AND the rollback truncate failed too (a disk failing twice
+/// over). That leftover is a complete, valid record the torn-tail rule
+/// cannot catch; a retry (or the next write) reusing the same seq would
+/// otherwise replay BESIDE it and double-apply. Later-wins drops the
+/// unacknowledged leftover in favor of the write that actually followed.
 pub fn replay<Op: DeserializeOwned>(path: &Path, watermark: u64) -> io::Result<(Vec<Op>, u64)> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -153,21 +164,19 @@ pub fn replay<Op: DeserializeOwned>(path: &Path, watermark: u64) -> io::Result<(
         }
         Err(error) => return Err(error),
     };
-
-    let mut segments: Vec<&[u8]> = bytes.split(|&byte| byte == b'\n').collect();
-    // A complete file ends in '\n', making the final segment empty; a
-    // torn file's final segment is the record a crash cut short. One
-    // rule covers both: the last segment is never a whole record.
-    if let Some(tail) = segments.pop()
-        && !tail.is_empty()
-    {
-        // Everything up to and including the last '\n' is intact; the
-        // torn fragment is exactly the trailing `tail.len()` bytes.
-        let healthy_len = (bytes.len() - tail.len()) as u64;
+    let (ops, top, torn) = parse_log(path, &bytes, watermark)?;
+    // A torn trailing record is the expected crash-mid-append shape. It
+    // is already left out of `ops`; heal it off disk too, so the next
+    // append does not write straight after the fragment and fuse a new
+    // record onto it — turning a recoverable tear into the fatal
+    // interior-corruption case. It was never acknowledged, so truncating
+    // it loses nothing. Best effort: a failure only leaves the log as it
+    // was, to be retried next replay.
+    if let Some(torn_len) = torn {
+        let healthy_len = bytes.len() as u64 - torn_len;
         tracing::warn!(
-            "dropping a torn trailing WAL record at {} ({} bytes) — crash mid-append",
+            "dropping a torn trailing WAL record at {} ({torn_len} bytes) — crash mid-append",
             path.display(),
-            tail.len(),
         );
         if let Err(error) = truncate_to(path, healthy_len) {
             tracing::warn!(
@@ -176,8 +185,54 @@ pub fn replay<Op: DeserializeOwned>(path: &Path, watermark: u64) -> io::Result<(
             );
         }
     }
+    Ok((ops, top))
+}
 
-    let mut ops = Vec::new();
+/// Like [`replay`] but read-only: it heals nothing. Returns the applied
+/// ops and top seq exactly as `replay` would, plus — when the log's
+/// final record was torn by a crash mid-append — the byte size of that
+/// torn fragment (`Some(bytes)`), so a diagnostic caller such as `taguru
+/// inspect` can REPORT the tear rather than silently truncate it. A
+/// clean log returns `None`. The torn fragment is already excluded from
+/// the returned ops, so what this reports is exactly what the server's
+/// next `replay` would heal away.
+pub fn replay_readonly<Op: DeserializeOwned>(
+    path: &Path,
+    watermark: u64,
+) -> io::Result<(Vec<Op>, u64, Option<u64>)> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), watermark, None));
+        }
+        Err(error) => return Err(error),
+    };
+    parse_log(path, &bytes, watermark)
+}
+
+/// The disk-free core of replay: split the bytes, set aside a torn
+/// trailing fragment (returned as its byte length, `None` when the file
+/// ends clean), and decode every intact record above `watermark` in seq
+/// order — a repeated seq keeps the later record (see [`replay`] for the
+/// double-fault that can leak one). Writes nothing; whether to heal a
+/// torn tail is left to the caller.
+fn parse_log<Op: DeserializeOwned>(
+    path: &Path,
+    bytes: &[u8],
+    watermark: u64,
+) -> io::Result<(Vec<Op>, u64, Option<u64>)> {
+    let mut segments: Vec<&[u8]> = bytes.split(|&byte| byte == b'\n').collect();
+    // A complete file ends in '\n', making the final segment empty; a
+    // torn file's final segment is the record a crash cut short. One
+    // rule covers both: the last segment is never a whole record.
+    let torn = match segments.pop() {
+        Some(tail) if !tail.is_empty() => Some(tail.len() as u64),
+        _ => None,
+    };
+
+    // Keyed by seq so a duplicate resolves to the later record, and
+    // drained in seq order (== append order for the monotonic tail).
+    let mut pending: BTreeMap<u64, Op> = BTreeMap::new();
     let mut top = watermark;
     for (index, line) in segments.iter().enumerate() {
         let record: WalRecord<Op> = serde_json::from_slice(line).map_err(|error| {
@@ -191,11 +246,17 @@ pub fn replay<Op: DeserializeOwned>(path: &Path, watermark: u64) -> io::Result<(
             )
         })?;
         top = top.max(record.seq);
-        if record.seq > watermark {
-            ops.push(record.op);
+        if record.seq > watermark && pending.insert(record.seq, record.op).is_some() {
+            tracing::warn!(
+                "WAL {} carries a duplicate seq {} — keeping the later record \
+                 (an earlier append's failed sync left an un-rolled-back batch)",
+                path.display(),
+                record.seq,
+            );
         }
     }
-    Ok((ops, top))
+    let ops = pending.into_values().collect();
+    Ok((ops, top, torn))
 }
 
 /// Empties the log in place (`set_len(0)`, same inode, no directory
@@ -333,6 +394,28 @@ mod tests {
             vec!["a", "c"]
         );
         assert_eq!(top, 2);
+    }
+
+    #[test]
+    fn a_duplicate_seq_keeps_the_later_record_not_both() {
+        // A complete batch whose sync then failed, with a rollback that
+        // failed too, leaves a valid record on disk that the torn-tail
+        // rule cannot catch. The write that follows reuses the same seq
+        // (the caller never advanced past a refused batch). Replay must
+        // apply the LATER record only — never both, which would
+        // double-apply the seq and resurrect the refused write.
+        let path = scratch_wal("dupseq");
+        append_batch(&path, 1, &[associate("ghost")]).unwrap();
+        // The retry reuses seq 1 rather than advancing.
+        append_batch(&path, 1, &[associate("real")]).unwrap();
+
+        let (ops, top) = replay(&path, 0).unwrap();
+        assert_eq!(
+            ops.iter().map(subject_of).collect::<Vec<_>>(),
+            vec!["real"],
+            "the later record at a reused seq wins; the ghost is dropped"
+        );
+        assert_eq!(top, 1);
     }
 
     #[test]

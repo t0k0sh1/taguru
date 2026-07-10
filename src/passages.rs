@@ -292,12 +292,17 @@ impl PassageStore {
     /// The legacy file keeps its historical contract (unreadable means
     /// empty) — refusing to boot over a file the old code tolerated
     /// would turn an upgrade into an outage.
+    /// `heal` heals a torn WAL tail in place (the server's boot) or
+    /// leaves the file untouched and returns the torn fragment's size so
+    /// a read-only caller — `taguru inspect` — can report it (`Ok`'s
+    /// second element; `None` when the log ends clean or was healed).
     pub(crate) fn load(
         snapshot_path: PathBuf,
         legacy_path: &Path,
         log_path: PathBuf,
         max_log_bytes: usize,
-    ) -> io::Result<Self> {
+        heal: bool,
+    ) -> io::Result<(Self, Option<u64>)> {
         let (sources, watermark, snapshot_bytes) = match fs::read(&snapshot_path) {
             Ok(bytes) => {
                 let size = bytes.len() as u64;
@@ -328,7 +333,16 @@ impl PassageStore {
         };
 
         let mut sources: BTreeMap<String, Arc<PassageRecord>> = sources;
-        let (ops, top) = wal::replay::<PassageOp>(&log_path, watermark)?;
+        // The server heals a torn tail in place (and `replay` logs it);
+        // inspect passes heal=false to leave the file as it found it and
+        // learn the torn size instead. Both decode the same ops, so an
+        // inspection that says ok means the server's load will succeed too.
+        let (ops, top, torn) = if heal {
+            let (ops, top) = wal::replay::<PassageOp>(&log_path, watermark)?;
+            (ops, top, None)
+        } else {
+            wal::replay_readonly::<PassageOp>(&log_path, watermark)?
+        };
         for op in ops {
             match op {
                 PassageOp::Store {
@@ -357,22 +371,25 @@ impl PassageStore {
             .map(|(source, record)| record_bytes(source, record))
             .sum();
 
-        Ok(Self {
-            writer: Mutex::new(()),
-            inner: RwLock::new(PassageStoreInner {
-                sources,
-                next_seq: top + 1,
-                log_bytes,
-                snapshot_bytes,
-                resident_bytes,
-                compactions: 0,
-                snapshot_bytes_written: 0,
-            }),
-            snapshot_path,
-            log_path,
-            legacy_path: legacy_path.to_path_buf(),
-            max_log_bytes: max_log_bytes as u64,
-        })
+        Ok((
+            Self {
+                writer: Mutex::new(()),
+                inner: RwLock::new(PassageStoreInner {
+                    sources,
+                    next_seq: top + 1,
+                    log_bytes,
+                    snapshot_bytes,
+                    resident_bytes,
+                    compactions: 0,
+                    snapshot_bytes_written: 0,
+                }),
+                snapshot_path,
+                log_path,
+                legacy_path: legacy_path.to_path_buf(),
+                max_log_bytes: max_log_bytes as u64,
+            },
+            torn,
+        ))
     }
 
     /// Merge-upserts a batch, log-first: fsync the ops, then apply —
@@ -784,8 +801,10 @@ mod tests {
             &dir.join("t.sources.json"),
             dir.join("t.passages.wal.jsonl"),
             max_log_bytes,
+            true,
         )
         .unwrap()
+        .0
     }
 
     fn batch(entries: &[(&str, &str)]) -> BTreeMap<String, PassageSubmission> {
@@ -1102,8 +1121,10 @@ mod tests {
             &dir.join("t.sources.json"),
             log_path,
             0,
+            true,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(
             store.get("doc").unwrap().sections,
             vec![(1, "本編".to_string())]
@@ -1229,6 +1250,7 @@ mod tests {
             &dir.join("t.sources.json"),
             dir.join("t.passages.wal.jsonl"),
             0,
+            true,
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);

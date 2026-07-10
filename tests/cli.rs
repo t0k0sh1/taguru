@@ -368,6 +368,64 @@ fn inspect_flags_a_corrupt_image_and_a_corrupt_wal() {
 }
 
 #[test]
+fn inspect_reports_a_torn_wal_tail_without_healing_it() {
+    // Fix 3: a directory audit must never mutate what it audits. A WAL
+    // whose last record was cut short by a crash mid-append is not
+    // corruption — the server heals it on its next load — so inspect
+    // reports it as a NOTE, still exits 0, and (the decisive part)
+    // leaves the torn bytes on disk untouched. This is the read-only
+    // guarantee that separates `inspect` from a boot-time replay.
+    let dir = std::env::temp_dir().join(format!("taguru-cli-torn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A healthy image at watermark 0 — the WAL below carries the writes.
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+
+    // One complete acknowledged record, then a fragment with no closing
+    // newline: exactly the shape a crash leaves after O_APPEND wrote
+    // part of the next line. This is the same on-disk JSON the server's
+    // replay reads, hand-written here the way wal.rs's own torn-tail
+    // tests are.
+    let wal = dir.join("sake.wal.jsonl");
+    let mut bytes = br#"{"seq":1,"op":"associate","subject":"a","label":"likes","object":"apple","weight":1.0}"#
+        .to_vec();
+    bytes.push(b'\n');
+    bytes.extend_from_slice(br#"{"seq":2,"op":"associate","subject":"b"#);
+    std::fs::write(&wal, &bytes).unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a torn tail is a crash artifact, not a failure: {stdout}"
+    );
+    assert!(stdout.contains("sake: ok"), "{stdout}");
+    assert!(
+        stdout.contains("NOTE"),
+        "the torn tail must be reported: {stdout}"
+    );
+    assert!(stdout.contains("WAL torn tail"), "{stdout}");
+    assert!(
+        stdout.contains("1 pending"),
+        "the one complete record decoded and counts as pending: {stdout}"
+    );
+
+    // The decisive read-only check: inspect left the file byte-for-byte
+    // as written, torn fragment and all. A boot replay would have
+    // truncated it back to the last newline.
+    assert_eq!(
+        std::fs::read(&wal).unwrap(),
+        bytes,
+        "inspect must not heal (truncate) the WAL it audits"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn inspect_refuses_a_nonexistent_path() {
     let output = run(&["inspect", "/nonexistent/data"]);
     assert_eq!(output.status.code(), Some(2));

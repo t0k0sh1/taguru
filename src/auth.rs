@@ -126,11 +126,15 @@ impl Keyring {
     }
 }
 
-/// Everything the bearer gate consults: the static keyring, and the
-/// OAuth subsystem when the operator enabled it.
+/// Everything the bearer gate consults: the static keyring, the OAuth
+/// subsystem when the operator enabled it, and a per-source-IP throttle
+/// on FAILED attempts (`TAGURU_AUTH_FAIL_LIMIT_PER_MIN`) so the gate
+/// cannot be brute-forced — or used to burn CPU on the constant-time
+/// scan — for free.
 pub struct Gate {
     pub keyring: Arc<Keyring>,
     pub oauth: Option<Arc<crate::oauth::Oauth>>,
+    pub fail_limiter: Arc<crate::limits::RateLimiter>,
 }
 
 /// Refuses any non-exempt request whose `Authorization: Bearer` token
@@ -180,6 +184,26 @@ pub async fn require_bearer(
         return response;
     }
 
+    // No credential matched. Throttle repeated failures per source IP:
+    // successful auth returned above without touching this limiter, so a
+    // legitimate caller presenting the right token is never throttled —
+    // only a brute-forcer (or a client burning the constant-time scan)
+    // spends here, and once over budget gets a 429 instead of a 401.
+    if !gate.fail_limiter.is_disabled() {
+        let peer = crate::limits::peer_ip(&request).unwrap_or_else(|| Arc::from("peer:unknown"));
+        if let Err(retry_after) = gate.fail_limiter.admit(&peer, started_at) {
+            let mut response = api::error(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("too many failed authentication attempts — retry in {retry_after}s"),
+                started_at,
+            );
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(retry_after));
+            return response;
+        }
+    }
+
     let mut response = api::error(
         StatusCode::UNAUTHORIZED,
         "missing or invalid bearer token (send Authorization: Bearer <token>)",
@@ -219,7 +243,14 @@ mod tests {
     }
 
     fn gate_app(keyring: Arc<Keyring>, oauth: Option<Arc<crate::oauth::Oauth>>) -> Router {
-        let gate = Arc::new(Gate { keyring, oauth });
+        // Failed-auth throttle off by default here: these tests assert
+        // the 401/200 verdicts, not the throttle. The throttle has its
+        // own test with a ConnectInfo layer and a live budget.
+        let gate = Arc::new(Gate {
+            keyring,
+            oauth,
+            fail_limiter: Arc::new(crate::limits::RateLimiter::new(0)),
+        });
         Router::new()
             .route("/health", get(|| async { "ok" }))
             .route("/metrics", get(|| async { "counts" }))
@@ -427,6 +458,59 @@ mod tests {
             200
         );
         assert_eq!(status_of(app(keyring), "/contexts", None).await, 401);
+    }
+
+    /// Repeated failures from one source IP trip a 429 with a
+    /// Retry-After, but a valid token from that very IP still passes:
+    /// the throttle bites brute force, never a caller who finally
+    /// presents the right credential.
+    #[tokio::test]
+    async fn failed_auth_is_throttled_per_source_ip() {
+        use axum::extract::connect_info::MockConnectInfo;
+        use std::net::SocketAddr;
+
+        let gate = Arc::new(Gate {
+            keyring: ring(Some("s3cret"), None),
+            oauth: None,
+            fail_limiter: Arc::new(crate::limits::RateLimiter::new(3)),
+        });
+        let app = Router::new()
+            .route("/contexts", get(|| async { "secret" }))
+            .layer(axum::middleware::from_fn_with_state(gate, require_bearer))
+            // Outermost, so every request carries a peer address before
+            // the gate reads one — all from the same mocked IP, so they
+            // share a bucket and the budget trips.
+            .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
+        let send = |authorization: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    HttpRequest::builder()
+                        .uri("/contexts")
+                        .header("Authorization", authorization)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // The 3/min budget spends on failures...
+        for _ in 0..3 {
+            assert_eq!(
+                send("Bearer wrong").await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        // ...and the next failure is throttled, not merely refused.
+        let throttled = send("Bearer wrong").await;
+        assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(throttled.headers().get(header::RETRY_AFTER).is_some());
+
+        // The right token still opens the gate from the same IP: success
+        // never reaches the throttle.
+        assert_eq!(send("Bearer s3cret").await.status(), StatusCode::OK);
     }
 
     /// RFC 7230 §3.2.2: a repeated Authorization header is malformed. Rather

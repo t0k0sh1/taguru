@@ -371,17 +371,25 @@ impl Oauth {
         let grant = {
             let mut refresh = self.refresh.lock().unwrap();
             refresh.retain(|token| token.expires_at > now);
-            let position = refresh
-                .iter()
-                .position(|token| bool::from(token.hash.as_bytes().ct_eq(hash.as_bytes())));
+            // Validate the FULL binding — token hash AND client — before
+            // burning anything. A refresh token rotates: it must die only
+            // on a successful exchange, so a request carrying a real token
+            // but the wrong client_id fails WITHOUT consuming it. Burning
+            // it first (as the code path deliberately does for replay
+            // defense) would let anyone who learned a token but not its
+            // client binding grief the legitimate client by destroying it.
+            // ct_eq keeps the secret-hash compare constant-time; client_id
+            // is public, so a plain equality gate behind the short-circuit
+            // leaks nothing.
+            let position = refresh.iter().position(|token| {
+                bool::from(token.hash.as_bytes().ct_eq(hash.as_bytes()))
+                    && token.client_id == client_id
+            });
             match position {
                 Some(position) => refresh.swap_remove(position),
                 None => return Err(OauthError("invalid_grant")),
             }
         };
-        if grant.client_id != client_id {
-            return Err(OauthError("invalid_grant"));
-        }
         Ok(self.mint(grant.key, client_id, now))
     }
 
@@ -766,6 +774,52 @@ mod tests {
             reopened
                 .exchange_refresh(&client.client_id, &first.refresh_token, 1005)
                 .is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A refresh token belongs to ONE client. Presented under a
+    /// different client_id it is refused — and, crucially, NOT burned:
+    /// were it consumed on the mismatch, anyone who learned the token
+    /// string (but not its binding) could destroy the rightful client's
+    /// session at will. The rightful client must still rotate it after.
+    #[test]
+    fn a_refresh_token_under_the_wrong_client_is_refused_without_burning() {
+        let (oauth, dir) = scratch_oauth("refresh-wrongclient");
+        let victim = register(&oauth);
+        let attacker = oauth
+            .register_client("attacker", vec!["https://claude.ai/cb".to_string()])
+            .unwrap();
+        let verifier = "0123456789012345678901234567890123456789012345";
+        let code = oauth.issue_code(
+            &victim,
+            "https://claude.ai/cb",
+            &s256_challenge(verifier),
+            "laptop",
+            1000,
+        );
+        let grant = oauth
+            .exchange_code(
+                &victim.client_id,
+                &code,
+                verifier,
+                "https://claude.ai/cb",
+                1001,
+            )
+            .unwrap();
+
+        // Wrong client: refused...
+        assert!(
+            oauth
+                .exchange_refresh(&attacker.client_id, &grant.refresh_token, 1002)
+                .is_err()
+        );
+        // ...and untouched — the rightful client still rotates it.
+        assert!(
+            oauth
+                .exchange_refresh(&victim.client_id, &grant.refresh_token, 1003)
+                .is_ok()
         );
 
         let _ = std::fs::remove_dir_all(dir);

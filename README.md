@@ -175,10 +175,19 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #   TAGURU_RATE_LIMIT_PER_MIN  per-key request budget (default 0 = off):
 #                     each named key may burst a full minute's allowance,
 #                     then settles to the sustained rate; unauthenticated
-#                     deployments share one anonymous bucket. Past it:
-#                     429 in the error shape with Retry-After (seconds);
-#                     /health and /metrics stay exempt. Turn this on
-#                     whenever the server leaves localhost.
+#                     callers (and OAuth discovery/grant traffic) are
+#                     bucketed per source IP. Past it: 429 in the error
+#                     shape with Retry-After (seconds); /health and
+#                     /metrics stay exempt. Turn this on whenever the
+#                     server leaves localhost.
+#   TAGURU_AUTH_FAIL_LIMIT_PER_MIN  failed bearer attempts per source IP
+#                     before a 429 (default 10; 0 = off). Bounds
+#                     brute-force and the CPU it would burn; a valid
+#                     token is never throttled. Behind a reverse proxy
+#                     every caller shares the proxy's IP, so this (and
+#                     the anonymous rate bucket above) collapse to one
+#                     bucket — throttle at the proxy there. taguru does
+#                     not trust X-Forwarded-For.
 ```
 
 ### Docker

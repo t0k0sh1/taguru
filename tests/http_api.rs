@@ -2804,9 +2804,12 @@ fn an_offline_import_carries_sections_through_and_drops_out_of_range_ones() {
 }
 
 /// Unlike questions/sections above, an association's paragraph is
-/// incidental metadata, not its reason for existing — so an
-/// out-of-range one is cleared silently (no counter, no report line)
-/// rather than dropping the whole fact.
+/// incidental metadata, not its reason for existing — so an out-of-range
+/// one clears just the locator and keeps the whole fact, where a
+/// question or section drops entirely. But the drop is still surfaced
+/// with its own count and report line, symmetric with those two: a
+/// locator silently vanishing is exactly the kind of loss the report
+/// exists to name.
 #[test]
 fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_fact() {
     let batches = batch_dir("import-assoc-paragraph");
@@ -2828,7 +2831,13 @@ fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_f
     let _ = std::fs::remove_dir_all(&data_dir);
     let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    // Both facts land — the out-of-range locator does not cost its
+    // association — and the one dropped locator is named, not silent.
     assert!(stdout.contains("+2 association(s)"), "{stdout}");
+    assert!(
+        stdout.contains("1 association paragraph locator(s) dropped: no such paragraph"),
+        "{stdout}"
+    );
 
     let server = Server::start_on("import-assoc-paragraph", data_dir);
     let founding = server.ok(
@@ -3243,6 +3252,32 @@ fn the_import_endpoint_reports_section_bookkeeping() {
     assert_eq!(status, 200, "{result}");
     assert_eq!(result["result"]["sections_stored"], json!(1), "{result}");
     assert_eq!(result["result"]["sections_dropped"], json!(1), "{result}");
+}
+
+/// The import endpoint surfaces a dropped association paragraph locator
+/// in its JSON just as the CLI report does: the fact still lands (unlike
+/// a dropped question or section, which vanishes whole), only the
+/// out-of-range locator is cleared — and counted, never silent.
+#[test]
+fn the_import_endpoint_reports_dropped_association_paragraphs() {
+    let server = Server::start("http-import-assoc-drop");
+    let batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-guide\", \
+                 \"create\": {\"description\": \"d\"}}\n\
+                 {\"passage\": \"蔵の杜氏は高瀬。\\n\\n創業は1907年。\"}\n\
+                 {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0, \"paragraph\": 9}\n";
+
+    let (status, result) = post_import(&server, batch, None);
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(
+        result["result"]["associations"],
+        json!(1),
+        "the fact lands: {result}"
+    );
+    assert_eq!(
+        result["result"]["association_paragraphs_dropped"],
+        json!(1),
+        "the out-of-range locator is cleared and counted: {result}"
+    );
 }
 
 #[test]
