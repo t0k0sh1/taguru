@@ -2118,10 +2118,18 @@ fn usage_counters_track_reads_writes_and_empties_per_context() {
         "/contexts/used/query",
         Some(json!({"subject": "青嶺酒造"})),
     );
+    // The registry groups unreachable_from with the association reads
+    // above; the usage counters must agree. Zero orphans is the audit
+    // succeeding, so it counts as a read but never as an empty one.
+    server.ok(
+        "POST",
+        "/contexts/used/unreachable_from",
+        Some(json!({"origins": ["青嶺酒造"]})),
+    );
 
     let used = server.ok("GET", "/contexts/used", None);
     assert_eq!(used["usage"]["writes"], json!(1), "{used}");
-    assert_eq!(used["usage"]["reads"], json!(3), "{used}");
+    assert_eq!(used["usage"]["reads"], json!(4), "{used}");
     assert_eq!(used["usage"]["empty_reads"], json!(1), "{used}");
     assert!(used["usage"]["last_read_epoch"].as_u64().unwrap() > 0);
     assert!(used["usage"]["last_write_epoch"].as_u64().unwrap() > 0);

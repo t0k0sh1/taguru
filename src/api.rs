@@ -2009,6 +2009,11 @@ pub async fn unreachable_from(
     }) {
         Ok(result) => {
             let (total, matches) = page(result, request.limit);
+            // A graph read like recall/query/explore/activate — the
+            // usage counters must agree with that grouping. Zero
+            // orphans is the audit SUCCEEDING, though, not a miss, so
+            // it never counts as an empty read.
+            state.note_read(&name, false);
             let matches = associations_out(&state, &name, matches);
             ok(MatchPage { total, matches }, started_at)
         }
