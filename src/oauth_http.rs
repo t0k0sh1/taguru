@@ -186,8 +186,13 @@ fn encode_query_value(value: &str) -> String {
 
 /// Anything wrong with the code/PKCE/resource parameters, or nothing.
 fn params_error(state: &OauthState, params: &AuthorizeParams) -> Option<&'static str> {
+    // A well-formed S256 challenge is the base64url of a SHA-256 digest:
+    // always exactly 43 unpadded characters. Pinning the length (rather
+    // than merely non-empty) rejects a malformed challenge here, at
+    // consent, with a clear `invalid_request` instead of letting it slip
+    // through to a puzzling `invalid_grant` at the token endpoint.
     if params.response_type != "code"
-        || params.code_challenge.is_empty()
+        || params.code_challenge.len() != 43
         || params.code_challenge_method != "S256"
     {
         return Some("invalid_request");

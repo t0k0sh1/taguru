@@ -664,11 +664,28 @@ fn oauth_http_layer_refuses_bad_client_redirect_and_grant_parameters() {
         "{location}"
     );
 
+    // A present-but-malformed challenge is refused just like an absent
+    // one: an S256 challenge is always exactly 43 base64url chars, so a
+    // short "abc" can match no verifier and is rejected here at consent.
+    let (status, location) = authorize(&format!(
+        "response_type=code&client_id={client_id}&redirect_uri={REDIRECT}&state=s3b\
+         &code_challenge=abc&code_challenge_method=S256"
+    ));
+    assert_eq!(status, 303);
+    assert!(
+        location.starts_with("https://claude.ai/cb?error=invalid_request"),
+        "{location}"
+    );
+
     // A resource that does not name this server's own /mcp is a
-    // distinct failure: invalid_target, not invalid_request.
+    // distinct failure: invalid_target, not invalid_request — so this
+    // case needs a well-formed challenge (a real S256 challenge is
+    // always 43 chars) to clear the PKCE check and reach the resource
+    // check at all.
+    let challenge = "a".repeat(43);
     let (status, location) = authorize(&format!(
         "response_type=code&client_id={client_id}&redirect_uri={REDIRECT}&state=s4\
-         &code_challenge=abc&code_challenge_method=S256&resource=https%3A%2F%2Fother.example%2Fmcp"
+         &code_challenge={challenge}&code_challenge_method=S256&resource=https%3A%2F%2Fother.example%2Fmcp"
     ));
     assert_eq!(status, 303);
     assert!(

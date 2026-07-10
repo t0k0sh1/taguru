@@ -339,6 +339,13 @@ impl Oauth {
         {
             return Err(OauthError("invalid_grant"));
         }
+        // RFC 7636 §4.1 bounds the verifier at 43–128 characters. Checking
+        // it here (after the code is spent, so single-use still holds) keeps
+        // a malformed proof from reaching the digest at all — belt to the
+        // constant-time comparison's suspenders.
+        if verifier.len() < 43 || verifier.len() > 128 {
+            return Err(OauthError("invalid_grant"));
+        }
         let challenge = s256_challenge(verifier);
         if !bool::from(grant.code_challenge.as_bytes().ct_eq(challenge.as_bytes())) {
             return Err(OauthError("invalid_grant"));
@@ -624,6 +631,76 @@ mod tests {
                     2001
                 )
                 .is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_verifier_outside_the_rfc_length_bounds_is_refused() {
+        let (oauth, dir) = scratch_oauth("verifier-length");
+        let client = register(&oauth);
+        // The RFC 7636 §4.1 floor is 43 characters.
+        let verifier = "0123456789012345678901234567890123456789012";
+        assert_eq!(verifier.len(), 43);
+
+        // Too short (42): refused — and the code still burns on
+        // presentation, so a length-failed proof cannot be retried.
+        let code = oauth.issue_code(
+            &client,
+            "https://claude.ai/cb",
+            &s256_challenge(verifier),
+            "k",
+            1000,
+        );
+        assert_eq!(
+            oauth
+                .exchange_code(
+                    &client.client_id,
+                    &code,
+                    &verifier[..42],
+                    "https://claude.ai/cb",
+                    1001
+                )
+                .map(|_| ())
+                .unwrap_err(),
+            OauthError("invalid_grant")
+        );
+        assert!(
+            oauth
+                .exchange_code(
+                    &client.client_id,
+                    &code,
+                    verifier,
+                    "https://claude.ai/cb",
+                    1002
+                )
+                .is_err(),
+            "the code was spent on first presentation"
+        );
+
+        // Too long (129): refused before the digest even though this
+        // verifier's own challenge would otherwise match.
+        let long = "a".repeat(129);
+        let code = oauth.issue_code(
+            &client,
+            "https://claude.ai/cb",
+            &s256_challenge(&long),
+            "k",
+            2000,
+        );
+        assert_eq!(
+            oauth
+                .exchange_code(
+                    &client.client_id,
+                    &code,
+                    &long,
+                    "https://claude.ai/cb",
+                    2001
+                )
+                .map(|_| ())
+                .unwrap_err(),
+            OauthError("invalid_grant")
         );
 
         let _ = std::fs::remove_dir_all(dir);
