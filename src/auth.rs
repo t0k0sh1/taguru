@@ -152,11 +152,16 @@ pub async fn require_bearer(
     }
 
     let started_at = Instant::now();
-    let presented = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(strip_bearer_prefix);
+    // RFC 7230 §3.2.2: Authorization is single-valued. Two copies are a
+    // malformed request — and the shape of a smuggling attempt, where a
+    // front proxy authenticates on one copy while this server reads the
+    // other. Refuse outright rather than silently honor the first and
+    // trust the proxy agreed on which one that was.
+    let mut authorizations = request.headers().get_all(header::AUTHORIZATION).iter();
+    let presented = match (authorizations.next(), authorizations.next()) {
+        (Some(value), None) => value.to_str().ok().and_then(strip_bearer_prefix),
+        _ => None,
+    };
     let key = presented.and_then(|token| {
         gate.keyring
             .authenticate(token)
@@ -422,5 +427,24 @@ mod tests {
             200
         );
         assert_eq!(status_of(app(keyring), "/contexts", None).await, 401);
+    }
+
+    /// RFC 7230 §3.2.2: a repeated Authorization header is malformed. Rather
+    /// than pick a winner — which a proxy and the gate might disagree on — the
+    /// gate fails closed, so smuggling a second credential past the first
+    /// never authenticates.
+    #[tokio::test]
+    async fn duplicate_authorization_headers_are_refused() {
+        let request = HttpRequest::builder()
+            .uri("/contexts")
+            .header("Authorization", "Bearer wrong")
+            .header("Authorization", "Bearer s3cret")
+            .body(Body::empty())
+            .unwrap();
+        let response = app(ring(Some("s3cret"), None))
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
