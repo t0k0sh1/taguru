@@ -213,9 +213,25 @@ impl Context {
                 })
                 .collect();
             let mut edges = Vec::with_capacity(legacy_edges.len());
+            // A chain is identified by its head: edges sharing a
+            // `first_attribution` walk the identical `next` list and get the
+            // same length, so memoize by head. Without this a pathological
+            // image whose every edge points at one long shared chain walks
+            // that chain once per edge — O(edges × chain) — during a
+            // migration that holds the write lock and never yields.
+            let mut chain_lens: HashMap<AttributionId, u64> = HashMap::new();
             for legacy in &legacy_edges {
-                let chain_len =
-                    legacy_attribution_chain_len(&legacy_attributions, legacy.first_attribution)?;
+                let chain_len = match chain_lens.get(&legacy.first_attribution) {
+                    Some(&len) => len,
+                    None => {
+                        let len = legacy_attribution_chain_len(
+                            &legacy_attributions,
+                            legacy.first_attribution,
+                        )?;
+                        chain_lens.insert(legacy.first_attribution, len);
+                        len
+                    }
+                };
                 edges.push(EdgeRecord {
                     subject: legacy.subject,
                     label: legacy.label,
