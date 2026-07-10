@@ -101,8 +101,30 @@ impl EmbeddingProvider for HttpEmbeddings {
         let response = request
             .send_string(&body.to_string())
             .map_err(|error| format!("embedding request failed: {error}"))?;
-        let parsed: serde_json::Value = response
-            .into_json()
+        // ureq's `into_string` caps its read at 10 MiB, but `into_json`
+        // reads without any bound — and the agent's 60s timeout bounds
+        // time, not bytes, so a misbehaving or misaddressed provider
+        // could stream this process into the ground. Read through an
+        // explicit cap instead: 64 MiB clears the largest honest reply
+        // several times over (128 inputs × 4096 dims × ~24 JSON bytes
+        // per component ≈ 13 MiB) while keeping the buffer finite.
+        const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+        let mut body = Vec::new();
+        {
+            use std::io::Read;
+            response
+                .into_reader()
+                .take(MAX_RESPONSE_BYTES + 1)
+                .read_to_end(&mut body)
+                .map_err(|error| format!("embedding response unreadable: {error}"))?;
+        }
+        if body.len() as u64 > MAX_RESPONSE_BYTES {
+            return Err(format!(
+                "embedding response is larger than {MAX_RESPONSE_BYTES} bytes; \
+                 refusing to buffer it"
+            ));
+        }
+        let parsed: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|error| format!("embedding response unreadable: {error}"))?;
         let data = parsed
             .get("data")
@@ -674,6 +696,51 @@ mod tests {
             request.contains("x-taguru-embed-purpose: query"),
             "{request}"
         );
+    }
+
+    /// A provider (or a proxy in front of one) that returns an
+    /// oversized body must be refused at the byte cap, never buffered
+    /// whole — the agent's timeout bounds seconds, not bytes.
+    #[test]
+    fn an_oversized_embedding_response_is_refused_not_buffered() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_full_request(&mut stream);
+            // 65 MiB claimed and streamed: one past the reader's cap.
+            // The client stops reading there and hangs up, so tolerate
+            // the broken pipe instead of unwrapping it.
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                65 * 1024 * 1024
+            );
+            if stream.write_all(head.as_bytes()).is_err() {
+                return;
+            }
+            let chunk = vec![b'x'; 1024 * 1024];
+            for _ in 0..65 {
+                if stream.write_all(&chunk).is_err() {
+                    return;
+                }
+            }
+        });
+
+        let provider = HttpEmbeddings {
+            url: format!("http://{addr}"),
+            model: "stub-model".to_string(),
+            api_key: None,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(10))
+                .build(),
+        };
+        let error = provider
+            .embed(&["こんにちは"], EmbedPurpose::Query)
+            .unwrap_err();
+        assert!(error.contains("refusing to buffer"), "{error}");
     }
 
     /// A provider that returns `data` out of input order is realigned by
