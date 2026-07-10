@@ -265,8 +265,14 @@ fn usage_error(message: &str) -> ! {
 pub fn fmt_bytes(bytes: u64) -> String {
     const UNITS: [(&str, u64); 3] = [("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)];
     for (unit, size) in UNITS {
-        if bytes >= size {
-            return format!("{:.1} {unit}", bytes as f64 / size as f64);
+        let value = bytes as f64 / size as f64;
+        // One byte under a GiB is 1023.99… MiB, which "{:.1}" prints
+        // as "1024.0 MiB" — this unit's own boundary in the smaller
+        // unit's spelling. A value that ROUNDS to that boundary wears
+        // this unit instead ("1.0 GiB"); anything below it keeps the
+        // smaller unit's precision.
+        if bytes >= size || value * 1024.0 >= 1023.95 {
+            return format!("{value:.1} {unit}");
         }
     }
     format!("{bytes} B")
@@ -398,6 +404,20 @@ mod tests {
     fn config_keys_with_spaces_are_refused() {
         let error = parse_config("TAGURU WAL=1\n").unwrap_err();
         assert!(error.contains("line 1"), "{error}");
+    }
+
+    #[test]
+    fn fmt_bytes_never_prints_a_full_unit_in_the_smaller_unit() {
+        // Straight cases keep their unit and precision.
+        assert_eq!(fmt_bytes(1 << 30), "1.0 GiB");
+        assert_eq!(fmt_bytes(900 * (1 << 20)), "900.0 MiB");
+        assert_eq!(fmt_bytes(1023), "1023 B");
+        // One byte under a unit rounds to that unit's own boundary —
+        // "1024.0 MiB" is a GiB wearing the wrong spelling.
+        assert_eq!(fmt_bytes((1 << 30) - 1), "1.0 GiB");
+        assert_eq!(fmt_bytes((1 << 20) - 1), "1.0 MiB");
+        // Just below the rounding boundary the smaller unit stays.
+        assert_eq!(fmt_bytes(1073635738), "1023.9 MiB");
     }
 
     #[test]
