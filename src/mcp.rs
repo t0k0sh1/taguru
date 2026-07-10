@@ -351,9 +351,9 @@ pub fn tool_definitions() -> Vec<Value> {
             object_schema(
                 json!({
                     "context": context,
-                    "subject": { "description": "string or array" },
-                    "label": { "description": "string or array" },
-                    "object": { "description": "string or array" },
+                    "subject": { "type": ["string", "array"], "description": "string or array" },
+                    "label": { "type": ["string", "array"], "description": "string or array" },
+                    "object": { "type": ["string", "array"], "description": "string or array" },
                     "limit": { "type": "integer", "minimum": 0 }
                 }),
                 &["context"],
