@@ -274,6 +274,13 @@ impl Oauth {
                 return Err(format!("redirect uri '{uri}' must be https or loopback"));
             }
         }
+        // The registered name is what the consent page shows the
+        // operator as the thing being approved. HTML escaping keeps it
+        // from being markup, but a name carrying invisible characters
+        // can still lie visually — U+202E reorders what renders, a
+        // zero-width joiner hides a difference — so everything that
+        // renders as nothing is stripped before the name is stored.
+        let client_name: String = client_name.chars().filter(|c| !is_invisible(*c)).collect();
         let client_name = client_name.trim();
         if client_name.len() > MAX_CLIENT_NAME_BYTES {
             return Err(format!(
@@ -512,6 +519,31 @@ fn slug(client_name: &str) -> String {
     } else {
         cleaned
     }
+}
+
+/// Characters that render as nothing — or reorder what renders: C0/C1
+/// controls plus the Unicode format characters (BIDI embeddings,
+/// overrides and isolates, zero-width joiners and spaces, the soft
+/// hyphen, the BOM, interlinear annotation anchors, and the invisible
+/// tag block). A client_name survives HTML escaping with these intact,
+/// and a name that can rewrite its own visual order or hide a
+/// character can impersonate a trusted client on the consent page.
+/// Stripped at registration so the stored name is what the operator
+/// will actually see.
+fn is_invisible(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+        )
 }
 
 /// Minimal HTML escaping for the consent page (attribute and text
@@ -945,6 +977,23 @@ mod tests {
             escape_html(r#"<b a="x">&'"#),
             "&lt;b a=&quot;x&quot;&gt;&amp;&#39;"
         );
+    }
+
+    #[test]
+    fn registration_strips_invisible_and_direction_control_characters() {
+        let (oauth, dir) = scratch_oauth("invisible-name");
+        // U+202E flips rendering order, a zero-width space hides a
+        // boundary, a tag character is an invisible ASCII mirror — a
+        // consent page showing any of them shows a lie, so none may
+        // survive into the stored name.
+        let client = oauth
+            .register_client(
+                "Cla\u{202E}ude\u{200B} Code\u{E0041}",
+                vec!["https://example.com/cb".to_string()],
+            )
+            .unwrap();
+        assert_eq!(client.client_name, "Claude Code");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// mint() must sweep expired refresh grants before appending, the
