@@ -178,8 +178,14 @@ async fn serve() {
     // same routes. The dispatch handle is captured BEFORE the
     // middleware stack goes on, so a tool call that already passed
     // auth, the timeout, and the body cap at /mcp is not re-charged
-    // inside — one client request, one budget, one log line.
-    let mcp_dispatch = app.clone();
+    // inside — one client request, one budget, one log line. "No body
+    // cap inside" has to be said explicitly, though: an extractor that
+    // finds no DefaultBodyLimit extension falls back to axum's own
+    // hardcoded 2 MiB default, which would silently cap dispatched
+    // tool calls below the operator's TAGURU_MAX_BODY_BYTES.
+    let mcp_dispatch = app
+        .clone()
+        .layer(axum::extract::DefaultBodyLimit::disable());
     let app = app.route(
         "/mcp",
         post(move |body: axum::body::Bytes| {

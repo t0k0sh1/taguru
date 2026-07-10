@@ -807,6 +807,27 @@ fn mcp_over_http_serves_initialize_tools_and_calls() {
     let error_text = failed["result"]["content"][0]["text"].as_str().unwrap();
     assert!(error_text.contains("HTTP 404"), "{error_text}");
 
+    // A tool payload between axum's 2 MiB extractor default and the
+    // operator's body cap (8 MiB here) must go through: the outer /mcp
+    // request already paid the configured cap, and the in-process
+    // dispatch is deliberately uncapped rather than silently re-capped
+    // at the extractor default.
+    let big = "a".repeat(3 * 1024 * 1024);
+    let (status, stored) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 60, "method": "tools/call",
+                    "params": {"name": "store_passages",
+                               "arguments": {"context": "remote",
+                                             "passages": {"big.md": big}}}})),
+    );
+    assert_eq!(status, 200);
+    assert!(
+        stored["result"].get("isError").is_none(),
+        "a 3 MiB tool call must clear the 2 MiB extractor default: {}",
+        stored["result"]["content"][0]["text"]
+    );
+
     // Unknown JSON-RPC methods ARE protocol errors...
     let (_, unknown) = server.call(
         "POST",
