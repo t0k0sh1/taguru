@@ -605,3 +605,53 @@ fn estimate_requires_the_association_count() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn the_mcp_bridge_answers_initialize_despite_a_stalled_protocol_probe() {
+    use std::io::Write;
+
+    // A listener that accepts (localhost handshakes complete via the
+    // backlog) but never responds: the worst startup case — a server
+    // that is not dead, just silent. The bridge's protocol probe must
+    // give up on its own short ceiling, not hold stdio hostage for the
+    // full 75-second tool-call timeout an MCP client's handshake
+    // budget never survives.
+    let stall = std::net::TcpListener::bind("127.0.0.1:0").expect("stall listener must bind");
+    let addr = stall.local_addr().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_taguru-mcp"))
+        .env("TAGURU_URL", format!("http://{addr}"))
+        .env_remove("TAGURU_API_TOKEN")
+        .env_remove("TAGURU_MCP_TIMEOUT_SECS")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge must spawn");
+
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {{}}}}"#
+    )
+    .unwrap();
+
+    // Read the reply on a side thread so a hung bridge fails this test
+    // by timeout rather than hanging the harness with it.
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines();
+        let _ = sender.send(lines.next().and_then(Result::ok));
+    });
+    let reply = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("initialize must be answered within the probe ceiling, not the tool timeout")
+        .expect("one JSON-RPC response line");
+    assert!(reply.contains(r#""id":1"#), "{reply}");
+    // The probe failed, so the bundled protocol copy is what serves.
+    assert!(reply.contains("instructions"), "{reply}");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}

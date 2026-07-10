@@ -56,7 +56,24 @@ fn main() {
             .build(),
     };
 
-    let instructions = bridge
+    // The probe runs BEFORE the stdio loop: until it settles, the
+    // bridge cannot answer even `initialize`. A dead server fails it in
+    // milliseconds (connection refused), but a host that swallows the
+    // connection — a firewall dropping SYNs, a stalled tunnel — would
+    // hold the full tool-call timeout: 75 seconds of startup silence
+    // that an MCP client with a shorter handshake budget reads as a
+    // hang and kills. The probe gets its own short ceiling instead;
+    // past it, the bundled copy serves and the loop starts. Tool calls
+    // keep the long timeout — they run after the handshake, when the
+    // client is already talking to us.
+    let probe = Bridge {
+        base: bridge.base.clone(),
+        token: bridge.token.clone(),
+        agent: ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(timeout_secs.min(5)))
+            .build(),
+    };
+    let instructions = probe
         .call("GET", "/protocol", None)
         .unwrap_or_else(|error| {
             // The bundled copy keeps the agent functional, but a dead or
