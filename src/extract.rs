@@ -1046,7 +1046,13 @@ fn render_batch(
             "object": fact.object,
             "weight": fact.weight,
         });
-        if let Some(paragraph) = fact.paragraph {
+        // A paragraph locator attaches to THIS batch's passage line;
+        // with the passage stripped (--no-passage) there is nothing to
+        // locate into, and import refuses the dangling reference — so
+        // strip the locators with the text they pointed at.
+        if passage.is_some()
+            && let Some(paragraph) = fact.paragraph
+        {
             line["paragraph"] = serde_json::json!(paragraph);
         }
         lines.push(line.to_string());
@@ -1456,6 +1462,35 @@ mod tests {
         assert_eq!(batch.context, "sake");
         assert_eq!(batch.source, "docs/aomine.md");
         assert!(batch.label_vocabulary().contains("杜氏"));
+    }
+
+    #[test]
+    fn a_stripped_passage_strips_the_paragraph_locators_too() {
+        // The model tags facts with paragraph numbers unconditionally —
+        // the base prompt instructs it to. With --no-passage the batch
+        // has no passage line for those locators to attach to, and
+        // import refuses the dangling reference; render must drop the
+        // tags along with the text or extract fails its own
+        // self-validation on essentially every document.
+        let extraction = merge(
+            vec![ModelOutput {
+                associations: vec![ModelAssociation {
+                    paragraph: Some(1),
+                    ..association("青嶺酒造", "杜氏", "高瀬", 2.0)
+                }],
+                aliases: Vec::new(),
+                questions: Vec::new(),
+            }],
+            0,
+            2,
+        );
+        let body = render_batch("sake", "docs/aomine.md", None, &extraction, None);
+        assert!(
+            !body.contains("\"paragraph\""),
+            "no passage line, no locators: {body}"
+        );
+        crate::ingest::parse_batch(Cursor::new(body.as_bytes()))
+            .expect("extract must never emit what import refuses");
     }
 
     #[test]
