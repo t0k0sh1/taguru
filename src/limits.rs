@@ -142,7 +142,12 @@ impl RateLimiter {
         });
         let elapsed = now.duration_since(bucket.refreshed).as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * per_second).min(capacity);
-        bucket.refreshed = now;
+        // Two same-key requests can take the mutex in an order inverted
+        // from their `Instant::now()` captures. The straggler's elapsed
+        // saturates to zero above — correct — but writing its earlier
+        // timestamp back would hand the NEXT request the same interval
+        // again, so the clock only ever advances.
+        bucket.refreshed = bucket.refreshed.max(now);
         if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
             Ok(())
@@ -278,6 +283,27 @@ mod tests {
                 .admit(&key, start + Duration::from_millis(1500))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn a_lock_race_cannot_rewind_the_refill_clock() {
+        let limiter = RateLimiter::new(60); // one token per second
+        let key: Arc<str> = Arc::from("k");
+        let start = Instant::now();
+        for _ in 0..60 {
+            assert!(limiter.admit(&key, start).is_ok());
+        }
+        assert!(limiter.admit(&key, start).is_err(), "drained");
+
+        // Two same-key requests race the mutex in an order inverted
+        // from their Instant::now() captures: the later timestamp
+        // lands first, the straggler's saturates to zero elapsed.
+        assert!(limiter.admit(&key, start + Duration::from_secs(2)).is_ok());
+        assert!(limiter.admit(&key, start + Duration::from_secs(1)).is_ok());
+        // Those two seconds refilled two tokens and both are spent. If
+        // the straggler had rewound the clock, this third admit at the
+        // same instant would be handed the same second again.
+        assert!(limiter.admit(&key, start + Duration::from_secs(2)).is_err());
     }
 
     #[test]
