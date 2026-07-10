@@ -123,6 +123,7 @@ impl EmbeddingProvider for HttpEmbeddings {
         // falls back to its array position — the old, order-trusting
         // behavior, so a provider that never sends `index` still works.
         let mut slots: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
+        let mut width: Option<usize> = None;
         for (position, item) in data.iter().enumerate() {
             let index = item
                 .get("index")
@@ -143,6 +144,20 @@ impl EmbeddingProvider for HttpEmbeddings {
                 .iter()
                 .map(|v| v.as_f64().unwrap_or(0.0) as f32)
                 .collect();
+            // One response, one model, one width. A mixed-width response
+            // is a provider bug; carried into a store it would feed
+            // `similarity` mismatched dimensions later, which score as
+            // nothing — better to name the bug at the boundary.
+            match width {
+                None => width = Some(vector.len()),
+                Some(expected) if expected != vector.len() => {
+                    return Err(format!(
+                        "embedding response mixes vector widths ({expected} and {})",
+                        vector.len()
+                    ));
+                }
+                Some(_) => {}
+            }
             normalize(&mut vector);
             if slots[index].replace(vector).is_some() {
                 return Err(format!("embedding response repeated index {index}"));
@@ -185,7 +200,15 @@ pub fn normalize(vector: &mut [f32]) {
 }
 
 /// Cosine similarity of two unit vectors (a dot product).
+///
+/// Widths must agree: `zip` would silently truncate to the shorter
+/// side, turning a dimension mismatch (a provider changing output
+/// width behind a stable model name) into a plausible-looking but
+/// meaningless score. No signal is the honest answer.
 pub fn similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
@@ -570,6 +593,10 @@ mod tests {
         assert!((similarity(&a, &a) - 1.0).abs() < 1e-6);
         let b = vec![-a[1], a[0]];
         assert!(similarity(&a, &b).abs() < 1e-6);
+        // A width mismatch is no signal — never a truncated dot product
+        // that would read as a plausible score.
+        assert_eq!(similarity(&a, &[1.0]), 0.0);
+        assert_eq!(similarity(&[], &a), 0.0);
     }
 
     /// Reads one whole HTTP request — headers plus the Content-Length
@@ -687,6 +714,44 @@ mod tests {
         // Input 0 keeps index 0's vector (3-4-5 → 0.6, 0.8); input 1 keeps
         // index 1's (0, 2 → 0, 1). Trusting array order would swap them.
         assert_eq!(vectors, vec![vec![0.6, 0.8], vec![0.0, 1.0]]);
+    }
+
+    /// One response, one model, one width: an entry whose vector width
+    /// disagrees with the rest is a provider bug named at the boundary,
+    /// not carried into stores for `similarity` to score as nothing.
+    #[test]
+    fn http_embeddings_reject_a_mixed_width_response() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_full_request(&mut stream);
+            let body =
+                br#"{"data":[{"index":0,"embedding":[3.0,4.0]},{"index":1,"embedding":[1.0]}]}"#;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let provider = HttpEmbeddings {
+            url: format!("http://{addr}"),
+            model: "stub-model".to_string(),
+            api_key: None,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+        let error = provider
+            .embed(&["first", "second"], EmbedPurpose::Query)
+            .unwrap_err();
+        served.join().unwrap();
+        assert!(error.contains("widths"), "{error}");
     }
 
     #[test]

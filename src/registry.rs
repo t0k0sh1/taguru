@@ -1921,17 +1921,68 @@ impl AppState {
         // here at a time, so the diff below always runs against
         // whatever the previous refresh (if any) already published.
         let existing = VectorStore::load(&path);
-        let fresh_model = existing.model != embedder.model();
-        let embedded_concepts =
+        let mut fresh_model = existing.model != embedder.model();
+        let mut embedded_concepts =
             match self.embed_stale(&*embedder, &existing.concepts, &concepts, fresh_model) {
                 Ok(embedded) => embedded,
                 Err(error) => return Some(Err(error)),
             };
-        let embedded_labels =
+        let mut embedded_labels =
             match self.embed_stale(&*embedder, &existing.labels, &labels, fresh_model) {
                 Ok(embedded) => embedded,
                 Err(error) => return Some(Err(error)),
             };
+        // The model NAME is the staleness discriminator, but a provider
+        // can change output width behind a stable name (a backend swap
+        // behind the same proxy or gateway). Old-width rows carried next
+        // to new-width ones would feed `similarity` mismatched
+        // dimensions — no error, no score — so a width disagreement
+        // stales the whole table, exactly as if the model were renamed.
+        let width = |table: &VectorTable| table.values().map(|(_, vector)| vector.len()).next();
+        let carried_width = width(&existing.concepts).or_else(|| width(&existing.labels));
+        let mut fresh_width = width(&embedded_concepts).or_else(|| width(&embedded_labels));
+        // Unchanged hashes embed nothing, which would leave the width
+        // change of exactly this scenario — backend swap, no gloss
+        // edits — undetectable forever. One probe embedding per no-op
+        // refresh keeps that from hiding.
+        if !fresh_model
+            && carried_width.is_some()
+            && fresh_width.is_none()
+            && let Some((_, gloss)) = concepts.first().or_else(|| labels.first())
+        {
+            match embedder.embed(&[gloss.as_str()], EmbedPurpose::Index) {
+                Ok(vectors) => {
+                    self.0.metrics.record_embed_refresh(true);
+                    fresh_width = vectors.first().map(Vec::len);
+                }
+                Err(error) => {
+                    self.0.metrics.record_embed_refresh(false);
+                    return Some(Err(error));
+                }
+            }
+        }
+        if !fresh_model
+            && let (Some(carried), Some(fresh)) = (carried_width, fresh_width)
+            && carried != fresh
+        {
+            tracing::warn!(
+                context = name,
+                model = embedder.model(),
+                carried,
+                fresh,
+                "embedding width changed under an unchanged model name; re-embedding every gloss"
+            );
+            fresh_model = true;
+            embedded_concepts =
+                match self.embed_stale(&*embedder, &existing.concepts, &concepts, true) {
+                    Ok(embedded) => embedded,
+                    Err(error) => return Some(Err(error)),
+                };
+            embedded_labels = match self.embed_stale(&*embedder, &existing.labels, &labels, true) {
+                Ok(embedded) => embedded,
+                Err(error) => return Some(Err(error)),
+            };
+        }
         let newly_embedded = embedded_concepts.len() + embedded_labels.len();
 
         // Publish under the entry lock (a delete that may have won it
@@ -1940,7 +1991,10 @@ impl AppState {
         // read-modify-write race-free, not this lock by itself.
         let _guard = entry.lock_unless_deleted()?;
         let mut store = VectorStore::load(&path);
-        if store.model != embedder.model() {
+        // `fresh_model` also covers the width change above: rows for
+        // names that have since left the graph must not linger at the
+        // old width either.
+        if fresh_model || store.model != embedder.model() {
             store = VectorStore {
                 model: embedder.model().to_string(),
                 ..Default::default()
@@ -6596,6 +6650,78 @@ mod tests {
         assert!(!refresh_calls.is_empty());
         assert!(refresh_calls.iter().all(|p| *p == EmbedPurpose::Index));
         assert_eq!(*cue_call, EmbedPurpose::Query);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A provider that changes output width behind a stable model name
+    /// (a backend swap behind the same proxy) must stale the whole
+    /// carried table: gloss hashes are unchanged, so without the width
+    /// check nothing re-embeds and old-width rows sit next to new-width
+    /// ones — which `similarity` scores as nothing, silently.
+    #[test]
+    fn a_width_change_under_the_same_model_name_re_embeds_everything() {
+        struct WidthEmbeddings(usize);
+        impl EmbeddingProvider for WidthEmbeddings {
+            fn model(&self) -> &str {
+                "stable-name"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                Ok(texts
+                    .iter()
+                    .map(|_| {
+                        let mut vector = vec![0.0; self.0];
+                        vector[0] = 1.0;
+                        vector
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("width-change");
+        {
+            let embedder = Some(Arc::new(WidthEmbeddings(2)) as Arc<dyn EmbeddingProvider>);
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            state
+                .create("w", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("w", |context| {
+                    context.associate("a", "l", "b", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+            let (embedded, total) = state.refresh_embeddings("w").unwrap().unwrap();
+            assert_eq!((embedded, total), (3, 3)); // a, b, and the label l
+            state.flush_dirty();
+        }
+
+        // Same model name, wider vectors: every gloss must re-embed
+        // (hashes alone would say "nothing to do") and the published
+        // sidecar must be uniformly the new width.
+        let embedder = Some(Arc::new(WidthEmbeddings(3)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        let (embedded, total) = state.refresh_embeddings("w").unwrap().unwrap();
+        assert_eq!((embedded, total), (3, 3));
+        let store = VectorStore::load(&vectors_path(&dir, &file_stem("w")));
+        assert!(
+            store
+                .concepts
+                .values()
+                .chain(store.labels.values())
+                .all(|(_, vector)| vector.len() == 3),
+            "old-width rows must not survive the width change"
+        );
+
+        // A no-op refresh against the same-width provider stays a no-op
+        // (the probe embeds one gloss but re-embeds nothing).
+        let (embedded, total) = state.refresh_embeddings("w").unwrap().unwrap();
+        assert_eq!((embedded, total), (0, 3));
 
         let _ = fs::remove_dir_all(dir);
     }
