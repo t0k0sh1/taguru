@@ -82,6 +82,36 @@ fn injected_append_failure() -> Option<io::Error> {
     })
 }
 
+/// [`fail_appends_after`]'s twin for [`truncate_to`]: after `successes`
+/// more truncates succeed normally, the one after them fails with an
+/// injected error and the hook disarms. This is how tests reach the
+/// partial-apply rollback failing while the batch append before it
+/// succeeded — the reverse of what directory permissions can select.
+#[cfg(test)]
+pub(crate) fn fail_truncates_after(successes: u32) {
+    TRUNCATE_FAULT.with(|cell| cell.set(Some(successes)));
+}
+
+#[cfg(test)]
+thread_local! {
+    static TRUNCATE_FAULT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn injected_truncate_failure() -> Option<io::Error> {
+    TRUNCATE_FAULT.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            Some(io::Error::other("injected truncate failure"))
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            None
+        }
+        None => None,
+    })
+}
+
 /// Appends `ops` numbered from `first_seq`, one line each, with a
 /// single fsync after all of them — the HTTP batch is the natural
 /// group-commit unit (one document, one request, one lock, one sync).
@@ -315,6 +345,10 @@ pub fn reset(path: &Path) -> io::Result<()> {
 /// indistinguishable from an applied record, and replay would try it
 /// independently next time this context goes cold.
 pub fn truncate_to(path: &Path, len: u64) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = injected_truncate_failure() {
+        return Err(error);
+    }
     let file = fs::OpenOptions::new().write(true).open(path)?;
     file.set_len(len)?;
     file.sync_all()

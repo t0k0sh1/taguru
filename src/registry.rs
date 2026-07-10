@@ -2796,10 +2796,27 @@ impl AppState {
                             inner.wal_seq = first_seq;
                         }
                         Err(error) => {
+                            // The untried tail is still on disk looking
+                            // exactly like applied records, and replay
+                            // does not stop where the live apply did —
+                            // left until the next flush tick, a crash
+                            // would apply ops the caller was just told
+                            // failed. Same medicine as the re-append
+                            // failure above: flush the image now (out
+                            // of this lock). Its watermark covers the
+                            // whole batch's seqs, so the tail becomes
+                            // replay-inert even if the log keeps
+                            // refusing to shrink. Bookkeeping stays at
+                            // the full-batch values: that is what the
+                            // file still holds if the truncate never
+                            // landed, and a successful flush resets
+                            // both anyway.
                             tracing::warn!(
                                 context = %name, %error,
-                                "WAL truncate after a partial apply failed; the untried tail may replay independently later"
+                                "WAL truncate after a partial apply failed; \
+                                 flushing the image now to retire the untried tail"
                             );
+                            wal_behind = true;
                         }
                     }
                 }
@@ -4144,6 +4161,93 @@ mod tests {
                 .iter()
                 .any(|(alias, canonical)| alias == "aomine" && canonical == "青嶺酒造"),
             "the acknowledged alias must survive the crash: {aliases:?}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_wal_trim_after_a_partial_apply_keeps_the_untried_tail_from_replaying() {
+        // A partial apply trims the untried tail back out of the WAL.
+        // If that trim itself fails, the tail sits on disk looking
+        // exactly like applied records — and replay does not stop at
+        // the rejection the live apply stopped at, so a crash would
+        // apply ops the caller was just told failed. logged_write must
+        // close that window itself: an immediate image flush whose
+        // watermark retires the whole batch's seqs.
+        let dir = scratch_dir("wal-trim-fault");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "所在地", "京都酒造", 1.0, None)],
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .add_aliases(
+                    "sake",
+                    &BTreeMap::from([("kyo".to_string(), "京都酒造".to_string())]),
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+                .unwrap();
+
+            // BTreeMap order: "aomine" applies, "kyo" conflicts
+            // (re-pointing an existing alias) and stops the batch,
+            // "mine" is never tried. The batch append succeeds; the
+            // fault fires on the trim that should carry "kyo" and
+            // "mine" back off the disk.
+            wal::fail_truncates_after(0);
+            let partial = state
+                .add_aliases(
+                    "sake",
+                    &BTreeMap::from([
+                        ("aomine".to_string(), "青嶺酒造".to_string()),
+                        ("kyo".to_string(), "青嶺酒造".to_string()),
+                        ("mine".to_string(), "青嶺酒造".to_string()),
+                    ]),
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(
+                partial.applied, 1,
+                "only the first alias landed before the conflict"
+            );
+            // NO flush_dirty: dropping the state here is the crash.
+        }
+
+        let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let aliases = reborn
+            .read_context("sake", |context| {
+                context
+                    .concept_aliases()
+                    .into_iter()
+                    .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(
+            aliases
+                .iter()
+                .any(|(alias, canonical)| alias == "aomine" && canonical == "青嶺酒造"),
+            "the acknowledged alias must survive the crash: {aliases:?}"
+        );
+        assert!(
+            aliases
+                .iter()
+                .any(|(alias, canonical)| alias == "kyo" && canonical == "京都酒造"),
+            "the conflicting alias must keep its original target: {aliases:?}"
+        );
+        assert!(
+            !aliases.iter().any(|(alias, _)| alias == "mine"),
+            "an op the caller was told failed must not replay into existence: {aliases:?}"
         );
         let _ = fs::remove_dir_all(dir);
     }
