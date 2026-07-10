@@ -154,11 +154,25 @@ fn checked_redirect(
 /// Parameter problems AFTER the redirect target is verified go back to
 /// the client as OAuth error redirects, per spec.
 fn error_redirect(params: &AuthorizeParams, error: &str) -> Response {
-    let mut target = format!("{}?error={error}", params.redirect_uri);
+    let mut target = format!(
+        "{}{}error={error}",
+        params.redirect_uri,
+        query_separator(&params.redirect_uri)
+    );
     if !params.state.is_empty() {
         target.push_str(&format!("&state={}", encode_query_value(&params.state)));
     }
     Redirect::to(&target).into_response()
+}
+
+/// `?` to open the query, or `&` to extend one the redirect URI already
+/// carries. Registration only checks the scheme, so a registered
+/// `https://app/cb?tenant=x` is legal; RFC 6749 §3.1.2 requires that
+/// existing query to be kept and our parameters appended to it. An
+/// unconditional `?` would yield `...?tenant=x?code=...`, folding the
+/// code and state into `tenant`'s value and breaking the callback.
+fn query_separator(redirect_uri: &str) -> char {
+    if redirect_uri.contains('?') { '&' } else { '?' }
 }
 
 /// `state` is opaque, attacker-controlled data that gets spliced
@@ -225,7 +239,11 @@ async fn approve(State(state): State<OauthState>, Form(params): Form<AuthorizePa
         &key,
         now_secs(),
     );
-    let mut target = format!("{}?code={code}", params.redirect_uri);
+    let mut target = format!(
+        "{}{}code={code}",
+        params.redirect_uri,
+        query_separator(&params.redirect_uri)
+    );
     if !params.state.is_empty() {
         target.push_str(&format!("&state={}", encode_query_value(&params.state)));
     }
@@ -328,5 +346,56 @@ async fn token(State(state): State<OauthState>, Form(params): Form<TokenParams>)
         }))
         .into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, Json(json!({ "error": error.0 }))).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::header::LOCATION;
+
+    fn params_with(redirect_uri: &str, state: &str) -> AuthorizeParams {
+        serde_json::from_value(json!({
+            "redirect_uri": redirect_uri,
+            "state": state,
+        }))
+        .unwrap()
+    }
+
+    fn location_of(response: Response) -> String {
+        response
+            .headers()
+            .get(LOCATION)
+            .expect("a redirect carries a Location header")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn query_separator_opens_or_extends_the_redirect_query() {
+        assert_eq!(query_separator("https://app/cb"), '?');
+        assert_eq!(query_separator("https://app/cb?tenant=x"), '&');
+    }
+
+    /// A redirect_uri that already carries a query gets the OAuth
+    /// parameters `&`-joined, not a second `?` that would fold `error`
+    /// and `state` into the existing parameter's value (RFC 6749 §3.1.2).
+    #[test]
+    fn error_redirect_extends_an_existing_query_with_ampersand() {
+        let params = params_with("https://app/cb?tenant=x", "s p");
+        let location = location_of(error_redirect(&params, "invalid_request"));
+        assert_eq!(
+            location,
+            "https://app/cb?tenant=x&error=invalid_request&state=s+p"
+        );
+    }
+
+    /// A bare redirect_uri still opens its query with `?`.
+    #[test]
+    fn error_redirect_opens_a_bare_query_with_question_mark() {
+        let params = params_with("https://app/cb", "");
+        let location = location_of(error_redirect(&params, "invalid_request"));
+        assert_eq!(location, "https://app/cb?error=invalid_request");
     }
 }
