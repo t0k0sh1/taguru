@@ -1641,7 +1641,10 @@ impl Context {
             .iter()
             .enumerate()
             .map(|(id, record)| {
-                let degree = (record.outgoing_count + record.incoming_count) as usize;
+                // Widen before summing: the two u32 halves can together
+                // exceed u32 — the same reason validate_chains sums
+                // them in u64.
+                let degree = (record.outgoing_count as usize) + (record.incoming_count as usize);
                 (degree, id as u32)
             })
             .collect();
