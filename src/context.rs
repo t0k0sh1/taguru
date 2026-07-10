@@ -1462,8 +1462,9 @@ impl Context {
 
     /// A compact textual gloss of one concept: its name followed by its
     /// heaviest facts phrased as minimal sentences, most established
-    /// first (|weight| descending, ties in insertion order), negatives
-    /// phrased as denials. This is what an external embedding tier
+    /// first (ranked by raw cumulative |sum|, not the averaged public
+    /// weight, ties in insertion order), negatives phrased as denials.
+    /// This is what an external embedding tier
     /// should embed instead of the bare name — a lone word carries too
     /// little signal for sentence-trained embedding models (measured on
     /// text-embedding-3-large: 醸造責任者×杜氏 lands at cosine 0.28
@@ -1487,7 +1488,8 @@ impl Context {
         Some(self.gloss_text(self.label_name(id), &edges, None))
     }
 
-    /// The `keep` heaviest edges of a chain walk, |weight| descending,
+    /// The `keep` heaviest edges of a chain walk, ranked by the raw
+    /// cumulative |sum| descending (not the averaged public weight),
     /// ties toward insertion order.
     fn heaviest(&self, edges: impl Iterator<Item = EdgeId>, keep: usize) -> Vec<EdgeId> {
         let mut edges: Vec<EdgeId> = edges.collect();
