@@ -2860,8 +2860,12 @@ impl AppState {
     /// One entry's eviction, everything under its write lock: persist
     /// if dirty, drop the graph, clear the cached vectors. `false`
     /// means nothing was freed — the entry got pinned since the
-    /// caller's sweep, or its save failed (it stays resident rather
-    /// than losing writes).
+    /// caller's sweep, its save failed (it stays resident rather than
+    /// losing writes), or a concurrent eviction already cleared it. That
+    /// last case matters: two budget sweeps snapshot the directory under
+    /// a shared lock and can carry the same candidate, so the loser must
+    /// report `false` or the caller subtracts its bytes from the
+    /// residency estimate a second time.
     fn evict_entry(&self, name: &str, entry: &Entry) -> bool {
         let mut guard = entry.inner.write().unwrap();
         let inner = &mut *guard;
@@ -2870,6 +2874,11 @@ impl AppState {
         if inner.meta.pinned {
             return false;
         }
+        // Tracks whether THIS call actually released something — a graph,
+        // a passage store, an index, or a vector cache. A call that finds
+        // everything already gone (a rival sweep won the race) returns
+        // `false` so its bytes are not double-counted.
+        let mut freed = false;
         let watermark = inner.wal_seq - 1;
         if let Slot::Hot(context) = &mut inner.slot {
             // Persist before dropping if the image is stale (`dirty`) OR a
@@ -2908,39 +2917,46 @@ impl AppState {
             // global, so a recount's delta would double-count.
             inner.counted_bytes = 0;
             self.0.metrics.record_eviction(true);
+            freed = true;
         }
         // Dropping the passage store loses nothing (its log is fsynced
         // per batch); a best-effort compaction first just spares the
         // next load a replay. Failure changes neither.
         {
             let mut passages = entry.passages.lock().unwrap();
-            if let Some(store) = passages.as_ref()
-                && store.pending_log_bytes() > 0
-                && let Err(error) = store.compact()
-            {
-                tracing::warn!("passages for '{name}' evicted uncompacted: {error}");
+            if let Some(store) = passages.take() {
+                freed = true;
+                if store.pending_log_bytes() > 0
+                    && let Err(error) = store.compact()
+                {
+                    tracing::warn!("passages for '{name}' evicted uncompacted: {error}");
+                }
             }
-            *passages = None;
         }
         // Same best-effort posture for a dirty index: saving it spares
         // the next residency a re-tokenization, and the entry lock held
         // above keeps a racing delete away from the file.
         {
             let mut bm25 = entry.bm25.write().unwrap();
-            if let Some(index) = bm25.as_ref()
-                && entry.bm25_dirty.swap(false, Ordering::Relaxed)
-                && let Err(error) = write_atomic(
-                    &bm25_path(&self.0.data_dir, &file_stem(name)),
-                    &index.to_bytes(),
-                )
-            {
-                tracing::warn!("BM25 index for '{name}' evicted unpersisted: {error}");
+            if let Some(index) = bm25.take() {
+                freed = true;
+                if entry.bm25_dirty.swap(false, Ordering::Relaxed)
+                    && let Err(error) = write_atomic(
+                        &bm25_path(&self.0.data_dir, &file_stem(name)),
+                        &index.to_bytes(),
+                    )
+                {
+                    tracing::warn!("BM25 index for '{name}' evicted unpersisted: {error}");
+                }
             }
-            *bm25 = None;
         }
-        *entry.passage_vectors.lock().unwrap() = None;
-        *entry.vectors.lock().unwrap() = None;
-        true
+        if entry.passage_vectors.lock().unwrap().take().is_some() {
+            freed = true;
+        }
+        if entry.vectors.lock().unwrap().take().is_some() {
+            freed = true;
+        }
+        freed
     }
 }
 
@@ -5178,6 +5194,40 @@ mod tests {
             .unwrap();
         assert!(found["第1段落"].starts_with("仕込み水"));
         assert!(missing.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_second_eviction_of_the_same_entry_frees_nothing() {
+        // Two concurrent budget sweeps can snapshot the same candidate;
+        // the loser must report `false` so the caller does not subtract
+        // the freed bytes from the residency estimate a second time.
+        let dir = scratch_dir("double-evict");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1段落".to_string(),
+            "仕込み水は雲居山の伏流水。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        // The first eviction does the work and reports it.
+        assert!(state.evict_entry("sake", &entry));
+        // The second finds the slot cold and every cache already cleared,
+        // so it frees nothing — and must say so.
+        assert!(
+            !state.evict_entry("sake", &entry),
+            "a repeat eviction must not claim a second freeing"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
