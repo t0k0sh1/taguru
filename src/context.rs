@@ -1440,7 +1440,7 @@ impl Context {
     pub fn concept_gloss(&self, concept: &str, facts: usize) -> Option<String> {
         let &id = self.concept_ids.get(concept)?;
         let edges = self.heaviest(self.outgoing(id).chain(self.incoming(id)), facts);
-        Some(self.gloss_text(self.concept_name(id), &edges))
+        Some(self.gloss_text(self.concept_name(id), &edges, Some(id)))
     }
 
     /// [`Context::concept_gloss`] for a relation label: the label's name
@@ -1449,7 +1449,7 @@ impl Context {
     pub fn label_gloss(&self, label: &str, examples: usize) -> Option<String> {
         let &id = self.label_ids.get(label)?;
         let edges = self.heaviest(self.labeled(id), examples);
-        Some(self.gloss_text(self.label_name(id), &edges))
+        Some(self.gloss_text(self.label_name(id), &edges, None))
     }
 
     /// The `keep` heaviest edges of a chain walk, |weight| descending,
@@ -1469,14 +1469,22 @@ impl Context {
 
     /// Renders a name plus fact sentences: `名前。AのBはC。…`, negatives
     /// as `…ではない。` — mechanical rather than fluent, which is all an
-    /// embedding needs.
-    fn gloss_text(&self, name: &str, edges: &[EdgeId]) -> String {
+    /// embedding needs. A fact's subject is dropped when it is `own`
+    /// (the gloss's own concept — so a concept with several outgoing
+    /// facts states its own name once, not once per sentence) or when
+    /// it repeats the previous sentence's subject; otherwise the
+    /// subject is stated and becomes the new one to compare against.
+    fn gloss_text(&self, name: &str, edges: &[EdgeId], own: Option<ConceptId>) -> String {
         let mut gloss = String::from(name);
         gloss.push('。');
+        let mut prev_subject = None;
         for &edge_id in edges {
             let edge = &self.edges[edge_id as usize];
-            gloss.push_str(self.concept_name(edge.subject));
-            gloss.push('の');
+            if Some(edge.subject) != own && Some(edge.subject) != prev_subject {
+                gloss.push_str(self.concept_name(edge.subject));
+                gloss.push('の');
+            }
+            prev_subject = Some(edge.subject);
             gloss.push_str(self.label_name(edge.label));
             gloss.push('は');
             gloss.push_str(self.concept_name(edge.object));
@@ -3959,10 +3967,11 @@ mod tests {
             .unwrap();
 
         // Heaviest facts first, capped at `facts`; ties in insertion
-        // order (出身 before 監督する).
+        // order (出身 before 監督する). The second sentence's subject
+        // (高瀬, the gloss's own concept) is dropped.
         assert_eq!(
             context.concept_gloss("高瀬", 2).unwrap(),
-            "高瀬。青嶺酒造の杜氏は高瀬。高瀬の出身は南部杜氏。"
+            "高瀬。青嶺酒造の杜氏は高瀬。出身は南部杜氏。"
         );
         // A label gloss shows what the relation relates.
         assert_eq!(
@@ -3994,13 +4003,67 @@ mod tests {
             context
                 .concept_gloss("株式会社青嶺", Context::GLOSS_FACTS)
                 .unwrap(),
-            "株式会社青嶺。株式会社青嶺の別物は青嶺株式会社。"
+            "株式会社青嶺。別物は青嶺株式会社。"
         );
         assert_eq!(
             context
                 .concept_gloss("青嶺株式会社", Context::GLOSS_FACTS)
                 .unwrap(),
             "青嶺株式会社。株式会社青嶺の別物は青嶺株式会社。"
+        );
+    }
+
+    #[test]
+    fn gloss_states_its_own_name_once_across_mixed_labels_and_polarity() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "代表銘柄", "青嶺", 4.0)
+            .unwrap();
+        context
+            .associate("青嶺酒造", "創業年", "1907年", 3.0)
+            .unwrap();
+        context
+            .associate("青嶺酒造", "行う", "大量生産", -2.0)
+            .unwrap();
+
+        // Every fact's subject is the gloss's own concept, so it is
+        // stated once (as the leading name) and dropped from every
+        // sentence after, even across different labels and a negative
+        // weight.
+        assert_eq!(
+            context.concept_gloss("青嶺酒造", 3).unwrap(),
+            "青嶺酒造。代表銘柄は青嶺。創業年は1907年。行うは大量生産ではない。"
+        );
+    }
+
+    #[test]
+    fn gloss_tracks_the_subject_across_incoming_and_outgoing_facts() {
+        let mut context = Context::default();
+        context.associate("青嶺酒造", "杜氏", "高瀬", 4.0).unwrap();
+        context.associate("青嶺酒造", "顧問", "高瀬", 3.0).unwrap();
+        context.associate("高瀬", "出身", "南部杜氏", 2.0).unwrap();
+        context.associate("南部酒造", "杜氏", "高瀬", 1.0).unwrap();
+
+        // 青嶺酒造 is stated once and dropped from the immediately
+        // following sentence that repeats it; 高瀬 (this gloss's own
+        // concept) is dropped outright; 南部酒造 is a new subject, so
+        // it is restated even though it shares 高瀬's own name as the
+        // object and 杜氏 as the label with the first sentence.
+        assert_eq!(
+            context.concept_gloss("高瀬", 4).unwrap(),
+            "高瀬。青嶺酒造の杜氏は高瀬。顧問は高瀬。出身は南部杜氏。南部酒造の杜氏は高瀬。"
+        );
+    }
+
+    #[test]
+    fn label_gloss_omits_a_repeated_example_subject() {
+        let mut context = Context::default();
+        context.associate("青嶺酒造", "杜氏", "高瀬", 2.0).unwrap();
+        context.associate("青嶺酒造", "杜氏", "山田", 1.0).unwrap();
+
+        assert_eq!(
+            context.label_gloss("杜氏", 2).unwrap(),
+            "杜氏。青嶺酒造の杜氏は高瀬。杜氏は山田。"
         );
     }
 
