@@ -488,6 +488,15 @@ pub struct Context {
     /// it unlinks the record, keeping the map from pointing at dead space.
     /// Not persisted — rebuilt from the chains on load.
     attribution_ids: HashMap<(EdgeId, SourceId), AttributionId>,
+    /// Derived reverse index: source → the edges carrying a LIVE
+    /// attribution from it. This is what lets `retract_source` cost the
+    /// document's own footprint instead of a walk over every edge — the
+    /// differential-sync workflow retracts a source on every document
+    /// update, and that must not scale with the whole graph. Maintained
+    /// beside `attribution_ids`: one entry pushed when a live
+    /// attribution is appended, the whole key dropped on retraction.
+    /// Not persisted — rebuilt from the chains on load.
+    source_edges: HashMap<SourceId, Vec<EdgeId>>,
     /// Derived entry index over concept spellings — normalized forms and
     /// a bigram posting index behind `resolve`. Not persisted.
     concept_index: EntryIndex,
@@ -829,6 +838,10 @@ impl Context {
         });
         self.attribution_ids
             .insert((edge_id, source_id), attribution_id);
+        self.source_edges
+            .entry(source_id)
+            .or_default()
+            .push(edge_id);
         if let Some(paragraph) = paragraph {
             self.attribution_locators.push(AttributionLocatorRecord {
                 attribution: attribution_id,
@@ -1645,6 +1658,11 @@ impl Context {
             + name_entries * MAP_ENTRY_OVERHEAD
             + self.edges.len() * (triple_entry + MAP_ENTRY_OVERHEAD)
             + self.attribution_ids.len() * (attribution_entry + MAP_ENTRY_OVERHEAD)
+            // The source → edges reverse index: one map entry per
+            // attributing source, one Vec element per live attribution
+            // (the same population `attribution_ids` counts).
+            + self.source_edges.len() * (size_of::<SourceId>() + size_of::<Vec<EdgeId>>() + MAP_ENTRY_OVERHEAD)
+            + self.attribution_ids.len() * size_of::<EdgeId>()
             + self.concept_index.footprint()
             + self.label_index.footprint();
 
@@ -1841,8 +1859,15 @@ impl Context {
     /// append-only table.
     pub fn retract_source(&mut self, source: &str) -> Option<usize> {
         let &source_id = self.source_ids.get(source)?;
+        // The reverse index hands over exactly the edges this source
+        // touches: retraction costs the document's own footprint, not a
+        // scan of every edge in the context. Processed in edge order,
+        // the same order the old full scan visited them.
+        let mut edges_of_source = self.source_edges.remove(&source_id).unwrap_or_default();
+        edges_of_source.sort_unstable();
         let mut touched = 0usize;
-        for edge_index in 0..self.edges.len() {
+        for edge_id in edges_of_source {
+            let edge_index = edge_id as usize;
             // Locate the source's attribution and its predecessor.
             let mut previous = NIL;
             let mut cursor = self.edges[edge_index].first_attribution;
@@ -1877,7 +1902,7 @@ impl Context {
             // index entry too, or a later re-assertion from this source
             // would fold into the unlinked record instead of appending a
             // fresh one — resurrecting retracted weight.
-            self.attribution_ids.remove(&(edge_index as u32, source_id));
+            self.attribution_ids.remove(&(edge_id, source_id));
             touched += 1;
         }
         Some(touched)
@@ -3668,6 +3693,24 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// Retracting twice is idempotent — the second call finds no live
+    /// attributions (the source → edges reverse index was emptied) and
+    /// reports zero — and the name stays usable for a fresh assertion,
+    /// whose retraction works again.
+    #[test]
+    fn retracting_a_source_twice_reports_zero_the_second_time() {
+        let mut context = Context::default();
+        context
+            .associate_from("A", "r", "B", 2.0, "doc", None)
+            .unwrap();
+        assert_eq!(context.retract_source("doc"), Some(1));
+        assert_eq!(context.retract_source("doc"), Some(0));
+        context
+            .associate_from("A", "r", "B", 3.0, "doc", None)
+            .unwrap();
+        assert_eq!(context.retract_source("doc"), Some(1));
     }
 
     #[test]

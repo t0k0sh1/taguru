@@ -290,6 +290,7 @@ impl Context {
             source_ids: HashMap::new(),
             edge_ids: HashMap::new(),
             attribution_ids: HashMap::new(),
+            source_edges: HashMap::new(),
             concept_index: EntryIndex::default(),
             label_index: EntryIndex::default(),
             dice_floor: None,
@@ -505,6 +506,10 @@ impl Context {
                 {
                     return Err(CorruptImage("one edge attributes a source twice"));
                 }
+                self.source_edges
+                    .entry(record.source)
+                    .or_default()
+                    .push(edge_id);
                 chain_count = chain_count
                     .checked_add(record.count)
                     .ok_or(CorruptImage("attribution chain count overflows u64"))?;
