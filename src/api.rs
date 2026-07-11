@@ -223,10 +223,21 @@ pub struct ContextPage {
 /// mean a megabytes-large response on every routing decision.
 pub async fn list_contexts(
     State(state): State<AppState>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
     AppQuery(query): AppQuery<ListContextsQuery>,
 ) -> Response {
     let started_at = Instant::now();
     let directory = state.directory();
+    // A context-scoped key's world IS its grant: rows outside it are
+    // filtered rather than refused, and `total` counts the visible
+    // world so pagination stays coherent for that caller.
+    let directory: Vec<_> = match &scope {
+        Some(axum::Extension(scope)) => directory
+            .into_iter()
+            .filter(|entry| scope.allows_context(&entry.name))
+            .collect(),
+        None => directory,
+    };
     let total = directory.len();
     let contexts: Vec<_> = directory
         .into_iter()
@@ -1566,6 +1577,7 @@ fn import_refusal(
 pub async fn import_batch(
     State(state): State<AppState>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
     body: axum::body::Bytes,
 ) -> Response {
     let started_at = Instant::now();
@@ -1574,6 +1586,26 @@ pub async fn import_batch(
         // Line-numbered, like the CLI's validation pass.
         Err(message) => return error(StatusCode::BAD_REQUEST, message, started_at),
     };
+    // Import's contexts live in the BODY, out of the route-level
+    // authorization check's reach — a context-scoped key is judged
+    // here instead, before anything applies.
+    if let Some(axum::Extension(scope)) = &scope
+        && let Some(refused) = batches
+            .iter()
+            .find(|batch| !scope.allows_context(&batch.context))
+    {
+        return error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "key '{}' has no grant on context '{}' (batch source '{}'); nothing \
+                 was applied",
+                key.as_ref().map_or("-", |extension| extension.0.0.as_ref()),
+                refused.context,
+                refused.source
+            ),
+            started_at,
+        );
+    }
     let total = batches.len();
     let mut outcomes: Vec<ImportOutcome> = Vec::with_capacity(total);
     for (index, batch) in batches.iter().enumerate() {

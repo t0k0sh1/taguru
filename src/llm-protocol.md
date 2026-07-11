@@ -259,6 +259,12 @@ Source code takes the same discipline; only the naming changes.
   attaches it to every request — when the server turns auth on, set
   the same value on the bridge.
 - Unset = auth disabled (dev mode; never expose beyond localhost).
+- Keys may carry a scope (`TAGURU_KEY_SCOPES`): a role — read (the
+  retrieval loop) ⊂ write (+ the ingest loop) ⊂ admin (+ context
+  deletion, `/import`, `/flush`) — and optionally a context list.
+  Out of scope → `403` in the error shape, naming what the key lacks;
+  a context-scoped key sees only its grant in `GET /contexts`. Scopes
+  bind MCP tool calls exactly as raw HTTP.
 
 ## Errors and limits
 

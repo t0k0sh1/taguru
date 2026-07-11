@@ -3,16 +3,24 @@
 //! and/or a `TAGURU_API_TOKENS` keyring ("ci:tokA,laptop:tokB") — so
 //! the access log can say WHICH caller, one leaked key dies without
 //! rotating the others, and rotation itself is an overlap (add the
-//! new key, move callers, drop the old). Tenancy still comes later:
-//! every key opens every context.
+//! new key, move callers, drop the old).
+//!
+//! Authorization rides on top: `TAGURU_KEY_SCOPES` grants each key a
+//! ROLE (read ⊂ write ⊂ admin) and optionally a context list, and
+//! [`enforce_authorization`] holds every request — the in-process MCP
+//! dispatch included — to that grant. A key the variable does not
+//! name keeps the historical full grant (admin over every context),
+//! so existing deployments change nothing by upgrading.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::extract::{MatchedPath, Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
+use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
 use crate::api;
@@ -49,10 +57,73 @@ fn strip_bearer_prefix(value: &str) -> Option<&str> {
 #[derive(Clone)]
 pub struct AuthKey(pub Arc<str>);
 
+/// What a key may do, ordered by inclusion: `Admin` ⊃ `Write` ⊃
+/// `Read`. Read is the retrieval loop; Write adds the ingest loop
+/// (create contexts, assert, store passages, heal aliases, retract
+/// and re-sync its sources, refresh embeddings); Admin adds the
+/// operator verbs (delete contexts, bulk import, flush).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Role {
+    Read,
+    Write,
+    Admin,
+}
+
+impl Role {
+    fn as_str(self) -> &'static str {
+        match self {
+            Role::Read => "read",
+            Role::Write => "write",
+            Role::Admin => "admin",
+        }
+    }
+}
+
+/// One key's grant: its role, and the contexts it may touch (`None` =
+/// every context). The default — and the grant of any key
+/// `TAGURU_KEY_SCOPES` does not name — is exactly what every key
+/// could do before scopes existed: admin, everywhere.
+#[derive(Clone, Debug)]
+pub struct KeyScope {
+    pub role: Role,
+    pub contexts: Option<Arc<HashSet<String>>>,
+}
+
+impl Default for KeyScope {
+    fn default() -> Self {
+        Self {
+            role: Role::Admin,
+            contexts: None,
+        }
+    }
+}
+
+impl KeyScope {
+    pub fn allows_context(&self, name: &str) -> bool {
+        self.contexts
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(name))
+    }
+}
+
+/// One entry of the `TAGURU_KEY_SCOPES` JSON: `"read"` as shorthand,
+/// or `{"role": "write", "contexts": ["sake"]}` in full.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ScopeSpec {
+    Role(String),
+    Full {
+        role: String,
+        #[serde(default)]
+        contexts: Option<Vec<String>>,
+    },
+}
+
 /// The configured credentials. Empty = auth disabled (development
 /// mode, warned about loudly at boot).
 pub struct Keyring {
     keys: Vec<(Arc<str>, String)>,
+    scopes: HashMap<String, KeyScope>,
 }
 
 impl Keyring {
@@ -100,7 +171,84 @@ impl Keyring {
                 return Err("TAGURU_API_TOKENS is set but holds no entries".to_string());
             }
         }
-        Ok(Self { keys })
+        Ok(Self {
+            keys,
+            scopes: HashMap::new(),
+        })
+    }
+
+    /// Applies `TAGURU_KEY_SCOPES` — a JSON object mapping key names to
+    /// grants: `{"ci": "read", "bot": {"role": "write", "contexts":
+    /// ["sake"]}}`. Refusals are boot refusals, keyring-style: a scope
+    /// naming no configured key is a typo that would silently guard
+    /// nobody, and an empty contexts list would grant nothing at all —
+    /// omitting the field is how "every context" is said.
+    pub fn apply_scopes(&mut self, json: Option<&str>) -> Result<(), String> {
+        let Some(json) = json else {
+            return Ok(());
+        };
+        if json.trim().is_empty() {
+            return Err("TAGURU_KEY_SCOPES is set but empty".to_string());
+        }
+        let raw: HashMap<String, ScopeSpec> = serde_json::from_str(json).map_err(|error| {
+            format!(
+                "TAGURU_KEY_SCOPES is not the documented JSON shape \
+                 ({{\"name\": \"role\" | {{\"role\": …, \"contexts\": […]}}}}): {error}"
+            )
+        })?;
+        for (name, spec) in raw {
+            if !self.keys.iter().any(|(key, _)| key.as_ref() == name) {
+                return Err(format!(
+                    "TAGURU_KEY_SCOPES names '{name}', which is no configured key"
+                ));
+            }
+            let (role, contexts) = match spec {
+                ScopeSpec::Role(role) => (role, None),
+                ScopeSpec::Full { role, contexts } => (role, contexts),
+            };
+            let role = match role.as_str() {
+                "read" => Role::Read,
+                "write" => Role::Write,
+                "admin" => Role::Admin,
+                other => {
+                    return Err(format!(
+                        "TAGURU_KEY_SCOPES key '{name}': unknown role '{other}' \
+                         (read, write, or admin)"
+                    ));
+                }
+            };
+            let contexts = match contexts {
+                None => None,
+                Some(list) if list.is_empty() => {
+                    return Err(format!(
+                        "TAGURU_KEY_SCOPES key '{name}': an empty contexts list grants \
+                         nothing — omit the field to grant every context"
+                    ));
+                }
+                Some(list) => Some(Arc::new(list.into_iter().collect())),
+            };
+            self.scopes.insert(name, KeyScope { role, contexts });
+        }
+        Ok(())
+    }
+
+    /// The grant behind a key name. OAuth delegations act as
+    /// "key@client", so the lookup falls back to the name before the
+    /// last '@' — the delegation can never out-rank the key it wraps.
+    pub fn scope_of(&self, key_name: &str) -> KeyScope {
+        if let Some(scope) = self.scopes.get(key_name) {
+            return scope.clone();
+        }
+        if let Some((base, _)) = key_name.rsplit_once('@')
+            && let Some(scope) = self.scopes.get(base)
+        {
+            return scope.clone();
+        }
+        KeyScope::default()
+    }
+
+    pub fn scoped_key_count(&self) -> usize {
+        self.scopes.len()
     }
 
     pub fn is_disabled(&self) -> bool {
@@ -223,6 +371,115 @@ pub async fn require_bearer(
         .headers_mut()
         .insert(header::WWW_AUTHENTICATE, challenge);
     response
+}
+
+/// The least role a (method, route template) demands. Fail closed: a
+/// route this table does not classify demands Admin, so an endpoint
+/// added without a classification locks down for scoped keys instead
+/// of leaking open. `/mcp` itself needs only Read — every tool call
+/// dispatches onto a real route in-process and is judged there.
+pub(crate) fn required_role(method: &Method, route: &str) -> Role {
+    match (method, route) {
+        // The retrieval loop, the directory, and the manual.
+        (&Method::GET, "/contexts")
+        | (&Method::GET, "/contexts/{name}")
+        | (&Method::GET, "/contexts/{name}/labels")
+        | (&Method::GET, "/contexts/{name}/aliases")
+        | (&Method::GET, "/contexts/{name}/sources")
+        | (&Method::GET, "/contexts/{name}/export")
+        | (&Method::GET, "/protocol")
+        | (&Method::POST, "/contexts/{name}/recall")
+        | (&Method::POST, "/contexts/{name}/query")
+        | (&Method::POST, "/contexts/{name}/describe")
+        | (&Method::POST, "/contexts/{name}/explore")
+        | (&Method::POST, "/contexts/{name}/activate")
+        | (&Method::POST, "/contexts/{name}/resolve")
+        | (&Method::POST, "/contexts/{name}/resolve_label")
+        | (&Method::POST, "/contexts/{name}/sources/lookup")
+        | (&Method::POST, "/contexts/{name}/sources/search")
+        | (&Method::POST, "/contexts/{name}/citations")
+        | (&Method::POST, "/contexts/{name}/unreachable_from")
+        | (&Method::POST, "/contexts/{name}/vocabulary/audit")
+        | (&Method::POST, "/mcp") => Role::Read,
+        // The ingest loop — everything the documented agent discipline
+        // drives, context creation and per-source re-sync included.
+        (&Method::PUT, "/contexts/{name}")
+        | (&Method::PATCH, "/contexts/{name}")
+        | (&Method::POST, "/contexts/{name}/associations")
+        | (&Method::POST, "/contexts/{name}/aliases")
+        | (&Method::DELETE, "/contexts/{name}/aliases")
+        | (&Method::POST, "/contexts/{name}/sources")
+        | (&Method::POST, "/contexts/{name}/sources/retract")
+        | (&Method::POST, "/contexts/{name}/embeddings/refresh") => Role::Write,
+        // Operator verbs — and everything unclassified.
+        _ => Role::Admin,
+    }
+}
+
+/// Holds a request to its key's grant. Sits INSIDE the bearer gate on
+/// the HTTP surface (it needs WHO), and directly on the in-process
+/// `/mcp` dispatch router — `remote_mcp` stamps the outer request's
+/// key onto every dispatched tool call, so the two surfaces cannot
+/// drift. No key at all (auth off, or an exempt path) means no
+/// restriction, exactly as before scopes existed. The resolved
+/// [`KeyScope`] rides the request extensions for the handlers that
+/// FILTER rather than refuse (`GET /contexts`) and for `/import`,
+/// whose contexts live in the body.
+pub async fn enforce_authorization(
+    State(keyring): State<Arc<Keyring>>,
+    matched: Option<MatchedPath>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(key) = request.extensions().get::<AuthKey>().cloned() else {
+        return next.run(request).await;
+    };
+    let scope = keyring.scope_of(&key.0);
+    let started_at = Instant::now();
+    let route = matched
+        .as_ref()
+        .map(|matched| matched.as_str().to_string())
+        .unwrap_or_else(|| "<unmatched>".to_string());
+    let required = required_role(request.method(), &route);
+    if scope.role < required {
+        return api::error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "key '{}' has role '{}', but {} {} needs '{}'",
+                key.0,
+                scope.role.as_str(),
+                request.method(),
+                route,
+                required.as_str()
+            ),
+            started_at,
+        );
+    }
+    let (mut parts, body) = request.into_parts();
+    if scope.contexts.is_some() {
+        use axum::extract::FromRequestParts as _;
+        let context = axum::extract::RawPathParams::from_request_parts(&mut parts, &())
+            .await
+            .ok()
+            .and_then(|params| {
+                params
+                    .iter()
+                    .find(|(name, _)| *name == "name")
+                    .map(|(_, value)| value.to_string())
+            });
+        if let Some(context) = context
+            && !scope.allows_context(&context)
+        {
+            return api::error(
+                StatusCode::FORBIDDEN,
+                format!("key '{}' has no grant on context '{context}'", key.0),
+                started_at,
+            );
+        }
+    }
+    let mut request = Request::from_parts(parts, body);
+    request.extensions_mut().insert(scope);
+    next.run(request).await
 }
 
 #[cfg(test)]
@@ -511,6 +768,175 @@ mod tests {
         // The right token still opens the gate from the same IP: success
         // never reaches the throttle.
         assert_eq!(send("Bearer s3cret").await.status(), StatusCode::OK);
+    }
+
+    /// Scope grants parse strictly: a scope naming no configured key, a
+    /// role typo, an empty contexts list, or non-JSON all refuse the
+    /// boot instead of arming a partial authorization table.
+    #[test]
+    fn scope_grants_parse_strictly_and_resolve_with_the_oauth_fallback() {
+        let mut keyring =
+            Keyring::parse(None, Some("boss:tok-a,reader:tok-b,bot:tok-c".to_string())).unwrap();
+        keyring
+            .apply_scopes(Some(
+                r#"{"reader": "read", "bot": {"role": "write", "contexts": ["sake"]}}"#,
+            ))
+            .unwrap();
+        assert_eq!(keyring.scoped_key_count(), 2);
+        // Unnamed keys keep the historical full grant.
+        assert_eq!(keyring.scope_of("boss").role, Role::Admin);
+        assert!(keyring.scope_of("boss").allows_context("anything"));
+        assert_eq!(keyring.scope_of("reader").role, Role::Read);
+        // OAuth delegations ("key@client") inherit the key's grant.
+        let delegated = keyring.scope_of("bot@claude-abc123");
+        assert_eq!(delegated.role, Role::Write);
+        assert!(delegated.allows_context("sake"));
+        assert!(!delegated.allows_context("bunko"));
+
+        for (scopes, complaint) in [
+            (r#"{"ghost": "read"}"#, "no configured key"),
+            (r#"{"reader": "supreme"}"#, "unknown role"),
+            (r#"{"reader": {"role": "read", "contexts": []}}"#, "empty"),
+            ("not json", "documented JSON shape"),
+            ("", "empty"),
+        ] {
+            let mut keyring = Keyring::parse(None, Some("reader:tok-b".to_string())).unwrap();
+            let error = keyring.apply_scopes(Some(scopes)).unwrap_err();
+            assert!(error.contains(complaint), "{scopes} → {error}");
+        }
+    }
+
+    /// The role table fails closed: an endpoint nobody classified
+    /// demands admin, so a scoped key locks out of new surface until
+    /// someone decides otherwise.
+    #[test]
+    fn unclassified_routes_demand_admin() {
+        assert_eq!(
+            required_role(&Method::POST, "/contexts/{name}/future_thing"),
+            Role::Admin
+        );
+        assert_eq!(
+            required_role(&Method::GET, "/contexts/{name}/export"),
+            Role::Read
+        );
+        assert_eq!(
+            required_role(&Method::POST, "/contexts/{name}/sources/retract"),
+            Role::Write
+        );
+        assert_eq!(required_role(&Method::POST, "/import"), Role::Admin);
+        assert_eq!(
+            required_role(&Method::DELETE, "/contexts/{name}"),
+            Role::Admin
+        );
+    }
+
+    /// The authorization layer end to end: role refusals, context
+    /// grants, and the untouched full-grant default, all in the
+    /// ApiError shape with a 403.
+    #[tokio::test]
+    async fn scoped_keys_are_held_to_role_and_context() {
+        let mut keyring =
+            Keyring::parse(None, Some("boss:tok-a,reader:tok-b,bot:tok-c".to_string())).unwrap();
+        keyring
+            .apply_scopes(Some(
+                r#"{"reader": "read", "bot": {"role": "write", "contexts": ["sake"]}}"#,
+            ))
+            .unwrap();
+        let keyring = Arc::new(keyring);
+        let app = || {
+            let gate = Arc::new(Gate {
+                keyring: Arc::clone(&keyring),
+                oauth: None,
+                fail_limiter: Arc::new(crate::limits::RateLimiter::new(0)),
+            });
+            Router::new()
+                .route("/contexts", get(|| async { "rows" }))
+                .route(
+                    "/contexts/{name}/recall",
+                    axum::routing::post(|| async { "hits" }),
+                )
+                .route(
+                    "/contexts/{name}/associations",
+                    axum::routing::post(|| async { "landed" }),
+                )
+                .route(
+                    "/contexts/{name}",
+                    axum::routing::delete(|| async { "gone" }),
+                )
+                // Authorization innermost, the bearer gate outside it —
+                // the same nesting main.rs builds.
+                .layer(axum::middleware::from_fn_with_state(
+                    Arc::clone(&keyring),
+                    enforce_authorization,
+                ))
+                .layer(axum::middleware::from_fn_with_state(gate, require_bearer))
+        };
+        let send = |method: &'static str, path: &'static str, token: &'static str| {
+            let app = app();
+            async move {
+                app.oneshot(
+                    HttpRequest::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("Authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // The read key runs the retrieval loop and nothing else.
+        assert_eq!(
+            send("POST", "/contexts/sake/recall", "tok-b")
+                .await
+                .status(),
+            200
+        );
+        let refused = send("POST", "/contexts/sake/associations", "tok-b").await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(refused.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "error");
+        assert!(
+            body["error"].as_str().unwrap().contains("needs 'write'"),
+            "{body}"
+        );
+
+        // The context-scoped write key writes inside its grant only,
+        // and never reaches the admin verbs.
+        assert_eq!(
+            send("POST", "/contexts/sake/associations", "tok-c")
+                .await
+                .status(),
+            200
+        );
+        let outside = send("POST", "/contexts/bunko/associations", "tok-c").await;
+        assert_eq!(outside.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(outside.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("no grant on context 'bunko'"),
+            "{body}"
+        );
+        assert_eq!(
+            send("DELETE", "/contexts/sake", "tok-c").await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        // The unscoped key keeps the historical full grant.
+        assert_eq!(
+            send("DELETE", "/contexts/sake", "tok-a").await.status(),
+            200
+        );
     }
 
     /// RFC 7230 §3.2.2: a repeated Authorization header is malformed. Rather

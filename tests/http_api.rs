@@ -2624,6 +2624,185 @@ fn the_access_log_carries_the_trace_id_when_export_is_configured() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// TAGURU_KEY_SCOPES end to end: roles gate the verbs, context grants
+/// gate the objects, the directory shows a scoped key only its world,
+/// import checks its body-carried contexts, and an MCP tool call is
+/// judged exactly as the route it dispatches onto.
+#[test]
+fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
+    let server = Server::start_with_env(
+        "http-scopes",
+        &[
+            (
+                "TAGURU_API_TOKENS",
+                "boss:atok,reader:rtok,scribe:wtok,potter:stok",
+            ),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"reader": "read", "scribe": "write", "potter": {"role": "write", "contexts": ["sake"]}}"#,
+            ),
+        ],
+    );
+    let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
+        server.call_with_token(method, path, body, Some(token))
+    };
+    let fact = json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
+                      "weight": 1.0, "source": "a.md"}]);
+
+    // The unscoped key keeps the historical full grant: admin, everywhere.
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/sake",
+            Some(json!({"description": "d"})),
+            "atok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/bunko",
+            Some(json!({"description": "d"})),
+            "atok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "POST",
+            "/contexts/sake/associations",
+            Some(fact.clone()),
+            "atok"
+        )
+        .0,
+        200
+    );
+
+    // Read: the retrieval loop answers, the ingest loop refuses.
+    assert_eq!(
+        call(
+            "POST",
+            "/contexts/sake/recall",
+            Some(json!({"cue": "蔵"})),
+            "rtok"
+        )
+        .0,
+        200
+    );
+    let (status, refusal) = call(
+        "POST",
+        "/contexts/sake/associations",
+        Some(fact.clone()),
+        "rtok",
+    );
+    assert_eq!(status, 403, "{refusal}");
+    assert!(
+        refusal["error"].as_str().unwrap().contains("needs 'write'"),
+        "{refusal}"
+    );
+    assert_eq!(call("DELETE", "/contexts/sake", None, "rtok").0, 403);
+
+    // Write: ingest yes, operator verbs no.
+    assert_eq!(
+        call(
+            "POST",
+            "/contexts/bunko/associations",
+            Some(fact.clone()),
+            "wtok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(call("DELETE", "/contexts/bunko", None, "wtok").0, 403);
+    assert_eq!(call("POST", "/flush", None, "wtok").0, 403);
+
+    // Context-scoped write: inside the grant yes, outside no — and the
+    // directory shows only the granted world.
+    assert_eq!(
+        call(
+            "POST",
+            "/contexts/sake/associations",
+            Some(fact.clone()),
+            "stok"
+        )
+        .0,
+        200
+    );
+    let (status, outside) = call("POST", "/contexts/bunko/associations", Some(fact), "stok");
+    assert_eq!(status, 403);
+    assert!(
+        outside["error"]
+            .as_str()
+            .unwrap()
+            .contains("no grant on context 'bunko'"),
+        "{outside}"
+    );
+    assert_eq!(call("GET", "/contexts/bunko", None, "stok").0, 403);
+    let (status, listed) = call("GET", "/contexts", None, "stok");
+    assert_eq!(status, 200);
+    assert_eq!(listed["result"]["total"], json!(1), "{listed}");
+    assert_eq!(
+        listed["result"]["contexts"][0]["name"],
+        json!("sake"),
+        "{listed}"
+    );
+
+    // Import carries its contexts in the body; the grant is checked
+    // batch by batch before anything applies. (Import itself is an
+    // admin verb, so even the granted context refuses for a writer.)
+    let batch = "{\"taguru_batch\": 1, \"context\": \"bunko\", \"source\": \"s\"}\n";
+    let (status, _) = post_import(&server, batch, Some("stok"));
+    assert_eq!(status, 403);
+    let (status, scoped_admin) = post_import(&server, batch, Some("atok"));
+    assert_eq!(status, 200, "{scoped_admin}");
+
+    // MCP tool calls are judged as the routes they land on: the read
+    // key's add_associations dispatch refuses with the same 403.
+    let (status, reply) = server.call_with_token(
+        "POST",
+        "/mcp",
+        Some(json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "add_associations", "arguments": {
+                "context": "sake",
+                "associations": [{"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0}],
+            }},
+        })),
+        Some("rtok"),
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["result"]["isError"], json!(true), "{reply}");
+    assert!(
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("403"),
+        "{reply}"
+    );
+    // ...and a permitted tool call still works through the same key.
+    let (status, reply) = server.call_with_token(
+        "POST",
+        "/mcp",
+        Some(json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "recall", "arguments": {"context": "sake", "cue": "蔵"}},
+        })),
+        Some("rtok"),
+    );
+    assert_eq!(status, 200);
+    assert_ne!(reply["result"]["isError"], json!(true), "{reply}");
+    assert!(
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("matches"),
+        "{reply}"
+    );
+}
+
 /// The access log names the context a request addressed, and every
 /// destructive operation leaves one `taguru::audit` line saying who
 /// did what to which object — the route template alone cannot answer

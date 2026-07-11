@@ -160,6 +160,25 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #                     revocation instead of a total rotation, and rotation
 #                     itself is an overlap: add the new key, move callers,
 #                     drop the old. Malformed entries refuse to boot.
+#   TAGURU_KEY_SCOPES   per-key grants as one JSON object, by key name:
+#                     {"ci": "read", "laptop": "admin",
+#                      "bot": {"role": "write", "contexts": ["sake"]}}
+#                     Roles nest: read (the retrieval loop) ⊂ write
+#                     (+ the ingest loop: create contexts, assert, store
+#                     passages, aliases, retract-and-resync sources,
+#                     refresh embeddings) ⊂ admin (+ delete contexts,
+#                     /import, /flush). "contexts" restricts a key to
+#                     those contexts (GET /contexts shows it only its
+#                     grant; /import bodies are checked batch by batch);
+#                     omit it for every context. A key the object does
+#                     not name keeps the historical full grant — admin,
+#                     everywhere — so setting the variable changes only
+#                     the keys it names. Grants hold identically over
+#                     raw HTTP and MCP tool calls (each dispatched tool
+#                     call is judged as the route it lands on), and an
+#                     OAuth connection is capped by the key it
+#                     delegates. Out of range: 403 in the error shape.
+#                     Malformed JSON or unknown key names refuse to boot.
 #   TAGURU_PUBLIC_URL   the server's public base URL (e.g.
 #                     https://memory.example.com). Setting it enables OAuth
 #                     on the remote MCP endpoint for clients that insist on

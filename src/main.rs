@@ -127,7 +127,13 @@ async fn serve() {
     let keyring = match auth::Keyring::parse(
         std::env::var("TAGURU_API_TOKEN").ok(),
         std::env::var("TAGURU_API_TOKENS").ok(),
-    ) {
+    )
+    .and_then(|mut keyring| {
+        // Scopes are part of the same credential story: a grant that
+        // silently failed to arm is an authorization hole.
+        keyring.apply_scopes(std::env::var("TAGURU_KEY_SCOPES").ok().as_deref())?;
+        Ok(keyring)
+    }) {
         Ok(keyring) => Arc::new(keyring),
         Err(error) => {
             tracing::error!(%error, "refusing to start with broken credentials");
@@ -136,7 +142,11 @@ async fn serve() {
     };
     let auth_configured = !keyring.is_disabled();
     if auth_configured {
-        info!(keys = keyring.key_count(), "bearer auth enabled");
+        info!(
+            keys = keyring.key_count(),
+            scoped = keyring.scoped_key_count(),
+            "bearer auth enabled"
+        );
     } else {
         warn!(
             "TAGURU_API_TOKEN(S) is not set: the API accepts UNAUTHENTICATED requests \
@@ -201,6 +211,15 @@ async fn serve() {
     spawn_flusher(state.clone(), flush_secs, auto_embed);
 
     let app = routes(protocol_trailer).with_state(state.clone());
+    // Authorization is the innermost layer ON PURPOSE: the /mcp
+    // dispatch handle captured just below deliberately skips the rest
+    // of the stack (auth, budgets, logging — one client request, one
+    // charge), but a scoped key's grant must hold on BOTH surfaces,
+    // so the scope check is part of the routes themselves.
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        Arc::clone(&keyring),
+        auth::enforce_authorization,
+    ));
 
     // POST /mcp speaks the MCP Streamable HTTP transport over these
     // same routes. The dispatch handle is captured BEFORE the
@@ -216,9 +235,16 @@ async fn serve() {
         .layer(axum::extract::DefaultBodyLimit::disable());
     let app = app.route(
         "/mcp",
-        post(move |body: axum::body::Bytes| {
-            remote_mcp::serve(mcp_dispatch.clone(), Arc::clone(&mcp_instructions), body)
-        }),
+        post(
+            move |key: Option<axum::Extension<auth::AuthKey>>, body: axum::body::Bytes| {
+                remote_mcp::serve(
+                    mcp_dispatch.clone(),
+                    Arc::clone(&mcp_instructions),
+                    key.map(|extension| extension.0),
+                    body,
+                )
+            },
+        ),
     );
     // OAuth's discovery and grant endpoints ride the same stack (rate
     // limited, logged) but are exempted from bearer auth inside the

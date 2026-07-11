@@ -26,10 +26,18 @@ use tower::ServiceExt;
 
 use crate::mcp;
 
-/// Answers one Streamable HTTP message. `dispatch` is the layer-free
-/// router the tool calls run against; `instructions` is the manual
-/// exactly as GET /protocol serves it.
-pub async fn serve(dispatch: Router, instructions: Arc<String>, body: Bytes) -> Response {
+/// Answers one Streamable HTTP message. `dispatch` is the router the
+/// tool calls run against — free of every layer except authorization;
+/// `instructions` is the manual exactly as GET /protocol serves it;
+/// `key` is the OUTER request's authenticated identity, stamped onto
+/// each dispatched call so a scoped key's grant holds through the MCP
+/// surface exactly as over raw HTTP.
+pub async fn serve(
+    dispatch: Router,
+    instructions: Arc<String>,
+    key: Option<crate::auth::AuthKey>,
+    body: Bytes,
+) -> Response {
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
         return rpc_over_http(
             StatusCode::BAD_REQUEST,
@@ -74,7 +82,9 @@ pub async fn serve(dispatch: Router, instructions: Arc<String>, body: Bytes) -> 
         mcp::Call::ToolsList => mcp::response(id, mcp::tools_result()),
         mcp::Call::Tool { name, arguments } => {
             let outcome = match mcp::route_tool(&name, &arguments) {
-                Ok((method, path, body)) => call_inner(dispatch, method, &path, body).await,
+                Ok((method, path, body)) => {
+                    call_inner(dispatch, method, &path, body, key.as_ref()).await
+                }
                 Err(error) => Err(error),
             };
             mcp::response(id, mcp::tool_response(outcome))
@@ -94,9 +104,10 @@ async fn call_inner(
     method: &str,
     path: &str,
     body: Option<Value>,
+    key: Option<&crate::auth::AuthKey>,
 ) -> Result<String, String> {
     let builder = Request::builder().method(method).uri(path);
-    let request = match body {
+    let mut request = match body {
         Some(body) => builder
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string())),
@@ -108,6 +119,12 @@ async fn call_inner(
     // which the builder reports here — fail this one call gracefully
     // rather than panic the task.
     .map_err(|error| format!("could not build the in-process request: {error}"))?;
+    // The outer request's identity travels with the dispatched call:
+    // the authorization layer on the dispatch router judges each tool
+    // call by the same grant the raw API would.
+    if let Some(key) = key {
+        request.extensions_mut().insert(key.clone());
+    }
     let response = match dispatch.oneshot(request).await {
         Ok(response) => response,
         Err(never) => match never {},
@@ -147,6 +164,7 @@ mod tests {
         let response = serve(
             Router::new(),
             Arc::new(String::new()),
+            None,
             Bytes::from(body.to_string()),
         )
         .await;

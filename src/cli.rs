@@ -63,6 +63,10 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_API_TOKEN             bearer token; unset = UNAUTHENTICATED
   TAGURU_API_TOKENS            named keys 'ci:tokA,laptop:tokB' — the access
                                log carries the key name; rotate by overlap
+  TAGURU_KEY_SCOPES            JSON grants per key name: {\"ci\": \"read\",
+                               \"bot\": {\"role\": \"write\", \"contexts\":
+                               [\"sake\"]}} — roles read ⊂ write ⊂ admin;
+                               unnamed keys keep the full historical grant
   TAGURU_PUBLIC_URL            public base URL; enables OAuth key delegation
                                on /mcp (claude.ai custom connectors)
   TAGURU_MAX_BODY_BYTES        request body cap (8 MiB)
@@ -291,7 +295,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 29] = [
+const KNOWN_KEYS: [&str; 30] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -301,6 +305,7 @@ const KNOWN_KEYS: [&str; 29] = [
     "TAGURU_PASSAGES_WAL_MAX_BYTES",
     "TAGURU_API_TOKEN",
     "TAGURU_API_TOKENS",
+    "TAGURU_KEY_SCOPES",
     "TAGURU_PUBLIC_URL",
     "TAGURU_MAX_BODY_BYTES",
     "TAGURU_REQUEST_TIMEOUT_SECS",
