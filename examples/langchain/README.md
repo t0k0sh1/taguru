@@ -44,6 +44,13 @@ npm start --workspace=rag_qa/typescript
 ```
 
 The npm workspace here installs the SDKs as pack-copies of the `file:`
-dependencies (see [.npmrc](.npmrc)) — re-run `npm install` after rebuilding
-the SDKs. When the packages are on npm, a copied-out example only needs the
-`file:` specifiers swapped for registry versions.
+dependencies (see [.npmrc](.npmrc)). npm never refreshes those copies while
+the SDK version stands still, so after rebuilding the SDKs re-pack them
+with:
+
+```sh
+rm -rf node_modules/taguru node_modules/langchain-taguru && npm install
+```
+
+When the packages are on npm, a copied-out example only needs the `file:`
+specifiers swapped for registry versions.
