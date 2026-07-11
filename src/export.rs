@@ -68,8 +68,11 @@ an exported file without touching anything.
 ";
 
 /// Reserved source id for weight that was asserted without a source.
-/// A real source with this exact id would collide, so export refuses
-/// such a context outright rather than merging the two silently.
+/// A real source with this exact id has its attributions folded into
+/// the same sourceless residual rather than merged in as attributed
+/// weight (see the fixed-point note in [`render`]) — but if it also
+/// has a passage attached, export refuses the context outright rather
+/// than picking a winner silently.
 pub(crate) const UNSOURCED_SOURCE: &str = "export:unsourced";
 
 /// Reserved source id for the header-only batch an otherwise-empty
