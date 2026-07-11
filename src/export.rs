@@ -26,6 +26,11 @@
 //!   import) cannot ride in a per-source batch honestly, so it lands
 //!   in a reserved batch whose source id is `export:unsourced`; the
 //!   numbers survive, and the attribution says where they came from.
+//!   Import stamps that reserved id onto the batch's lines, so the
+//!   restored context carries a real `export:unsourced` attribution —
+//!   which the next export folds straight back into the sourceless
+//!   batch rather than refusing, making the stream an exact fixed
+//!   point across repeated round trips.
 //! - Fully retracted edges (count 0) render as nothing — an
 //!   export/import round trip sheds the dead records the append-only
 //!   image keeps, so it doubles as offline compaction.
@@ -190,10 +195,27 @@ pub(crate) fn render(context: &str, snapshot: &ExportSnapshot) -> Result<Rendere
             if attribution.count == 0 {
                 continue;
             }
-            if attribution.source == UNSOURCED_SOURCE || attribution.source == EMPTY_SOURCE {
+            // UNSOURCED_SOURCE is what THIS renderer names sourceless
+            // weight, so an attribution already carrying it is the round
+            // trip coming back around (export → import stamps the batch's
+            // reserved id onto the line). Fold it back into the residual
+            // by NOT counting it as attributed — the residual push below
+            // re-emits it under the same reserved id, making export an
+            // exact fixed point instead of a one-way door that refuses
+            // its own output. (A genuine, manually-created source
+            // colliding with the id lands here too and is likewise
+            // treated as sourceless — the id means what it says.)
+            if attribution.source == UNSOURCED_SOURCE {
+                continue;
+            }
+            // EMPTY_SOURCE only ever labels a header-only batch, which
+            // carries no associations, so it can never arrive here from a
+            // round trip — only a manual write could, and merging real
+            // weight into the empty-context sentinel would be a lie.
+            if attribution.source == EMPTY_SOURCE {
                 return Err(format!(
-                    "source id '{}' is reserved by export — rename the source and re-export",
-                    attribution.source
+                    "source id '{EMPTY_SOURCE}' is reserved by export — rename the source \
+                     and re-export"
                 ));
             }
             attributed_count += attribution.count;
@@ -207,7 +229,8 @@ pub(crate) fn render(context: &str, snapshot: &ExportSnapshot) -> Result<Rendere
             );
         }
         // Whatever the edge's total says beyond the attributed share
-        // came in without a source.
+        // came in without a source — including any UNSOURCED_SOURCE
+        // attribution folded back in just above.
         let residual_count = association.count.saturating_sub(attributed_count);
         if residual_count > 0 {
             let residual_sum = association.weight * association.count as f64 - attributed_sum;
@@ -678,6 +701,27 @@ mod tests {
         }
         let snapshot_b = state_b.export_context("sake").unwrap();
 
+        // The restored context has a REAL attribution to the reserved
+        // "export:unsourced" id now (import stamped it from the batch
+        // header). Re-rendering must NOT refuse — it folds back into a
+        // sourceless batch — so the backup stream is a true fixed point.
+        let rendered_b = render("sake", &snapshot_b).expect("re-export must not refuse");
+        let rendered_c = {
+            let state_c =
+                crate::registry::AppState::boot(scratch_dir("roundtrip-c"), usize::MAX, None)
+                    .unwrap();
+            for batch in ingest::parse_batches(rendered_b.stream.as_bytes()).unwrap() {
+                ingest::apply_batch(&state_c, &batch)
+                    .map_err(|r| r.text())
+                    .unwrap();
+            }
+            render("sake", &state_c.export_context("sake").unwrap()).unwrap()
+        };
+        assert_eq!(
+            rendered_b.stream, rendered_c.stream,
+            "export must be a fixed point across a second round trip"
+        );
+
         assert_eq!(snapshot_b.meta.description, "酒蔵の知識");
         assert!(snapshot_b.meta.pinned);
         assert_eq!(snapshot_b.meta.dice_floor, Some(0.25));
@@ -818,12 +862,42 @@ mod tests {
         assert!(rendered.stream.contains("\"description\":\"テスト\""));
     }
 
+    /// An attribution already carrying UNSOURCED_SOURCE is the round
+    /// trip coming back: it must fold into the sourceless residual (one
+    /// reserved batch), NOT refuse — otherwise export cannot re-export
+    /// its own imported output.
     #[test]
-    fn a_reserved_source_id_refuses_the_export() {
+    fn an_unsourced_attribution_folds_back_instead_of_refusing() {
+        let edge = association(
+            2,
+            vec![Attribution {
+                source: UNSOURCED_SOURCE.to_string(),
+                weight: 3.0,
+                count: 2,
+                paragraph: None,
+            }],
+        );
+        let rendered = render("sake", &snapshot(vec![edge])).unwrap();
+        assert_eq!(rendered.batches, 1, "just the reserved batch");
+        assert_eq!(rendered.association_lines, 2);
+        assert!(
+            rendered.stream.contains(UNSOURCED_SOURCE),
+            "{}",
+            rendered.stream
+        );
+        // Re-rendering the same reduced shape is a fixed point.
+        assert!(!rendered.stream.contains("reserved"));
+    }
+
+    /// EMPTY_SOURCE cannot arise from a round trip (empty batches carry
+    /// no associations), so a real attribution under it is manual
+    /// misuse and still refuses.
+    #[test]
+    fn an_empty_source_attribution_still_refuses() {
         let edge = association(
             1,
             vec![Attribution {
-                source: UNSOURCED_SOURCE.to_string(),
+                source: EMPTY_SOURCE.to_string(),
                 weight: 1.0,
                 count: 1,
                 paragraph: None,
