@@ -74,6 +74,15 @@ fn not_found(name: &str, started_at: Instant) -> Response {
     )
 }
 
+/// The credential behind a request, for the `taguru::audit` lines —
+/// "-" when auth is off, mirroring the access log's key column. The
+/// auth layer stamps [`crate::auth::AuthKey`] onto the request
+/// extensions, so any handler that must say WHO can take it as an
+/// optional `Extension`.
+pub(crate) fn key_name(key: &Option<axum::Extension<crate::auth::AuthKey>>) -> &str {
+    key.as_ref().map_or("-", |extension| extension.0.0.as_ref())
+}
+
 /// axum's Json extractor with its rejections reshaped into the
 /// [`ApiError`] body: a machine client parses ONE error shape on every
 /// axis, malformed JSON included. The status codes stay axum's — 400
@@ -414,18 +423,38 @@ pub async fn update_context(
     }
 }
 
-pub async fn delete_context(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+pub async fn delete_context(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+) -> Response {
     let started_at = Instant::now();
     match state.delete(&name) {
         None => not_found(&name, started_at),
-        Some(Ok(())) => ok(true, started_at),
-        Some(Err(io_error)) => {
-            state.metrics().record_error(ErrorKind::Io);
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("context '{name}' removed but its files were not: {io_error}"),
-                started_at,
-            )
+        Some(outcome) => {
+            // Every destructive operation leaves one self-contained
+            // `taguru::audit` line — who, what, to which object — so an
+            // incident review greps one target instead of reconstructing
+            // objects from route templates. Logged on the failed-unlink
+            // arm too: the context is gone from the API either way.
+            tracing::info!(
+                target: "taguru::audit",
+                key = %key_name(&key),
+                context = %name,
+                files_removed = outcome.is_ok(),
+                "context deleted",
+            );
+            match outcome {
+                Ok(()) => ok(true, started_at),
+                Err(io_error) => {
+                    state.metrics().record_error(ErrorKind::Io);
+                    error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("context '{name}' removed but its files were not: {io_error}"),
+                        started_at,
+                    )
+                }
+            }
         }
     }
 }
@@ -1029,6 +1058,7 @@ pub struct RemoveAliasesRequest {
 pub async fn remove_aliases(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
     AppJson(request): AppJson<RemoveAliasesRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -1058,6 +1088,18 @@ pub async fn remove_aliases(
     }) {
         Err(failure) => access_error(&state, failure, &name, started_at),
         Ok(Ok(removed)) => {
+            // Withdrawn spellings live in the body; counts (not the
+            // spellings — a batch may run to thousands) reach the
+            // audit line, the access log names the context and key.
+            tracing::info!(
+                target: "taguru::audit",
+                key = %key_name(&key),
+                context = %name,
+                concepts = request.concepts.len(),
+                labels = request.labels.len(),
+                removed,
+                "aliases removed",
+            );
             state.note_write(&name);
             ok(removed, started_at)
         }
@@ -1521,7 +1563,11 @@ fn import_refusal(
 /// durably, and because every batch is retract-then-apply,
 /// re-POSTing the whole corrected stream is exact, never
 /// double-counted.
-pub async fn import_batch(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
+pub async fn import_batch(
+    State(state): State<AppState>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+    body: axum::body::Bytes,
+) -> Response {
     let started_at = Instant::now();
     let batches = match crate::ingest::parse_batches(&body[..]) {
         Ok(batches) => batches,
@@ -1532,7 +1578,22 @@ pub async fn import_batch(State(state): State<AppState>, body: axum::body::Bytes
     let mut outcomes: Vec<ImportOutcome> = Vec::with_capacity(total);
     for (index, batch) in batches.iter().enumerate() {
         match crate::ingest::apply_batch(&state, batch) {
-            Ok(applied) => outcomes.push(import_outcome(batch, &applied)),
+            Ok(applied) => {
+                // Import is retract-then-apply — destructive — and both
+                // the context and the replaced source live in the BODY,
+                // out of the access log's reach. One audit line each.
+                tracing::info!(
+                    target: "taguru::audit",
+                    key = %key_name(&key),
+                    context = %batch.context,
+                    source = %batch.source,
+                    created = applied.created,
+                    retracted = applied.retracted,
+                    associations = applied.associations,
+                    "import batch applied",
+                );
+                outcomes.push(import_outcome(batch, &applied));
+            }
             Err(refusal) => {
                 let note = if total > 1 {
                     format!(

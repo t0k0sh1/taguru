@@ -234,7 +234,12 @@ docker run --rm -v taguru-data:/data ghcr.io/t0k0sh1/taguru inspect /data
 `docker build -t taguru .` builds the same image locally; releases
 publish linux/amd64 + linux/arm64 to GHCR on version tags.
 
-Observability: every request lands in the access log, and
+Observability: every request lands in the access log — method, route
+template, the CONTEXT the request addressed, status, key, latency —
+and each destructive operation (context delete, source retract, alias
+removal, import batches) additionally leaves one self-contained
+`taguru::audit` line naming who did what to which object, body-carried
+objects included; "which contexts did this key delete" is one grep.
 `GET /metrics` serves Prometheus text — per-route request counts and
 latency histograms, cache/flush/WAL/embedding outcomes, a 500-cause
 breakdown (`taguru_errors_total{kind=...}`), retrieval hit/empty

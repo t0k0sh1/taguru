@@ -769,6 +769,30 @@ pub async fn track_http(
         .as_ref()
         .map(|matched| matched.as_str().to_string())
         .unwrap_or_else(|| "<unmatched>".to_string());
+    // The context the request addressed, when the route names one.
+    // The route TEMPLATE keeps metric cardinality bounded, but a log
+    // line is no series: without the real name here, "which contexts
+    // did this key delete" has no answer after the fact. "-" mirrors
+    // the key convention below. Context names are identifiers, not
+    // memory content — the registry's own warnings already print them.
+    // Extracted by hand: `RawPathParams` rejects param-less routes, so
+    // it cannot ride the signature as an extractor the way MatchedPath
+    // (which supports optional extraction) does.
+    let (mut parts, body) = request.into_parts();
+    let context = {
+        use axum::extract::FromRequestParts as _;
+        axum::extract::RawPathParams::from_request_parts(&mut parts, &())
+            .await
+            .ok()
+            .and_then(|params| {
+                params
+                    .iter()
+                    .find(|(name, _)| *name == "name")
+                    .map(|(_, value)| value.to_string())
+            })
+            .unwrap_or_else(|| "-".to_string())
+    };
+    let request = Request::from_parts(parts, body);
     let started = Instant::now();
 
     let (response, trace_id) = if crate::trace::enabled() {
@@ -792,6 +816,7 @@ pub async fn track_http(
         Some(trace_id) => tracing::info!(
             method = %method,
             route = %route,
+            context = %context,
             status,
             key = %key,
             latency_ms = elapsed.as_secs_f64() * 1000.0,
@@ -801,6 +826,7 @@ pub async fn track_http(
         None => tracing::info!(
             method = %method,
             route = %route,
+            context = %context,
             status,
             key = %key,
             latency_ms = elapsed.as_secs_f64() * 1000.0,

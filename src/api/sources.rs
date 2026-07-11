@@ -155,6 +155,7 @@ pub struct RetractOutcome {
 pub async fn retract_source(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
     AppJson(request): AppJson<RetractSourceRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -163,6 +164,17 @@ pub async fn retract_source(
     match tokio::task::block_in_place(|| state.retract_source(&name, &request.source)) {
         Err(failure) => access_error(&state, failure, &name, started_at),
         Ok((associations_touched, passage_removed)) => {
+            // The retracted SOURCE lives in the body, so the access log
+            // alone cannot say what was withdrawn — the audit line can.
+            tracing::info!(
+                target: "taguru::audit",
+                key = %crate::api::key_name(&key),
+                context = %name,
+                source = %request.source,
+                associations_touched,
+                passage_removed,
+                "source retracted",
+            );
             // A retraction that found nothing changed nothing; only an
             // effective one counts as a write.
             if associations_touched > 0 || passage_removed {

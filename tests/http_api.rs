@@ -2624,6 +2624,130 @@ fn the_access_log_carries_the_trace_id_when_export_is_configured() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// The access log names the context a request addressed, and every
+/// destructive operation leaves one `taguru::audit` line saying who
+/// did what to which object — the route template alone cannot answer
+/// "which context did this key delete" after the fact.
+#[test]
+fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
+    let data_dir = std::env::temp_dir().join(format!("taguru-auditlog-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .env("TAGURU_ADDR", "127.0.0.1:0")
+        .env("TAGURU_DATA_DIR", &data_dir)
+        .env("TAGURU_LOG_FORMAT", "json")
+        .env("TAGURU_API_TOKEN", "opskey")
+        .env_remove("TAGURU_EMBED_URL")
+        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("server binary must spawn");
+
+    let stdout = child.stdout.take().expect("stdout must be piped");
+    let mut stdout_lines = BufReader::new(stdout).lines();
+    let base = loop {
+        let line = stdout_lines
+            .next()
+            .expect("server must print its address")
+            .expect("server stdout must be readable");
+        if let Some(addr) = line.strip_prefix("listening on ") {
+            break format!("http://{addr}");
+        }
+    };
+
+    let call = |method: &str, path: &str, body: Option<Value>| {
+        let request = ureq::AgentBuilder::new()
+            .build()
+            .request(method, &format!("{base}{path}"))
+            .set("Authorization", "Bearer opskey");
+        let response = match body {
+            Some(body) => request
+                .set("Content-Type", "application/json")
+                .send_string(&body.to_string()),
+            None => request.call(),
+        };
+        response
+            .map(|reply| reply.status())
+            .unwrap_or_else(|error| match error {
+                ureq::Error::Status(status, _) => status,
+                other => panic!("{method} {path}: {other}"),
+            })
+    };
+    assert_eq!(
+        call("PUT", "/contexts/sake", Some(json!({"description": "d"}))),
+        200
+    );
+    assert_eq!(
+        call(
+            "POST",
+            "/contexts/sake/associations",
+            Some(json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
+                         "weight": 1.0, "source": "a.md"}])),
+        ),
+        200
+    );
+    assert_eq!(
+        call(
+            "POST",
+            "/contexts/sake/sources/retract",
+            Some(json!({"source": "a.md"})),
+        ),
+        200
+    );
+    assert_eq!(call("DELETE", "/contexts/sake", None), 200);
+
+    // Stop the server so stderr reaches EOF, then judge the whole log.
+    let pid = child.id().to_string();
+    Command::new("kill")
+        .args(["-TERM", &pid])
+        .status()
+        .expect("kill must run");
+    let _ = child.wait();
+    let stderr = child.stderr.take().expect("stderr must be piped");
+    let lines: Vec<Value> = BufReader::new(stderr)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str(&line).ok())
+        .collect();
+
+    let access_delete = lines
+        .iter()
+        .find(|record| {
+            record["fields"]["message"] == json!("http")
+                && record["fields"]["method"] == json!("DELETE")
+                && record["fields"]["route"] == json!("/contexts/{name}")
+        })
+        .expect("an access-log line for the DELETE must appear");
+    assert_eq!(access_delete["fields"]["context"], json!("sake"));
+    assert_eq!(access_delete["fields"]["key"], json!("default"));
+
+    let retracted = lines
+        .iter()
+        .find(|record| {
+            record["target"] == json!("taguru::audit")
+                && record["fields"]["message"] == json!("source retracted")
+        })
+        .expect("the retraction must leave an audit line");
+    assert_eq!(retracted["fields"]["context"], json!("sake"));
+    assert_eq!(retracted["fields"]["source"], json!("a.md"));
+    assert_eq!(retracted["fields"]["key"], json!("default"));
+    assert_eq!(retracted["fields"]["associations_touched"], json!(1));
+
+    let deleted = lines
+        .iter()
+        .find(|record| {
+            record["target"] == json!("taguru::audit")
+                && record["fields"]["message"] == json!("context deleted")
+        })
+        .expect("the deletion must leave an audit line");
+    assert_eq!(deleted["fields"]["context"], json!("sake"));
+    assert_eq!(deleted["fields"]["files_removed"], json!(true));
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
 /// One request against a manually spawned server — the JSON-log
 /// sessions below run outside the `Server` harness so they can own
 /// stderr. Returns the status; bodies are irrelevant to log tests.
