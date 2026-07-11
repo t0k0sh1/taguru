@@ -65,6 +65,13 @@ pub struct HttpEmbeddings {
 const RETRY_ATTEMPTS: usize = 2;
 const RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 
+/// The most attempts one `embed()` call can make (the first plus the
+/// retries). Exposed so the boot-time timeout-sanity warning can size
+/// the worst-case wall time a slow provider holds a request for —
+/// `attempts × per-attempt timeout` — instead of assuming a single
+/// attempt.
+pub(crate) const MAX_EMBED_ATTEMPTS: usize = RETRY_ATTEMPTS + 1;
+
 /// One failed attempt: what to tell the caller, and whether trying
 /// again could plausibly answer differently — a dropped connection, a
 /// timeout, a 429 or a 5xx can; a 4xx refusal or a malformed response

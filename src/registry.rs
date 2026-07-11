@@ -2572,6 +2572,9 @@ impl AppState {
             }
         }
         // Slow path: load under the exclusive lock, as read_context does.
+        // The `?` skips touch/enforce_budget on a load failure, matching
+        // read_context and compact_context — a repeatedly-failing export
+        // must not keep bumping a broken entry's LRU recency.
         let snapshot = offload(|| {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
@@ -2581,10 +2584,10 @@ impl AppState {
                 unreachable!("ensure_hot leaves the slot hot");
             };
             self.export_snapshot(&entry, &stem, &inner.meta, context)
-        });
+        })?;
         self.touch(&entry);
         self.enforce_budget(name);
-        snapshot
+        Ok(snapshot)
     }
 
     /// The materialization inside [`AppState::export_context`]'s fence.

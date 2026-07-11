@@ -127,16 +127,10 @@ fn checked_redirect(
     params: &AuthorizeParams,
 ) -> Result<crate::oauth::Client, Box<Response>> {
     let refuse = |reason: &str| {
-        Box::new(
-            (
-                StatusCode::BAD_REQUEST,
-                Html(format!(
-                    "<h1>Cannot continue</h1><p>{}</p>",
-                    escape_html(reason)
-                )),
-            )
-                .into_response(),
-        )
+        Box::new(hardened_html(
+            StatusCode::BAD_REQUEST,
+            format!("<h1>Cannot continue</h1><p>{}</p>", escape_html(reason)),
+        ))
     };
     let Some(client) = state.oauth.client(&params.client_id) else {
         return Err(refuse("unknown client_id — register first (RFC 7591)"));
@@ -255,6 +249,32 @@ async fn approve(State(state): State<OauthState>, Form(params): Form<AuthorizePa
     Redirect::to(&target).into_response()
 }
 
+/// Browser hardening for every credential-collecting or
+/// OAuth-parameter-echoing HTML page the server renders: no framing
+/// (a password form is the classic clickjacking target), no scripts
+/// or external loads (these pages carry only inline style), forms post
+/// to this origin alone, and the URL — which holds the OAuth state —
+/// never rides a Referer out. Applied to the consent form AND to the
+/// "cannot continue" refusal page, since both are reachable
+/// unauthenticated at the same public /oauth/authorize entry point.
+fn hardened_html(status: StatusCode, body: String) -> Response {
+    let mut response = (status, Html(body)).into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; \
+             frame-ancestors 'none'; base-uri 'none'",
+        ),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
 fn consent_form(client_name: &str, params: &AuthorizeParams, error: Option<&str>) -> Response {
     let hidden = |name: &str, value: &str| {
         format!(
@@ -300,27 +320,7 @@ fn consent_form(client_name: &str, params: &AuthorizeParams, error: Option<&str>
         ccm = hidden("code_challenge_method", &params.code_challenge_method),
         res = hidden("resource", &params.resource),
     );
-    // The one credential-collecting HTML page the server renders gets
-    // the browser hardening the JSON API never needs: no framing (the
-    // classic clickjacking target is exactly a password form), no
-    // scripts or external loads (the page carries only inline style),
-    // the form posts to this origin alone, and the URL — which holds
-    // the OAuth state — never rides a Referer out.
-    let mut response = Html(page).into_response();
-    let headers = response.headers_mut();
-    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; \
-             frame-ancestors 'none'; base-uri 'none'",
-        ),
-    );
-    headers.insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
-    response
+    hardened_html(StatusCode::OK, page)
 }
 
 #[derive(Deserialize)]
@@ -410,21 +410,33 @@ mod tests {
         assert_eq!(query_separator("https://app/cb?tenant=x"), '&');
     }
 
-    /// The consent page is the one credential-collecting HTML the
-    /// server renders — it must refuse framing (clickjacking on a
-    /// password form), lock sources down to its own inline style, and
-    /// keep the OAuth state out of Referer headers.
+    /// Every OAuth HTML page — the credential-collecting consent form
+    /// AND the "cannot continue" refusal (both reachable unauthenticated
+    /// at /oauth/authorize) — must refuse framing (clickjacking on a
+    /// password form), lock sources to its own inline style, and keep
+    /// the OAuth state out of Referer headers.
     #[test]
-    fn the_consent_form_carries_browser_hardening_headers() {
+    fn every_oauth_html_page_carries_browser_hardening_headers() {
         let params = params_with("https://app/cb", "s");
-        let response = consent_form("claude", &params, None);
-        let headers = response.headers();
-        assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
-        let csp = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
-        assert!(csp.contains("default-src 'none'"), "{csp}");
-        assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
-        assert!(csp.contains("form-action 'self'"), "{csp}");
-        assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
+        let assert_hardened = |response: &Response, label: &str| {
+            let headers = response.headers();
+            assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY", "{label}");
+            let csp = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+            assert!(csp.contains("default-src 'none'"), "{label}: {csp}");
+            assert!(csp.contains("frame-ancestors 'none'"), "{label}: {csp}");
+            assert!(csp.contains("form-action 'self'"), "{label}: {csp}");
+            assert_eq!(headers[header::REFERRER_POLICY], "no-referrer", "{label}");
+        };
+        assert_hardened(&consent_form("claude", &params, None), "consent form");
+        // The refusal page goes through the same helper via checked_redirect;
+        // exercise the helper directly to prove the shared guarantee.
+        assert_hardened(
+            &hardened_html(
+                StatusCode::BAD_REQUEST,
+                "<h1>Cannot continue</h1>".to_string(),
+            ),
+            "refusal page",
+        );
     }
 
     /// A redirect_uri that already carries a query gets the OAuth

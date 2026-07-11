@@ -167,7 +167,16 @@ impl Client {
                 let _ = reply.into_string();
                 Ok(())
             }
-            Err(ureq::Error::Status(code, _)) => Err(format!("HTTP {code}")),
+            // Drain the error body too: ureq only pools a connection
+            // whose body was read to EOF, so discarding a 4xx/5xx
+            // response unread closes the socket and forces the worker's
+            // next request onto a fresh handshake — skewing exactly the
+            // throughput/latency numbers this tool reports, worst when
+            // probing the server's own 429/503 ceilings.
+            Err(ureq::Error::Status(code, reply)) => {
+                let _ = reply.into_string();
+                Err(format!("HTTP {code}"))
+            }
             Err(error) => Err(format!("transport: {error}")),
         }
     }
@@ -275,6 +284,11 @@ fn parse_args() -> Config {
             other => panic!("unknown argument '{other}' (see examples/http_benchmark/README.md)"),
         }
     }
+    // Floor every count at 1: a zero-request or zero-seed phase records
+    // no latencies, and PhaseStats::print would then index an empty
+    // vector and panic. One request is a degenerate-but-valid run.
     config.concurrency = config.concurrency.max(1);
+    config.requests = config.requests.max(1);
+    config.seed = config.seed.max(1);
     config
 }
