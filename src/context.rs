@@ -101,6 +101,16 @@ pub enum AliasError {
     Full(ContextFull),
 }
 
+/// What [`Context::compacted`] left behind: the dead records shed and
+/// the aliases that could not survive (their canonical carries no live
+/// edge to re-intern it) — numbers for the report line, so nothing is
+/// dropped silently.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionStats {
+    pub dead_edges: usize,
+    pub aliases_dropped: usize,
+}
+
 impl fmt::Display for AliasError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1933,6 +1943,86 @@ impl Context {
             touched += 1;
         }
         Some(touched)
+    }
+
+    /// A fresh context holding exactly this one's LIVE content — the
+    /// offline answer to append-only storage: fully retracted edges,
+    /// their unlinked attribution records, arena bytes behind removed
+    /// aliases and dead names, and index slack all stay behind. Every
+    /// live edge is re-asserted assertion by assertion (per-source
+    /// sums re-accumulate within float re-addition error; counts and
+    /// first-assertion paragraph locators are exact), sourceless
+    /// weight included. An alias whose canonical no longer carries any
+    /// live edge cannot re-intern its target and is dropped — counted,
+    /// never silent. The caller re-applies configuration the image
+    /// never holds (`applied_seq`, `dice_floor`).
+    ///
+    /// # Errors
+    ///
+    /// [`ContextFull`] is structurally unreachable — the rebuild holds
+    /// a subset of what this context already held — but the write API
+    /// says it, so this signature does too.
+    pub fn compacted(&self) -> Result<(Context, CompactionStats), ContextFull> {
+        let mut fresh = Context::default();
+        let mut stats = CompactionStats::default();
+        for association in self.query_any(&[], &[], &[]) {
+            if association.count == 0 {
+                stats.dead_edges += 1;
+                continue;
+            }
+            let mut attributed_count = 0u64;
+            let mut attributed_sum = 0.0f64;
+            for attribution in &association.attributions {
+                if attribution.count == 0 {
+                    continue;
+                }
+                attributed_count += attribution.count;
+                attributed_sum += attribution.weight;
+                let per_assertion = attribution.weight / attribution.count as f64;
+                for index in 0..attribution.count {
+                    fresh.associate_from(
+                        &association.subject,
+                        &association.label,
+                        &association.object,
+                        per_assertion,
+                        &attribution.source,
+                        if index == 0 {
+                            attribution.paragraph
+                        } else {
+                            None
+                        },
+                    )?;
+                }
+            }
+            let residual_count = association.count.saturating_sub(attributed_count);
+            if residual_count > 0 {
+                let residual = (association.weight * association.count as f64 - attributed_sum)
+                    / residual_count as f64;
+                for _ in 0..residual_count {
+                    fresh.associate(
+                        &association.subject,
+                        &association.label,
+                        &association.object,
+                        residual,
+                    )?;
+                }
+            }
+        }
+        for (alias, canonical) in self.concept_aliases() {
+            match fresh.add_concept_alias(alias, canonical) {
+                Ok(()) => {}
+                Err(AliasError::Full(full)) => return Err(full),
+                Err(_) => stats.aliases_dropped += 1,
+            }
+        }
+        for (alias, canonical) in self.label_aliases() {
+            match fresh.add_label_alias(alias, canonical) {
+                Ok(()) => {}
+                Err(AliasError::Full(full)) => return Err(full),
+                Err(_) => stats.aliases_dropped += 1,
+            }
+        }
+        Ok((fresh, stats))
     }
 
     /// Every concept alias as (alias, canonical) pairs in registration

@@ -98,7 +98,9 @@ taguru import --config prod.env a.jsonl b.jsonl</code></pre>
       また、撤回はソースのattributionを解放するが、語彙を未登録には戻さない：一度鋳造された概念やラベルは
       コンテキストの生涯にわたってidを保持する。名前が回転し続ける改訂ファイルを再importし続けるパイプラインは、
       コンテキストを単調に成長させる。<code>taguru inspect</code> で数を、<code>taguru estimate</code> で余裕を監視し、
-      上限に近づいたコンテキストは「もう一度の改訂」ではなく再構築として扱うこと。
+      溜まった死重は <code>taguru compact</code>（オフライン）または
+      <code>POST /contexts/{name}/compact</code>（稼働中・admin）が回収する——生きた事実・count・段落ロケータは
+      全て保存され、撤回済みレコードとアリーナの残骸だけが消える。
     </p>
   </section>
 

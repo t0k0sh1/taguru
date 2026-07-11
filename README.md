@@ -337,6 +337,14 @@ sourceless writes rides a reserved `export:unsourced` batch, and
 fully retracted (weight-zero) edges are shed on the way out, so an
 export → import round trip also compacts the graph.
 
+The image is append-only by design — retraction unlinks records but
+never reclaims them — so a context with heavy revision traffic grows
+monotonically. `taguru compact` (offline) and
+`POST /contexts/{name}/compact` (live; admin role, that context's
+requests wait out the rebuild) rewrite each image from its live
+content alone and report what was shed; every fact, count, and
+paragraph locator survives.
+
 The data directory admits one taguru process at a time — a serve or
 an import — via an advisory lock (`.taguru.lock`); the second comer
 is refused with a message naming the conflict, instead of two live

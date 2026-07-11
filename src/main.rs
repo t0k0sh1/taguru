@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod bm25;
 mod cli;
+mod compact;
 mod embedding;
 mod estimate;
 mod export;
@@ -404,6 +405,7 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
                 .delete(api::delete_context),
         )
         .route("/contexts/{name}/export", get(api::export_context))
+        .route("/contexts/{name}/compact", post(api::compact_context))
         .route("/contexts/{name}/associations", post(api::add_associations))
         .route("/contexts/{name}/recall", post(api::recall))
         .route("/contexts/{name}/query", post(api::query))

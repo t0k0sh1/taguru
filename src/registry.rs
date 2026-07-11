@@ -493,6 +493,16 @@ pub enum CreateError {
     Io(io::Error),
 }
 
+/// What one compaction accomplished — the before/after footprint and
+/// the dead weight shed, for the CLI report and the endpoint response.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct CompactOutcome {
+    pub bytes_before: usize,
+    pub bytes_after: usize,
+    pub dead_edges: usize,
+    pub aliases_dropped: usize,
+}
+
 /// Why an operation on a named context could not run.
 #[derive(Debug)]
 pub enum AccessError {
@@ -2598,6 +2608,56 @@ impl AppState {
         })
     }
 
+    /// Rebuilds one context's image without its dead weight — the
+    /// append-only storage's accumulated retracted edges, unlinked
+    /// attributions, and arena slack (see [`Context::compacted`]) —
+    /// then persists the fresh image immediately. Runs under the
+    /// context's exclusive lock for the rebuild: requests to THIS
+    /// context wait; every other context is untouched. Crash-safe by
+    /// construction: the fresh context carries the old WAL watermark,
+    /// so a crash before the flush lands simply boots the old image
+    /// and replays the same log — compaction lost, nothing corrupted.
+    pub fn compact_context(&self, name: &str) -> Result<CompactOutcome, AccessError> {
+        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        let outcome = offload(|| {
+            let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
+            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
+                .map_err(AccessError::Load)?;
+            let Slot::Hot(context) = &inner.slot else {
+                unreachable!("ensure_hot leaves the slot hot");
+            };
+            let bytes_before = context.footprint();
+            let (mut fresh, stats) = context
+                .compacted()
+                .map_err(|full| AccessError::Load(format!("compaction refused: {full}")))?;
+            // Config the image never carries, re-applied exactly as a
+            // load would; the watermark keeps WAL replay monotonic.
+            fresh.set_applied_seq(context.applied_seq());
+            fresh.set_dice_floor(inner.meta.dice_floor);
+            let bytes_after = fresh.footprint();
+            inner.slot = Slot::Hot(Box::new(fresh));
+            let Slot::Hot(context) = &inner.slot else {
+                unreachable!("just installed");
+            };
+            inner.stats = ContextStats::of(context);
+            entry.dirty.store(true, Ordering::Relaxed);
+            self.recount_entry(&mut inner);
+            Ok(CompactOutcome {
+                bytes_before,
+                bytes_after,
+                dead_edges: stats.dead_edges,
+                aliases_dropped: stats.aliases_dropped,
+            })
+        })?;
+        // Persist the shrunken image now (flush_entry takes its own
+        // locks); a failure leaves the entry dirty for the next tick,
+        // which is the flusher's ordinary retry story.
+        self.flush_entry(name, &entry);
+        self.touch(&entry);
+        self.enforce_budget(name);
+        Ok(outcome)
+    }
+
     /// Test-only: rewinds any remembered load failure (graph image and
     /// passage store both) so the quarantine window can elapse without
     /// the test sleeping through it.
@@ -4160,6 +4220,88 @@ mod tests {
         assert!(rendered(&state).contains("taguru_contexts_resident 1"));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Compaction sheds the dead weight retraction leaves behind,
+    /// preserves every live fact, keeps the WAL watermark monotonic —
+    /// a write after the compact replays correctly across a hard crash
+    /// — and the shrunken image is what a restart boots.
+    #[test]
+    fn compaction_shrinks_the_image_and_stays_crash_safe() {
+        let dir = scratch_dir("compact");
+        let live_facts = |state: &AppState| -> Vec<(String, String, String, u64)> {
+            let mut facts = state
+                .read_context("sake", |context| {
+                    context
+                        .query_any(&[], &[], &[])
+                        .into_iter()
+                        .filter(|association| association.count > 0)
+                        .map(|association| {
+                            (
+                                association.subject,
+                                association.label,
+                                association.object,
+                                association.count,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|_| "read")
+                .unwrap();
+            facts.sort();
+            facts
+        };
+        let before;
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![
+                        assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                        assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
+                        assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                    ],
+                )
+                .unwrap()
+                .unwrap();
+            state.retract_source("sake", "gone.md").unwrap();
+            before = live_facts(&state);
+
+            let outcome = state.compact_context("sake").unwrap();
+            assert!(
+                outcome.bytes_after < outcome.bytes_before,
+                "{outcome:?} must shrink"
+            );
+            assert_eq!(outcome.dead_edges, 1, "{outcome:?}");
+            assert_eq!(live_facts(&state), before, "live content must survive");
+
+            // A write AFTER the compact must replay across a crash —
+            // the fresh image carries the old watermark, so the WAL
+            // sequence keeps counting from where it was.
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "創業年", "1907年", 1.0, Some("keep.md"))],
+                )
+                .unwrap()
+                .unwrap();
+            // Drop WITHOUT flushing: the crash.
+        }
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let after = live_facts(&state);
+        assert_eq!(after.len(), before.len() + 1, "{after:?}");
+        assert!(
+            after
+                .iter()
+                .any(|(_, label, object, _)| label == "創業年" && object == "1907年"),
+            "the post-compact write must replay: {after:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A context whose load failed answers the remembered refusal

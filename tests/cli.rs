@@ -765,3 +765,52 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `taguru compact` offline: the report names the shrink, and inspect
+/// vouches for the rewritten family.
+#[test]
+fn compact_rewrites_a_data_directory_offline() {
+    let dir = std::env::temp_dir().join(format!("taguru-cli-compact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    // A revision that drops the fact leaves dead records behind…
+    std::fs::write(
+        dir.join("b.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\"}\n\
+         {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+
+    let data = dir.join("data");
+    let run_in = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", &data)
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+    let first = run_in(&["import", &dir.join("a.jsonl").display().to_string()]);
+    assert_eq!(first.status.code(), Some(0), "{first:?}");
+    let second = run_in(&["import", &dir.join("b.jsonl").display().to_string()]);
+    assert_eq!(second.status.code(), Some(0), "{second:?}");
+
+    // …which compact reclaims.
+    let compacted = run_in(&["compact"]);
+    assert_eq!(compacted.status.code(), Some(0), "{compacted:?}");
+    let stdout = String::from_utf8_lossy(&compacted.stdout);
+    assert!(stdout.contains("dead edge(s) shed"), "{stdout}");
+    assert!(stdout.contains("1 of 1 context(s) rewritten"), "{stdout}");
+
+    let inspected = run_in(&["inspect", &data.display().to_string()]);
+    assert_eq!(inspected.status.code(), Some(0), "{inspected:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -39,6 +39,11 @@ USAGE:
                                         export --help); a running server
                                         serves the same at
                                         GET /contexts/{name}/export
+  taguru compact [CONTEXT...]           rewrite context images without the
+                                        dead weight the append-only format
+                                        accumulates (see: taguru compact
+                                        --help); live servers use
+                                        POST /contexts/{name}/compact
   taguru extract --context NAME --out DIR FILE|DIR...
                                         decompose documents into batch files
                                         through an OpenAI-compatible chat
@@ -137,6 +142,7 @@ pub fn dispatch() -> ServeArgs {
         Some("estimate") => exit(crate::estimate::run(&args[1..])),
         Some("import") => exit(crate::ingest::run(&args[1..])),
         Some("export") => exit(crate::export::run(&args[1..])),
+        Some("compact") => exit(crate::compact::run(&args[1..])),
         Some("extract") => exit(crate::extract::run(&args[1..])),
         Some(other) => {
             eprintln!("taguru: unknown argument '{other}' — try 'taguru --help'");

@@ -4785,3 +4785,66 @@ fn urlencode(value: &str) -> String {
         })
         .collect()
 }
+
+/// POST /contexts/{name}/compact rewrites the image live: smaller
+/// footprint, identical answers, and — being an admin verb — refused
+/// for write-scoped keys by the fail-closed role table.
+#[test]
+fn the_compact_endpoint_shrinks_live_and_is_admin_only() {
+    let server = Server::start_with_env(
+        "http-compact",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,scribe:wtok"),
+            ("TAGURU_KEY_SCOPES", r#"{"scribe": "write"}"#),
+        ],
+    );
+    let admin = Some("atok");
+    let (status, _) = server.call_with_token(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "d"})),
+        admin,
+    );
+    assert_eq!(status, 200);
+    server.call_with_token(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
+            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
+        ])),
+        admin,
+    );
+    server.call_with_token(
+        "POST",
+        "/contexts/sake/sources/retract",
+        Some(json!({"source": "gone.md"})),
+        admin,
+    );
+
+    let (status, refused) =
+        server.call_with_token("POST", "/contexts/sake/compact", None, Some("wtok"));
+    assert_eq!(status, 403, "{refused}");
+
+    let (status, outcome) = server.call_with_token("POST", "/contexts/sake/compact", None, admin);
+    assert_eq!(status, 200, "{outcome}");
+    let shed = &outcome["result"];
+    assert_eq!(shed["dead_edges"], json!(1), "{outcome}");
+    assert!(
+        shed["bytes_after"].as_u64().unwrap() < shed["bytes_before"].as_u64().unwrap(),
+        "{outcome}"
+    );
+    let (status, facts) = server.call_with_token(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "蔵"})),
+        admin,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(facts["result"]["total"], json!(1), "{facts}");
+    assert_eq!(
+        facts["result"]["matches"][0]["label"],
+        json!("杜氏"),
+        "{facts}"
+    );
+}

@@ -1716,6 +1716,39 @@ pub async fn import_batch(
     }
 }
 
+/// `POST /contexts/{name}/compact` — rebuild the image without the
+/// dead weight the append-only format accumulates (retracted edges,
+/// unlinked attributions, arena slack), persisting the result before
+/// answering. An admin verb (the role table's fail-closed default);
+/// the context's own requests wait out the rebuild, every other
+/// context is untouched. Content is preserved — the response says
+/// what was shed and what the footprint became.
+pub async fn compact_context(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+) -> Response {
+    let started_at = Instant::now();
+    match tokio::task::block_in_place(|| state.compact_context(&name)) {
+        Ok(outcome) => {
+            // Maintenance that rewrites the image is audit-worthy even
+            // though no knowledge changes.
+            tracing::info!(
+                target: "taguru::audit",
+                key = %key_name(&key),
+                context = %name,
+                bytes_before = outcome.bytes_before,
+                bytes_after = outcome.bytes_after,
+                dead_edges = outcome.dead_edges,
+                aliases_dropped = outcome.aliases_dropped,
+                "context compacted",
+            );
+            ok(outcome, started_at)
+        }
+        Err(failure) => access_error(&state, failure, &name, started_at),
+    }
+}
+
 /// `GET /contexts/{name}/export` — the context back out as the import
 /// batch stream (docs/import.html): one batch per source in source-id
 /// order, the create block on the first, the alias table on the last,
