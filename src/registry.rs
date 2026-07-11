@@ -366,6 +366,7 @@ impl Entry {
                 wal_bytes,
                 counted_bytes: 0,
                 load_failure: None,
+                image_generation: 0,
             }),
             dirty: AtomicBool::new(false),
             flushing: AtomicBool::new(false),
@@ -479,6 +480,16 @@ struct EntryInner {
     /// client retries. Cleared by the next successful load; never
     /// persisted.
     load_failure: Option<(std::time::Instant, String)>,
+    /// Bumped whenever `slot` is replaced by a NEW `Context` object
+    /// while staying `Hot` — currently only `compact_context`. Plain
+    /// u64 like `wal_seq`: every touch happens under this entry's write
+    /// lock. `flush_entry` stages its bytes with the entry unlocked and
+    /// re-checks `slot` on republish; that recheck sees Hot in both an
+    /// untouched entry and a freshly-compacted one, so it cannot alone
+    /// tell "unchanged since I read it" apart from "replaced by a
+    /// compaction while I staged" — this generation is what makes the
+    /// two distinguishable.
+    image_generation: u64,
 }
 
 #[derive(Debug)]
@@ -2654,6 +2665,7 @@ impl AppState {
             fresh.set_dice_floor(inner.meta.dice_floor);
             let bytes_after = fresh.footprint();
             inner.slot = Slot::Hot(Box::new(fresh));
+            inner.image_generation += 1;
             let Slot::Hot(context) = &inner.slot else {
                 unreachable!("just installed");
             };
@@ -2756,7 +2768,7 @@ impl AppState {
         if !entry.dirty.load(Ordering::Relaxed) {
             return false;
         }
-        let (bytes, meta, stats, watermark) = {
+        let (bytes, meta, stats, watermark, generation) = {
             let mut guard = entry.inner.write().unwrap();
             let inner = &mut *guard;
             // Claim the flush UNDER the lock. `flushing` gates concurrent
@@ -2788,7 +2800,13 @@ impl AppState {
             // happens (crash, unwritable file — doesn't matter).
             context.set_applied_seq(watermark);
             let stats = ContextStats::of(context);
-            (context.to_bytes(), inner.meta.clone(), stats, watermark)
+            (
+                context.to_bytes(),
+                inner.meta.clone(),
+                stats,
+                watermark,
+                inner.image_generation,
+            )
         };
 
         let stem = file_stem(name);
@@ -2819,8 +2837,15 @@ impl AppState {
         // best a duplicate of what it wrote and, if a write beat the
         // evict, a step behind — publishing it would regress the image.
         // Drop the staged bytes and leave `dirty` as the evict (and any
-        // racing write) left it.
-        if !matches!(inner.slot, Slot::Hot(_)) {
+        // racing write) left it. A compaction that swapped `slot` for a
+        // fresh `Context` while we staged is the same story with the
+        // variant unchanged — Hot in, Hot out — so `image_generation` is
+        // what catches it: publishing our snapshot now would overwrite
+        // the compacted image with the pre-compaction one it just
+        // replaced, and stamp the entry's stats back to match. Compaction
+        // already left `dirty` set, so backing off here costs nothing —
+        // the next tick flushes the current image instead.
+        if !matches!(inner.slot, Slot::Hot(_)) || inner.image_generation != generation {
             let _ = fs::remove_file(&staged);
             entry.flushing.store(false, Ordering::Relaxed);
             return false;
@@ -5831,6 +5856,80 @@ mod tests {
                 .unwrap();
             assert_eq!(count, WRITES, "context '{name}' lost writes to the race");
         }
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_compaction_racing_a_periodic_flush_never_loses_the_image() {
+        use std::thread;
+
+        // `compact_context` swaps `slot` for a freshly rebuilt `Context`
+        // while a `flush_dirty` tick may already be mid-stage for the
+        // same entry (bytes read from the OLD `Context`, disk write in
+        // flight, entry unlocked). `image_generation` is what lets that
+        // flush's republish recognize the swap and back off instead of
+        // overwriting the fresh image with the one it just replaced.
+        // Hammering writes, compactions, and flush ticks on one context
+        // concurrently gives that window many chances to open; without
+        // the generation check this reliably drops associations from
+        // the persisted image (a stale flush's snapshot predates them).
+        let dir = scratch_dir("compact-flush-race");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        const ROUNDS: usize = 200;
+        let writer = {
+            let state = state.clone();
+            thread::spawn(move || {
+                for index in 0..ROUNDS {
+                    state
+                        .add_associations(
+                            "sake",
+                            vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
+                        )
+                        .unwrap()
+                        .unwrap();
+                }
+            })
+        };
+        let compactor = {
+            let state = state.clone();
+            thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    let _ = state.compact_context("sake");
+                }
+            })
+        };
+        while !writer.is_finished() || !compactor.is_finished() {
+            state.flush_dirty();
+        }
+        writer.join().unwrap();
+        compactor.join().unwrap();
+
+        let expected = state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(expected, ROUNDS, "the race lost associations in memory");
+        // One uncontested flush so the last round's write or compaction
+        // is guaranteed durable before the reboot below — the polling
+        // loop above only guarantees eventual, not final, convergence.
+        state.flush_dirty();
+        drop(state);
+
+        let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let recovered = reborn
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(
+            recovered, expected,
+            "the race lost associations from the image"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
