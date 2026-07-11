@@ -357,6 +357,44 @@ the old still holds the volume will see the new one exit — correct
 (it is what prevents a split-brain), but it means stop-then-start
 (Kubernetes `strategy: Recreate` on a shared volume), not overlap.
 
+### Deployment and availability
+
+Taguru is deliberately a **single-node, single-writer** system: the
+durability story (one fsync-then-apply owner per data directory) is
+what makes "200 = durable" simple enough to trust, and the advisory
+lock exists to enforce it, not to work around. Plan deployments on
+that model rather than against it:
+
+- **Deploys are stop-then-start** (`strategy: Recreate` on a shared
+  volume). The downtime is the boot: cold registration is cheap
+  however many contexts exist, and pinned contexts preload in
+  parallel — the port opens when they finish. Size a `startupProbe`
+  on `/live` accordingly; wire `livenessProbe: /live`,
+  `readinessProbe: /health` (503 = write path degraded; routing off
+  is the remedy, restarting is not).
+- **Availability is restore time, not failover.** There is no
+  replication or leader election; the recovery unit is the data
+  directory. Two rungs: a filesystem snapshot restores the whole
+  directory byte-exactly (fastest, same-version), and `taguru export`
+  streams restore anywhere through `taguru import` /  `POST /import`
+  (portable across versions and machines). Rehearse whichever rung is
+  the plan — `taguru inspect` verifies either result offline.
+- **Scale horizontally by partitioning, not clustering.** A context
+  is the unit of routing (clients pick one by the directory), so
+  independent taguru instances each owning a disjoint set of contexts
+  scale reads and writes without any coordination protocol — point
+  each client (or each MCP bridge) at the instance holding its
+  contexts. What does NOT work is two instances sharing one data
+  directory: on local disks the lock refuses it, and on NFS/EFS the
+  lock may fail to — which is why shared network volumes need
+  single-attachment enforced by the platform (e.g. EBS/PD
+  ReadWriteOnce, never ReadWriteMany).
+- **A rollback is a restore.** Image formats migrate forward on load
+  and never write the old version back out, so rolling the BINARY
+  back past a format bump needs the data directory rolled back with
+  it (snapshot) or re-imported from an export stream. Check the
+  release notes for format bumps before downgrading.
+
 ```sh
 curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \
   -d '{"description":"青嶺酒造という架空の酒蔵の知識"}'
