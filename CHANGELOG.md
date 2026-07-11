@@ -7,6 +7,8 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-12
+
 ### Added
 - Machine-readable error codes: every JSON error now carries a stable
   `code` beside the human `error` text —
@@ -89,6 +91,11 @@ Entries that change an on-disk format or a response shape say so.
 - The protocol doc states the compatibility policy: no `/v1` (the
   protocol travels with the server), additive responses parsed
   tolerantly, pre-1.0 shape changes announced here.
+- Documentation site at <https://t0k0sh1.github.io/taguru/>: getting
+  started, concepts, the import/extract references, per-platform
+  deployment guides (Docker Compose, Kubernetes, Amazon Bedrock), the
+  internal architecture, and a captured MCP retrieval walkthrough. The
+  README slims down to a user-facing overview that points there.
 
 ### Fixed
 - The protocol document and README now list `/live` among the
@@ -184,5 +191,6 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/t0k0sh1/taguru/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/t0k0sh1/taguru/releases/tag/v0.1.0
