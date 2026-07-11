@@ -5,7 +5,7 @@
  */
 
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -14,16 +14,25 @@ export const REPO_ROOT = resolve(import.meta.dirname, "../../..");
 export const ADMIN_TOKEN = "test-admin-token";
 export const READER_TOKEN = "test-reader-token";
 
-export function serverBinary(): string {
+export function serverBinary(repoRoot?: string): string {
   const override = process.env["TAGURU_TEST_BIN"];
   if (override) {
     return override;
   }
+  // REPO_ROOT is right only while this file physically lives at
+  // <repo>/sdk/typescript — a packed or published install sits under some
+  // consumer's node_modules, where the guess points at nothing buildable.
+  const root = repoRoot ?? REPO_ROOT;
+  if (!existsSync(join(root, "Cargo.toml"))) {
+    throw new Error(
+      `${root} is not the taguru repository — pass serverBinary(repoRoot) or set TAGURU_TEST_BIN`,
+    );
+  }
   execFileSync("cargo", ["build", "--quiet", "--bin", "taguru"], {
-    cwd: REPO_ROOT,
+    cwd: root,
     stdio: "inherit",
   });
-  return join(REPO_ROOT, "target", "debug", "taguru");
+  return join(root, "target", "debug", "taguru");
 }
 
 export interface SpawnedServer {
