@@ -545,7 +545,7 @@ fn expand_documents(paths: &[String]) -> Result<Vec<PathBuf>, String> {
 
 /// OpenAI-compatible `/chat/completions` client — deliberately the
 /// same protocol choice as embeddings: one wire shape here, vendor
-/// APIs bridged outside (bedrock.md shows how).
+/// APIs bridged outside (docs/bedrock.html shows how).
 struct ChatClient {
     url: String,
     model: String,

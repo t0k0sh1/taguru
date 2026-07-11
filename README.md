@@ -394,7 +394,7 @@ whoever holds one holds the memory. Mint one named key per client
 everything.
 
 Running the agent or the embeddings on Amazon Bedrock? See
-[_archive/docs/bedrock.md](_archive/docs/bedrock.md): the Converse hosting pattern for
+[docs/bedrock.html](docs/bedrock.html): the Converse hosting pattern for
 taguru-mcp, an InvokeModel embedding proxy, floor calibration, and the
 access-gate diagnosis commands.
 
