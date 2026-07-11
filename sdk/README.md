@@ -54,3 +54,39 @@ npm test --workspaces
 
 Regenerate the Python sync client after editing the async source:
 `python/scripts/generate_sync.py` (unasync; CI verifies freshness).
+
+## Releasing
+
+The packages version in lockstep with the server — one release, one
+number, no per-package tags. The `v*` tag that cuts the server release
+(`release.yml`: GitHub Release + crates.io) also fires
+`sdk-release.yml`, which publishes `taguru` and `langchain-taguru` to
+PyPI and npm. [`spec/check_versions.py`](spec/check_versions.py) pins
+every version site — Cargo.toml, both pyproject.toml and package.json
+plus their `taguru` dependency ranges, both `__version__`, the npm
+lockfile — in SDK CI, and both release jobs check it against the tag.
+
+To prepare a release:
+
+1. `python3 sdk/spec/check_versions.py --set X.Y.Z`
+2. `cargo check` and `(cd sdk && npm install)` — refresh both lockfiles
+3. `python3 sdk/spec/check_versions.py` — must pass
+4. Move the CHANGELOG's Unreleased entries under `## [X.Y.Z]`
+5. Commit, tag `vX.Y.Z`, push the tag
+
+One-time registry setup:
+
+- **PyPI** — a `PYPI_API_TOKEN` repository secret (account-scoped until
+  the packages exist, then swap in a project-scoped token). While it is
+  missing, a release tag skips the PyPI publish loudly instead of
+  failing.
+- **npm** — [trusted publishing](https://docs.npmjs.com/trusted-publishers):
+  no secret. On npmjs.com, each package's Settings → Trusted Publisher
+  takes user `t0k0sh1`, repository `taguru`, workflow
+  `sdk-release.yml`, environment blank. npmjs.com only offers this to
+  packages that already exist, so bootstrap the first version locally:
+  `cd sdk && npm install && npm login`, then
+  `npm publish --access public --workspace=taguru` and again for
+  `--workspace=langchain-taguru` (`prepublishOnly` builds them).
+  Configure the trusted publishers, re-run the tag's npm job — it skips
+  the versions just published — and every later release is hands-off.

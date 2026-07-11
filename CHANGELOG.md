@@ -33,7 +33,9 @@ Entries that change an on-disk format or a response shape say so.
   `TaguruRetriever` (graph lane + text lane, RRF-merged, verbatim
   citations) and `TaguruIngester` (the LangChain twin of
   `taguru extract` — same prompt discipline, same merge validation,
-  applied via `POST /import`'s per-source replace).
+  applied via `POST /import`'s per-source replace). The packages
+  version in lockstep with the server: each `v*` release tag
+  publishes all four to PyPI and npm alongside the crate.
 - SDK use-case examples under `examples/langchain/` — RAG QA with
   citations, governed document ingestion (dry-run review → apply →
   per-source replace → retract), and conversational long-term memory

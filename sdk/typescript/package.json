@@ -38,6 +38,7 @@
     "dist"
   ],
   "scripts": {
+    "prepublishOnly": "npm run build",
     "build": "tsup src/index.ts src/testing.ts --format esm,cjs --dts --sourcemap",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests",

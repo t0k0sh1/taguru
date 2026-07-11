@@ -1,22 +1,25 @@
 name: SDK Release
 
-# SDK packages release independently of the server, on their own tag
-# prefixes (mirroring release.yml's conventions: the tag must agree with
-# the manifest version, and a missing registry credential skips the
-# publish loudly instead of failing the workflow):
+# The four SDK packages carry the server's own version — one release,
+# one number everywhere (sdk/spec/check_versions.py pins the lockstep).
+# The same v* tag that cuts the server release (release.yml: GitHub
+# Release + crates.io) publishes them all:
 #
-#   sdk-python-v0.1.0               → PyPI  taguru
-#   sdk-python-langchain-v0.1.0     → PyPI  langchain-taguru
-#   sdk-typescript-v0.1.0           → npm   taguru
-#   sdk-typescript-langchain-v0.1.0 → npm   langchain-taguru
+#   v0.2.0 → PyPI taguru + langchain-taguru
+#          → npm  taguru + langchain-taguru
+#
+# Mirroring release.yml's conventions: the tag must agree with every
+# version site. PyPI publishes with the PYPI_API_TOKEN secret and skips
+# loudly while it is missing; npm uses trusted publishing (OIDC — no
+# secret lives here). Re-runs are safe — a version already on the
+# registry is skipped, not an error.
 
 on:
   push:
-    tags: ["sdk-*-v*"]
+    tags: ["v*"]
 
 jobs:
   pypi:
-    if: startsWith(github.ref_name, 'sdk-python')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -26,79 +29,62 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Resolve the package directory from the tag
-        run: |
-          case "$GITHUB_REF_NAME" in
-            sdk-python-langchain-v*) echo "PKG_DIR=sdk/python-langchain" >> "$GITHUB_ENV"
-                                     echo "PKG_VERSION=${GITHUB_REF_NAME#sdk-python-langchain-v}" >> "$GITHUB_ENV" ;;
-            sdk-python-v*)           echo "PKG_DIR=sdk/python" >> "$GITHUB_ENV"
-                                     echo "PKG_VERSION=${GITHUB_REF_NAME#sdk-python-v}" >> "$GITHUB_ENV" ;;
-            *) echo "unrecognized python SDK tag: $GITHUB_REF_NAME" >&2; exit 1 ;;
-          esac
-      - name: Tag and pyproject.toml must agree
-        run: |
-          manifest="$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('$PKG_DIR/pyproject.toml').read_text())['project']['version'])")"
-          if [ "$PKG_VERSION" != "$manifest" ]; then
-            echo "tag says ${PKG_VERSION}, ${PKG_DIR}/pyproject.toml says ${manifest}" >&2
-            exit 1
-          fi
-      - name: Build
+      - name: Tag and every version site must agree
+        run: python sdk/spec/check_versions.py --expect "${GITHUB_REF_NAME#v}"
+      - name: Build both packages
         run: |
           python -m pip install --upgrade build twine
-          python -m build "$PKG_DIR"
-      - name: Publish to PyPI
+          python -m build sdk/python
+          python -m build sdk/python-langchain
+          python -m twine check sdk/python/dist/* sdk/python-langchain/dist/*
+      - name: Publish to PyPI (taguru, then langchain-taguru)
         if: env.PYPI_API_TOKEN != ''
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: python -m twine upload "$PKG_DIR"/dist/*
+        run: python -m twine upload --skip-existing sdk/python/dist/* sdk/python-langchain/dist/*
       - name: Note the skip
         if: env.PYPI_API_TOKEN == ''
         run: echo "PYPI_API_TOKEN is not configured; skipping the PyPI publish" >&2
 
   npm:
-    if: startsWith(github.ref_name, 'sdk-typescript')
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    # Trusted publishing: the job's OIDC token is the credential — no
+    # npm secret. Each package's trusted publisher must be configured on
+    # npmjs.com (user t0k0sh1, repository taguru, workflow
+    # sdk-release.yml, environment blank), which npmjs.com only offers
+    # once the package exists: publish the first version locally,
+    # configure, then re-run this job — published versions are skipped,
+    # so the re-run goes green. --provenance stays explicit; the
+    # automatic attestation the docs promise has proven unreliable.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
-      - name: Resolve the package directory from the tag
-        run: |
-          case "$GITHUB_REF_NAME" in
-            sdk-typescript-langchain-v*) echo "PKG_DIR=typescript-langchain" >> "$GITHUB_ENV"
-                                         echo "PKG_VERSION=${GITHUB_REF_NAME#sdk-typescript-langchain-v}" >> "$GITHUB_ENV" ;;
-            sdk-typescript-v*)           echo "PKG_DIR=typescript" >> "$GITHUB_ENV"
-                                         echo "PKG_VERSION=${GITHUB_REF_NAME#sdk-typescript-v}" >> "$GITHUB_ENV" ;;
-            *) echo "unrecognized typescript SDK tag: $GITHUB_REF_NAME" >&2; exit 1 ;;
-          esac
-      - name: Tag and package.json must agree
-        working-directory: sdk
-        run: |
-          manifest="$(node -p "require('./$PKG_DIR/package.json').version")"
-          if [ "$PKG_VERSION" != "$manifest" ]; then
-            echo "tag says ${PKG_VERSION}, sdk/${PKG_DIR}/package.json says ${manifest}" >&2
-            exit 1
-          fi
-      - name: Install and build
+      # Node 22 bundles npm 10.x; trusted publishing needs >= 11.5.1.
+      - name: Upgrade npm
+        run: npm install -g npm@^11.5.1
+      - name: Tag and every version site must agree
+        run: python3 sdk/spec/check_versions.py --expect "${GITHUB_REF_NAME#v}"
+      - name: Install and build both packages
         working-directory: sdk
         run: |
           npm install --no-fund --no-audit
           npm run build --workspace=taguru
-          if [ "$PKG_DIR" = "typescript-langchain" ]; then
-            npm run build --workspace=langchain-taguru
-          fi
-      - name: Publish to npm
-        if: env.NPM_TOKEN != ''
+          npm run build --workspace=langchain-taguru
+      - name: Publish to npm (core first — langchain-taguru depends on it)
         working-directory: sdk
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public --workspace="./$PKG_DIR"
-      - name: Note the skip
-        if: env.NPM_TOKEN == ''
-        run: echo "NPM_TOKEN is not configured; skipping the npm publish" >&2
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for pkg in taguru langchain-taguru; do
+            if npm view "${pkg}@${version}" version >/dev/null 2>&1; then
+              echo "${pkg}@${version} is already on npm; skipping"
+            else
+              npm publish --provenance --access public --workspace="$pkg"
+            fi
+          done

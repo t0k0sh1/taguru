@@ -69,6 +69,8 @@ jobs:
           git diff --exit-code sdk/python/src/taguru/_sync
       - name: Surface parity
         run: python sdk/python/scripts/check_surface.py
+      - name: Version lockstep (SDK packages carry the server's version)
+        run: python sdk/spec/check_versions.py
       - name: Test (core)
         run: python -m pytest sdk/python/tests -q
         env:
