@@ -2774,6 +2774,22 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
     let (status, scoped_admin) = post_import(&server, batch, Some("atok"));
     assert_eq!(status, 200, "{scoped_admin}");
 
+    // The body-carried-context refusal: curator is admin (clears the
+    // role gate) but scoped to sake, so an out-of-grant bunko batch is
+    // refused by the per-batch check, and an in-grant sake batch lands.
+    let (status, out_of_grant) = post_import(&server, batch, Some("ctok"));
+    assert_eq!(status, 403, "{out_of_grant}");
+    assert!(
+        out_of_grant["error"]
+            .as_str()
+            .unwrap()
+            .contains("no grant on context 'bunko'"),
+        "{out_of_grant}"
+    );
+    let sake_batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s\"}\n";
+    let (status, in_grant) = post_import(&server, sake_batch, Some("ctok"));
+    assert_eq!(status, 200, "{in_grant}");
+
     // MCP tool calls are judged as the routes they land on: the read
     // key's add_associations dispatch refuses with the same 403.
     let (status, reply) = server.call_with_token(
@@ -2882,6 +2898,41 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
         ),
         200
     );
+    // Register then remove an alias (its own audit line).
+    assert_eq!(
+        call(
+            "POST",
+            "/contexts/sake/aliases",
+            Some(json!({"concepts": {"Kura": "蔵"}})),
+        ),
+        200
+    );
+    assert_eq!(
+        call(
+            "DELETE",
+            "/contexts/sake/aliases",
+            Some(json!({"concepts": ["Kura"]})),
+        ),
+        200
+    );
+    // An import batch (retract-then-apply) and a compaction: both
+    // destructive, both audited. Import is NDJSON, so send it raw
+    // rather than through the JSON `call` helper.
+    let import_status = ureq::AgentBuilder::new()
+        .build()
+        .request("POST", &format!("{base}/import"))
+        .set("Authorization", "Bearer opskey")
+        .send_string(
+            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\n\
+             {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
+        )
+        .map(|reply| reply.status())
+        .unwrap_or_else(|error| match error {
+            ureq::Error::Status(status, _) => status,
+            other => panic!("import: {other}"),
+        });
+    assert_eq!(import_status, 200);
+    assert_eq!(call("POST", "/contexts/sake/compact", None), 200);
     assert_eq!(
         call(
             "POST",
@@ -2938,6 +2989,29 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
         .expect("the deletion must leave an audit line");
     assert_eq!(deleted["fields"]["context"], json!("sake"));
     assert_eq!(deleted["fields"]["files_removed"], json!(true));
+
+    // Every destructive operation — not just delete/retract — leaves an
+    // audit line naming the key and the context. A missing one here is
+    // a silently-narrowed guarantee.
+    let audit_line = |message: &str| {
+        lines
+            .iter()
+            .find(|record| {
+                record["target"] == json!("taguru::audit")
+                    && record["fields"]["message"] == json!(message)
+            })
+            .unwrap_or_else(|| panic!("missing audit line: {message}"))
+    };
+    let aliases_removed = audit_line("aliases removed");
+    assert_eq!(aliases_removed["fields"]["context"], json!("sake"));
+    assert_eq!(aliases_removed["fields"]["key"], json!("default"));
+    let imported = audit_line("import batch applied");
+    assert_eq!(imported["fields"]["context"], json!("sake"));
+    assert_eq!(imported["fields"]["source"], json!("b.md"));
+    assert_eq!(imported["fields"]["key"], json!("default"));
+    let compacted = audit_line("context compacted");
+    assert_eq!(compacted["fields"]["context"], json!("sake"));
+    assert_eq!(compacted["fields"]["key"], json!("default"));
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }
@@ -3861,6 +3935,12 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
     let stream = exported
         .as_str()
         .expect("the export body is JSONL, not the envelope");
+    // The doc2query question rides the export stream (its round trip is
+    // otherwise invisible in a lexical-only test).
+    assert!(
+        stream.contains("どこの蔵?"),
+        "export must emit the question: {stream}"
+    );
     assert_eq!(
         stream.matches("\"taguru_batch\":1").count(),
         2,
@@ -3905,6 +3985,14 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
     );
     let row = server.ok("GET", "/contexts/sake", None);
     assert_eq!(row["dice_floor"], json!(0.25), "{row}");
+    // The question survived the delete+restore: re-exporting the
+    // restored context still carries it.
+    let (status, re_exported) = server.call("GET", "/contexts/sake/export", None);
+    assert_eq!(status, 200);
+    assert!(
+        re_exported.as_str().unwrap().contains("どこの蔵?"),
+        "the question must survive the round trip: {re_exported}"
+    );
 
     // Restoring over the restored context is a per-source replace, not
     // a doubling — the same idempotency the CLI import promises.

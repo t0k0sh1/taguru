@@ -176,17 +176,40 @@ fn access_error(
     name: &str,
     started_at: Instant,
 ) -> Response {
+    access_error_noted(state, failure, name, "", started_at)
+}
+
+/// [`access_error`] with a leading `note` — the one place the three
+/// `AccessError` arms map to statuses and metrics, so the per-batch
+/// import path (which prefixes each refusal with which batch failed)
+/// shares them instead of hand-copying the mapping. `note` is empty
+/// for every ordinary caller.
+fn access_error_noted(
+    state: &AppState,
+    failure: AccessError,
+    name: &str,
+    note: &str,
+    started_at: Instant,
+) -> Response {
     match failure {
-        AccessError::NotFound => not_found(name, started_at),
+        AccessError::NotFound => error(
+            StatusCode::NOT_FOUND,
+            format!("{note}context '{name}' not found"),
+            started_at,
+        ),
         AccessError::Load(message) => {
             state.metrics().record_error(ErrorKind::Load);
-            error(StatusCode::INTERNAL_SERVER_ERROR, message, started_at)
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{note}{message}"),
+                started_at,
+            )
         }
         AccessError::Unpersisted(message) => {
             state.metrics().record_error(ErrorKind::WalRefused);
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("write not persisted (nothing was applied): {message}"),
+                format!("{note}write not persisted (nothing was applied): {message}"),
                 started_at,
             )
         }
@@ -1585,31 +1608,10 @@ fn import_refusal(
     started_at: Instant,
 ) -> Response {
     match refusal {
-        crate::ingest::ApplyRefusal::Access(failure) if note.is_empty() => {
-            access_error(state, failure, &batch.context, started_at)
-        }
-        // The prefixed twin of access_error's arms — same statuses,
-        // same metrics, the batch note in front.
-        crate::ingest::ApplyRefusal::Access(AccessError::NotFound) => error(
-            StatusCode::NOT_FOUND,
-            format!("{note}context '{}' not found", batch.context),
-            started_at,
-        ),
-        crate::ingest::ApplyRefusal::Access(AccessError::Load(message)) => {
-            state.metrics().record_error(ErrorKind::Load);
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{note}{message}"),
-                started_at,
-            )
-        }
-        crate::ingest::ApplyRefusal::Access(AccessError::Unpersisted(message)) => {
-            state.metrics().record_error(ErrorKind::WalRefused);
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{note}write not persisted (nothing was applied): {message}"),
-                started_at,
-            )
+        // The three AccessError arms — status, metric, message — live
+        // in access_error_noted; import just supplies the batch note.
+        crate::ingest::ApplyRefusal::Access(failure) => {
+            access_error_noted(state, failure, &batch.context, note, started_at)
         }
         refusal @ crate::ingest::ApplyRefusal::NoContext(_) => error(
             StatusCode::NOT_FOUND,
@@ -1686,7 +1688,7 @@ pub async fn import_batch(
             format!(
                 "key '{}' has no grant on context '{}' (batch source '{}'); nothing \
                  was applied",
-                key.as_ref().map_or("-", |extension| extension.0.0.as_ref()),
+                key_name(&key),
                 refused.context,
                 refused.source
             ),
