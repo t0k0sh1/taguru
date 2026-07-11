@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::Response;
 
@@ -56,7 +56,7 @@ pub async fn enforce_timeout(
     match tokio::time::timeout(budget, next.run(request)).await {
         Ok(response) => response,
         Err(_) => api::error(
-            StatusCode::REQUEST_TIMEOUT,
+            api::ErrorCode::Timeout,
             format!(
                 "request exceeded the {}s budget; narrow the query \
                  (TAGURU_REQUEST_TIMEOUT_SECS tunes this)",
@@ -88,7 +88,7 @@ pub async fn enforce_concurrency(
         state.metrics().record_shed();
         let started_at = Instant::now();
         let mut response = api::error(
-            StatusCode::SERVICE_UNAVAILABLE,
+            api::ErrorCode::Overloaded,
             format!(
                 "server is at its in-flight ceiling ({limit} requests) — retry \
                  shortly (TAGURU_MAX_CONCURRENT_REQUESTS tunes this)"
@@ -232,7 +232,7 @@ pub async fn enforce_rate_limit(
         Ok(()) => next.run(request).await,
         Err(retry_after) => {
             let mut response = api::error(
-                StatusCode::TOO_MANY_REQUESTS,
+                api::ErrorCode::RateLimited,
                 format!(
                     "key '{key}' is over its request budget ({} per minute) — \
                      retry in {retry_after}s",

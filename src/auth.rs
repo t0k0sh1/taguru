@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderValue, Method, header};
 use axum::middleware::Next;
 use axum::response::Response;
 use serde::Deserialize;
@@ -354,7 +354,7 @@ pub async fn require_bearer(
         let peer = crate::limits::peer_ip(&request).unwrap_or_else(|| Arc::from("peer:unknown"));
         if let Err(retry_after) = gate.fail_limiter.admit(&peer, started_at) {
             let mut response = api::error(
-                StatusCode::TOO_MANY_REQUESTS,
+                api::ErrorCode::RateLimited,
                 format!("too many failed authentication attempts — retry in {retry_after}s"),
                 started_at,
             );
@@ -366,7 +366,7 @@ pub async fn require_bearer(
     }
 
     let mut response = api::error(
-        StatusCode::UNAUTHORIZED,
+        api::ErrorCode::Unauthorized,
         "missing or invalid bearer token (send Authorization: Bearer <token>)",
         started_at,
     );
@@ -456,7 +456,7 @@ pub async fn enforce_authorization(
     let required = required_role(request.method(), &route);
     if scope.role < required {
         return api::error(
-            StatusCode::FORBIDDEN,
+            api::ErrorCode::Forbidden,
             format!(
                 "key '{}' has role '{}', but {} {} needs '{}'",
                 key.0,
@@ -484,7 +484,7 @@ pub async fn enforce_authorization(
             && !scope.allows_context(&context)
         {
             return api::error(
-                StatusCode::FORBIDDEN,
+                api::ErrorCode::Forbidden,
                 format!("key '{}' has no grant on context '{context}'", key.0),
                 started_at,
             );
@@ -497,6 +497,8 @@ pub async fn enforce_authorization(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
+
     use super::*;
     use axum::Router;
     use axum::body::Body;

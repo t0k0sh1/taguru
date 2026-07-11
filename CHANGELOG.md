@@ -8,6 +8,18 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Machine-readable error codes: every JSON error now carries a stable
+  `code` beside the human `error` text —
+  `{"status": "error", "code": "<kind>", "error": "...", "time": ...}`.
+  The vocabulary (documented in `GET /protocol`): `malformed_request`,
+  `invalid_argument`, `over_limit`, `unauthorized`, `forbidden`,
+  `no_context`, `no_source`, `no_paragraph`, `unknown_path`,
+  `method_not_allowed`, `timeout`, `already_exists`, `conflict`,
+  `payload_too_large`, `rate_limited`, `internal`,
+  `embeddings_unconfigured`, `embeddings_failed`, `overloaded`,
+  `unhealthy`, `storage_full`. Branch on the code (or the status),
+  never on message wording. The SDKs surface it as `.code` on every
+  error.
 - `taguru export` and `GET /contexts/{name}/export`: every context
   renders as the same JSONL batch stream `taguru import` and
   `POST /import` apply — the portable, version-independent backup.
@@ -55,6 +67,9 @@ Entries that change an on-disk format or a response shape say so.
   tolerantly, pre-1.0 shape changes announced here.
 
 ### Fixed
+- The protocol document and README now list `/live` among the
+  auth-exempt probes — the code always exempted it alongside
+  `/health` and `/metrics`; only the docs omitted it.
 - A failed `DELETE /contexts/{name}` unlink could leak the context's
   sidecar files forever — or, if `.ctx` itself survived, resurrect
   the context at the next boot. Deletion now writes a durable
@@ -101,6 +116,17 @@ Entries that change an on-disk format or a response shape say so.
   NaN onto the safe extreme instead.
 
 ### Changed
+- **Response shape** (pre-1.0 break): `POST /import` now answers
+  `{batches: [...]}` for a single-batch body too (was: that batch's
+  bare outcome) — one shape for every import, no client-side
+  branching on stream length.
+- A request body over `TAGURU_MAX_BODY_BYTES` now answers 413 in the
+  same JSON error shape as every other axis (was: axum's plain-text
+  rejection).
+- `add_associations`' partial-write arm keeps the capacity/conflict
+  status split (507 vs 409) every other batch write reports —
+  previously it answered 507 unconditionally. Unobservable today
+  (association writes only fail on capacity), pinned for uniformity.
 - **Response shapes** (pre-1.0 break): `GET /contexts/{name}/labels`,
   `.../aliases`, and `.../sources` now page like the directory —
   `?limit=1000&after=...` in, `{total, ...}` out. The alias cursor

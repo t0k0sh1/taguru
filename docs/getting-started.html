@@ -101,7 +101,7 @@ taguru version</code></pre>
           <tr><td>TAGURU_FLUSH_SECS</td><td>5</td><td>イメージflushの間隔。WALが有効なら鮮度の刻みであって損失窓ではない</td></tr>
           <tr><td>TAGURU_WAL</td><td>on</td><td>承認した書き込みをfsyncしてから適用する（クラッシュで何も失わない）。<code>0</code>でflush間隔ぶんの損失窓に戻る</td></tr>
           <tr><td>TAGURU_WAL_MAX_BYTES</td><td>256 MiB</td><td>コンテキストごとのWAL上限。flushが失敗し続けたときだけ近づき、超えると書き込みを500で拒否する</td></tr>
-          <tr><td>TAGURU_API_TOKEN</td><td>—</td><td>Bearerトークン（<code>/health</code>・<code>/metrics</code>以外の全リクエストに必須）。未設定＝認証なし。localhostの外に出すなら必ず設定</td></tr>
+          <tr><td>TAGURU_API_TOKEN</td><td>—</td><td>Bearerトークン（<code>/health</code>・<code>/live</code>・<code>/metrics</code>以外の全リクエストに必須）。未設定＝認証なし。localhostの外に出すなら必ず設定</td></tr>
           <tr><td>TAGURU_API_TOKENS</td><td>—</td><td>名前付きキー（<code>"ci:tokA,laptop:tokB"</code>）。アクセスログにどのキーかが載り、漏洩は1本の失効で済む</td></tr>
           <tr><td>TAGURU_EMBED_URL / _MODEL / _API_KEY</td><td>—</td><td>セマンティック入口（OpenAI互換 <code>/embeddings</code>）。未設定なら入口は純粋に字句照合</td></tr>
           <tr><td>TAGURU_EMBED_AUTO</td><td>off</td><td>flushごとに差分だけ再埋め込み。エージェントがインジェストを駆動する構成では推奨（refreshの呼び忘れを当てにしない）</td></tr>

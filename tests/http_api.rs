@@ -1437,12 +1437,14 @@ fn off_axis_errors_speak_the_api_error_shape_too() {
     let (status, body) = server.call("GET", "/contextz", None);
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
+    assert_eq!(body["code"], json!("unknown_path"), "{body}");
     assert!(body["time"].is_number(), "{body}");
 
     // Known path, wrong method → 405 in the error shape.
     let (status, body) = server.call("DELETE", "/contexts/sake/recall", None);
     assert_eq!(status, 405, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
+    assert_eq!(body["code"], json!("method_not_allowed"), "{body}");
 
     // Malformed JSON on a JSON-required endpoint → 400 in shape.
     let (status, body) = server.call_raw(
@@ -1453,6 +1455,7 @@ fn off_axis_errors_speak_the_api_error_shape_too() {
     );
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
+    assert_eq!(body["code"], json!("malformed_request"), "{body}");
 
     // Wrong media type → 415 in shape.
     let (status, body) = server.call_raw(
@@ -1463,6 +1466,7 @@ fn off_axis_errors_speak_the_api_error_shape_too() {
     );
     assert_eq!(status, 415, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
+    assert_eq!(body["code"], json!("malformed_request"), "{body}");
 
     // Well-formed JSON of the wrong type → 422 in shape.
     let (status, body) = server.call_raw(
@@ -1473,6 +1477,133 @@ fn off_axis_errors_speak_the_api_error_shape_too() {
     );
     assert_eq!(status, 422, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
+    assert_eq!(body["code"], json!("malformed_request"), "{body}");
+}
+
+/// Every JSON error carries the machine-readable `code` the protocol
+/// documents — the stable branch key for clients that must not parse
+/// message wording. One axis per assertion, domain refusals included.
+#[test]
+fn errors_carry_the_documented_machine_readable_code() {
+    let server = Server::start_with_env(
+        "errcodes",
+        &[
+            ("TAGURU_API_TOKEN", "codekey"),
+            // Roomy enough for the over_limit body below (an origins
+            // list is ~8 KiB), tight enough to trip on the 413 probe.
+            ("TAGURU_MAX_BODY_BYTES", "16384"),
+        ],
+    );
+    let code_of = |status: u16, body: &Value| -> (u16, String) {
+        (
+            status,
+            body["code"].as_str().unwrap_or("<missing>").to_string(),
+        )
+    };
+
+    // Missing bearer token → unauthorized.
+    let (status, body) = server.call("GET", "/contexts", None);
+    assert_eq!(
+        code_of(status, &body),
+        (401, "unauthorized".into()),
+        "{body}"
+    );
+
+    let key = Some("codekey");
+    let (status, body) = server.call_with_token("PUT", "/contexts/sake", Some(json!({})), key);
+    assert_eq!(status, 200, "{body}");
+
+    // PUT on an existing context → already_exists.
+    let (status, body) = server.call_with_token("PUT", "/contexts/sake", Some(json!({})), key);
+    assert_eq!(
+        code_of(status, &body),
+        (409, "already_exists".into()),
+        "{body}"
+    );
+
+    // Unknown context → no_context.
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts/ghost/recall",
+        Some(json!({"cue": "x"})),
+        key,
+    );
+    assert_eq!(code_of(status, &body), (404, "no_context".into()), "{body}");
+
+    // A refused value (a weight the graph must never accumulate) →
+    // invalid_argument.
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([{"subject": "s", "label": "l", "object": "o", "weight": 1e300}])),
+        key,
+    );
+    assert_eq!(
+        code_of(status, &body),
+        (400, "invalid_argument".into()),
+        "{body}"
+    );
+
+    // A list-shaped input past its cap → over_limit (split and resend).
+    let origins: Vec<String> = (0..1001).map(|index| format!("o{index}")).collect();
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts/sake/activate",
+        Some(json!({"origins": origins})),
+        key,
+    );
+    assert_eq!(code_of(status, &body), (400, "over_limit".into()), "{body}");
+
+    // No embedding provider configured → embeddings_unconfigured.
+    let (status, body) =
+        server.call_with_token("POST", "/contexts/sake/embeddings/refresh", None, key);
+    assert_eq!(
+        code_of(status, &body),
+        (501, "embeddings_unconfigured".into()),
+        "{body}"
+    );
+
+    // Unknown source on the citation endpoint → no_source; a stored
+    // source with an out-of-range locator → no_paragraph.
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"doc": "本文。"}})),
+        key,
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "ghost", "paragraph": 0})),
+        key,
+    );
+    assert_eq!(code_of(status, &body), (404, "no_source".into()), "{body}");
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "doc", "paragraph": 9})),
+        key,
+    );
+    assert_eq!(
+        code_of(status, &body),
+        (404, "no_paragraph".into()),
+        "{body}"
+    );
+
+    // The body cap now answers in the SAME JSON shape as every other
+    // axis (it used to be axum's plain text) — payload_too_large.
+    let (status, body) = server.call_with_token(
+        "PUT",
+        "/contexts/big",
+        Some(json!({"description": "こ".repeat(8000)})),
+        key,
+    );
+    assert_eq!(
+        code_of(status, &body),
+        (413, "payload_too_large".into()),
+        "{body}"
+    );
 }
 
 #[test]
@@ -1883,12 +2014,16 @@ fn health_reports_503_while_flushes_fail_and_recovers_after() {
 #[test]
 fn a_body_over_the_configured_limit_is_rejected_with_413() {
     let server = Server::start_with_env("bodycap", &[("TAGURU_MAX_BODY_BYTES", "16")]);
-    let (status, _) = server.call(
+    let (status, body) = server.call(
         "PUT",
         "/contexts/sake",
         Some(json!({"description": "この説明は16バイトよりずっと長い"})),
     );
     assert_eq!(status, 413);
+    // The cap breach speaks the one JSON error shape like every other
+    // axis (it used to be axum's plain-text rejection).
+    assert_eq!(body["status"], json!("error"), "{body}");
+    assert_eq!(body["code"], json!("payload_too_large"), "{body}");
 }
 
 #[test]
@@ -3831,16 +3966,20 @@ fn the_import_endpoint_applies_batches_to_a_live_server() {
 
     let (status, first) = post_import(&server, batch, Some("opskey"));
     assert_eq!(status, 200, "{first}");
-    assert_eq!(first["result"]["created"], json!(true));
-    assert_eq!(first["result"]["associations"], json!(1));
-    assert_eq!(first["result"]["passage_stored"], json!(true));
-    assert_eq!(first["result"]["retracted"], json!(0));
+    // A single-batch body answers the same {batches: [...]} shape a
+    // stream does — one shape to parse, with one entry here.
+    let outcome = &first["result"]["batches"][0];
+    assert_eq!(first["result"]["batches"].as_array().map(Vec::len), Some(1));
+    assert_eq!(outcome["created"], json!(true));
+    assert_eq!(outcome["associations"], json!(1));
+    assert_eq!(outcome["passage_stored"], json!(true));
+    assert_eq!(outcome["retracted"], json!(0));
 
     // Same batch again: the source is replaced, not doubled — the
     // no-downtime spelling of the CLI's idempotency.
     let (status, second) = post_import(&server, batch, Some("opskey"));
     assert_eq!(status, 200, "{second}");
-    assert_eq!(second["result"]["retracted"], json!(1));
+    assert_eq!(second["result"]["batches"][0]["retracted"], json!(1));
     let (status, edge) = server.call_with_token(
         "POST",
         "/contexts/sake/query",
@@ -3862,8 +4001,16 @@ fn the_import_endpoint_reports_section_bookkeeping() {
 
     let (status, result) = post_import(&server, batch, None);
     assert_eq!(status, 200, "{result}");
-    assert_eq!(result["result"]["sections_stored"], json!(1), "{result}");
-    assert_eq!(result["result"]["sections_dropped"], json!(1), "{result}");
+    assert_eq!(
+        result["result"]["batches"][0]["sections_stored"],
+        json!(1),
+        "{result}"
+    );
+    assert_eq!(
+        result["result"]["batches"][0]["sections_dropped"],
+        json!(1),
+        "{result}"
+    );
 }
 
 /// The import endpoint surfaces a dropped association paragraph locator
@@ -3881,12 +4028,12 @@ fn the_import_endpoint_reports_dropped_association_paragraphs() {
     let (status, result) = post_import(&server, batch, None);
     assert_eq!(status, 200, "{result}");
     assert_eq!(
-        result["result"]["associations"],
+        result["result"]["batches"][0]["associations"],
         json!(1),
         "the fact lands: {result}"
     );
     assert_eq!(
-        result["result"]["association_paragraphs_dropped"],
+        result["result"]["batches"][0]["association_paragraphs_dropped"],
         json!(1),
         "the out-of-range locator is cleared and counted: {result}"
     );
@@ -4652,7 +4799,11 @@ fn citation_resolves_the_section_governing_its_paragraph() {
                  {\"paragraph\": 1, \"section\": \"沿革\"}\n";
     let (status, result) = post_import(&server, batch, None);
     assert_eq!(status, 200, "{result}");
-    assert_eq!(result["result"]["sections_stored"], json!(1), "{result}");
+    assert_eq!(
+        result["result"]["batches"][0]["sections_stored"],
+        json!(1),
+        "{result}"
+    );
 
     let before = server.ok(
         "POST",

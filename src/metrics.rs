@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -971,7 +971,7 @@ pub async fn health(State(state): State<AppState>) -> Response {
              check disk space and the server log"
         ),
     };
-    crate::api::error(StatusCode::SERVICE_UNAVAILABLE, reason, Instant::now())
+    crate::api::error(crate::api::ErrorCode::Unhealthy, reason, Instant::now())
 }
 
 /// GET /metrics: the whole registry in Prometheus text format.

@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
@@ -10,8 +9,8 @@ use crate::metrics::{ErrorKind, SearchOp};
 use crate::registry::{AppState, CitationLookup};
 
 use super::{
-    AppJson, AppQuery, KeysetQuery, MAX_MATCH_LIMIT, access_error, clamp, error, not_found, ok,
-    overlong, search_log_enabled,
+    AppJson, AppQuery, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, access_error, clamp, error,
+    not_found, ok, overlong, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -90,7 +89,7 @@ pub async fn citation(
         Some(Ok(CitationLookup::UnknownSource)) => {
             state.note_read(&name, true);
             error(
-                StatusCode::NOT_FOUND,
+                ErrorCode::NoSource,
                 format!("source '{}' not found in context '{name}'", request.source),
                 started_at,
             )
@@ -98,7 +97,7 @@ pub async fn citation(
         Some(Ok(CitationLookup::IndexOutOfRange)) => {
             state.note_read(&name, true);
             error(
-                StatusCode::NOT_FOUND,
+                ErrorCode::NoParagraph,
                 format!(
                     "paragraph {} out of range for source '{}' in context '{name}'",
                     request.paragraph, request.source
@@ -168,7 +167,7 @@ fn passages_unreadable(
 ) -> Response {
     state.metrics().record_error(ErrorKind::Io);
     error(
-        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::Internal,
         format!("passages could not be read: {io_error}"),
         started_at,
     )

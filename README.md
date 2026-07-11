@@ -150,8 +150,9 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #                     OTEL_* variables apply — OTEL_SERVICE_NAME (default
 #                     taguru), OTEL_EXPORTER_OTLP_HEADERS, batch cadence.
 #                     Unset = no tracing, byte-identical logs.
-#   TAGURU_API_TOKEN    bearer token required on everything but /health and
-#                     /metrics. Unset = UNAUTHENTICATED (localhost only).
+#   TAGURU_API_TOKEN    bearer token required on everything but /health,
+#                     /live, and /metrics. Unset = UNAUTHENTICATED
+#                     (localhost only).
 #                     The MCP bridge reads the same variable.
 #   TAGURU_API_TOKENS   named bearer keys ("ci:tokA,laptop:tokB"), accepted
 #                     alongside TAGURU_API_TOKEN (whose key name is

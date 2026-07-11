@@ -37,17 +37,134 @@ impl<T> ApiResponse<T> {
     }
 }
 
+/// The machine-readable failure kind riding every JSON error response
+/// as `code` — a STABLE vocabulary (documented in llm-protocol.md) for
+/// clients that must branch without parsing the human `error` text.
+/// The status stays the transport truth; the code names what the
+/// status alone leaves ambiguous (which 400, which 404, which 409,
+/// which 503). Renaming or repurposing a variant is a breaking change
+/// and belongs in the CHANGELOG like a response-shape change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ErrorCode {
+    /// The request never parsed: broken JSON, wrong media type,
+    /// well-formed JSON of the wrong shape, an unreadable query
+    /// string, or an import stream that fails line validation.
+    MalformedRequest,
+    /// The request parsed, but a value was refused: an empty or
+    /// oversized name, a non-finite or over-cap weight, a malformed
+    /// cursor, a question with no passage to attach to.
+    InvalidArgument,
+    /// A batch or list-shaped input over its per-request cap — the
+    /// one refusal where splitting the same content and resending it
+    /// works.
+    OverLimit,
+    Unauthorized,
+    Forbidden,
+    NoContext,
+    NoSource,
+    NoParagraph,
+    UnknownPath,
+    MethodNotAllowed,
+    Timeout,
+    /// `PUT` on a context that already exists.
+    AlreadyExists,
+    /// Every other 409: alias conflicts, non-capacity partial writes,
+    /// a real source colliding with a reserved export id.
+    Conflict,
+    PayloadTooLarge,
+    RateLimited,
+    Internal,
+    EmbeddingsUnconfigured,
+    EmbeddingsFailed,
+    /// 503 shed at the in-flight ceiling — `Retry-After` rides along.
+    Overloaded,
+    /// 503 from the readiness probe: the write path is degraded.
+    Unhealthy,
+    StorageFull,
+}
+
+impl ErrorCode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedRequest => "malformed_request",
+            Self::InvalidArgument => "invalid_argument",
+            Self::OverLimit => "over_limit",
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden => "forbidden",
+            Self::NoContext => "no_context",
+            Self::NoSource => "no_source",
+            Self::NoParagraph => "no_paragraph",
+            Self::UnknownPath => "unknown_path",
+            Self::MethodNotAllowed => "method_not_allowed",
+            Self::Timeout => "timeout",
+            Self::AlreadyExists => "already_exists",
+            Self::Conflict => "conflict",
+            Self::PayloadTooLarge => "payload_too_large",
+            Self::RateLimited => "rate_limited",
+            Self::Internal => "internal",
+            Self::EmbeddingsUnconfigured => "embeddings_unconfigured",
+            Self::EmbeddingsFailed => "embeddings_failed",
+            Self::Overloaded => "overloaded",
+            Self::Unhealthy => "unhealthy",
+            Self::StorageFull => "storage_full",
+        }
+    }
+
+    /// The status each code answers with — the code is the single
+    /// source of truth at every error site, so a site cannot pair a
+    /// code with a contradicting status. Codes sharing a status
+    /// (`no_context`/`no_source`/..., `overloaded`/`unhealthy`) are
+    /// exactly why the code exists. The extractor rejections are the
+    /// one exception: they keep axum's own status (400/413/415/422)
+    /// and pick the code FROM it — see [`AppJson`].
+    fn status(self) -> StatusCode {
+        match self {
+            Self::MalformedRequest | Self::InvalidArgument | Self::OverLimit => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::NoContext | Self::NoSource | Self::NoParagraph | Self::UnknownPath => {
+                StatusCode::NOT_FOUND
+            }
+            Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            Self::Timeout => StatusCode::REQUEST_TIMEOUT,
+            Self::AlreadyExists | Self::Conflict => StatusCode::CONFLICT,
+            Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::EmbeddingsUnconfigured => StatusCode::NOT_IMPLEMENTED,
+            Self::EmbeddingsFailed => StatusCode::BAD_GATEWAY,
+            Self::Overloaded | Self::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
+            Self::StorageFull => StatusCode::INSUFFICIENT_STORAGE,
+        }
+    }
+
+    /// The code an extractor rejection maps to, keyed on the status
+    /// axum chose: the body cap breach is its own kind (chunk the
+    /// payload); everything else is a request that never parsed.
+    fn for_rejection(status: StatusCode) -> Self {
+        if status == StatusCode::PAYLOAD_TOO_LARGE {
+            Self::PayloadTooLarge
+        } else {
+            Self::MalformedRequest
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct ApiError {
     status: &'static str,
+    code: &'static str,
     error: String,
     time: f64,
 }
 
 impl ApiError {
-    fn new(error: impl Into<String>, started_at: Instant) -> Self {
+    fn new(code: ErrorCode, error: impl Into<String>, started_at: Instant) -> Self {
         Self {
             status: "error",
+            code: code.as_str(),
             error: error.into(),
             time: started_at.elapsed().as_secs_f64(),
         }
@@ -58,17 +175,26 @@ fn ok<T: Serialize>(result: T, started_at: Instant) -> Response {
     (StatusCode::OK, Json(ApiResponse::ok(result, started_at))).into_response()
 }
 
-pub(crate) fn error(
+/// The one constructor every JSON error response goes through, status
+/// derived from the code. The extractor reshapes ([`AppJson`],
+/// [`AppQuery`], [`AppBytes`]) call [`coded`] instead, keeping axum's
+/// own rejection status.
+pub(crate) fn error(code: ErrorCode, message: impl Into<String>, started_at: Instant) -> Response {
+    coded(code.status(), code, message, started_at)
+}
+
+fn coded(
     status: StatusCode,
+    code: ErrorCode,
     message: impl Into<String>,
     started_at: Instant,
 ) -> Response {
-    (status, Json(ApiError::new(message, started_at))).into_response()
+    (status, Json(ApiError::new(code, message, started_at))).into_response()
 }
 
 fn not_found(name: &str, started_at: Instant) -> Response {
     error(
-        StatusCode::NOT_FOUND,
+        ErrorCode::NoContext,
         format!("context '{name}' not found"),
         started_at,
     )
@@ -100,8 +226,34 @@ where
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(request, state).await {
             Ok(Json(value)) => Ok(Self(value)),
-            Err(rejection) => Err(error(
+            Err(rejection) => Err(coded(
                 rejection.status(),
+                ErrorCode::for_rejection(rejection.status()),
+                rejection.body_text(),
+                Instant::now(),
+            )),
+        }
+    }
+}
+
+/// axum's Bytes extractor with its rejection reshaped into the
+/// [`ApiError`] body: the raw-body routes (import, and the
+/// optional-body handlers) answer a body-cap breach in the same one
+/// shape every other axis speaks, instead of axum's plain-text 413.
+pub struct AppBytes(pub axum::body::Bytes);
+
+impl<S> FromRequest<S> for AppBytes
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::body::Bytes::from_request(request, state).await {
+            Ok(bytes) => Ok(Self(bytes)),
+            Err(rejection) => Err(coded(
+                rejection.status(),
+                ErrorCode::for_rejection(rejection.status()),
                 rejection.body_text(),
                 Instant::now(),
             )),
@@ -126,8 +278,9 @@ where
     ) -> Result<Self, Self::Rejection> {
         match axum::extract::Query::<T>::from_request_parts(parts, state).await {
             Ok(axum::extract::Query(value)) => Ok(Self(value)),
-            Err(rejection) => Err(error(
+            Err(rejection) => Err(coded(
                 rejection.status(),
+                ErrorCode::for_rejection(rejection.status()),
                 rejection.body_text(),
                 Instant::now(),
             )),
@@ -139,7 +292,7 @@ where
 /// shape too, with a pointer at the self-describing endpoint.
 pub async fn unknown_path(method: Method, uri: Uri) -> Response {
     error(
-        StatusCode::NOT_FOUND,
+        ErrorCode::UnknownPath,
         format!("no route for {method} {uri}; GET /protocol lists the API"),
         Instant::now(),
     )
@@ -148,7 +301,7 @@ pub async fn unknown_path(method: Method, uri: Uri) -> Response {
 /// A known path hit with the wrong verb — same story, 405.
 pub async fn method_not_allowed(method: Method, uri: Uri) -> Response {
     error(
-        StatusCode::METHOD_NOT_ALLOWED,
+        ErrorCode::MethodNotAllowed,
         format!("{method} is not supported on {uri}; GET /protocol lists the API"),
         Instant::now(),
     )
@@ -193,22 +346,18 @@ fn access_error_noted(
 ) -> Response {
     match failure {
         AccessError::NotFound => error(
-            StatusCode::NOT_FOUND,
+            ErrorCode::NoContext,
             format!("{note}context '{name}' not found"),
             started_at,
         ),
         AccessError::Load(message) => {
             state.metrics().record_error(ErrorKind::Load);
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{note}{message}"),
-                started_at,
-            )
+            error(ErrorCode::Internal, format!("{note}{message}"), started_at)
         }
         AccessError::Unpersisted(message) => {
             state.metrics().record_error(ErrorKind::WalRefused);
             error(
-                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
                 format!("{note}write not persisted (nothing was applied): {message}"),
                 started_at,
             )
@@ -295,7 +444,7 @@ pub async fn flush_all(
         && scope.contexts.is_some()
     {
         return error(
-            StatusCode::FORBIDDEN,
+            ErrorCode::Forbidden,
             "flush is server-wide (it names every flushed context); a context-scoped \
              key cannot call it",
             started_at,
@@ -382,7 +531,7 @@ pub struct CreateContextRequest {
 pub async fn create_context(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    body: axum::body::Bytes,
+    AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
     let request: CreateContextRequest = match optional_body(&body, started_at) {
@@ -416,19 +565,19 @@ pub async fn create_context(
     match tokio::task::block_in_place(|| state.create(&name, meta)) {
         Ok(()) => ok(true, started_at),
         Err(CreateError::AlreadyExists) => error(
-            StatusCode::CONFLICT,
+            ErrorCode::AlreadyExists,
             format!("context '{name}' already exists"),
             started_at,
         ),
         Err(CreateError::InvalidName) => error(
-            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidArgument,
             "the context name must not be empty".to_string(),
             started_at,
         ),
         Err(CreateError::Io(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
-                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
                 format!("context '{name}' could not be persisted: {io_error}"),
                 started_at,
             )
@@ -477,7 +626,7 @@ pub async fn update_context(
         Some(Err(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
-                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
                 format!("metadata update not persisted: {io_error}"),
                 started_at,
             )
@@ -513,7 +662,7 @@ pub async fn delete_context(
                 Err(io_error) => {
                     state.metrics().record_error(ErrorKind::Io);
                     error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
+                        ErrorCode::Internal,
                         format!(
                             "context '{name}' removed but its files were not: {io_error} \
                              (a deletion marker remains; the next boot resumes the removal)"
@@ -540,7 +689,7 @@ pub async fn add_associations(
     // oversized batch is applied.
     if associations.len() > MAX_ASSOCIATIONS_PER_REQUEST {
         return error(
-            StatusCode::BAD_REQUEST,
+            ErrorCode::OverLimit,
             format!(
                 "batch of {} associations exceeds the per-request limit of \
                  {MAX_ASSOCIATIONS_PER_REQUEST}; split the ingest",
@@ -555,7 +704,7 @@ pub async fn add_associations(
     for (index, op) in associations.iter().enumerate() {
         if !op.weight.is_finite() || op.weight.abs() > MAX_ASSOCIATION_WEIGHT {
             return error(
-                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidArgument,
                 format!(
                     "associations[{index}].weight {} is outside the accepted range \
                      (finite, |weight| <= {MAX_ASSOCIATION_WEIGHT}); nothing was applied",
@@ -624,8 +773,16 @@ pub async fn add_associations(
             if partial.applied > 0 {
                 state.note_write(&name);
             }
+            // The capacity/conflict split every other batch write
+            // reports — association writes only fail on capacity
+            // today, but the mapping must not assume that.
+            let code = if partial.full {
+                ErrorCode::StorageFull
+            } else {
+                ErrorCode::Conflict
+            };
             error(
-                StatusCode::INSUFFICIENT_STORAGE,
+                code,
                 format!(
                     "applied {} of {total} associations, then: {}",
                     partial.applied, partial.message
@@ -672,7 +829,7 @@ const MAX_INPUT_ITEMS: usize = 1000;
 fn overlong(field: &str, len: usize, started_at: Instant) -> Option<Response> {
     (len > MAX_INPUT_ITEMS).then(|| {
         error(
-            StatusCode::BAD_REQUEST,
+            ErrorCode::OverLimit,
             format!(
                 "{field} carries {len} items, past the per-request limit of \
                  {MAX_INPUT_ITEMS}; split the request"
@@ -739,7 +896,7 @@ fn optional_body<T: Default + serde::de::DeserializeOwned>(
     }
     serde_json::from_slice(body).map_err(|parse| {
         Box::new(error(
-            StatusCode::BAD_REQUEST,
+            ErrorCode::MalformedRequest,
             format!("the request body is not valid JSON: {parse}"),
             started_at,
         ))
@@ -753,7 +910,7 @@ fn optional_body<T: Default + serde::de::DeserializeOwned>(
 fn oversized(what: &str, value: &str, cap: usize, started_at: Instant) -> Option<Response> {
     (value.len() > cap).then(|| {
         error(
-            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidArgument,
             format!(
                 "{what} is {} bytes, over the {cap}-byte cap; nothing was applied",
                 value.len()
@@ -771,7 +928,7 @@ fn oversized(what: &str, value: &str, cap: usize, started_at: Instant) -> Option
 fn empty(what: &str, value: &str, started_at: Instant) -> Option<Response> {
     value.is_empty().then(|| {
         error(
-            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidArgument,
             format!("{what} must not be empty; nothing was applied"),
             started_at,
         )
@@ -789,7 +946,7 @@ fn orphaned_source(
 ) -> Option<Response> {
     (!passages.contains_key(source)).then(|| {
         error(
-            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidArgument,
             format!("{what} for '{source}' arrived without a passage for it in this request"),
             started_at,
         )
@@ -1055,7 +1212,7 @@ pub async fn add_aliases(
     let pairs = request.concepts.len() + request.labels.len();
     if pairs > MAX_ASSOCIATIONS_PER_REQUEST {
         return error(
-            StatusCode::BAD_REQUEST,
+            ErrorCode::OverLimit,
             format!(
                 "batch of {pairs} aliases exceeds the per-request limit of \
                  {MAX_ASSOCIATIONS_PER_REQUEST}; split the ingest"
@@ -1105,13 +1262,13 @@ pub async fn add_aliases(
             if partial.applied > 0 {
                 state.note_write(&name);
             }
-            let status = if partial.full {
-                StatusCode::INSUFFICIENT_STORAGE
+            let code = if partial.full {
+                ErrorCode::StorageFull
             } else {
-                StatusCode::CONFLICT
+                ErrorCode::Conflict
             };
             error(
-                status,
+                code,
                 format!(
                     "applied {} aliases, then {}",
                     partial.applied, partial.message
@@ -1144,7 +1301,7 @@ pub async fn remove_aliases(
     // An empty withdrawal is a malformed request, not a silent no-op.
     if request.concepts.is_empty() && request.labels.is_empty() {
         return error(
-            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidArgument,
             "the request names no aliases to remove",
             started_at,
         );
@@ -1153,7 +1310,7 @@ pub async fn remove_aliases(
     let names = request.concepts.len() + request.labels.len();
     if names > MAX_ASSOCIATIONS_PER_REQUEST {
         return error(
-            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidArgument,
             format!(
                 "batch of {names} alias removals exceeds the per-request limit of \
                  {MAX_ASSOCIATIONS_PER_REQUEST}; split the request"
@@ -1188,13 +1345,13 @@ pub async fn remove_aliases(
             }
             // `full` is unreachable for removals (they free, never
             // fill), but the shared mapping stays uniform.
-            let status = if partial.full {
-                StatusCode::INSUFFICIENT_STORAGE
+            let code = if partial.full {
+                ErrorCode::StorageFull
             } else {
-                StatusCode::CONFLICT
+                ErrorCode::Conflict
             };
             error(
-                status,
+                code,
                 format!(
                     "removed {} aliases, then {}",
                     partial.applied, partial.message
@@ -1219,7 +1376,7 @@ pub async fn list_aliases(
             Some((kind @ ("concept" | "label"), alias)) => Some((kind == "label", alias)),
             _ => {
                 return error(
-                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidArgument,
                     "after must be 'concept:<alias>' or 'label:<alias>' — the last \
                      entry of the previous page",
                     started_at,
@@ -1349,7 +1506,7 @@ pub async fn store_passages(
         for spec in questions {
             if spec.question.len() > MAX_QUESTION_BYTES {
                 return error(
-                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidArgument,
                     format!(
                         "a question for '{source}' is {} bytes; questions are capped at \
                          {MAX_QUESTION_BYTES} bytes",
@@ -1372,7 +1529,7 @@ pub async fn store_passages(
             *count += 1;
             if *count > MAX_QUESTIONS_PER_PARAGRAPH {
                 return error(
-                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidArgument,
                     format!(
                         "paragraph {} of '{source}' carries more than \
                          {MAX_QUESTIONS_PER_PARAGRAPH} questions",
@@ -1395,7 +1552,7 @@ pub async fn store_passages(
         for spec in sections {
             if spec.section.len() > MAX_SECTION_BYTES {
                 return error(
-                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidArgument,
                     format!(
                         "a section label for '{source}' is {} bytes; section labels are \
                          capped at {MAX_SECTION_BYTES} bytes",
@@ -1462,7 +1619,7 @@ pub async fn store_passages(
         Some(Err(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
-                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
                 format!("passages could not be persisted: {io_error}"),
                 started_at,
             )
@@ -1511,7 +1668,7 @@ fn twin_pairs<S>(pairs: Vec<(String, String, S)>) -> Vec<TwinPair<S>> {
 pub async fn audit_vocabulary(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    body: axum::body::Bytes,
+    AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
     let request: VocabularyAuditRequest = match optional_body(&body, started_at) {
@@ -1579,9 +1736,9 @@ pub struct ImportOutcome {
     pub association_paragraphs_dropped: usize,
 }
 
-/// What a multi-batch `POST /import` stream accomplished — one
-/// [`ImportOutcome`] per batch, in stream order. Only streams answer
-/// this shape; a single-batch body keeps the original bare outcome.
+/// What a `POST /import` body accomplished — one [`ImportOutcome`] per
+/// batch, in stream order. Every import answers this shape, a
+/// single-batch body included: one shape to parse, not two.
 #[derive(Serialize)]
 pub struct ImportStreamOutcome {
     pub batches: Vec<ImportOutcome>,
@@ -1623,14 +1780,14 @@ fn import_refusal(
             access_error_noted(state, failure, &batch.context, note, started_at)
         }
         refusal @ crate::ingest::ApplyRefusal::NoContext(_) => error(
-            StatusCode::NOT_FOUND,
+            ErrorCode::NoContext,
             format!("{note}{}", refusal.text()),
             started_at,
         ),
         refusal @ crate::ingest::ApplyRefusal::Io(_) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
-                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
                 format!("{note}{}", refusal.text()),
                 started_at,
             )
@@ -1646,12 +1803,12 @@ fn import_refusal(
             if applied > 0 {
                 state.note_write(&batch.context);
             }
-            let status = if full {
-                StatusCode::INSUFFICIENT_STORAGE
+            let code = if full {
+                ErrorCode::StorageFull
             } else {
-                StatusCode::CONFLICT
+                ErrorCode::Conflict
             };
-            error(status, format!("{note}{message}"), started_at)
+            error(code, format!("{note}{message}"), started_at)
         }
     }
 }
@@ -1666,8 +1823,8 @@ fn import_refusal(
 /// as on any endpoint; embeddings ride the next flush
 /// (`TAGURU_EMBED_AUTO`) exactly as live writes do.
 ///
-/// A single-batch body answers with that batch's outcome; a stream
-/// answers `{batches: [...]}` in stream order. A refusal partway
+/// The response is `{batches: [...]}` in stream order — a single-batch
+/// body answers the same shape with one entry. A refusal partway
 /// through a stream stops there — the batches before it landed
 /// durably, and because every batch is retract-then-apply,
 /// re-POSTing the whole corrected stream is exact, never
@@ -1676,13 +1833,13 @@ pub async fn import_batch(
     State(state): State<AppState>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
-    body: axum::body::Bytes,
+    AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
     let batches = match crate::ingest::parse_batches(&body[..]) {
         Ok(batches) => batches,
         // Line-numbered, like the CLI's validation pass.
-        Err(message) => return error(StatusCode::BAD_REQUEST, message, started_at),
+        Err(message) => return error(ErrorCode::MalformedRequest, message, started_at),
     };
     // Import's contexts live in the BODY, out of the route-level
     // authorization check's reach — a context-scoped key is judged
@@ -1693,7 +1850,7 @@ pub async fn import_batch(
             .find(|batch| !scope.allows_context(&batch.context))
     {
         return error(
-            StatusCode::FORBIDDEN,
+            ErrorCode::Forbidden,
             format!(
                 "key '{}' has no grant on context '{}' (batch source '{}'); nothing \
                  was applied",
@@ -1752,16 +1909,11 @@ pub async fn import_batch(
         }
         Ok(outcomes)
     });
-    let mut outcomes = match outcome {
+    let outcomes = match outcome {
         Ok(outcomes) => outcomes,
         Err(refusal) => return *refusal,
     };
-    if total > 1 {
-        ok(ImportStreamOutcome { batches: outcomes }, started_at)
-    } else {
-        let outcome = outcomes.pop().expect("parse_batches refuses empty streams");
-        ok(outcome, started_at)
-    }
+    ok(ImportStreamOutcome { batches: outcomes }, started_at)
 }
 
 /// `POST /contexts/{name}/compact` — rebuild the image without the
@@ -1826,7 +1978,7 @@ pub async fn export_context(State(state): State<AppState>, Path(name): Path<Stri
             .into_response(),
         // A real source colliding with a reserved export id — the one
         // thing a context can hold that the stream cannot say.
-        Ok(Err(message)) => error(StatusCode::CONFLICT, message, started_at),
+        Ok(Err(message)) => error(ErrorCode::Conflict, message, started_at),
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
@@ -2300,7 +2452,7 @@ fn semantic_fallback(
         Some(Err(message)) => {
             tracing::warn!("semantic entry failed with nothing lexical to fall back on: {message}");
             Err(error(
-                StatusCode::BAD_GATEWAY,
+                ErrorCode::EmbeddingsFailed,
                 format!("semantic entry failed: {message}"),
                 started_at,
             ))
@@ -2371,7 +2523,7 @@ pub async fn refresh_embeddings(
     let started_at = Instant::now();
     if !state.embeddings_configured() {
         return error(
-            StatusCode::NOT_IMPLEMENTED,
+            ErrorCode::EmbeddingsUnconfigured,
             "no embedding provider is configured (set TAGURU_EMBED_URL and TAGURU_EMBED_MODEL)",
             started_at,
         );
@@ -2383,7 +2535,7 @@ pub async fn refresh_embeddings(
         Some(Ok(counts)) => counts,
         Some(Err(message)) => {
             return error(
-                StatusCode::BAD_GATEWAY,
+                ErrorCode::EmbeddingsFailed,
                 format!("embedding refresh failed: {message}"),
                 started_at,
             );
@@ -2424,7 +2576,7 @@ pub async fn refresh_embeddings(
         // is persisted — but the caller asked for a refresh and did not
         // fully get one; say so.
         Some(Err(message)) => error(
-            StatusCode::BAD_GATEWAY,
+            ErrorCode::EmbeddingsFailed,
             format!("passage embedding refresh failed partway (progress is saved): {message}"),
             started_at,
         ),

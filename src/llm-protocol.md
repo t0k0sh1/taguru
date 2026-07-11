@@ -248,14 +248,15 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/sources/retract` | `{source}` → withdraw that source's contributions (diff sync) |
 | POST | `/contexts/{name}/unreachable_from` | `{origins, limit?}` → `{total, matches}` unreachable associations |
 | POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?=0.6, cosine_floor?=0.6}` → spelling/synonym fork candidates |
-| GET | `/contexts/{name}/export` | the context as an import batch stream (JSON Lines body, not the JSON envelope) — one batch per source, create block first, aliases last; `POST /import` (or `taguru import`) restores it, per-source retract-then-apply |
+| GET | `/contexts/{name}/export` | the context as an import batch stream (JSON Lines body, not the JSON envelope) — one batch per source, create block first, aliases last; `POST /import` (or `taguru import`) restores it, per-source retract-then-apply, answering `{batches: [...]}` in stream order |
 | POST | `/contexts/{name}/compact` | rebuild the image without dead records (admin; the context's requests wait out the rebuild) → `{bytes_before, bytes_after, dead_edges, aliases_dropped}` |
 
 ## Auth
 
 - If the server sets `TAGURU_API_TOKEN`, every request except
-  `/health` and `/metrics` needs `Authorization: Bearer <token>`;
-  missing or wrong → `401` in the error shape below.
+  `/health`, `/live`, and `/metrics` needs
+  `Authorization: Bearer <token>`; missing or wrong → `401` in the
+  error shape below.
 - The MCP bridge (taguru-mcp) reads its own `TAGURU_API_TOKEN` and
   attaches it to every request — when the server turns auth on, set
   the same value on the bridge.
@@ -268,6 +269,21 @@ Source code takes the same discipline; only the naming changes.
   bind MCP tool calls exactly as raw HTTP.
 
 ## Errors and limits
+
+Every JSON error answers ONE shape:
+`{"status": "error", "code": "<kind>", "error": "<text>", "time": <s>}`.
+`error` is prose for you to read; `code` is the STABLE machine
+vocabulary to branch on (never match on message wording):
+`malformed_request` (the request never parsed: broken JSON, wrong
+Content-Type, mistyped shape) / `invalid_argument` (parsed, but a
+value was refused: empty or oversized name, bad weight, bad cursor) /
+`over_limit` (a batch or list over its per-request cap — split and
+resend) / `unauthorized` / `forbidden` / `no_context` / `no_source` /
+`no_paragraph` / `unknown_path` / `method_not_allowed` / `timeout` /
+`already_exists` / `conflict` / `payload_too_large` / `rate_limited` /
+`internal` / `embeddings_unconfigured` / `embeddings_failed` /
+`overloaded` (shed at the in-flight ceiling; wait `Retry-After`) /
+`unhealthy` (the write path is degraded) / `storage_full`.
 
 - `401` auth (above). `404` unknown context. `409` duplicate create /
   alias conflict.
@@ -286,7 +302,7 @@ Source code takes the same discipline; only the naming changes.
   passages go to sources, long knowledge gets decomposed; context
   name ≤ 64, description ≤ 4096). `408` timeout (default 30 s —
   narrow the query and retry). `413` body over the cap (default
-  8 MiB; this one answers in plain text, not the JSON error shape).
+  8 MiB).
   `429` this key is over its request budget — wait the `Retry-After`
   seconds and continue; prefer batching writes over rapid-fire calls.
 - Off-axis errors answer in the same shape: unknown path `404`, right
