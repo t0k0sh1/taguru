@@ -1338,7 +1338,10 @@ impl Context {
     /// `decay == 1.0` through dedicated relays, activation barely decays
     /// and the walk still covers whatever stays above the floor.
     pub fn activate(&self, origins: &[&str], decay: f64, limit: usize) -> (usize, Vec<Activation>) {
-        let decay = decay.clamp(0.0, 1.0);
+        // NaN must shrink every signal to nothing (like decay == 0.0),
+        // not propagate — clamp alone would let it through, since the
+        // score gate below is a `<=` that a NaN score never satisfies.
+        let decay = clamp_unit_or(decay, 0.0);
 
         let mut best: HashMap<ConceptId, f64> = HashMap::new();
         let mut parents: HashMap<ConceptId, ConceptId> = HashMap::new();
@@ -1512,7 +1515,7 @@ impl Context {
     ) -> Vec<Resolution> {
         let needle = normalize(cue);
         let mut resolutions: Vec<Resolution> = index
-            .resolve(cue, dice_floor.clamp(0.0, 1.0))
+            .resolve(cue, clamp_unit_or(dice_floor, 1.0))
             .into_iter()
             .map(|(id, (score, kind))| {
                 let name = name_of(self, id).to_string();
@@ -1554,7 +1557,7 @@ impl Context {
     /// value is not part of the persistent image, so whoever restores a
     /// context from bytes must re-apply it.
     pub fn set_dice_floor(&mut self, dice_floor: Option<f64>) {
-        self.dice_floor = dice_floor.map(|floor| floor.clamp(0.0, 1.0));
+        self.dice_floor = dice_floor.map(|floor| clamp_unit_or(floor, 1.0));
     }
 
     /// The full relation-label vocabulary in insertion order — the
@@ -1639,7 +1642,7 @@ impl Context {
         dice_floor: f64,
     ) -> Vec<(String, String, f64)> {
         index
-            .twins(dice_floor.clamp(0.0, 1.0))
+            .twins(clamp_unit_or(dice_floor, 1.0))
             .into_iter()
             .map(|(a, b, dice)| {
                 (
@@ -2451,6 +2454,24 @@ struct EntrySpan {
 /// context via [`Context::set_dice_floor`] and per call via
 /// [`Context::resolve_with_floor`].
 const DICE_FLOOR: f64 = 0.3;
+
+/// `f64::clamp` returns NaN when `self` is NaN — it clamps the RANGE,
+/// not the value — so every "clamped into [0, 1]" call site below fed
+/// a bare `.clamp(0.0, 1.0)` a NaN straight through. A NaN decay then
+/// makes every downstream `<= 0.0` / `< floor` comparison false rather
+/// than true, flipping fail-closed filters open (or, for `activate`'s
+/// score gate, leaving a phantom zero-strength entry where "no signal"
+/// should have skipped it outright). `nan_fallback` lets each call site
+/// pick the safe side: 0.0 where the floor is a shrink-to-nothing decay
+/// (no propagation beats fabricated propagation), 1.0 where it is an
+/// admission floor (excluding everything beats flooding with noise).
+fn clamp_unit_or(value: f64, nan_fallback: f64) -> f64 {
+    if value.is_nan() {
+        nan_fallback
+    } else {
+        value.clamp(0.0, 1.0)
+    }
+}
 
 impl EntryIndex {
     fn push(&mut self, spelling: &str, target: u32) {
@@ -3463,6 +3484,23 @@ mod tests {
         let _ = context.associate("A", "rel", "B", f64::NAN);
     }
 
+    /// `f64::clamp` returns NaN when `self` is NaN, so a bare
+    /// `.clamp(0.0, 1.0)` on a NaN decay would leave the score gate's
+    /// `score <= 0.0` comparison false for every edge (NaN compares
+    /// false against everything) — never skipping, so every edge would
+    /// settle with a NaN strength that `total_cmp` then sorts as the
+    /// maximum. A NaN decay must instead shrink every signal to
+    /// nothing, exactly like `decay == 0.0`.
+    #[test]
+    fn activate_treats_a_nan_decay_as_no_signal() {
+        let mut context = Context::default();
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+
+        let (total, matches) = context.activate(&["私"], f64::NAN, 10);
+        assert_eq!(total, 0);
+        assert!(matches.is_empty());
+    }
+
     /// A self-loop sits in both the outgoing and the incoming chain of
     /// its one endpoint; an unfiltered fan-out sum counted it twice,
     /// diluting every neighbor's propagated activation as if the loop
@@ -4157,6 +4195,45 @@ mod tests {
         assert!(context.resolve(cue).iter().any(|r| r.name == "青嶺酒造"));
         context.set_dice_floor(None);
         assert!(!context.resolve(cue).iter().any(|r| r.name == "青嶺酒造"));
+    }
+
+    /// `set_dice_floor` clamps into [0, 1] via the same helper as
+    /// `activate`'s decay, but a NaN floor here must land on 1.0 (the
+    /// strictest admission bar), not 0.0: excluding every fuzzy match
+    /// beats admitting every one of them.
+    #[test]
+    fn set_dice_floor_maps_nan_to_the_strictest_floor() {
+        let mut context = Context::default();
+        context.set_dice_floor(Some(f64::NAN));
+        assert_eq!(context.dice_floor(), 1.0);
+    }
+
+    /// `EntryIndex::twins` excludes a candidate pair with `if dice <
+    /// dice_floor { continue; }` — a bare `.clamp(0.0, 1.0)` lets a NaN
+    /// floor through unchanged, and `dice < NaN` is false for every
+    /// dice score, so the exclusion would never fire: every pair in the
+    /// namespace, however dissimilar, would flood out as a "similar"
+    /// candidate. Mapping NaN onto the strictest floor (1.0) keeps the
+    /// filter fail-closed instead.
+    #[test]
+    fn similar_concepts_treats_a_nan_floor_as_the_strictest_admission_bar() {
+        let mut context = Context::default();
+        context.associate("青嶺酒造", "分類", "酒蔵", 1.0).unwrap();
+        context.associate("青嶺酒蔵", "分類", "酒蔵", 1.0).unwrap();
+        let is_the_pair = |pairs: &[(String, String, f64)]| {
+            pairs.iter().any(|(a, b, _)| {
+                (a == "青嶺酒造" && b == "青嶺酒蔵") || (a == "青嶺酒蔵" && b == "青嶺酒造")
+            })
+        };
+
+        // The two spellings share 2 of 3 informative bigrams each:
+        // Dice = 2·2/(3+3) ≈ 0.667 — admitted by a lax floor ...
+        assert!(is_the_pair(&context.similar_concepts(0.5)));
+        // ... excluded by a floor stricter than their score ...
+        assert!(!is_the_pair(&context.similar_concepts(1.0)));
+        // ... and a NaN floor must exclude it the same way, not flood
+        // it back in the way an unclamped `dice < NaN` comparison would.
+        assert!(!is_the_pair(&context.similar_concepts(f64::NAN)));
     }
 
     #[test]
