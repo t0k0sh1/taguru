@@ -49,6 +49,11 @@ jobs:
           context: .
           platforms: linux/${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Every pushed image carries its bill of materials and a
+          # max-detail provenance attestation — what went in, built
+          # where, from which commit.
+          sbom: true
+          provenance: mode=max
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
@@ -70,6 +75,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       packages: write
+      # Keyless signing: the OIDC token IS the identity cosign binds
+      # the signature to (this workflow, this repo, this ref).
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -98,3 +106,14 @@ jobs:
             $(printf "$IMAGE@sha256:%s " *)
       - name: Verify the published manifest
         run: docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
+      # Sign the manifest-list digest keylessly (Sigstore): consumers
+      # verify with
+      #   cosign verify ghcr.io/t0k0sh1/taguru:TAG \
+      #     --certificate-identity-regexp 'github.com/t0k0sh1/taguru' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign the published manifest
+        run: |
+          digest="$(docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}" \
+            --format '{{json .Manifest}}' | jq -r .digest)"
+          cosign sign --yes "$IMAGE@$digest"

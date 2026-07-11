@@ -1,0 +1,28 @@
+# Taguru under docker compose — one writer, one named volume, the
+# probes the image ships with.
+#
+#   TAGURU_API_TOKENS='ops:CHANGE-ME' docker compose up -d
+#
+# The port stays on loopback: expose it beyond this host only behind
+# a TLS-terminating reverse proxy (a bearer token is the whole
+# credential), and set TAGURU_RATE_LIMIT_PER_MIN when you do.
+services:
+  taguru:
+    image: ghcr.io/t0k0sh1/taguru:0.1.0 # pin; `latest` moves
+    ports:
+      - "127.0.0.1:8248:8248"
+    environment:
+      TAGURU_API_TOKENS: ${TAGURU_API_TOKENS:?set TAGURU_API_TOKENS=name:token}
+      # Scope keys, budgets, and the embedding tier live here too —
+      # `taguru --help` lists every knob; `--env-file` reads the same
+      # KEY=VALUE file `taguru --config` does.
+    volumes:
+      - taguru-data:/data
+    read_only: true # /data is the only write target
+    restart: unless-stopped
+    # `docker stop` is a graceful shutdown (flush + usage sweep); give
+    # a large flush a moment before the kill.
+    stop_grace_period: 30s
+
+volumes:
+  taguru-data:

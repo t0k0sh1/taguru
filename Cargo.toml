@@ -8,8 +8,9 @@ repository = "https://github.com/t0k0sh1/taguru"
 readme = "README.md"
 keywords = ["llm", "memory", "mcp", "knowledge-graph", "semantic-memory"]
 categories = ["database-implementations", "web-programming::http-server"]
-# docs/ is the GitHub Pages site — nothing in src/ or tests/ reads it.
-exclude = ["/docs", "/.github", "/Dockerfile", "/.dockerignore"]
+# docs/ is the GitHub Pages site, deploy/ the operator manifests —
+# nothing in src/ or tests/ reads either.
+exclude = ["/docs", "/deploy", "/.github", "/Dockerfile", "/.dockerignore"]
 
 [dependencies]
 axum = "0.8.9"
