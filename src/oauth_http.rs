@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Form, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -300,7 +300,27 @@ fn consent_form(client_name: &str, params: &AuthorizeParams, error: Option<&str>
         ccm = hidden("code_challenge_method", &params.code_challenge_method),
         res = hidden("resource", &params.resource),
     );
-    Html(page).into_response()
+    // The one credential-collecting HTML page the server renders gets
+    // the browser hardening the JSON API never needs: no framing (the
+    // classic clickjacking target is exactly a password form), no
+    // scripts or external loads (the page carries only inline style),
+    // the form posts to this origin alone, and the URL — which holds
+    // the OAuth state — never rides a Referer out.
+    let mut response = Html(page).into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; \
+             frame-ancestors 'none'; base-uri 'none'",
+        ),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 #[derive(Deserialize)]
@@ -388,6 +408,23 @@ mod tests {
     fn query_separator_opens_or_extends_the_redirect_query() {
         assert_eq!(query_separator("https://app/cb"), '?');
         assert_eq!(query_separator("https://app/cb?tenant=x"), '&');
+    }
+
+    /// The consent page is the one credential-collecting HTML the
+    /// server renders — it must refuse framing (clickjacking on a
+    /// password form), lock sources down to its own inline style, and
+    /// keep the OAuth state out of Referer headers.
+    #[test]
+    fn the_consent_form_carries_browser_hardening_headers() {
+        let params = params_with("https://app/cb", "s");
+        let response = consent_form("claude", &params, None);
+        let headers = response.headers();
+        assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
+        let csp = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        assert!(csp.contains("default-src 'none'"), "{csp}");
+        assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+        assert!(csp.contains("form-action 'self'"), "{csp}");
+        assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
     }
 
     /// A redirect_uri that already carries a query gets the OAuth

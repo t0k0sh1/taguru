@@ -153,19 +153,28 @@ impl HttpEmbeddings {
             request = request.set("Authorization", &format!("Bearer {key}"));
         }
         let body = serde_json::json!({ "model": self.model, "input": texts });
+        // The messages deliberately omit ureq's own Display, which
+        // embeds the provider URL: these strings travel to CLIENTS in
+        // 502 bodies (refresh, resolve's semantic tier), and the
+        // endpoint an operator configured is infrastructure detail,
+        // not client business. The status code / transport kind is
+        // what a caller can act on.
         let response = request.send_string(&body.to_string()).map_err(|error| {
-            let retryable = match &error {
+            let (message, retryable) = match &error {
                 // Overload and server-side failure answer differently
                 // in a moment; a 4xx refusal does not.
-                ureq::Error::Status(code, _) => *code == 429 || *code >= 500,
+                ureq::Error::Status(code, _) => (
+                    format!("embedding provider answered HTTP {code}"),
+                    *code == 429 || *code >= 500,
+                ),
                 // Dropped connections and timeouts are the blip the
                 // retries exist for.
-                ureq::Error::Transport(_) => true,
+                ureq::Error::Transport(transport) => (
+                    format!("embedding provider unreachable ({})", transport.kind()),
+                    true,
+                ),
             };
-            Refusal {
-                message: format!("embedding request failed: {error}"),
-                retryable,
-            }
+            Refusal { message, retryable }
         })?;
         self.decode(response, texts).map_err(hard)
     }

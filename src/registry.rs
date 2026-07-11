@@ -2715,7 +2715,7 @@ impl AppState {
 
         let stem = file_stem(name);
         let image = image_path(&self.0.data_dir, &stem);
-        let staged = match stage_bytes(&image, &bytes) {
+        let staged = match stage_bytes(&image, &bytes, false) {
             Ok(staged) => staged,
             Err(error) => {
                 tracing::warn!("flush of context '{name}' failed (will retry): {error}");
@@ -3802,7 +3802,20 @@ fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
 /// without that a crash can forget the rename even though the file
 /// contents reached disk.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let staged = stage_bytes(path, bytes)?;
+    write_atomic_with(path, bytes, false)
+}
+
+/// [`write_atomic`] for secret-bearing files (the OAuth grant store):
+/// the staged file drops to owner-only permissions BEFORE any content
+/// lands in it, and the rename carries the mode to the final name —
+/// no moment exists where another local account could read the bytes.
+/// Non-Unix platforms have no mode bits and get the plain behavior.
+pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_with(path, bytes, true)
+}
+
+fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
+    let staged = stage_bytes(path, bytes, private)?;
     let result = commit_staged(&staged, path);
     if result.is_err() {
         // A failed rename leaves `staged` sitting under its temporary
@@ -3830,11 +3843,18 @@ fn staging_path(path: &Path) -> PathBuf {
 /// The heavy half of [`write_atomic`]: writes and fsyncs `bytes` under
 /// a staging name beside `path`. Safe to run without any lock — the
 /// file is invisible until [`commit_staged`] publishes it.
-fn stage_bytes(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Result<PathBuf> {
     use std::io::Write;
 
+    #[cfg(not(unix))]
+    let _ = private;
     let staged = staging_path(path);
     let write = fs::File::create(&staged).and_then(|mut file| {
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(bytes)?;
         file.sync_all()
     });
@@ -5518,6 +5538,28 @@ mod tests {
             })
             .count();
         assert_eq!(leftovers, 0, "staging files must not survive a commit");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The private variant owns its bytes from the first write: the
+    /// mode is set on the staged file before content lands, and the
+    /// rename carries it to the final name.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_private_lands_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("atomic-private");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.json");
+        write_atomic_private(&path, b"{}").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "mode {mode:o}");
+        // Re-persisting keeps the tightened mode.
+        write_atomic_private(&path, b"{\"v\":2}").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "mode {mode:o}");
 
         let _ = fs::remove_dir_all(dir);
     }
