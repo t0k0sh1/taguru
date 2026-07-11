@@ -413,6 +413,10 @@ taguru estimate --associations 1_000_000      # memory/disk sizing for a target 
                                               # MEASURES it (latency: see benchmark)
 ```
 
+Library-level usage examples live in [examples/](examples/) — one
+directory per example, each with its own README saying what it
+demonstrates and what to look for in the output.
+
 `tests/qa_recall.rs` is the retrieval-quality regression floor: 11
 questions against a fictional corpus (covering typo entry, full-width
 entry, aliases, two-hop composition, negation, and corroboration) must

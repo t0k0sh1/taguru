@@ -1,5 +1,5 @@
 //! QA golden set over the fictional 青嶺酒造 corpus (the same five
-//! paragraphs as examples/paragraph_corpus.rs, ground truth fully
+//! paragraphs as examples/paragraph_corpus/main.rs, ground truth fully
 //! known). Each question carries the cues an LLM client would extract
 //! from its wording and the facts needed to answer it; retrieval runs
 //! the documented loop mechanically — resolve every cue (concepts and

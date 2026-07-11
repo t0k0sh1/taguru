@@ -231,7 +231,7 @@
     <h2>配布物とサイジング</h2>
     <ul>
       <li><b>Dockerイメージは<code>scratch</code>にバイナリ1枚</b>：muslの静的リンクで〜13 MB。シェルなし、libcなし、CAバンドルなし（TLSルートはバイナリに焼き込み）。HEALTHCHECKは <code>taguru health</code>——バイナリの自己プローブ。uid 65532、<code>--read-only</code> 可。</li>
-      <li><b>サイジングは測る</b>：<code>taguru estimate --associations 1_000_000</code> が目標規模のコンテキストを実際に組み立てて<b>実測</b>する。レイテンシは <code>cargo run --release --example benchmark</code>（10万/100万件での操作別計測）——ただしexamplesは現在整理中。</li>
+      <li><b>サイジングは測る</b>：<code>taguru estimate --associations 1_000_000</code> が目標規模のコンテキストを実際に組み立てて<b>実測</b>する。レイテンシは <code>cargo run --release --example benchmark</code>（10万/100万件での操作別計測。examples/ には例ごとのREADMEがある）。</li>
     </ul>
     <p class="note">
       各判断の一次資料はソースのモジュールコメント：
