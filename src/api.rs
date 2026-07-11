@@ -967,12 +967,24 @@ pub struct AliasRequest {
     pub labels: BTreeMap<String, String>,
 }
 
-/// The full alias vocabulary of one context — the exportable unit for
-/// bulk workflows (dump names, translate, re-import).
+/// One page of the alias table: `total` counts BOTH namespaces before
+/// paging, the maps carry this page's entries. The page cursor spans
+/// the namespaces in order — concepts (sorted by alias), then labels —
+/// so the next page starts after the last entry shown:
+/// `?after=concept:<alias>` or `?after=label:<alias>`.
 #[derive(Serialize)]
 pub struct AliasExport {
+    pub total: usize,
     pub concepts: BTreeMap<String, String>,
     pub labels: BTreeMap<String, String>,
+}
+
+/// `?limit=&after=` — the keyset page every unbounded listing takes
+/// (default and ceiling [`MAX_MATCH_LIMIT`], like the directory).
+#[derive(Debug, Deserialize)]
+pub struct KeysetQuery {
+    pub limit: Option<usize>,
+    pub after: Option<String>,
 }
 
 pub async fn add_aliases(
@@ -1137,19 +1149,70 @@ pub async fn remove_aliases(
     }
 }
 
-pub async fn list_aliases(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+pub async fn list_aliases(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    AppQuery(query): AppQuery<KeysetQuery>,
+) -> Response {
     let started_at = Instant::now();
-    match state.read_context(&name, |context| AliasExport {
-        concepts: context
+    // The cursor names a namespace and an alias; anything else is a
+    // malformed request, not an empty page.
+    let after = match query.after.as_deref() {
+        None => None,
+        Some(cursor) => match cursor.split_once(':') {
+            Some((kind @ ("concept" | "label"), alias)) => Some((kind == "label", alias)),
+            _ => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "after must be 'concept:<alias>' or 'label:<alias>' — the last \
+                     entry of the previous page",
+                    started_at,
+                );
+            }
+        },
+    };
+    let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    match state.read_context(&name, |context| {
+        let mut concepts: Vec<(String, String)> = context
             .concept_aliases()
             .into_iter()
             .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
-            .collect(),
-        labels: context
+            .collect();
+        concepts.sort();
+        let mut labels: Vec<(String, String)> = context
             .label_aliases()
             .into_iter()
             .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
-            .collect(),
+            .collect();
+        labels.sort();
+        let total = concepts.len() + labels.len();
+        // One ordered sequence — concepts, then labels — filtered past
+        // the cursor and cut at the limit, then split back into maps.
+        let page: Vec<(bool, (String, String))> = concepts
+            .into_iter()
+            .map(|entry| (false, entry))
+            .chain(labels.into_iter().map(|entry| (true, entry)))
+            .filter(|(is_label, (alias, _))| match after {
+                None => true,
+                Some((after_is_label, after_alias)) => {
+                    (*is_label, alias.as_str()) > (after_is_label, after_alias)
+                }
+            })
+            .take(limit)
+            .collect();
+        let mut export = AliasExport {
+            total,
+            concepts: BTreeMap::new(),
+            labels: BTreeMap::new(),
+        };
+        for (is_label, (alias, canonical)) in page {
+            if is_label {
+                export.labels.insert(alias, canonical);
+            } else {
+                export.concepts.insert(alias, canonical);
+            }
+        }
+        export
     }) {
         Ok(result) => ok(result, started_at),
         Err(failure) => access_error(&state, failure, &name, started_at),
@@ -2287,14 +2350,37 @@ pub async fn refresh_embeddings(
     }
 }
 
-pub async fn labels(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+/// One page of the relation vocabulary, keyset by label — the
+/// vocabulary is client-minted, so like every listing it pages
+/// instead of promising to fit in one response.
+#[derive(Serialize)]
+pub struct LabelPage {
+    pub total: usize,
+    pub labels: Vec<String>,
+}
+
+pub async fn labels(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    AppQuery(query): AppQuery<KeysetQuery>,
+) -> Response {
     let started_at = Instant::now();
+    let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     match state.read_context(&name, |context| {
-        context
-            .labels()
+        let mut labels: Vec<String> = context.labels().into_iter().map(String::from).collect();
+        labels.sort();
+        let total = labels.len();
+        let labels: Vec<String> = labels
             .into_iter()
-            .map(String::from)
-            .collect::<Vec<String>>()
+            .filter(|label| {
+                query
+                    .after
+                    .as_deref()
+                    .is_none_or(|after| label.as_str() > after)
+            })
+            .take(limit)
+            .collect();
+        LabelPage { total, labels }
     }) {
         Ok(result) => ok(result, started_at),
         Err(failure) => access_error(&state, failure, &name, started_at),

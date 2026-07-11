@@ -323,8 +323,15 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_sources",
-            "Source ids with registered passages — targets for retract_source / lookup_passages, inventory for diff sync.",
-            object_schema(json!({ "context": context }), &["context"]),
+            "Source ids with registered passages — targets for retract_source / lookup_passages, inventory for diff sync. Keyset-paged by id; total above the returned count means more pages.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "limit": { "type": "integer", "minimum": 0, "description": "page size (default/ceiling 1000)" },
+                    "after": { "type": "string", "description": "only ids sorting strictly after this one" }
+                }),
+                &["context"],
+            ),
         ),
         (
             "resolve",
@@ -416,13 +423,27 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_labels",
-            "The full relation vocabulary (canonical only). Read it before extracting to avoid spelling forks.",
-            object_schema(json!({ "context": context }), &["context"]),
+            "The relation vocabulary (canonical only). Read it before extracting to avoid spelling forks. Keyset-paged by label; total above the returned count means more pages.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "limit": { "type": "integer", "minimum": 0, "description": "page size (default/ceiling 1000)" },
+                    "after": { "type": "string", "description": "only labels sorting strictly after this one" }
+                }),
+                &["context"],
+            ),
         ),
         (
             "get_aliases",
-            "Export registered aliases (alias → canonical).",
-            object_schema(json!({ "context": context }), &["context"]),
+            "Registered aliases (alias → canonical), paged across both namespaces — concepts first, then labels. total above the returned count means more pages; continue with after = 'concept:<alias>' or 'label:<alias>' (the last entry shown).",
+            object_schema(
+                json!({
+                    "context": context,
+                    "limit": { "type": "integer", "minimum": 0, "description": "page size (default/ceiling 1000)" },
+                    "after": { "type": "string", "description": "'concept:<alias>' or 'label:<alias>' — the last entry of the previous page" }
+                }),
+                &["context"],
+            ),
         ),
         (
             "add_aliases",
@@ -588,7 +609,15 @@ pub fn route_tool(
             format!("{}/sources/lookup", context_path("context")?),
             Some(pick(arguments, &["sources"])),
         ),
-        "list_sources" => ("GET", format!("{}/sources", context_path("context")?), None),
+        "list_sources" => (
+            "GET",
+            format!(
+                "{}/sources{}",
+                context_path("context")?,
+                query_string(arguments, &["limit", "after"])
+            ),
+            None,
+        ),
         "resolve" => (
             "POST",
             format!("{}/resolve", context_path("context")?),
@@ -630,8 +659,24 @@ pub fn route_tool(
             format!("{}/explore", context_path("context")?),
             Some(pick(arguments, &["origins", "max_depth", "limit"])),
         ),
-        "list_labels" => ("GET", format!("{}/labels", context_path("context")?), None),
-        "get_aliases" => ("GET", format!("{}/aliases", context_path("context")?), None),
+        "list_labels" => (
+            "GET",
+            format!(
+                "{}/labels{}",
+                context_path("context")?,
+                query_string(arguments, &["limit", "after"])
+            ),
+            None,
+        ),
+        "get_aliases" => (
+            "GET",
+            format!(
+                "{}/aliases{}",
+                context_path("context")?,
+                query_string(arguments, &["limit", "after"])
+            ),
+            None,
+        ),
         "add_aliases" => (
             "POST",
             format!("{}/aliases", context_path("context")?),

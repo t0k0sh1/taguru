@@ -10,8 +10,8 @@ use crate::metrics::{ErrorKind, SearchOp};
 use crate::registry::{AppState, CitationLookup};
 
 use super::{
-    AppJson, MAX_MATCH_LIMIT, access_error, clamp, error, not_found, ok, overlong,
-    search_log_enabled,
+    AppJson, AppQuery, KeysetQuery, MAX_MATCH_LIMIT, access_error, clamp, error, not_found, ok,
+    overlong, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -114,11 +114,38 @@ pub async fn citation(
     }
 }
 
-pub async fn list_sources(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+/// One page of registered source ids, keyset by id — the list grows
+/// with every ingested document, so it pages like the directory.
+#[derive(Serialize)]
+pub struct SourcePage {
+    pub total: usize,
+    pub sources: Vec<String>,
+}
+
+pub async fn list_sources(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    AppQuery(query): AppQuery<KeysetQuery>,
+) -> Response {
     let started_at = Instant::now();
+    let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     match state.passage_sources(&name) {
         None => not_found(&name, started_at),
-        Some(Ok(sources)) => ok(sources, started_at),
+        Some(Ok(mut sources)) => {
+            sources.sort();
+            let total = sources.len();
+            let sources: Vec<String> = sources
+                .into_iter()
+                .filter(|source| {
+                    query
+                        .after
+                        .as_deref()
+                        .is_none_or(|after| source.as_str() > after)
+                })
+                .take(limit)
+                .collect();
+            ok(SourcePage { total, sources }, started_at)
+        }
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
     }
 }

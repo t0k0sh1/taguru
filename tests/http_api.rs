@@ -1047,7 +1047,7 @@ fn full_retrieval_loop_over_http() {
         }})),
     );
     let sources = server.ok("GET", "/contexts/sake/sources", None);
-    assert_eq!(sources, json!(["第2段落"]));
+    assert_eq!(sources, json!({"total": 1, "sources": ["第2段落"]}));
 
     // recall/query pages carry totals; query takes OR-sets per position.
     let page = server.ok(
@@ -4700,4 +4700,88 @@ fn live_answers_unauthenticated_even_with_auth_on() {
     let (status, body) = server.call("GET", "/live", None);
     assert_eq!(status, 200);
     assert_eq!(body, json!("ok"));
+}
+
+/// The three collection listings page like the directory: keyset
+/// cursors, a total that tells the whole story, and — for aliases —
+/// one cursor spanning both namespaces, concepts first.
+#[test]
+fn labels_aliases_and_sources_page_with_keyset_cursors() {
+    let server = Server::start("http-keyset-pages");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "a.md"},
+            {"subject": "蔵", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "a.md"},
+            {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "b.md"},
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"a.md": "本文。", "b.md": "本文。", "c.md": "本文。"}})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/aliases",
+        Some(json!({
+            "concepts": {"Aomine": "青嶺", "Kura": "蔵"},
+            "labels": {"establishment": "創業年"},
+        })),
+    );
+
+    // labels: sorted, paged, total constant across pages.
+    let first = server.ok("GET", "/contexts/sake/labels?limit=2", None);
+    assert_eq!(first["total"], json!(3), "{first}");
+    assert_eq!(first["labels"].as_array().unwrap().len(), 2);
+    let last = first["labels"][1].as_str().unwrap();
+    let second = server.ok(
+        "GET",
+        &format!("/contexts/sake/labels?after={}", urlencode(last)),
+        None,
+    );
+    assert_eq!(second["total"], json!(3));
+    assert_eq!(second["labels"].as_array().unwrap().len(), 1);
+
+    // sources: keyset by id.
+    let first = server.ok("GET", "/contexts/sake/sources?limit=2", None);
+    assert_eq!(first["total"], json!(3), "{first}");
+    assert_eq!(first["sources"], json!(["a.md", "b.md"]), "{first}");
+    let second = server.ok("GET", "/contexts/sake/sources?after=b.md", None);
+    assert_eq!(second["sources"], json!(["c.md"]), "{second}");
+
+    // aliases: one cursor across both namespaces, concepts first.
+    let first = server.ok("GET", "/contexts/sake/aliases?limit=2", None);
+    assert_eq!(first["total"], json!(3), "{first}");
+    assert_eq!(
+        first["concepts"],
+        json!({"Aomine": "青嶺", "Kura": "蔵"}),
+        "{first}"
+    );
+    assert_eq!(first["labels"], json!({}), "{first}");
+    let second = server.ok("GET", "/contexts/sake/aliases?after=concept:Kura", None);
+    assert_eq!(second["concepts"], json!({}), "{second}");
+    assert_eq!(
+        second["labels"],
+        json!({"establishment": "創業年"}),
+        "{second}"
+    );
+    // A malformed cursor is a 400, not an empty page.
+    let (status, refusal) = server.call("GET", "/contexts/sake/aliases?after=bogus", None);
+    assert_eq!(status, 400, "{refusal}");
+}
+
+/// Percent-encodes one query value the way ureq will not do for us.
+fn urlencode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }
