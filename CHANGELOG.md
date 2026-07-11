@@ -47,6 +47,19 @@ Entries that change an on-disk format or a response shape say so.
 - Pinned contexts preload in parallel at boot.
 - Deployment examples under `deploy/` (Kubernetes, docker-compose)
   matching the documented single-writer model.
+- `examples/http_benchmark`: concurrent load against a running server
+  — throughput and p50/p95/p99 per phase (seed writes, reads, a 90/10
+  mix), the capacity-planning companion to the library benchmark.
+- The protocol doc states the compatibility policy: no `/v1` (the
+  protocol travels with the server), additive responses parsed
+  tolerantly, pre-1.0 shape changes announced here.
+
+### Fixed
+- A failed `DELETE /contexts/{name}` unlink could leak the context's
+  sidecar files forever — or, if `.ctx` itself survived, resurrect
+  the context at the next boot. Deletion now writes a durable
+  `.deleted` marker first, and boot resumes any deletion it finds a
+  marker for.
 
 ### Changed
 - **Response shapes** (pre-1.0 break): `GET /contexts/{name}/labels`,
