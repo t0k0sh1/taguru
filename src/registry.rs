@@ -1192,6 +1192,11 @@ impl AppState {
             pvectors_path(&self.0.data_dir, &stem),
             bm25_path(&self.0.data_dir, &stem),
             vectors_path(&self.0.data_dir, &stem),
+            // A leftover marker from an earlier delete that could not
+            // finish MUST go before this new generation of files
+            // lands — otherwise the next boot's resume-sweep sees the
+            // marker and deletes the context we are creating right now.
+            deleted_marker_path(&self.0.data_dir, &stem),
         ] {
             if let Err(error) = fs::remove_file(&stale)
                 && error.kind() != io::ErrorKind::NotFound
@@ -1249,7 +1254,7 @@ impl AppState {
         // next start, and a surviving `.ctx` can never resurrect a
         // context the API reported gone. Written before the first
         // unlink; removed only after the last one succeeds.
-        let marker = self.0.data_dir.join(format!("{stem}.deleted"));
+        let marker = deleted_marker_path(&self.0.data_dir, &stem);
         if let Err(error) = write_atomic(&marker, b"") {
             tracing::warn!(context = %name, %error, "deletion marker not persisted; a partial delete would not resume at boot");
         }
@@ -3722,6 +3727,15 @@ pub(crate) fn wal_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.wal.jsonl"))
 }
 
+/// The durable-deletion marker: while it exists, boot resumes the
+/// unlinks (see `delete`/`scan_data_dir`). One builder so the writer,
+/// the boot sweep, and the create-time cleanup can never disagree
+/// about its name — a stale marker beside a freshly recreated context
+/// would otherwise make the next boot delete the new context.
+pub(crate) fn deleted_marker_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.deleted"))
+}
+
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x1_0000_01b3;
 
@@ -4307,6 +4321,56 @@ mod tests {
             !dir.join("sake.deleted").exists(),
             "the marker leaves once the family did"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The dangerous interleaving: a delete leaves a marker behind
+    /// (partial failure), the SAME running server recreates the
+    /// context, and a later restart must NOT let the stale marker
+    /// destroy the freshly created files. create() clears the marker.
+    #[test]
+    fn recreating_a_context_clears_a_stale_deletion_marker() {
+        let dir = scratch_dir("deleted-recreate");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.delete("sake");
+            // Simulate the failure mode delete() cannot fully guard: its
+            // unlink loop errored before removing the marker, so the
+            // marker survives on disk while the name is free again.
+            fs::write(deleted_marker_path(&dir, "sake"), b"").unwrap();
+            // The same server recreates the context; create() must clear
+            // that stale marker so the next boot does not resume it.
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "recreate")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+        assert!(
+            !dir.join("sake.deleted").exists(),
+            "recreate must clear the stale marker"
+        );
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            state.directory_entry("sake").is_some(),
+            "the recreated context must survive the restart"
+        );
+        let count = state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(count, 1, "its data must be intact");
         let _ = fs::remove_dir_all(&dir);
     }
 
