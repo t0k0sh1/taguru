@@ -77,6 +77,16 @@ jobs:
         run: python -m pytest sdk/python-langchain/tests -q
         env:
           TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru
+      # The use-case examples double as end-to-end smoke tests: each spawns
+      # the real binary and runs offline on canned fake chat models.
+      - name: Run examples
+        run: |
+          for main in examples/langchain/*/python/main.py; do
+            echo "--- $main"
+            python "$main"
+          done
+        env:
+          TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru
 
   typescript:
     needs: build-server
@@ -95,8 +105,10 @@ jobs:
       - name: Install workspace
         run: npm install --no-fund --no-audit
         working-directory: sdk
-      - name: Build core package (langchain-taguru consumes its dist)
-        run: npm run build --workspace=taguru
+      - name: Build packages (langchain-taguru consumes taguru's dist; the examples consume both)
+        run: |
+          npm run build --workspace=taguru
+          npm run build --workspace=langchain-taguru
         working-directory: sdk
       - name: Lint
         run: |
@@ -119,5 +131,22 @@ jobs:
       - name: Test (langchain)
         run: npm test --workspace=langchain-taguru
         working-directory: sdk
+        env:
+          TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru
+      # The use-case examples double as end-to-end smoke tests: each spawns
+      # the real binary and runs offline on canned fake chat models. Their
+      # workspace pack-copies the file: SDK dependencies (see the .npmrc), so
+      # this install must come after the build step above.
+      - name: Install examples workspace
+        run: npm install --no-fund --no-audit
+        working-directory: examples/langchain
+      - name: Run examples
+        run: |
+          for ws in */typescript; do
+            echo "--- $ws"
+            npm run typecheck --workspace="$ws"
+            npm start --workspace="$ws"
+          done
+        working-directory: examples/langchain
         env:
           TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru

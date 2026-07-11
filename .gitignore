@@ -11,3 +11,10 @@ sdk/**/*.egg-info/
 sdk/**/.pytest_cache/
 sdk/**/.mypy_cache/
 sdk/**/.ruff_cache/
+
+# SDK example artifacts (the examples workspace deliberately commits no
+# lockfile: its SDK dependencies are file: paths into this repo)
+examples/langchain/**/node_modules/
+examples/langchain/package-lock.json
+examples/langchain/.venv/
+examples/langchain/**/__pycache__/

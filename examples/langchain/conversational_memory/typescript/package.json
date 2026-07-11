@@ -1,0 +1,22 @@
+{
+  "name": "taguru-example-conversational-memory",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.2",
+    "langchain-taguru": "file:../../../../sdk/typescript-langchain",
+    "taguru": "file:../../../../sdk/typescript"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5.5.0"
+  }
+}

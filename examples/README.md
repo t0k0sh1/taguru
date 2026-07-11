@@ -21,3 +21,14 @@ server.
 Suggested order: `network_retrieval` → `accurate_retrieval` →
 `paragraph_corpus`. Reach for `benchmark` and `http_benchmark`
 (together with `taguru estimate`) when sizing a deployment.
+
+## SDK + LangChain examples
+
+[langchain/](langchain/) holds the client-side counterpart: use-case
+programs built on the [SDK packages](../sdk/) (`taguru`,
+`langchain-taguru`), one directory per use case with a Python and a
+TypeScript version side by side — RAG QA with citations, governed
+document ingestion, and conversational long-term memory. Unlike the
+Rust examples above, each drives the whole server over HTTP (a real
+binary is spawned per run) and still runs offline, with deterministic
+fake LLMs standing in until you export an API key.

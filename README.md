@@ -533,7 +533,9 @@ taguru estimate --associations 1_000_000      # memory/disk sizing for a target 
 
 Library-level usage examples live in [examples/](examples/) — one
 directory per example, each with its own README saying what it
-demonstrates and what to look for in the output.
+demonstrates and what to look for in the output. Client-side SDK
+examples (Python/TypeScript with LangChain, one use case per
+directory) live in [examples/langchain/](examples/langchain/).
 
 `tests/qa_recall.rs` is the retrieval-quality regression floor: 11
 questions against a fictional corpus (covering typo entry, full-width

@@ -20,6 +20,14 @@ once; `python/scripts/check_surface.py` and
 (`.github/workflows/sdk.yml`) — a method added, removed, or renamed in one
 language only fails the build.
 
+## Examples
+
+Runnable use-case examples — RAG QA with citations, governed ingestion,
+conversational long-term memory — live in
+[examples/langchain/](../examples/langchain/), each as a Python and a
+TypeScript program mirrored line for line. They run offline (server
+spawned, deterministic fake LLMs) and CI executes all of them.
+
 ## Behavioral ground truth
 
 There is deliberately no OpenAPI spec. The contract is the server's own

@@ -29,6 +29,11 @@ const retriever = new TaguruRetriever({ context: "sake", k: 8 });
 const documents = await retriever.invoke("青嶺酒造");
 ```
 
+Runnable use-case examples (RAG QA with citations, governed ingestion,
+conversational long-term memory — each mirrored in Python) live in
+[examples/langchain](https://github.com/t0k0sh1/taguru/tree/main/examples/langchain);
+they work offline, no API key needed.
+
 Not provided, deliberately: a VectorStore facade (Taguru's retrieval is
 structural-first — `similaritySearch` would misrepresent it), a Memory class
 (deprecated upstream in favor of LangGraph state), and agent Tools (the MCP

@@ -34,6 +34,14 @@ Entries that change an on-disk format or a response shape say so.
   citations) and `TaguruIngester` (the LangChain twin of
   `taguru extract` — same prompt discipline, same merge validation,
   applied via `POST /import`'s per-source replace).
+- SDK use-case examples under `examples/langchain/` — RAG QA with
+  citations, governed document ingestion (dry-run review → apply →
+  per-source replace → retract), and conversational long-term memory
+  with correction by negative weight — one directory per use case,
+  each as a Python and a TypeScript program mirrored line for line.
+  All run offline (a real server binary is spawned per run;
+  deterministic fake chat models stand in for the LLM) and the SDK CI
+  workflow executes every one of them.
 - `taguru export` and `GET /contexts/{name}/export`: every context
   renders as the same JSONL batch stream `taguru import` and
   `POST /import` apply — the portable, version-independent backup.

@@ -1,0 +1,10 @@
+# Editable installs of the in-repo SDKs. Run pip from THIS directory —
+# pip resolves relative paths against the current working directory:
+#
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+#
+-e ../../sdk/python
+-e ../../sdk/python-langchain
+
+# Optional, to drive the examples with a real LLM (export OPENAI_API_KEY):
+# langchain-openai>=1.0

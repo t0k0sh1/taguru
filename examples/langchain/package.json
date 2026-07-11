@@ -1,0 +1,5 @@
+{
+  "name": "taguru-langchain-examples",
+  "private": true,
+  "workspaces": ["*/typescript"]
+}
