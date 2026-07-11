@@ -1,0 +1,116 @@
+# The cross-language surface spec: one entry per logical operation.
+#
+# Both SDKs must expose exactly this surface. Python names are canonical;
+# TypeScript method names are derived mechanically (snake_case → camelCase).
+# `args` are positional parameters; `options` are Python keyword-only
+# parameters / TypeScript trailing-options-object keys (snake_case in both).
+# `route` is documentation. Checked in CI by check_python.py and
+# check_typescript.ts; drift fails the build.
+
+functions:
+  citation_key:
+    args: [source, paragraph]
+
+classes:
+  Taguru:
+    health: { route: "GET /health" }
+    live: { route: "GET /live" }
+    metrics: { route: "GET /metrics" }
+    protocol: { route: "GET /protocol" }
+    flush: { route: "POST /flush" }
+    import_batches: { route: "POST /import", args: [data] }
+    import_file: { route: "POST /import", args: [path] }
+    wait_until_ready: { options: [timeout, interval] }
+    context: { args: [name] }
+    close: {}
+
+  Contexts:
+    list: { route: "GET /contexts", options: [limit, after] }
+    iter: { route: "GET /contexts", options: [limit] }
+    get: { route: "GET /contexts/{name}", args: [name] }
+    exists: { route: "GET /contexts/{name}", args: [name] }
+    create:
+      route: "PUT /contexts/{name}"
+      args: [name]
+      options: [description, pinned, dice_floor, semantic_floor]
+    update:
+      route: "PATCH /contexts/{name}"
+      args: [name]
+      options: [description, pinned, dice_floor, semantic_floor]
+    delete: { route: "DELETE /contexts/{name}", args: [name] }
+
+  Context:
+    resolve:
+      route: "POST /contexts/{name}/resolve"
+      args: [cue]
+      options: [dice_floor, semantic_floor, limit]
+    resolve_label:
+      route: "POST /contexts/{name}/resolve_label"
+      args: [cue]
+      options: [dice_floor, semantic_floor, limit]
+    describe: { route: "POST /contexts/{name}/describe", args: [concept] }
+    query:
+      route: "POST /contexts/{name}/query"
+      options: [subject, label, object, limit]
+    recall: { route: "POST /contexts/{name}/recall", args: [cue], options: [limit] }
+    activate:
+      route: "POST /contexts/{name}/activate"
+      args: [origins]
+      options: [decay, limit]
+    explore:
+      route: "POST /contexts/{name}/explore"
+      args: [origins]
+      options: [max_depth, limit]
+    unreachable_from:
+      route: "POST /contexts/{name}/unreachable_from"
+      args: [origins]
+      options: [limit]
+    list_labels: { route: "GET /contexts/{name}/labels", options: [limit, after] }
+    iter_labels: { route: "GET /contexts/{name}/labels", options: [limit] }
+    add_associations:
+      route: "POST /contexts/{name}/associations"
+      args: [associations]
+    add_associations_batched:
+      route: "POST /contexts/{name}/associations"
+      args: [associations]
+      options: [chunk_size, max_chunk_bytes]
+    store_passages:
+      route: "POST /contexts/{name}/sources"
+      args: [passages]
+      options: [questions, sections]
+    lookup_passages: { route: "POST /contexts/{name}/sources/lookup", args: [sources] }
+    search_passages:
+      route: "POST /contexts/{name}/sources/search"
+      args: [query]
+      options: [limit]
+    retract_source: { route: "POST /contexts/{name}/sources/retract", args: [source] }
+    list_sources: { route: "GET /contexts/{name}/sources", options: [limit, after] }
+    iter_sources: { route: "GET /contexts/{name}/sources", options: [limit] }
+    cite_passage: { route: "POST /contexts/{name}/citations", args: [source, paragraph] }
+    get_aliases: { route: "GET /contexts/{name}/aliases", options: [limit, after] }
+    iter_aliases: { route: "GET /contexts/{name}/aliases", options: [limit] }
+    add_aliases: { route: "POST /contexts/{name}/aliases", options: [concepts, labels] }
+    remove_aliases: { route: "DELETE /contexts/{name}/aliases", options: [concepts, labels] }
+    audit_vocabulary:
+      route: "POST /contexts/{name}/vocabulary/audit"
+      options: [dice_floor, cosine_floor]
+    refresh_embeddings: { route: "POST /contexts/{name}/embeddings/refresh" }
+    compact: { route: "POST /contexts/{name}/compact" }
+    export: { route: "GET /contexts/{name}/export" }
+    export_stream: { route: "GET /contexts/{name}/export" }
+    export_to_file: { route: "GET /contexts/{name}/export", args: [path] }
+    retrieve:
+      args: [origins]
+      options:
+        - labels
+        - dice_floor
+        - semantic_floor
+        - resolve_limit
+        - auto_pick
+        - activate_decay
+        - activate_limit
+        - describe_first
+        - fetch_citations
+        - text_fallback_query
+        - text_fallback_only_if_empty
+        - search_limit

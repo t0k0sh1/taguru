@@ -1,3 +1,13 @@
 /target
 /data
 .DS_Store
+
+# SDK build/dev artifacts
+sdk/**/node_modules/
+sdk/**/dist/
+sdk/**/.venv/
+sdk/**/__pycache__/
+sdk/**/*.egg-info/
+sdk/**/.pytest_cache/
+sdk/**/.mypy_cache/
+sdk/**/.ruff_cache/

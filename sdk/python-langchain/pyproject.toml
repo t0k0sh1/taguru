@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "langchain-taguru"
+version = "0.1.0"
+description = "LangChain integration for the Taguru long-term semantic memory server"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Takashi Yamashina" }]
+keywords = ["taguru", "langchain", "llm", "memory", "rag", "retriever"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Typing :: Typed",
+]
+dependencies = [
+    "taguru>=0.1.0,<0.2.0",
+    "langchain-core>=1.0.0,<2.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/t0k0sh1/taguru"
+Repository = "https://github.com/t0k0sh1/taguru"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "langchain-tests>=1.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/taguru_langchain"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+strict = true
+files = ["src"]

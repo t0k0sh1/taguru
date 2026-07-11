@@ -1,0 +1,179 @@
+/** Transport-independent pieces: envelope handling, error mapping, chunking. */
+
+import { TaguruError, errorForStatus } from "./errors.js";
+import type { AssocOp, ImportOutcome } from "./models.js";
+import { parseRetryAfter } from "./retry.js";
+
+export const DEFAULT_BASE_URL = "http://127.0.0.1:8248";
+export const ENV_URL = "TAGURU_URL";
+export const ENV_TOKEN = "TAGURU_API_TOKEN";
+/**
+ * Matches the server's own TAGURU_REQUEST_TIMEOUT_SECS default; raise both
+ * together when the server has an embedding provider configured.
+ */
+export const DEFAULT_TIMEOUT_SECS = 30.0;
+/** Server-enforced caps mirrored client-side by addAssociationsBatched. */
+export const MAX_OPS_PER_REQUEST = 10_000;
+export const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
+
+/** Omit absent optional fields instead of sending nulls. */
+export function dropUndefined(mapping: Record<string, unknown>): Record<string, unknown> {
+  const kept: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(mapping)) {
+    if (value !== undefined && value !== null) {
+      kept[key] = value;
+    }
+  }
+  return kept;
+}
+
+/** Split a batch by both element count and serialized body size. */
+export function* chunkAssociations(
+  ops: AssocOp[],
+  chunkSize: number,
+  maxChunkBytes: number,
+): Generator<AssocOp[], void, undefined> {
+  let chunk: AssocOp[] = [];
+  let chunkBytes = 2; // "[" + "]"
+  for (const op of ops) {
+    const opBytes = Buffer.byteLength(JSON.stringify(op), "utf-8");
+    let added = opBytes + (chunk.length > 0 ? 1 : 0); // separating comma
+    if (chunk.length > 0 && (chunk.length >= chunkSize || chunkBytes + added > maxChunkBytes)) {
+      yield chunk;
+      chunk = [];
+      chunkBytes = 2;
+      added = opBytes;
+    }
+    chunk.push(op);
+    chunkBytes += added;
+  }
+  if (chunk.length > 0) {
+    yield chunk;
+  }
+}
+
+/** Build the mapped error for a non-2xx response body. */
+export function errorFromBody(
+  status: number,
+  retryAfterHeader: string | null,
+  bodyText: string,
+): TaguruError {
+  const retry_after = parseRetryAfter(retryAfterHeader);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    const message = bodyText.trim() || `HTTP ${status}`;
+    return errorForStatus(status, message, { body: bodyText, retry_after });
+  }
+  let message = `HTTP ${status}`;
+  let code: string | null = null;
+  let time: number | null = null;
+  if (typeof parsed === "object" && parsed !== null) {
+    const shaped = parsed as { error?: unknown; code?: unknown; time?: unknown };
+    if (typeof shaped.error === "string") {
+      message = shaped.error;
+    }
+    if (typeof shaped.code === "string") {
+      code = shaped.code;
+    }
+    if (typeof shaped.time === "number") {
+      time = shaped.time;
+    }
+  }
+  return errorForStatus(status, message, { body: parsed, code, time, retry_after });
+}
+
+/** Extract `result` from the `{"result", "status": "ok", "time"}` envelope. */
+export function unwrapEnvelope(status: number, bodyText: string): unknown {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch (cause) {
+    throw new TaguruError("expected a JSON envelope, got a non-JSON body", {
+      status,
+      body: bodyText,
+      cause,
+    });
+  }
+  if (typeof parsed === "object" && parsed !== null && "result" in parsed) {
+    const shaped = parsed as { result: unknown; status?: unknown };
+    if (shaped.status === "ok") {
+      return shaped.result;
+    }
+  }
+  throw new TaguruError("response is not the taguru envelope shape", {
+    status,
+    body: parsed,
+  });
+}
+
+/**
+ * Flatten /import's response to the outcome array. Current servers always
+ * answer `{batches: [...]}`; servers predating that change answered a bare
+ * outcome for a single batch — both parse here, so callers never branch on
+ * response shape.
+ */
+export function normalizeImportOutcomes(result: unknown): ImportOutcome[] {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    Array.isArray((result as { batches?: unknown }).batches)
+  ) {
+    return (result as { batches: ImportOutcome[] }).batches;
+  }
+  return [result as ImportOutcome];
+}
+
+/** Percent-encode one path segment (context names may be any UTF-8). */
+export function encodeName(name: string): string {
+  return encodeURIComponent(name);
+}
+
+/**
+ * Whether a fetch failure certainly happened before the request was sent
+ * (refused connection, unresolvable host) — always safe to retry. Anything
+ * else is ambiguous: the request may have executed server-side.
+ */
+export function isPreConnectFailure(error: unknown): boolean {
+  const codes = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
+  const codeOf = (value: unknown): string | undefined => {
+    if (typeof value === "object" && value !== null && "code" in value) {
+      const code = (value as { code?: unknown }).code;
+      return typeof code === "string" ? code : undefined;
+    }
+    return undefined;
+  };
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current !== undefined && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const code = codeOf(current);
+    if (code !== undefined && codes.has(code)) {
+      return true;
+    }
+    if (current instanceof AggregateError) {
+      return current.errors.some((inner) => {
+        const innerCode = codeOf(inner);
+        return innerCode !== undefined && codes.has(innerCode);
+      });
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+export function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = (error as { cause?: unknown }).cause;
+    if (cause instanceof Error && cause.message) {
+      return `${error.message}: ${cause.message}`;
+    }
+    return error.message || error.name;
+  }
+  return String(error);
+}
+
+export function sleep(seconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+}

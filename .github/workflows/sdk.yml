@@ -1,0 +1,123 @@
+name: SDK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch/PR supersedes the running check.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Both SDK integration suites drive the REAL server binary; build it once
+  # and hand it to the language jobs as an artifact.
+  build-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build server binary
+        run: cargo build --locked --bin taguru
+      - uses: actions/upload-artifact@v4
+        with:
+          name: taguru-server-binary
+          path: target/debug/taguru
+
+  python:
+    needs: build-server
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: taguru-server-binary
+          path: bin
+      - run: chmod +x bin/taguru
+      - name: Install packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "sdk/python[dev]" -e "sdk/python-langchain[dev]"
+      - name: Lint (core)
+        run: |
+          ruff check sdk/python/src sdk/python/scripts sdk/python/tests
+          ruff format --check sdk/python/src sdk/python/scripts sdk/python/tests
+      - name: Lint (langchain)
+        run: |
+          ruff check sdk/python-langchain/src sdk/python-langchain/tests
+          ruff format --check sdk/python-langchain/src sdk/python-langchain/tests
+      - name: Typecheck
+        run: |
+          mypy --config-file sdk/python/pyproject.toml sdk/python/src
+          mypy --config-file sdk/python-langchain/pyproject.toml sdk/python-langchain/src
+      - name: Sync client freshness (unasync)
+        run: |
+          python sdk/python/scripts/generate_sync.py
+          git diff --exit-code sdk/python/src/taguru/_sync
+      - name: Surface parity
+        run: python sdk/python/scripts/check_surface.py
+      - name: Test (core)
+        run: python -m pytest sdk/python/tests -q
+        env:
+          TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru
+      - name: Test (langchain)
+        run: python -m pytest sdk/python-langchain/tests -q
+        env:
+          TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru
+
+  typescript:
+    needs: build-server
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v4
+        with:
+          name: taguru-server-binary
+          path: bin
+      - run: chmod +x bin/taguru
+      - name: Install workspace
+        run: npm install --no-fund --no-audit
+        working-directory: sdk
+      - name: Build core package (langchain-taguru consumes its dist)
+        run: npm run build --workspace=taguru
+        working-directory: sdk
+      - name: Lint
+        run: |
+          npm run lint --workspace=taguru
+          npm run lint --workspace=langchain-taguru
+        working-directory: sdk
+      - name: Typecheck
+        run: |
+          npm run typecheck --workspace=taguru
+          npm run typecheck --workspace=langchain-taguru
+        working-directory: sdk
+      - name: Surface parity
+        run: npm run check:surface --workspace=taguru
+        working-directory: sdk
+      - name: Test (core)
+        run: npm test --workspace=taguru
+        working-directory: sdk
+        env:
+          TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru
+      - name: Test (langchain)
+        run: npm test --workspace=langchain-taguru
+        working-directory: sdk
+        env:
+          TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru

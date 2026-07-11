@@ -1,0 +1,5 @@
+{
+  "name": "taguru-sdk-workspace",
+  "private": true,
+  "workspaces": ["typescript", "typescript-langchain"]
+}

@@ -1,0 +1,104 @@
+name: SDK Release
+
+# SDK packages release independently of the server, on their own tag
+# prefixes (mirroring release.yml's conventions: the tag must agree with
+# the manifest version, and a missing registry credential skips the
+# publish loudly instead of failing the workflow):
+#
+#   sdk-python-v0.1.0               → PyPI  taguru
+#   sdk-python-langchain-v0.1.0     → PyPI  langchain-taguru
+#   sdk-typescript-v0.1.0           → npm   taguru
+#   sdk-typescript-langchain-v0.1.0 → npm   langchain-taguru
+
+on:
+  push:
+    tags: ["sdk-*-v*"]
+
+jobs:
+  pypi:
+    if: startsWith(github.ref_name, 'sdk-python')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Resolve the package directory from the tag
+        run: |
+          case "$GITHUB_REF_NAME" in
+            sdk-python-langchain-v*) echo "PKG_DIR=sdk/python-langchain" >> "$GITHUB_ENV"
+                                     echo "PKG_VERSION=${GITHUB_REF_NAME#sdk-python-langchain-v}" >> "$GITHUB_ENV" ;;
+            sdk-python-v*)           echo "PKG_DIR=sdk/python" >> "$GITHUB_ENV"
+                                     echo "PKG_VERSION=${GITHUB_REF_NAME#sdk-python-v}" >> "$GITHUB_ENV" ;;
+            *) echo "unrecognized python SDK tag: $GITHUB_REF_NAME" >&2; exit 1 ;;
+          esac
+      - name: Tag and pyproject.toml must agree
+        run: |
+          manifest="$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('$PKG_DIR/pyproject.toml').read_text())['project']['version'])")"
+          if [ "$PKG_VERSION" != "$manifest" ]; then
+            echo "tag says ${PKG_VERSION}, ${PKG_DIR}/pyproject.toml says ${manifest}" >&2
+            exit 1
+          fi
+      - name: Build
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build "$PKG_DIR"
+      - name: Publish to PyPI
+        if: env.PYPI_API_TOKEN != ''
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python -m twine upload "$PKG_DIR"/dist/*
+      - name: Note the skip
+        if: env.PYPI_API_TOKEN == ''
+        run: echo "PYPI_API_TOKEN is not configured; skipping the PyPI publish" >&2
+
+  npm:
+    if: startsWith(github.ref_name, 'sdk-typescript')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Resolve the package directory from the tag
+        run: |
+          case "$GITHUB_REF_NAME" in
+            sdk-typescript-langchain-v*) echo "PKG_DIR=typescript-langchain" >> "$GITHUB_ENV"
+                                         echo "PKG_VERSION=${GITHUB_REF_NAME#sdk-typescript-langchain-v}" >> "$GITHUB_ENV" ;;
+            sdk-typescript-v*)           echo "PKG_DIR=typescript" >> "$GITHUB_ENV"
+                                         echo "PKG_VERSION=${GITHUB_REF_NAME#sdk-typescript-v}" >> "$GITHUB_ENV" ;;
+            *) echo "unrecognized typescript SDK tag: $GITHUB_REF_NAME" >&2; exit 1 ;;
+          esac
+      - name: Tag and package.json must agree
+        working-directory: sdk
+        run: |
+          manifest="$(node -p "require('./$PKG_DIR/package.json').version")"
+          if [ "$PKG_VERSION" != "$manifest" ]; then
+            echo "tag says ${PKG_VERSION}, sdk/${PKG_DIR}/package.json says ${manifest}" >&2
+            exit 1
+          fi
+      - name: Install and build
+        working-directory: sdk
+        run: |
+          npm install --no-fund --no-audit
+          npm run build --workspace=taguru
+          if [ "$PKG_DIR" = "typescript-langchain" ]; then
+            npm run build --workspace=langchain-taguru
+          fi
+      - name: Publish to npm
+        if: env.NPM_TOKEN != ''
+        working-directory: sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public --workspace="./$PKG_DIR"
+      - name: Note the skip
+        if: env.NPM_TOKEN == ''
+        run: echo "NPM_TOKEN is not configured; skipping the npm publish" >&2

@@ -20,6 +20,20 @@ Entries that change an on-disk format or a response shape say so.
   `unhealthy`, `storage_full`. Branch on the code (or the status),
   never on message wording. The SDKs surface it as `.code` on every
   error.
+- Client SDKs under `sdk/`: `taguru` for Python (sync + async, httpx)
+  and TypeScript/JavaScript (fetch, zero dependencies) with one
+  identical surface — typed models for every endpoint,
+  idempotency-aware retry (`add_associations` never retries after an
+  ambiguous transport failure; 429/503 always retry), keyset
+  auto-pagination, chunked batch writes, export/import helpers, and a
+  `retrieve()` implementation of the protocol's retrieval loop.
+  Cross-language parity is machine-checked against
+  `sdk/spec/surface.yaml` in CI; integration suites spawn the real
+  server binary. Plus `langchain-taguru` for both ecosystems:
+  `TaguruRetriever` (graph lane + text lane, RRF-merged, verbatim
+  citations) and `TaguruIngester` (the LangChain twin of
+  `taguru extract` — same prompt discipline, same merge validation,
+  applied via `POST /import`'s per-source replace).
 - `taguru export` and `GET /contexts/{name}/export`: every context
   renders as the same JSONL batch stream `taguru import` and
   `POST /import` apply — the portable, version-independent backup.
