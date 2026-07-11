@@ -39,7 +39,10 @@ pub async fn lookup_passages(
     if let Some(refusal) = overlong("sources", request.sources.len(), started_at) {
         return refusal;
     }
-    match state.lookup_passages(&name, &request.sources) {
+    // A residency's first passage access loads the store from disk
+    // (sources.json/passages.bin/WAL replay); keep that off the async
+    // worker like every other passage-search entry.
+    match tokio::task::block_in_place(|| state.lookup_passages(&name, &request.sources)) {
         None => not_found(&name, started_at),
         Some(Ok((passages, missing))) => {
             state.note_read(&name, passages.is_empty());
@@ -78,7 +81,10 @@ pub async fn citation(
     AppJson(request): AppJson<CitationRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.citation(&name, &request.source, request.paragraph) {
+    // Same cold-load path as lookup_passages; keep it off the async
+    // worker.
+    match tokio::task::block_in_place(|| state.citation(&name, &request.source, request.paragraph))
+    {
         None => not_found(&name, started_at),
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(CitationLookup::UnknownSource)) => {
@@ -129,7 +135,9 @@ pub async fn list_sources(
 ) -> Response {
     let started_at = Instant::now();
     let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
-    match state.passage_sources(&name) {
+    // Same cold-load path as lookup_passages; keep it off the async
+    // worker.
+    match tokio::task::block_in_place(|| state.passage_sources(&name)) {
         None => not_found(&name, started_at),
         // `passage_sources` already yields BTreeMap-key order — no sort.
         Some(Ok(sources)) => {

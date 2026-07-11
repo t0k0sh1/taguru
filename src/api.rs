@@ -411,7 +411,9 @@ pub async fn create_context(
         dice_floor: request.dice_floor.map(|floor| floor.clamp(0.0, 1.0)),
         semantic_floor: request.semantic_floor.map(|floor| floor.clamp(0.0, 1.0)),
     };
-    match state.create(&name, meta) {
+    // Writes the sidecar (fsync + rename) like every other mutating
+    // endpoint; keep it off the async worker.
+    match tokio::task::block_in_place(|| state.create(&name, meta)) {
         Ok(()) => ok(true, started_at),
         Err(CreateError::AlreadyExists) => error(
             StatusCode::CONFLICT,
@@ -458,13 +460,18 @@ pub async fn update_context(
     {
         return refusal;
     }
-    match state.update_meta(
-        &name,
-        request.description,
-        request.pinned,
-        request.dice_floor,
-        request.semantic_floor,
-    ) {
+    // Writes the sidecar (fsync + rename) like every other mutating
+    // endpoint, and a pin toggle can additionally load the context from
+    // disk (`ensure_hot`); keep both off the async worker.
+    match tokio::task::block_in_place(|| {
+        state.update_meta(
+            &name,
+            request.description,
+            request.pinned,
+            request.dice_floor,
+            request.semantic_floor,
+        )
+    }) {
         None => not_found(&name, started_at),
         Some(Ok(meta)) => ok(meta, started_at),
         Some(Err(io_error)) => {
@@ -484,7 +491,9 @@ pub async fn delete_context(
     key: Option<axum::Extension<crate::auth::AuthKey>>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.delete(&name) {
+    // Writes a durable marker (fsync) then unlinks every sidecar file;
+    // keep it off the async worker like every other mutating endpoint.
+    match tokio::task::block_in_place(|| state.delete(&name)) {
         None => not_found(&name, started_at),
         Some(outcome) => {
             // Every destructive operation leaves one self-contained
@@ -1696,44 +1705,57 @@ pub async fn import_batch(
         );
     }
     let total = batches.len();
-    let mut outcomes: Vec<ImportOutcome> = Vec::with_capacity(total);
-    for (index, batch) in batches.iter().enumerate() {
-        match crate::ingest::apply_batch(&state, batch) {
-            Ok(applied) => {
-                // Import is retract-then-apply — destructive — and both
-                // the context and the replaced source live in the BODY,
-                // out of the access log's reach. One audit line each.
-                tracing::info!(
-                    target: "taguru::audit",
-                    key = %key_name(&key),
-                    context = %batch.context,
-                    source = %batch.source,
-                    created = applied.created,
-                    retracted = applied.retracted,
-                    associations = applied.associations,
-                    "import batch applied",
-                );
-                outcomes.push(import_outcome(batch, &applied));
-            }
-            Err(refusal) => {
-                let note = if total > 1 {
-                    format!(
-                        "batch {} of {total} (context '{}', source '{}') refused — the {} \
-                         batch(es) before it landed durably; fixing the stream and \
-                         re-POSTing it whole is exact (each batch replaces its own \
-                         source): ",
-                        index + 1,
-                        batch.context,
-                        batch.source,
-                        outcomes.len(),
-                    )
-                } else {
-                    String::new()
-                };
-                return import_refusal(&state, batch, refusal, &note, started_at);
+    // Each batch is a create/retract_source/store_passages/add_associations/
+    // add_aliases sequence — fsync-bearing writes, same as every other
+    // mutating endpoint — run back to back; keep the whole loop off the
+    // async worker rather than just one call in it.
+    let outcome = tokio::task::block_in_place(|| {
+        let mut outcomes: Vec<ImportOutcome> = Vec::with_capacity(total);
+        for (index, batch) in batches.iter().enumerate() {
+            match crate::ingest::apply_batch(&state, batch) {
+                Ok(applied) => {
+                    // Import is retract-then-apply — destructive — and both
+                    // the context and the replaced source live in the BODY,
+                    // out of the access log's reach. One audit line each.
+                    tracing::info!(
+                        target: "taguru::audit",
+                        key = %key_name(&key),
+                        context = %batch.context,
+                        source = %batch.source,
+                        created = applied.created,
+                        retracted = applied.retracted,
+                        associations = applied.associations,
+                        "import batch applied",
+                    );
+                    outcomes.push(import_outcome(batch, &applied));
+                }
+                Err(refusal) => {
+                    let note = if total > 1 {
+                        format!(
+                            "batch {} of {total} (context '{}', source '{}') refused — the {} \
+                             batch(es) before it landed durably; fixing the stream and \
+                             re-POSTing it whole is exact (each batch replaces its own \
+                             source): ",
+                            index + 1,
+                            batch.context,
+                            batch.source,
+                            outcomes.len(),
+                        )
+                    } else {
+                        String::new()
+                    };
+                    return Err(Box::new(import_refusal(
+                        &state, batch, refusal, &note, started_at,
+                    )));
+                }
             }
         }
-    }
+        Ok(outcomes)
+    });
+    let mut outcomes = match outcome {
+        Ok(outcomes) => outcomes,
+        Err(refusal) => return *refusal,
+    };
     if total > 1 {
         ok(ImportStreamOutcome { batches: outcomes }, started_at)
     } else {
