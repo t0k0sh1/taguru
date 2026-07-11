@@ -163,6 +163,18 @@ impl Keyring {
                         position + 1
                     ));
                 }
+                // '@' is reserved: OAuth delegations act as "key@client",
+                // and `scope_of` strips at the last '@' to inherit the
+                // underlying key's grant. A raw key whose name contains
+                // '@' would collide with that fallback — silently
+                // inheriting an unrelated scoped key's grant instead of
+                // the documented default. Refuse it at boot, keyring-style.
+                if name.contains('@') {
+                    return Err(format!(
+                        "key name '{name}' must not contain '@' (reserved for OAuth \
+                         delegation, 'key@client')"
+                    ));
+                }
                 if keys.iter().any(|(existing, _)| existing.as_ref() == name) {
                     return Err(format!("key name '{name}' is configured twice"));
                 }
@@ -618,6 +630,13 @@ mod tests {
                 .key_count(),
             1
         );
+        // '@' in a key name collides with the OAuth-delegation scope
+        // fallback, so it is refused at boot rather than silently
+        // inheriting an unrelated key's grant.
+        let error = Keyring::parse(None, Some("bot@internal:sekrit-z".to_string()))
+            .err()
+            .expect("an '@' key name must be refused");
+        assert!(error.contains('@') && !error.contains("sekrit"), "{error}");
     }
 
     #[tokio::test]
