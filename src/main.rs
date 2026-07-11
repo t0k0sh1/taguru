@@ -373,6 +373,7 @@ async fn serve() {
 fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
     Router::new()
         .route("/health", get(metrics::health))
+        .route("/live", get(metrics::live))
         .route("/metrics", get(metrics::render))
         .route(
             "/protocol",

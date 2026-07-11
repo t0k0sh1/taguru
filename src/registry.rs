@@ -901,25 +901,53 @@ impl AppState {
         Ok(state)
     }
 
-    /// Loads every pinned context now — serial and chatty on purpose:
-    /// a boot that spends seconds loading pinned contexts should say
-    /// what it is loading, not sit silent until "server ready".
+    /// Loads every pinned context now — in parallel, because this runs
+    /// before the listener binds and its wall-clock IS the downtime a
+    /// single-writer deploy pays (stop-then-start; see the README's
+    /// rollout note), and chatty on purpose: a boot that spends
+    /// seconds loading should say what it is loading, not sit silent
+    /// until "server ready". Entries have independent locks, so the
+    /// workers never contend with each other.
     fn preload_pinned(&self) {
-        for (name, entry) in self.snapshot() {
-            let mut inner = entry.inner.write().unwrap();
-            if !inner.meta.pinned {
-                continue;
-            }
-            let preload_started = std::time::Instant::now();
-            match ensure_hot(&self.0.data_dir, &name, &mut inner, &self.0.metrics) {
-                Ok(()) => tracing::info!(
-                    context = %name,
-                    ms = preload_started.elapsed().as_millis() as u64,
-                    "preloaded pinned context"
-                ),
-                Err(error) => tracing::warn!("pinned context '{name}' not preloaded: {error}"),
-            }
+        let pinned: Vec<(String, Arc<Entry>)> = self
+            .snapshot()
+            .into_iter()
+            .filter(|(_, entry)| entry.inner.read().unwrap().meta.pinned)
+            .collect();
+        if pinned.is_empty() {
+            return;
         }
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(pinned.len());
+        let queue = Mutex::new(pinned.into_iter());
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let Some((name, entry)) = queue.lock().unwrap().next() else {
+                            break;
+                        };
+                        let mut inner = entry.inner.write().unwrap();
+                        if !inner.meta.pinned {
+                            continue;
+                        }
+                        let preload_started = std::time::Instant::now();
+                        match ensure_hot(&self.0.data_dir, &name, &mut inner, &self.0.metrics) {
+                            Ok(()) => tracing::info!(
+                                context = %name,
+                                ms = preload_started.elapsed().as_millis() as u64,
+                                "preloaded pinned context"
+                            ),
+                            Err(error) => {
+                                tracing::warn!("pinned context '{name}' not preloaded: {error}");
+                            }
+                        }
+                    }
+                });
+            }
+        });
     }
 
     /// The shared observability registry — the HTTP middleware records

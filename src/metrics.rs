@@ -905,12 +905,25 @@ async fn traced_request(
     (response, Some(trace_id))
 }
 
+/// GET /live: pure liveness — 200 for as long as the process answers
+/// at all, deliberately unconditional. A failing flush is a DISK
+/// problem (that is `/health`'s signal): restarting the process fixes
+/// no disk and costs a full pinned preload, so an orchestrator's
+/// liveness probe belongs here, its readiness probe on `/health`.
+/// Wiring both probes at `/health` turns every transient disk stall
+/// into a restart loop.
+pub async fn live() -> &'static str {
+    "ok"
+}
+
 /// GET /health: 200 "ok" while the write path is healthy, 503 in the
 /// ApiError shape when the most recent image flush failed. The check
 /// is the flusher's own outcome, so an orchestrator's probe turns red
 /// within one flush interval of the disk going bad — and green again
 /// one interval after it recovers. (An idle server with nothing dirty
-/// reports its last known state.)
+/// reports its last known state.) The readiness signal: stop routing
+/// traffic while the disk is bad, resume when it heals — liveness
+/// lives at `/live`.
 pub async fn health(State(state): State<AppState>) -> Response {
     if state.metrics().flush_is_healthy() {
         return "ok".into_response();

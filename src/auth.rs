@@ -25,13 +25,14 @@ use subtle::ConstantTimeEq;
 
 use crate::api;
 
-/// Paths that answer without credentials. `/health` is the liveness
-/// probe — orchestrators must reach it unconfigured. `/metrics`
-/// carries only aggregates and route templates (no context names, no
-/// content), and exempting it keeps scrape configs trivial. The rate
-/// limiter honors the same list: probes and scrapes must not starve
-/// behind a chatty client.
-pub(crate) const PROBE_EXEMPT: [&str; 2] = ["/health", "/metrics"];
+/// Paths that answer without credentials. `/live` (liveness) and
+/// `/health` (readiness — 503 while the write path is degraded) are
+/// the orchestrator probes and must be reachable unconfigured.
+/// `/metrics` carries only aggregates and route templates (no context
+/// names, no content), and exempting it keeps scrape configs trivial.
+/// The rate limiter and the in-flight ceiling honor the same list:
+/// probes and scrapes must not starve behind a chatty client.
+pub(crate) const PROBE_EXEMPT: [&str; 3] = ["/health", "/live", "/metrics"];
 
 /// What answers without a bearer token. With OAuth enabled, its
 /// discovery and grant endpoints join the probes — they exist to
@@ -510,6 +511,7 @@ mod tests {
         });
         Router::new()
             .route("/health", get(|| async { "ok" }))
+            .route("/live", get(|| async { "ok" }))
             .route("/metrics", get(|| async { "counts" }))
             .route("/contexts", get(|| async { "secret" }))
             .route("/mcp", get(|| async { "tools" }))
@@ -706,14 +708,13 @@ mod tests {
     #[tokio::test]
     async fn health_and_metrics_are_exempt_while_everything_else_is_gated() {
         let keyring = ring(Some("s3cret"), None);
-        assert_eq!(
-            status_of(app(Arc::clone(&keyring)), "/health", None).await,
-            200
-        );
-        assert_eq!(
-            status_of(app(Arc::clone(&keyring)), "/metrics", None).await,
-            200
-        );
+        for probe in ["/health", "/live", "/metrics"] {
+            assert_eq!(
+                status_of(app(Arc::clone(&keyring)), probe, None).await,
+                200,
+                "{probe} must answer unconfigured"
+            );
+        }
         assert_eq!(status_of(app(keyring), "/contexts", None).await, 401);
     }
 

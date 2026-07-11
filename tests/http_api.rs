@@ -4690,3 +4690,14 @@ fn a_section_stored_via_store_passages_resolves_on_citation() {
     assert_eq!(after["text"], "創業は1907年。", "{after}");
     assert_eq!(after["section"], json!("沿革"), "{after}");
 }
+
+/// /live is the pure liveness probe: 200 whenever the process answers,
+/// unauthenticated, unconditional — /health keeps the readiness
+/// (write-path) signal.
+#[test]
+fn live_answers_unauthenticated_even_with_auth_on() {
+    let server = Server::start_with_env("http-live", &[("TAGURU_API_TOKEN", "opskey")]);
+    let (status, body) = server.call("GET", "/live", None);
+    assert_eq!(status, 200);
+    assert_eq!(body, json!("ok"));
+}

@@ -285,7 +285,15 @@ the Datadog Agent, ADOT for X-Ray, Jaeger, Tempo — and switching is
 collector configuration, not a Taguru change.
 `GET /health` answers `200 ok` while the write path is healthy and
 `503` (JSON error shape) while the most recent image flush has failed
-— it recovers by itself one flush interval after the disk does.
+— it recovers by itself one flush interval after the disk does. That
+is a READINESS signal: stop routing traffic while the disk is bad,
+resume when it heals. Liveness is `GET /live` — `200` for as long as
+the process answers at all — because restarting on a disk stall fixes
+no disk and re-pays the pinned preload. On Kubernetes:
+`livenessProbe: /live`, `readinessProbe: /health`, and a
+`startupProbe` on `/live` sized for the preload (the port opens only
+after pinned contexts load — now in parallel — so "connection
+refused" simply means "still starting").
 
 Backups: one context is the whole file family — `{stem}.ctx`,
 `.meta.json`, `.passages.bin`, `.passages.wal.jsonl`, `.bm25.bin`,
