@@ -270,7 +270,7 @@ impl Oauth {
                     uri.len()
                 ));
             }
-            if !uri.starts_with("https://") && !is_loopback_redirect(uri) {
+            if !is_https_redirect(uri) && !is_loopback_redirect(uri) {
                 return Err(format!("redirect uri '{uri}' must be https or loopback"));
             }
         }
@@ -484,6 +484,21 @@ impl Oauth {
             tracing::warn!(%error, "could not persist the OAuth store");
         }
     }
+}
+
+/// Structural https check: parses the URI and inspects the scheme and
+/// userinfo, never a string prefix. `uri.starts_with("https://")` would
+/// admit `https://trusted-app.example.com@evil.attacker.com/callback` —
+/// text that opens with a trusted-looking name but whose HOST (what the
+/// authorization code actually reaches, once approval's exact match lets
+/// it through) is the attacker's. A redirect URI has no legitimate use
+/// for embedded credentials, so any userinfo component is refused
+/// outright rather than merely ignored.
+fn is_https_redirect(uri: &str) -> bool {
+    let Ok(parsed) = Url::parse(uri) else {
+        return false;
+    };
+    parsed.scheme() == "https" && parsed.username().is_empty() && parsed.password().is_none()
 }
 
 /// RFC 8252 loopback interface redirection: `http://` to the loopback
@@ -926,6 +941,18 @@ mod tests {
         assert!(
             oauth
                 .register_client("x", vec!["http://localhost.evil.example/cb".to_string()])
+                .is_err()
+        );
+        // A string-prefix match on "https://" would wrongly accept this:
+        // it opens with a trusted-looking name, but the HOST — where the
+        // authorization code actually goes — is the attacker's domain
+        // after the '@'.
+        assert!(
+            oauth
+                .register_client(
+                    "x",
+                    vec!["https://trusted-app.example.com@evil.attacker.com/callback".to_string()]
+                )
                 .is_err()
         );
         for i in 0..CLIENT_CAP {
