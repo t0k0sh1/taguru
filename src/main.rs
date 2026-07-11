@@ -4,6 +4,7 @@ mod bm25;
 mod cli;
 mod embedding;
 mod estimate;
+mod export;
 mod extract;
 mod ingest;
 mod inspect;
@@ -333,6 +334,7 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
                 .patch(api::update_context)
                 .delete(api::delete_context),
         )
+        .route("/contexts/{name}/export", get(api::export_context))
         .route("/contexts/{name}/associations", post(api::add_associations))
         .route("/contexts/{name}/recall", post(api::recall))
         .route("/contexts/{name}/query", post(api::query))

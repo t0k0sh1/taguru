@@ -254,6 +254,44 @@ curl -X POST localhost:8248/import \
     </p>
   </section>
 
+  <section id="streams">
+    <h2>バッチのストリームと <code>taguru export</code>（バックアップ／復元）</h2>
+    <p class="section-sub">
+      1ファイル（1リクエストボディ）は、1バッチ<b>または連結された複数バッチ</b>を運べる——
+      各 <code>taguru_batch</code> ヘッダー行が前のバッチを閉じ、次を開く。バッチごとの
+      検証・retract-then-apply・(context, source) の一意性は単体ファイルと同一。
+    </p>
+    <p>
+      そのストリームを書き出すのが <code>taguru export --out DIR [CONTEXT...]</code>（オフライン、
+      ディレクトリロック下）と、稼働中サーバーの <code>GET /contexts/{name}/export</code>
+      （ボディがそのままJSON Linesのストリーム）。1コンテキスト＝1ストリーム：ソースid順に1バッチずつ、
+      先頭バッチに <code>create</code> ブロック（description・pinned・floors）、
+      末尾バッチに別名表が同乗する。復元は通常のimport——ソース単位の置き換えなので冪等で、
+      スナップショットと厳密に一致させたいときはコンテキストを先に削除してから流し込む。
+    </p>
+    <ul>
+      <li><b>忠実度</b>：同一ソースがn回主張した事実はn本の連想行として再現される（corroborationの
+        <code>count</code> が往復を生き延びる）。段落ロケータは初回主張行に載る（first-write-winsの再現）。</li>
+      <li><b>ソース無しの重み</b>（APIの <code>source</code> 省略で入ったもの）は予約ソース
+        <code>export:unsourced</code> のバッチに載る——数字は保存され、出所はattributionが語る。
+        実ソースがこの予約idと衝突した場合、exportは黙って混ぜずに拒否する。</li>
+      <li><b>完全撤回済みのエッジ（weight 0）は排出されない</b>：export → import の往復は、
+        追記専用イメージが抱える死んだレコードを削ぎ落とす——オフラインのコンパクションを兼ねる。</li>
+      <li>正準名が生きた連想を1本も持たない別名は落とされ、件数が報告される（importの契約上、
+        正準名は連想行によって鋳造されるため）。</li>
+      <li>複数バッチのストリームへの <code>POST /import</code> は <code>{"batches": [バッチごとの結果…]}</code>
+        で答える（単体バッチは従来の形のまま）。途中で拒否されたら手前のバッチは着地済み——
+        各バッチがretract-then-applyなので、直したストリームを丸ごと再POSTすれば正確に収束する。</li>
+      <li>レンダリングは決定的：同じ状態は同じバイト列に書き出され、バックアップ同士がdiffできる。</li>
+    </ul>
+    <pre><code><span class="c"># 稼働中サーバーから1コンテキストを退避し、別サーバーへ復元する</span>
+curl -H 'Authorization: Bearer &lt;key&gt;' \
+  localhost:8248/contexts/sake/export &gt; sake.jsonl
+curl -X POST other-host:8248/import \
+  -H 'Authorization: Bearer &lt;key&gt;' --data-binary @sake.jsonl
+<span class="c"># オフラインなら： taguru export --out backups/ ; taguru import backups/</span></code></pre>
+  </section>
+
   <section id="producing">
     <h2>バッチファイルを生産する</h2>
     <p>

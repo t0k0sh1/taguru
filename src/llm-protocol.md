@@ -248,6 +248,7 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/sources/retract` | `{source}` → withdraw that source's contributions (diff sync) |
 | POST | `/contexts/{name}/unreachable_from` | `{origins, limit?}` → `{total, matches}` unreachable associations |
 | POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?=0.6, cosine_floor?=0.6}` → spelling/synonym fork candidates |
+| GET | `/contexts/{name}/export` | the context as an import batch stream (JSON Lines body, not the JSON envelope) — one batch per source, create block first, aliases last; `POST /import` (or `taguru import`) restores it, per-source retract-then-apply |
 
 ## Auth
 

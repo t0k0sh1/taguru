@@ -669,3 +669,99 @@ fn estimate_prints_usage_for_help_in_any_position() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+/// The offline backup loop end to end: import seeds a data directory,
+/// export writes it back out as batch streams, import --dry-run
+/// validates the streams untouched, a second import restores them into
+/// a fresh directory, and inspect vouches for the restored family.
+/// Re-exporting the restored directory reproduces the streams byte for
+/// byte — the format is deterministic, so backups diff cleanly.
+#[test]
+fn export_round_trips_a_data_directory_through_batch_streams() {
+    let dir = std::env::temp_dir().join(format!("taguru-cli-export-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("batches")).expect("scratch dir must be creatable");
+    std::fs::write(
+        dir.join("batches/a.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"酒蔵の知識\"}}\n\
+         {\"passage\": \"青嶺酒造の紹介。\\n\\n代表銘柄は青嶺。\"}\n\
+         {\"paragraph\": 0, \"section\": \"概要\"}\n\
+         {\"subject\": \"青嶺酒造\", \"label\": \"代表銘柄\", \"object\": \"青嶺\", \
+          \"weight\": 1.0, \"paragraph\": 1}\n\
+         {\"alias\": \"Aomine\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n",
+    )
+    .expect("fixture must be writable");
+    std::fs::write(
+        dir.join("batches/b.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\n\
+         {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n",
+    )
+    .expect("fixture must be writable");
+
+    let run_in = |data_dir: &std::path::Path, args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", data_dir)
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+
+    let data_a = dir.join("data-a");
+    let seeded = run_in(
+        &data_a,
+        &["import", &dir.join("batches").display().to_string()],
+    );
+    assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
+
+    let exports = dir.join("exports");
+    let exported = run_in(
+        &data_a,
+        &["export", "--out", &exports.display().to_string()],
+    );
+    assert_eq!(exported.status.code(), Some(0), "{exported:?}");
+    let stdout = String::from_utf8_lossy(&exported.stdout);
+    assert!(stdout.contains("sake.jsonl"), "{stdout}");
+    assert!(stdout.contains("2 batch(es)"), "{stdout}");
+    let stream =
+        std::fs::read_to_string(exports.join("sake.jsonl")).expect("the stream must exist");
+    assert!(
+        stream.contains("\"description\":\"酒蔵の知識\""),
+        "{stream}"
+    );
+
+    // --dry-run validates the export without a data directory or lock.
+    let checked = run_in(
+        &data_a,
+        &["import", "--dry-run", &exports.display().to_string()],
+    );
+    assert_eq!(checked.status.code(), Some(0), "{checked:?}");
+    assert!(
+        String::from_utf8_lossy(&checked.stdout).contains("2 batch(es) valid"),
+        "{}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+
+    let data_b = dir.join("data-b");
+    let restored = run_in(&data_b, &["import", &exports.display().to_string()]);
+    assert_eq!(restored.status.code(), Some(0), "{restored:?}");
+    let inspected = run_in(&data_b, &["inspect", &data_b.display().to_string()]);
+    assert_eq!(inspected.status.code(), Some(0), "{inspected:?}");
+
+    let re_exports = dir.join("exports-b");
+    let re_exported = run_in(
+        &data_b,
+        &["export", "--out", &re_exports.display().to_string()],
+    );
+    assert_eq!(re_exported.status.code(), Some(0), "{re_exported:?}");
+    let re_stream =
+        std::fs::read_to_string(re_exports.join("sake.jsonl")).expect("the stream must exist");
+    assert_eq!(
+        stream, re_stream,
+        "a restore must re-export byte-identically"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

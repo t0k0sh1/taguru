@@ -2438,6 +2438,79 @@ impl AppState {
         Ok(result)
     }
 
+    /// Materializes everything one context's export stream renders
+    /// from — graph, aliases, meta, passages — under a single fence.
+    /// The graph half is read under `inner` (shared when hot,
+    /// exclusive across a cold load), which every graph write also
+    /// takes exclusively, so the associations and the passage
+    /// snapshot cannot shear against a retraction or a batch apply.
+    /// A concurrent passage store (which runs under the SHARED fence)
+    /// can still land between the two — the passage text may be
+    /// newer than the graph, never torn within one source.
+    pub fn export_context(&self, name: &str) -> Result<crate::export::ExportSnapshot, AccessError> {
+        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        let stem = file_stem(name);
+        // Fast path: already resident, shared lock (mirrors read_context).
+        {
+            let inner = entry.inner.read().unwrap();
+            match &inner.slot {
+                Slot::Hot(context) => {
+                    self.0.metrics.record_cache_hit();
+                    let snapshot = self.export_snapshot(&entry, &stem, &inner.meta, context);
+                    drop(inner);
+                    self.touch(&entry);
+                    self.enforce_budget(name);
+                    return snapshot;
+                }
+                Slot::Deleted => return Err(AccessError::NotFound),
+                Slot::Cold => {}
+            }
+        }
+        // Slow path: load under the exclusive lock, as read_context does.
+        let snapshot = {
+            let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
+            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
+                .map_err(AccessError::Load)?;
+            self.recount_entry(&mut inner);
+            let Slot::Hot(context) = &inner.slot else {
+                unreachable!("ensure_hot leaves the slot hot");
+            };
+            self.export_snapshot(&entry, &stem, &inner.meta, context)
+        };
+        self.touch(&entry);
+        self.enforce_budget(name);
+        snapshot
+    }
+
+    /// The materialization inside [`AppState::export_context`]'s fence.
+    /// Lock order: the caller holds `inner`; `entry_passages` takes
+    /// `passages` — the documented `inner` → `passages` order.
+    fn export_snapshot(
+        &self,
+        entry: &Entry,
+        stem: &str,
+        meta: &ContextMeta,
+        context: &Context,
+    ) -> Result<crate::export::ExportSnapshot, AccessError> {
+        let passages = self
+            .entry_passages(entry, stem)
+            .map_err(|error| AccessError::Load(format!("passage store: {error}")))?
+            .snapshot();
+        let owned = |pairs: Vec<(&str, &str)>| -> Vec<(String, String)> {
+            pairs
+                .into_iter()
+                .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
+                .collect()
+        };
+        Ok(crate::export::ExportSnapshot {
+            meta: meta.clone(),
+            associations: context.query_any(&[], &[], &[]),
+            concept_aliases: owned(context.concept_aliases()),
+            label_aliases: owned(context.label_aliases()),
+            passages,
+        })
+    }
+
     /// Runs a mutating operation on one context, loading it first if
     /// cold, and marks it dirty — the raw primitive under the tests.
     /// HTTP-reachable mutations go through [`AppState::logged_write`]
@@ -3695,7 +3768,7 @@ pub(crate) fn fsync_parent_dir(path: &Path) -> io::Result<()> {
 /// become %XX. Context names arrive from URL paths and may contain path
 /// separators or dots; encoding them keeps every name inside the data
 /// directory (no traversal) and reversible.
-fn file_stem(name: &str) -> String {
+pub(crate) fn file_stem(name: &str) -> String {
     let mut stem = String::new();
     for byte in name.bytes() {
         match byte {

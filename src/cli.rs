@@ -33,6 +33,12 @@ USAGE:
                                         loads (see: taguru import --help);
                                         the directory lock refuses to run
                                         beside a live server
+  taguru export --out DIR [CONTEXT...]  write contexts back out of the data
+                                        directory as import batch streams —
+                                        the portable backup (see: taguru
+                                        export --help); a running server
+                                        serves the same at
+                                        GET /contexts/{name}/export
   taguru extract --context NAME --out DIR FILE|DIR...
                                         decompose documents into batch files
                                         through an OpenAI-compatible chat
@@ -120,6 +126,7 @@ pub fn dispatch() -> ServeArgs {
         Some("inspect") => exit(crate::inspect::run(&args[1..])),
         Some("estimate") => exit(crate::estimate::run(&args[1..])),
         Some("import") => exit(crate::ingest::run(&args[1..])),
+        Some("export") => exit(crate::export::run(&args[1..])),
         Some("extract") => exit(crate::extract::run(&args[1..])),
         Some(other) => {
             eprintln!("taguru: unknown argument '{other}' — try 'taguru --help'");

@@ -3500,6 +3500,106 @@ fn the_import_endpoint_reports_dropped_association_paragraphs() {
     );
 }
 
+/// The backup loop, live: build a context over the API, pull it back
+/// out at GET /contexts/{name}/export, delete the context, and restore
+/// it by POSTing the stream to /import — facts, aliases, passages,
+/// questions, and sections all round-trip, and the stream response
+/// reports one outcome per batch.
+#[test]
+fn a_context_round_trips_through_the_export_endpoint_and_import() {
+    let server = Server::start("http-export-roundtrip");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "酒蔵の知識", "dice_floor": 0.25})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
+             "weight": 1.0, "source": "a.md", "paragraph": 0},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬",
+             "weight": 2.0, "source": "b.md"},
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {"a.md": "青嶺酒造の紹介。\n\n代表銘柄は青嶺。"},
+            "questions": {"a.md": [{"paragraph": 0, "question": "どこの蔵?"}]},
+            "sections": {"a.md": [{"paragraph": 0, "section": "概要"}]},
+        })),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/aliases",
+        Some(json!({"concepts": {"Aomine": "青嶺酒造"}})),
+    );
+
+    let (status, exported) = server.call("GET", "/contexts/sake/export", None);
+    assert_eq!(status, 200, "{exported}");
+    let stream = exported
+        .as_str()
+        .expect("the export body is JSONL, not the envelope");
+    assert_eq!(
+        stream.matches("\"taguru_batch\":1").count(),
+        2,
+        "one batch per source: {stream}"
+    );
+    assert!(
+        stream.contains("\"description\":\"酒蔵の知識\""),
+        "{stream}"
+    );
+
+    // Exporting a context that does not exist is the ordinary 404.
+    let (status, missing) = server.call("GET", "/contexts/ghost/export", None);
+    assert_eq!(status, 404, "{missing}");
+
+    server.ok("DELETE", "/contexts/sake", None);
+    let (status, restored) = post_import(&server, stream, None);
+    assert_eq!(status, 200, "{restored}");
+    let outcomes = restored["result"]["batches"]
+        .as_array()
+        .expect("a stream answers one outcome per batch");
+    assert_eq!(outcomes.len(), 2, "{restored}");
+    assert_eq!(outcomes[0]["created"], json!(true), "{restored}");
+
+    let facts = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造"})),
+    );
+    assert_eq!(facts["total"], json!(2), "{facts}");
+    let citation = server.ok(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "a.md", "paragraph": 0})),
+    );
+    assert_eq!(citation["text"], json!("青嶺酒造の紹介。"), "{citation}");
+    assert_eq!(citation["section"], json!("概要"), "{citation}");
+    let aliases = server.ok("GET", "/contexts/sake/aliases", None);
+    assert_eq!(
+        aliases["concepts"]["Aomine"],
+        json!("青嶺酒造"),
+        "{aliases}"
+    );
+    let row = server.ok("GET", "/contexts/sake", None);
+    assert_eq!(row["dice_floor"], json!(0.25), "{row}");
+
+    // Restoring over the restored context is a per-source replace, not
+    // a doubling — the same idempotency the CLI import promises.
+    let (status, again) = post_import(&server, stream, None);
+    assert_eq!(status, 200, "{again}");
+    let facts = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造"})),
+    );
+    assert_eq!(facts["total"], json!(2), "no doubling: {facts}");
+}
+
 #[test]
 fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
     let server = Server::start("http-import-refuse");

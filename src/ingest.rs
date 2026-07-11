@@ -48,11 +48,13 @@ const USAGE: &str = "\
 usage: taguru import [--dry-run] [--no-embed] [--config FILE] FILE|DIR...
 
 Applies JSONL batch files to TAGURU_DATA_DIR offline (the server must
-not be running — the directory lock enforces it). One file = one
+not be running — the directory lock enforces it). One batch = one
 source's complete truth: import retracts the source, then applies the
-file, so re-importing is idempotent. A directory expands to its
-*.jsonl files, sorted by name. Format: docs/import.html. A running
-server accepts the same body at POST /import (authenticated), one
+batch, so re-importing is idempotent. A file carries one batch or a
+whole stream of them (each `taguru_batch` header line starts the
+next) — `taguru export` writes such streams. A directory expands to
+its *.jsonl files, sorted by name. Format: docs/import.html. A running
+server accepts the same bodies at POST /import (authenticated), one
 file per request — live systems need no downtime window.
 
   --dry-run    validate every file and report; touch nothing
@@ -121,28 +123,32 @@ pub fn run(args: &[String]) -> i32 {
 
     // Pass 1 — every file parses, or nothing applies. Apply-stage
     // refusals can strand a half-written source; a malformed line is
-    // knowable up front, so it must never cost a write.
+    // knowable up front, so it must never cost a write. A file may
+    // carry one batch or a whole stream (`taguru export` output);
+    // either way each batch stands alone from here on.
     let mut batches = Vec::new();
     let mut broken = 0;
     let mut owners: HashSet<(String, String)> = HashSet::new();
     for path in &files {
-        let batch = fs::File::open(path)
+        let parsed = fs::File::open(path)
             .map_err(|error| error.to_string())
-            .and_then(|file| parse_batch(std::io::BufReader::new(file)));
-        match batch {
-            Ok(batch) => {
-                if !owners.insert((batch.context.clone(), batch.source.clone())) {
-                    eprintln!(
-                        "taguru: import: {}: source '{}' in context '{}' is already \
-                         stated by an earlier file — one file owns one source's truth",
-                        path.display(),
-                        batch.source,
-                        batch.context
-                    );
-                    broken += 1;
-                    continue;
+            .and_then(|file| parse_batches(std::io::BufReader::new(file)));
+        match parsed {
+            Ok(file_batches) => {
+                for batch in file_batches {
+                    if !owners.insert((batch.context.clone(), batch.source.clone())) {
+                        eprintln!(
+                            "taguru: import: {}: source '{}' in context '{}' is already \
+                             stated by an earlier file — one file owns one source's truth",
+                            path.display(),
+                            batch.source,
+                            batch.context
+                        );
+                        broken += 1;
+                        continue;
+                    }
+                    batches.push((path, batch));
                 }
-                batches.push((path, batch));
             }
             Err(message) => {
                 eprintln!("taguru: import: {}: {message}", path.display());
@@ -163,7 +169,10 @@ pub fn run(args: &[String]) -> i32 {
         for (path, batch) in &batches {
             println!("{}: {}", path.display(), batch.describe());
         }
-        println!("dry run: {} file(s) valid, nothing applied", batches.len());
+        println!(
+            "dry run: {} batch(es) valid, nothing applied",
+            batches.len()
+        );
         return 0;
     }
 
@@ -238,7 +247,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     println!(
-        "import: {} of {} file(s) applied across {} context(s)",
+        "import: {} of {} batch(es) applied across {} context(s)",
         batches.len() - failures,
         batches.len(),
         touched.len()
@@ -414,15 +423,35 @@ struct SectionLine {
     section: String,
 }
 
-/// Parses one batch file completely, or says which line refused and
-/// why. Blank lines are skipped; the first non-blank line must be the
-/// header.
-pub(crate) fn parse_batch(mut reader: impl BufRead) -> Result<Batch, String> {
-    let mut batch: Option<Batch> = None;
+/// Parses one single-batch file completely, or says which line refused
+/// and why — the shape `taguru extract` emits and re-validates. Streams
+/// that may carry several batches go through [`parse_batches`].
+pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
+    let mut batches = parse_batches(reader)?;
+    if batches.len() > 1 {
+        return Err(format!(
+            "{} batches in one file where exactly one was expected",
+            batches.len()
+        ));
+    }
+    Ok(batches.pop().expect("parse_batches refuses empty streams"))
+}
+
+/// Parses a batch stream: one batch, or several concatenated — the
+/// shape `taguru export` renders. Every `taguru_batch` header line
+/// closes the batch before it and opens the next; line numbers in
+/// errors count from the stream's first line. Two batches claiming one
+/// (context, source) pair refuse the whole stream — within a stream
+/// exactly as across import's files, one batch owns one source's
+/// truth.
+pub(crate) fn parse_batches(mut reader: impl BufRead) -> Result<Vec<Batch>, String> {
+    let mut batches: Vec<Batch> = Vec::new();
+    let mut current: Option<Batch> = None;
+    let mut owners: HashSet<(String, String)> = HashSet::new();
     // Per-paragraph question tally, carried as we parse so the per-line
     // cap check is a map lookup instead of a rescan of every question
     // seen so far — a batch piling questions on one paragraph would
-    // otherwise be quadratic.
+    // otherwise be quadratic. Reset at every batch boundary.
     let mut question_counts: BTreeMap<u32, usize> = BTreeMap::new();
     let mut raw: Vec<u8> = Vec::new();
     let mut number = 0usize;
@@ -452,12 +481,46 @@ pub(crate) fn parse_batch(mut reader: impl BufRead) -> Result<Batch, String> {
         if line.is_empty() {
             continue;
         }
-        match &mut batch {
-            None => batch = Some(parse_header(line, number)?),
-            Some(batch) => parse_op(batch, &mut question_counts, line, number)?,
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|error| format!("line {number}: not JSON: {error}"))?;
+        let is_header = value
+            .as_object()
+            .is_some_and(|object| object.contains_key("taguru_batch"));
+        if is_header {
+            if let Some(finished) = current.take() {
+                batches.push(finish_batch(finished)?);
+                question_counts.clear();
+            }
+            let batch = parse_header(value, number)?;
+            if !owners.insert((batch.context.clone(), batch.source.clone())) {
+                return Err(format!(
+                    "line {number}: source '{}' in context '{}' is already stated by \
+                     an earlier batch of this stream — one batch owns one source's truth",
+                    batch.source, batch.context
+                ));
+            }
+            current = Some(batch);
+        } else {
+            match &mut current {
+                None => {
+                    return Err(format!(
+                        "line {number}: not a batch header (no taguru_batch field) where \
+                         one was expected"
+                    ));
+                }
+                Some(batch) => parse_op(batch, &mut question_counts, value, number)?,
+            }
         }
     }
-    let batch = batch.ok_or_else(|| "empty file: expected a batch header line".to_string())?;
+    match current.take() {
+        Some(finished) => batches.push(finish_batch(finished)?),
+        None => return Err("empty file: expected a batch header line".to_string()),
+    }
+    Ok(batches)
+}
+
+/// The end-of-batch validations that need the whole batch in hand.
+fn finish_batch(batch: Batch) -> Result<Batch, String> {
     // Questions attach to paragraphs of THIS batch's passage; with no
     // passage line there is no text for them to name (apply retracts
     // the source first, so "the previously stored text" does not exist
@@ -496,8 +559,8 @@ pub(crate) fn parse_batch(mut reader: impl BufRead) -> Result<Batch, String> {
     Ok(batch)
 }
 
-fn parse_header(line: &str, number: usize) -> Result<Batch, String> {
-    let header: Header = serde_json::from_str(line)
+fn parse_header(value: serde_json::Value, number: usize) -> Result<Batch, String> {
+    let header: Header = serde_json::from_value(value)
         .map_err(|error| format!("line {number}: not a batch header: {error}"))?;
     if header.taguru_batch != BATCH_VERSION {
         return Err(format!(
@@ -542,11 +605,9 @@ fn parse_header(line: &str, number: usize) -> Result<Batch, String> {
 fn parse_op(
     batch: &mut Batch,
     question_counts: &mut BTreeMap<u32, usize>,
-    line: &str,
+    value: serde_json::Value,
     number: usize,
 ) -> Result<(), String> {
-    let value: serde_json::Value =
-        serde_json::from_str(line).map_err(|error| format!("line {number}: not JSON: {error}"))?;
     let Some(object) = value.as_object() else {
         return Err(format!("line {number}: a batch line must be a JSON object"));
     };
@@ -947,10 +1008,11 @@ fn report(batch: &Batch, applied: &Applied) -> String {
     )
 }
 
-/// Import logs like the server does (RUST_LOG, stderr) so registry
-/// warnings — WAL replay notes, load failures — are not dropped on the
-/// floor, but stdout stays pure report.
-fn init_logging() {
+/// Import (and export, which shares the need) logs like the server
+/// does (RUST_LOG, stderr) so registry warnings — WAL replay notes,
+/// load failures — are not dropped on the floor, but stdout stays
+/// pure report.
+pub(crate) fn init_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt()
@@ -1013,6 +1075,66 @@ mod tests {
         assert!(error.contains("taguru_batch 2"), "{error}");
 
         assert!(parse("\n\n").unwrap_err().contains("empty file"));
+    }
+
+    #[test]
+    fn a_stream_of_batches_parses_with_per_batch_state() {
+        let batches = parse_batches(std::io::Cursor::new(format!(
+            "{HEADER}\n\
+             {{\"passage\": \"第1段落。\"}}\n\
+             {{\"paragraph\": 0, \"question\": \"何?\"}}\n\
+             {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}}\n\
+             {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
+        )))
+        .unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].source, "doc-1");
+        assert_eq!(batches[0].questions.len(), 1);
+        assert_eq!(batches[1].source, "doc-2");
+        // Per-batch validation still applies at each boundary: the
+        // second batch carries no passage, so its questions would have
+        // refused — and doc-1's question must not leak into doc-2.
+        assert!(batches[1].questions.is_empty());
+        assert_eq!(batches[1].associations[0].source.as_deref(), Some("doc-2"));
+    }
+
+    #[test]
+    fn a_stream_restating_one_source_is_refused() {
+        let error = parse_batches(std::io::Cursor::new(format!(
+            "{HEADER}\n\
+             {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
+             {HEADER}\n"
+        )))
+        .unwrap_err();
+        assert!(
+            error.contains("line 3") && error.contains("one batch owns one source's truth"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_batch_boundary_runs_the_finish_validations() {
+        // The FIRST batch is the broken one (a question with no
+        // passage); the boundary — not the end of the stream — must
+        // catch it.
+        let error = parse_batches(std::io::Cursor::new(format!(
+            "{HEADER}\n\
+             {{\"paragraph\": 0, \"question\": \"何?\"}}\n\
+             {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}}\n\
+             {{\"passage\": \"本文。\"}}\n"
+        )))
+        .unwrap_err();
+        assert!(error.contains("question"), "{error}");
+    }
+
+    #[test]
+    fn parse_batch_refuses_a_multi_batch_stream() {
+        let error = parse(&format!(
+            "{HEADER}\n\
+             {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}}\n"
+        ))
+        .unwrap_err();
+        assert!(error.contains("exactly one"), "{error}");
     }
 
     #[test]

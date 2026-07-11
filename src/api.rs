@@ -1407,59 +1407,88 @@ pub struct ImportOutcome {
     pub association_paragraphs_dropped: usize,
 }
 
-/// `POST /import` — the batch-file contract (docs/import.html) over
-/// HTTP: the body IS one batch file, applied to the live server with
-/// the same validate-first, retract-then-apply semantics as `taguru
-/// import`. One request states one source's complete truth, so bulk
-/// loads reach a running server without a downtime window. The body
-/// cap, auth, timeout, and rate limit apply as on any endpoint;
-/// embeddings ride the next flush (`TAGURU_EMBED_AUTO`) exactly as
-/// live writes do.
-pub async fn import_batch(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
-    let started_at = Instant::now();
-    let batch = match crate::ingest::parse_batch(&body[..]) {
-        Ok(batch) => batch,
-        // Line-numbered, like the CLI's validation pass.
-        Err(message) => return error(StatusCode::BAD_REQUEST, message, started_at),
-    };
-    match crate::ingest::apply_batch(&state, &batch) {
-        Ok(applied) => ok(
-            ImportOutcome {
-                context: batch.context.clone(),
-                source: batch.source.clone(),
-                created: applied.created,
-                retracted: applied.retracted,
-                associations: applied.associations,
-                aliases: applied.aliases,
-                passage_stored: applied.passage_stored,
-                passage_dropped: applied.passage_dropped,
-                questions_stored: applied.questions_stored,
-                questions_dropped: applied.questions_dropped,
-                sections_stored: applied.sections_stored,
-                sections_dropped: applied.sections_dropped,
-                association_paragraphs_dropped: applied.association_paragraphs_dropped,
-            },
+/// What a multi-batch `POST /import` stream accomplished — one
+/// [`ImportOutcome`] per batch, in stream order. Only streams answer
+/// this shape; a single-batch body keeps the original bare outcome.
+#[derive(Serialize)]
+pub struct ImportStreamOutcome {
+    pub batches: Vec<ImportOutcome>,
+}
+
+fn import_outcome(batch: &crate::ingest::Batch, applied: &crate::ingest::Applied) -> ImportOutcome {
+    ImportOutcome {
+        context: batch.context.clone(),
+        source: batch.source.clone(),
+        created: applied.created,
+        retracted: applied.retracted,
+        associations: applied.associations,
+        aliases: applied.aliases,
+        passage_stored: applied.passage_stored,
+        passage_dropped: applied.passage_dropped,
+        questions_stored: applied.questions_stored,
+        questions_dropped: applied.questions_dropped,
+        sections_stored: applied.sections_stored,
+        sections_dropped: applied.sections_dropped,
+        association_paragraphs_dropped: applied.association_paragraphs_dropped,
+    }
+}
+
+/// Maps one batch's [`ApplyRefusal`](crate::ingest::ApplyRefusal) onto
+/// the response, `note` naming which batch of a stream refused (empty
+/// for a single-batch body, keeping that path's responses exactly as
+/// they were).
+fn import_refusal(
+    state: &AppState,
+    batch: &crate::ingest::Batch,
+    refusal: crate::ingest::ApplyRefusal,
+    note: &str,
+    started_at: Instant,
+) -> Response {
+    match refusal {
+        crate::ingest::ApplyRefusal::Access(failure) if note.is_empty() => {
+            access_error(state, failure, &batch.context, started_at)
+        }
+        // The prefixed twin of access_error's arms — same statuses,
+        // same metrics, the batch note in front.
+        crate::ingest::ApplyRefusal::Access(AccessError::NotFound) => error(
+            StatusCode::NOT_FOUND,
+            format!("{note}context '{}' not found", batch.context),
             started_at,
         ),
-        Err(crate::ingest::ApplyRefusal::Access(failure)) => {
-            access_error(&state, failure, &batch.context, started_at)
-        }
-        Err(refusal @ crate::ingest::ApplyRefusal::NoContext(_)) => {
-            error(StatusCode::NOT_FOUND, refusal.text(), started_at)
-        }
-        Err(refusal @ crate::ingest::ApplyRefusal::Io(_)) => {
-            state.metrics().record_error(ErrorKind::Io);
+        crate::ingest::ApplyRefusal::Access(AccessError::Load(message)) => {
+            state.metrics().record_error(ErrorKind::Load);
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                refusal.text(),
+                format!("{note}{message}"),
                 started_at,
             )
         }
-        Err(crate::ingest::ApplyRefusal::Partial {
+        crate::ingest::ApplyRefusal::Access(AccessError::Unpersisted(message)) => {
+            state.metrics().record_error(ErrorKind::WalRefused);
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{note}write not persisted (nothing was applied): {message}"),
+                started_at,
+            )
+        }
+        refusal @ crate::ingest::ApplyRefusal::NoContext(_) => error(
+            StatusCode::NOT_FOUND,
+            format!("{note}{}", refusal.text()),
+            started_at,
+        ),
+        refusal @ crate::ingest::ApplyRefusal::Io(_) => {
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{note}{}", refusal.text()),
+                started_at,
+            )
+        }
+        crate::ingest::ApplyRefusal::Partial {
             applied,
             message,
             full,
-        }) => {
+        } => {
             // The batch got partway: what landed counts as a write,
             // and the status keeps the capacity/conflict distinction
             // every partial write reports.
@@ -1471,8 +1500,97 @@ pub async fn import_batch(State(state): State<AppState>, body: axum::body::Bytes
             } else {
                 StatusCode::CONFLICT
             };
-            error(status, message, started_at)
+            error(status, format!("{note}{message}"), started_at)
         }
+    }
+}
+
+/// `POST /import` — the batch-file contract (docs/import.html) over
+/// HTTP: the body IS one batch file — or a whole stream of batches,
+/// as `GET /contexts/{name}/export` renders — applied to the live
+/// server with the same validate-first, retract-then-apply semantics
+/// as `taguru import`. Each batch states one source's complete truth,
+/// so bulk loads and restores reach a running server without a
+/// downtime window. The body cap, auth, timeout, and rate limit apply
+/// as on any endpoint; embeddings ride the next flush
+/// (`TAGURU_EMBED_AUTO`) exactly as live writes do.
+///
+/// A single-batch body answers with that batch's outcome; a stream
+/// answers `{batches: [...]}` in stream order. A refusal partway
+/// through a stream stops there — the batches before it landed
+/// durably, and because every batch is retract-then-apply,
+/// re-POSTing the whole corrected stream is exact, never
+/// double-counted.
+pub async fn import_batch(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
+    let started_at = Instant::now();
+    let batches = match crate::ingest::parse_batches(&body[..]) {
+        Ok(batches) => batches,
+        // Line-numbered, like the CLI's validation pass.
+        Err(message) => return error(StatusCode::BAD_REQUEST, message, started_at),
+    };
+    let total = batches.len();
+    let mut outcomes: Vec<ImportOutcome> = Vec::with_capacity(total);
+    for (index, batch) in batches.iter().enumerate() {
+        match crate::ingest::apply_batch(&state, batch) {
+            Ok(applied) => outcomes.push(import_outcome(batch, &applied)),
+            Err(refusal) => {
+                let note = if total > 1 {
+                    format!(
+                        "batch {} of {total} (context '{}', source '{}') refused — the {} \
+                         batch(es) before it landed durably; fixing the stream and \
+                         re-POSTing it whole is exact (each batch replaces its own \
+                         source): ",
+                        index + 1,
+                        batch.context,
+                        batch.source,
+                        outcomes.len(),
+                    )
+                } else {
+                    String::new()
+                };
+                return import_refusal(&state, batch, refusal, &note, started_at);
+            }
+        }
+    }
+    if total > 1 {
+        ok(ImportStreamOutcome { batches: outcomes }, started_at)
+    } else {
+        let outcome = outcomes.pop().expect("parse_batches refuses empty streams");
+        ok(outcome, started_at)
+    }
+}
+
+/// `GET /contexts/{name}/export` — the context back out as the import
+/// batch stream (docs/import.html): one batch per source in source-id
+/// order, the create block on the first, the alias table on the last,
+/// sourceless weight in a reserved `export:unsourced` batch. The
+/// response body IS the stream (JSON Lines, not the JSON envelope):
+/// save it, and `taguru import` or `POST /import` restores it —
+/// per-source retract-then-apply, so re-importing is idempotent.
+/// Materialized under one registry fence (a concurrent write cannot
+/// shear the graph against the passages) and rendered off the async
+/// runtime, the way vocabulary/audit steps aside.
+pub async fn export_context(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    let started_at = Instant::now();
+    let rendered = tokio::task::block_in_place(|| {
+        state
+            .export_context(&name)
+            .map(|snapshot| crate::export::render(&name, &snapshot))
+    });
+    match rendered {
+        Ok(Ok(rendered)) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/x-ndjson; charset=utf-8",
+            )],
+            rendered.stream,
+        )
+            .into_response(),
+        // A real source colliding with a reserved export id — the one
+        // thing a context can hold that the stream cannot say.
+        Ok(Err(message)) => error(StatusCode::CONFLICT, message, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }
 

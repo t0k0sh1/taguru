@@ -271,6 +271,21 @@ fully validating load the server boots with, every WAL through the
 same replay parser, with per-context stats — nonzero exit means
 something holding acknowledged data is corrupt.
 
+The *portable* backup is `taguru export --out DIR` (offline; no
+CONTEXT arguments means every context), or `GET /contexts/{name}/export`
+on a running server: each context comes back as the very JSONL batch
+stream `taguru import` and `POST /import` apply — one batch per
+source, the create block on the first, aliases on the last. Unlike
+the file family it is version-independent plain text, restores
+without downtime through `POST /import`, migrates between servers,
+and diffs cleanly (the rendering is deterministic). Re-importing a
+stream is idempotent — each batch replaces its own source — so a
+restore over live data is a per-source sync; delete the context
+first when the result must equal the snapshot exactly. Weight from
+sourceless writes rides a reserved `export:unsourced` batch, and
+fully retracted (weight-zero) edges are shed on the way out, so an
+export → import round trip also compacts the graph.
+
 The data directory admits one taguru process at a time — a serve or
 an import — via an advisory lock (`.taguru.lock`); the second comer
 is refused with a message naming the conflict, instead of two live
@@ -299,9 +314,9 @@ For the endpoint list and the ingest/retrieval discipline, see
 
 Initial loads and migrations skip HTTP entirely: `taguru import
 FILE|DIR...` applies JSONL batch files straight to `TAGURU_DATA_DIR`
-through the same WAL-staged write path the server uses. One file
+through the same WAL-staged write path the server uses. One batch
 states one **source**'s complete truth — import retracts the source,
-then applies the file — so re-importing is idempotent and a revised
+then applies the batch — so re-importing is idempotent and a revised
 file replaces cleanly instead of double-counting weights.
 
 ```jsonl
@@ -315,10 +330,15 @@ Validation is a separate pass: a malformed line refuses the whole run
 (with its line number) before anything is written, and `--dry-run`
 stops there on purpose. The data directory lock makes import and a
 running server mutually exclusive — no torn state, just a refusal.
+A file may carry one batch or a whole **stream** of them — every
+`taguru_batch` header line starts the next batch — which is exactly
+what `taguru export` writes, so a backup restores through the same
+two entrances as any bulk load.
 
 A **running** server takes the same contract at `POST /import` (one
-request = one batch file, same validation, same replace-a-source
-semantics), so live systems bulk-load without a downtime window:
+request = one batch file or stream, same validation, same
+replace-a-source semantics), so live systems bulk-load without a
+downtime window:
 
 ```sh
 curl -X POST localhost:8248/import -H 'Authorization: Bearer <key>' \
