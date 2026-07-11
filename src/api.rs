@@ -255,8 +255,29 @@ pub async fn list_contexts(
 /// POST /flush: persist every dirty context NOW and answer with the
 /// names that flushed — the quiescing move before a file-level backup,
 /// instead of "stop the server or wait out the flush interval".
-pub async fn flush_all(State(state): State<AppState>) -> Response {
+///
+/// Flush is inherently whole-of-server — that IS its job — so it has
+/// no `{name}` for the middleware's per-context grant to key on, and
+/// its response NAMES every flushed context. A context-scoped key must
+/// therefore be refused outright rather than handed the full list
+/// (which `GET /contexts` would hide from it): filtering flush would
+/// silently defeat its one purpose, quiescing everything before a
+/// backup.
+pub async fn flush_all(
+    State(state): State<AppState>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+) -> Response {
     let started_at = Instant::now();
+    if let Some(axum::Extension(scope)) = &scope
+        && scope.contexts.is_some()
+    {
+        return error(
+            StatusCode::FORBIDDEN,
+            "flush is server-wide (it names every flushed context); a context-scoped \
+             key cannot call it",
+            started_at,
+        );
+    }
     let flushed = tokio::task::block_in_place(|| state.flush_dirty());
     ok(flushed, started_at)
 }

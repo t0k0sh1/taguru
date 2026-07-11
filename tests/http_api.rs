@@ -2635,11 +2635,11 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         &[
             (
                 "TAGURU_API_TOKENS",
-                "boss:atok,reader:rtok,scribe:wtok,potter:stok",
+                "boss:atok,reader:rtok,scribe:wtok,potter:stok,curator:ctok",
             ),
             (
                 "TAGURU_KEY_SCOPES",
-                r#"{"reader": "read", "scribe": "write", "potter": {"role": "write", "contexts": ["sake"]}}"#,
+                r#"{"reader": "read", "scribe": "write", "potter": {"role": "write", "contexts": ["sake"]}, "curator": {"role": "admin", "contexts": ["sake"]}}"#,
             ),
         ],
     );
@@ -2718,6 +2718,21 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
     );
     assert_eq!(call("DELETE", "/contexts/bunko", None, "wtok").0, 403);
     assert_eq!(call("POST", "/flush", None, "wtok").0, 403);
+
+    // Flush is server-wide (it names every flushed context), so a
+    // context-scoped key is refused even at admin role — the refusal
+    // is the CONTEXT bypass guard, not the role check (curator IS
+    // admin). The unscoped admin flushes normally.
+    let (status, scoped_flush) = call("POST", "/flush", None, "ctok");
+    assert_eq!(status, 403, "{scoped_flush}");
+    assert!(
+        scoped_flush["error"]
+            .as_str()
+            .unwrap()
+            .contains("server-wide"),
+        "{scoped_flush}"
+    );
+    assert_eq!(call("POST", "/flush", None, "atok").0, 200);
 
     // Context-scoped write: inside the grant yes, outside no — and the
     // directory shows only the granted world.

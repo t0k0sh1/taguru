@@ -226,28 +226,25 @@ async fn serve() {
     spawn_flusher(state.clone(), flush_secs, auto_embed);
 
     let app = routes(protocol_trailer).with_state(state.clone());
-    // Authorization is the innermost layer ON PURPOSE: the /mcp
-    // dispatch handle captured just below deliberately skips the rest
-    // of the stack (auth, budgets, logging — one client request, one
-    // charge), but a scoped key's grant must hold on BOTH surfaces,
-    // so the scope check is part of the routes themselves.
-    let app = app.layer(axum::middleware::from_fn_with_state(
-        Arc::clone(&keyring),
-        auth::enforce_authorization,
-    ));
 
     // POST /mcp speaks the MCP Streamable HTTP transport over these
-    // same routes. The dispatch handle is captured BEFORE the
+    // same routes. The dispatch handle is captured BEFORE the outer
     // middleware stack goes on, so a tool call that already passed
     // auth, the timeout, and the body cap at /mcp is not re-charged
-    // inside — one client request, one budget, one log line. "No body
-    // cap inside" has to be said explicitly, though: an extractor that
-    // finds no DefaultBodyLimit extension falls back to axum's own
-    // hardcoded 2 MiB default, which would silently cap dispatched
-    // tool calls below the operator's TAGURU_MAX_BODY_BYTES.
+    // inside — one client request, one budget, one log line — but it
+    // DOES carry its own authorization layer, so a scoped key's grant
+    // is enforced on each dispatched tool call exactly as on the raw
+    // API. ("No body cap inside" is explicit: an extractor that finds
+    // no DefaultBodyLimit extension falls back to axum's hardcoded
+    // 2 MiB default, which would silently cap dispatched tool calls
+    // below the operator's TAGURU_MAX_BODY_BYTES.)
     let mcp_dispatch = app
         .clone()
-        .layer(axum::extract::DefaultBodyLimit::disable());
+        .layer(axum::extract::DefaultBodyLimit::disable())
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&keyring),
+            auth::enforce_authorization,
+        ));
     let app = app.route(
         "/mcp",
         post(
@@ -271,6 +268,17 @@ async fn serve() {
         })),
         None => app,
     };
+    // Authorization wraps every OUTER route — the context API, the
+    // /mcp endpoint itself, and the merged OAuth routes — now that all
+    // are registered. `.layer()` only covers routes already on the
+    // router, so this MUST come after the /mcp route and the oauth
+    // merge above; layering it earlier (as this once did) silently
+    // left both surfaces unchecked. Idempotent on auth-exempt routes:
+    // enforce_authorization no-ops when no AuthKey extension is present.
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        Arc::clone(&keyring),
+        auth::enforce_authorization,
+    ));
     let gate = Arc::new(auth::Gate {
         keyring,
         oauth: oauth.clone(),
