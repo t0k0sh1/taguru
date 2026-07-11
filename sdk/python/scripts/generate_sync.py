@@ -8,6 +8,7 @@ this and fails if the committed sync client is stale.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -63,6 +64,11 @@ def main() -> int:
             seen_import_time = True
         kept.append(line)
     target.write_text("".join(kept), encoding="utf-8")
+
+    # unasync keeps the async source's line wrapping, but dropping `async `
+    # lets some signatures fit on one line — and CI holds the committed file
+    # to `ruff format --check`. Format here so both checks agree.
+    subprocess.run([sys.executable, "-m", "ruff", "format", "--quiet", str(target)], check=True)
 
     init = SYNC_DIR / "__init__.py"
     if not init.exists():
