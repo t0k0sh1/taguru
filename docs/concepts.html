@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>コンセプト — Taguru</title>
+  <meta name="description" content="Taguruの考え方：連想モデル、文脈、検索ループ、グラフとテキスト二本のレーン、インジェストの規律、手順・因果・コードの表現パターン。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23a8402f'/%3E%3Ctext x='32' y='46' font-size='38' text-anchor='middle' fill='%23fff' font-family='serif'%3E糸%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="theme.js"></script>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">糸</span>Taguru</a>
+    <div class="topnav-links">
+      <a href="getting-started.html">はじめる</a>
+      <a href="concepts.html" aria-current="page">コンセプト</a>
+      <a href="architecture.html">アーキテクチャ</a>
+      <a href="bedrock.html">Bedrock</a>
+      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+      <a href="https://github.com/t0k0sh1/taguru">GitHub</a>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">concepts</div>
+    <h1>コンセプト——連想、文脈、二本のレーン</h1>
+    <p class="lede">
+      Taguruが何を保持し、どう探し、何をあえてグラフに書かないか。
+      この設計を知っていると、インジェストの質がそのまま検索の質になる理由が見える。
+    </p>
+  </header>
+
+  <section id="associations">
+    <h2>知識は連想である</h2>
+    <p class="section-sub">最小単位は <span class="tuple">(subject, label, object, weight, source)</span> の五つ組。</p>
+    <div class="model-card">
+      <p>
+        <b>weightは符号付きの証拠量。</b>負の値は否定の主張になる——「大量生産を行わない」は
+        <span class="tuple">(青嶺酒造, 行う, 大量生産, −1.0)</span>。
+        否定は肯定と同じラベルに負の符号で載るから、読み違えようがない。
+      </p>
+      <p>
+        <b>再主張は加算、出典は保存。</b>同じ三つ組を別の文書が主張するとweightが積み上がり、
+        ソースごとのattributionが全部残る。<code>2ソース × 1.0</code>（独立した裏付け）と
+        <code>1ソース × 2.0</code>（ひとつの強い主張）は最後まで区別できる。
+        だから同一文書内での言い換えの再主張は禁物（証拠の水増し）、文書をまたいだ再主張は歓迎（それが裏付け）。
+      </p>
+      <p>
+        <b>名前は見出し、本文ではない。</b>subject/label/objectは1024バイトまで。長い知識は分解するか、
+        原文としてソースAPIに置く。weightは証拠の強さであって効果の大きさではない——「リスク2倍」は
+        objectに書くか（<span class="tuple">喫煙 →リスク倍率→ 2倍</span>）、原文に残す。
+      </p>
+    </div>
+  </section>
+
+  <section id="contexts">
+    <h2>コンテキスト＝文脈</h2>
+    <p class="section-sub">1つのコンテキストの中では、1つの綴りは1つの指示対象を意味する。</p>
+    <p>
+      果物のAppleと会社のAppleは別のコンテキストに属する。この「一綴り一referent」の規約が、
+      グラフを曖昧性解消の装置ではなく<b>知識の置き場</b>として単純に保つ。
+      どのコンテキストに聞くかを選ぶのは言語理解の仕事、つまりLLMの仕事——
+      そのために <code>GET /contexts</code> は人間が書いた説明文、機械集計の統計（連想数・主要概念・ラベル見本）、
+      使用統計（読み・空振り・書き・最終アクセス）を1行に並べて返す。
+      「誰にも選ばれないコンテキスト」と「選ばれるのに何も答えないコンテキスト」はそこで見分けられる。
+    </p>
+  </section>
+
+  <section id="index-not-archive">
+    <h2>グラフは索引、アーカイブではない</h2>
+    <p class="section-sub">骨格はグラフに、肉付けは原文に。</p>
+    <p>
+      文書をインジェストするときは、事実の骨格を連想に落とすと同時に、原文そのものをソースAPIに登録する
+      （ソースid → パッセージ）。サーバーは本文を空行境界で段落に分割して保持し、
+      すべての連想のattributionは <code>source</code> と <code>paragraph</code> でその段落を指せる——
+      <code>citations</code> APIで元の一文まで手繰って裏取りできるのはこの構造のおかげ。
+      段落に <code>section</code>（見出し）を付けておけば、グラフの読み出し結果のattributionに
+      解決済みのセクション名が同乗してくる。
+    </p>
+  </section>
+
+  <section id="retrieval">
+    <h2>検索ループ</h2>
+    <p class="section-sub">接続したLLMが <code>/protocol</code> から受け取る規律。人間がcurlで辿っても同じ形になる。</p>
+    <div class="loop">
+      <div class="loop-step"><span class="n">01</span><span class="t">選ぶ</span><span class="d">list_contexts で対象の文脈を選定</span></div>
+      <div class="loop-step"><span class="n">02</span><span class="t">解決する</span><span class="d">resolve / resolve_label でcueを正規名に</span></div>
+      <div class="loop-step"><span class="n">03</span><span class="t">見取る</span><span class="d">describe→query で絞り込む</span></div>
+      <div class="loop-step"><span class="n">04</span><span class="t">広げる</span><span class="d">activate / explore で関連知識を収集</span></div>
+      <div class="loop-step"><span class="n">05</span><span class="t">裏取りする</span><span class="d">cite_passage で原文を確認</span></div>
+      <div class="loop-step" style="border-bottom-color: var(--thread-soft);"><span class="n" style="color:var(--thread)">06</span><span class="t">網を張る</span><span class="d">グラフで届かなければ search_passages</span></div>
+    </div>
+
+    <h3>入口の正規化——cueはそのままでは照合しない</h3>
+    <p>
+      <code>resolve</code> の入口はNFKC正規化・大文字小文字の畳み込み・カタカナ→ひらがな変換の上に
+      バイグラム転置索引を張ったもの。全半角の揺れ、かな表記の揺れ、軽い誤字はここで吸収される。
+      外れたら言い換えるか、<code>dice_floor</code>（既定0.3）を一時的に下げて曖昧照合を広げる。
+    </p>
+    <p>
+      候補には <code>kind</code> が付く。<code>exact</code>／<code>alias</code> は「cueが登録済みの綴りそのもの」、
+      <code>containment</code>／<code>fuzzy</code> は「文字列として重なっているだけ」。後者の高スコアは
+      <b>そっくりさん</b>の可能性がある——京都は東京都に0.67で重なる。上位候補に付いてくる
+      <code>gloss</code>（名前＋最重量の事実の要約）を読んでから採用する。スコアだけで採らない。
+    </p>
+
+    <h3>セマンティック層は「弱い入口を補う層」</h3>
+    <p>
+      埋め込みが設定されていれば、字句候補が無い・弱い（最高スコア &lt; 0.5）ときに
+      <code>tier:"semantic"</code> の候補が合流する。名前は<b>グロスとして</b>埋め込まれているので、
+      言い換え（醸造責任者→杜氏）や質問形のcueも着地する。tierを跨いだスコア比較はしない——
+      字句のDice係数とコサイン類似度は別の物差しだ。床（<code>semantic_floor</code>）は
+      埋め込みモデルの属性であり、モデルを替えたら<a href="bedrock.html">校正し直す</a>。
+    </p>
+  </section>
+
+  <section id="text-lane">
+    <h2>テキストレーン——三つ組にならない知識の網</h2>
+    <p class="section-sub">手順の細部、条件、数量、談話。骨格化できない知識は最初から文章のまま探す。</p>
+    <p>
+      <code>sources/search</code> は段落単位の検索で、BM25の字句レーンと（<code>TAGURU_EMBED_PASSAGES</code> が
+      有効なら）段落埋め込みのセマンティックレーンを融合する。ヒットには <code>lanes</code> が付き、
+      どのレーンが何位で当てたかを常に申告する——vectorだけのヒットは言い換えが利いた印、
+      BM25だけのヒットは字面が合った印。どちらも証拠であって判定ではない。本文を読む。
+    </p>
+    <p class="note">
+      <b>質問ではなく、答えの形で検索する。</b>多くの埋め込みモデルは質問文（「SSOはどのプランで使える?」）を、
+      その答えの文（「SSOはEnterpriseプランで利用できる。」）より遠くに置く。ありそうな平叙文を推測して
+      <b>その文で</b>検索する——推測が当たっている必要はなく、探している文と同じ<i>形</i>であればいい。
+      逆向きの対策がdoc2query：インジェスト時に段落へ「この段落が答えになる質問」を添えておくと、
+      質問形の検索が質問側の索引に着地する。
+    </p>
+  </section>
+
+  <section id="ingest">
+    <h2>インジェストの規律</h2>
+    <p class="section-sub">検索の質はここで決まる。<code>/protocol</code> のインジェスト・ループの骨子。</p>
+    <ul>
+      <li><b>鋳造の前に照合</b>（check before mint）：綴りを新しく作る前に <code>resolve</code>／<code>resolve_label</code>。あるものを再利用する。ラベル語彙は <code>GET /contexts/{name}/labels</code> が一覧する。</li>
+      <li><b>暗黙のメンバーシップを明示する</b>：「杜氏は高瀬」——誰の杜氏か。文書の主要エンティティから <code>unreachable_from</code> を叩けば、繋ぎ忘れた島が見つかる。</li>
+      <li><b>文書が更新されたらdiff同期</b>：<code>sources/retract</code> で旧版の寄与（weight・attribution・パッセージ）を撤回してから、新版を普通にインジェスト。概念とエッジは残り、weightだけが下がる。</li>
+      <li><b>節目に語彙監査</b>：<code>vocabulary/audit</code> が綴りの分岐候補を挙げる——字句の双子（表記ゆれ）と意味の双子（同義語の分裂）。候補であって判定ではない。同一referentなら正準を決めてエイリアスを張る。<b>別物なのに衝突し続ける対</b>（東京都/京都、前株/後株）は「別物」という事実として書く：<span class="tuple">(株式会社青嶺, 別物, 青嶺株式会社, 1.0)</span>——以後、両者のglossが resolve の場で警告してくれる。</li>
+      <li><b>エイリアスは入口専用</b>：結果は常に正準の綴りで返る。既存の2概念を繋ぐことはできない（それはマージであり、再構築の領分）。登録間違いは同じパスのDELETEで撤回する。</li>
+    </ul>
+  </section>
+
+  <section id="patterns">
+    <h2>表現パターン</h2>
+    <p class="section-sub">新しい機構は無い——メンバーシップのエッジと負のweightと同じ道具立てで表す。</p>
+
+    <h3>手順（順序のある知識）</h3>
+    <pre><code>[{<span class="k">"subject"</span>:<span class="s">"日本酒の醸造"</span>,<span class="k">"label"</span>:<span class="s">"最初の工程"</span>,<span class="k">"object"</span>:<span class="s">"洗米"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"工程書"</span>},
+ {<span class="k">"subject"</span>:<span class="s">"洗米"</span>,<span class="k">"label"</span>:<span class="s">"次の工程"</span>,<span class="k">"object"</span>:<span class="s">"浸漬"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"工程書"</span>},
+ {<span class="k">"subject"</span>:<span class="s">"日本酒の醸造"</span>,<span class="k">"label"</span>:<span class="s">"工程"</span>,<span class="k">"object"</span>:<span class="s">"洗米"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"工程書"</span>}]</code></pre>
+    <ul>
+      <li><b>順序</b>は <code>次の工程</code> の連鎖（正準ラベルを1つに固定。分岐は複数の<code>次の工程</code>エッジ＝DAG）。<b>開始</b>は <code>最初の工程</code>。<b>所属</b>（<code>工程</code>）が全ステップをハブに繋ぎ、網羅性の監査を効かせる。</li>
+      <li>再生は「開始を引く→<code>query {label:"次の工程"}</code> で全対を取って並べる」。<b><code>explore</code> のホップ距離を順序に使わない</b>——所属エッジがハブ経由の近道を作り、鎖上の位置と食い違う。</li>
+      <li>分量・条件・コツはグラフに押し込まず原文に残し、<code>sources/search</code> で拾う。</li>
+    </ul>
+
+    <h3>因果</h3>
+    <pre><code>[{<span class="k">"subject"</span>:<span class="s">"ストレス"</span>,<span class="k">"label"</span>:<span class="s">"引き起こす"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"論文A"</span>},
+ {<span class="k">"subject"</span>:<span class="s">"カフェイン"</span>,<span class="k">"label"</span>:<span class="s">"引き起こす"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">-0.8</span>,<span class="k">"source"</span>:<span class="s">"論文C"</span>},
+ {<span class="k">"subject"</span>:<span class="s">"運動"</span>,<span class="k">"label"</span>:<span class="s">"防ぐ"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"論文D"</span>}]</code></pre>
+    <ul>
+      <li>「なぜX?」は <code>query {label:["引き起こす","高める","要因"], object:"X"}</code>。連鎖は <code>activate</code> のpathで見える——システムは A→B→C を見せるが A→C を主張しない。推移は読む側の判断。</li>
+      <li>「引き起こさない」は因果ラベルに負のweight、「防ぐ」は独立した正のラベル。混ぜない。相関は<code>相関する</code>のまま、因果に昇格させない。</li>
+      <li>議論が割れた因果は、1本のエッジ上の小さな正味weightと割れたattributionsとして現れる。答えでもそう言う。</li>
+    </ul>
+
+    <h3>ソースコード</h3>
+    <ul>
+      <li>概念は識別子の正確な綴り、<b>短い名前</b>で：<code>fetch_block</code> であって <code>CacheStore::fetch_block</code> ではない——修飾は入口のスコアを薄める。名前空間はエッジで（<code>defined_in</code> → <code>src/store.rs</code>）。ファイルもパスも概念。</li>
+      <li>ラベル語彙は小さく決めて使い回す：<code>kind</code>・<code>defined_in</code>・<code>calls</code>・<code>field</code>・<code>variant</code>・<code>returns</code>・<code>invariant</code>・<code>purpose</code> でコードの事実の大半が書ける。</li>
+      <li>大小文字の双子（型<code>Frame</code>とアクセサ<code>frame</code>）は別概念で、resolveは両方を1.0で返す——同点は describe で見分ける。決してマージしない。</li>
+      <li>入口が camelCase/snake_case/誤字を吸収する（<code>fetchBlock</code> も <code>evict_cld</code> も届く）。自然言語からの入口は識別子へのエイリアスで（<code>退避ループ</code> → <code>evict_cold</code>）。</li>
+      <li>いちばん価値が高いのは<b>grepが答えられない事実</b>——不変条件・目的・設計上の制約を、識別子の上のエッジとして書く。</li>
+    </ul>
+
+    <div class="next-links">
+      <a class="nav-card" href="architecture.html" style="flex:1 1 16rem">
+        <span class="nc-title">次へ：内部アーキテクチャ</span>
+        <p>この規律を支える実装——フラットバッファ、WAL、三つの検索経路。</p>
+      </a>
+      <a class="nav-card" href="mcp-rag-walkthrough.html" style="flex:1 1 16rem">
+        <span class="nc-title">ウォークスルー</span>
+        <p>この検索ループが実リクエストでどう流れるか。</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</body>
+</html>

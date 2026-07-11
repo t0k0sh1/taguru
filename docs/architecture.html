@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>内部アーキテクチャ — Taguru</title>
+  <meta name="description" content="Taguruの内部構造：フラットバッファのグラフ、ディスクを真実とするレジストリ、WALによる耐久性、三つの検索経路、認証と可観測性。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23a8402f'/%3E%3Ctext x='32' y='46' font-size='38' text-anchor='middle' fill='%23fff' font-family='serif'%3E糸%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="theme.js"></script>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">糸</span>Taguru</a>
+    <div class="topnav-links">
+      <a href="getting-started.html">はじめる</a>
+      <a href="concepts.html">コンセプト</a>
+      <a href="architecture.html" aria-current="page">アーキテクチャ</a>
+      <a href="bedrock.html">Bedrock</a>
+      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+      <a href="https://github.com/t0k0sh1/taguru">GitHub</a>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">internals</div>
+    <h1>内部アーキテクチャ——ディスクが真実、メモリはキャッシュ</h1>
+    <p class="lede">
+      1コンテキスト＝1枚のフラットバッファという割り切りから、WALの耐久性、三つの検索経路、
+      認証と可観測性まで。設計判断は対応するソースのモジュールコメントにも書かれている——
+      ここはその見取り図。
+    </p>
+  </header>
+
+  <section id="overview">
+    <h2>見取り図</h2>
+    <div class="arch">
+      <div class="arch-layer">
+        <div class="arch-label">clients</div>
+        <div class="arch-row">
+          <div class="arch-box dim"><b>LLMエージェント</b><span>Claude Code / Desktop、Converseループ等</span></div>
+          <div class="arch-box dim"><b>HTTPクライアント</b><span>curl、パイプライン、監視</span></div>
+          <div class="arch-box dim"><b>claude.ai コネクタ</b><span>OAuth経由のリモートMCP</span></div>
+        </div>
+      </div>
+      <div class="arch-down">↓</div>
+      <div class="arch-layer">
+        <div class="arch-label">surface</div>
+        <div class="arch-row">
+          <div class="arch-box"><b>taguru-mcp</b><span>stdioブリッジ。ツール呼び出しをHTTPに翻訳</span></div>
+          <div class="arch-box"><b>HTTP API</b><span>axum。全エンドポイント＋<code>POST /import</code></span></div>
+          <div class="arch-box"><b>POST /mcp</b><span>Streamable HTTP（ステートレス・プロファイル）</span></div>
+        </div>
+      </div>
+      <div class="arch-down">↓</div>
+      <div class="arch-layer">
+        <div class="arch-label">cross-cutting</div>
+        <div class="arch-row">
+          <div class="arch-box"><b>auth</b><span>名前付きBearerキー</span></div>
+          <div class="arch-box"><b>oauth</b><span>リモートMCP用・内蔵AS</span></div>
+          <div class="arch-box"><b>limits</b><span>時間予算とレート</span></div>
+          <div class="arch-box"><b>metrics / trace</b><span>Prometheus・OTLP</span></div>
+        </div>
+      </div>
+      <div class="arch-down">↓</div>
+      <div class="arch-layer">
+        <div class="arch-label">registry</div>
+        <div class="arch-row">
+          <div class="arch-box"><b>registry</b><span>コンテキスト単位のキャッシュ（LRU・ピン留め）、dirty追跡、周期flusher、コールドブート登録</span></div>
+        </div>
+      </div>
+      <div class="arch-down">↓</div>
+      <div class="arch-layer">
+        <div class="arch-label">per context</div>
+        <div class="arch-row">
+          <div class="arch-box"><b>Context</b><span>連想グラフ本体（フラットバッファ）</span></div>
+          <div class="arch-box lane-text"><b>passages</b><span>原文ストア（スナップショット＋追記ログ）</span></div>
+          <div class="arch-box lane-text"><b>bm25</b><span>段落転置索引（派生・再構築可能）</span></div>
+          <div class="arch-box"><b>vectors</b><span>グロス／段落の埋め込み（任意）</span></div>
+        </div>
+      </div>
+      <div class="arch-down">↓</div>
+      <div class="arch-layer">
+        <div class="arch-label">disk</div>
+        <div class="arch-row">
+          <div class="arch-box dim"><b>{name}.ctx ほかファイルファミリー</b><span>+ .wal.jsonl / oauth.json / .taguru.lock — すべて fsync + rename で書かれる</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="library">
+    <h2>ライブラリ層——1コンテキスト＝1枚のフラットバッファ</h2>
+    <p class="section-sub"><code>context.rs</code>。全状態が1つの平坦なバッファに収まるという不変条件が、この下のすべてを単純にする。</p>
+    <ul>
+      <li>状態は「UTF-8文字列アリーナ＋固定幅 <code>#[repr(C)]</code> レコードの7テーブル」。隣接リストはエッジレコードに縫い込まれた侵入型チェーン（intrusive chains）で、ポインタの追跡が別アロケーションを生まない。</li>
+      <li>すべての変更は「追記」か「フィールド更新」。だから全状態が <code>to_bytes</code>／<code>from_bytes</code> で1枚のイメージとして往復する——リトルエンディアン、ロード時に全検証。</li>
+      <li>容量はu32空間：テーブルあたり約42.9億レコード、インターン済みテキスト4 GiB。超過は <code>ContextFull</code> エラーであって、パニックではない（HTTPでは507になり、書き込みは適用されていない）。</li>
+      <li>検索の入口は正規化（NFKC・大小・カナ→ひらがな）＋バイグラム転置索引。エイリアスは入口専用の別綴りで、結果は常に正準の綴りを運ぶ。</li>
+    </ul>
+    <div class="chips" style="margin-top:0.9rem">
+      <span class="chip used">recall</span><span class="chip used">query</span><span class="chip used">query_any</span><span class="chip used">describe</span><span class="chip used">explore</span><span class="chip used">activate</span><span class="chip used">resolve</span><span class="chip used">resolve_label</span><span class="chip used">unreachable_from</span>
+      <span class="chip">associate</span><span class="chip">associate_from</span><span class="chip">add_concept_alias</span><span class="chip">add_label_alias</span>
+    </div>
+    <p class="note">藍が読み出し、無色が書き込み。ライブラリの表面はこれだけで、残りはすべてサーバー側の関心事。</p>
+  </section>
+
+  <section id="server">
+    <h2>サーバー層——レジストリとファイルファミリー</h2>
+    <p class="section-sub"><code>registry.rs</code>。ディスクが真実の源で、メモリはコンテキスト丸ごと単位のキャッシュ。</p>
+    <pre><code>data/
+├── {name}.ctx                 <span class="c"># グラフのイメージ（to_bytesの生バイト）</span>
+├── {name}.meta.json           <span class="c"># 説明・ピン留め・統計のサイドカー（イメージを純粋なダンプに保つため外に置く）</span>
+├── {name}.wal.jsonl           <span class="c"># グラフの書き込みWAL（flush成功のたびに切り詰め）</span>
+├── {name}.passages.bin        <span class="c"># 原文のコンパクション済みスナップショット</span>
+├── {name}.passages.wal.jsonl  <span class="c"># 原文の追記ログ</span>
+├── {name}.bm25.bin            <span class="c"># 段落転置索引（派生物——失っても再構築、障害にはならない）</span>
+├── {name}.vectors.bin         <span class="c"># 埋め込みキャッシュ（モデル名がキー）</span>
+├── oauth.json                 <span class="c"># リモートMCPのOAuthグラント</span>
+└── .taguru.lock               <span class="c"># データディレクトリの advisory ロック</span></code></pre>
+    <ul>
+      <li>ブートは全コンテキストを<b>コールド</b>登録（ピン留めだけ先読み）。最初のアクセスが透過的にロードし、キャッシュ予算（<code>TAGURU_CACHE_BYTES</code>）を超えるとLRUで退避。</li>
+      <li>書き込みはコンテキストをdirtyにするだけ。永続化は周期flusher（<code>TAGURU_FLUSH_SECS</code>）、退避時、シャットダウン時。</li>
+      <li>1コンテキストの真実はファミリー一式——バックアップは<b>必ず一括</b>（<a href="getting-started.html#ops">運用の基本</a>）。</li>
+    </ul>
+  </section>
+
+  <section id="durability">
+    <h2>耐久性——WALが「200＝残る」を作る</h2>
+    <p class="section-sub"><code>wal.rs</code>・<code>passages.rs</code>。flush間隔は鮮度の刻みであって、損失窓ではない。</p>
+    <ul>
+      <li>HTTP APIが受理したグラフ変更は、メモリに触れる<b>前に</b>WALへ追記される（JSON Lines、バッチごとにfsync）。クラッシュしても、次のブートがリプレイして戻す。</li>
+      <li>リプレイはシーケンス番号だけで駆動される：各レコードが単調な <code>seq</code> を持ち、イメージのヘッダが「ここまで焼き込み済み」の透かし（watermark）を持つ。二重適用も取りこぼしも構造的に起きない。</li>
+      <li>WALはflush成功のたびに切り詰められる。上限（既定256 MiB）に近づくのはflushが失敗し続けているときだけで、超えたら書き込みを500で<b>拒否</b>する——ログを無限に伸ばすより、書けない事実を早く言う。</li>
+      <li>原文は独立した耐久経路を持つ：コンパクション済みスナップショット＋常時ONの追記ログ。前身は1ファイルを毎回全書き換えで、N文書のimportがO(N²)バイトを書いていた——今はグラフと同じ「スナップショット＋ログ」の形。</li>
+      <li>すべてのライターがfsync＋rename。ファイルシステムのスナップショットはいつの瞬間でも安全で、<code>taguru inspect</code> がサーバーと同じ全検証ロード＋WALリプレイでバックアップを裏取りする。</li>
+    </ul>
+  </section>
+
+  <section id="search">
+    <h2>三つの検索経路</h2>
+    <p class="section-sub">グラフの入口、字句の網、意味の網。どれが答えたかは常に結果が申告する。</p>
+    <div class="card-grid">
+      <div class="card">
+        <h3>グラフの入口</h3>
+        <p>正規化＋バイグラム索引でcueを概念に解決し、あとは構造を手繰る（<code>describe</code>／<code>query</code>／<code>activate</code>／<code>explore</code>）。類似度はここに登場しない。</p>
+      </div>
+      <div class="card">
+        <h3>字句レーン（BM25）</h3>
+        <p>段落の転置索引を常駐させ、クエリごとの再トークン化を止める。原文ストアが真実で、索引は<b>派生物</b>——欠けていれば再構築される。更新はソース単位の墓標＋追記で増分。</p>
+      </div>
+      <div class="card">
+        <h3>セマンティックレーン（任意）</h3>
+        <p>概念・ラベルは<b>グロス</b>（名前＋最重量の事実）として埋め込む——単語だけでは文で訓練されたモデルに信号が足りない。<code>TAGURU_EMBED_PASSAGES</code> で段落とdoc2query質問も対象に。</p>
+      </div>
+    </div>
+    <ul style="margin-top:1.2rem">
+      <li>「段落」を決める関数は<b>ひとつ</b>（<code>paragraph.rs</code>）：BM25も、段落埋め込みも、原文ストアの区間も同じ分割を輸入する。三者が食い違う余地を最初から作らない。分割は機械的——空行の連なりが境界、正規化なし。</li>
+      <li>両レーンが走ったときの <code>sources/search</code> のスコアはランク融合、片方ならその素点。ヒットの <code>lanes</code> がレーンごとの順位と素点を必ず添える。</li>
+      <li>埋め込みリクエストには <code>X-Taguru-Embed-Purpose: index | query</code> が付く——非対称モデル（Cohere・Voyage）を前置きプロキシで正しく振り分けるためのフック。素のOpenAIサーバーは無視する。</li>
+      <li>ベクトルは常駐で、上限は <code>TAGURU_PASSAGE_VECTOR_LIMIT</code>（既定20,000行）。超えた分は字句レーンが全段落を守り、セマンティック側だけが部分的になる（refreshの応答がスキップを報告する）。</li>
+    </ul>
+  </section>
+
+  <section id="mcp-surface">
+    <h2>MCPの表面はひとつ</h2>
+    <p class="section-sub"><code>mcp.rs</code>・<code>remote_mcp.rs</code>・<code>src/bin/taguru-mcp.rs</code>。</p>
+    <p>
+      ツール定義、ツール→HTTPリクエストの対応、JSON-RPCの枠組みは <code>mcp.rs</code> に<b>一度だけ</b>書かれ、
+      stdioブリッジと <code>POST /mcp</code> が共有する。トランスポートの違いは「翻訳したリクエストをどう実行するか」
+      （ブリッジはureqの往復、サーバー内は同一プロセスのRouter呼び出し）と「返事をどう運ぶか」だけ。
+      リモート側はステートレス・プロファイル：<code>initialize</code> は規律書を配り、各ツール呼び出しは自立している——
+      SSEもセッションIDも、再開すべきものが無い。
+    </p>
+  </section>
+
+  <section id="security">
+    <h2>認証・認可・上限</h2>
+    <p class="section-sub"><code>auth.rs</code>・<code>oauth.rs</code>・<code>limits.rs</code>。</p>
+    <ul>
+      <li><b>Bearerは名前付きキーリング</b>：<code>TAGURU_API_TOKEN</code>（キー名 "default"）と <code>TAGURU_API_TOKENS</code>（"ci:tokA,laptop:tokB"）。アクセスログが<b>どのキーか</b>を言い、失効は1本ずつ、ローテーションは重ね掛け（新キー追加→移行→旧キー削除）。不正な設定は起動拒否。</li>
+      <li><b>OAuthはリモートMCPのため</b>：RFC 9728のリソースメタデータ＋内蔵の最小認可サーバー（PKCE・動的登録込み）。「ログイン」は既存APIキーの所持そのもの——同意ページにキーを貼ると、その接続がそのキーとして振る舞う。トークンはSHA-256でハッシュ化して保存、グラントは <code>data_dir/oauth.json</code>（削除＋再起動で失効、30日未使用で自動失効）。OAuthが開くのは <code>/mcp</code> だけ。</li>
+      <li><b>上限は層で分担</b>：リクエスト全体の時間予算とキー毎レートは <code>limits.rs</code>（1分ぶんバーストしてから定常レートに収束、超過は <code>Retry-After</code> 付き429）。ボディ上限は本体の層、パラメータ上限は各ハンドラ（連想バッチ10,000／リスト入力1,000／<code>limit</code> は全所1,000天井）。</li>
+      <li><b>ブルートフォース対策</b>：失敗したBearer試行はソースIPごとに毎分制限（既定10）。正しいトークンは絶対に絞られない。<code>X-Forwarded-For</code> は信用しない——リバースプロキシの背後では全員がプロキシのIPを共有するので、そこではプロキシ側で絞る。</li>
+    </ul>
+  </section>
+
+  <section id="observability">
+    <h2>可観測性</h2>
+    <p class="section-sub"><code>metrics.rs</code>・<code>trace.rs</code>。手書きのRED——数個のatomicと1つのrender関数で足りるものにファサードcrateは要らない。</p>
+    <ul>
+      <li><code>GET /metrics</code>：ルート別のリクエスト数とレイテンシヒストグラム、キャッシュ/flush/WAL/埋め込みの結果、500の原因内訳（<code>taguru_errors_total{kind=…}</code>）、検索のヒット/空振り（<code>taguru_searches_total</code>）、resolveのtier内訳（<code>taguru_resolves_total</code>——semanticの比率が上がる＝cueが語彙から漂流中）、WAL・原文ログのサイズゲージ、最終flush成功時刻。</li>
+      <li><b>コンテキスト名はメトリクスラベルに入れない</b>：名前はクライアントが鋳造するので、入れた瞬間に系列が無限に増える。コンテキスト別の数字は <code>GET /contexts</code> の使用統計（読み・空振り・書き・最終アクセス）が持つ——advisoryで、flushごと＋graceful shutdown時に永続化。読み出しがディスク書き込みを起こすことはない。</li>
+      <li><b>分散トレースはopt-in</b>：<code>OTEL_EXPORTER_OTLP_ENDPOINT</code> を置けば全リクエストがOTLPスパンになり、流入する W3C <code>traceparent</code>／AWS <code>X-Amzn-Trace-Id</code>（ALB・API Gateway）のトレースに合流する。埋め込みプロバイダの往復は子スパンで見え、アクセスログに <code>trace_id</code> が載ってログとトレースが相互参照できる。バックエンドはOTLPなら何でも——切り替えはコレクタ設定であってTaguruの変更ではない。</li>
+    </ul>
+  </section>
+
+  <section id="shipping">
+    <h2>配布物とサイジング</h2>
+    <ul>
+      <li><b>Dockerイメージは<code>scratch</code>にバイナリ1枚</b>：muslの静的リンクで〜13 MB。シェルなし、libcなし、CAバンドルなし（TLSルートはバイナリに焼き込み）。HEALTHCHECKは <code>taguru health</code>——バイナリの自己プローブ。uid 65532、<code>--read-only</code> 可。</li>
+      <li><b>サイジングは測る</b>：<code>taguru estimate --associations 1_000_000</code> が目標規模のコンテキストを実際に組み立てて<b>実測</b>する。レイテンシは <code>cargo run --release --example benchmark</code>（10万/100万件での操作別計測）——ただしexamplesは現在整理中。</li>
+    </ul>
+    <p class="note">
+      各判断の一次資料はソースのモジュールコメント：
+      <code>registry.rs</code>（ディスクが真実）、<code>wal.rs</code>（seqとwatermark）、<code>passages.rs</code>（O(N²)からの脱出）、
+      <code>bm25.rs</code>（派生物という立場）、<code>paragraph.rs</code>（唯一の分割関数）、<code>embedding.rs</code>（グロスを埋め込む理由）、
+      <code>mcp.rs</code>（一度だけ書く）、<code>oauth.rs</code>（内蔵ASの割り切り）、<code>limits.rs</code>・<code>metrics.rs</code>・<code>auth.rs</code>。
+    </p>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</body>
+</html>

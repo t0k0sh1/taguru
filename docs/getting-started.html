@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>はじめる — Taguru</title>
+  <meta name="description" content="Taguruのインストール、起動と設定、最初の記憶、Docker、一括投入（import / extract）、MCP接続、運用の基本。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23a8402f'/%3E%3Ctext x='32' y='46' font-size='38' text-anchor='middle' fill='%23fff' font-family='serif'%3E糸%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="theme.js"></script>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">糸</span>Taguru</a>
+    <div class="topnav-links">
+      <a href="getting-started.html" aria-current="page">はじめる</a>
+      <a href="concepts.html">コンセプト</a>
+      <a href="architecture.html">アーキテクチャ</a>
+      <a href="bedrock.html">Bedrock</a>
+      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+      <a href="https://github.com/t0k0sh1/taguru">GitHub</a>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">getting started</div>
+    <h1>はじめる</h1>
+    <p class="lede">
+      インストールから最初の記憶、まとまった知識の投入、LLMエージェントとの接続、
+      そして運用の基本まで。ここを一往復すれば、Taguruを実際の作業に組み込める。
+    </p>
+  </header>
+
+  <section id="install">
+    <h2>1. インストール</h2>
+    <p class="section-sub">ひとつのcrateからサーバーとMCPブリッジの両方が入る。</p>
+    <pre><code>cargo install taguru        <span class="c"># `taguru`（サーバー）と `taguru-mcp`（MCPブリッジ）</span>
+
+<span class="c"># ソースから</span>
+git clone https://github.com/t0k0sh1/taguru &amp;&amp; cd taguru
+cargo run --release
+
+<span class="c"># Docker（linux/amd64 + linux/arm64）</span>
+docker run -d --name taguru \
+  -p 127.0.0.1:8248:8248 \
+  -v taguru-data:/data \
+  ghcr.io/t0k0sh1/taguru:latest</code></pre>
+  </section>
+
+  <section id="config">
+    <h2>2. 起動と設定</h2>
+    <p class="section-sub">
+      既定は <code>127.0.0.1:8248</code>（電話キーパッドの TAGU。近隣ツールの既定ポートを避けて選んである）、
+      データは <code>./data</code>。設定はすべて環境変数で、<code>taguru --help</code> が全変数を列挙する。
+    </p>
+    <pre><code>taguru                       <span class="c"># そのまま起動</span>
+taguru --config taguru.env   <span class="c"># KEY=VALUE ファイルから読む —</span>
+                             <span class="c"># `docker run --env-file` と同じ方言なので1ファイルで両方を駆動できる。</span>
+                             <span class="c"># 実環境変数がファイルより優先。未知の TAGURU_* はtypoとして警告される</span>
+taguru version</code></pre>
+    <h3>主要な環境変数</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>変数</th><th>既定</th><th>役割</th></tr></thead>
+        <tbody>
+          <tr><td>TAGURU_ADDR</td><td>127.0.0.1:8248</td><td>バインドアドレス</td></tr>
+          <tr><td>TAGURU_DATA_DIR</td><td>./data</td><td>データディレクトリ</td></tr>
+          <tr><td>TAGURU_CACHE_BYTES</td><td>512 MiB</td><td>ピン留めされていないコンテキストの常駐メモリ予算（LRUで退避）</td></tr>
+          <tr><td>TAGURU_FLUSH_SECS</td><td>5</td><td>イメージflushの間隔。WALが有効なら鮮度の刻みであって損失窓ではない</td></tr>
+          <tr><td>TAGURU_WAL</td><td>on</td><td>承認した書き込みをfsyncしてから適用する（クラッシュで何も失わない）。<code>0</code>でflush間隔ぶんの損失窓に戻る</td></tr>
+          <tr><td>TAGURU_WAL_MAX_BYTES</td><td>256 MiB</td><td>コンテキストごとのWAL上限。flushが失敗し続けたときだけ近づき、超えると書き込みを500で拒否する</td></tr>
+          <tr><td>TAGURU_API_TOKEN</td><td>—</td><td>Bearerトークン（<code>/health</code>・<code>/metrics</code>以外の全リクエストに必須）。未設定＝認証なし。localhostの外に出すなら必ず設定</td></tr>
+          <tr><td>TAGURU_API_TOKENS</td><td>—</td><td>名前付きキー（<code>"ci:tokA,laptop:tokB"</code>）。アクセスログにどのキーかが載り、漏洩は1本の失効で済む</td></tr>
+          <tr><td>TAGURU_EMBED_URL / _MODEL / _API_KEY</td><td>—</td><td>セマンティック入口（OpenAI互換 <code>/embeddings</code>）。未設定なら入口は純粋に字句照合</td></tr>
+          <tr><td>TAGURU_EMBED_AUTO</td><td>off</td><td>flushごとに差分だけ再埋め込み。エージェントがインジェストを駆動する構成では推奨（refreshの呼び忘れを当てにしない）</td></tr>
+          <tr><td>TAGURU_EMBED_PASSAGES</td><td>off</td><td>段落も埋め込む＝テキストレーンのセマンティック側。コーパスはグロスより桁違いに大きいので、費用は明示的に選ぶ</td></tr>
+          <tr><td>TAGURU_SEMANTIC_FLOOR</td><td>0.35</td><td>セマンティック入口の床。<b>埋め込みモデルの属性</b>（既定はtext-embedding-3-large向け。<a href="bedrock.html">Bedrock</a>のTitan V2なら〜0.2）</td></tr>
+          <tr><td>TAGURU_PUBLIC_URL</td><td>—</td><td>公開ベースURL。設定するとリモートMCP（<code>/mcp</code>）でOAuthが有効になり、claude.aiカスタムコネクタが繋がる</td></tr>
+          <tr><td>TAGURU_RATE_LIMIT_PER_MIN</td><td>0（off）</td><td>キーごとの毎分リクエスト予算。localhostの外に出すなら有効化</td></tr>
+          <tr><td>TAGURU_REQUEST_TIMEOUT_SECS</td><td>30</td><td>リクエストの時間予算。埋め込みプロバイダを設定したら60以上に</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      観測系（<code>RUST_LOG</code>、<code>TAGURU_LOG_FORMAT=json</code>、<code>OTEL_EXPORTER_OTLP_ENDPOINT</code>、
+      検索ログの<code>TAGURU_LOG_SEARCHES</code>）と上限系（<code>TAGURU_MAX_BODY_BYTES</code>ほか）は
+      <a href="architecture.html">アーキテクチャ</a>で。全リストは <code>taguru --help</code>。
+    </p>
+  </section>
+
+  <section id="first">
+    <h2>3. 最初の記憶</h2>
+    <p class="section-sub">コンテキストを作り、連想を入れ、手繰る。HTTPだけで一往復できる。</p>
+    <pre><code>curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \
+  -d '{"description":"青嶺酒造という架空の酒蔵の知識"}'
+
+curl -X POST localhost:8248/contexts/sake/associations -H 'Content-Type: application/json' \
+  -d '[{"subject":"青嶺酒造","label":"代表銘柄","object":"青嶺","weight":1.0,"source":"第1段落"}]'
+
+curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application/json' \
+  -d '{"origins":["青嶺酒造"]}'</code></pre>
+    <p>
+      <code>activate</code> の応答は強さ順の連想リストで、各行に <code>strength</code>（この呼び出し内での順位づけ）、
+      <code>path</code>（どう手繰ってきたか）、出典の <code>attributions</code> が付く。
+      エンドポイント全一覧と規律書は、起動中のサーバーの <code>GET /protocol</code> がそのまま配る。
+    </p>
+  </section>
+
+  <section id="docker">
+    <h2>4. Dockerで運用する</h2>
+    <p class="section-sub">公開イメージは<code>scratch</code>上のサーバー単体——シェルもlibcも無い、パッチ対象の無い〜13 MB。</p>
+    <ul>
+      <li>コンテナ内では <code>0.0.0.0:8248</code> にバインドする（loopbackだと <code>-p</code> の外から届かない）。つまり<b>認証なしモードは公開した所まで届く</b>——<code>-p</code> を <code>127.0.0.1</code> に絞るか、<code>TAGURU_API_TOKEN</code> を設定する。</li>
+      <li>設定は同じ環境変数（<code>-e</code>、または <code>--env-file taguru.env</code>——<code>--config</code> が読むのと同一ファイル）。</li>
+      <li>プロセスは uid 65532 で走る。名前付きボリュームは初回に所有権を自動継承、バインドマウントは先に <code>chown -R 65532</code>（または <code>--user "$(id -u)"</code>）。</li>
+      <li><code>--read-only</code> で動く（書き込み先は /data のみ）。<code>docker stop</code> は graceful shutdown（flush＋使用統計の書き出し）。</li>
+      <li>HEALTHCHECKは <code>taguru health</code>——バイナリが自分自身を突く（scratchにcurlは無い）。</li>
+    </ul>
+    <pre><code><span class="c"># バックアップの検証もローカルツールチェーン不要</span>
+docker run --rm -v taguru-data:/data ghcr.io/t0k0sh1/taguru inspect /data</code></pre>
+  </section>
+
+  <section id="bulk">
+    <h2>5. まとめて入れる — <code>taguru import</code></h2>
+    <p class="section-sub">
+      初期ロードや移行はHTTPを介さない。JSONLのバッチファイルを、サーバーと同じWAL経由の書き込み経路で
+      データディレクトリに直接適用する。
+    </p>
+    <pre><code>taguru import batches/            <span class="c"># 配下の *.jsonl を名前順に</span>
+taguru import --dry-run batches/  <span class="c"># 検証と報告だけ。何も書かない</span></code></pre>
+    <p>
+      <b>1ファイル＝1ソースの完全な真実</b>が唯一のルール。適用は「そのソースを撤回してから、ファイルを適用」なので——
+    </p>
+    <ul>
+      <li><b>冪等</b>：同じファイルを2度importしても同じ状態。weightは二重加算されない。</li>
+      <li><b>改訂可能</b>：修正版ファイルは古い事実を丸ごと置き換える（エージェントがライブで行うdiff同期と同じ）。</li>
+      <li><b>再試行可能</b>：途中で失敗したファイルは直して再import——撤回が再試行を正確にする。</li>
+    </ul>
+    <pre><code><span class="c"># バッチファイル：先頭がヘッダー、以降は1行1操作</span>
+{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
+{<span class="k">"passage"</span>: <span class="s">"青嶺酒造は1907年創業。杜氏は高瀬。"</span>}
+{<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"section"</span>: <span class="s">"沿革"</span>}
+{<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"question"</span>: <span class="s">"青嶺酒造の酒造りの責任者は誰?"</span>}
+{<span class="k">"subject"</span>: <span class="s">"青嶺酒造"</span>, <span class="k">"label"</span>: <span class="s">"杜氏"</span>, <span class="k">"object"</span>: <span class="s">"高瀬"</span>, <span class="k">"weight"</span>: <span class="nu">2.0</span>}
+{<span class="k">"alias"</span>: <span class="s">"Aomine Brewery"</span>, <span class="k">"canonical"</span>: <span class="s">"青嶺酒造"</span>, <span class="k">"kind"</span>: <span class="s">"concept"</span>}</code></pre>
+    <p>
+      検証は適用と別パス：1行でも不正ならファイル全体が行番号付きで拒否され、何も書かれない。
+      稼働中のサーバーには同じ契約が <code>POST /import</code> にある（1リクエスト＝1バッチファイル）——
+      ダウンタイム無しの一括投入はこちら。
+    </p>
+    <pre><code><span class="c"># -d は改行を落とす。改行がフォーマットなので --data-binary で</span>
+curl -X POST localhost:8248/import -H 'Authorization: Bearer &lt;key&gt;' \
+  --data-binary @docs-aomine.jsonl</code></pre>
+
+    <h3>文書からバッチファイルを作る — <code>taguru extract</code></h3>
+    <p>
+      <code>taguru extract</code> は <code>.md</code>/<code>.txt</code> をOpenAI互換のチャットモデルに読ませ、
+      <code>/protocol</code> の規律で連想に分解して、文書ごとに1バッチファイルを書き出すオフラインの生産者。
+      サーバーは相変わらずモデルの資格情報を持たない——<code>TAGURU_EXTRACT_*</code> は抽出プロセスの環境だけに居る。
+    </p>
+    <pre><code>TAGURU_EXTRACT_URL=https://api.openai.com/v1/chat/completions \
+TAGURU_EXTRACT_MODEL=gpt-4.1 TAGURU_EXTRACT_API_KEY=$KEY \
+taguru extract --context sake --description "酒蔵の知識" --out batches/ docs/
+taguru import batches/</code></pre>
+    <ul>
+      <li><code>--out</code> のマニフェストが「内容×モデル×プロンプト版×コンテキスト」を記録し、変わっていない文書はスキップ（<code>--force</code> で強制）。夜間の extract→import は変更分のモデル呼び出しだけで回る。</li>
+      <li><code>--questions N</code> でdoc2query：段落ごとに検索質問を最大N件同梱。<code>TAGURU_EMBED_PASSAGES</code> のサーバーでは質問が段落の隣に埋め込まれ、質問形の検索が答えの形の本文に着地する。</li>
+      <li>モデル出力は信用せず、こちら側で契約を強制する——不正項目は捨ててカウントし、書き出す前にimportのパーサで再検証する。extractは「importが拒否するファイル」を作れない。</li>
+      <li>ローカルモデル（Ollama等）で回すなら：<b>思考モードはOFF</b>（reasoningトークンが時間予算を食い潰す）、<b>コンテキスト窓を実サイズに</b>（<code>num_ctx 16384</code>——4kのままだと静かに切り詰められて品質だけ落ちる）、タイムアウトはハードウェアに合わせ<code>TAGURU_EXTRACT_TIMEOUT_SECS</code>、マニフェストは<b>モデル名</b>を信じるのでエイリアスの差し替え後は<code>--force</code>。</li>
+    </ul>
+  </section>
+
+  <section id="mcp">
+    <h2>6. LLMエージェントから繋ぐ — MCP</h2>
+    <p class="section-sub">
+      分解と組み立てはエージェントの仕事。規律はツール定義とMCPの<code>instructions</code>（<code>/protocol</code>の全文）に
+      同梱されて自動で届くので、接続した時点でLLMは正しい手順を知っている。
+    </p>
+    <h3>ローカル（stdioブリッジ）</h3>
+    <pre><code>claude mcp add taguru -e TAGURU_URL=http://127.0.0.1:8248 -- taguru-mcp</code></pre>
+    <p>
+      これだけで「このフォルダの文書をsakeコンテキストに取り込んで」「青嶺酒造について出典付きで教えて」が、
+      ディレクトリ選択 → resolve → describe/query/activate → 引用、のループとして動く。
+      実際の一往復は<a href="mcp-rag-walkthrough.html">ウォークスルー</a>で追える。
+    </p>
+    <h3>リモート（Streamable HTTP）</h3>
+    <pre><code>claude mcp add --transport http taguru https://your-host/mcp \
+  --header "Authorization: Bearer $TAGURU_API_TOKEN"
+<span class="c"># Claude API: mcp_servers = [{type: "url", url: "https://your-host/mcp",</span>
+<span class="c">#                             name: "taguru", authorization_token: "…"}]</span></code></pre>
+    <p>
+      <code>POST /mcp</code> はMCP Streamable HTTPトランスポート（ステートレス・プロファイル：素のJSON応答、
+      管理すべきセッション無し）を、他のAPIと同じBearerトークンの内側で話す。
+    </p>
+    <h3>claude.ai カスタムコネクタ（OAuth）</h3>
+    <p>
+      ヘッダーを貼れないクライアントには：<code>TAGURU_PUBLIC_URL</code> を設定し、コネクタを
+      <code>https://your-host/mcp</code> に向け、同意ページで<b>既存のAPIキーを貼る</b>——以後その接続はそのキーとして
+      振る舞う（アクセスログでは <code>key@client</code>）。ディスカバリ、動的登録、PKCEは内蔵で、外部IdPは不要。
+      OAuthトークンが開くのは <code>/mcp</code> だけで、素のAPIはキーのみのまま。
+    </p>
+    <p class="note warn">
+      localhostの外に出すならTLS必須（リバースプロキシで）。トークンは資格情報そのもの——持つ者が記憶を持つ。
+      クライアントごとに名前付きキーを切っておけば（<code>TAGURU_API_TOKENS</code>）、漏洩は1本の失効で済む。
+    </p>
+  </section>
+
+  <section id="ops">
+    <h2>7. 運用の基本</h2>
+    <ul>
+      <li><b>ヘルス</b>：<code>GET /health</code> は書き込み経路が健全なら <code>200 ok</code>、直近のflushが失敗していれば <code>503</code>。ディスクが直れば1 flush間隔で自己回復する。</li>
+      <li><b>メトリクス</b>：<code>GET /metrics</code>（Prometheusテキスト）。ルート別レイテンシ、キャッシュ/flush/WAL/埋め込みの結果、検索のヒット/空振り、500の原因内訳。コンテキスト名は意図的にラベルへ入れない（クライアントが名前を鋳造するため系列が無限に増える）——コンテキスト別の数字は <code>GET /contexts</code> の使用統計が持つ。</li>
+      <li><b>バックアップ</b>：1コンテキスト＝1ファイルファミリー（<code>.ctx</code> <code>.meta.json</code> <code>.passages.bin</code> <code>.passages.wal.jsonl</code> <code>.bm25.bin</code> <code>.vectors.bin</code> <code>.wal.jsonl</code>）。<b>必ず一括で</b>。全ライターはfsync+renameなので、ファイルシステムのスナップショット（ZFS/Btrfs/LVM）はいつでも安全。稼働中の素朴な <code>rsync</code>/<code>cp</code> はファイル間の一貫性を保証しない——止めるか、本物のスナップショットを。<code>POST /flush</code> で直前に全dirtyを書き切れる。検証は <code>taguru inspect /path/to/data</code>（サーバーと同じ全検証ロード＋WALリプレイ。非ゼロ終了＝承認済みデータの破損）。</li>
+      <li><b>排他</b>：データディレクトリは同時に1プロセス（serve か import）。advisoryロック（flock系——ローカルディスクでは頼れるが、<b>NFS/EFS/FUSEでは両側に許可され得る</b>）。ローリングデプロイは新旧が重なった時点で新側が正しく退場する＝共有ボリュームでは stop-then-start（Kubernetesなら <code>strategy: Recreate</code>）。</li>
+    </ul>
+    <div class="next-links">
+      <a class="nav-card" href="concepts.html" style="flex:1 1 16rem">
+        <span class="nc-title">次へ：コンセプト</span>
+        <p>連想・文脈・二本のレーン。何をグラフに書き、何を文章に残すか。</p>
+      </a>
+      <a class="nav-card" href="mcp-rag-walkthrough.html" style="flex:1 1 16rem">
+        <span class="nc-title">ウォークスルー</span>
+        <p>接続したLLMが実際にどうツールを呼ぶかを、本物のリクエストで。</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</body>
+</html>

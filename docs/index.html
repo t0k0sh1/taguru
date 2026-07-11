@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Taguru — LLMのための長期意味記憶</title>
+  <meta name="description" content="知識を連想として蓄積し、糸口から手繰って引き出す。LLMのための長期意味記憶サーバー Taguru のドキュメント。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23a8402f'/%3E%3Ctext x='32' y='46' font-size='38' text-anchor='middle' fill='%23fff' font-family='serif'%3E糸%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="theme.js"></script>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">糸</span>Taguru</a>
+    <div class="topnav-links">
+      <a href="getting-started.html">はじめる</a>
+      <a href="concepts.html">コンセプト</a>
+      <a href="architecture.html">アーキテクチャ</a>
+      <a href="bedrock.html">Bedrock</a>
+      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+      <a href="https://github.com/t0k0sh1/taguru">GitHub</a>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">taguru · documentation</div>
+    <h1>手繰る（たぐる）——<br>糸口から知識を引き出す、LLMのための長期記憶</h1>
+    <p class="lede">
+      Taguruは知識を <span class="tuple">(subject, label, object, weight, source)</span>
+      の連想として蓄積し、質問が「何について」かという糸口（cue）から連想グラフを
+      手繰って知識を引き出す記憶サーバー。ベクトル類似度は検索の入口ではなく、
+      証拠を運ぶ一本のレーンとして併走する。
+    </p>
+    <div class="hero-meta">
+      <span><b>License:</b> MIT</span>
+      <span><b>実装:</b> Rust・単一バイナリ（~13 MB static）</span>
+      <span><b>インターフェイス:</b> HTTP API / MCP（stdio・Streamable HTTP）</span>
+    </div>
+  </header>
+
+  <section id="model">
+    <h2>何をするサーバーか</h2>
+    <p class="section-sub">保持するもの、検索のしかた、そして仕事の分担。</p>
+    <div class="model-card">
+      <p>
+        「青嶺酒造の杜氏は高瀬」という知識は
+        <span class="tuple">(青嶺酒造, 杜氏, 高瀬, 1.0, docs/aomine.md)</span>
+        という一本の連想になる。weightは符号付きで、負の値は「〜ではない」という否定の主張。
+        同じ三つ組を別の文書が再主張すればweightが加算され、出典ごとのattributionが残る——
+        2つの情報源が独立に支持する事実と、1つの情報源が強く主張する事実は、最後まで区別できる。
+      </p>
+      <p>
+        検索はまず構造から。cueを正規化された照合（表記ゆれ・かな/カナ・軽い誤字を吸収）で
+        グラフ上の概念に<b>解決</b>し、そこから連想を<b>手繰る</b>——これが第一レーン。
+        元の文章は段落単位のテキスト検索（BM25＋設定時は埋め込み）でもう一本のレーンとして引ける。
+        三つ組に収まらなかった手順の細部や条件は、こちらでしか見つからない。
+      </p>
+      <p>
+        言語を理解する仕事——文書を事実に分解する、コンテキストを選ぶ、結果を文章に組み立て直す——は
+        クライアント（LLM）の仕事。サーバーは構造の保管と探索だけを引き受け、
+        そのための規律書は <code>GET /protocol</code> でサーバー自身が配布する。
+      </p>
+    </div>
+  </section>
+
+  <section id="docs">
+    <h2>ドキュメント</h2>
+    <p class="section-sub">導入から内部構造まで。すべてのページはビルド不要の静的HTMLで、ローカルでもそのまま開ける。</p>
+    <div class="nav-cards">
+      <a class="nav-card" href="getting-started.html">
+        <span class="nc-title">はじめる</span>
+        <p>インストール、起動と設定、最初の記憶、Docker、一括投入（import / extract）、MCP接続、運用の基本。</p>
+      </a>
+      <a class="nav-card" href="concepts.html">
+        <span class="nc-title">コンセプト</span>
+        <p>連想モデルと文脈、検索ループ、二本のレーンの役割分担、インジェストの規律、手順・因果・コードの表現パターン。</p>
+      </a>
+      <a class="nav-card" href="architecture.html">
+        <span class="nc-title">内部アーキテクチャ</span>
+        <p>フラットバッファのグラフ、ディスクを真実とするレジストリ、WALと耐久性、三つの検索経路、認証と可観測性。</p>
+      </a>
+      <a class="nav-card" href="bedrock.html">
+        <span class="nc-title">Amazon Bedrockで使う</span>
+        <p>Converse APIでのtaguru-mcpホスト、埋め込みのブリッジプロキシ、semantic floorの校正、モデルアクセスの診断。</p>
+      </a>
+      <a class="nav-card" href="mcp-rag-walkthrough.html">
+        <span class="nc-title">ウォークスルー：LLMが知識を引き出すまで</span>
+        <p>実際のMCPリクエストとレスポンスで追う一往復。グラフレーンで答える質問と、テキストレーンに切り替える質問。</p>
+      </a>
+    </div>
+  </section>
+
+  <section id="quickstart">
+    <h2>30秒で試す</h2>
+    <p class="section-sub">サーバーを起き、コンテキストを作り、事実を一本入れて、手繰ってみる。</p>
+    <pre><code><span class="c"># インストール（server `taguru` と MCPブリッジ `taguru-mcp` が入る）</span>
+cargo install taguru
+taguru   <span class="c"># 127.0.0.1:8248 で待ち受け（データは ./data）</span>
+
+<span class="c"># コンテキストを作る</span>
+curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \
+  -d '{"description":"青嶺酒造という架空の酒蔵の知識"}'
+
+<span class="c"># 連想を一本入れる</span>
+curl -X POST localhost:8248/contexts/sake/associations -H 'Content-Type: application/json' \
+  -d '[{"subject":"青嶺酒造","label":"代表銘柄","object":"青嶺","weight":1.0,"source":"第1段落"}]'
+
+<span class="c"># 手繰る</span>
+curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application/json' \
+  -d '{"origins":["青嶺酒造"]}'</code></pre>
+    <p class="note">
+      エンドポイントの一覧と、インジェスト／検索の規律の全文は、起動中のサーバーの
+      <code>GET /protocol</code> が配布する——LLMクライアントが受け取るものと同じ一次資料。
+      続きは<a href="getting-started.html">はじめる</a>へ。
+    </p>
+  </section>
+
+  <section id="principles">
+    <h2>設計原則</h2>
+    <div class="principles">
+      <div class="principle">
+        <span class="mark">一</span>
+        <div>
+          <h3>構造が本線、類似度は一レーン</h3>
+          <p>入口は正規化された照合と概念解決。埋め込みは設定されていれば「弱い入口を補う層」と「テキストレーンの並走」として効く。どのレーンが当てたかは結果の<code>lanes</code>や<code>tier</code>が常に申告する。</p>
+        </div>
+      </div>
+      <div class="principle">
+        <span class="mark">二</span>
+        <div>
+          <h3>クライアントはLLM</h3>
+          <p>文書の分解も、答えの組み立ても、コンテキスト選びも言語理解の仕事なのでLLM側。サーバーは規律書（<code>/protocol</code>）とツール定義を自ら配り、接続した瞬間からLLMが正しい順番でツールを呼べるようにする。</p>
+        </div>
+      </div>
+      <div class="principle">
+        <span class="mark">三</span>
+        <div>
+          <h3>答えは原文まで手繰れる</h3>
+          <p>グラフはアーカイブではなく索引。すべての事実は出典付きで、attributionの<code>source</code>と<code>paragraph</code>から元の段落そのものを引用（citation）で裏取りできる。</p>
+        </div>
+      </div>
+      <div class="principle">
+        <span class="mark">四</span>
+        <div>
+          <h3>200を返した書き込みは失われない</h3>
+          <p>受理された書き込みはWALにfsyncしてから適用される。クラッシュしても再起動時のリプレイで戻る。ディスクが真実、メモリはコンテキスト単位のキャッシュにすぎない。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+    <span>このサイトは静的HTML——クローンして file:// で開いても全ページ動く</span>
+  </footer>
+
+</div>
+</body>
+</html>

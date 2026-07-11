@@ -2,7 +2,12 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Taguru MCPで手繰るRAG</title>
+  <meta name="description" content="AIチャットボットの裏側でLLMがTaguru MCPのツールを呼び、知識グラフと原文を手繰り寄せて答えるまでを、実際のリクエストとレスポンスで追うウォークスルー。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23a8402f'/%3E%3Ctext x='32' y='46' font-size='38' text-anchor='middle' fill='%23fff' font-family='serif'%3E糸%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="theme.js"></script>
   <style>
   :root {
     --bg: #f6f3ec;
@@ -475,6 +480,21 @@
     font-family: var(--font-mono);
   }
 </style>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">糸</span>Taguru</a>
+    <div class="topnav-links">
+      <a href="getting-started.html">はじめる</a>
+      <a href="concepts.html">コンセプト</a>
+      <a href="architecture.html">アーキテクチャ</a>
+      <a href="bedrock.html">Bedrock</a>
+      <a href="mcp-rag-walkthrough.html" aria-current="page">ウォークスルー</a>
+      <a href="https://github.com/t0k0sh1/taguru">GitHub</a>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    </div>
+  </div>
+</nav>
 
 <div class="page">
 

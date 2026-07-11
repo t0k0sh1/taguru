@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Amazon Bedrockで使う — Taguru</title>
+  <meta name="description" content="TaguruをAmazon Bedrockで使う：Converse APIでのtaguru-mcpホスト、埋め込みのブリッジプロキシ、semantic floorの校正、モデルアクセスゲートの診断。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23a8402f'/%3E%3Ctext x='32' y='46' font-size='38' text-anchor='middle' fill='%23fff' font-family='serif'%3E糸%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="theme.js"></script>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">糸</span>Taguru</a>
+    <div class="topnav-links">
+      <a href="getting-started.html">はじめる</a>
+      <a href="concepts.html">コンセプト</a>
+      <a href="architecture.html">アーキテクチャ</a>
+      <a href="bedrock.html" aria-current="page">Bedrock</a>
+      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+      <a href="https://github.com/t0k0sh1/taguru">GitHub</a>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">architecture guide · amazon bedrock</div>
+    <h1>Amazon Bedrockで使う</h1>
+    <p class="lede">
+      Taguruはモデル非依存——サーバーはHTTPを、ブリッジはMCP over stdioを話し、
+      どのモデルがエージェントを駆動しているかを気にしない。このページは3つの統合点と、
+      実際に全部を動かして踏んだ角を記録する。
+    </p>
+    <div class="hero-meta">
+      <span><b>エージェント:</b> Claude Sonnet 4.5（<code>us.</code>推論プロファイル）</span>
+      <span><b>埋め込み:</b> amazon.titan-embed-text-v2:0</span>
+      <span><b>リージョン:</b> us-east-1</span>
+    </div>
+  </header>
+
+  <section id="agent">
+    <h2>1. エージェント側——Converse + taguru-mcp</h2>
+    <p class="section-sub">MCPが通るところはMCPで。通らないところにはHTTP APIが残っている。</p>
+    <p>
+      <b>Claude CodeをBedrockで使うなら</b>（<code>CLAUDE_CODE_USE_BEDROCK=1</code>）、特別なことは何もない——
+      MCPサーバーはローカルの子プロセスなので、<a href="getting-started.html#mcp">通常のセットアップ</a>の
+      <code>claude mcp add taguru …</code> がそのまま動く。
+    </p>
+    <p><b>Converse APIで自前のエージェントループを組むなら</b>、<code>taguru-mcp</code> をstdioの子プロセスとして抱えて機械的に翻訳する：</p>
+    <ul>
+      <li><code>initialize</code> が規律書の全文を <code>instructions</code> として返す（<code>GET /protocol</code> から生きた設定つきで配られる）。これをConverseの <code>system</code> テキストに——毎ターン再送されるので、<code>cachePoint</code> ブロックの後ろに置くのが望ましい。</li>
+      <li><code>tools/list</code> の各エントリはConverseのツールに1:1で対応する：<code>{"toolSpec": {"name", "description", "inputSchema": {"json": &lt;MCPのinputSchema&gt;}}}</code>——スキーマは素のJSON Schemaで、無加工で通る。</li>
+      <li><code>stopReason == "tool_use"</code> なら各ブロックを <code>tools/call</code> に転送し、テキストを <code>toolResult</code> として返す。<code>end_turn</code> までループ。</li>
+    </ul>
+    <p class="note">
+      Sonnet 4.5での実測：9つの事実を含む日本語メモが、規律どおりの8ツール呼び出し
+      （create → 一括の add_associations → store_passages → audit_coverage → 検証）で取り込まれた。
+      同じ文書の再実行は retract-then-reingest のdiff同期になり、weightの二重加算なし——
+      規律書だけで、Anthropic以外のホストAPIの上でも規律が運ばれた。
+    </p>
+    <p>
+      <b>マネージドなエージェント実行環境</b>（Bedrock AgentCoreなど）は<b>リモート</b>のMCPエンドポイントを欲しがる——
+      それもある：<code>POST /mcp</code> がMCP Streamable HTTPを、他のAPIと同じBearerトークンの内側で話す
+      （TLSはリバースプロキシで）。<code>https://your-host/mcp</code> をそのまま登録する。
+      stdioブリッジは同居構成向けの正解であり続け、MCPが届かない場所でも、HTTP APIは
+      Bearer認証つきの小さなJSON APIとしてOpenAPIアクショングループ／Gatewayターゲットに収まる。
+    </p>
+  </section>
+
+  <section id="embeddings">
+    <h2>2. 埋め込み——ブリッジプロキシの背後のBedrockモデル</h2>
+    <p class="section-sub">
+      Taguruが話す埋め込みプロトコルはひとつ：OpenAI互換の <code>POST {model, input}</code> → <code>{data: [{embedding}]}</code>。
+      Bedrockの埋め込みモデルは InvokeModel + SigV4 の向こうに、モデルファミリーごとのボディ形で座っている。
+    </p>
+    <p>
+      橋渡しはLiteLLMやAWSのBedrock Access Gatewayサンプル（どちらも既にOpenAIを話す）で——
+      あるいはこの程度の小ささのプロキシでも足りる（エラー処理は省略。バインドはloopbackだけに）：
+    </p>
+    <pre><code>#!/usr/bin/env python3
+<span class="c"># OpenAI互換 /embeddings → Bedrock InvokeModel（Titan & Cohere）</span>
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import boto3
+
+bedrock = boto3.Session(region_name="us-east-1").client("bedrock-runtime")
+
+def invoke(model_id, body):
+    response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+    return json.loads(response["body"].read())
+
+def embed(model_id, texts, purpose):
+    if model_id.startswith("cohere.embed"):
+        <span class="c"># X-Taguru-Embed-Purpose はCohereが求める非対称性そのもの</span>
+        input_type = "search_document" if purpose == "index" else "search_query"
+        out = []
+        for i in range(0, len(texts), 96):  <span class="c"># Cohereは96テキストが上限</span>
+            out += invoke(model_id, {"texts": texts[i : i + 96],
+                                     "input_type": input_type})["embeddings"]
+        return out
+    shape = (lambda t: {"inputText": t, "dimensions": 512}) if "v2" in model_id \
+        else (lambda t: {"inputText": t})  <span class="c"># Titan: 1呼び出し1テキスト</span>
+    return [invoke(model_id, shape(t))["embedding"] for t in texts]
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        texts = request["input"]
+        texts = [texts] if isinstance(texts, str) else texts
+        purpose = self.headers.get("X-Taguru-Embed-Purpose", "query")
+        vectors = embed(request["model"], texts, purpose)
+        body = json.dumps({"data":
+            [{"embedding": v, "index": i} for i, v in enumerate(vectors)]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+HTTPServer(("127.0.0.1", 8257), Handler).serve_forever()</code></pre>
+    <p>Taguruをそこへ向ける：</p>
+    <pre><code>TAGURU_EMBED_URL=http://127.0.0.1:8257/v1/embeddings
+TAGURU_EMBED_MODEL=amazon.titan-embed-text-v2:0
+TAGURU_SEMANTIC_FLOOR=0.2   <span class="c"># 下で校正する——飛ばさないこと</span>
+TAGURU_EMBED_AUTO=1         <span class="c"># エージェントのrefresh呼び出しは当てにしない</span></code></pre>
+    <p class="note warn">
+      Taguruは受け取ったベクトルを正規化するので、Titanの生（非正規化）出力はそのままでよい。
+      ただし <code>dimensions: 512</code> は固定で——次元設定の違うベクトルは絶対に同じサイドカーを共有してはならず、
+      Taguruのベクトルキャッシュは<b>モデル名だけ</b>をキーにする。次元は一度決めたら変えない。
+    </p>
+  </section>
+
+  <section id="floor">
+    <h2>3. <code>TAGURU_SEMANTIC_FLOOR</code> の校正</h2>
+    <p class="section-sub">床は埋め込みモデルの属性。既定値のまま別モデルに乗り換えると、静かに全部を捨てることがある。</p>
+    <p>
+      内蔵の床（0.35）は <code>text-embedding-3-large</code> のグロス向けに校正されている。
+      Titan V2（512次元）は日本語のコサインを圧縮する：実測では正解が0.2〜0.3、無関係な名前が〜0.15に並び、
+      既定の0.35は<b>正しい答えを全部黙って捨てていた</b>——resolveは <code>[]</code> を返すのに、
+      その下のランキングは完璧、という症状になる。
+    </p>
+    <p>埋め込みモデルごとに一度だけ校正する：</p>
+    <ol>
+      <li>代表的な内容をインジェストし、埋め込みをrefreshする。</li>
+      <li>格納済みのどの名前とも綴りを共有しない<b>言い換えcue</b>で突く：<code>POST /contexts/{name}/resolve {"cue": "…", "semantic_floor": 0.05}</code></li>
+      <li>スコアが2つの帯に分かれて見える。<code>TAGURU_SEMANTIC_FLOOR</code> をその間に置く。</li>
+    </ol>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>モデル</th><th>床</th></tr></thead>
+        <tbody>
+          <tr><td>text-embedding-3-large</td><td>0.35（既定値）</td></tr>
+          <tr><td>amazon.titan-embed-text-v2:0（512d・日本語）</td><td>〜0.2</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="access">
+    <h2>4. Bedrockがモデルの提供を拒むとき</h2>
+    <p class="section-sub">
+      サードパーティモデルへのアクセスは<b>ばたつく</b>ことがある——成功した直後に同一リクエストが拒否される、
+      をコンソール側の状態が伝播する間くり返す。当て推量は飛ばして、1コールで全ゲートに名前を付ける。
+    </p>
+    <pre><code>aws bedrock get-foundation-model-availability \
+  --model-id anthropic.claude-sonnet-4-5-20250929-v1:0</code></pre>
+    <ul>
+      <li><code>regionAvailability</code> — そもそもこのリージョンで提供されているか</li>
+      <li><code>entitlementAvailability</code></li>
+      <li><code>authorizationStatus</code> — Anthropicのユースケースフォーム（コンソールで、アカウントごとに一度。個人なら自分の名前とGitHubのURLで足りる）</li>
+      <li><code>agreementAvailability</code> — AWS Marketplaceの契約</li>
+    </ul>
+    <p>
+      コンソールからの修復に抵抗するのは <code>agreementAvailability: NOT_AVAILABLE</code>
+      （呼び出しエラーはIAMのせいにし続けるのに、コンソールには保留中のものが何も見えない）。契約は直接作る：
+    </p>
+    <pre><code>aws bedrock list-foundation-model-agreement-offers --model-id &lt;id&gt;   <span class="c"># → offerToken</span>
+aws bedrock create-foundation-model-agreement --model-id &lt;id&gt; --offer-token &lt;token&gt;</code></pre>
+    <p>
+      Bedrockのモデルオファーは前払い$0の従量制。契約の作成には<b>呼び出し側</b>のアイデンティティに
+      <code>aws-marketplace:Subscribe</code> + <code>aws-marketplace:ViewSubscriptions</code> が一度だけ要る——
+      成功したらそのグラントは剥がしてよく、以後の普通の呼び出しは <code>bedrock:InvokeModel</code> だけで済む。
+    </p>
+    <p>あと2つの罠：</p>
+    <ul>
+      <li>新しめのClaudeモデルは素のモデルIDを拒む（"on-demand throughput isn't supported"）：クロスリージョン推論プロファイル（<code>us.</code>／<code>apac.</code>／<code>global.</code> プレフィックス）を呼び、IAMは<b>推論プロファイルのARNと、ルーティングされ得る全リージョンの基盤モデルARNの両方</b>に付与する——リージョンはワイルドカードで。</li>
+      <li>Amazonの自社モデル（Titan）はMarketplaceを通らない。<b>Titanは動くのにAnthropic/Cohereが失敗するなら、それは契約ゲートであって、あなたのポリシーではない。</b></li>
+    </ul>
+    <h3>最小の呼び出しポリシー</h3>
+    <p>（契約作成は含まない——それは別途・短期間だけ付与する）</p>
+    <pre><code>{
+  <span class="k">"Version"</span>: <span class="s">"2012-10-17"</span>,
+  <span class="k">"Statement"</span>: [
+    {
+      <span class="k">"Effect"</span>: <span class="s">"Allow"</span>,
+      <span class="k">"Action"</span>: [<span class="s">"bedrock:InvokeModel"</span>, <span class="s">"bedrock:InvokeModelWithResponseStream"</span>],
+      <span class="k">"Resource"</span>: [
+        <span class="s">"arn:aws:bedrock:*::foundation-model/anthropic.*"</span>,
+        <span class="s">"arn:aws:bedrock:*::foundation-model/amazon.titan-embed-*"</span>,
+        <span class="s">"arn:aws:bedrock:*::foundation-model/cohere.embed-*"</span>,
+        <span class="s">"arn:aws:bedrock:*:&lt;ACCOUNT_ID&gt;:inference-profile/*"</span>
+      ]
+    },
+    {
+      <span class="k">"Effect"</span>: <span class="s">"Allow"</span>,
+      <span class="k">"Action"</span>: [
+        <span class="s">"bedrock:ListFoundationModels"</span>,
+        <span class="s">"bedrock:GetFoundationModel"</span>,
+        <span class="s">"bedrock:GetFoundationModelAvailability"</span>,
+        <span class="s">"bedrock:ListInferenceProfiles"</span>,
+        <span class="s">"bedrock:GetInferenceProfile"</span>
+      ],
+      <span class="k">"Resource"</span>: <span class="s">"*"</span>
+    }
+  ]
+}</code></pre>
+
+    <div class="next-links">
+      <a class="nav-card" href="getting-started.html" style="flex:1 1 16rem">
+        <span class="nc-title">はじめるに戻る</span>
+        <p>サーバー本体のセットアップ、import / extract、MCP接続。</p>
+      </a>
+      <a class="nav-card" href="mcp-rag-walkthrough.html" style="flex:1 1 16rem">
+        <span class="nc-title">ウォークスルー</span>
+        <p>接続後のLLMが実際にどう検索するか。</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</body>
+</html>
