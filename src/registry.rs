@@ -341,6 +341,12 @@ pub struct Entry {
     /// skips the contexts nobody touched.
     usage: UsageCounters,
     usage_dirty: AtomicBool,
+    /// The passage store's last failed load, while it is being
+    /// remembered — [`EntryInner::load_failure`]'s counterpart for the
+    /// passage side, which caches its store in `passages` rather than
+    /// the slot. Only ever locked while `passages` is held (or alone
+    /// by the test aging helper), so it adds no lock-order edge.
+    passages_load_failure: Mutex<Option<(std::time::Instant, String)>>,
 }
 
 impl Entry {
@@ -359,6 +365,7 @@ impl Entry {
                 wal_seq: 1,
                 wal_bytes,
                 counted_bytes: 0,
+                load_failure: None,
             }),
             dirty: AtomicBool::new(false),
             flushing: AtomicBool::new(false),
@@ -373,6 +380,7 @@ impl Entry {
             passage_refresh: Mutex::new(()),
             usage: UsageCounters::seeded(&usage),
             usage_dirty: AtomicBool::new(false),
+            passages_load_failure: Mutex::new(None),
         }
     }
 
@@ -463,6 +471,14 @@ struct EntryInner {
     /// recounted under this lock, so the global sum cannot drift from
     /// double-applied deltas.
     counted_bytes: usize,
+    /// The last failed image load, while it is being remembered: when
+    /// it failed and the refusal it produced. While fresh
+    /// ([`LOAD_FAILURE_RETRY`]), `ensure_hot` answers the cached
+    /// refusal without touching the disk — a permanently corrupt
+    /// context must not cost a full read + parse per request under
+    /// client retries. Cleared by the next successful load; never
+    /// persisted.
+    load_failure: Option<(std::time::Instant, String)>,
 }
 
 #[derive(Debug)]
@@ -1377,6 +1393,25 @@ impl AppState {
         if let Some(store) = slot.as_ref() {
             return Ok(Arc::clone(store));
         }
+        // A store whose last load failed is quarantined exactly like a
+        // graph image (`ensure_hot`): answer the remembered refusal
+        // while it is fresh instead of re-reading a broken snapshot on
+        // every passage request.
+        {
+            let failure = entry.passages_load_failure.lock().unwrap();
+            if let Some((failed_at, refusal)) = &*failure
+                && failed_at.elapsed() < LOAD_FAILURE_RETRY
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{refusal} (quarantined after the failed load; the disk is \
+                         retried at most every {}s)",
+                        LOAD_FAILURE_RETRY.as_secs()
+                    ),
+                ));
+            }
+        }
         // The live server heals a torn tail on load; the torn indicator
         // is for read-only inspection, so drop it here.
         let (store, _torn) = crate::passages::PassageStore::load(
@@ -1385,7 +1420,12 @@ impl AppState {
             passages_wal_path(&self.0.data_dir, stem),
             self.0.passages_wal_max_bytes,
             true,
-        )?;
+        )
+        .inspect_err(|error| {
+            *entry.passages_load_failure.lock().unwrap() =
+                Some((std::time::Instant::now(), error.to_string()));
+        })?;
+        *entry.passages_load_failure.lock().unwrap() = None;
         let store = Arc::new(store);
         *slot = Some(Arc::clone(&store));
         Ok(store)
@@ -2515,6 +2555,24 @@ impl AppState {
         })
     }
 
+    /// Test-only: rewinds any remembered load failure (graph image and
+    /// passage store both) so the quarantine window can elapse without
+    /// the test sleeping through it.
+    #[cfg(test)]
+    pub fn age_load_failures(&self, name: &str, by: std::time::Duration) {
+        let entry = self.lookup(name).expect("the context must be registered");
+        if let Some((failed_at, _)) = &mut entry.inner.write().unwrap().load_failure {
+            *failed_at = failed_at
+                .checked_sub(by)
+                .expect("test ages within the Instant range");
+        }
+        if let Some((failed_at, _)) = &mut *entry.passages_load_failure.lock().unwrap() {
+            *failed_at = failed_at
+                .checked_sub(by)
+                .expect("test ages within the Instant range");
+        }
+    }
+
     /// Runs a mutating operation on one context, loading it first if
     /// cold, and marks it dirty — the raw primitive under the tests.
     /// HTTP-reachable mutations go through [`AppState::logged_write`]
@@ -3300,11 +3358,24 @@ fn rollback_meta(inner: &mut EntryInner, previous: ContextMeta) {
     inner.meta = previous;
 }
 
+/// How long a failed load's refusal is answered from memory before the
+/// disk is tried again. Long enough that a client retry storm against
+/// one broken context cannot grind the disk; short enough that
+/// restoring the files heals the context without a restart.
+const LOAD_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Loads the image behind a cold slot and replays whatever the WAL
 /// holds above the image's watermark; hot slots pass through. On
 /// success the slot is hot, the stats are fresh, and `wal_seq`
 /// continues from the replay's tail. Every call lands in the cache
-/// metrics: hot is a hit, a Cold→Hot attempt is a load.
+/// metrics: hot is a hit, a Cold→Hot attempt is a load — but a
+/// quarantined refusal (below) is neither: no disk was touched.
+///
+/// A failed load is remembered: for the next [`LOAD_FAILURE_RETRY`]
+/// this answers the same refusal without re-reading anything, so a
+/// permanently corrupt context costs one read per interval instead of
+/// one per request. The heal paths stay what they were — restore the
+/// files and the next retry loads, or DELETE the context.
 fn ensure_hot(
     data_dir: &Path,
     name: &str,
@@ -3319,6 +3390,15 @@ fn ensure_hot(
     // seeing one here means a caller forgot.
     if matches!(inner.slot, Slot::Deleted) {
         return Err(format!("context '{name}' is deleted"));
+    }
+    if let Some((failed_at, refusal)) = &inner.load_failure
+        && failed_at.elapsed() < LOAD_FAILURE_RETRY
+    {
+        return Err(format!(
+            "{refusal} (quarantined after the failed load; the disk is retried at \
+             most every {}s — restore the file family or DELETE the context)",
+            LOAD_FAILURE_RETRY.as_secs()
+        ));
     }
     let stem = file_stem(name);
     let loaded = fs::read(image_path(data_dir, &stem))
@@ -3343,10 +3423,12 @@ fn ensure_hot(
         Ok(loaded) => loaded,
         Err(error) => {
             metrics.record_cache_load(false);
+            inner.load_failure = Some((std::time::Instant::now(), error.clone()));
             return Err(error);
         }
     };
     metrics.record_cache_load(true);
+    inner.load_failure = None;
     // The image carries knowledge only; tuning config lives in the
     // sidecar and is re-applied on every load.
     context.set_dice_floor(inner.meta.dice_floor);
@@ -4015,6 +4097,118 @@ mod tests {
         assert!(rendered(&state).contains("taguru_contexts_resident 1"));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A context whose load failed answers the remembered refusal
+    /// without touching the disk until the retry window elapses — a
+    /// permanently corrupt context must not cost a read + full parse
+    /// per request under client retries — and heals by itself on the
+    /// first retry after the files are restored.
+    #[test]
+    fn a_failed_load_is_quarantined_until_the_retry_window_elapses() {
+        let dir = scratch_dir("quarantine");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+        let image = dir.join("sake.ctx");
+        let healthy = fs::read(&image).unwrap();
+        let mut corrupt = healthy.clone();
+        corrupt[8] = 0xFF; // the version field — refused by from_bytes
+        fs::write(&image, &corrupt).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let AccessError::Load(first) = state.read_context("sake", |_| ()).unwrap_err() else {
+            panic!("a corrupt image must refuse the read");
+        };
+        assert!(first.contains("corrupt"), "{first}");
+
+        // Repair the file. Within the window the CACHED refusal still
+        // answers — proof the disk is not consulted per request.
+        fs::write(&image, &healthy).unwrap();
+        let AccessError::Load(second) = state.read_context("sake", |_| ()).unwrap_err() else {
+            panic!("the quarantine must still refuse");
+        };
+        assert!(second.contains("quarantined"), "{second}");
+        assert!(
+            rendered(&state).contains("taguru_cache_loads_total{outcome=\"failed\"} 1"),
+            "a quarantined refusal is not a second load attempt"
+        );
+
+        // Past the window, the retry sees the repaired image and heals.
+        state.age_load_failures("sake", LOAD_FAILURE_RETRY);
+        let count = state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(count, 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The passage store gets the same quarantine as the graph image:
+    /// a broken snapshot or log answers its remembered refusal instead
+    /// of being re-read on every passage request.
+    #[test]
+    fn a_failed_passage_load_is_quarantined_like_the_image() {
+        let dir = scratch_dir("passage-quarantine");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .store_passages(
+                    "sake",
+                    BTreeMap::from([(
+                        "a.md".to_string(),
+                        crate::passages::PassageSubmission::plain("本文。"),
+                    )]),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+        let log = dir.join("sake.passages.wal.jsonl");
+        let healthy = fs::read(&log).unwrap();
+        let mut corrupt = healthy.clone();
+        corrupt.splice(0..0, *b"not json\n"); // a corrupt INTERIOR line
+        fs::write(&log, &corrupt).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let sources = ["a.md".to_string()];
+        let first = state
+            .lookup_passages("sake", &sources)
+            .expect("registered")
+            .unwrap_err();
+        assert!(!first.to_string().contains("quarantined"), "{first}");
+
+        fs::write(&log, &healthy).unwrap();
+        let second = state
+            .lookup_passages("sake", &sources)
+            .expect("registered")
+            .unwrap_err();
+        assert!(second.to_string().contains("quarantined"), "{second}");
+
+        state.age_load_failures("sake", LOAD_FAILURE_RETRY);
+        let (passages, missing) = state
+            .lookup_passages("sake", &sources)
+            .expect("registered")
+            .unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(passages["a.md"], "本文。");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
