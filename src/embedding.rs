@@ -249,10 +249,19 @@ impl HttpEmbeddings {
                 .get("embedding")
                 .and_then(|e| e.as_array())
                 .ok_or("embedding entry carries no vector")?;
+            // Every other malformed shape here (missing vector, wrong
+            // width, out-of-range or repeated index) fails the whole
+            // response rather than patching around it; a non-numeric
+            // component gets the same treatment instead of silently
+            // becoming 0.0 and corrupting the stored vector's geometry.
             let mut vector: Vec<f32> = embedding
                 .iter()
-                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-                .collect();
+                .map(|component| {
+                    component.as_f64().map(|value| value as f32).ok_or_else(|| {
+                        format!("embedding entry {index} contains a non-numeric component")
+                    })
+                })
+                .collect::<Result<_, _>>()?;
             // One response, one model, one width. A mixed-width response
             // is a provider bug; carried into a store it would feed
             // `similarity` mismatched dimensions later, which score as
@@ -981,6 +990,41 @@ mod tests {
             .unwrap_err();
         served.join().unwrap();
         assert!(error.contains("widths"), "{error}");
+    }
+
+    /// A non-numeric component must fail the whole response, the same as
+    /// a missing vector or a mixed width — never fall back to 0.0 and
+    /// carry a silently corrupted vector into the store.
+    #[test]
+    fn http_embeddings_reject_a_non_numeric_component() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_full_request(&mut stream);
+            let body = br#"{"data":[{"index":0,"embedding":[3.0,"oops"]}]}"#;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let provider = HttpEmbeddings {
+            url: format!("http://{addr}"),
+            model: "stub-model".to_string(),
+            api_key: None,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+        let error = provider.embed(&["first"], EmbedPurpose::Query).unwrap_err();
+        served.join().unwrap();
+        assert!(error.contains("non-numeric"), "{error}");
     }
 
     #[test]
