@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="Taguru — an association graph with threads being pulled from it" width="220">
+</p>
+
 # Taguru
 
 Long-term semantic memory for LLMs that recalls the way a thread is

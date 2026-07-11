@@ -128,18 +128,16 @@ a:hover { text-decoration: underline; text-underline-offset: 0.2em; }
   white-space: nowrap;
 }
 .brand:hover { text-decoration: none; }
+/* White tile behind the logo: keeps its indigo linework legible on the
+   dark theme no matter what the PNG's own background is. */
 .brand-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.55em;
-  height: 1.55em;
+  width: 1.6em;
+  height: 1.6em;
   border-radius: 5px;
-  background: var(--thread);
-  color: #fff;
-  font-size: 0.62em;
-  line-height: 1;
-  letter-spacing: 0.05em;
+  background: #fff;
+  padding: 0.1em;
+  object-fit: contain;
+  flex-shrink: 0;
 }
 
 .sidebar {
