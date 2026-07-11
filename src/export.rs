@@ -41,7 +41,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -484,13 +483,12 @@ fn export_one(state: &AppState, name: &str, out: &std::path::Path) -> Result<Str
         })?;
     let rendered = render(name, &snapshot)?;
     let path = out.join(format!("{}.jsonl", crate::registry::file_stem(name)));
-    // A backup that "wrote" but never reached the platter is worse
-    // than a refusal — sync before reporting success.
-    fs::File::create(&path)
-        .and_then(|mut file| {
-            file.write_all(rendered.stream.as_bytes())?;
-            file.sync_all()
-        })
+    // Stage + fsync + rename, never a truncating write in place: a
+    // backup that "wrote" but never reached the platter is worse than a
+    // refusal, and a crash while REFRESHING an existing backup must not
+    // shred the previous good copy — the exact hazard the same helper
+    // guards for the server's own images.
+    crate::registry::write_atomic(&path, rendered.stream.as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     Ok(format!(
         "{}: context '{name}' → {} batch(es), {} association line(s), {} alias(es){}{}",
