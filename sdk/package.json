@@ -1,5 +1,8 @@
 {
   "name": "taguru-sdk-workspace",
   "private": true,
-  "workspaces": ["typescript", "typescript-langchain"]
+  "workspaces": ["typescript", "typescript-langchain"],
+  "overrides": {
+    "esbuild": "^0.28.1"
+  }
 }
