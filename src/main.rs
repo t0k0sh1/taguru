@@ -93,8 +93,20 @@ async fn serve() {
         env_number("TAGURU_RATE_LIMIT_PER_MIN", 0),
     );
     let rate_limiter = Arc::new(limits::RateLimiter::new(rate_per_minute));
-    if !rate_limiter.is_disabled() {
+    let rate_limit_disabled = rate_limiter.is_disabled();
+    if !rate_limit_disabled {
         info!(per_minute = rate_per_minute, "per-key rate limit enabled");
+    }
+    // The in-flight ceiling defaults ON: without it nothing bounds
+    // concurrent request growth under overload but the OS itself. 256
+    // is far above any healthy load for a single node while still
+    // being a real valve; 0 disables.
+    let max_concurrent = env_number("TAGURU_MAX_CONCURRENT_REQUESTS", 256);
+    if max_concurrent > 0 {
+        info!(
+            max_in_flight = max_concurrent,
+            "in-flight request ceiling enabled (past it: 503 + Retry-After)"
+        );
     }
     // Failed-auth attempts are throttled per source IP so the gate
     // cannot be brute-forced for free (default 10/min; 0 disables).
@@ -244,6 +256,13 @@ async fn serve() {
             Duration::from_secs(timeout_secs as u64),
             limits::enforce_timeout,
         ))
+        // The in-flight ceiling sits outside the timeout: a shed must
+        // be the cheapest possible response — no auth, no body read,
+        // no handler — while still landing in the access log below.
+        .layer(axum::middleware::from_fn_with_state(
+            (max_concurrent, state.clone()),
+            limits::enforce_concurrency,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             metrics::track_http,
@@ -268,6 +287,15 @@ async fn serve() {
     // whoever spawned us (integration tests included) reads it here.
     // This stdout line is a contract — logging changes must not touch it.
     println!("listening on {}", listener.local_addr().unwrap());
+    // Off-loopback with no per-key budget: one chatty client owns the
+    // whole server. README says to turn the limit on when the server
+    // leaves localhost — say it where the operator is looking.
+    if !listener.local_addr().unwrap().ip().is_loopback() && rate_limit_disabled {
+        warn!(
+            "listening beyond loopback with TAGURU_RATE_LIMIT_PER_MIN off — set a \
+             per-key budget whenever the server leaves localhost"
+        );
+    }
     // "ready" only after the socket exists: everything an operator
     // needs to sanity-check the deployment, in one line, at the moment
     // requests can actually arrive.

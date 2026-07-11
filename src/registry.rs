@@ -2397,7 +2397,11 @@ impl AppState {
     /// cold. A hot context is served under the SHARED lock, so
     /// concurrent reads of one context run in parallel — a long explore
     /// no longer makes every recall on the same context queue behind
-    /// it. Only a cold load (and every write) takes the exclusive path.
+    /// it. Only a cold load (and every write) takes the exclusive path;
+    /// the cold load is real disk IO plus full-image validation, so it
+    /// steps off the async runtime (see [`offload`]) — a post-restart
+    /// burst of reads against distinct cold contexts must not consume
+    /// the worker pool on synchronous loads.
     pub fn read_context<T>(
         &self,
         name: &str,
@@ -2423,7 +2427,7 @@ impl AppState {
         // Slow path: load under the exclusive lock. ensure_hot
         // re-checks the slot, so losing the load race to a concurrent
         // reader is fine — its load counts as ours.
-        let result = {
+        let result = offload(|| {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
                 .map_err(AccessError::Load)?;
@@ -2431,8 +2435,8 @@ impl AppState {
             let Slot::Hot(context) = &inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
             };
-            operate(context)
-        };
+            Ok(operate(context))
+        })?;
         self.touch(&entry);
         self.enforce_budget(name);
         Ok(result)
@@ -2467,7 +2471,7 @@ impl AppState {
             }
         }
         // Slow path: load under the exclusive lock, as read_context does.
-        let snapshot = {
+        let snapshot = offload(|| {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
                 .map_err(AccessError::Load)?;
@@ -2476,7 +2480,7 @@ impl AppState {
                 unreachable!("ensure_hot leaves the slot hot");
             };
             self.export_snapshot(&entry, &stem, &inner.meta, context)
-        };
+        });
         self.touch(&entry);
         self.enforce_budget(name);
         snapshot
@@ -3762,6 +3766,25 @@ pub(crate) fn fsync_parent_dir(path: &Path) -> io::Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
+}
+
+/// Runs blocking work — a cold load's disk read plus full-image
+/// validation — off the async runtime when called from one:
+/// `block_in_place` tells the multi-thread runtime this worker will
+/// stall, so queued tasks migrate to other workers instead of waiting
+/// behind synchronous IO. The CLI entrances (import, export) and plain
+/// `#[test]`s run with no runtime, and a current_thread test runtime
+/// cannot block-in-place — both fall through to running the work
+/// inline. Nested calls are safe: tokio treats an inner
+/// `block_in_place` on an already-blocking thread as a no-op (the
+/// api layer wraps writes and passage search in one already).
+fn offload<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
 }
 
 /// Encodes a context name as a file stem: bytes outside [A-Za-z0-9_-]

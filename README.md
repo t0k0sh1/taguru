@@ -192,6 +192,14 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #                     the anonymous rate bucket above) collapse to one
 #                     bucket — throttle at the proxy there. taguru does
 #                     not trust X-Forwarded-For.
+#   TAGURU_MAX_CONCURRENT_REQUESTS  in-flight ceiling (default 256; 0 = off).
+#                     Past it new requests are SHED — an immediate 503
+#                     with Retry-After, before auth even runs — instead
+#                     of queueing until everything times out. /health
+#                     and /metrics stay exempt so probes see the
+#                     overload rather than joining it. Watch
+#                     taguru_inflight_requests (gauge) and
+#                     taguru_requests_shed_total (counter).
 ```
 
 ### Docker

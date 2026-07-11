@@ -9,7 +9,7 @@
 //! (scrape) time.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -137,6 +137,13 @@ pub struct Metrics {
     /// boot). `time() - this` on a dashboard says how stale images are
     /// without knowing the flush interval.
     last_flush_success_epoch: AtomicU64,
+    /// Requests currently inside the stack (probes exempt) — the load
+    /// signal behind the in-flight ceiling, and a gauge on /metrics
+    /// either way.
+    inflight: AtomicUsize,
+    /// Requests refused at the ceiling with a 503 — sustained growth
+    /// means the server is saturated, not slow.
+    requests_shed: AtomicU64,
 }
 
 /// Why a request answered 500. The status code alone cannot separate
@@ -245,6 +252,35 @@ pub struct GaugeSnapshot {
 }
 
 impl Metrics {
+    /// Counts one request in, refusing past `limit` (0 = no ceiling,
+    /// count only). Compare-and-swap so two racing admissions cannot
+    /// both squeeze under the ceiling.
+    pub(crate) fn admit_inflight(&self, limit: usize) -> bool {
+        let mut current = self.inflight.load(Ordering::Relaxed);
+        loop {
+            if limit != 0 && current >= limit {
+                return false;
+            }
+            match self.inflight.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub(crate) fn release_inflight(&self) {
+        self.inflight.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_shed(&self) {
+        self.requests_shed.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_http(&self, method: &str, route: &str, status: u16, elapsed: Duration) {
         let stat = self.route_stat(method, route);
         stat.latency.observe(elapsed);
@@ -658,6 +694,26 @@ impl Metrics {
         ));
         push_header(
             &mut out,
+            "taguru_inflight_requests",
+            "gauge",
+            "Requests currently being served (probe endpoints exempt).",
+        );
+        out.push_str(&format!(
+            "taguru_inflight_requests {}\n",
+            self.inflight.load(Ordering::Relaxed)
+        ));
+        push_header(
+            &mut out,
+            "taguru_requests_shed_total",
+            "counter",
+            "Requests refused with a 503 at the in-flight ceiling (TAGURU_MAX_CONCURRENT_REQUESTS).",
+        );
+        out.push_str(&format!(
+            "taguru_requests_shed_total {}\n",
+            self.requests_shed.load(Ordering::Relaxed)
+        ));
+        push_header(
+            &mut out,
             "taguru_build_info",
             "gauge",
             "Build metadata as labels; the value is always 1.",
@@ -869,6 +925,32 @@ mod tests {
             wal_bytes: 0,
             passages_wal_bytes: 0,
         }
+    }
+
+    /// The in-flight counter: a ceiling refuses at capacity, zero means
+    /// count-only, release always returns the slot — and both series
+    /// render on /metrics.
+    #[test]
+    fn the_inflight_counter_admits_releases_and_renders() {
+        let metrics = Metrics::default();
+        assert!(metrics.admit_inflight(2));
+        assert!(metrics.admit_inflight(2));
+        assert!(!metrics.admit_inflight(2), "the ceiling holds");
+        metrics.record_shed();
+        metrics.release_inflight();
+        assert!(metrics.admit_inflight(2), "a release frees a slot");
+        // 0 = no ceiling; the gauge still counts.
+        assert!(metrics.admit_inflight(0));
+
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            rendered.contains("taguru_inflight_requests 3"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("taguru_requests_shed_total 1"),
+            "{rendered}"
+        );
     }
 
     #[test]

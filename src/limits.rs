@@ -67,6 +67,51 @@ pub async fn enforce_timeout(
     }
 }
 
+/// The in-flight ceiling (`TAGURU_MAX_CONCURRENT_REQUESTS`): past it a
+/// request is SHED — an immediate 503 with `Retry-After` — instead of
+/// joining a queue that hides the overload until everything times out.
+/// This is the last-resort valve, sitting outside auth on purpose: at
+/// saturation the refusal must be the cheapest response the server can
+/// make. `/health` and `/metrics` stay exempt, exactly as they are for
+/// auth and the rate gate — probes and scrapes must see the overload,
+/// not join it. The counter doubles as the `taguru_inflight_requests`
+/// gauge, ticking whether or not a ceiling is set.
+pub async fn enforce_concurrency(
+    State((limit, state)): State<(usize, crate::registry::AppState)>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if auth::PROBE_EXEMPT.contains(&request.uri().path()) {
+        return next.run(request).await;
+    }
+    if !state.metrics().admit_inflight(limit) {
+        state.metrics().record_shed();
+        let started_at = Instant::now();
+        let mut response = api::error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "server is at its in-flight ceiling ({limit} requests) — retry \
+                 shortly (TAGURU_MAX_CONCURRENT_REQUESTS tunes this)"
+            ),
+            started_at,
+        );
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(1u32));
+        return response;
+    }
+    // Drop-guard, not a manual decrement: the count must come back
+    // down even when a handler panics mid-request.
+    struct Release(crate::registry::AppState);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.metrics().release_inflight();
+        }
+    }
+    let _release = Release(state.clone());
+    next.run(request).await
+}
+
 /// Token buckets (`TAGURU_RATE_LIMIT_PER_MIN`): each key gets a minute's
 /// allowance as capacity, refilled continuously, so a client may burst
 /// its whole budget and then settle to the sustained rate. 0 disables
@@ -258,6 +303,76 @@ mod tests {
         assert_eq!(status, 408);
         assert_eq!(body["status"], "error");
         assert!(body["error"].as_str().unwrap().contains("budget"), "{body}");
+    }
+
+    /// At the ceiling a new request is shed — 503, Retry-After, the
+    /// ApiError shape — while probes stay exempt, and the permit
+    /// returns the moment the in-flight request finishes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_inflight_ceiling_sheds_and_recovers() {
+        let dir = std::env::temp_dir().join(format!("taguru-limits-shed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = crate::registry::AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Router::new()
+                .route(
+                    "/slow",
+                    get(move || {
+                        let entered = Arc::clone(&entered);
+                        let release = Arc::clone(&release);
+                        async move {
+                            entered.notify_one();
+                            release.notified().await;
+                            "done"
+                        }
+                    }),
+                )
+                .route("/fast", get(|| async { "done" }))
+                .route("/health", get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn_with_state(
+                    (1usize, state.clone()),
+                    enforce_concurrency,
+                ))
+        };
+        let request = |path: &str| {
+            HttpRequest::builder()
+                .uri(path)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let holder = tokio::spawn({
+            let app = app.clone();
+            let held = request("/slow");
+            async move { app.oneshot(held).await.unwrap() }
+        });
+        entered.notified().await; // the permit is now held
+
+        let shed = app.clone().oneshot(request("/fast")).await.unwrap();
+        assert_eq!(shed.status(), 503);
+        assert!(shed.headers().get(header::RETRY_AFTER).is_some());
+        let bytes = axum::body::to_bytes(shed.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "error");
+        assert!(
+            body["error"].as_str().unwrap().contains("ceiling"),
+            "{body}"
+        );
+
+        // Probes must see the overload, not join it.
+        let probe = app.clone().oneshot(request("/health")).await.unwrap();
+        assert_eq!(probe.status(), 200);
+
+        release.notify_one();
+        assert_eq!(holder.await.unwrap().status(), 200);
+        // The drop-guard returned the permit: capacity is back.
+        let after = app.clone().oneshot(request("/fast")).await.unwrap();
+        assert_eq!(after.status(), 200);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The bucket allows a full-capacity burst, refills continuously,

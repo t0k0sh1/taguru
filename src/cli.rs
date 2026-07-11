@@ -71,6 +71,9 @@ ENVIRONMENT (every knob; unset = the shown default):
                                Retry-After (0 = off)
   TAGURU_AUTH_FAIL_LIMIT_PER_MIN  failed-auth attempts per source IP before
                                429 (10; 0 = off; coarse behind a proxy)
+  TAGURU_MAX_CONCURRENT_REQUESTS  in-flight request ceiling — past it new
+                               requests are shed with 503 + Retry-After;
+                               /health and /metrics exempt (256; 0 = off)
   TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off)
   TAGURU_EMBED_MODEL           embedding model name
   TAGURU_EMBED_API_KEY         embedding provider credential
@@ -288,7 +291,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 28] = [
+const KNOWN_KEYS: [&str; 29] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -303,6 +306,7 @@ const KNOWN_KEYS: [&str; 28] = [
     "TAGURU_REQUEST_TIMEOUT_SECS",
     "TAGURU_RATE_LIMIT_PER_MIN",
     "TAGURU_AUTH_FAIL_LIMIT_PER_MIN",
+    "TAGURU_MAX_CONCURRENT_REQUESTS",
     "TAGURU_EMBED_URL",
     "TAGURU_EMBED_MODEL",
     "TAGURU_EMBED_API_KEY",
