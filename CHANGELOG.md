@@ -74,6 +74,31 @@ Entries that change an on-disk format or a response shape say so.
   every flushed context); authorization now wraps the `/mcp` and OAuth
   routes it previously missed; and `@` in a key name is refused at
   boot (it collided with the OAuth-delegation scope fallback).
+- A context compaction racing a background flush's stage-then-publish
+  window could have the flush win the race and republish
+  pre-compaction bytes over the compacted image, silently reverting
+  the associations the compaction had just discarded. A per-entry
+  generation counter now detects a Hot-to-Hot swap mid-flush and backs
+  the stale republish off instead.
+- `POST /import`'s multi-batch apply loop, `create`/`update` (a pin
+  toggle can also load a context from disk) and `delete` on
+  `/contexts/{name}`, and passage lookup/citation/listing on a
+  context's first cold load all ran their synchronous, fsync-bearing
+  I/O directly on the async runtime with no `block_in_place` — a large
+  import alone could stall it for seconds, delaying every other
+  in-flight request. All now wrap their blocking calls, matching the
+  rest of the write and passage-search paths.
+- A non-numeric component in an embedding provider's response silently
+  became `0.0` instead of refusing the response like every other
+  malformed shape (missing vector, wrong width, bad index) — a
+  corrupted vector could then rank as a plausible neighbor in
+  similarity search. It now refuses and names the offending index.
+- `activate`'s decay and every `dice_floor` entry point
+  (`resolve_with_floor`, `set_dice_floor`,
+  `similar_concepts`/`similar_labels`) clamped into `[0, 1]` with a
+  bare `.clamp`, which passes a NaN input straight through instead of
+  clamping it — flipping some fail-closed filters open. Each now maps
+  NaN onto the safe extreme instead.
 
 ### Changed
 - **Response shapes** (pre-1.0 break): `GET /contexts/{name}/labels`,
@@ -93,6 +118,13 @@ Entries that change an on-disk format or a response shape say so.
 - The OAuth consent page carries `X-Frame-Options: DENY`, a
   locked-down `Content-Security-Policy`, and
   `Referrer-Policy: no-referrer`.
+- Dynamic client registration accepted a `redirect_uri` by
+  string-prefix-matching `"https://"`, so
+  `https://trusted-app.example.com@evil.attacker.com/callback`
+  registered without error — the host an approved code actually
+  reaches is the attacker's domain after the `@`, not the
+  trusted-looking name before it. Registration now parses the URI
+  structurally and refuses any userinfo component outright.
 
 ## [0.1.0] - 2026-07-05
 
