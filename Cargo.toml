@@ -8,10 +8,8 @@ repository = "https://github.com/t0k0sh1/taguru"
 readme = "README.md"
 keywords = ["llm", "memory", "mcp", "knowledge-graph", "semantic-memory"]
 categories = ["database-implementations", "web-programming::http-server"]
-# _archive/ holds the retired docs/, examples/ and samples/ trees
-# pending triage (1.2 MB of it Project Gutenberg text), and docs/ is
-# the GitHub Pages site — nothing in src/ or tests/ reads either.
-exclude = ["/_archive", "/docs", "/.github", "/Dockerfile", "/.dockerignore"]
+# docs/ is the GitHub Pages site — nothing in src/ or tests/ reads it.
+exclude = ["/docs", "/.github", "/Dockerfile", "/.dockerignore"]
 
 [dependencies]
 axum = "0.8.9"
