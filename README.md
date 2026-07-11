@@ -321,7 +321,7 @@ curl -X POST localhost:8248/import -H 'Authorization: Bearer <key>' \
   --data-binary @docs-aomine.jsonl   # --data-binary: -d strips the newlines
 ```
 
-Full contract for both entrances: [_archive/docs/import.md](_archive/docs/import.md).
+Full contract for both entrances: [docs/import.html](docs/import.html).
 
 ### Documents in, batch files out (`taguru extract`)
 
@@ -345,7 +345,7 @@ environment only. A manifest in `--out` skips unchanged documents on
 re-runs (`--force` overrides), model output is validated against the
 batch contract before anything is written, and local or bridged
 models (Ollama, LiteLLM in front of Bedrock) work the same way the
-embedding side does. Full contract: [_archive/docs/extract.md](_archive/docs/extract.md).
+embedding side does. Full contract: [docs/extract.html](docs/extract.html).
 
 ## Using it from an LLM agent (MCP)
 

@@ -11,7 +11,7 @@
 //! The server never holds model credentials; extract keeps that
 //! boundary. It is an offline producer carrying TAGURU_EXTRACT_* in
 //! its own environment, exactly like the agent-side pipelines
-//! docs/import.md describes — packaged as a subcommand. Vendor APIs
+//! docs/import.html describes — packaged as a subcommand. Vendor APIs
 //! (Bedrock, native Anthropic) bridge the same way embeddings do:
 //! LiteLLM or any proxy speaking /chat/completions.
 //!
@@ -61,7 +61,7 @@ chat endpoint:
   --description TEXT  add a create block (used only if the context is absent)
   --config F          read KEY=VALUE environment from F (same dialect as serve)
 
-Contract and discipline: docs/extract.md.
+Contract and discipline: docs/extract.html.
 ";
 
 /// Stamped into every manifest entry; bump when the system prompt
@@ -308,7 +308,7 @@ enum Outcome {
 /// One extract run: the settled flags, the provider, and everything
 /// that accumulates across documents — the manifest, the label
 /// vocabulary offered to later prompts, and the output names already
-/// claimed. One run targets one context on purpose (docs/extract.md).
+/// claimed. One run targets one context on purpose (docs/extract.html).
 struct Run {
     context: String,
     description: Option<String>,
@@ -557,7 +557,7 @@ impl ChatClient {
     fn from_env() -> Result<Self, String> {
         let url = std::env::var("TAGURU_EXTRACT_URL").map_err(|_| {
             "TAGURU_EXTRACT_URL is not set — extract needs an OpenAI-compatible \
-             /chat/completions endpoint (docs/extract.md)"
+             /chat/completions endpoint (docs/extract.html)"
                 .to_string()
         })?;
         let model = std::env::var("TAGURU_EXTRACT_MODEL")
@@ -801,7 +801,7 @@ fn parse_model_output(content: &str) -> Result<ModelOutput, String> {
     if unfenced.is_empty() {
         return Err(
             "the answer was empty — thinking-mode models can burn their whole budget on \
-             reasoning before any text (docs/extract.md: turn thinking off)"
+             reasoning before any text (docs/extract.html: turn thinking off)"
                 .to_string(),
         );
     }

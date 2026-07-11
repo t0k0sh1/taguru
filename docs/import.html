@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>バッチ投入の契約（import） — Taguru</title>
+  <meta name="description" content="taguru import と POST /import が共有するバッチファイル契約の完全なリファレンス：1ファイル=1ソース、行タイプ、上限、検証と適用、並行性の規則。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23a8402f'/%3E%3Ctext x='32' y='46' font-size='38' text-anchor='middle' fill='%23fff' font-family='serif'%3E糸%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="メニューを開閉">☰</button>
+  <a class="brand" href="index.html"><span class="brand-mark">糸</span>Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><span class="brand-mark">糸</span>Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">ホーム</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">ガイド</div>
+      <a href="getting-started.html">はじめる</a>
+      <a href="concepts.html">コンセプト</a>
+      <a href="architecture.html">内部アーキテクチャ</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">リファレンス</div>
+      <a href="import.html" aria-current="page">バッチ投入（import）</a>
+      <a href="extract.html">文書抽出（extract）</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">クラウドで使う</div>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">読みもの</div>
+      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">reference · batch import</div>
+    <h1>バッチ投入の契約——<code>taguru import</code> と <code>POST /import</code></h1>
+    <p class="lede">
+      オフラインCLIと稼働中サーバーのエンドポイントが共有する、ひとつのファイル契約の完全なリファレンス。
+      初期ロード、インスタンス間の移行、抽出パイプラインの再生はここを通る。
+      ライブで少しずつ書くのは相変わらずHTTP API／MCPツールの仕事。
+    </p>
+  </header>
+
+  <section id="cli">
+    <h2>CLIの形</h2>
+    <p class="section-sub">
+      <code>taguru import</code> はバッチファイルをデータディレクトリへ直接適用する——稼働中のサーバー無しで、
+      そして決してサーバーの横では動かない：ディレクトリロックが相互に拒否する
+      （advisoryなflock。ローカルディスクでは頼れるが、ネットワークファイルシステムでは両側に許可され得る）。
+    </p>
+    <pre><code>taguru import batch/                  <span class="c"># batch/ 配下の全 *.jsonl を名前順に</span>
+taguru import --dry-run batch/        <span class="c"># 検証して報告する。何にも触れない</span>
+taguru import --config prod.env a.jsonl b.jsonl</code></pre>
+    <p>終了コード：<code>0</code> すべて適用 · <code>1</code> 何かが拒否または失敗（詳細はstderr） · <code>2</code> 使い方の誤り。</p>
+  </section>
+
+  <section id="one-file-one-source">
+    <h2>1ファイル＝1ソースの完全な真実</h2>
+    <p class="section-sub">ファイルの適用とは：<b>そのソースを撤回してから、ファイルを適用する</b>。この一つの規則が運用上の性質を全部くれる。</p>
+    <ul>
+      <li><b>冪等</b>——同じファイルを2度importしても同じ状態に着地する。weightは決して二重にならない。</li>
+      <li><b>改訂可能</b>——同じソースの修正版ファイルは古い事実を丸ごと置き換える。エージェントがライブで行う差分同期（<code>retract_source</code> → 再インジェスト）と同じ操作。</li>
+      <li><b>再試行可能</b>——途中で失敗した（容量・ディスク）ファイルは、直して再importする。撤回が再試行を正確にする。</li>
+    </ul>
+    <p>
+      連想の行が自分の <code>source</code> フィールドを<b>持てない</b>（拒否される）のもこのため：ヘッダーが名乗らないソースは
+      撤回を生き延び、再importのたびに二重化してしまう。ヘッダーのsourceがファイル内の全連想に刻印される。
+    </p>
+    <p>
+      ヘッダーだけで操作行の無いファイルは<b>純粋な撤回</b>——「このソースはもう何も主張しない」。
+    </p>
+    <p class="note warn">
+      <b>鋭い角がひとつ。</b>retract-then-apply の順序ゆえに、apply段が<i>持続的に</i>失敗すると（現実的なのは容量）、
+      再importが成功するまでそのソースは空のまま（旧事実は撤回済み、新事実は拒否済み）になる。
+      また、撤回はソースのattributionを解放するが、語彙を未登録には戻さない：一度鋳造された概念やラベルは
+      コンテキストの生涯にわたってidを保持する。名前が回転し続ける改訂ファイルを再importし続けるパイプラインは、
+      コンテキストを単調に成長させる。<code>taguru inspect</code> で数を、<code>taguru estimate</code> で余裕を監視し、
+      上限に近づいたコンテキストは「もう一度の改訂」ではなく再構築として扱うこと。
+    </p>
+  </section>
+
+  <section id="format">
+    <h2>ファイル形式</h2>
+    <p class="section-sub">JSON Lines、UTF-8。空行は無視。最初の非空行がヘッダー、以降の各行が1操作。</p>
+    <pre><code>{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
+{<span class="k">"passage"</span>: <span class="s">"青嶺酒造は1907年創業。杜氏は高瀬。"</span>}
+{<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"question"</span>: <span class="s">"青嶺酒造の酒造りの責任者は誰?"</span>}
+{<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"section"</span>: <span class="s">"沿革"</span>}
+{<span class="k">"subject"</span>: <span class="s">"青嶺酒造"</span>, <span class="k">"label"</span>: <span class="s">"創業年"</span>, <span class="k">"object"</span>: <span class="s">"1907年"</span>, <span class="k">"weight"</span>: <span class="nu">1.0</span>}
+{<span class="k">"subject"</span>: <span class="s">"青嶺酒造"</span>, <span class="k">"label"</span>: <span class="s">"杜氏"</span>, <span class="k">"object"</span>: <span class="s">"高瀬"</span>, <span class="k">"weight"</span>: <span class="nu">2.0</span>}
+{<span class="k">"alias"</span>: <span class="s">"Aomine Brewery"</span>, <span class="k">"canonical"</span>: <span class="s">"青嶺酒造"</span>, <span class="k">"kind"</span>: <span class="s">"concept"</span>}
+{<span class="k">"alias"</span>: <span class="s">"設立年"</span>, <span class="k">"canonical"</span>: <span class="s">"創業年"</span>, <span class="k">"kind"</span>: <span class="s">"label"</span>}</code></pre>
+
+    <h3>Header（ヘッダー行）</h3>
+    <p>
+      <code>taguru_batch</code> は <code>1</code> でなければならない（このビルドが読む唯一の版）。
+      <code>context</code> と <code>source</code> は必須。<code>create</code> は任意で、
+      <code>PUT /contexts/{name}</code> と同じフィールド（<code>description</code>・<code>pinned</code>・
+      <code>dice_floor</code>・<code>semantic_floor</code>）を運ぶ——使われるのはコンテキストが
+      <b>まだ存在しないときだけ</b>。createブロック無しで不在のコンテキストへimportするのは拒否。
+    </p>
+
+    <h3>Association（連想行）</h3>
+    <p>
+      <code>subject</code> / <code>label</code> / <code>object</code> / <code>weight</code>——
+      associationsエンドポイントのフィールドから <code>source</code> を除いたそのもの（理由は上記）。
+    </p>
+
+    <h3>Alias（別名行）</h3>
+    <p>
+      <code>alias</code> / <code>canonical</code> / <code>kind</code>（<code>"concept"</code> か <code>"label"</code>）。
+      エイリアスは<b>コンテキストレベル</b>で、ソーススコープではない：再importは再登録（不変ペアはno-op）、
+      撤回はエイリアスを消さない。canonicalがこのファイルの連想で初めて導入される名前でもよい——連想が先に適用される。
+      既存のエイリアスを<b>別の</b>canonicalへ付け替えるのは競合で、ファイルを失敗させる——importが黙って語彙を
+      配線し直してはならない。直し方は意図的に一手間：旧登録を撤回してから
+      （<code>DELETE /contexts/{name}/aliases</code> に正確な綴りで、またはMCPの <code>remove_aliases</code>）、
+      再importする——撤回が再試行を正確にする。バッチファイル自身はエイリアスを<b>消せない</b>。これも故意。
+    </p>
+
+    <h3>Passage（原文行）</h3>
+    <p>
+      そのソースの原文テキスト。<b>1ファイルに最大1つ</b>。同じソースidの背後に格納され、
+      <code>sources/lookup</code> と <code>sources/search</code> が提供する。
+    </p>
+
+    <h3>Question（doc2query行）</h3>
+    <p>
+      <code>paragraph</code> / <code>question</code>：このファイルのpassageの1段落に付く検索質問。
+      <code>paragraph</code> はサーバーの空行分割での0起点位置（passage行の無いファイルにquestion行があれば拒否）。
+      1行1問、同じ段落に複数可（上限まで）。<code>TAGURU_EMBED_PASSAGES</code> のサーバーでは各質問が段落の隣に
+      埋め込まれ、質問形の検索が答えの形の本文に着地する。passageの分割に存在しない段落を名指した質問は
+      格納時に捨てられ、応答で数えられる（<code>questions_dropped</code>）——よくある原因は生産側の分割が
+      サーバーの分割からドリフトすること。<a href="extract.html"><code>taguru extract --questions N</code></a> は
+      サーバー自身のsplitterを使うのでドリフトできない。
+    </p>
+
+    <h3>Section（見出し行）</h3>
+    <p>
+      <code>paragraph</code> / <code>section</code>：このファイルのpassageの中で、名前付きセクションが
+      <b>始まる</b>位置を示す見出し（0起点、Questionと同じ分割規約。passage行が無ければ拒否）。
+      セクションは自分の段落から、次のセクションの開始または本文末尾まで暗黙に延びる——「終わり」の行は無い。
+      分割に存在しない段落を名指したセクションは格納時に捨てられ数えられる（<code>sections_dropped</code>、
+      原因の相場もquestionsと同じ）。attributionが一致する段落ロケータを持つ連想は、そのattribution上で
+      セクションを報告する：<code>recall</code>・<code>query</code>・<code>explore</code>・<code>activate</code>・
+      <code>unreachable_from</code> のすべてが <code>attributions[].section</code> を解決し、ロケータがどの
+      セクションにも入らなければ <code>null</code>。<code>POST /contexts/{name}/citations</code> も同じ解決を
+      その1段落について行う。passage検索のヒットはこのフィールドをまだ読まず、格納内容に関わらず省略し続ける——
+      別途のフォローアップ。
+    </p>
+
+    <p class="note">未知のフィールドと認識できない行形状は、行番号付きで拒否される。</p>
+  </section>
+
+  <section id="caps">
+    <h2>上限（APIと同じもの。行ごとに強制）</h2>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>対象</th><th>上限</th></tr></thead>
+        <tbody>
+          <tr><td>context名</td><td>64バイト</td></tr>
+          <tr><td>source id・subject/label/object・alias/canonical</td><td>1,024バイト</td></tr>
+          <tr><td>create.description</td><td>4,096バイト</td></tr>
+          <tr><td>weight</td><td>有限、|w| ≤ 1e6</td></tr>
+          <tr><td>passage</td><td>8 MiB（HTTP既定のボディ上限）</td></tr>
+          <tr><td>question 1件</td><td>512バイト</td></tr>
+          <tr><td>1段落あたりのquestion数</td><td>8</td></tr>
+          <tr><td>section 1件</td><td>512バイト</td></tr>
+          <tr><td>任意の1行</td><td>16 MiB</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      ファイル自体に操作数の上限は無い。適用は内部でAPIのバッチサイズ（10,000）ごとに刻まれ、
+      長い実行は定期的にflushするので、どのコンテキストのWALも <code>TAGURU_WAL_MAX_BYTES</code> に近づかない。
+    </p>
+  </section>
+
+  <section id="validate">
+    <h2>検証、それから適用</h2>
+    <ul>
+      <li>すべてのファイルがparseでき、かつどの2ファイルも同じ (context, source) を主張しない——それを確かめてから<b>初めて</b>何かが適用される。1行の不正が実行全体を行番号付きで拒否し、何も書かれない（<code>--dry-run</code> は設計どおりそこで止まる）。</li>
+      <li>apply段でしか発見できない失敗（容量・ディスク）はファイルごとに報告され、残りのファイルは続行する：ファイルは構造上独立（1ファイル1ソース）で、部分適用されたファイルは再importで治る。</li>
+      <li>書き込みはサーバーと同じレジストリを通る——WALに載せてfsync、予算を強制、最後にflush。だから <code>taguru inspect</code> も次回のbootも、ライブのインジェストが生んだのと寸分違わぬ状態を見る。importは各コンテキストの使用統計でwriteとして数えられる。</li>
+    </ul>
+    <p class="note warn">
+      <b>先に全部を検証することには費用がある</b>：parse済みの全ファイルが適用までメモリに留まるので、
+      実行のフットプリントは<b>ファイル群の合計</b>サイズに比例する（最大の1つではなく）。
+      100万文書の移行は数回の呼び出しに分けて流す（ディレクトリを輪切りに）——importは冪等で
+      各ファイルが自分のソースを運ぶから、分割は何も費やさない。
+    </p>
+  </section>
+
+  <section id="embeddings">
+    <h2>埋め込み</h2>
+    <p>
+      <code>TAGURU_EMBED_URL</code>／<code>TAGURU_EMBED_MODEL</code> が設定されていれば（<code>--config</code> 経由でも）、
+      触れたすべてのコンテキストが実行の最後に変更されたグロスを再埋め込みする——サーバーの
+      <code>TAGURU_EMBED_AUTO</code> と同じ冪等なrefresh。<code>--no-embed</code> でスキップ。
+      refreshの失敗は何も巻き戻さない：グラフはimport済みで耐久であり、実行は回復手順
+      （稼働サーバーの <code>POST /contexts/{name}/embeddings/refresh</code>）を名指しして1で終了する。
+    </p>
+  </section>
+
+  <section id="http">
+    <h2>同じ契約をHTTPで：<code>POST /import</code></h2>
+    <p class="section-sub">
+      リクエストボディ<b>が</b>1つのバッチファイルであり、1リクエストが1ソースの完全な真実を述べる。
+      稼働中のシステムはダウンタイム無しで一括投入できる。
+    </p>
+    <pre><code><span class="c"># --data-binary であって -d ではない：curlの -d は改行を剥ぎ、改行こそがフォーマット</span>
+curl -X POST localhost:8248/import \
+  -H 'Authorization: Bearer &lt;key&gt;' \
+  --data-binary @docs-aomine.jsonl
+<span class="c"># → {"result": {"context": "sake", "source": "docs/aomine.md",</span>
+<span class="c">#    "created": false, "retracted": 12, "associations": 14,</span>
+<span class="c">#    "aliases": 2, "passage_stored": true}, "status": "ok", …}</span></code></pre>
+    <ul>
+      <li>先に検証（不正な行は行番号付きの400で、何も適用されない）、それからretract-then-apply——同じバッチの再POSTは、CLIの再実行と同じくソースを正確に置き換える。応答はCLIが印字するのと同じ数字を運ぶ。</li>
+      <li>どのエンドポイントも従うものにこれも従う：Bearer認証、ボディ上限（<code>TAGURU_MAX_BODY_BYTES</code>、既定8 MiB——それより大きいバッチはオフラインCLIか上限の引き上げ）、リクエストタイムアウト、キーごとのレート制限。</li>
+      <li>ステータスはAPIの流儀：<code>400</code> 不正なバッチ（行番号付き） · <code>404</code> コンテキスト不在でcreateブロック無し · <code>409</code>／<code>507</code> 部分書き込み（競合／容量。何が着地したかはメッセージが名指しし、撤回が修正後の再試行を正確にする） · <code>500</code> WALまたはディスクが拒んだ書き込み。</li>
+      <li>埋め込みはリクエスト内ではrefreshされない。<code>TAGURU_EMBED_AUTO</code> が有効なら、ライブの書き込みと同じく次のflushに同乗する。</li>
+    </ul>
+    <p class="note warn">
+      <b>異なる</b>ソースの2バッチは並行してPOSTしてよい——バッチ内の各書き込みはコンテキスト上で直列化される。
+      <b>同じ</b>ソースの2つのimportを競走させてはならない：一方のretractとapplyの間にもう一方が割り込み、
+      両バッチの<b>和集合</b>が生き残り得る。1ソース、同時に1ライター。
+    </p>
+    <p>
+      入口の選び方：サーバーがまだ無い、または大量の初期ロード → <code>taguru import</code>
+      （リクエスト単位の上限なし、flushは最後に1回）。答え続けなければならないライブ系 → <code>POST /import</code>。
+    </p>
+  </section>
+
+  <section id="producing">
+    <h2>バッチファイルを生産する</h2>
+    <p>
+      Taguruのサーバーは散文から事実を抽出<b>しない</b>——それは読む側のLLMの仕事で、サーバーは決して
+      モデルの資格情報を持たない。生産者（producer）が文書を読み、モデルに <code>/protocol</code> の規律で
+      連想を吐かせ、文書idをソースとして文書ごとに1バッチファイルを書く。
+    </p>
+    <p>
+      そういう生産者がひとつ同梱されている：<a href="extract.html"><code>taguru extract</code></a>——
+      上記そのものを任意のOpenAI互換チャットエンドポイントで行うオフラインのサブコマンドで、
+      <code>TAGURU_EXTRACT_*</code> の資格情報を自分の環境だけに持つ。カスタムパイプラインも第一級のまま：
+      <a href="bedrock.html">Bedrockガイド</a>のConverseループと <code>/protocol</code> のツール語彙は
+      そういう生産者の両半分であり、バッチファイルはそのオフライン直列化にすぎない。
+    </p>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>

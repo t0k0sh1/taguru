@@ -1407,7 +1407,7 @@ pub struct ImportOutcome {
     pub association_paragraphs_dropped: usize,
 }
 
-/// `POST /import` — the batch-file contract (docs/import.md) over
+/// `POST /import` — the batch-file contract (docs/import.html) over
 /// HTTP: the body IS one batch file, applied to the live server with
 /// the same validate-first, retract-then-apply semantics as `taguru
 /// import`. One request states one source's complete truth, so bulk

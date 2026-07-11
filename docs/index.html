@@ -7,25 +7,51 @@
   <meta name="description" content="知識を連想として蓄積し、糸口から手繰って引き出す。LLMのための長期意味記憶サーバー Taguru のドキュメント。">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23a8402f'/%3E%3Ctext x='32' y='46' font-size='38' text-anchor='middle' fill='%23fff' font-family='serif'%3E糸%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
-  <script src="theme.js"></script>
+  <script src="site.js"></script>
 </head>
 <body>
 
-<nav class="topnav">
-  <div class="topnav-inner">
-    <a class="brand" href="index.html"><span class="brand-mark">糸</span>Taguru</a>
-    <div class="topnav-links">
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="メニューを開閉">☰</button>
+  <a class="brand" href="index.html"><span class="brand-mark">糸</span>Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><span class="brand-mark">糸</span>Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html" aria-current="page">ホーム</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">ガイド</div>
       <a href="getting-started.html">はじめる</a>
       <a href="concepts.html">コンセプト</a>
-      <a href="architecture.html">アーキテクチャ</a>
-      <a href="bedrock.html">Bedrock</a>
-      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
-      <a href="https://github.com/t0k0sh1/taguru">GitHub</a>
-      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+      <a href="architecture.html">内部アーキテクチャ</a>
     </div>
+    <div class="side-group">
+      <div class="side-group-label">リファレンス</div>
+      <a href="import.html">バッチ投入（import）</a>
+      <a href="extract.html">文書抽出（extract）</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">クラウドで使う</div>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">読みもの</div>
+      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
   </div>
-</nav>
+</aside>
 
+<main class="content">
 <div class="page">
 
   <header class="hero">
@@ -84,6 +110,14 @@
       <a class="nav-card" href="architecture.html">
         <span class="nc-title">内部アーキテクチャ</span>
         <p>フラットバッファのグラフ、ディスクを真実とするレジストリ、WALと耐久性、三つの検索経路、認証と可観測性。</p>
+      </a>
+      <a class="nav-card" href="import.html">
+        <span class="nc-title">バッチ投入の契約（import）</span>
+        <p>1ファイル=1ソースの完全な真実。ファイル形式の全行タイプ、上限、検証と適用、<code>POST /import</code> と並行性の規則。</p>
+      </a>
+      <a class="nav-card" href="extract.html">
+        <span class="nc-title">文書抽出（extract）</span>
+        <p>文書からバッチファイルを作るオフラインの生産者。プロンプトと強制、チャンク分割、doc2query、マニフェスト、信頼と品質。</p>
       </a>
       <a class="nav-card" href="bedrock.html">
         <span class="nc-title">Amazon Bedrockで使う</span>
@@ -161,6 +195,8 @@ curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application
     <span>このサイトは静的HTML——クローンして file:// で開いても全ページ動く</span>
   </footer>
 
+</div>
+</main>
 </div>
 </body>
 </html>

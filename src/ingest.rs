@@ -51,7 +51,7 @@ Applies JSONL batch files to TAGURU_DATA_DIR offline (the server must
 not be running — the directory lock enforces it). One file = one
 source's complete truth: import retracts the source, then applies the
 file, so re-importing is idempotent. A directory expands to its
-*.jsonl files, sorted by name. Format: docs/import.md. A running
+*.jsonl files, sorted by name. Format: docs/import.html. A running
 server accepts the same body at POST /import (authenticated), one
 file per request — live systems need no downtime window.
 
@@ -60,7 +60,7 @@ file per request — live systems need no downtime window.
   --config F   read KEY=VALUE environment from F (same dialect as serve)
 ";
 
-/// The one format version this build reads and docs/import.md
+/// The one format version this build reads and docs/import.html
 /// describes.
 const BATCH_VERSION: u64 = 1;
 
