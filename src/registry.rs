@@ -1855,6 +1855,21 @@ impl AppState {
         Some(Ok(hits))
     }
 
+    /// One provider round trip, timed into the embed-latency histogram
+    /// whatever the outcome — the ok/failed counters cannot tell a
+    /// slow provider from a down one; the histogram can.
+    fn timed_embed(
+        &self,
+        embedder: &dyn EmbeddingProvider,
+        texts: &[&str],
+        purpose: EmbedPurpose,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        let started = std::time::Instant::now();
+        let outcome = embedder.embed(texts, purpose);
+        self.0.metrics.record_embed_latency(started.elapsed());
+        outcome
+    }
+
     /// The query side of every embedding lookup: process cache first,
     /// provider (as [`EmbedPurpose::Query`]) on a miss. No lock is held
     /// across the provider call.
@@ -1866,7 +1881,7 @@ impl AppState {
         if let Some(vector) = self.0.cue_cache.lock().unwrap().get(cue) {
             return Ok(vector);
         }
-        match embedder.embed(&[cue], EmbedPurpose::Query) {
+        match self.timed_embed(embedder, &[cue], EmbedPurpose::Query) {
             Ok(mut vectors) => {
                 self.0.metrics.record_embed_resolve(true);
                 let vector = Arc::new(vectors.pop().unwrap_or_default());
@@ -2042,7 +2057,7 @@ impl AppState {
             && fresh_width.is_none()
             && let Some((_, gloss)) = concepts.first().or_else(|| labels.first())
         {
-            match embedder.embed(&[gloss.as_str()], EmbedPurpose::Index) {
+            match self.timed_embed(embedder.as_ref(), &[gloss.as_str()], EmbedPurpose::Index) {
                 Ok(vectors) => {
                     self.0.metrics.record_embed_refresh(true);
                     fresh_width = vectors.first().map(Vec::len);
@@ -2128,7 +2143,7 @@ impl AppState {
         let mut embedded = VectorTable::new();
         for chunk in stale.chunks(128) {
             let texts: Vec<&str> = chunk.iter().map(|(_, gloss, _)| gloss.as_str()).collect();
-            match embedder.embed(&texts, EmbedPurpose::Index) {
+            match self.timed_embed(embedder, &texts, EmbedPurpose::Index) {
                 Ok(vectors) => {
                     self.0.metrics.record_embed_refresh(true);
                     embedded.extend(
@@ -2280,7 +2295,7 @@ impl AppState {
         let mut failure: Option<String> = None;
         for chunk in to_embed.chunks(128) {
             let texts: Vec<&str> = chunk.iter().map(|(_, text)| text.as_str()).collect();
-            match embedder.embed(&texts, EmbedPurpose::Index) {
+            match self.timed_embed(embedder.as_ref(), &texts, EmbedPurpose::Index) {
                 Ok(vectors) => {
                     self.0.metrics.record_embed_refresh(true);
                     for ((key, _), vector) in chunk.iter().zip(vectors) {

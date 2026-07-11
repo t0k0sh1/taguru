@@ -81,6 +81,9 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off)
   TAGURU_EMBED_MODEL           embedding model name
   TAGURU_EMBED_API_KEY         embedding provider credential
+  TAGURU_EMBED_TIMEOUT_SECS    per-attempt provider budget (60); transient
+                               failures retry twice with backoff — keep
+                               TAGURU_REQUEST_TIMEOUT_SECS above this
   TAGURU_EMBED_PASSAGES        1/true also embeds stored paragraphs — the
                                semantic passage lane; opt-in spend (off)
   TAGURU_PASSAGE_VECTOR_LIMIT  max embedded paragraphs per context (20000);
@@ -295,7 +298,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 30] = [
+const KNOWN_KEYS: [&str; 31] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -315,6 +318,7 @@ const KNOWN_KEYS: [&str; 30] = [
     "TAGURU_EMBED_URL",
     "TAGURU_EMBED_MODEL",
     "TAGURU_EMBED_API_KEY",
+    "TAGURU_EMBED_TIMEOUT_SECS",
     "TAGURU_EMBED_AUTO",
     "TAGURU_EMBED_PASSAGES",
     "TAGURU_PASSAGE_VECTOR_LIMIT",

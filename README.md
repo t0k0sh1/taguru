@@ -193,8 +193,19 @@ cargo run --release   # or `cargo install taguru`, which installs the
 #                     TAGURU_API_TOKEN(S) — consent delegates a real key.
 #   TAGURU_MAX_BODY_BYTES      request body cap (default 8 MiB)
 #   TAGURU_REQUEST_TIMEOUT_SECS  per-request budget (default 30; raise
-#                     above 60 when TAGURU_EMBED_URL is configured — the
-#                     provider round trip cannot be preempted mid-call)
+#                     above TAGURU_EMBED_TIMEOUT_SECS when TAGURU_EMBED_URL
+#                     is configured — the provider round trip cannot be
+#                     preempted mid-call, and the boot log warns when the
+#                     two are misordered)
+#   TAGURU_EMBED_TIMEOUT_SECS  the provider's per-attempt budget (default
+#                     60). Transient failures — dropped connections,
+#                     timeouts, 429s, 5xx — retry twice with a short
+#                     backoff before the error surfaces; 4xx refusals and
+#                     malformed responses fail immediately. Watch
+#                     taguru_embedding_duration_seconds (histogram,
+#                     retries included) next to the ok/failed counters:
+#                     the counters say THAT the provider misbehaves, the
+#                     histogram says how slowly.
 #   TAGURU_RATE_LIMIT_PER_MIN  per-key request budget (default 0 = off):
 #                     each named key may burst a full minute's allowance,
 #                     then settles to the sustained rate; unauthenticated

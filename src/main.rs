@@ -176,6 +176,20 @@ async fn serve() {
     let embedder = embedding::HttpEmbeddings::from_env();
     if let Some(embedder) = &embedder {
         info!(model = embedder.model(), "semantic entry tier enabled");
+        // The provider call runs in block_in_place, which the request
+        // timeout cannot preempt — a budget under the provider ceiling
+        // 408s spuriously whenever the provider is merely slow. This
+        // trap used to live only in a code comment; say it at boot.
+        let embed_timeout = env_number("TAGURU_EMBED_TIMEOUT_SECS", 60).max(1);
+        if timeout_secs <= embed_timeout {
+            warn!(
+                request_timeout_secs = timeout_secs,
+                embed_timeout_secs = embed_timeout,
+                "TAGURU_REQUEST_TIMEOUT_SECS is at or under the embedding provider's \
+                 ceiling — raise it above TAGURU_EMBED_TIMEOUT_SECS, or slow provider \
+                 calls will answer 408 after the work was already done"
+            );
+        }
     }
     let auto_embed = embedder.is_some()
         && std::env::var("TAGURU_EMBED_AUTO")

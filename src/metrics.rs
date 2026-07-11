@@ -137,6 +137,12 @@ pub struct Metrics {
     /// boot). `time() - this` on a dashboard says how stale images are
     /// without knowing the flush interval.
     last_flush_success_epoch: AtomicU64,
+    /// Embedding-provider round-trip latency (retries included) — the
+    /// ok/failed counters say THAT the provider misbehaves; this says
+    /// how slowly. Calls past the top finite bucket (5s) still land in
+    /// `+Inf`/`_count`, so a provider crawling toward its timeout is
+    /// visible as a growing tail.
+    embed_latency: Histogram,
     /// Requests currently inside the stack (probes exempt) — the load
     /// signal behind the in-flight ceiling, and a gauge on /metrics
     /// either way.
@@ -275,6 +281,10 @@ impl Metrics {
 
     pub(crate) fn release_inflight(&self) {
         self.inflight.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_embed_latency(&self, elapsed: Duration) {
+        self.embed_latency.observe(elapsed);
     }
 
     pub(crate) fn record_shed(&self) {
@@ -562,6 +572,30 @@ impl Metrics {
                 failed.load(Ordering::Relaxed)
             ));
         }
+        push_header(
+            &mut out,
+            "taguru_embedding_duration_seconds",
+            "histogram",
+            "Embedding provider round-trip latency, retries included \
+             (calls past the top bucket land in +Inf).",
+        );
+        let cumulative = self.embed_latency.cumulative();
+        for ((_, le), value) in LATENCY_BUCKETS.iter().zip(cumulative) {
+            out.push_str(&format!(
+                "taguru_embedding_duration_seconds_bucket{{le=\"{le}\"}} {value}\n"
+            ));
+        }
+        let count = self.embed_latency.count.load(Ordering::Relaxed);
+        out.push_str(&format!(
+            "taguru_embedding_duration_seconds_bucket{{le=\"+Inf\"}} {count}\n"
+        ));
+        out.push_str(&format!(
+            "taguru_embedding_duration_seconds_sum {}\n",
+            self.embed_latency.sum_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0
+        ));
+        out.push_str(&format!(
+            "taguru_embedding_duration_seconds_count {count}\n"
+        ));
 
         push_header(
             &mut out,
@@ -988,6 +1022,21 @@ mod tests {
         );
         assert!(
             rendered.contains("taguru_requests_shed_total 1"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn embed_latency_renders_as_a_histogram() {
+        let metrics = Metrics::default();
+        metrics.record_embed_latency(Duration::from_millis(3));
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            rendered.contains("taguru_embedding_duration_seconds_count 1"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("taguru_embedding_duration_seconds_bucket{le=\"0.005\"} 1"),
             "{rendered}"
         );
     }

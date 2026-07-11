@@ -56,16 +56,39 @@ pub struct HttpEmbeddings {
     agent: ureq::Agent,
 }
 
+/// Transient provider failures retry this many times past the first
+/// attempt, sleeping [`RETRY_INITIAL_BACKOFF`] then five times that.
+/// Small on purpose: the refresh paths hold per-context refresh locks
+/// across the round trip, and resolve's caller is an interactive
+/// request — a provider that is down stays down; the retries are for
+/// the blip, not the outage.
+const RETRY_ATTEMPTS: usize = 2;
+const RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+
+/// One failed attempt: what to tell the caller, and whether trying
+/// again could plausibly answer differently — a dropped connection, a
+/// timeout, a 429 or a 5xx can; a 4xx refusal or a malformed response
+/// body cannot.
+struct Refusal {
+    message: String,
+    retryable: bool,
+}
+
 impl HttpEmbeddings {
     pub fn from_env() -> Option<Self> {
         let url = std::env::var("TAGURU_EMBED_URL").ok()?;
         let model = std::env::var("TAGURU_EMBED_MODEL").ok()?;
+        // The provider budget (TAGURU_EMBED_TIMEOUT_SECS, default 60):
+        // a blocking call cannot be preempted by the request timeout,
+        // so this is the true ceiling on how long one attempt can hold
+        // a worker thread. Floored to 1 like the other second knobs.
+        let timeout_secs = crate::env_number("TAGURU_EMBED_TIMEOUT_SECS", 60).max(1);
         Some(Self {
             url,
             model,
             api_key: std::env::var("TAGURU_EMBED_API_KEY").ok(),
             agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(60))
+                .timeout(Duration::from_secs(timeout_secs as u64))
                 .build(),
         })
     }
@@ -80,7 +103,8 @@ impl EmbeddingProvider for HttpEmbeddings {
         // A client span per provider round trip — the one downstream
         // call whose latency Taguru's own timings cannot explain. Runs
         // on the caller's thread (block_in_place), so a request span
-        // in scope becomes its parent automatically.
+        // in scope becomes its parent automatically. Retries stay
+        // inside the one span: one logical embed, one client call.
         let span = tracing::info_span!(
             "embed",
             otel.kind = "client",
@@ -89,6 +113,37 @@ impl EmbeddingProvider for HttpEmbeddings {
             embed.purpose = purpose.as_str(),
         );
         let _guard = span.enter();
+        let mut backoff = RETRY_INITIAL_BACKOFF;
+        let mut attempt = 0;
+        loop {
+            match self.attempt(texts, purpose) {
+                Ok(vectors) => return Ok(vectors),
+                Err(refusal) if refusal.retryable && attempt < RETRY_ATTEMPTS => {
+                    attempt += 1;
+                    tracing::warn!(
+                        attempt,
+                        of = RETRY_ATTEMPTS,
+                        error = %refusal.message,
+                        "transient embedding failure; retrying"
+                    );
+                    std::thread::sleep(backoff);
+                    backoff *= 5;
+                }
+                Err(refusal) => return Err(refusal.message),
+            }
+        }
+    }
+}
+
+impl HttpEmbeddings {
+    /// One provider round trip, classified for the retry loop above.
+    fn attempt(&self, texts: &[&str], purpose: EmbedPurpose) -> Result<Vec<Vec<f32>>, Refusal> {
+        // Everything past the transport is a hard refusal: a malformed
+        // body will be malformed again.
+        let hard = |message: String| Refusal {
+            message,
+            retryable: false,
+        };
         let mut request = self
             .agent
             .post(&self.url)
@@ -98,9 +153,25 @@ impl EmbeddingProvider for HttpEmbeddings {
             request = request.set("Authorization", &format!("Bearer {key}"));
         }
         let body = serde_json::json!({ "model": self.model, "input": texts });
-        let response = request
-            .send_string(&body.to_string())
-            .map_err(|error| format!("embedding request failed: {error}"))?;
+        let response = request.send_string(&body.to_string()).map_err(|error| {
+            let retryable = match &error {
+                // Overload and server-side failure answer differently
+                // in a moment; a 4xx refusal does not.
+                ureq::Error::Status(code, _) => *code == 429 || *code >= 500,
+                // Dropped connections and timeouts are the blip the
+                // retries exist for.
+                ureq::Error::Transport(_) => true,
+            };
+            Refusal {
+                message: format!("embedding request failed: {error}"),
+                retryable,
+            }
+        })?;
+        self.decode(response, texts).map_err(hard)
+    }
+
+    /// Decodes one successful response into per-input vectors.
+    fn decode(&self, response: ureq::Response, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
         // ureq's `into_string` caps its read at 10 MiB, but `into_json`
         // reads without any bound — and the agent's 60s timeout bounds
         // time, not bytes, so a misbehaving or misaddressed provider
@@ -652,6 +723,81 @@ mod tests {
             }
             request.extend_from_slice(&buffer[..read]);
         }
+    }
+
+    /// Two 503s then a 200: the transient-failure retries absorb the
+    /// blip and the caller sees one clean Ok — while a 4xx refusal
+    /// (here 401) surfaces immediately, because retrying a rejected
+    /// credential three times just triples the noise.
+    #[test]
+    fn transient_provider_failures_retry_and_hard_refusals_do_not() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_full_request(&mut stream);
+                let attempt = counted.fetch_add(1, Ordering::SeqCst);
+                if attempt < 2 {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\
+                          Connection: close\r\n\r\n",
+                    );
+                } else {
+                    let body = br#"{"data":[{"embedding":[3.0,4.0]}]}"#;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(body);
+                }
+            }
+        });
+        let provider = HttpEmbeddings {
+            url: format!("http://{addr}"),
+            model: "stub-model".to_string(),
+            api_key: None,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+        let vectors = provider.embed(&["x"], EmbedPurpose::Query).unwrap();
+        assert_eq!(vectors, vec![vec![0.6, 0.8]]);
+        assert_eq!(hits.load(Ordering::SeqCst), 3, "503, 503, then the 200");
+
+        // The hard-refusal half: one 401, no second attempt.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let _ = read_full_request(&mut stream);
+                counted.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\
+                      Connection: close\r\n\r\n",
+                );
+            }
+        });
+        let provider = HttpEmbeddings {
+            url: format!("http://{addr}"),
+            model: "stub-model".to_string(),
+            api_key: None,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+        let error = provider.embed(&["x"], EmbedPurpose::Query).unwrap_err();
+        assert!(error.contains("401"), "{error}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "a 4xx never retries");
     }
 
     /// The HTTP provider must tell a bridging proxy WHY it is embedding
