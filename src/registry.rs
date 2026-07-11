@@ -3954,12 +3954,28 @@ fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Result<PathBuf> 
     #[cfg(not(unix))]
     let _ = private;
     let staged = staging_path(path);
-    let write = fs::File::create(&staged).and_then(|mut file| {
+    // A private file must be BORN owner-only: create-then-chmod leaves a
+    // window (the default-umask create, ~0644, before the chmod) in
+    // which another local account can open() the staging file and keep
+    // reading it — the secret bytes land in that fd afterwards. `mode`
+    // on the open() sets the creation mode atomically, so no readable
+    // moment ever exists. `create_new` also refuses to reuse a file an
+    // attacker pre-created, closing the mirror-image swap. The staging
+    // name is per-process unique (`staging_path`), so create_new never
+    // collides with our own concurrent stagers.
+    let open = |staged: &Path| -> io::Result<fs::File> {
         #[cfg(unix)]
         if private {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            return fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(staged);
         }
+        fs::File::create(staged)
+    };
+    let write = open(&staged).and_then(|mut file| {
         file.write_all(bytes)?;
         file.sync_all()
     });
@@ -5854,6 +5870,32 @@ mod tests {
         write_atomic_private(&path, b"{\"v\":2}").unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "mode {mode:o}");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The STAGING file — not just the committed one — is owner-only
+    /// the instant it exists: `stage_bytes` must leave no readable
+    /// window between create and the secret write (the TOCTOU the
+    /// create_new+mode fix closes). Inspect the temp file's mode before
+    /// it is committed.
+    #[cfg(unix)]
+    #[test]
+    fn private_staging_file_is_born_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("atomic-private-staging");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.json");
+        let staged = stage_bytes(&path, b"secret", true).unwrap();
+        let mode = fs::metadata(&staged).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "staging file mode {mode:o} — must be 0600 at birth, not chmod'd after"
+        );
+        // The non-private path stays world-default (no regression).
+        let staged_plain = stage_bytes(&dir.join("plain.bin"), b"x", false).unwrap();
+        assert!(fs::metadata(&staged_plain).is_ok());
 
         let _ = fs::remove_dir_all(dir);
     }
