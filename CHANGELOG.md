@@ -58,8 +58,22 @@ Entries that change an on-disk format or a response shape say so.
 - A failed `DELETE /contexts/{name}` unlink could leak the context's
   sidecar files forever — or, if `.ctx` itself survived, resurrect
   the context at the next boot. Deletion now writes a durable
-  `.deleted` marker first, and boot resumes any deletion it finds a
-  marker for.
+  `.deleted` marker first, boot resumes any deletion it finds a marker
+  for, and recreating a context clears a stale marker so a failed
+  delete followed by a same-name create cannot be undone at the next
+  boot.
+- Export is now a true fixed point: a context with sourceless weight
+  exports a reserved `export:unsourced` batch, and re-exporting the
+  restored context (which carries a real attribution to that id) folds
+  it back instead of refusing — the round trip export exists for no
+  longer breaks on its own output.
+- `taguru export` writes each stream atomically (stage + fsync +
+  rename), so a crash while refreshing a backup no longer truncates
+  the previous good copy.
+- `/flush` refuses a context-scoped key (it is server-wide and names
+  every flushed context); authorization now wraps the `/mcp` and OAuth
+  routes it previously missed; and `@` in a key name is refused at
+  boot (it collided with the OAuth-delegation scope fallback).
 
 ### Changed
 - **Response shapes** (pre-1.0 break): `GET /contexts/{name}/labels`,
@@ -73,8 +87,9 @@ Entries that change an on-disk format or a response shape say so.
   limit off.
 
 ### Security
-- The OAuth grant store (`oauth.json`) is written owner-only (0600),
-  mode set before content lands.
+- The OAuth grant store (`oauth.json`) is created owner-only (0600) at
+  open time — born with the mode, not chmod'd after, so no readable
+  window exists between create and the secret write.
 - The OAuth consent page carries `X-Frame-Options: DENY`, a
   locked-down `Content-Security-Policy`, and
   `Referrer-Policy: no-referrer`.
