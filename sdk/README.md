@@ -76,10 +76,13 @@ To prepare a release:
 
 One-time registry setup:
 
-- **PyPI** — a `PYPI_API_TOKEN` repository secret (account-scoped until
-  the packages exist, then swap in a project-scoped token). While it is
-  missing, a release tag skips the PyPI publish loudly instead of
-  failing.
+- **PyPI** — one project-scoped token per package, as the
+  `PYPI_API_TOKEN_TAGURU` and `PYPI_API_TOKEN_LANGCHAIN_TAGURU`
+  repository secrets (mint each on that project's Settings → "API
+  tokens" on pypi.org — PyPI scopes a token to a single project, so a
+  leak costs one project's token, not the account). While a token is
+  missing, a release tag skips that package's publish loudly instead
+  of failing.
 - **npm** — [trusted publishing](https://docs.npmjs.com/trusted-publishers):
   no secret. On npmjs.com, each package's Settings → Trusted Publisher
   takes user `t0k0sh1`, repository `taguru`, workflow

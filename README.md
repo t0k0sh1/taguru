@@ -232,6 +232,11 @@ batched writes, the `retrieve()` loop), and `langchain-taguru` for
 Python and JS/TS (a retriever that merges both lanes, and an ingester
 that decomposes LangChain Documents into the graph).
 
+```sh
+pip install taguru        # or: pip install langchain-taguru
+npm install taguru        # or: npm install langchain-taguru
+```
+
 Library-level examples live in [examples/](examples/) — one directory
 per example, each with its own README. Runnable LangChain use cases
 (RAG QA with citations, governed ingestion, conversational long-term
