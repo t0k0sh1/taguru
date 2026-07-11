@@ -670,7 +670,7 @@ fn extract_chunk(client: &ChatClient, system: &str, user: &str) -> Result<ModelO
     ))
 }
 
-/// The extraction discipline, distilled from docs/llm-protocol.md's
+/// The extraction discipline, distilled from src/llm-protocol.md's
 /// ingest loop for a producer with no live server to resolve against:
 /// consistent spellings inside the run replace check-before-mint,
 /// everything else is what agents follow live.

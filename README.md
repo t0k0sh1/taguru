@@ -16,7 +16,7 @@ understanding — decomposing documents into facts, choosing a context,
 recomposing results into prose — is the client's job; this server only
 stores and walks structure. The server distributes the complete
 playbook for clients itself: `GET /protocol` (the content of
-[_archive/docs/llm-protocol.md](_archive/docs/llm-protocol.md)).
+[src/llm-protocol.md](src/llm-protocol.md)).
 
 ## Architecture
 
