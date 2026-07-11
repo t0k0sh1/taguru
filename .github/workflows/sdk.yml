@@ -141,12 +141,11 @@ jobs:
         run: npm install --no-fund --no-audit
         working-directory: examples/langchain
       - name: Run examples
+        # npm's own workspace resolution, not a shell glob — */typescript
+        # also matches node_modules/typescript (the compiler package).
         run: |
-          for ws in */typescript; do
-            echo "--- $ws"
-            npm run typecheck --workspace="$ws"
-            npm start --workspace="$ws"
-          done
+          npm run typecheck --workspaces
+          npm run start --workspaces
         working-directory: examples/langchain
         env:
           TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru
