@@ -1243,23 +1243,26 @@ impl AppState {
         *entry.passage_vectors.lock().unwrap() = None;
         *entry.vectors.lock().unwrap() = None;
         let stem = file_stem(name);
+        // The durable half of the acknowledgment: while this marker
+        // exists, boot resumes the unlinks — so a partial failure here
+        // (a held handle, a flaky mount) can leak bytes only until the
+        // next start, and a surviving `.ctx` can never resurrect a
+        // context the API reported gone. Written before the first
+        // unlink; removed only after the last one succeeds.
+        let marker = self.0.data_dir.join(format!("{stem}.deleted"));
+        if let Err(error) = write_atomic(&marker, b"") {
+            tracing::warn!(context = %name, %error, "deletion marker not persisted; a partial delete would not resume at boot");
+        }
         let mut outcome = Ok(());
-        for file in [
-            format!("{stem}.ctx"),
-            format!("{stem}.meta.json"),
-            format!("{stem}.sources.json"),
-            format!("{stem}.passages.bin"),
-            format!("{stem}.passages.wal.jsonl"),
-            format!("{stem}.pvectors.bin"),
-            format!("{stem}.bm25.bin"),
-            format!("{stem}.vectors.bin"),
-            format!("{stem}.wal.jsonl"),
-        ] {
+        for file in context_files(&stem) {
             if let Err(error) = fs::remove_file(self.0.data_dir.join(file))
                 && error.kind() != io::ErrorKind::NotFound
             {
                 outcome = Err(error);
             }
+        }
+        if outcome.is_ok() {
+            let _ = fs::remove_file(&marker);
         }
         self.0.pending_deletes.lock().unwrap().remove(name);
         Some(outcome)
@@ -3418,6 +3421,34 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
 /// as unbounded disk litter), and every context image found is
 /// registered cold, described by its sidecar snapshot.
 fn scan_data_dir(data_dir: &Path) -> io::Result<HashMap<String, Arc<Entry>>> {
+    // Unfinished deletions first: a `.deleted` marker means delete()
+    // acknowledged the removal but could not unlink the whole family —
+    // without this sweep, a surviving `.ctx` would RESURRECT a context
+    // the API already reported gone (and a surviving sidecar would
+    // leak forever). Resuming the deletion here makes the marker the
+    // durable half of the operation: acknowledged deletes stay deleted
+    // across any crash or IO failure, eventually.
+    for dir_entry in fs::read_dir(data_dir)? {
+        let path = dir_entry?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("deleted")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            tracing::warn!(stem, "resuming an unfinished context deletion");
+            let stem = stem.to_string();
+            for file in context_files(&stem) {
+                let target = data_dir.join(file);
+                if let Err(error) = fs::remove_file(&target)
+                    && error.kind() != io::ErrorKind::NotFound
+                {
+                    tracing::warn!(path = %target.display(), %error, "unfinished deletion: file still held");
+                }
+            }
+            // The marker goes last: it only leaves once the family did.
+            if fs::remove_file(&path).is_err() {
+                tracing::warn!(path = %path.display(), "unfinished deletion: marker still held");
+            }
+        }
+    }
     let mut registry = HashMap::new();
     for dir_entry in fs::read_dir(data_dir)? {
         let path = dir_entry?.path();
@@ -3992,6 +4023,23 @@ fn offload<T>(work: impl FnOnce() -> T) -> T {
     }
 }
 
+/// One context's whole file family, by stem — the delete loop and the
+/// boot-time deletion sweep must never disagree about what "the whole
+/// family" means, so both read this one list.
+fn context_files(stem: &str) -> [String; 9] {
+    [
+        format!("{stem}.ctx"),
+        format!("{stem}.meta.json"),
+        format!("{stem}.sources.json"),
+        format!("{stem}.passages.bin"),
+        format!("{stem}.passages.wal.jsonl"),
+        format!("{stem}.pvectors.bin"),
+        format!("{stem}.bm25.bin"),
+        format!("{stem}.vectors.bin"),
+        format!("{stem}.wal.jsonl"),
+    ]
+}
+
 /// Encodes a context name as a file stem: bytes outside [A-Za-z0-9_-]
 /// become %XX. Context names arrive from URL paths and may contain path
 /// separators or dots; encoding them keeps every name inside the data
@@ -4220,6 +4268,46 @@ mod tests {
         assert!(rendered(&state).contains("taguru_contexts_resident 1"));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A `.deleted` marker is the durable half of a delete: boot
+    /// resumes the unlinks it finds one for, so an acknowledged
+    /// deletion can never resurrect — however the unlink loop failed.
+    #[test]
+    fn an_unfinished_deletion_is_resumed_at_boot() {
+        let dir = scratch_dir("deleted-sweep");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+        assert!(dir.join("sake.ctx").exists());
+        // The crash-shaped state: delete() wrote its marker, then the
+        // process died before (or while) the unlinks ran.
+        fs::write(dir.join("sake.deleted"), b"").unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            state.directory_entry("sake").is_none(),
+            "an acknowledged deletion must not resurrect"
+        );
+        assert!(!dir.join("sake.ctx").exists(), "the family must be gone");
+        assert!(!dir.join("sake.wal.jsonl").exists());
+        assert!(
+            !dir.join("sake.deleted").exists(),
+            "the marker leaves once the family did"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Compaction sheds the dead weight retraction leaves behind,

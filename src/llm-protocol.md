@@ -301,3 +301,20 @@ Source code takes the same discipline; only the naming changes.
   crash and replays on restart). Only when the server runs
   `TAGURU_WAL=0` can writes inside the flush interval (default 5 s)
   be lost.
+
+## Compatibility
+
+- This protocol travels WITH the server — read it from the deployment
+  you target (`GET /protocol`, or the MCP instructions, which carry
+  the same text). There is deliberately no `/v1` path prefix: one
+  server serves one protocol version, its own.
+- Parse responses tolerantly: new fields may appear in any release
+  (additive), and absent optional fields are omitted rather than
+  null. Pre-1.0, shapes may also change between minor versions —
+  every break is named in the CHANGELOG's "Changed" section before it
+  ships.
+- The batch format (`taguru_batch: 1`) and the image format are
+  versioned independently of the API: old batch files stay readable,
+  and images migrate forward on load. Rolling a server BINARY back
+  past an image-format bump needs the data rolled back with it — the
+  release notes flag format bumps.

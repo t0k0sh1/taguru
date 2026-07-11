@@ -461,7 +461,10 @@ pub async fn delete_context(
                     state.metrics().record_error(ErrorKind::Io);
                     error(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("context '{name}' removed but its files were not: {io_error}"),
+                        format!(
+                            "context '{name}' removed but its files were not: {io_error} \
+                             (a deletion marker remains; the next boot resumes the removal)"
+                        ),
                         started_at,
                     )
                 }
