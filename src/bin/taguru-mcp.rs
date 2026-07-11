@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-const FALLBACK_INSTRUCTIONS: &str = include_str!("../../docs/llm-protocol.md");
+const FALLBACK_INSTRUCTIONS: &str = include_str!("../../_archive/docs/llm-protocol.md");
 
 fn main() {
     let base = std::env::var("TAGURU_URL").unwrap_or_else(|_| "http://127.0.0.1:8248".to_string());

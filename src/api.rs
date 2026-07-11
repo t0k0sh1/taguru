@@ -271,7 +271,7 @@ pub async fn protocol(trailer: Option<String>) -> Response {
 /// trailer. Shared with the MCP transports, whose `initialize` must
 /// hand out exactly what GET /protocol serves.
 pub fn protocol_text(trailer: Option<&str>) -> String {
-    let mut body = include_str!("../docs/llm-protocol.md").to_string();
+    let mut body = include_str!("../_archive/docs/llm-protocol.md").to_string();
     if let Some(trailer) = trailer {
         body.push_str(trailer);
     }

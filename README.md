@@ -16,7 +16,7 @@ understanding — decomposing documents into facts, choosing a context,
 recomposing results into prose — is the client's job; this server only
 stores and walks structure. The server distributes the complete
 playbook for clients itself: `GET /protocol` (the content of
-[docs/llm-protocol.md](docs/llm-protocol.md)).
+[_archive/docs/llm-protocol.md](_archive/docs/llm-protocol.md)).
 
 ## Architecture
 
@@ -321,7 +321,7 @@ curl -X POST localhost:8248/import -H 'Authorization: Bearer <key>' \
   --data-binary @docs-aomine.jsonl   # --data-binary: -d strips the newlines
 ```
 
-Full contract for both entrances: [docs/import.md](docs/import.md).
+Full contract for both entrances: [_archive/docs/import.md](_archive/docs/import.md).
 
 ### Documents in, batch files out (`taguru extract`)
 
@@ -345,7 +345,7 @@ environment only. A manifest in `--out` skips unchanged documents on
 re-runs (`--force` overrides), model output is validated against the
 batch contract before anything is written, and local or bridged
 models (Ollama, LiteLLM in front of Bedrock) work the same way the
-embedding side does. Full contract: [docs/extract.md](docs/extract.md).
+embedding side does. Full contract: [_archive/docs/extract.md](_archive/docs/extract.md).
 
 ## Using it from an LLM agent (MCP)
 
@@ -394,7 +394,7 @@ whoever holds one holds the memory. Mint one named key per client
 everything.
 
 Running the agent or the embeddings on Amazon Bedrock? See
-[docs/bedrock.md](docs/bedrock.md): the Converse hosting pattern for
+[_archive/docs/bedrock.md](_archive/docs/bedrock.md): the Converse hosting pattern for
 taguru-mcp, an InvokeModel embedding proxy, floor calibration, and the
 access-gate diagnosis commands.
 

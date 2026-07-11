@@ -8,9 +8,12 @@ repository = "https://github.com/t0k0sh1/taguru"
 readme = "README.md"
 keywords = ["llm", "memory", "mcp", "knowledge-graph", "semantic-memory"]
 categories = ["database-implementations", "web-programming::http-server"]
-# samples/ is raw ingest material for manual runs (1.2 MB of it Project
-# Gutenberg text) — nothing in src/ or tests/ reads it.
-exclude = ["/samples", "/.github", "/Dockerfile", "/.dockerignore"]
+# _archive/ holds the retired docs/, examples/ and samples/ trees
+# pending triage. _archive/docs must ship in the package: the binary
+# include_str!'s llm-protocol.md out of it. samples (1.2 MB of it
+# Project Gutenberg text) and examples are dead weight — nothing in
+# src/ or tests/ reads them.
+exclude = ["/_archive/samples", "/_archive/examples", "/.github", "/Dockerfile", "/.dockerignore"]
 
 [dependencies]
 axum = "0.8.9"

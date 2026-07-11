@@ -7,7 +7,8 @@ RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY docs ./docs
+# _archive/docs: llm-protocol.md is include_str!'d into the binary.
+COPY _archive/docs ./_archive/docs
 RUN cargo build --release --locked --bin taguru \
     && mkdir /data-skeleton
 
