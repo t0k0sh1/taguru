@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deploy on Kubernetes — Taguru</title>
+  <meta name="description" content="Deploying Taguru on Kubernetes: the single-writer model as a Deployment with replicas: 1 and strategy: Recreate, ReadWriteOnce storage, the probe wiring, sizing, backups and restore.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html" aria-current="page">Kubernetes</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">deploy · kubernetes</div>
+    <h1>Deploy on Kubernetes</h1>
+    <p class="lede">
+      <a href="https://github.com/t0k0sh1/taguru/blob/main/deploy/kubernetes.yaml"><code>deploy/kubernetes.yaml</code></a>
+      spells Taguru's single-writer model out as manifests: a Deployment with
+      <code>replicas: 1</code> and <code>strategy: Recreate</code>, a ReadWriteOnce
+      PersistentVolumeClaim, a ClusterIP Service, and the probe wiring. This page walks the
+      decisions the file encodes.
+    </p>
+    <div class="hero-meta">
+      <span><b>Image:</b> ghcr.io/t0k0sh1/taguru (scratch, ~13 MB)</span>
+      <span><b>Manifest:</b> deploy/kubernetes.yaml</span>
+    </div>
+  </header>
+
+  <section id="model">
+    <h2>The model you are deploying</h2>
+    <p class="section-sub">
+      One fsync-then-apply owner per data directory is what makes "200 = durable" simple enough
+      to trust. The advisory lock exists to enforce that, not to be worked around — plan the
+      deployment on this model rather than against it.
+    </p>
+    <ul>
+      <li><b>Deploys are stop-then-start.</b> The downtime is the boot: cold registration is cheap however many contexts exist, and pinned contexts preload in parallel — the port opens when they finish. Never let the platform run two pods against one volume, even during a rollout.</li>
+      <li><b>Availability is restore time, not failover.</b> There is no replication or leader election; the recovery unit is the data directory. Two rungs: a storage-layer snapshot restores the volume byte-exactly (fastest, same-version), and a <code>taguru export</code> stream restores anywhere through <code>taguru import</code> / <code>POST /import</code> (portable across versions and machines). Rehearse whichever rung is the plan.</li>
+      <li><b>Scale horizontally by partitioning, not clustering.</b> A context is the unit of routing, so independent instances each owning a disjoint set of contexts scale reads and writes with no coordination protocol — point each client (or each MCP bridge) at the instance holding its contexts. What does <b>not</b> work is two instances sharing one data directory: on local disks the lock refuses it, and on NFS/EFS the lock may fail to.</li>
+      <li><b>A rollback is a restore.</b> Image formats migrate forward on load and never write the old version back out, so rolling the binary back past a format bump needs the data directory rolled back with it (snapshot) or re-imported from an export stream. Check the release notes for format bumps before downgrading.</li>
+    </ul>
+    <p class="note">
+      The same model on a single host, without a scheduler in the loop, is the
+      <a href="docker-compose.html">Docker Compose page</a>.
+    </p>
+  </section>
+
+  <section id="install">
+    <h2>Installing</h2>
+    <p class="section-sub">Credentials stay out of the manifest — the Deployment reads them from a Secret.</p>
+    <pre><code>kubectl create namespace taguru
+kubectl -n taguru create secret generic taguru-keys \
+  --from-literal=TAGURU_API_TOKENS='ops:CHANGE-ME'
+kubectl -n taguru apply -f kubernetes.yaml</code></pre>
+    <p>
+      Named keys (<code>name:token</code>) mean the access log says which key was used and a leak
+      costs one revocation. Grow the rest of the configuration in the Secret or a ConfigMap as the
+      deployment grows (<code>TAGURU_RATE_LIMIT_PER_MIN</code>, the <code>TAGURU_EMBED_*</code>
+      tier, cache budgets, …) — every knob is an environment variable, listed by
+      <code>taguru --help</code>.
+    </p>
+  </section>
+
+  <section id="choices">
+    <h2>The load-bearing choices</h2>
+    <p class="section-sub">All of them follow from one data directory owning durability.</p>
+    <ul>
+      <li><b><code>replicas: 1</code> and <code>strategy: Recreate</code>.</b> The advisory lock refuses a second writer on local disks and <b>cannot be trusted to</b> on shared network filesystems, so the platform must never run two pods against one volume. Recreate makes every rollout stop-then-start; the default RollingUpdate would briefly run old and new side by side.</li>
+      <li><b>ReadWriteOnce, block-backed storage</b> (EBS/PD/Ceph RBD) — never ReadWriteMany/NFS. Single-attachment enforced by the platform is what keeps the single-writer model honest where the lock can't.</li>
+      <li><b>Three probes, three different questions:</b>
+        <div class="tbl" style="margin-top:0.6rem">
+          <table>
+            <thead><tr><th>Probe</th><th>Endpoint</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td>startupProbe</td><td><code>/live</code></td><td>Boot = cold registration + parallel pinned preload; the port opens when it finishes. Sized <code>periodSeconds: 5</code> × <code>failureThreshold: 60</code> = five minutes of grace — resize to your fleet.</td></tr>
+              <tr><td>livenessProbe</td><td><code>/live</code></td><td>Restarts fix wedged processes, <b>not disks</b> — so liveness must not watch the write path.</td></tr>
+              <tr><td>readinessProbe</td><td><code>/health</code></td><td><code>503</code> while the write path is degraded (a failing flush). Routing away is the remedy; restarting is not. Self-heals within one flush interval once the disk recovers.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </li>
+      <li><b><code>fsGroup: 65532</code></b> makes the volume writable by the scratch image's uid, and <code>readOnlyRootFilesystem: true</code> holds because /data is the only write target. The image is the server binary alone on <code>scratch</code> — no shell to <code>kubectl exec</code> into; the observability surface is <code>/metrics</code>, the logs, and the probes.</li>
+      <li><b>Memory requests ≈ <code>TAGURU_CACHE_BYTES</code> (default 512 MiB) + pinned contexts + headroom</b> (the manifest ships 1Gi request / 2Gi limit). Don't guess at scale — <code>taguru estimate --associations N</code> builds a context of the target size and measures it.</li>
+      <li><b>The Service stays inside the cluster.</b> Expose beyond it only behind TLS (Ingress/Gateway with a certificate) — a bearer token is the whole credential — and set <code>TAGURU_RATE_LIMIT_PER_MIN</code> when you do.</li>
+      <li><b>The image version is pinned</b> (<code>latest</code> moves): with formats that migrate forward only, a surprise binary bump on a pod reschedule is a one-way door.</li>
+    </ul>
+  </section>
+
+  <section id="backup">
+    <h2>Backups and restore</h2>
+    <p class="section-sub">The procedure is the same as everywhere; only the snapshot mechanism is the cluster's.</p>
+    <ol>
+      <li><code>POST /flush</code> — write out everything dirty.</li>
+      <li>Snapshot the PersistentVolume at the storage layer (a CSI VolumeSnapshot, or the backing store's own snapshot — every writer is fsync+rename, so a point-in-time snapshot is safe at any instant). Or take the portable stream with <code>GET /contexts/{name}/export</code> and restore anywhere through <code>POST /import</code>.</li>
+      <li>Verify the restored copy with <code>taguru inspect</code> — the same fully-validating load + WAL replay the server does. Verification runs anywhere the image runs: mount the restored volume on any machine and <code>docker run --rm -v …:/data ghcr.io/t0k0sh1/taguru inspect /data</code>.</li>
+    </ol>
+    <p class="note warn">
+      Back up each context's file family <b>as a set, always</b> — copying files out of a live
+      volume does not guarantee cross-file consistency; snapshot, or stop the writer. And
+      <b>rehearse the restore</b>: on this model, the restore drill <i>is</i> the availability
+      story. Details in <a href="getting-started.html#ops">operational basics</a>.
+    </p>
+  </section>
+
+  <section id="next">
+    <div class="next-links">
+      <a class="nav-card" href="bedrock.html" style="flex:1 1 16rem">
+        <span class="nc-title">Amazon Bedrock</span>
+        <p>Wiring the agent and the embedding tier to Bedrock models around a deployed server.</p>
+      </a>
+      <a class="nav-card" href="getting-started.html" style="flex:1 1 16rem">
+        <span class="nc-title">Getting started</span>
+        <p>Configuration reference, Docker basics, MCP wiring, operational basics.</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>

@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>内部アーキテクチャ — Taguru</title>
-  <meta name="description" content="Taguruの内部構造：フラットバッファのグラフ、ディスクを真実とするレジストリ、WALによる耐久性、三つの検索経路、認証と可観測性。">
+  <title>Internal architecture — Taguru</title>
+  <meta name="description" content="Inside Taguru: the flat-buffer graph, the disk-as-truth registry, WAL durability, three retrieval paths, auth and observability.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -12,9 +12,9 @@
 <body>
 
 <div class="topbar">
-  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="メニューを開閉">☰</button>
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
-  <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
 </div>
 <div class="scrim" id="scrim"></div>
 
@@ -23,31 +23,33 @@
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
   <nav class="side-nav">
     <div class="side-group">
-      <a href="index.html">ホーム</a>
+      <a href="index.html">Home</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">ガイド</div>
-      <a href="getting-started.html">はじめる</a>
-      <a href="concepts.html">コンセプト</a>
-      <a href="architecture.html" aria-current="page">内部アーキテクチャ</a>
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">リファレンス</div>
-      <a href="import.html">バッチ投入（import）</a>
-      <a href="extract.html">文書抽出（extract）</a>
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">クラウドで使う</div>
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
       <a href="bedrock.html">Amazon Bedrock</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">読みもの</div>
-      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html" aria-current="page">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
     </div>
   </nav>
   <div class="sidebar-footer">
     <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
-    <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
   </div>
 </aside>
 
@@ -55,189 +57,191 @@
 <div class="page">
 
   <header class="hero">
-    <div class="eyebrow">internals</div>
-    <h1>内部アーキテクチャ——ディスクが真実、メモリはキャッシュ</h1>
+    <div class="eyebrow">how it works · internals</div>
+    <h1>Internal architecture — disk is the truth, memory is a cache</h1>
     <p class="lede">
-      1コンテキスト＝1枚のフラットバッファという割り切りから、WALの耐久性、三つの検索経路、
-      認証と可観測性まで。設計判断は対応するソースのモジュールコメントにも書かれている——
-      ここはその見取り図。
+      From the "one context = one flat buffer" decision, through WAL durability, the three
+      retrieval paths, auth, and observability. Each design decision is also written down as a
+      module comment in the corresponding source — this page is the map.
     </p>
   </header>
 
   <section id="overview">
-    <h2>見取り図</h2>
+    <h2>The map</h2>
     <div class="arch">
       <div class="arch-layer">
         <div class="arch-label">clients</div>
         <div class="arch-row">
-          <div class="arch-box dim"><b>LLMエージェント</b><span>Claude Code / Desktop、Converseループ等</span></div>
-          <div class="arch-box dim"><b>HTTPクライアント</b><span>curl、パイプライン、監視</span></div>
-          <div class="arch-box dim"><b>claude.ai コネクタ</b><span>OAuth経由のリモートMCP</span></div>
+          <div class="arch-box dim"><b>LLM agents</b><span>Claude Code / Desktop, Converse loops, …</span></div>
+          <div class="arch-box dim"><b>HTTP clients</b><span>curl, pipelines, monitoring</span></div>
+          <div class="arch-box dim"><b>claude.ai connectors</b><span>remote MCP via OAuth</span></div>
         </div>
       </div>
       <div class="arch-down">↓</div>
       <div class="arch-layer">
         <div class="arch-label">surface</div>
         <div class="arch-row">
-          <div class="arch-box"><b>taguru-mcp</b><span>stdioブリッジ。ツール呼び出しをHTTPに翻訳</span></div>
-          <div class="arch-box"><b>HTTP API</b><span>axum。全エンドポイント＋<code>POST /import</code></span></div>
-          <div class="arch-box"><b>POST /mcp</b><span>Streamable HTTP（ステートレス・プロファイル）</span></div>
+          <div class="arch-box"><b>taguru-mcp</b><span>stdio bridge; translates tool calls into HTTP</span></div>
+          <div class="arch-box"><b>HTTP API</b><span>axum. Every endpoint + <code>POST /import</code></span></div>
+          <div class="arch-box"><b>POST /mcp</b><span>Streamable HTTP (stateless profile)</span></div>
         </div>
       </div>
       <div class="arch-down">↓</div>
       <div class="arch-layer">
         <div class="arch-label">cross-cutting</div>
         <div class="arch-row">
-          <div class="arch-box"><b>auth</b><span>名前付きBearerキー</span></div>
-          <div class="arch-box"><b>oauth</b><span>リモートMCP用・内蔵AS</span></div>
-          <div class="arch-box"><b>limits</b><span>時間予算とレート</span></div>
-          <div class="arch-box"><b>metrics / trace</b><span>Prometheus・OTLP</span></div>
+          <div class="arch-box"><b>auth</b><span>named Bearer keys</span></div>
+          <div class="arch-box"><b>oauth</b><span>for remote MCP; built-in AS</span></div>
+          <div class="arch-box"><b>limits</b><span>time budgets and rates</span></div>
+          <div class="arch-box"><b>metrics / trace</b><span>Prometheus · OTLP</span></div>
         </div>
       </div>
       <div class="arch-down">↓</div>
       <div class="arch-layer">
         <div class="arch-label">registry</div>
         <div class="arch-row">
-          <div class="arch-box"><b>registry</b><span>コンテキスト単位のキャッシュ（LRU・ピン留め）、dirty追跡、周期flusher、コールドブート登録</span></div>
+          <div class="arch-box"><b>registry</b><span>whole-context cache (LRU + pinning), dirty tracking, periodic flusher, cold-boot registration</span></div>
         </div>
       </div>
       <div class="arch-down">↓</div>
       <div class="arch-layer">
         <div class="arch-label">per context</div>
         <div class="arch-row">
-          <div class="arch-box"><b>Context</b><span>連想グラフ本体（フラットバッファ）</span></div>
-          <div class="arch-box lane-text"><b>passages</b><span>原文ストア（スナップショット＋追記ログ）</span></div>
-          <div class="arch-box lane-text"><b>bm25</b><span>段落転置索引（派生・再構築可能）</span></div>
-          <div class="arch-box"><b>vectors</b><span>グロス／段落の埋め込み（任意）</span></div>
+          <div class="arch-box"><b>Context</b><span>the association graph itself (flat buffer)</span></div>
+          <div class="arch-box lane-text"><b>passages</b><span>original-text store (snapshot + append log)</span></div>
+          <div class="arch-box lane-text"><b>bm25</b><span>paragraph inverted index (derived; rebuildable)</span></div>
+          <div class="arch-box"><b>vectors</b><span>gloss / paragraph embeddings (optional)</span></div>
         </div>
       </div>
       <div class="arch-down">↓</div>
       <div class="arch-layer">
         <div class="arch-label">disk</div>
         <div class="arch-row">
-          <div class="arch-box dim"><b>{name}.ctx ほかファイルファミリー</b><span>+ .wal.jsonl / oauth.json / .taguru.lock — すべて fsync + rename で書かれる</span></div>
+          <div class="arch-box dim"><b>{name}.ctx and the rest of the file family</b><span>+ .wal.jsonl / oauth.json / .taguru.lock — all written fsync + rename</span></div>
         </div>
       </div>
     </div>
   </section>
 
   <section id="library">
-    <h2>ライブラリ層——1コンテキスト＝1枚のフラットバッファ</h2>
-    <p class="section-sub"><code>context.rs</code>。全状態が1つの平坦なバッファに収まるという不変条件が、この下のすべてを単純にする。</p>
+    <h2>The library layer — one context = one flat buffer</h2>
+    <p class="section-sub"><code>context.rs</code>. The invariant that all state fits in one flat buffer is what keeps everything below it simple.</p>
     <ul>
-      <li>状態は「UTF-8文字列アリーナ＋固定幅 <code>#[repr(C)]</code> レコードの7テーブル」。隣接リストはエッジレコードに縫い込まれた侵入型チェーン（intrusive chains）で、ポインタの追跡が別アロケーションを生まない。</li>
-      <li>すべての変更は「追記」か「フィールド更新」。だから全状態が <code>to_bytes</code>／<code>from_bytes</code> で1枚のイメージとして往復する——リトルエンディアン、ロード時に全検証。</li>
-      <li>容量はu32空間：テーブルあたり約42.9億レコード、インターン済みテキスト4 GiB。超過は <code>ContextFull</code> エラーであって、パニックではない（HTTPでは507になり、書き込みは適用されていない）。</li>
-      <li>検索の入口は正規化（NFKC・大小・カナ→ひらがな）＋バイグラム転置索引。エイリアスは入口専用の別綴りで、結果は常に正準の綴りを運ぶ。</li>
+      <li>State is "a UTF-8 string arena + seven tables of fixed-width <code>#[repr(C)]</code> records". Adjacency lists are intrusive chains threaded through the edge records, so pointer chasing allocates nothing.</li>
+      <li>Every mutation is an append or a field update. So the whole state round-trips as one image through <code>to_bytes</code>/<code>from_bytes</code> — little-endian, fully validated on load.</li>
+      <li>Capacity is the u32 space: ~4.29 billion records per table, 4 GiB of interned text. Overflow is a <code>ContextFull</code> error, not a panic (507 over HTTP, and the write was not applied).</li>
+      <li>The retrieval entrance is normalization (NFKC, case folding, katakana→hiragana) plus a bigram inverted index. Aliases are entry-only alternative spellings; results always carry the canonical spelling.</li>
     </ul>
     <div class="chips" style="margin-top:0.9rem">
       <span class="chip used">recall</span><span class="chip used">query</span><span class="chip used">query_any</span><span class="chip used">describe</span><span class="chip used">explore</span><span class="chip used">activate</span><span class="chip used">resolve</span><span class="chip used">resolve_label</span><span class="chip used">unreachable_from</span>
       <span class="chip">associate</span><span class="chip">associate_from</span><span class="chip">add_concept_alias</span><span class="chip">add_label_alias</span>
     </div>
-    <p class="note">藍が読み出し、無色が書き込み。ライブラリの表面はこれだけで、残りはすべてサーバー側の関心事。</p>
+    <p class="note">Indigo = reads, plain = writes. That is the entire library surface; everything else is the server's concern.</p>
   </section>
 
   <section id="server">
-    <h2>サーバー層——レジストリとファイルファミリー</h2>
-    <p class="section-sub"><code>registry.rs</code>。ディスクが真実の源で、メモリはコンテキスト丸ごと単位のキャッシュ。</p>
+    <h2>The server layer — the registry and the file family</h2>
+    <p class="section-sub"><code>registry.rs</code>. Disk is the source of truth; memory is a cache managed at whole-context granularity.</p>
     <pre><code>data/
-├── {name}.ctx                 <span class="c"># グラフのイメージ（to_bytesの生バイト）</span>
-├── {name}.meta.json           <span class="c"># 説明・ピン留め・統計のサイドカー（イメージを純粋なダンプに保つため外に置く）</span>
-├── {name}.wal.jsonl           <span class="c"># グラフの書き込みWAL（flush成功のたびに切り詰め）</span>
-├── {name}.passages.bin        <span class="c"># 原文のコンパクション済みスナップショット</span>
-├── {name}.passages.wal.jsonl  <span class="c"># 原文の追記ログ</span>
-├── {name}.bm25.bin            <span class="c"># 段落転置索引（派生物——失っても再構築、障害にはならない）</span>
-├── {name}.vectors.bin         <span class="c"># 埋め込みキャッシュ（モデル名がキー）</span>
-├── oauth.json                 <span class="c"># リモートMCPのOAuthグラント</span>
-└── .taguru.lock               <span class="c"># データディレクトリの advisory ロック</span></code></pre>
+├── {name}.ctx                 <span class="c"># the graph image (raw bytes of to_bytes)</span>
+├── {name}.meta.json           <span class="c"># description / pinning / stats sidecar (kept outside so the image stays a pure dump)</span>
+├── {name}.wal.jsonl           <span class="c"># graph write WAL (truncated after every successful flush)</span>
+├── {name}.passages.bin        <span class="c"># compacted snapshot of the original text</span>
+├── {name}.passages.wal.jsonl  <span class="c"># append log of the original text</span>
+├── {name}.bm25.bin            <span class="c"># paragraph inverted index (derived — lose it and it rebuilds; never an outage)</span>
+├── {name}.vectors.bin         <span class="c"># embedding cache (keyed by model name)</span>
+├── oauth.json                 <span class="c"># OAuth grants for remote MCP</span>
+└── .taguru.lock               <span class="c"># advisory lock on the data directory</span></code></pre>
     <ul>
-      <li>ブートは全コンテキストを<b>コールド</b>登録（ピン留めだけ先読み）。最初のアクセスが透過的にロードし、キャッシュ予算（<code>TAGURU_CACHE_BYTES</code>）を超えるとLRUで退避。</li>
-      <li>書き込みはコンテキストをdirtyにするだけ。永続化は周期flusher（<code>TAGURU_FLUSH_SECS</code>）、退避時、シャットダウン時。</li>
-      <li>1コンテキストの真実はファミリー一式——バックアップは<b>必ず一括</b>（<a href="getting-started.html#ops">運用の基本</a>）。</li>
+      <li>Boot registers every context <b>cold</b> (only pinned ones preload). The first access loads transparently; past the cache budget (<code>TAGURU_CACHE_BYTES</code>) least-recently-used contexts are evicted.</li>
+      <li>A write only marks its context dirty. Persistence happens on the periodic flusher (<code>TAGURU_FLUSH_SECS</code>), on eviction, and on shutdown.</li>
+      <li>The truth of one context is its whole file family — back it up <b>as a set, always</b> (<a href="getting-started.html#ops">operational basics</a>).</li>
     </ul>
   </section>
 
   <section id="durability">
-    <h2>耐久性——WALが「200＝残る」を作る</h2>
-    <p class="section-sub"><code>wal.rs</code>・<code>passages.rs</code>。flush間隔は鮮度の刻みであって、損失窓ではない。</p>
+    <h2>Durability — the WAL is what makes "200 = durable"</h2>
+    <p class="section-sub"><code>wal.rs</code> · <code>passages.rs</code>. The flush interval is freshness cadence, not a loss window.</p>
     <ul>
-      <li>HTTP APIが受理したグラフ変更は、メモリに触れる<b>前に</b>WALへ追記される（JSON Lines、バッチごとにfsync）。クラッシュしても、次のブートがリプレイして戻す。</li>
-      <li>リプレイはシーケンス番号だけで駆動される：各レコードが単調な <code>seq</code> を持ち、イメージのヘッダが「ここまで焼き込み済み」の透かし（watermark）を持つ。二重適用も取りこぼしも構造的に起きない。</li>
-      <li>WALはflush成功のたびに切り詰められる。上限（既定256 MiB）に近づくのはflushが失敗し続けているときだけで、超えたら書き込みを500で<b>拒否</b>する——ログを無限に伸ばすより、書けない事実を早く言う。</li>
-      <li>原文は独立した耐久経路を持つ：コンパクション済みスナップショット＋常時ONの追記ログ。前身は1ファイルを毎回全書き換えで、N文書のimportがO(N²)バイトを書いていた——今はグラフと同じ「スナップショット＋ログ」の形。</li>
-      <li>すべてのライターがfsync＋rename。ファイルシステムのスナップショットはいつの瞬間でも安全で、<code>taguru inspect</code> がサーバーと同じ全検証ロード＋WALリプレイでバックアップを裏取りする。</li>
+      <li>A graph change accepted by the HTTP API is appended to the WAL <b>before</b> memory is touched (JSON Lines, fsynced per batch). After a crash, the next boot replays it back.</li>
+      <li>Replay is driven by sequence numbers alone: every record carries a monotonic <code>seq</code>, and the image header carries a "burned in up to here" watermark. Double-apply and dropped records are structurally impossible.</li>
+      <li>The WAL truncates after every successful flush. It only nears its ceiling (default 256 MiB) when flushes keep failing — past it, writes are <b>refused</b> with 500: better to say "cannot write" early than to grow the log forever.</li>
+      <li>Original text has its own durability path: a compacted snapshot plus an always-on append log. The predecessor rewrote one whole file every time, so importing N documents wrote O(N²) bytes — now it is the same "snapshot + log" shape as the graph.</li>
+      <li>Every writer is fsync + rename. A filesystem snapshot is safe at any instant, and <code>taguru inspect</code> verifies a backup with the same fully-validating load + WAL replay the server does.</li>
     </ul>
   </section>
 
   <section id="search">
-    <h2>三つの検索経路</h2>
-    <p class="section-sub">グラフの入口、字句の網、意味の網。どれが答えたかは常に結果が申告する。</p>
+    <h2>Three retrieval paths</h2>
+    <p class="section-sub">The graph entrance, the lexical net, the semantic net. Results always declare which one answered.</p>
     <div class="card-grid">
       <div class="card">
-        <h3>グラフの入口</h3>
-        <p>正規化＋バイグラム索引でcueを概念に解決し、あとは構造を手繰る（<code>describe</code>／<code>query</code>／<code>activate</code>／<code>explore</code>）。類似度はここに登場しない。</p>
+        <h3>The graph entrance</h3>
+        <p>Normalization + the bigram index resolve a cue to a concept; from there it's all structure (<code>describe</code>/<code>query</code>/<code>activate</code>/<code>explore</code>). Similarity plays no part here.</p>
       </div>
       <div class="card">
-        <h3>字句レーン（BM25）</h3>
-        <p>段落の転置索引を常駐させ、クエリごとの再トークン化を止める。原文ストアが真実で、索引は<b>派生物</b>——欠けていれば再構築される。更新はソース単位の墓標＋追記で増分。</p>
+        <h3>The lexical lane (BM25)</h3>
+        <p>The paragraph inverted index stays resident, ending per-query re-tokenization. The passage store is the truth and the index is <b>derived</b> — if missing, it rebuilds. Updates are incremental: per-source tombstones + appends.</p>
       </div>
       <div class="card">
-        <h3>セマンティックレーン（任意）</h3>
-        <p>概念・ラベルは<b>グロス</b>（名前＋最重量の事実）として埋め込む——単語だけでは文で訓練されたモデルに信号が足りない。<code>TAGURU_EMBED_PASSAGES</code> で段落とdoc2query質問も対象に。</p>
+        <h3>The semantic lane (optional)</h3>
+        <p>Concepts and labels are embedded <b>as glosses</b> (name + heaviest facts) — a bare word carries too little signal for models trained on sentences. <code>TAGURU_EMBED_PASSAGES</code> extends it to paragraphs and doc2query questions.</p>
       </div>
     </div>
     <ul style="margin-top:1.2rem">
-      <li>「段落」を決める関数は<b>ひとつ</b>（<code>paragraph.rs</code>）：BM25も、段落埋め込みも、原文ストアの区間も同じ分割を輸入する。三者が食い違う余地を最初から作らない。分割は機械的——空行の連なりが境界、正規化なし。</li>
-      <li>両レーンが走ったときの <code>sources/search</code> のスコアはランク融合、片方ならその素点。ヒットの <code>lanes</code> がレーンごとの順位と素点を必ず添える。</li>
-      <li>埋め込みリクエストには <code>X-Taguru-Embed-Purpose: index | query</code> が付く——非対称モデル（Cohere・Voyage）を前置きプロキシで正しく振り分けるためのフック。素のOpenAIサーバーは無視する。</li>
-      <li>ベクトルは常駐で、上限は <code>TAGURU_PASSAGE_VECTOR_LIMIT</code>（既定20,000行）。超えた分は字句レーンが全段落を守り、セマンティック側だけが部分的になる（refreshの応答がスキップを報告する）。</li>
+      <li>There is <b>one</b> function that decides what a "paragraph" is (<code>paragraph.rs</code>): BM25, paragraph embeddings, and the passage store's spans all import the same split. The three cannot disagree by construction. The split is mechanical — runs of blank lines are boundaries, no normalization.</li>
+      <li>When both lanes ran, the <code>sources/search</code> score is a rank fusion; with one lane it is that lane's raw score. Each hit's <code>lanes</code> always carries per-lane rank and raw score.</li>
+      <li>Embedding requests carry <code>X-Taguru-Embed-Purpose: index | query</code> — the hook that lets a fronting proxy route asymmetric models (Cohere, Voyage) correctly. Plain OpenAI servers ignore it.</li>
+      <li>Vectors are resident, capped by <code>TAGURU_PASSAGE_VECTOR_LIMIT</code> (default 20,000 rows). Past the cap the lexical lane still serves every paragraph; only the semantic side goes partial (the refresh response reports the skips).</li>
     </ul>
   </section>
 
   <section id="mcp-surface">
-    <h2>MCPの表面はひとつ</h2>
-    <p class="section-sub"><code>mcp.rs</code>・<code>remote_mcp.rs</code>・<code>src/bin/taguru-mcp.rs</code>。</p>
+    <h2>One MCP surface</h2>
+    <p class="section-sub"><code>mcp.rs</code> · <code>remote_mcp.rs</code> · <code>src/bin/taguru-mcp.rs</code>.</p>
     <p>
-      ツール定義、ツール→HTTPリクエストの対応、JSON-RPCの枠組みは <code>mcp.rs</code> に<b>一度だけ</b>書かれ、
-      stdioブリッジと <code>POST /mcp</code> が共有する。トランスポートの違いは「翻訳したリクエストをどう実行するか」
-      （ブリッジはureqの往復、サーバー内は同一プロセスのRouter呼び出し）と「返事をどう運ぶか」だけ。
-      リモート側はステートレス・プロファイル：<code>initialize</code> は規律書を配り、各ツール呼び出しは自立している——
-      SSEもセッションIDも、再開すべきものが無い。
+      The tool definitions, the tool→HTTP-request mapping, and the JSON-RPC plumbing are written
+      <b>once</b>, in <code>mcp.rs</code>, and shared by the stdio bridge and <code>POST /mcp</code>.
+      The transports differ only in "how a translated request is executed" (the bridge does a ureq
+      round trip; in-server it calls the same-process Router) and "how the reply travels".
+      The remote side is the stateless profile: <code>initialize</code> hands out the playbook and
+      every tool call stands alone — no SSE, no session IDs, nothing to resume.
     </p>
   </section>
 
   <section id="security">
-    <h2>認証・認可・上限</h2>
-    <p class="section-sub"><code>auth.rs</code>・<code>oauth.rs</code>・<code>limits.rs</code>。</p>
+    <h2>Authentication, authorization, limits</h2>
+    <p class="section-sub"><code>auth.rs</code> · <code>oauth.rs</code> · <code>limits.rs</code>.</p>
     <ul>
-      <li><b>Bearerは名前付きキーリング</b>：<code>TAGURU_API_TOKEN</code>（キー名 "default"）と <code>TAGURU_API_TOKENS</code>（"ci:tokA,laptop:tokB"）。アクセスログが<b>どのキーか</b>を言い、失効は1本ずつ、ローテーションは重ね掛け（新キー追加→移行→旧キー削除）。不正な設定は起動拒否。</li>
-      <li><b>OAuthはリモートMCPのため</b>：RFC 9728のリソースメタデータ＋内蔵の最小認可サーバー（PKCE・動的登録込み）。「ログイン」は既存APIキーの所持そのもの——同意ページにキーを貼ると、その接続がそのキーとして振る舞う。トークンはSHA-256でハッシュ化して保存、グラントは <code>data_dir/oauth.json</code>（削除＋再起動で失効、30日未使用で自動失効）。OAuthが開くのは <code>/mcp</code> だけ。</li>
-      <li><b>上限は層で分担</b>：リクエスト全体の時間予算とキー毎レートは <code>limits.rs</code>（1分ぶんバーストしてから定常レートに収束、超過は <code>Retry-After</code> 付き429）。ボディ上限は本体の層、パラメータ上限は各ハンドラ（連想バッチ10,000／リスト入力1,000／<code>limit</code> は全所1,000天井）。</li>
-      <li><b>ブルートフォース対策</b>：失敗したBearer試行はソースIPごとに毎分制限（既定10）。正しいトークンは絶対に絞られない。<code>X-Forwarded-For</code> は信用しない——リバースプロキシの背後では全員がプロキシのIPを共有するので、そこではプロキシ側で絞る。</li>
+      <li><b>Bearer is a named keyring</b>: <code>TAGURU_API_TOKEN</code> (key name "default") and <code>TAGURU_API_TOKENS</code> ("ci:tokA,laptop:tokB"). Access logs say <b>which key</b>; revocation is per key, rotation is overlap (add the new key → migrate → remove the old). Invalid configuration refuses to boot.</li>
+      <li><b>OAuth exists for remote MCP</b>: RFC 9728 resource metadata + a built-in minimal authorization server (PKCE and dynamic registration included). "Logging in" is possession of an existing API key — paste the key on the consent page and that connection acts as that key. Tokens are stored SHA-256-hashed; grants live in <code>data_dir/oauth.json</code> (delete + restart to revoke; auto-expiry after 30 days unused). OAuth opens <code>/mcp</code> only.</li>
+      <li><b>Limits are layered</b>: whole-request time budgets and per-key rates in <code>limits.rs</code> (a one-minute burst, then convergence to the steady rate; excess gets 429 with <code>Retry-After</code>). The body cap sits in the body layer; parameter caps sit in each handler (association batches 10,000 / list inputs 1,000 / every <code>limit</code> ceilinged at 1,000).</li>
+      <li><b>Brute-force defense</b>: failed Bearer attempts are limited per source IP per minute (default 10). A correct token is never throttled. <code>X-Forwarded-For</code> is not trusted — behind a reverse proxy everyone shares the proxy's IP, so throttle at the proxy there.</li>
     </ul>
   </section>
 
   <section id="observability">
-    <h2>可観測性</h2>
-    <p class="section-sub"><code>metrics.rs</code>・<code>trace.rs</code>。手書きのRED——数個のatomicと1つのrender関数で足りるものにファサードcrateは要らない。</p>
+    <h2>Observability</h2>
+    <p class="section-sub"><code>metrics.rs</code> · <code>trace.rs</code>. Hand-rolled RED — a few atomics and one render function don't need a facade crate.</p>
     <ul>
-      <li><code>GET /metrics</code>：ルート別のリクエスト数とレイテンシヒストグラム、キャッシュ/flush/WAL/埋め込みの結果、500の原因内訳（<code>taguru_errors_total{kind=…}</code>）、検索のヒット/空振り（<code>taguru_searches_total</code>）、resolveのtier内訳（<code>taguru_resolves_total</code>——semanticの比率が上がる＝cueが語彙から漂流中）、WAL・原文ログのサイズゲージ、最終flush成功時刻。</li>
-      <li><b>コンテキスト名はメトリクスラベルに入れない</b>：名前はクライアントが鋳造するので、入れた瞬間に系列が無限に増える。コンテキスト別の数字は <code>GET /contexts</code> の使用統計（読み・空振り・書き・最終アクセス）が持つ——advisoryで、flushごと＋graceful shutdown時に永続化。読み出しがディスク書き込みを起こすことはない。</li>
-      <li><b>分散トレースはopt-in</b>：<code>OTEL_EXPORTER_OTLP_ENDPOINT</code> を置けば全リクエストがOTLPスパンになり、流入する W3C <code>traceparent</code>／AWS <code>X-Amzn-Trace-Id</code>（ALB・API Gateway）のトレースに合流する。埋め込みプロバイダの往復は子スパンで見え、アクセスログに <code>trace_id</code> が載ってログとトレースが相互参照できる。バックエンドはOTLPなら何でも——切り替えはコレクタ設定であってTaguruの変更ではない。</li>
+      <li><code>GET /metrics</code>: per-route request counts and latency histograms, cache/flush/WAL/embedding outcomes, a 500-cause breakdown (<code>taguru_errors_total{kind=…}</code>), search hits/misses (<code>taguru_searches_total</code>), the resolve tier breakdown (<code>taguru_resolves_total</code> — a rising semantic share means cues are drifting from the vocabulary), WAL and passage-log size gauges, and the time of the last successful flush.</li>
+      <li><b>Context names never become metric labels</b>: clients mint the names, so the moment they land in labels the series grow without bound. Per-context numbers live in the usage stats of <code>GET /contexts</code> (reads, misses, writes, last access) — advisory, persisted with each flush and on graceful shutdown. A read never causes a disk write.</li>
+      <li><b>Distributed tracing is opt-in</b>: set <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> and every request becomes an OTLP span, joining incoming W3C <code>traceparent</code> / AWS <code>X-Amzn-Trace-Id</code> (ALB, API Gateway) traces. Embedding-provider round trips show up as child spans, and the access log carries <code>trace_id</code> so logs and traces cross-reference. Any OTLP backend works — switching is collector configuration, not a Taguru change.</li>
     </ul>
   </section>
 
   <section id="shipping">
-    <h2>配布物とサイジング</h2>
+    <h2>Shipping and sizing</h2>
     <ul>
-      <li><b>Dockerイメージは<code>scratch</code>にバイナリ1枚</b>：muslの静的リンクで〜13 MB。シェルなし、libcなし、CAバンドルなし（TLSルートはバイナリに焼き込み）。HEALTHCHECKは <code>taguru health</code>——バイナリの自己プローブ。uid 65532、<code>--read-only</code> 可。</li>
-      <li><b>サイジングは測る</b>：<code>taguru estimate --associations 1_000_000</code> が目標規模のコンテキストを実際に組み立てて<b>実測</b>する。レイテンシは <code>cargo run --release --example benchmark</code>（10万/100万件での操作別計測。examples/ には例ごとのREADMEがある）。</li>
+      <li><b>The Docker image is one binary on <code>scratch</code></b>: statically linked with musl, ~13 MB. No shell, no libc, no CA bundle (TLS roots are baked into the binary). The HEALTHCHECK is <code>taguru health</code> — the binary's self-probe. uid 65532, <code>--read-only</code> capable.</li>
+      <li><b>Sizing is measured, not guessed</b>: <code>taguru estimate --associations 1_000_000</code> actually builds a context of the target size and <b>measures</b> it. For latency, <code>cargo run --release --example benchmark</code> (per-operation timings at 100k/1M records; each example under examples/ has its own README).</li>
     </ul>
     <p class="note">
-      各判断の一次資料はソースのモジュールコメント：
-      <code>registry.rs</code>（ディスクが真実）、<code>wal.rs</code>（seqとwatermark）、<code>passages.rs</code>（O(N²)からの脱出）、
-      <code>bm25.rs</code>（派生物という立場）、<code>paragraph.rs</code>（唯一の分割関数）、<code>embedding.rs</code>（グロスを埋め込む理由）、
-      <code>mcp.rs</code>（一度だけ書く）、<code>oauth.rs</code>（内蔵ASの割り切り）、<code>limits.rs</code>・<code>metrics.rs</code>・<code>auth.rs</code>。
+      The primary sources for each decision are the module comments:
+      <code>registry.rs</code> (disk as truth), <code>wal.rs</code> (seq and watermark), <code>passages.rs</code> (escaping O(N²)),
+      <code>bm25.rs</code> (its standing as a derived artifact), <code>paragraph.rs</code> (the single split function),
+      <code>embedding.rs</code> (why glosses are embedded), <code>mcp.rs</code> (written once),
+      <code>oauth.rs</code> (the built-in-AS tradeoff), <code>limits.rs</code> · <code>metrics.rs</code> · <code>auth.rs</code>.
     </p>
   </section>
 

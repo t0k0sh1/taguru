@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>バッチ投入の契約（import） — Taguru</title>
-  <meta name="description" content="taguru import と POST /import が共有するバッチファイル契約の完全なリファレンス：1ファイル=1ソース、行タイプ、上限、検証と適用、並行性の規則。">
+  <title>The batch contract (import) — Taguru</title>
+  <meta name="description" content="The complete reference for the batch-file contract shared by taguru import and POST /import: one file = one source, line types, caps, validation and apply, concurrency rules.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -12,9 +12,9 @@
 <body>
 
 <div class="topbar">
-  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="メニューを開閉">☰</button>
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
-  <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
 </div>
 <div class="scrim" id="scrim"></div>
 
@@ -23,31 +23,33 @@
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
   <nav class="side-nav">
     <div class="side-group">
-      <a href="index.html">ホーム</a>
+      <a href="index.html">Home</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">ガイド</div>
-      <a href="getting-started.html">はじめる</a>
-      <a href="concepts.html">コンセプト</a>
-      <a href="architecture.html">内部アーキテクチャ</a>
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">リファレンス</div>
-      <a href="import.html" aria-current="page">バッチ投入（import）</a>
-      <a href="extract.html">文書抽出（extract）</a>
+      <div class="side-group-label">Reference</div>
+      <a href="import.html" aria-current="page">Batch import</a>
+      <a href="extract.html">Document extraction</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">クラウドで使う</div>
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
       <a href="bedrock.html">Amazon Bedrock</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">読みもの</div>
-      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
     </div>
   </nav>
   <div class="sidebar-footer">
     <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
-    <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
   </div>
 </aside>
 
@@ -56,183 +58,204 @@
 
   <header class="hero">
     <div class="eyebrow">reference · batch import</div>
-    <h1>バッチ投入の契約——<code>taguru import</code> と <code>POST /import</code></h1>
+    <h1>The batch contract — <code>taguru import</code> and <code>POST /import</code></h1>
     <p class="lede">
-      オフラインCLIと稼働中サーバーのエンドポイントが共有する、ひとつのファイル契約の完全なリファレンス。
-      初期ロード、インスタンス間の移行、抽出パイプラインの再生はここを通る。
-      ライブで少しずつ書くのは相変わらずHTTP API／MCPツールの仕事。
+      The complete reference for the single file contract shared by the offline CLI and the
+      running server's endpoint. Initial loads, migrations between instances, and replays of an
+      extraction pipeline all pass through here. Writing a little at a time, live, remains the
+      job of the HTTP API and the MCP tools.
     </p>
   </header>
 
   <section id="cli">
-    <h2>CLIの形</h2>
+    <h2>The CLI shape</h2>
     <p class="section-sub">
-      <code>taguru import</code> はバッチファイルをデータディレクトリへ直接適用する——稼働中のサーバー無しで、
-      そして決してサーバーの横では動かない：ディレクトリロックが相互に拒否する
-      （advisoryなflock。ローカルディスクでは頼れるが、ネットワークファイルシステムでは両側に許可され得る）。
+      <code>taguru import</code> applies batch files straight to the data directory — without a
+      running server, and never beside one: the directory lock makes them mutually exclusive
+      (an advisory flock — dependable on local disks; a network filesystem may grant it to both sides).
     </p>
-    <pre><code>taguru import batch/                  <span class="c"># batch/ 配下の全 *.jsonl を名前順に</span>
-taguru import --dry-run batch/        <span class="c"># 検証して報告する。何にも触れない</span>
+    <pre><code>taguru import batch/                  <span class="c"># every *.jsonl under batch/, in name order</span>
+taguru import --dry-run batch/        <span class="c"># validate and report; touches nothing</span>
 taguru import --config prod.env a.jsonl b.jsonl</code></pre>
-    <p>終了コード：<code>0</code> すべて適用 · <code>1</code> 何かが拒否または失敗（詳細はstderr） · <code>2</code> 使い方の誤り。</p>
+    <p>Exit codes: <code>0</code> everything applied · <code>1</code> something was refused or failed (details on stderr) · <code>2</code> usage error.</p>
   </section>
 
   <section id="one-file-one-source">
-    <h2>1ファイル＝1ソースの完全な真実</h2>
-    <p class="section-sub">ファイルの適用とは：<b>そのソースを撤回してから、ファイルを適用する</b>。この一つの規則が運用上の性質を全部くれる。</p>
+    <h2>One file = one source's complete truth</h2>
+    <p class="section-sub">Applying a file means: <b>retract that source, then apply the file</b>. This one rule buys every operational property below.</p>
     <ul>
-      <li><b>冪等</b>——同じファイルを2度importしても同じ状態に着地する。weightは決して二重にならない。</li>
-      <li><b>改訂可能</b>——同じソースの修正版ファイルは古い事実を丸ごと置き換える。エージェントがライブで行う差分同期（<code>retract_source</code> → 再インジェスト）と同じ操作。</li>
-      <li><b>再試行可能</b>——途中で失敗した（容量・ディスク）ファイルは、直して再importする。撤回が再試行を正確にする。</li>
+      <li><b>Idempotent</b> — importing the same file twice lands in the same state. Weights never double-count.</li>
+      <li><b>Revisable</b> — a corrected file for the same source replaces the old facts wholesale. The same operation as the live diff-sync an agent performs (<code>retract_source</code> → re-ingest).</li>
+      <li><b>Retryable</b> — a file that failed midway (capacity, disk) is fixed and re-imported. The retraction is what makes the retry exact.</li>
     </ul>
     <p>
-      連想の行が自分の <code>source</code> フィールドを<b>持てない</b>（拒否される）のもこのため：ヘッダーが名乗らないソースは
-      撤回を生き延び、再importのたびに二重化してしまう。ヘッダーのsourceがファイル内の全連想に刻印される。
+      This is also why an association line <b>cannot</b> carry its own <code>source</code> field
+      (it is refused): a source the header does not declare would survive the retraction and
+      double itself on every re-import. The header's source is stamped onto every association in
+      the file.
     </p>
     <p>
-      ヘッダーだけで操作行の無いファイルは<b>純粋な撤回</b>——「このソースはもう何も主張しない」。
+      A file that is only a header, with no operation lines, is a <b>pure retraction</b> —
+      "this source no longer asserts anything."
     </p>
     <p class="note warn">
-      <b>鋭い角がひとつ。</b>retract-then-apply の順序ゆえに、apply段が<i>持続的に</i>失敗すると（現実的なのは容量）、
-      再importが成功するまでそのソースは空のまま（旧事実は撤回済み、新事実は拒否済み）になる。
-      また、撤回はソースのattributionを解放するが、語彙を未登録には戻さない：一度鋳造された概念やラベルは
-      コンテキストの生涯にわたってidを保持する。名前が回転し続ける改訂ファイルを再importし続けるパイプラインは、
-      コンテキストを単調に成長させる。<code>taguru inspect</code> で数を、<code>taguru estimate</code> で余裕を監視し、
-      溜まった死重は <code>taguru compact</code>（オフライン）または
-      <code>POST /contexts/{name}/compact</code>（稼働中・admin）が回収する——生きた事実・count・段落ロケータは
-      全て保存され、撤回済みレコードとアリーナの残骸だけが消える。
+      <b>One sharp edge.</b> Because of the retract-then-apply order, if the apply stage fails
+      <i>persistently</i> (capacity is the realistic case), that source stays empty until a
+      re-import succeeds (old facts retracted, new facts refused).
+      Also, retraction releases a source's attributions but does not un-register vocabulary: once
+      minted, a concept or label keeps its id for the lifetime of the context. A pipeline that
+      keeps re-importing revision files whose names keep rotating grows the context monotonically.
+      Watch the counts with <code>taguru inspect</code> and the headroom with
+      <code>taguru estimate</code>; accumulated dead weight is reclaimed by
+      <code>taguru compact</code> (offline) or <code>POST /contexts/{name}/compact</code>
+      (live, admin) — live facts, counts, and paragraph locators are all preserved; only retracted
+      records and arena debris disappear.
     </p>
   </section>
 
   <section id="format">
-    <h2>ファイル形式</h2>
-    <p class="section-sub">JSON Lines、UTF-8。空行は無視。最初の非空行がヘッダー、以降の各行が1操作。</p>
+    <h2>The file format</h2>
+    <p class="section-sub">JSON Lines, UTF-8. Blank lines are ignored. The first non-blank line is the header; every following line is one operation.</p>
     <pre><code>{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"青嶺酒造は1907年創業。杜氏は高瀬。"</span>}
-{<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"question"</span>: <span class="s">"青嶺酒造の酒造りの責任者は誰?"</span>}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"section"</span>: <span class="s">"沿革"</span>}
+{<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"question"</span>: <span class="s">"青嶺酒造の酒造りの責任者は誰?"</span>}
 {<span class="k">"subject"</span>: <span class="s">"青嶺酒造"</span>, <span class="k">"label"</span>: <span class="s">"創業年"</span>, <span class="k">"object"</span>: <span class="s">"1907年"</span>, <span class="k">"weight"</span>: <span class="nu">1.0</span>}
 {<span class="k">"subject"</span>: <span class="s">"青嶺酒造"</span>, <span class="k">"label"</span>: <span class="s">"杜氏"</span>, <span class="k">"object"</span>: <span class="s">"高瀬"</span>, <span class="k">"weight"</span>: <span class="nu">2.0</span>}
 {<span class="k">"alias"</span>: <span class="s">"Aomine Brewery"</span>, <span class="k">"canonical"</span>: <span class="s">"青嶺酒造"</span>, <span class="k">"kind"</span>: <span class="s">"concept"</span>}
 {<span class="k">"alias"</span>: <span class="s">"設立年"</span>, <span class="k">"canonical"</span>: <span class="s">"創業年"</span>, <span class="k">"kind"</span>: <span class="s">"label"</span>}</code></pre>
 
-    <h3>Header（ヘッダー行）</h3>
+    <h3>Header</h3>
     <p>
-      <code>taguru_batch</code> は <code>1</code> でなければならない（このビルドが読む唯一の版）。
-      <code>context</code> と <code>source</code> は必須。<code>create</code> は任意で、
-      <code>PUT /contexts/{name}</code> と同じフィールド（<code>description</code>・<code>pinned</code>・
-      <code>dice_floor</code>・<code>semantic_floor</code>）を運ぶ——使われるのはコンテキストが
-      <b>まだ存在しないときだけ</b>。createブロック無しで不在のコンテキストへimportするのは拒否。
+      <code>taguru_batch</code> must be <code>1</code> (the only version this build reads).
+      <code>context</code> and <code>source</code> are required. <code>create</code> is optional
+      and carries the same fields as <code>PUT /contexts/{name}</code> (<code>description</code>,
+      <code>pinned</code>, <code>dice_floor</code>, <code>semantic_floor</code>) — used only when
+      the context <b>does not exist yet</b>. Importing into an absent context without a create
+      block is refused.
     </p>
 
-    <h3>Association（連想行）</h3>
+    <h3>Association lines</h3>
     <p>
-      <code>subject</code> / <code>label</code> / <code>object</code> / <code>weight</code>——
-      associationsエンドポイントのフィールドから <code>source</code> を除いたそのもの（理由は上記）。
+      <code>subject</code> / <code>label</code> / <code>object</code> / <code>weight</code> —
+      exactly the fields of the associations endpoint minus <code>source</code> (for the reason
+      above).
     </p>
 
-    <h3>Alias（別名行）</h3>
+    <h3>Alias lines</h3>
     <p>
-      <code>alias</code> / <code>canonical</code> / <code>kind</code>（<code>"concept"</code> か <code>"label"</code>）。
-      エイリアスは<b>コンテキストレベル</b>で、ソーススコープではない：再importは再登録（不変ペアはno-op）、
-      撤回はエイリアスを消さない。canonicalがこのファイルの連想で初めて導入される名前でもよい——連想が先に適用される。
-      既存のエイリアスを<b>別の</b>canonicalへ付け替えるのは競合で、ファイルを失敗させる——importが黙って語彙を
-      配線し直してはならない。直し方は意図的に一手間：旧登録を撤回してから
-      （<code>DELETE /contexts/{name}/aliases</code> に正確な綴りで、またはMCPの <code>remove_aliases</code>）、
-      再importする——撤回が再試行を正確にする。バッチファイル自身はエイリアスを<b>消せない</b>。これも故意。
+      <code>alias</code> / <code>canonical</code> / <code>kind</code> (<code>"concept"</code> or
+      <code>"label"</code>). Aliases are <b>context-level</b>, not source-scoped: re-import
+      re-registers (an unchanged pair is a no-op), and retraction does not remove aliases.
+      The canonical may be a name first introduced by this file's associations — associations
+      apply first. Re-pointing an existing alias at a <b>different</b> canonical is a conflict and
+      fails the file — import must never silently rewire vocabulary. The fix is deliberately
+      two-step: retract the old registration first (<code>DELETE /contexts/{name}/aliases</code>
+      with the exact spelling, or MCP's <code>remove_aliases</code>), then re-import — the
+      retraction makes the retry exact. A batch file itself <b>cannot delete</b> an alias.
+      Also deliberate.
     </p>
 
-    <h3>Passage（原文行）</h3>
+    <h3>Passage line</h3>
     <p>
-      そのソースの原文テキスト。<b>1ファイルに最大1つ</b>。同じソースidの背後に格納され、
-      <code>sources/lookup</code> と <code>sources/search</code> が提供する。
+      The source's original text. <b>At most one per file.</b> Stored behind the same source id
+      and served by <code>sources/lookup</code> and <code>sources/search</code>.
     </p>
 
-    <h3>Question（doc2query行）</h3>
+    <h3>Question lines (doc2query)</h3>
     <p>
-      <code>paragraph</code> / <code>question</code>：このファイルのpassageの1段落に付く検索質問。
-      <code>paragraph</code> はサーバーの空行分割での0起点位置（passage行の無いファイルにquestion行があれば拒否）。
-      1行1問、同じ段落に複数可（上限まで）。<code>TAGURU_EMBED_PASSAGES</code> のサーバーでは各質問が段落の隣に
-      埋め込まれ、質問形の検索が答えの形の本文に着地する。passageの分割に存在しない段落を名指した質問は
-      格納時に捨てられ、応答で数えられる（<code>questions_dropped</code>）——よくある原因は生産側の分割が
-      サーバーの分割からドリフトすること。<a href="extract.html"><code>taguru extract --questions N</code></a> は
-      サーバー自身のsplitterを使うのでドリフトできない。
+      <code>paragraph</code> / <code>question</code>: a retrieval question attached to one
+      paragraph of this file's passage. <code>paragraph</code> is a 0-based position in the
+      server's blank-line split (a question line in a file with no passage line is refused).
+      One question per line; several may target the same paragraph (up to the cap). On a server
+      with <code>TAGURU_EMBED_PASSAGES</code>, each question is embedded next to its paragraph, so
+      question-shaped searches land on answer-shaped text. A question naming a paragraph that does
+      not exist in the passage's split is dropped at store time and counted in the response
+      (<code>questions_dropped</code>) — the usual cause is a producer's split drifting from the
+      server's. <a href="extract.html"><code>taguru extract --questions N</code></a> uses the
+      server's own splitter, so it cannot drift.
     </p>
 
-    <h3>Section（見出し行）</h3>
+    <h3>Section lines</h3>
     <p>
-      <code>paragraph</code> / <code>section</code>：このファイルのpassageの中で、名前付きセクションが
-      <b>始まる</b>位置を示す見出し（0起点、Questionと同じ分割規約。passage行が無ければ拒否）。
-      セクションは自分の段落から、次のセクションの開始または本文末尾まで暗黙に延びる——「終わり」の行は無い。
-      分割に存在しない段落を名指したセクションは格納時に捨てられ数えられる（<code>sections_dropped</code>、
-      原因の相場もquestionsと同じ）。attributionが一致する段落ロケータを持つ連想は、そのattribution上で
-      セクションを報告する：<code>recall</code>・<code>query</code>・<code>explore</code>・<code>activate</code>・
-      <code>unreachable_from</code> のすべてが <code>attributions[].section</code> を解決し、ロケータがどの
-      セクションにも入らなければ <code>null</code>。<code>POST /contexts/{name}/citations</code> も同じ解決を
-      その1段落について行う。passage検索のヒットはこのフィールドをまだ読まず、格納内容に関わらず省略し続ける——
-      別途のフォローアップ。
+      <code>paragraph</code> / <code>section</code>: a heading marking where a named section
+      <b>starts</b> within this file's passage (0-based, same split convention as questions;
+      refused without a passage line). A section implicitly extends from its paragraph to the
+      start of the next section or the end of the text — there is no "end" line. Sections naming
+      paragraphs absent from the split are dropped at store time and counted
+      (<code>sections_dropped</code>; same usual cause as questions). An association whose
+      attribution carries a matching paragraph locator reports the section on that attribution:
+      <code>recall</code>, <code>query</code>, <code>explore</code>, <code>activate</code>, and
+      <code>unreachable_from</code> all resolve <code>attributions[].section</code>, or
+      <code>null</code> when the locator falls in no section.
+      <code>POST /contexts/{name}/citations</code> performs the same resolution for its one
+      paragraph. Passage-search hits do not read this field yet and keep omitting it regardless of
+      what is stored — a separate follow-up.
     </p>
 
-    <p class="note">未知のフィールドと認識できない行形状は、行番号付きで拒否される。</p>
+    <p class="note">Unknown fields and unrecognizable line shapes are refused, with the line number.</p>
   </section>
 
   <section id="caps">
-    <h2>上限（APIと同じもの。行ごとに強制）</h2>
+    <h2>Caps (the same ones as the API, enforced per line)</h2>
     <div class="tbl">
       <table>
-        <thead><tr><th>対象</th><th>上限</th></tr></thead>
+        <thead><tr><th>Subject</th><th>Cap</th></tr></thead>
         <tbody>
-          <tr><td>context名</td><td>64バイト</td></tr>
-          <tr><td>source id・subject/label/object・alias/canonical</td><td>1,024バイト</td></tr>
-          <tr><td>create.description</td><td>4,096バイト</td></tr>
-          <tr><td>weight</td><td>有限、|w| ≤ 1e6</td></tr>
-          <tr><td>passage</td><td>8 MiB（HTTP既定のボディ上限）</td></tr>
-          <tr><td>question 1件</td><td>512バイト</td></tr>
-          <tr><td>1段落あたりのquestion数</td><td>8</td></tr>
-          <tr><td>section 1件</td><td>512バイト</td></tr>
-          <tr><td>任意の1行</td><td>16 MiB</td></tr>
+          <tr><td>context name</td><td>64 bytes</td></tr>
+          <tr><td>source id · subject/label/object · alias/canonical</td><td>1,024 bytes</td></tr>
+          <tr><td>create.description</td><td>4,096 bytes</td></tr>
+          <tr><td>weight</td><td>finite, |w| ≤ 1e6</td></tr>
+          <tr><td>passage</td><td>8 MiB (the default HTTP body cap)</td></tr>
+          <tr><td>one question</td><td>512 bytes</td></tr>
+          <tr><td>questions per paragraph</td><td>8</td></tr>
+          <tr><td>one section</td><td>512 bytes</td></tr>
+          <tr><td>any single line</td><td>16 MiB</td></tr>
         </tbody>
       </table>
     </div>
     <p>
-      ファイル自体に操作数の上限は無い。適用は内部でAPIのバッチサイズ（10,000）ごとに刻まれ、
-      長い実行は定期的にflushするので、どのコンテキストのWALも <code>TAGURU_WAL_MAX_BYTES</code> に近づかない。
+      There is no cap on operations per file. Apply is internally chunked at the API batch size
+      (10,000) and long runs flush periodically, so no context's WAL ever approaches
+      <code>TAGURU_WAL_MAX_BYTES</code>.
     </p>
   </section>
 
   <section id="validate">
-    <h2>検証、それから適用</h2>
+    <h2>Validate, then apply</h2>
     <ul>
-      <li>すべてのファイルがparseでき、かつどの2ファイルも同じ (context, source) を主張しない——それを確かめてから<b>初めて</b>何かが適用される。1行の不正が実行全体を行番号付きで拒否し、何も書かれない（<code>--dry-run</code> は設計どおりそこで止まる）。</li>
-      <li>apply段でしか発見できない失敗（容量・ディスク）はファイルごとに報告され、残りのファイルは続行する：ファイルは構造上独立（1ファイル1ソース）で、部分適用されたファイルは再importで治る。</li>
-      <li>書き込みはサーバーと同じレジストリを通る——WALに載せてfsync、予算を強制、最後にflush。だから <code>taguru inspect</code> も次回のbootも、ライブのインジェストが生んだのと寸分違わぬ状態を見る。importは各コンテキストの使用統計でwriteとして数えられる。</li>
+      <li>Every file parses, and no two files claim the same (context, source) — only once that is established does anything apply. One malformed line refuses the entire run with its line number, and nothing is written (<code>--dry-run</code> stops there by design).</li>
+      <li>Failures only discoverable at the apply stage (capacity, disk) are reported per file, and the remaining files continue: files are structurally independent (one file, one source), and a partially applied file heals on re-import.</li>
+      <li>Writes go through the same registry the server uses — staged on the WAL and fsynced, budgets enforced, one flush at the end. So <code>taguru inspect</code> and the next boot see exactly the state a live ingest would have produced. Imports count as writes in each context's usage stats.</li>
     </ul>
     <p class="note warn">
-      <b>先に全部を検証することには費用がある</b>：parse済みの全ファイルが適用までメモリに留まるので、
-      実行のフットプリントは<b>ファイル群の合計</b>サイズに比例する（最大の1つではなく）。
-      100万文書の移行は数回の呼び出しに分けて流す（ディレクトリを輪切りに）——importは冪等で
-      各ファイルが自分のソースを運ぶから、分割は何も費やさない。
+      <b>Validating everything first has a cost</b>: every parsed file stays in memory until
+      apply, so the run's footprint is proportional to the <b>total</b> size of the file set
+      (not the largest one). Stream a million-document migration as a few invocations (slice the
+      directory) — import is idempotent and every file carries its own source, so splitting costs
+      nothing.
     </p>
   </section>
 
   <section id="embeddings">
-    <h2>埋め込み</h2>
+    <h2>Embeddings</h2>
     <p>
-      <code>TAGURU_EMBED_URL</code>／<code>TAGURU_EMBED_MODEL</code> が設定されていれば（<code>--config</code> 経由でも）、
-      触れたすべてのコンテキストが実行の最後に変更されたグロスを再埋め込みする——サーバーの
-      <code>TAGURU_EMBED_AUTO</code> と同じ冪等なrefresh。<code>--no-embed</code> でスキップ。
-      refreshの失敗は何も巻き戻さない：グラフはimport済みで耐久であり、実行は回復手順
-      （稼働サーバーの <code>POST /contexts/{name}/embeddings/refresh</code>）を名指しして1で終了する。
+      If <code>TAGURU_EMBED_URL</code>/<code>TAGURU_EMBED_MODEL</code> are set (also via
+      <code>--config</code>), every touched context re-embeds its changed glosses at the end of
+      the run — the same idempotent refresh as the server's <code>TAGURU_EMBED_AUTO</code>.
+      <code>--no-embed</code> skips it. A refresh failure rolls back nothing: the graph is
+      imported and durable, and the run exits 1 naming the recovery step
+      (<code>POST /contexts/{name}/embeddings/refresh</code> on a running server).
     </p>
   </section>
 
   <section id="http">
-    <h2>同じ契約をHTTPで：<code>POST /import</code></h2>
+    <h2>The same contract over HTTP: <code>POST /import</code></h2>
     <p class="section-sub">
-      リクエストボディ<b>が</b>1つのバッチファイルであり、1リクエストが1ソースの完全な真実を述べる。
-      稼働中のシステムはダウンタイム無しで一括投入できる。
+      The request body <b>is</b> one batch file, and one request states one source's complete
+      truth. A live system bulk-loads with no downtime window.
     </p>
-    <pre><code><span class="c"># --data-binary であって -d ではない：curlの -d は改行を剥ぎ、改行こそがフォーマット</span>
+    <pre><code><span class="c"># --data-binary, not -d: curl's -d strips newlines, and newlines are the format</span>
 curl -X POST localhost:8248/import \
   -H 'Authorization: Bearer &lt;key&gt;' \
   --data-binary @docs-aomine.jsonl
@@ -240,73 +263,72 @@ curl -X POST localhost:8248/import \
 <span class="c">#    "created": false, "retracted": 12, "associations": 14,</span>
 <span class="c">#    "aliases": 2, "passage_stored": true}, "status": "ok", …}</span></code></pre>
     <ul>
-      <li>先に検証（不正な行は行番号付きの400で、何も適用されない）、それからretract-then-apply——同じバッチの再POSTは、CLIの再実行と同じくソースを正確に置き換える。応答はCLIが印字するのと同じ数字を運ぶ。</li>
-      <li>どのエンドポイントも従うものにこれも従う：Bearer認証、ボディ上限（<code>TAGURU_MAX_BODY_BYTES</code>、既定8 MiB——それより大きいバッチはオフラインCLIか上限の引き上げ）、リクエストタイムアウト、キーごとのレート制限。</li>
-      <li>ステータスはAPIの流儀：<code>400</code> 不正なバッチ（行番号付き） · <code>404</code> コンテキスト不在でcreateブロック無し · <code>409</code>／<code>507</code> 部分書き込み（競合／容量。何が着地したかはメッセージが名指しし、撤回が修正後の再試行を正確にする） · <code>500</code> WALまたはディスクが拒んだ書き込み。</li>
-      <li>埋め込みはリクエスト内ではrefreshされない。<code>TAGURU_EMBED_AUTO</code> が有効なら、ライブの書き込みと同じく次のflushに同乗する。</li>
+      <li>Validation first (a malformed line is a 400 with its line number, and nothing applies), then retract-then-apply — re-POSTing the same batch replaces the source exactly, just like re-running the CLI. The response carries the same numbers the CLI prints.</li>
+      <li>It obeys everything every endpoint obeys: Bearer auth, the body cap (<code>TAGURU_MAX_BODY_BYTES</code>, default 8 MiB — larger batches go through the offline CLI or a raised cap), the request timeout, per-key rate limits.</li>
+      <li>Statuses follow the API's dialect: <code>400</code> malformed batch (with line number) · <code>404</code> absent context and no create block · <code>409</code>/<code>507</code> partial write (conflict / capacity; the message names what landed, and the retraction makes the corrected retry exact) · <code>500</code> a write the WAL or disk refused.</li>
+      <li>Embeddings are not refreshed within the request. With <code>TAGURU_EMBED_AUTO</code> on, they ride the next flush, same as live writes.</li>
     </ul>
     <p class="note warn">
-      <b>異なる</b>ソースの2バッチは並行してPOSTしてよい——バッチ内の各書き込みはコンテキスト上で直列化される。
-      <b>同じ</b>ソースの2つのimportを競走させてはならない：一方のretractとapplyの間にもう一方が割り込み、
-      両バッチの<b>和集合</b>が生き残り得る。1ソース、同時に1ライター。
+      Two batches for <b>different</b> sources may be POSTed concurrently — each write inside a
+      batch is serialized on the context. Never race two imports of the <b>same</b> source: one
+      side's apply can interleave with the other's retract, and the <b>union</b> of both batches
+      can survive. One source, one writer at a time.
     </p>
     <p>
-      入口の選び方：サーバーがまだ無い、または大量の初期ロード → <code>taguru import</code>
-      （リクエスト単位の上限なし、flushは最後に1回）。答え続けなければならないライブ系 → <code>POST /import</code>。
+      Choosing the entrance: no server yet, or a huge initial load → <code>taguru import</code>
+      (no per-request caps, one flush at the end). A live system that must keep answering →
+      <code>POST /import</code>.
     </p>
   </section>
 
   <section id="streams">
-    <h2>バッチのストリームと <code>taguru export</code>（バックアップ／復元）</h2>
+    <h2>Batch streams and <code>taguru export</code> (backup / restore)</h2>
     <p class="section-sub">
-      1ファイル（1リクエストボディ）は、1バッチ<b>または連結された複数バッチ</b>を運べる——
-      各 <code>taguru_batch</code> ヘッダー行が前のバッチを閉じ、次を開く。バッチごとの
-      検証・retract-then-apply・(context, source) の一意性は単体ファイルと同一。
+      One file (one request body) may carry one batch <b>or several concatenated ones</b> — each
+      <code>taguru_batch</code> header line closes the previous batch and opens the next.
+      Per-batch validation, retract-then-apply, and (context, source) uniqueness are identical to
+      the single-file case.
     </p>
     <p>
-      そのストリームを書き出すのが <code>taguru export --out DIR [CONTEXT...]</code>（オフライン、
-      ディレクトリロック下）と、稼働中サーバーの <code>GET /contexts/{name}/export</code>
-      （ボディがそのままJSON Linesのストリーム）。1コンテキスト＝1ストリーム：ソースid順に1バッチずつ、
-      先頭バッチに <code>create</code> ブロック（description・pinned・floors）、
-      末尾バッチに別名表が同乗する。復元は通常のimport——ソース単位の置き換えなので冪等で、
-      スナップショットと厳密に一致させたいときはコンテキストを先に削除してから流し込む。
+      That stream is what <code>taguru export --out DIR [CONTEXT...]</code> writes (offline, under
+      the directory lock), and what a running server serves at
+      <code>GET /contexts/{name}/export</code> (the body is the JSON Lines stream itself).
+      One context = one stream: one batch per source id, in order, with a <code>create</code>
+      block (description, pinning, floors) on the first batch and the alias table riding the last.
+      Restore is a normal import — per-source replacement makes it idempotent; to match a snapshot
+      exactly, delete the context first, then stream it in.
     </p>
     <ul>
-      <li><b>忠実度</b>：同一ソースがn回主張した事実はn本の連想行として再現される（corroborationの
-        <code>count</code> が往復を生き延びる）。段落ロケータは初回主張行に載る（first-write-winsの再現）。</li>
-      <li><b>ソース無しの重み</b>（APIの <code>source</code> 省略で入ったもの）は予約ソース
-        <code>export:unsourced</code> のバッチに載る——数字は保存され、出所はattributionが語る。
-        実ソースがこの予約idと衝突した場合、exportは黙って混ぜずに拒否する。</li>
-      <li><b>完全撤回済みのエッジ（weight 0）は排出されない</b>：export → import の往復は、
-        追記専用イメージが抱える死んだレコードを削ぎ落とす——オフラインのコンパクションを兼ねる。</li>
-      <li>正準名が生きた連想を1本も持たない別名は落とされ、件数が報告される（importの契約上、
-        正準名は連想行によって鋳造されるため）。</li>
-      <li><code>POST /import</code> は常に <code>{"batches": [バッチごとの結果…]}</code>
-        で答える（単体バッチも要素1個の同じ形——パースすべき形はひとつ）。途中で拒否されたら手前のバッチは着地済み——
-        各バッチがretract-then-applyなので、直したストリームを丸ごと再POSTすれば正確に収束する。</li>
-      <li>レンダリングは決定的：同じ状態は同じバイト列に書き出され、バックアップ同士がdiffできる。</li>
+      <li><b>Fidelity</b>: a fact the same source asserted n times reproduces as n association lines (corroboration <code>count</code> survives the round trip). Paragraph locators ride the first assertion line (reproducing first-write-wins).</li>
+      <li><b>Sourceless weight</b> (entered via the API with <code>source</code> omitted) rides a batch under the reserved source <code>export:unsourced</code> — the numbers are preserved and the attribution tells the story. If a real source collides with this reserved id, export refuses rather than silently mixing.</li>
+      <li><b>Fully retracted edges (weight 0) are not emitted</b>: an export → import round trip sheds the dead records an append-only image accumulates — doubling as offline compaction.</li>
+      <li>An alias whose canonical has no live associations is dropped and the count reported (under the import contract, canonicals are minted by association lines).</li>
+      <li><code>POST /import</code> always answers <code>{"batches": [per-batch results…]}</code> (a single batch is the same shape with one element — one shape to parse). If the stream is refused midway, the earlier batches have landed — each batch is retract-then-apply, so re-POSTing the corrected stream converges exactly.</li>
+      <li>Rendering is deterministic: the same state writes the same bytes, so backups diff against each other.</li>
     </ul>
-    <pre><code><span class="c"># 稼働中サーバーから1コンテキストを退避し、別サーバーへ復元する</span>
+    <pre><code><span class="c"># evacuate one context from a live server and restore it elsewhere</span>
 curl -H 'Authorization: Bearer &lt;key&gt;' \
   localhost:8248/contexts/sake/export &gt; sake.jsonl
 curl -X POST other-host:8248/import \
   -H 'Authorization: Bearer &lt;key&gt;' --data-binary @sake.jsonl
-<span class="c"># オフラインなら： taguru export --out backups/ ; taguru import backups/</span></code></pre>
+<span class="c"># offline:  taguru export --out backups/ ; taguru import backups/</span></code></pre>
   </section>
 
   <section id="producing">
-    <h2>バッチファイルを生産する</h2>
+    <h2>Producing batch files</h2>
     <p>
-      Taguruのサーバーは散文から事実を抽出<b>しない</b>——それは読む側のLLMの仕事で、サーバーは決して
-      モデルの資格情報を持たない。生産者（producer）が文書を読み、モデルに <code>/protocol</code> の規律で
-      連想を吐かせ、文書idをソースとして文書ごとに1バッチファイルを書く。
+      Taguru's server does <b>not</b> extract facts from prose — that is the reading LLM's job,
+      and the server never holds model credentials. A producer reads the documents, has a model
+      emit associations under the <code>/protocol</code> discipline, and writes one batch file per
+      document with the document id as the source.
     </p>
     <p>
-      そういう生産者がひとつ同梱されている：<a href="extract.html"><code>taguru extract</code></a>——
-      上記そのものを任意のOpenAI互換チャットエンドポイントで行うオフラインのサブコマンドで、
-      <code>TAGURU_EXTRACT_*</code> の資格情報を自分の環境だけに持つ。カスタムパイプラインも第一級のまま：
-      <a href="bedrock.html">Bedrockガイド</a>のConverseループと <code>/protocol</code> のツール語彙は
-      そういう生産者の両半分であり、バッチファイルはそのオフライン直列化にすぎない。
+      One such producer ships in the box: <a href="extract.html"><code>taguru extract</code></a> —
+      an offline subcommand that does exactly the above against any OpenAI-compatible chat
+      endpoint, holding the <code>TAGURU_EXTRACT_*</code> credentials in its own environment only.
+      Custom pipelines remain first-class: the Converse loop in the
+      <a href="bedrock.html">Bedrock guide</a> and the tool vocabulary of <code>/protocol</code>
+      are the two halves of such a producer, and a batch file is merely its offline serialization.
     </p>
   </section>
 

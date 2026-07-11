@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Taguru MCPで手繰るRAG</title>
-  <meta name="description" content="AIチャットボットの裏側でLLMがTaguru MCPのツールを呼び、知識グラフと原文を手繰り寄せて答えるまでを、実際のリクエストとレスポンスで追うウォークスルー。">
+  <title>Walkthrough — how an LLM pulls knowledge out through Taguru MCP</title>
+  <meta name="description" content="A walkthrough of an LLM behind an AI chatbot calling Taguru MCP tools and pulling in the knowledge graph and original text before answering — traced in real requests and responses.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -484,9 +484,9 @@
 <body>
 
 <div class="topbar">
-  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="メニューを開閉">☰</button>
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
-  <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
 </div>
 <div class="scrim" id="scrim"></div>
 
@@ -495,31 +495,33 @@
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
   <nav class="side-nav">
     <div class="side-group">
-      <a href="index.html">ホーム</a>
+      <a href="index.html">Home</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">ガイド</div>
-      <a href="getting-started.html">はじめる</a>
-      <a href="concepts.html">コンセプト</a>
-      <a href="architecture.html">内部アーキテクチャ</a>
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">リファレンス</div>
-      <a href="import.html">バッチ投入（import）</a>
-      <a href="extract.html">文書抽出（extract）</a>
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">クラウドで使う</div>
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
       <a href="bedrock.html">Amazon Bedrock</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">読みもの</div>
-      <a href="mcp-rag-walkthrough.html" aria-current="page">ウォークスルー</a>
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html" aria-current="page">Walkthrough</a>
     </div>
   </nav>
   <div class="sidebar-footer">
     <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
-    <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
   </div>
 </aside>
 
@@ -528,39 +530,50 @@
 
   <header class="hero">
     <div class="eyebrow">taguru mcp · retrieval walkthrough</div>
-    <h1>手繰る（たぐる）——<br>Taguru MCPでLLMが知識を引き出すまで</h1>
+    <h1>手繰る (taguru) —<br>how an LLM pulls knowledge out through Taguru MCP</h1>
     <p class="lede">
-      AIチャットボットがユーザーの質問に答えるとき、裏側でLLMはTaguru MCPのツールを何度も呼び出し、
-      構造化された知識グラフと元の文章を手繰り寄せてから返答している。
-      その一往復を、実際に動かしたサーバーへの本物のリクエストとレスポンスで追う。
+      When an AI chatbot answers a question, the LLM behind it calls Taguru MCP tools over and
+      over, pulling in the structured knowledge graph and the original text before it replies.
+      This page traces one such round trip in real requests and responses against a live server.
+      The conversation and the stored knowledge are Japanese — the fixture is a fictional sake
+      brewery — and are shown exactly as captured.
     </p>
     <div class="hero-meta">
-      <span><b>実行方法：</b>ローカルのTaguruサーバーへ <code>POST /mcp</code>（Streamable HTTP）</span>
-      <span><b>構成：</b>埋め込み未設定＝字句レーンのみ</span>
-      <span><b>題材：</b>架空の酒蔵「青嶺酒造」</span>
+      <span><b>How:</b> <code>POST /mcp</code> (Streamable HTTP) against a local Taguru server</span>
+      <span><b>Configuration:</b> no embeddings = lexical lane only</span>
+      <span><b>Fixture:</b> 青嶺酒造, a fictional sake brewery</span>
     </div>
   </header>
 
   <section id="model">
-    <h2>まず全体像</h2>
-    <p class="section-sub">Taguru MCPが何を保持し、どう検索するかの最小限の説明。</p>
+    <h2>The big picture first</h2>
+    <p class="section-sub">The minimum about what Taguru MCP keeps and how it searches.</p>
     <div class="model-card">
       <p>
-        Taguruは知識を <span class="tuple">(subject, label, object, weight, source)</span> の連想（アソシエーション）として溜め込む、LLM向けの長期記憶サーバーだ。
-        「青嶺酒造の杜氏は高瀬」であれば <span class="tuple">(青嶺酒造, 杜氏, 高瀬, 1.0, docs/aomine.md)</span> という一本の連想になる。
+        Taguru is a long-term memory server for LLMs that accumulates knowledge as
+        <span class="tuple">(subject, label, object, weight, source)</span> associations.
+        「青嶺酒造の杜氏は高瀬」 — Aomine Brewery's master brewer is Takase — becomes the single
+        association <span class="tuple">(青嶺酒造, 杜氏, 高瀬, 1.0, docs/aomine.md)</span>.
       </p>
       <p>
-        検索はベクトル類似度から始めない。まず「何についての質問か」という手がかり（cue）から概念名を<b>解決</b>し、そこを起点に連想のグラフを<b>辿る</b>——これが「手繰る」の名の由来であり、第一の検索レーンになる。
-        元の文章（パッセージ）はもう一本のレーンとして並走し、BM25と（設定されていれば）埋め込みの類似検索で段落ごとに引ける。三段論法や条件・手順のようにグラフの三つ組に収まらなかった知識は、こちらでしか見つからない。
+        Retrieval does not start from vector similarity. First, the cue — what the question is
+        <b>about</b> — is <b>resolved</b> to a concept name, and the association graph is
+        <b>walked</b> from there. That is where the name 手繰る ("to pull a thread in, hand over
+        hand") comes from, and it is the first retrieval lane. The original text (passages) runs
+        alongside as the second lane, searchable per paragraph by BM25 and, when configured,
+        embedding similarity. Knowledge that never fit the graph's triples — reasoning across
+        facts, conditions, procedure detail — is only found there.
       </p>
       <p>
-        知識を分解して連想に変換すること、検索結果を文章に組み立て直すことは、サーバーの仕事ではなくLLM＝MCPクライアントの仕事。サーバーは構造の保管と探索だけを引き受ける。
+        Decomposing knowledge into associations and recomposing search results into prose are not
+        the server's job; they belong to the LLM, the MCP client. The server takes on storage and
+        traversal of structure, nothing more.
       </p>
     </div>
 
     <div class="tool-groups">
       <div class="tool-group">
-        <div class="tool-group-label">コンテキスト</div>
+        <div class="tool-group-label">Contexts</div>
         <div class="chips">
           <span class="chip used">list_contexts</span>
           <span class="chip">create_context</span>
@@ -569,7 +582,7 @@
         </div>
       </div>
       <div class="tool-group">
-        <div class="tool-group-label">書き込み（ingest）</div>
+        <div class="tool-group-label">Writes (ingest)</div>
         <div class="chips">
           <span class="chip">add_associations</span>
           <span class="chip">store_passages</span>
@@ -578,7 +591,7 @@
         </div>
       </div>
       <div class="tool-group">
-        <div class="tool-group-label">検索・読み出し</div>
+        <div class="tool-group-label">Search &amp; read</div>
         <div class="chips">
           <span class="chip used">resolve</span>
           <span class="chip">resolve_label</span>
@@ -592,7 +605,7 @@
         </div>
       </div>
       <div class="tool-group">
-        <div class="tool-group-label">語彙・保守</div>
+        <div class="tool-group-label">Vocabulary &amp; maintenance</div>
         <div class="chips">
           <span class="chip">list_labels</span>
           <span class="chip">get_aliases</span>
@@ -606,31 +619,31 @@
         </div>
       </div>
     </div>
-    <p class="note">全26ツールのうち、色付きの6つ（<span class="chip used" style="padding:0.1em 0.4em;">藍</span> がグラフレーン、<span class="chip used-text" style="padding:0.1em 0.4em;">朱</span> がテキストレーン）を、このあとの2つのシナリオで実際に呼び出す。</p>
+    <p class="note">Of the 26 tools, the six highlighted (<span class="chip used" style="padding:0.1em 0.4em;">indigo</span> = graph lane, <span class="chip used-text" style="padding:0.1em 0.4em;">vermilion</span> = text lane) are the ones actually called in the two scenarios below.</p>
 
     <div class="loop">
-      <div class="loop-step"><span class="n">01</span><span class="t">選ぶ</span><span class="d">list_contexts で対象を選定</span></div>
-      <div class="loop-step"><span class="n">02</span><span class="t">解決する</span><span class="d">resolve / resolve_label でcueを正規名に</span></div>
-      <div class="loop-step"><span class="n">03</span><span class="t">見取る</span><span class="d">describe→query で絞り込む</span></div>
-      <div class="loop-step"><span class="n">04</span><span class="t">広げる</span><span class="d">activate / explore で関連知識を収集</span></div>
-      <div class="loop-step"><span class="n">05</span><span class="t">裏取りする</span><span class="d">cite_passage で原文を確認</span></div>
-      <div class="loop-step" style="border-bottom-color: var(--thread-soft);"><span class="n" style="color:var(--thread)">06</span><span class="t">網を張る</span><span class="d">グラフで届かなければ search_passages</span></div>
+      <div class="loop-step"><span class="n">01</span><span class="t">Select</span><span class="d">pick the context with list_contexts</span></div>
+      <div class="loop-step"><span class="n">02</span><span class="t">Resolve</span><span class="d">resolve / resolve_label turn the cue into canonical names</span></div>
+      <div class="loop-step"><span class="n">03</span><span class="t">Survey</span><span class="d">describe → query to narrow down</span></div>
+      <div class="loop-step"><span class="n">04</span><span class="t">Expand</span><span class="d">activate / explore gather related knowledge</span></div>
+      <div class="loop-step"><span class="n">05</span><span class="t">Verify</span><span class="d">cite_passage checks the original text</span></div>
+      <div class="loop-step" style="border-bottom-color: var(--thread-soft);"><span class="n" style="color:var(--thread)">06</span><span class="t">Cast the net</span><span class="d">search_passages when the graph can't reach</span></div>
     </div>
   </section>
 
   <section id="scenario-1">
-    <h2>シナリオ1：知っていることを聞かれる</h2>
-    <p class="section-sub">グラフに構造化済みの事実で答えが組み立てられるケース。resolve → describe → activate → cite_passage と手繰っていく。</p>
+    <h2>Scenario 1: asked about something it knows</h2>
+    <p class="section-sub">The user asks 「青嶺酒造について教えて。根拠も教えて。」 — "tell me about Aomine Brewery, and back it up." The answer assembles from facts already structured on the graph, pulled in as resolve → describe → activate → cite_passage.</p>
 
     <div class="chat-turn user">
       <div>
-        <div class="who">ユーザー</div>
+        <div class="who">User</div>
         <div class="bubble"><p>青嶺酒造について教えて。根拠も教えて。</p></div>
       </div>
     </div>
 
     <div class="note">
-      接続直後、LLMは <code>initialize</code> の応答で <code>instructions</code> フィールドを受け取る。これは <code>GET /protocol</code> の全文そのもので、ここまでの「まず全体像」に書いた検索ループの規律が、会話が始まる前にLLMへ手渡されている。以降はその規律に沿ってツールを呼ぶだけでよい。
+      Right after connecting, the LLM received the <code>instructions</code> field in the <code>initialize</code> response — the full text of <code>GET /protocol</code>. The retrieval-loop discipline described under "The big picture first" was handed to the LLM before the conversation began; from here on it only has to call the tools in that order.
     </div>
 
     <div class="timeline" data-lane="graph">
@@ -642,7 +655,7 @@
             <span class="step-route">GET /contexts</span>
           </div>
           <div class="step-body">
-            <p class="step-why">どのコンテキスト（＝どの「文脈」の知識ベース）を検索すべきか、まず一覧から選ぶ。</p>
+            <p class="step-why">First, pick from the list which context — which knowledge base of meaning — to search.</p>
             <div class="io">
               <div class="io-block">
                 <h4>Request</h4>
@@ -668,7 +681,7 @@
 }</code></pre>
               </div>
             </div>
-            <p class="step-note"><b>人が書いた説明文</b>と<b>機械集計の統計</b>が同じ行に並ぶ。LLMはこの一覧だけで「sakeコンテキストに聞けばよさそうだ」と判断できる。</p>
+            <p class="step-note"><b>A human-written description</b> and <b>machine-computed stats</b> sit on the same row. From this list alone, the LLM can decide the sake context is the one to ask.</p>
           </div>
         </div>
       </div>
@@ -680,7 +693,7 @@
             <span class="step-route">POST /contexts/sake/resolve</span>
           </div>
           <div class="step-body">
-            <p class="step-why">質問文から抜き出した「青嶺酒造」という手がかり（cue）を、グラフ上の正式な概念名に解決する。</p>
+            <p class="step-why">Resolve the cue 「青嶺酒造」, extracted from the question, to its canonical concept name on the graph.</p>
             <div class="io">
               <div class="io-block">
                 <h4>Request</h4>
@@ -705,7 +718,7 @@
 }]</code></pre>
               </div>
             </div>
-            <p class="step-note"><code>kind: "exact"</code> はcueがそのまま登録済みの綴りだった印。<code>gloss</code>にはその概念の主要な事実が要約されており、この時点で答えの下書きはほぼ見えている——ただしまだ裏取りしていない。2件目の「青嶺」は文字列として重なっているだけの<code>containment</code>候補で、スコア0.5と低く、正しく脇に残る。</p>
+            <p class="step-note"><code>kind: "exact"</code> means the cue was a registered spelling as-is. The <code>gloss</code> summarizes the concept's main facts, so a draft of the answer is nearly visible already — but nothing has been verified yet. The second candidate, 青嶺 (the brand), merely overlaps as a string — a <code>containment</code> candidate at a low 0.5, correctly left aside.</p>
           </div>
         </div>
       </div>
@@ -717,7 +730,7 @@
             <span class="step-route">POST /contexts/sake/describe</span>
           </div>
           <div class="step-body">
-            <p class="step-why">「青嶺酒造」という概念が、どんなラベルで何件の事実を持つかをまず見取る。プロフィール全体を勘で引く前の下見。</p>
+            <p class="step-why">Survey which labels the concept 青嶺酒造 carries and how many facts each holds — a scouting pass before pulling the whole profile on a hunch.</p>
             <div class="io">
               <div class="io-block">
                 <h4>Request</h4>
@@ -742,7 +755,7 @@
 }</code></pre>
               </div>
             </div>
-            <p class="step-note">6種のラベルが見え、「全部聞けば足りる」規模だと分かる（大きなハブ概念ならここで<code>label</code>を絞ってから <code>query</code> するところ）。<code>行う</code>ラベルの存在は次のactivateで否定の事実として効いてくる。</p>
+            <p class="step-note">Six labels are visible — small enough that fetching everything will do (on a large hub concept, this is where you would narrow by <code>label</code> and then <code>query</code>). The presence of the <code>行う</code> ("does") label pays off in the next activate as a negated fact.</p>
           </div>
         </div>
       </div>
@@ -754,7 +767,7 @@
             <span class="step-route">POST /contexts/sake/activate</span>
           </div>
           <div class="step-body">
-            <p class="step-why">「青嶺酒造」を起点に拡散し、直接の事実と、そこから連なる関連知識を強さ順に集める。関連知識収集の主力ツール。</p>
+            <p class="step-why">Spread out from 青嶺酒造, collecting the direct facts and the knowledge chained beyond them, ordered by strength. The workhorse for gathering related knowledge.</p>
             <div class="io">
               <div class="io-block">
                 <h4>Request</h4>
@@ -764,7 +777,7 @@
 }</code></pre>
               </div>
               <div class="io-block">
-                <h4>Response（抜粋）</h4>
+                <h4>Response (excerpt)</h4>
                 <pre><code>[
  {<span class="k">"strength"</span>:<span class="hl nu">0.5</span>,<span class="k">"path"</span>:[<span class="s">"青嶺酒造"</span>],
   <span class="k">"association"</span>:{<span class="k">"label"</span>:<span class="s">"杜氏"</span>,
@@ -778,16 +791,16 @@
    <span class="k">"attributions"</span>:[{<span class="k">"source"</span>:
     <span class="s">"docs/aomine.md"</span>,<span class="k">"section"</span>:
     <span class="s">"経営方針"</span>}]}},
- <span style="color:var(--ink-faint)">… 代表銘柄・創業年・所在地も strength 0.5 で同様に</span>
+ <span style="color:var(--ink-faint)">… 代表銘柄 (flagship brand), 創業年 (founded), 所在地 (location) follow at strength 0.5</span>
  {<span class="k">"strength"</span>:<span class="nu">0.0417</span>,<span class="k">"path"</span>:
   [<span class="s">"青嶺酒造"</span>,<span class="s">"日本酒の醸造"</span>],
   <span class="k">"association"</span>:{<span class="k">"label"</span>:<span class="s">"最初の工程"</span>,
    <span class="k">"object"</span>:<span class="s">"洗米"</span>, …}}
- <span style="color:var(--ink-faint)">… 醸造工程の連鎖が2ホップ先まで、より弱く続く</span>
+ <span style="color:var(--ink-faint)">… the brewing-process chain continues two hops out, weaker</span>
 ]</code></pre>
               </div>
             </div>
-            <p class="step-note">直接つながる事実は<code>strength 0.5</code>で並び、<code>path</code>が1ホップの<code>["青嶺酒造"]</code>。醸造工程（別の連想の連鎖）は<code>path</code>が2ホップに伸びるぶん<code>strength</code>が減衰して混ざり込む——「青嶺酒造は何をしているか」まで自然に広がる一方、遠い情報ほど弱く扱われる。負の<code>weight: -1.0</code>は「大量生産を<b>行わない</b>」という否定の事実で、そのままプラスの主張と読み違えないための符号。<code>attributions</code>には<code>section</code>まで解決済みで付いてくるので、この時点で「概要／経営方針のどちらに書かれているか」も分かる。</p>
+            <p class="step-note">Directly connected facts line up at <code>strength 0.5</code>, with a one-hop <code>path</code> of <code>["青嶺酒造"]</code>. The brewing process — a separate chain of associations — mixes in with its <code>strength</code> decayed as the <code>path</code> stretches to two hops: the expansion naturally reaches "so what does the brewery do", while more distant information is weighted down. The negative <code>weight: -1.0</code> is the negated fact "does <b>not</b> mass-produce" — the sign that keeps it from being read as an affirmative claim. <code>attributions</code> arrive with <code>section</code> already resolved, so which section states each fact — 概要 (overview) or 経営方針 (management policy) — is known at this point too.</p>
           </div>
         </div>
       </div>
@@ -799,7 +812,7 @@
             <span class="step-route">POST /contexts/sake/citations</span>
           </div>
           <div class="step-body">
-            <p class="step-why">「杜氏は高瀬」の根拠を、要約や連想ではなく元の文章そのもので裏取りする。</p>
+            <p class="step-why">Verify the grounds for "the master brewer is 高瀬" against the original text itself — not a summary, not an association.</p>
             <div class="io">
               <div class="io-block">
                 <h4>Request</h4>
@@ -818,7 +831,7 @@
 }</code></pre>
               </div>
             </div>
-            <p class="step-note"><code>paragraph</code>にはactivateのattributionsに載っていた<code>paragraph: 1</code>の値をそのまま渡しただけ。連想は「杜氏＝高瀬」という骨格だけを持ち、「先代から技術を受け継ぎ」という肉付けは骨格化されずに原文側に残っている——だからこそ引用して初めて手に入る。</p>
+            <p class="step-note"><code>paragraph</code> is simply the <code>paragraph: 1</code> value that rode the activate attributions, passed back as-is. The association holds only the skeleton 杜氏 = 高瀬; the flesh — "inherited the craft from his predecessor" — was never skeletonized and stays in the original text. Which is exactly why it only surfaces on citation.</p>
           </div>
         </div>
       </div>
@@ -827,7 +840,7 @@
 
     <div class="chat-turn assistant">
       <div>
-        <div class="who">アシスタント</div>
+        <div class="who">Assistant</div>
         <div class="bubble">
           <p>青嶺酒造は1907年に長野県で創業した蔵元で、代表銘柄は「青嶺」です。杜氏は高瀬さんが務めており、先代から技術を受け継いで伝統製法を守っています。大量生産は行わず、仕込み規模を抑えて一つひとつの工程に手間をかける方針とのことです。</p>
           <div class="citation-block">
@@ -840,12 +853,12 @@
   </section>
 
   <section id="scenario-2">
-    <h2>シナリオ2：グラフに無い知識を聞かれる</h2>
-    <p class="section-sub">三つ組に収まらない手順の細部（条件・数量）は、そもそもグラフに書かれていない。describeで空振りを確認してから、テキストレーンに切り替える。</p>
+    <h2>Scenario 2: asked about knowledge the graph doesn't hold</h2>
+    <p class="section-sub">The user asks 「浸漬はどのくらいの時間行いますか？」 — "how long does the steeping run?" Procedure details that don't fit a triple (conditions, quantities) were never written on the graph. Confirm the miss with describe, then switch to the text lane.</p>
 
     <div class="chat-turn user">
       <div>
-        <div class="who">ユーザー</div>
+        <div class="who">User</div>
         <div class="bubble"><p>浸漬はどのくらいの時間行いますか？</p></div>
       </div>
     </div>
@@ -858,7 +871,7 @@
             <span class="step-route">POST /contexts/sake/describe</span>
           </div>
           <div class="step-body">
-            <p class="step-why"><code>resolve</code>で「浸漬」を解決した後、まずグラフ側にどんな事実があるかを確認する。</p>
+            <p class="step-why">After resolving 浸漬 (steeping) with <code>resolve</code>, first check what facts the graph side holds.</p>
             <div class="io">
               <div class="io-block">
                 <h4>Request</h4>
@@ -881,7 +894,7 @@
 }</code></pre>
               </div>
             </div>
-            <p class="step-note">「浸漬の次は麹造り」という<b>順序</b>はあっても、「何分」という<b>数量</b>のラベルは無い——手順の骨格は連想として書かれているが、条件や分量のような細部は最初から三つ組に押し込めず、文章側に残す設計だからだ。ここでグラフを追うのを打ち切り、テキストレーンに切り替える。</p>
+            <p class="step-note">There is <b>order</b> ("after steeping comes koji making") but no <b>quantity</b> label answering "how many minutes" — the skeleton of the procedure is written as associations, while details like conditions and amounts are, by design, never forced into triples and stay on the text side. Stop walking the graph here and switch lanes.</p>
           </div>
         </div>
       </div>
@@ -895,7 +908,7 @@
             <span class="step-route">POST /contexts/sake/sources/search</span>
           </div>
           <div class="step-body">
-            <p class="step-why">質問文をそのまま投げず、あり得る<b>答えの文</b>に言い換えて検索する——「浸漬は何分？」ではなく「浸漬は夏場40分、冬場90分ほど行う」。当たる保証は要らない、探している文と同じ<i>形</i>であればよい。</p>
+            <p class="step-why">Don't send the question as-is; rephrase it into a plausible <b>answering sentence</b> — not 「浸漬は何分？」 ("how many minutes?") but 「浸漬は夏場40分、冬場90分ほど行う」 ("steeping runs about 40 minutes in summer, 90 in winter"). It doesn't have to be right, only the same <i>shape</i> as the sentence being sought.</p>
             <div class="io">
               <div class="io-block">
                 <h4>Request</h4>
@@ -918,7 +931,7 @@
 }, { <span style="color:var(--ink-faint)">// paragraph 2, score 1.02 …</span> }]</code></pre>
               </div>
             </div>
-            <p class="step-note"><code>lanes</code>に<code>bm25</code>しか無いのは、このサーバーが埋め込み未設定＝字句レーンのみで動いているため（<code>TAGURU_EMBED_URL</code>を設定すれば<code>vector</code>レーンも並走し、言い換えにも強くなる）。今回は「浸漬」「40分」「90分」という語そのものが原文にあるので、BM25だけで一発当選している。</p>
+            <p class="step-note"><code>lanes</code> shows only <code>bm25</code> because this server runs with no embeddings configured — lexical lane only (set <code>TAGURU_EMBED_URL</code> and a <code>vector</code> lane runs alongside, robust to paraphrase too). Here the very words — 浸漬, 40分, 90分 — appear in the original text, so BM25 alone lands it in one shot.</p>
           </div>
         </div>
       </div>
@@ -926,7 +939,7 @@
 
     <div class="chat-turn assistant">
       <div>
-        <div class="who">アシスタント</div>
+        <div class="who">Assistant</div>
         <div class="bubble">
           <p>浸漬は、夏場は40分、冬場は90分を目安に行っているとのことです。ただし固定値ではなく、気温や米の状態に応じて毎回微調整するそうです。</p>
           <div class="citation-block">
@@ -937,45 +950,45 @@
       </div>
     </div>
 
-    <p class="note">この質問はグラフの連想を1件も使わなかった。<b>グラフが本線、テキスト検索は安全網</b>——三つ組に落とせた事実はグラフから素早く正確に、落とせなかった細部はテキストレーンから拾う、という役割分担がそのまま表れている。</p>
+    <p class="note">This question used not a single graph association. <b>The graph is the main line; text search is the safety net</b> — facts that reduced to triples come back fast and exact from the graph, and the details that didn't are picked up from the text lane. The division of labor shows exactly as designed.</p>
   </section>
 
   <section id="wrap">
-    <h2>この往復から読み取れる設計</h2>
+    <h2>What this round trip shows about the design</h2>
     <div class="principles">
       <div class="principle">
         <span class="mark">一</span>
         <div>
-          <h3>ベクトル類似度は入口ではない</h3>
-          <p><code>resolve</code>はまず正規化された文字列一致（表記ゆれ・かな/カナ・軽い誤字を吸収）で解決し、埋め込みが無ければそれで完結する。似ている文字列と同じものは別概念として扱われ、<code>gloss</code>が両者の違いを教えてくれる。</p>
+          <h3>Vector similarity is not the entrance</h3>
+          <p><code>resolve</code> resolves through normalized string matching first (absorbing spelling variation, kana/katakana, light typos), and with no embeddings configured, that is the whole story. A merely similar string is treated as a different concept, and the <code>gloss</code> is what tells the two apart.</p>
         </div>
       </div>
       <div class="principle">
         <span class="mark">二</span>
         <div>
-          <h3>答えは常に原文まで手繰れる</h3>
-          <p>グラフ経由でもテキスト経由でも、最終的な一文は<code>attributions</code>や検索結果の<code>source</code>／<code>paragraph</code>から<code>cite_passage</code>で裏取りできる。今回の2つの最終回答は、どちらも要約ではなく実在する段落を引用して締めている。</p>
+          <h3>Every answer pulls back to the original text</h3>
+          <p>Via the graph or via text search, the final sentence can be verified with <code>cite_passage</code> from the <code>source</code>/<code>paragraph</code> on <code>attributions</code> or search hits. Both final answers above close by quoting a real paragraph, not a summary.</p>
         </div>
       </div>
       <div class="principle">
         <span class="mark">三</span>
         <div>
-          <h3>グラフとテキストは役割が違う</h3>
-          <p>「誰が」「いつ」のような骨格はグラフが速く正確に答え、「どのくらい」「どんな条件で」のような細部は文章のまま残る。LLMは<code>describe</code>で空振りを検知したら、質問文ではなく答えらしい一文に言い換えて<code>search_passages</code>に切り替える。</p>
+          <h3>The graph and the text have different jobs</h3>
+          <p>Skeleton facts — who, when — come fast and exact from the graph; details — how much, under what conditions — stay as prose. When <code>describe</code> detects a miss, the LLM rephrases into an answer-shaped sentence, not the question, and switches to <code>search_passages</code>.</p>
         </div>
       </div>
       <div class="principle">
         <span class="mark">四</span>
         <div>
-          <h3>規律はツール定義とinstructionsに同梱される</h3>
-          <p>この一連の手順をLLMがどこかで学習している必要はない。<code>initialize</code>の<code>instructions</code>と各ツールの説明文自体が検索ループの規律を運んでくるので、接続した時点でLLMは正しい順番を知っている。</p>
+          <h3>The discipline ships with the tool definitions and instructions</h3>
+          <p>The LLM never needed to have learned this procedure anywhere. The <code>initialize</code> <code>instructions</code> and the tool descriptions themselves carry the retrieval-loop discipline, so a connected LLM knows the right order from the start.</p>
         </div>
       </div>
     </div>
   </section>
 
   <footer class="colophon">
-    taguru serve（ローカル, embeddings未設定）に対する実際の POST /mcp 呼び出しより採取 / context: sake（架空データ）
+    Captured from real POST /mcp calls against taguru serve (local, no embeddings configured) / context: sake (fictional data)
   </footer>
 
 </div>

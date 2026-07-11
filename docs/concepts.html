@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>コンセプト — Taguru</title>
-  <meta name="description" content="Taguruの考え方：連想モデル、文脈、検索ループ、グラフとテキスト二本のレーン、インジェストの規律、手順・因果・コードの表現パターン。">
+  <title>Concepts — Taguru</title>
+  <meta name="description" content="How Taguru thinks: the association model, contexts, the retrieval loop, the graph and text lanes, ingest discipline, and patterns for procedures, causality, and code.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -12,9 +12,9 @@
 <body>
 
 <div class="topbar">
-  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="メニューを開閉">☰</button>
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
-  <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
 </div>
 <div class="scrim" id="scrim"></div>
 
@@ -23,31 +23,33 @@
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
   <nav class="side-nav">
     <div class="side-group">
-      <a href="index.html">ホーム</a>
+      <a href="index.html">Home</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">ガイド</div>
-      <a href="getting-started.html">はじめる</a>
-      <a href="concepts.html" aria-current="page">コンセプト</a>
-      <a href="architecture.html">内部アーキテクチャ</a>
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html" aria-current="page">Concepts</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">リファレンス</div>
-      <a href="import.html">バッチ投入（import）</a>
-      <a href="extract.html">文書抽出（extract）</a>
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">クラウドで使う</div>
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
       <a href="bedrock.html">Amazon Bedrock</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">読みもの</div>
-      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
     </div>
   </nav>
   <div class="sidebar-footer">
     <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
-    <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
   </div>
 </aside>
 
@@ -56,168 +58,184 @@
 
   <header class="hero">
     <div class="eyebrow">concepts</div>
-    <h1>コンセプト——連想、文脈、二本のレーン</h1>
+    <h1>Concepts — associations, contexts, two lanes</h1>
     <p class="lede">
-      Taguruが何を保持し、どう探し、何をあえてグラフに書かないか。
-      この設計を知っていると、インジェストの質がそのまま検索の質になる理由が見える。
+      What Taguru keeps, how it searches, and what it deliberately does not write on the graph.
+      Knowing this design makes it obvious why the quality of an ingest becomes the quality of
+      retrieval.
     </p>
   </header>
 
   <section id="associations">
-    <h2>知識は連想である</h2>
-    <p class="section-sub">最小単位は <span class="tuple">(subject, label, object, weight, source)</span> の五つ組。</p>
+    <h2>Knowledge is an association</h2>
+    <p class="section-sub">The smallest unit is the five-tuple <span class="tuple">(subject, label, object, weight, source)</span>.</p>
     <div class="model-card">
       <p>
-        <b>weightは符号付きの証拠量。</b>負の値は否定の主張になる——「大量生産を行わない」は
-        <span class="tuple">(青嶺酒造, 行う, 大量生産, −1.0)</span>。
-        否定は肯定と同じラベルに負の符号で載るから、読み違えようがない。
+        <b>The weight is a signed quantity of evidence.</b> A negative value states a negation —
+        "does not mass-produce" becomes
+        <span class="tuple">(青嶺酒造, 行う, 大量生産, −1.0)</span>.
+        Because a negation rides the same label as the affirmation with a negative sign,
+        it cannot be misread.
       </p>
       <p>
-        <b>再主張は加算、出典は保存。</b>同じ三つ組を別の文書が主張するとweightが積み上がり、
-        ソースごとのattributionが全部残る。<code>2ソース × 1.0</code>（独立した裏付け）と
-        <code>1ソース × 2.0</code>（ひとつの強い主張）は最後まで区別できる。
-        だから同一文書内での言い換えの再主張は禁物（証拠の水増し）、文書をまたいだ再主張は歓迎（それが裏付け）。
+        <b>Re-assertion adds up; attribution is preserved.</b> When another document asserts the
+        same triple, the weight accumulates and every per-source attribution is kept.
+        <code>2 sources × 1.0</code> (independent corroboration) and <code>1 source × 2.0</code>
+        (one strong claim) stay distinguishable to the end. That is why re-asserting a paraphrase
+        within one document is forbidden (evidence inflation), while re-assertion across documents
+        is welcome (that is corroboration).
       </p>
       <p>
-        <b>名前は見出し、本文ではない。</b>subject/label/objectは1024バイトまで。長い知識は分解するか、
-        原文としてソースAPIに置く。weightは証拠の強さであって効果の大きさではない——「リスク2倍」は
-        objectに書くか（<span class="tuple">喫煙 →リスク倍率→ 2倍</span>）、原文に残す。
+        <b>Names are headings, not body text.</b> Subject, label, and object are capped at 1024
+        bytes. Long knowledge is decomposed, or kept as original text in the sources API. The
+        weight is strength of evidence, not size of effect — "doubles the risk" goes into the
+        object (<span class="tuple">喫煙 →リスク倍率→ 2倍</span>) or stays in the original text.
       </p>
     </div>
   </section>
 
   <section id="contexts">
-    <h2>コンテキスト＝文脈</h2>
-    <p class="section-sub">1つのコンテキストの中では、1つの綴りは1つの指示対象を意味する。</p>
+    <h2>A context is a 文脈 — one frame of meaning</h2>
+    <p class="section-sub">Within one context, one spelling means one referent.</p>
     <p>
-      果物のAppleと会社のAppleは別のコンテキストに属する。この「一綴り一referent」の規約が、
-      グラフを曖昧性解消の装置ではなく<b>知識の置き場</b>として単純に保つ。
-      どのコンテキストに聞くかを選ぶのは言語理解の仕事、つまりLLMの仕事——
-      そのために <code>GET /contexts</code> は人間が書いた説明文、機械集計の統計（連想数・主要概念・ラベル見本）、
-      使用統計（読み・空振り・書き・最終アクセス）を1行に並べて返す。
-      「誰にも選ばれないコンテキスト」と「選ばれるのに何も答えないコンテキスト」はそこで見分けられる。
+      Apple the fruit and Apple the company belong to different contexts. This
+      one-spelling-one-referent convention keeps the graph a simple <b>place to put knowledge</b>
+      rather than a disambiguation machine. Choosing which context to ask is language
+      understanding — the LLM's job. For that, <code>GET /contexts</code> returns, on one row per
+      context: the human-written description, machine-computed stats (association count, top
+      concepts, label samples), and usage stats (reads, misses, writes, last access).
+      "A context nobody ever picks" and "a context that gets picked but never answers"
+      can both be spotted there.
     </p>
   </section>
 
   <section id="index-not-archive">
-    <h2>グラフは索引、アーカイブではない</h2>
-    <p class="section-sub">骨格はグラフに、肉付けは原文に。</p>
+    <h2>The graph is an index, not an archive</h2>
+    <p class="section-sub">The skeleton goes on the graph; the flesh stays in the original text.</p>
     <p>
-      文書をインジェストするときは、事実の骨格を連想に落とすと同時に、原文そのものをソースAPIに登録する
-      （ソースid → パッセージ）。サーバーは本文を空行境界で段落に分割して保持し、
-      すべての連想のattributionは <code>source</code> と <code>paragraph</code> でその段落を指せる——
-      <code>citations</code> APIで元の一文まで手繰って裏取りできるのはこの構造のおかげ。
-      段落に <code>section</code>（見出し）を付けておけば、グラフの読み出し結果のattributionに
-      解決済みのセクション名が同乗してくる。
+      When ingesting a document, the skeleton of its facts is written as associations and,
+      at the same time, the original text itself is registered with the sources API
+      (source id → passage). The server splits the passage into paragraphs at blank-line
+      boundaries, and every association's attribution can point at a paragraph via
+      <code>source</code> and <code>paragraph</code> — which is what lets the <code>citations</code>
+      API pull back the original sentence for verification. Give paragraphs a
+      <code>section</code> (heading) and the resolved section name rides along on the
+      attributions of every graph read.
     </p>
   </section>
 
   <section id="retrieval">
-    <h2>検索ループ</h2>
-    <p class="section-sub">接続したLLMが <code>/protocol</code> から受け取る規律。人間がcurlで辿っても同じ形になる。</p>
+    <h2>The retrieval loop</h2>
+    <p class="section-sub">The discipline a connected LLM receives from <code>/protocol</code>. Tracing it by hand with curl takes the same shape.</p>
     <div class="loop">
-      <div class="loop-step"><span class="n">01</span><span class="t">選ぶ</span><span class="d">list_contexts で対象の文脈を選定</span></div>
-      <div class="loop-step"><span class="n">02</span><span class="t">解決する</span><span class="d">resolve / resolve_label でcueを正規名に</span></div>
-      <div class="loop-step"><span class="n">03</span><span class="t">見取る</span><span class="d">describe→query で絞り込む</span></div>
-      <div class="loop-step"><span class="n">04</span><span class="t">広げる</span><span class="d">activate / explore で関連知識を収集</span></div>
-      <div class="loop-step"><span class="n">05</span><span class="t">裏取りする</span><span class="d">cite_passage で原文を確認</span></div>
-      <div class="loop-step" style="border-bottom-color: var(--thread-soft);"><span class="n" style="color:var(--thread)">06</span><span class="t">網を張る</span><span class="d">グラフで届かなければ search_passages</span></div>
+      <div class="loop-step"><span class="n">01</span><span class="t">Select</span><span class="d">pick the context with list_contexts</span></div>
+      <div class="loop-step"><span class="n">02</span><span class="t">Resolve</span><span class="d">resolve / resolve_label turn the cue into canonical names</span></div>
+      <div class="loop-step"><span class="n">03</span><span class="t">Survey</span><span class="d">describe → query to narrow down</span></div>
+      <div class="loop-step"><span class="n">04</span><span class="t">Expand</span><span class="d">activate / explore gather related knowledge</span></div>
+      <div class="loop-step"><span class="n">05</span><span class="t">Verify</span><span class="d">cite_passage checks the original text</span></div>
+      <div class="loop-step" style="border-bottom-color: var(--thread-soft);"><span class="n" style="color:var(--thread)">06</span><span class="t">Cast the net</span><span class="d">search_passages when the graph can't reach</span></div>
     </div>
 
-    <h3>入口の正規化——cueはそのままでは照合しない</h3>
+    <h3>The normalized entrance — a cue is never matched raw</h3>
     <p>
-      <code>resolve</code> の入口はNFKC正規化・大文字小文字の畳み込み・カタカナ→ひらがな変換の上に
-      バイグラム転置索引を張ったもの。全半角の揺れ、かな表記の揺れ、軽い誤字はここで吸収される。
-      外れたら言い換えるか、<code>dice_floor</code>（既定0.3）を一時的に下げて曖昧照合を広げる。
+      The entrance of <code>resolve</code> is a bigram inverted index built on top of NFKC
+      normalization, case folding, and katakana→hiragana conversion. Full/half-width variation,
+      kana spelling variation, and light typos are absorbed there. On a miss, rephrase, or
+      temporarily lower <code>dice_floor</code> (default 0.3) to widen fuzzy matching.
     </p>
     <p>
-      候補には <code>kind</code> が付く。<code>exact</code>／<code>alias</code> は「cueが登録済みの綴りそのもの」、
-      <code>containment</code>／<code>fuzzy</code> は「文字列として重なっているだけ」。後者の高スコアは
-      <b>そっくりさん</b>の可能性がある——京都は東京都に0.67で重なる。上位候補に付いてくる
-      <code>gloss</code>（名前＋最重量の事実の要約）を読んでから採用する。スコアだけで採らない。
+      Candidates carry a <code>kind</code>. <code>exact</code>/<code>alias</code> mean "the cue is
+      a registered spelling itself"; <code>containment</code>/<code>fuzzy</code> mean "the strings
+      merely overlap". A high score of the latter kind can be a <b>look-alike</b> — 京都 overlaps
+      東京都 at 0.67. Read the <code>gloss</code> that rides along with the top candidates
+      (name + a summary of its heaviest facts) before adopting one. Never adopt on score alone.
     </p>
 
-    <h3>セマンティック層は「弱い入口を補う層」</h3>
+    <h3>The semantic tier backs up a weak entrance</h3>
     <p>
-      埋め込みが設定されていれば、字句候補が無い・弱い（最高スコア &lt; 0.5）ときに
-      <code>tier:"semantic"</code> の候補が合流する。名前は<b>グロスとして</b>埋め込まれているので、
-      言い換え（醸造責任者→杜氏）や質問形のcueも着地する。tierを跨いだスコア比較はしない——
-      字句のDice係数とコサイン類似度は別の物差しだ。床（<code>semantic_floor</code>）は
-      埋め込みモデルの属性であり、モデルを替えたら<a href="bedrock.html">校正し直す</a>。
+      With embeddings configured, <code>tier:"semantic"</code> candidates join when lexical
+      candidates are absent or weak (top score &lt; 0.5). Names are embedded <b>as glosses</b>,
+      so paraphrases (醸造責任者 → 杜氏) and question-shaped cues land too. Scores are never
+      compared across tiers — a lexical Dice coefficient and a cosine similarity are different
+      rulers. The floor (<code>semantic_floor</code>) is a property of the embedding model;
+      switch models and <a href="bedrock.html">recalibrate</a>.
     </p>
   </section>
 
   <section id="text-lane">
-    <h2>テキストレーン——三つ組にならない知識の網</h2>
-    <p class="section-sub">手順の細部、条件、数量、談話。骨格化できない知識は最初から文章のまま探す。</p>
+    <h2>The text lane — a net for knowledge that won't become triples</h2>
+    <p class="section-sub">Procedural detail, conditions, quantities, discourse. Knowledge that can't be skeletonized is searched as text from the start.</p>
     <p>
-      <code>sources/search</code> は段落単位の検索で、BM25の字句レーンと（<code>TAGURU_EMBED_PASSAGES</code> が
-      有効なら）段落埋め込みのセマンティックレーンを融合する。ヒットには <code>lanes</code> が付き、
-      どのレーンが何位で当てたかを常に申告する——vectorだけのヒットは言い換えが利いた印、
-      BM25だけのヒットは字面が合った印。どちらも証拠であって判定ではない。本文を読む。
+      <code>sources/search</code> is paragraph-level search that fuses a lexical BM25 lane with
+      (when <code>TAGURU_EMBED_PASSAGES</code> is on) a semantic lane over paragraph embeddings.
+      Every hit carries <code>lanes</code>, always declaring which lane ranked it where — a
+      vector-only hit means a paraphrase connected; a BM25-only hit means the surface forms
+      matched. Either is evidence, not a verdict. Read the text.
     </p>
     <p class="note">
-      <b>質問ではなく、答えの形で検索する。</b>多くの埋め込みモデルは質問文（「SSOはどのプランで使える?」）を、
-      その答えの文（「SSOはEnterpriseプランで利用できる。」）より遠くに置く。ありそうな平叙文を推測して
-      <b>その文で</b>検索する——推測が当たっている必要はなく、探している文と同じ<i>形</i>であればいい。
-      逆向きの対策がdoc2query：インジェスト時に段落へ「この段落が答えになる質問」を添えておくと、
-      質問形の検索が質問側の索引に着地する。
+      <b>Search with the shape of the answer, not the question.</b> Most embedding models place a
+      question ("Which plan includes SSO?") farther from its answer than the answering sentence
+      does ("SSO is available on the Enterprise plan."). Guess a plausible declarative sentence
+      and search <b>with that</b> — the guess doesn't have to be right, only the same <i>shape</i>
+      as the sentence you're looking for. The complementary fix is doc2query: attach "questions
+      this paragraph answers" to paragraphs at ingest, and question-shaped searches land on the
+      question index.
     </p>
   </section>
 
   <section id="ingest">
-    <h2>インジェストの規律</h2>
-    <p class="section-sub">検索の質はここで決まる。<code>/protocol</code> のインジェスト・ループの骨子。</p>
+    <h2>Ingest discipline</h2>
+    <p class="section-sub">Retrieval quality is decided here. The skeleton of the ingest loop in <code>/protocol</code>.</p>
     <ul>
-      <li><b>鋳造の前に照合</b>（check before mint）：綴りを新しく作る前に <code>resolve</code>／<code>resolve_label</code>。あるものを再利用する。ラベル語彙は <code>GET /contexts/{name}/labels</code> が一覧する。</li>
-      <li><b>暗黙のメンバーシップを明示する</b>：「杜氏は高瀬」——誰の杜氏か。文書の主要エンティティから <code>unreachable_from</code> を叩けば、繋ぎ忘れた島が見つかる。</li>
-      <li><b>文書が更新されたらdiff同期</b>：<code>sources/retract</code> で旧版の寄与（weight・attribution・パッセージ）を撤回してから、新版を普通にインジェスト。概念とエッジは残り、weightだけが下がる。</li>
-      <li><b>節目に語彙監査</b>：<code>vocabulary/audit</code> が綴りの分岐候補を挙げる——字句の双子（表記ゆれ）と意味の双子（同義語の分裂）。候補であって判定ではない。同一referentなら正準を決めてエイリアスを張る。<b>別物なのに衝突し続ける対</b>（東京都/京都、前株/後株）は「別物」という事実として書く：<span class="tuple">(株式会社青嶺, 別物, 青嶺株式会社, 1.0)</span>——以後、両者のglossが resolve の場で警告してくれる。</li>
-      <li><b>エイリアスは入口専用</b>：結果は常に正準の綴りで返る。既存の2概念を繋ぐことはできない（それはマージであり、再構築の領分）。登録間違いは同じパスのDELETEで撤回する。</li>
+      <li><b>Check before mint</b>: <code>resolve</code>/<code>resolve_label</code> before creating a new spelling. Reuse what exists. The label vocabulary is listed by <code>GET /contexts/{name}/labels</code>.</li>
+      <li><b>Make implicit membership explicit</b>: "杜氏は高瀬" — whose master brewer? Run <code>unreachable_from</code> from the document's main entity to find islands you forgot to connect.</li>
+      <li><b>Diff-sync when a document is updated</b>: retract the old version's contribution (weights, attributions, passage) with <code>sources/retract</code>, then ingest the new version normally. Concepts and edges remain; only weights drop.</li>
+      <li><b>Audit the vocabulary at milestones</b>: <code>vocabulary/audit</code> lists candidate spelling splits — lexical twins (spelling variation) and semantic twins (a synonym split in two). Candidates, not verdicts. Same referent → pick a canonical and add an alias. <b>A pair that keeps colliding but is genuinely different</b> (東京都/京都, 前株/後株) is written down as a fact: <span class="tuple">(株式会社青嶺, 別物, 青嶺株式会社, 1.0)</span> — from then on, both glosses warn right at the resolve site.</li>
+      <li><b>Aliases are entry-only</b>: results always return the canonical spelling. An alias cannot connect two existing concepts (that would be a merge — rebuild territory). A mistaken registration is retracted with DELETE on the same path.</li>
     </ul>
   </section>
 
   <section id="patterns">
-    <h2>表現パターン</h2>
-    <p class="section-sub">新しい機構は無い——メンバーシップのエッジと負のweightと同じ道具立てで表す。</p>
+    <h2>Representation patterns</h2>
+    <p class="section-sub">No new machinery — membership edges and negative weights express all of these.</p>
 
-    <h3>手順（順序のある知識）</h3>
+    <h3>Procedures (ordered knowledge)</h3>
     <pre><code>[{<span class="k">"subject"</span>:<span class="s">"日本酒の醸造"</span>,<span class="k">"label"</span>:<span class="s">"最初の工程"</span>,<span class="k">"object"</span>:<span class="s">"洗米"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"工程書"</span>},
  {<span class="k">"subject"</span>:<span class="s">"洗米"</span>,<span class="k">"label"</span>:<span class="s">"次の工程"</span>,<span class="k">"object"</span>:<span class="s">"浸漬"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"工程書"</span>},
  {<span class="k">"subject"</span>:<span class="s">"日本酒の醸造"</span>,<span class="k">"label"</span>:<span class="s">"工程"</span>,<span class="k">"object"</span>:<span class="s">"洗米"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"工程書"</span>}]</code></pre>
     <ul>
-      <li><b>順序</b>は <code>次の工程</code> の連鎖（正準ラベルを1つに固定。分岐は複数の<code>次の工程</code>エッジ＝DAG）。<b>開始</b>は <code>最初の工程</code>。<b>所属</b>（<code>工程</code>）が全ステップをハブに繋ぎ、網羅性の監査を効かせる。</li>
-      <li>再生は「開始を引く→<code>query {label:"次の工程"}</code> で全対を取って並べる」。<b><code>explore</code> のホップ距離を順序に使わない</b>——所属エッジがハブ経由の近道を作り、鎖上の位置と食い違う。</li>
-      <li>分量・条件・コツはグラフに押し込まず原文に残し、<code>sources/search</code> で拾う。</li>
+      <li><b>Order</b> is a chain of next-step edges (次の工程 above; fix one canonical label — branches are multiple next-step edges, i.e. a DAG). <b>Start</b> is a first-step edge (最初の工程). <b>Membership</b> (工程) connects every step to the hub, which is what makes coverage audits work.</li>
+      <li>Replay is "fetch the start → <code>query {label:"次の工程"}</code> for all pairs → line them up". <b>Never use <code>explore</code> hop distance for order</b> — membership edges create shortcuts through the hub that disagree with chain position.</li>
+      <li>Quantities, conditions, and tricks of the trade are not forced onto the graph; they stay in the original text and are caught by <code>sources/search</code>.</li>
     </ul>
 
-    <h3>因果</h3>
+    <h3>Causality</h3>
     <pre><code>[{<span class="k">"subject"</span>:<span class="s">"ストレス"</span>,<span class="k">"label"</span>:<span class="s">"引き起こす"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"論文A"</span>},
  {<span class="k">"subject"</span>:<span class="s">"カフェイン"</span>,<span class="k">"label"</span>:<span class="s">"引き起こす"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">-0.8</span>,<span class="k">"source"</span>:<span class="s">"論文C"</span>},
  {<span class="k">"subject"</span>:<span class="s">"運動"</span>,<span class="k">"label"</span>:<span class="s">"防ぐ"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"論文D"</span>}]</code></pre>
     <ul>
-      <li>「なぜX?」は <code>query {label:["引き起こす","高める","要因"], object:"X"}</code>。連鎖は <code>activate</code> のpathで見える——システムは A→B→C を見せるが A→C を主張しない。推移は読む側の判断。</li>
-      <li>「引き起こさない」は因果ラベルに負のweight、「防ぐ」は独立した正のラベル。混ぜない。相関は<code>相関する</code>のまま、因果に昇格させない。</li>
-      <li>議論が割れた因果は、1本のエッジ上の小さな正味weightと割れたattributionsとして現れる。答えでもそう言う。</li>
+      <li>"Why X?" is <code>query {label:["引き起こす","高める","要因"], object:"X"}</code> — query by the causal labels with X as object. Chains show up in <code>activate</code> paths — the system shows A→B→C but never asserts A→C. Transitivity is the reader's judgment.</li>
+      <li>"Does not cause" is a negative weight on the causal label; "prevents" (防ぐ) is an independent positive label. Don't mix them. Correlation stays on its own label (相関する) and is never promoted to causation.</li>
+      <li>A disputed cause shows up as one edge with a small net weight and split attributions. Say so in the answer, too.</li>
     </ul>
 
-    <h3>ソースコード</h3>
+    <h3>Source code</h3>
     <ul>
-      <li>概念は識別子の正確な綴り、<b>短い名前</b>で：<code>fetch_block</code> であって <code>CacheStore::fetch_block</code> ではない——修飾は入口のスコアを薄める。名前空間はエッジで（<code>defined_in</code> → <code>src/store.rs</code>）。ファイルもパスも概念。</li>
-      <li>ラベル語彙は小さく決めて使い回す：<code>kind</code>・<code>defined_in</code>・<code>calls</code>・<code>field</code>・<code>variant</code>・<code>returns</code>・<code>invariant</code>・<code>purpose</code> でコードの事実の大半が書ける。</li>
-      <li>大小文字の双子（型<code>Frame</code>とアクセサ<code>frame</code>）は別概念で、resolveは両方を1.0で返す——同点は describe で見分ける。決してマージしない。</li>
-      <li>入口が camelCase/snake_case/誤字を吸収する（<code>fetchBlock</code> も <code>evict_cld</code> も届く）。自然言語からの入口は識別子へのエイリアスで（<code>退避ループ</code> → <code>evict_cold</code>）。</li>
-      <li>いちばん価値が高いのは<b>grepが答えられない事実</b>——不変条件・目的・設計上の制約を、識別子の上のエッジとして書く。</li>
+      <li>Concepts are identifiers in their exact spelling, as <b>short names</b>: <code>fetch_block</code>, not <code>CacheStore::fetch_block</code> — qualification dilutes the entrance score. Namespacing is an edge (<code>defined_in</code> → <code>src/store.rs</code>). Files and paths are concepts too.</li>
+      <li>Keep the label vocabulary small and reuse it: <code>kind</code>, <code>defined_in</code>, <code>calls</code>, <code>field</code>, <code>variant</code>, <code>returns</code>, <code>invariant</code>, <code>purpose</code> cover most facts about code.</li>
+      <li>Case twins (type <code>Frame</code> and accessor <code>frame</code>) are separate concepts, and resolve returns both at 1.0 — break the tie with describe. Never merge them.</li>
+      <li>The entrance absorbs camelCase/snake_case and typos (<code>fetchBlock</code> and <code>evict_cld</code> both arrive). Natural-language entry points are aliases onto identifiers (<code>退避ループ</code> → <code>evict_cold</code>).</li>
+      <li>The highest-value facts are the ones <b>grep cannot answer</b> — invariants, purpose, design constraints, written as edges over the identifiers.</li>
     </ul>
 
     <div class="next-links">
       <a class="nav-card" href="architecture.html" style="flex:1 1 16rem">
-        <span class="nc-title">次へ：内部アーキテクチャ</span>
-        <p>この規律を支える実装——フラットバッファ、WAL、三つの検索経路。</p>
+        <span class="nc-title">Next: Internal architecture</span>
+        <p>The implementation that carries this discipline — flat buffers, the WAL, three retrieval paths.</p>
       </a>
       <a class="nav-card" href="mcp-rag-walkthrough.html" style="flex:1 1 16rem">
-        <span class="nc-title">ウォークスルー</span>
-        <p>この検索ループが実リクエストでどう流れるか。</p>
+        <span class="nc-title">Walkthrough</span>
+        <p>How this retrieval loop flows in real requests.</p>
       </a>
     </div>
   </section>

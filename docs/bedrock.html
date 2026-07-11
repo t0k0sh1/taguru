@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Amazon Bedrockで使う — Taguru</title>
-  <meta name="description" content="TaguruをAmazon Bedrockで使う：Converse APIでのtaguru-mcpホスト、埋め込みのブリッジプロキシ、semantic floorの校正、モデルアクセスゲートの診断。">
+  <title>Taguru on Amazon Bedrock — Taguru</title>
+  <meta name="description" content="Using Taguru with Amazon Bedrock: hosting taguru-mcp in a Converse loop, the embeddings bridge proxy, calibrating the semantic floor, diagnosing model-access gates.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -12,9 +12,9 @@
 <body>
 
 <div class="topbar">
-  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="メニューを開閉">☰</button>
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
-  <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
 </div>
 <div class="scrim" id="scrim"></div>
 
@@ -23,31 +23,33 @@
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
   <nav class="side-nav">
     <div class="side-group">
-      <a href="index.html">ホーム</a>
+      <a href="index.html">Home</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">ガイド</div>
-      <a href="getting-started.html">はじめる</a>
-      <a href="concepts.html">コンセプト</a>
-      <a href="architecture.html">内部アーキテクチャ</a>
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">リファレンス</div>
-      <a href="import.html">バッチ投入（import）</a>
-      <a href="extract.html">文書抽出（extract）</a>
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">クラウドで使う</div>
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
       <a href="bedrock.html" aria-current="page">Amazon Bedrock</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">読みもの</div>
-      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
     </div>
   </nav>
   <div class="sidebar-footer">
     <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
-    <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
   </div>
 </aside>
 
@@ -55,61 +57,65 @@
 <div class="page">
 
   <header class="hero">
-    <div class="eyebrow">cloud guide · amazon bedrock</div>
-    <h1>Amazon Bedrockで使う</h1>
+    <div class="eyebrow">deploy · amazon bedrock</div>
+    <h1>Taguru on Amazon Bedrock</h1>
     <p class="lede">
-      Taguruはモデル非依存——サーバーはHTTPを、ブリッジはMCP over stdioを話し、
-      どのモデルがエージェントを駆動しているかを気にしない。このページは3つの統合点と、
-      実際に全部を動かして踏んだ角を記録する。
+      Taguru is model-agnostic — the server speaks HTTP, the bridge speaks MCP over stdio, and
+      neither cares which model drives the agent. This page records the three integration points
+      and the corners actually hit while running the whole thing.
     </p>
     <div class="hero-meta">
-      <span><b>エージェント:</b> Claude Sonnet 4.5（<code>us.</code>推論プロファイル）</span>
-      <span><b>埋め込み:</b> amazon.titan-embed-text-v2:0</span>
-      <span><b>リージョン:</b> us-east-1</span>
+      <span><b>Agent:</b> Claude Sonnet 4.5 (<code>us.</code> inference profile)</span>
+      <span><b>Embeddings:</b> amazon.titan-embed-text-v2:0</span>
+      <span><b>Region:</b> us-east-1</span>
     </div>
   </header>
 
   <section id="agent">
-    <h2>1. エージェント側——Converse + taguru-mcp</h2>
-    <p class="section-sub">MCPが通るところはMCPで。通らないところにはHTTP APIが残っている。</p>
+    <h2>1. The agent side — Converse + taguru-mcp</h2>
+    <p class="section-sub">MCP where MCP reaches; the HTTP API remains where it doesn't.</p>
     <p>
-      <b>Claude CodeをBedrockで使うなら</b>（<code>CLAUDE_CODE_USE_BEDROCK=1</code>）、特別なことは何もない——
-      MCPサーバーはローカルの子プロセスなので、<a href="getting-started.html#mcp">通常のセットアップ</a>の
-      <code>claude mcp add taguru …</code> がそのまま動く。
+      <b>Using Claude Code on Bedrock</b> (<code>CLAUDE_CODE_USE_BEDROCK=1</code>) needs nothing
+      special — the MCP server is a local child process, so the
+      <code>claude mcp add taguru …</code> of the <a href="getting-started.html#mcp">normal
+      setup</a> works as-is.
     </p>
-    <p><b>Converse APIで自前のエージェントループを組むなら</b>、<code>taguru-mcp</code> をstdioの子プロセスとして抱えて機械的に翻訳する：</p>
+    <p><b>Building your own agent loop on the Converse API</b>, hold <code>taguru-mcp</code> as a stdio child process and translate mechanically:</p>
     <ul>
-      <li><code>initialize</code> が規律書の全文を <code>instructions</code> として返す（<code>GET /protocol</code> から生きた設定つきで配られる）。これをConverseの <code>system</code> テキストに——毎ターン再送されるので、<code>cachePoint</code> ブロックの後ろに置くのが望ましい。</li>
-      <li><code>tools/list</code> の各エントリはConverseのツールに1:1で対応する：<code>{"toolSpec": {"name", "description", "inputSchema": {"json": &lt;MCPのinputSchema&gt;}}}</code>——スキーマは素のJSON Schemaで、無加工で通る。</li>
-      <li><code>stopReason == "tool_use"</code> なら各ブロックを <code>tools/call</code> に転送し、テキストを <code>toolResult</code> として返す。<code>end_turn</code> までループ。</li>
+      <li><code>initialize</code> returns the full playbook as <code>instructions</code> (distributed from <code>GET /protocol</code> with the live configuration baked in). Put it in Converse's <code>system</code> text — it is re-sent every turn, so it belongs behind a <code>cachePoint</code> block.</li>
+      <li>Each <code>tools/list</code> entry maps 1:1 onto a Converse tool: <code>{"toolSpec": {"name", "description", "inputSchema": {"json": &lt;the MCP inputSchema&gt;}}}</code> — the schemas are plain JSON Schema and pass through unmodified.</li>
+      <li>On <code>stopReason == "tool_use"</code>, forward each block to <code>tools/call</code> and return the text as a <code>toolResult</code>. Loop until <code>end_turn</code>.</li>
     </ul>
     <p class="note">
-      Sonnet 4.5での実測：9つの事実を含む日本語メモが、規律どおりの8ツール呼び出し
-      （create → 一括の add_associations → store_passages → audit_coverage → 検証）で取り込まれた。
-      同じ文書の再実行は retract-then-reingest のdiff同期になり、weightの二重加算なし——
-      規律書だけで、Anthropic以外のホストAPIの上でも規律が運ばれた。
+      Measured with Sonnet 4.5: a Japanese memo containing nine facts was ingested with the eight
+      tool calls the discipline prescribes (create → one batched add_associations →
+      store_passages → audit_coverage → verification). Re-running the same document became a
+      retract-then-reingest diff sync with no weight double-counting — the playbook alone carried
+      the discipline, on a non-Anthropic host API.
     </p>
     <p>
-      <b>マネージドなエージェント実行環境</b>（Bedrock AgentCoreなど）は<b>リモート</b>のMCPエンドポイントを欲しがる——
-      それもある：<code>POST /mcp</code> がMCP Streamable HTTPを、他のAPIと同じBearerトークンの内側で話す
-      （TLSはリバースプロキシで）。<code>https://your-host/mcp</code> をそのまま登録する。
-      stdioブリッジは同居構成向けの正解であり続け、MCPが届かない場所でも、HTTP APIは
-      Bearer認証つきの小さなJSON APIとしてOpenAPIアクショングループ／Gatewayターゲットに収まる。
+      <b>Managed agent runtimes</b> (Bedrock AgentCore and the like) want a <b>remote</b> MCP
+      endpoint — that exists too: <code>POST /mcp</code> speaks MCP Streamable HTTP behind the
+      same Bearer token as the rest of the API (TLS via a reverse proxy). Register
+      <code>https://your-host/mcp</code> directly. The stdio bridge remains the right answer for
+      co-located setups, and where MCP doesn't reach at all, the HTTP API fits an OpenAPI action
+      group / Gateway target as a small Bearer-authenticated JSON API.
     </p>
   </section>
 
   <section id="embeddings">
-    <h2>2. 埋め込み——ブリッジプロキシの背後のBedrockモデル</h2>
+    <h2>2. Embeddings — a Bedrock model behind a bridge proxy</h2>
     <p class="section-sub">
-      Taguruが話す埋め込みプロトコルはひとつ：OpenAI互換の <code>POST {model, input}</code> → <code>{data: [{embedding}]}</code>。
-      Bedrockの埋め込みモデルは InvokeModel + SigV4 の向こうに、モデルファミリーごとのボディ形で座っている。
+      Taguru speaks one embedding protocol: OpenAI-compatible <code>POST {model, input}</code> →
+      <code>{data: [{embedding}]}</code>. Bedrock's embedding models sit behind InvokeModel +
+      SigV4, with a per-family body shape.
     </p>
     <p>
-      橋渡しはLiteLLMやAWSのBedrock Access Gatewayサンプル（どちらも既にOpenAIを話す）で——
-      あるいはこの程度の小ささのプロキシでも足りる（エラー処理は省略。バインドはloopbackだけに）：
+      Bridge with LiteLLM or AWS's Bedrock Access Gateway sample (both already speak OpenAI) — or
+      a proxy this small is enough (error handling omitted; bind to loopback only):
     </p>
     <pre><code>#!/usr/bin/env python3
-<span class="c"># OpenAI互換 /embeddings → Bedrock InvokeModel（Titan & Cohere）</span>
+<span class="c"># OpenAI-compatible /embeddings → Bedrock InvokeModel (Titan &amp; Cohere)</span>
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import boto3
@@ -122,15 +128,15 @@ def invoke(model_id, body):
 
 def embed(model_id, texts, purpose):
     if model_id.startswith("cohere.embed"):
-        <span class="c"># X-Taguru-Embed-Purpose はCohereが求める非対称性そのもの</span>
+        <span class="c"># X-Taguru-Embed-Purpose is exactly the asymmetry Cohere asks for</span>
         input_type = "search_document" if purpose == "index" else "search_query"
         out = []
-        for i in range(0, len(texts), 96):  <span class="c"># Cohereは96テキストが上限</span>
+        for i in range(0, len(texts), 96):  <span class="c"># Cohere caps at 96 texts</span>
             out += invoke(model_id, {"texts": texts[i : i + 96],
                                      "input_type": input_type})["embeddings"]
         return out
     shape = (lambda t: {"inputText": t, "dimensions": 512}) if "v2" in model_id \
-        else (lambda t: {"inputText": t})  <span class="c"># Titan: 1呼び出し1テキスト</span>
+        else (lambda t: {"inputText": t})  <span class="c"># Titan: one text per call</span>
     return [invoke(model_id, shape(t))["embedding"] for t in texts]
 
 class Handler(BaseHTTPRequestHandler):
@@ -149,76 +155,80 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 HTTPServer(("127.0.0.1", 8257), Handler).serve_forever()</code></pre>
-    <p>Taguruをそこへ向ける：</p>
+    <p>Point Taguru at it:</p>
     <pre><code>TAGURU_EMBED_URL=http://127.0.0.1:8257/v1/embeddings
 TAGURU_EMBED_MODEL=amazon.titan-embed-text-v2:0
-TAGURU_SEMANTIC_FLOOR=0.2   <span class="c"># 下で校正する——飛ばさないこと</span>
-TAGURU_EMBED_AUTO=1         <span class="c"># エージェントのrefresh呼び出しは当てにしない</span></code></pre>
+TAGURU_SEMANTIC_FLOOR=0.2   <span class="c"># calibrated below — do not skip this</span>
+TAGURU_EMBED_AUTO=1         <span class="c"># don't count on the agent calling refresh</span></code></pre>
     <p class="note warn">
-      Taguruは受け取ったベクトルを正規化するので、Titanの生（非正規化）出力はそのままでよい。
-      ただし <code>dimensions: 512</code> は固定で——次元設定の違うベクトルは絶対に同じサイドカーを共有してはならず、
-      Taguruのベクトルキャッシュは<b>モデル名だけ</b>をキーにする。次元は一度決めたら変えない。
+      Taguru normalizes the vectors it receives, so Titan's raw (unnormalized) output is fine
+      as-is. But keep <code>dimensions: 512</code> fixed — vectors with different dimension
+      settings must never share a sidecar, and Taguru's vector cache is keyed by <b>model name
+      alone</b>. Pick a dimension once and never change it.
     </p>
   </section>
 
   <section id="floor">
-    <h2>3. <code>TAGURU_SEMANTIC_FLOOR</code> の校正</h2>
-    <p class="section-sub">床は埋め込みモデルの属性。既定値のまま別モデルに乗り換えると、静かに全部を捨てることがある。</p>
+    <h2>3. Calibrating <code>TAGURU_SEMANTIC_FLOOR</code></h2>
+    <p class="section-sub">The floor is a property of the embedding model. Switching models while keeping the default can silently discard everything.</p>
     <p>
-      内蔵の床（0.35）は <code>text-embedding-3-large</code> のグロス向けに校正されている。
-      Titan V2（512次元）は日本語のコサインを圧縮する：実測では正解が0.2〜0.3、無関係な名前が〜0.15に並び、
-      既定の0.35は<b>正しい答えを全部黙って捨てていた</b>——resolveは <code>[]</code> を返すのに、
-      その下のランキングは完璧、という症状になる。
+      The built-in floor (0.35) is calibrated for <code>text-embedding-3-large</code> over
+      glosses. Titan V2 (512 dimensions) compresses cosines on Japanese text: measured, true
+      matches landed at 0.2–0.3 with unrelated names around ~0.15 — and the default 0.35 was
+      <b>silently discarding every correct answer</b>. The symptom: resolve returns
+      <code>[]</code> while the ranking underneath is perfect.
     </p>
-    <p>埋め込みモデルごとに一度だけ校正する：</p>
+    <p>Calibrate once per embedding model:</p>
     <ol>
-      <li>代表的な内容をインジェストし、埋め込みをrefreshする。</li>
-      <li>格納済みのどの名前とも綴りを共有しない<b>言い換えcue</b>で突く：<code>POST /contexts/{name}/resolve {"cue": "…", "semantic_floor": 0.05}</code></li>
-      <li>スコアが2つの帯に分かれて見える。<code>TAGURU_SEMANTIC_FLOOR</code> をその間に置く。</li>
+      <li>Ingest representative content and refresh the embeddings.</li>
+      <li>Probe with <b>paraphrase cues</b> that share no spelling with any stored name: <code>POST /contexts/{name}/resolve {"cue": "…", "semantic_floor": 0.05}</code></li>
+      <li>The scores separate into two bands. Set <code>TAGURU_SEMANTIC_FLOOR</code> between them.</li>
     </ol>
     <div class="tbl">
       <table>
-        <thead><tr><th>モデル</th><th>床</th></tr></thead>
+        <thead><tr><th>Model</th><th>Floor</th></tr></thead>
         <tbody>
-          <tr><td>text-embedding-3-large</td><td>0.35（既定値）</td></tr>
-          <tr><td>amazon.titan-embed-text-v2:0（512d・日本語）</td><td>〜0.2</td></tr>
+          <tr><td>text-embedding-3-large</td><td>0.35 (the default)</td></tr>
+          <tr><td>amazon.titan-embed-text-v2:0 (512d, Japanese)</td><td>~0.2</td></tr>
         </tbody>
       </table>
     </div>
   </section>
 
   <section id="access">
-    <h2>4. Bedrockがモデルの提供を拒むとき</h2>
+    <h2>4. When Bedrock refuses to serve a model</h2>
     <p class="section-sub">
-      サードパーティモデルへのアクセスは<b>ばたつく</b>ことがある——成功した直後に同一リクエストが拒否される、
-      をコンソール側の状態が伝播する間くり返す。当て推量は飛ばして、1コールで全ゲートに名前を付ける。
+      Access to third-party models can <b>flap</b> — the same request succeeds and is then denied
+      while console-side state propagates. Skip the guessing and name every gate in one call.
     </p>
     <pre><code>aws bedrock get-foundation-model-availability \
   --model-id anthropic.claude-sonnet-4-5-20250929-v1:0</code></pre>
     <ul>
-      <li><code>regionAvailability</code> — そもそもこのリージョンで提供されているか</li>
+      <li><code>regionAvailability</code> — is it offered in this region at all</li>
       <li><code>entitlementAvailability</code></li>
-      <li><code>authorizationStatus</code> — Anthropicのユースケースフォーム（コンソールで、アカウントごとに一度。個人なら自分の名前とGitHubのURLで足りる）</li>
-      <li><code>agreementAvailability</code> — AWS Marketplaceの契約</li>
+      <li><code>authorizationStatus</code> — Anthropic's use-case form (in the console, once per account; for an individual, your name and a GitHub URL suffice)</li>
+      <li><code>agreementAvailability</code> — the AWS Marketplace agreement</li>
     </ul>
     <p>
-      コンソールからの修復に抵抗するのは <code>agreementAvailability: NOT_AVAILABLE</code>
-      （呼び出しエラーはIAMのせいにし続けるのに、コンソールには保留中のものが何も見えない）。契約は直接作る：
+      The one that resists console repair is <code>agreementAvailability: NOT_AVAILABLE</code>
+      (invocation errors keep blaming IAM while the console shows nothing pending). Create the
+      agreement directly:
     </p>
     <pre><code>aws bedrock list-foundation-model-agreement-offers --model-id &lt;id&gt;   <span class="c"># → offerToken</span>
 aws bedrock create-foundation-model-agreement --model-id &lt;id&gt; --offer-token &lt;token&gt;</code></pre>
     <p>
-      Bedrockのモデルオファーは前払い$0の従量制。契約の作成には<b>呼び出し側</b>のアイデンティティに
-      <code>aws-marketplace:Subscribe</code> + <code>aws-marketplace:ViewSubscriptions</code> が一度だけ要る——
-      成功したらそのグラントは剥がしてよく、以後の普通の呼び出しは <code>bedrock:InvokeModel</code> だけで済む。
+      Bedrock model offers are $0-upfront, pay-as-you-go. Creating the agreement needs
+      <code>aws-marketplace:Subscribe</code> + <code>aws-marketplace:ViewSubscriptions</code> on
+      the <b>calling</b> identity, once — the grant can be peeled off after it succeeds, and
+      ordinary calls thereafter need only <code>bedrock:InvokeModel</code>.
     </p>
-    <p>あと2つの罠：</p>
+    <p>Two more traps:</p>
     <ul>
-      <li>新しめのClaudeモデルは素のモデルIDを拒む（"on-demand throughput isn't supported"）：クロスリージョン推論プロファイル（<code>us.</code>／<code>apac.</code>／<code>global.</code> プレフィックス）を呼び、IAMは<b>推論プロファイルのARNと、ルーティングされ得る全リージョンの基盤モデルARNの両方</b>に付与する——リージョンはワイルドカードで。</li>
-      <li>Amazonの自社モデル（Titan）はMarketplaceを通らない。<b>Titanは動くのにAnthropic/Cohereが失敗するなら、それは契約ゲートであって、あなたのポリシーではない。</b></li>
+      <li>Newer Claude models refuse the bare model ID ("on-demand throughput isn't supported"): call the cross-region inference profile (<code>us.</code>/<code>apac.</code>/<code>global.</code> prefix), and grant IAM on <b>both the inference-profile ARN and the foundation-model ARNs of every region it can route to</b> — wildcard the region.</li>
+      <li>Amazon's own models (Titan) don't pass through the Marketplace. <b>If Titan works while Anthropic/Cohere fail, it's the agreement gate, not your policy.</b></li>
     </ul>
-    <h3>最小の呼び出しポリシー</h3>
-    <p>（契約作成は含まない——それは別途・短期間だけ付与する）</p>
+    <h3>A minimal invocation policy</h3>
+    <p>(Does not include agreement creation — grant that separately, briefly.)</p>
     <pre><code>{
   <span class="k">"Version"</span>: <span class="s">"2012-10-17"</span>,
   <span class="k">"Statement"</span>: [
@@ -247,13 +257,17 @@ aws bedrock create-foundation-model-agreement --model-id &lt;id&gt; --offer-toke
 }</code></pre>
 
     <div class="next-links">
-      <a class="nav-card" href="getting-started.html" style="flex:1 1 16rem">
-        <span class="nc-title">はじめるに戻る</span>
-        <p>サーバー本体のセットアップ、import / extract、MCP接続。</p>
+      <a class="nav-card" href="docker-compose.html" style="flex:1 1 16rem">
+        <span class="nc-title">Docker Compose</span>
+        <p>The server on a single host: named volume, loopback port, backups.</p>
+      </a>
+      <a class="nav-card" href="kubernetes.html" style="flex:1 1 16rem">
+        <span class="nc-title">Kubernetes</span>
+        <p>replicas: 1 + Recreate, ReadWriteOnce storage, the probe wiring.</p>
       </a>
       <a class="nav-card" href="mcp-rag-walkthrough.html" style="flex:1 1 16rem">
-        <span class="nc-title">ウォークスルー</span>
-        <p>接続後のLLMが実際にどう検索するか。</p>
+        <span class="nc-title">Walkthrough</span>
+        <p>How a connected LLM actually retrieves.</p>
       </a>
     </div>
   </section>

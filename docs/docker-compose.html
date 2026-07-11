@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deploy with Docker Compose — Taguru</title>
+  <meta name="description" content="Deploying Taguru on a single host with Docker Compose: the single-writer model, the scratch image, a walkthrough of deploy/docker-compose.yml, credentials, backups and restore.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html" aria-current="page">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">deploy · docker compose</div>
+    <h1>Deploy with Docker Compose</h1>
+    <p class="lede">
+      Taguru is deliberately a single-node, single-writer system, and
+      <a href="https://github.com/t0k0sh1/taguru/blob/main/deploy/docker-compose.yml"><code>deploy/docker-compose.yml</code></a>
+      is that model on a single host: one container, one named volume, a loopback port, a
+      graceful stop. This page walks the file and the operations around it.
+    </p>
+    <div class="hero-meta">
+      <span><b>Image:</b> ghcr.io/t0k0sh1/taguru (scratch, ~13 MB)</span>
+      <span><b>Manifest:</b> deploy/docker-compose.yml</span>
+    </div>
+  </header>
+
+  <section id="model">
+    <h2>Ground rules — one host, one writer</h2>
+    <p class="section-sub">
+      One fsync-then-apply owner per data directory is what makes "200 = durable" simple enough
+      to trust. Everything below follows from it.
+    </p>
+    <ul>
+      <li><b>Never run two containers against one volume.</b> The advisory lock refuses a second writer on local disks; don't rely on being refused — just don't wire it up.</li>
+      <li><b>Deploys are stop-then-start.</b> <code>docker compose up -d</code> after an image change recreates the container: stop, then start. The downtime is the boot — cold registration is cheap however many contexts exist, and pinned contexts preload in parallel.</li>
+      <li><b>Availability is restore time, not failover.</b> There is no replication; the recovery unit is the volume. The backup procedure below <i>is</i> the availability story — rehearse it.</li>
+      <li><b>A rollback is a restore.</b> Image formats migrate forward on load and never write the old version back out, so rolling the binary back past a format bump needs the volume rolled back with it (snapshot) or re-imported from an export stream. Check the release notes before downgrading.</li>
+    </ul>
+    <p class="note">
+      The same model on a cluster — with the platform enforcing the single writer — is the
+      <a href="kubernetes.html">Kubernetes page</a>.
+    </p>
+  </section>
+
+  <section id="image">
+    <h2>The image</h2>
+    <p class="section-sub">The published image is the server binary alone on <code>scratch</code> — no shell, no libc, nothing to patch.</p>
+    <ul>
+      <li>Inside a container the server binds <code>0.0.0.0:8248</code> by default, so <b>the port reaches as far as you publish it</b> — keep the publish on <code>127.0.0.1</code>, and set a token.</li>
+      <li>The process runs as uid 65532. A named volume inherits ownership automatically on first use; a bind mount needs <code>chown -R 65532</code> first (or <code>--user "$(id -u)"</code>).</li>
+      <li>It runs with a read-only root filesystem — /data is the only write target. The compose file turns that on.</li>
+      <li>The HEALTHCHECK is <code>taguru health</code> — the binary probes itself; there is no curl on scratch.</li>
+      <li><code>docker stop</code> is a graceful shutdown (flush + usage-stats sweep).</li>
+      <li><b>Pin the image version</b>: <code>latest</code> moves, and a surprise binary bump on a restart is exactly what a format-sensitive data directory doesn't want.</li>
+    </ul>
+  </section>
+
+  <section id="compose">
+    <h2>The compose file</h2>
+    <p class="section-sub">Credentials stay out of the manifest — the file demands the token from the caller's environment.</p>
+    <pre><code>TAGURU_API_TOKENS='ops:CHANGE-ME' docker compose up -d</code></pre>
+    <pre><code>services:
+  taguru:
+    image: ghcr.io/t0k0sh1/taguru:0.1.0 <span class="c"># pin; `latest` moves</span>
+    ports:
+      - "127.0.0.1:8248:8248"
+    environment:
+      TAGURU_API_TOKENS: ${TAGURU_API_TOKENS:?set TAGURU_API_TOKENS=name:token}
+      <span class="c"># Scope keys, budgets, and the embedding tier live here too —</span>
+      <span class="c"># `taguru --help` lists every knob; `--env-file` reads the same</span>
+      <span class="c"># KEY=VALUE file `taguru --config` does.</span>
+    volumes:
+      - taguru-data:/data
+    read_only: true <span class="c"># /data is the only write target</span>
+    restart: unless-stopped
+    <span class="c"># `docker stop` is a graceful shutdown (flush + usage sweep); give</span>
+    <span class="c"># a large flush a moment before the kill.</span>
+    stop_grace_period: 30s
+
+volumes:
+  taguru-data:</code></pre>
+    <ul>
+      <li><b>The token is required, not defaulted</b>: <code>${TAGURU_API_TOKENS:?…}</code> fails the deploy loudly rather than starting an unauthenticated server. Named keys (<code>name:token</code>) mean the access log says which key was used and a leak costs one revocation.</li>
+      <li><b>The port stays on loopback.</b> Expose it beyond this host only behind a TLS-terminating reverse proxy (a bearer token is the whole credential), and set <code>TAGURU_RATE_LIMIT_PER_MIN</code> when you do.</li>
+      <li><b><code>stop_grace_period: 30s</code></b> gives a large final flush room before the kill; <code>restart: unless-stopped</code> covers crashes without fighting an intentional stop.</li>
+      <li>All other configuration is ordinary environment: add <code>TAGURU_EMBED_*</code>, cache and rate budgets, etc. right in <code>environment:</code>, or via <code>--env-file</code> — the same KEY=VALUE file <code>taguru --config</code> reads, so one file can drive a local binary and this container alike.</li>
+    </ul>
+  </section>
+
+  <section id="backup">
+    <h2>Backups and restore</h2>
+    <p class="section-sub">On this model, availability is restore time. Two rungs: a byte-exact snapshot, and a portable export stream.</p>
+    <ol>
+      <li><code>POST /flush</code> — write out everything dirty.</li>
+      <li>Snapshot the volume (every writer is fsync+rename, so a filesystem snapshot is safe at any instant) — or take the portable stream with <code>taguru export</code> / <code>GET /contexts/{name}/export</code>, which restores anywhere through <code>taguru import</code> / <code>POST /import</code>, across versions and machines.</li>
+      <li>Verify with <code>taguru inspect</code> — the same fully-validating load + WAL replay the server does; non-zero exit means acknowledged data is corrupt.</li>
+    </ol>
+    <pre><code><span class="c"># verification needs no local toolchain — run the image against the volume</span>
+docker run --rm -v taguru-data:/data ghcr.io/t0k0sh1/taguru inspect /data</code></pre>
+    <p class="note warn">
+      Back up each context's file family <b>as a set, always</b> — a naive <code>rsync</code>/<code>cp</code>
+      against a live server does not guarantee cross-file consistency; stop the server or take a
+      real snapshot. And <b>rehearse the restore</b>. Details in
+      <a href="getting-started.html#ops">operational basics</a>.
+    </p>
+  </section>
+
+  <section id="next">
+    <div class="next-links">
+      <a class="nav-card" href="kubernetes.html" style="flex:1 1 16rem">
+        <span class="nc-title">Kubernetes</span>
+        <p>The same single-writer model on a cluster: replicas: 1 + Recreate, ReadWriteOnce storage, the probe wiring.</p>
+      </a>
+      <a class="nav-card" href="bedrock.html" style="flex:1 1 16rem">
+        <span class="nc-title">Amazon Bedrock</span>
+        <p>Wiring the agent and the embedding tier to Bedrock models around a deployed server.</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>

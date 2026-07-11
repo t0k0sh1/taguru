@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Taguru — LLMのための長期意味記憶</title>
-  <meta name="description" content="知識を連想として蓄積し、糸口から手繰って引き出す。LLMのための長期意味記憶サーバー Taguru のドキュメント。">
+  <title>Taguru — long-term semantic memory for LLMs</title>
+  <meta name="description" content="Documentation for Taguru, a long-term semantic memory server for LLMs: knowledge accumulates as associations and is pulled back out from a cue.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -12,9 +12,9 @@
 <body>
 
 <div class="topbar">
-  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="メニューを開閉">☰</button>
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
-  <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
 </div>
 <div class="scrim" id="scrim"></div>
 
@@ -23,31 +23,33 @@
   <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
   <nav class="side-nav">
     <div class="side-group">
-      <a href="index.html" aria-current="page">ホーム</a>
+      <a href="index.html" aria-current="page">Home</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">ガイド</div>
-      <a href="getting-started.html">はじめる</a>
-      <a href="concepts.html">コンセプト</a>
-      <a href="architecture.html">内部アーキテクチャ</a>
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">リファレンス</div>
-      <a href="import.html">バッチ投入（import）</a>
-      <a href="extract.html">文書抽出（extract）</a>
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">クラウドで使う</div>
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
       <a href="bedrock.html">Amazon Bedrock</a>
     </div>
     <div class="side-group">
-      <div class="side-group-label">読みもの</div>
-      <a href="mcp-rag-walkthrough.html">ウォークスルー</a>
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
     </div>
   </nav>
   <div class="sidebar-footer">
     <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
-    <button class="theme-toggle" type="button" aria-label="テーマ切り替え">◐</button>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
   </div>
 </aside>
 
@@ -56,134 +58,148 @@
 
   <header class="hero">
     <div class="eyebrow">taguru · documentation</div>
-    <h1>手繰る（たぐる）——<br>糸口から知識を引き出す、LLMのための長期記憶</h1>
+    <h1>手繰る (taguru) —<br>long-term memory for LLMs that pulls knowledge in from a cue</h1>
     <p class="lede">
-      Taguruは知識を <span class="tuple">(subject, label, object, weight, source)</span>
-      の連想として蓄積し、質問が「何について」かという糸口（cue）から連想グラフを
-      手繰って知識を引き出す記憶サーバー。ベクトル類似度は検索の入口ではなく、
-      証拠を運ぶ一本のレーンとして併走する。
+      Taguru accumulates knowledge as <span class="tuple">(subject, label, object, weight, source)</span>
+      associations and retrieves it the way a thread is pulled in hand over hand: from the cue —
+      what a question is <i>about</i>, the 糸口, the end of the thread — the association graph is
+      walked to draw the knowledge out. Vector similarity is not the entrance to retrieval;
+      it runs alongside as one lane of evidence.
     </p>
     <div class="hero-meta">
       <span><b>License:</b> MIT</span>
-      <span><b>実装:</b> Rust・単一バイナリ（~13 MB static）</span>
-      <span><b>インターフェイス:</b> HTTP API / MCP（stdio・Streamable HTTP）</span>
+      <span><b>Implementation:</b> Rust · single binary (~13 MB static)</span>
+      <span><b>Interfaces:</b> HTTP API / MCP (stdio · Streamable HTTP)</span>
     </div>
   </header>
 
   <section id="model">
-    <h2>何をするサーバーか</h2>
-    <p class="section-sub">保持するもの、検索のしかた、そして仕事の分担。</p>
+    <h2>What the server does</h2>
+    <p class="section-sub">What it keeps, how it searches, and who does which job.</p>
     <div class="model-card">
       <p>
-        「青嶺酒造の杜氏は高瀬」という知識は
-        <span class="tuple">(青嶺酒造, 杜氏, 高瀬, 1.0, docs/aomine.md)</span>
-        という一本の連想になる。weightは符号付きで、負の値は「〜ではない」という否定の主張。
-        同じ三つ組を別の文書が再主張すればweightが加算され、出典ごとのattributionが残る——
-        2つの情報源が独立に支持する事実と、1つの情報源が強く主張する事実は、最後まで区別できる。
+        The fact 「青嶺酒造の杜氏は高瀬」 — Aomine Brewery's master brewer is Takase — becomes the
+        single association
+        <span class="tuple">(青嶺酒造, 杜氏, 高瀬, 1.0, docs/aomine.md)</span>.
+        The weight is signed: a negative value states a negation ("is not"). When another document
+        re-asserts the same triple, the weights add up and a per-source attribution is kept —
+        a fact supported independently by two sources and a fact asserted strongly by one source
+        stay distinguishable to the end.
       </p>
       <p>
-        検索はまず構造から。cueを正規化された照合（表記ゆれ・かな/カナ・軽い誤字を吸収）で
-        グラフ上の概念に<b>解決</b>し、そこから連想を<b>手繰る</b>——これが第一レーン。
-        元の文章は段落単位のテキスト検索（BM25＋設定時は埋め込み）でもう一本のレーンとして引ける。
-        三つ組に収まらなかった手順の細部や条件は、こちらでしか見つからない。
+        Retrieval starts from structure. The cue is <b>resolved</b> to a concept on the graph
+        through normalized matching (absorbing spelling variation, kana/katakana differences,
+        light typos), and the associations are pulled from there — that is the first lane.
+        The original text can be searched as a second lane, paragraph by paragraph
+        (BM25, plus embeddings when configured). Procedural details and conditions that never
+        fit into a triple are only found on this lane.
       </p>
       <p>
-        言語を理解する仕事——文書を事実に分解する、コンテキストを選ぶ、結果を文章に組み立て直す——は
-        クライアント（LLM）の仕事。サーバーは構造の保管と探索だけを引き受け、
-        そのための規律書は <code>GET /protocol</code> でサーバー自身が配布する。
+        Everything that needs language understanding — decomposing documents into facts, choosing
+        a context, recomposing results into prose — is the client's (the LLM's) job. The server
+        only stores and walks structure, and it distributes the playbook for doing so itself:
+        <code>GET /protocol</code>.
       </p>
     </div>
   </section>
 
   <section id="docs">
-    <h2>ドキュメント</h2>
-    <p class="section-sub">導入から内部構造まで。すべてのページはビルド不要の静的HTMLで、ローカルでもそのまま開ける。</p>
+    <h2>Documentation</h2>
+    <p class="section-sub">From first install to the internals. Every page is build-free static HTML and opens locally as-is.</p>
     <div class="nav-cards">
       <a class="nav-card" href="getting-started.html">
-        <span class="nc-title">はじめる</span>
-        <p>インストール、起動と設定、最初の記憶、Docker、一括投入（import / extract）、MCP接続、運用の基本。</p>
+        <span class="nc-title">Getting started</span>
+        <p>Install, run and configure, the first memory, Docker, bulk loads (import / extract), MCP wiring, operational basics.</p>
       </a>
       <a class="nav-card" href="concepts.html">
-        <span class="nc-title">コンセプト</span>
-        <p>連想モデルと文脈、検索ループ、二本のレーンの役割分担、インジェストの規律、手順・因果・コードの表現パターン。</p>
-      </a>
-      <a class="nav-card" href="architecture.html">
-        <span class="nc-title">内部アーキテクチャ</span>
-        <p>フラットバッファのグラフ、ディスクを真実とするレジストリ、WALと耐久性、三つの検索経路、認証と可観測性。</p>
+        <span class="nc-title">Concepts</span>
+        <p>The association model and contexts, the retrieval loop, how the two lanes divide the work, ingest discipline, patterns for procedures, causality, and code.</p>
       </a>
       <a class="nav-card" href="import.html">
-        <span class="nc-title">バッチ投入の契約（import）</span>
-        <p>1ファイル=1ソースの完全な真実。ファイル形式の全行タイプ、上限、検証と適用、<code>POST /import</code> と並行性の規則。</p>
+        <span class="nc-title">The batch contract (import)</span>
+        <p>One file = one source's complete truth. Every line type of the file format, the caps, validation and apply, <code>POST /import</code>, and the concurrency rules.</p>
       </a>
       <a class="nav-card" href="extract.html">
-        <span class="nc-title">文書抽出（extract）</span>
-        <p>文書からバッチファイルを作るオフラインの生産者。プロンプトと強制、チャンク分割、doc2query、マニフェスト、信頼と品質。</p>
+        <span class="nc-title">Document extraction (extract)</span>
+        <p>The offline producer that turns documents into batch files. Prompt and enforcement, chunking, doc2query, the manifest, trust and quality.</p>
+      </a>
+      <a class="nav-card" href="docker-compose.html">
+        <span class="nc-title">Deploy with Docker Compose</span>
+        <p>A single host: the scratch image, a named volume, a loopback port, a graceful stop, backups and restore.</p>
+      </a>
+      <a class="nav-card" href="kubernetes.html">
+        <span class="nc-title">Deploy on Kubernetes</span>
+        <p>replicas: 1 + Recreate on ReadWriteOnce storage, the probe wiring, sizing, and storage-layer backups.</p>
       </a>
       <a class="nav-card" href="bedrock.html">
-        <span class="nc-title">Amazon Bedrockで使う</span>
-        <p>Converse APIでのtaguru-mcpホスト、埋め込みのブリッジプロキシ、semantic floorの校正、モデルアクセスの診断。</p>
+        <span class="nc-title">Amazon Bedrock</span>
+        <p>Hosting taguru-mcp in a Converse loop, the embeddings bridge proxy, calibrating the semantic floor, diagnosing model access.</p>
+      </a>
+      <a class="nav-card" href="architecture.html">
+        <span class="nc-title">Internal architecture</span>
+        <p>The flat-buffer graph, the disk-as-truth registry, WAL durability, three retrieval paths, auth and observability.</p>
       </a>
       <a class="nav-card" href="mcp-rag-walkthrough.html">
-        <span class="nc-title">ウォークスルー：LLMが知識を引き出すまで</span>
-        <p>実際のMCPリクエストとレスポンスで追う一往復。グラフレーンで答える質問と、テキストレーンに切り替える質問。</p>
+        <span class="nc-title">Walkthrough: how an LLM pulls knowledge out</span>
+        <p>One full round trip in real MCP requests and responses. A question the graph answers, and a question that switches to the text lane.</p>
       </a>
     </div>
   </section>
 
   <section id="quickstart">
-    <h2>30秒で試す</h2>
-    <p class="section-sub">サーバーを起き、コンテキストを作り、事実を一本入れて、手繰ってみる。</p>
-    <pre><code><span class="c"># インストール（server `taguru` と MCPブリッジ `taguru-mcp` が入る）</span>
+    <h2>Try it in 30 seconds</h2>
+    <p class="section-sub">Start the server, create a context, store one fact, and pull it back out.</p>
+    <pre><code><span class="c"># install (brings the server `taguru` and the MCP bridge `taguru-mcp`)</span>
 cargo install taguru
-taguru   <span class="c"># 127.0.0.1:8248 で待ち受け（データは ./data）</span>
+taguru   <span class="c"># listens on 127.0.0.1:8248 (data in ./data)</span>
 
-<span class="c"># コンテキストを作る</span>
+<span class="c"># create a context</span>
 curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \
   -d '{"description":"青嶺酒造という架空の酒蔵の知識"}'
 
-<span class="c"># 連想を一本入れる</span>
+<span class="c"># store one association</span>
 curl -X POST localhost:8248/contexts/sake/associations -H 'Content-Type: application/json' \
   -d '[{"subject":"青嶺酒造","label":"代表銘柄","object":"青嶺","weight":1.0,"source":"第1段落"}]'
 
-<span class="c"># 手繰る</span>
+<span class="c"># pull the thread</span>
 curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application/json' \
   -d '{"origins":["青嶺酒造"]}'</code></pre>
     <p class="note">
-      エンドポイントの一覧と、インジェスト／検索の規律の全文は、起動中のサーバーの
-      <code>GET /protocol</code> が配布する——LLMクライアントが受け取るものと同じ一次資料。
-      続きは<a href="getting-started.html">はじめる</a>へ。
+      The full endpoint list and the complete ingest/retrieval discipline are distributed by the
+      running server itself at <code>GET /protocol</code> — the same primary source an LLM client
+      receives. Continue with <a href="getting-started.html">Getting started</a>.
     </p>
   </section>
 
   <section id="principles">
-    <h2>設計原則</h2>
+    <h2>Design principles</h2>
     <div class="principles">
       <div class="principle">
         <span class="mark">一</span>
         <div>
-          <h3>構造が本線、類似度は一レーン</h3>
-          <p>入口は正規化された照合と概念解決。埋め込みは設定されていれば「弱い入口を補う層」と「テキストレーンの並走」として効く。どのレーンが当てたかは結果の<code>lanes</code>や<code>tier</code>が常に申告する。</p>
+          <h3>Structure is the main line; similarity is one lane</h3>
+          <p>The entrance is normalized matching and concept resolution. When embeddings are configured they act as a tier that backs up a weak entrance and as the parallel lane of text search. Which lane found a hit is always declared by <code>lanes</code> or <code>tier</code> in the result.</p>
         </div>
       </div>
       <div class="principle">
         <span class="mark">二</span>
         <div>
-          <h3>クライアントはLLM</h3>
-          <p>文書の分解も、答えの組み立ても、コンテキスト選びも言語理解の仕事なのでLLM側。サーバーは規律書（<code>/protocol</code>）とツール定義を自ら配り、接続した瞬間からLLMが正しい順番でツールを呼べるようにする。</p>
+          <h3>The client is an LLM</h3>
+          <p>Decomposing documents, assembling answers, and choosing a context are language-understanding work, so they belong to the LLM. The server hands out its own playbook (<code>/protocol</code>) and tool definitions, so a connected LLM knows the correct order of calls from the first turn.</p>
         </div>
       </div>
       <div class="principle">
         <span class="mark">三</span>
         <div>
-          <h3>答えは原文まで手繰れる</h3>
-          <p>グラフはアーカイブではなく索引。すべての事実は出典付きで、attributionの<code>source</code>と<code>paragraph</code>から元の段落そのものを引用（citation）で裏取りできる。</p>
+          <h3>Every answer pulls back to the original text</h3>
+          <p>The graph is an index, not an archive. Every fact carries its attribution, and the <code>source</code> and <code>paragraph</code> of an attribution lead back to the original paragraph itself through the citations API.</p>
         </div>
       </div>
       <div class="principle">
         <span class="mark">四</span>
         <div>
-          <h3>200を返した書き込みは失われない</h3>
-          <p>受理された書き込みはWALにfsyncしてから適用される。クラッシュしても再起動時のリプレイで戻る。ディスクが真実、メモリはコンテキスト単位のキャッシュにすぎない。</p>
+          <h3>A write acknowledged with 200 is never lost</h3>
+          <p>An accepted write is fsynced to the WAL before it applies. After a crash, replay on the next boot brings it back. Disk is the source of truth; memory is only a per-context cache.</p>
         </div>
       </div>
     </div>
@@ -192,7 +208,7 @@ curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application
   <footer class="colophon">
     <span>MIT License</span>
     <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
-    <span>このサイトは静的HTML——クローンして file:// で開いても全ページ動く</span>
+    <span>This site is plain static HTML — clone it and every page works over file://</span>
   </footer>
 
 </div>
