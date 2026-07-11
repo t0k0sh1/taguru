@@ -2552,6 +2552,13 @@ impl AppState {
     /// A concurrent passage store (which runs under the SHARED fence)
     /// can still land between the two — the passage text may be
     /// newer than the graph, never torn within one source.
+    ///
+    /// Cost note, like `compact_context`: the whole graph is walked and
+    /// materialized into owned strings while the (shared) fence is held,
+    /// so on a large context writers to THAT context wait out the
+    /// materialization. It is a per-context stall, off the async runtime
+    /// (`block_in_place` at the HTTP layer); a streaming, lock-light
+    /// export is future work, not a v1 promise.
     pub fn export_context(&self, name: &str) -> Result<crate::export::ExportSnapshot, AccessError> {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let stem = file_stem(name);

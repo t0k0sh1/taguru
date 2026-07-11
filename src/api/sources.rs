@@ -131,8 +131,8 @@ pub async fn list_sources(
     let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     match state.passage_sources(&name) {
         None => not_found(&name, started_at),
-        Some(Ok(mut sources)) => {
-            sources.sort();
+        // `passage_sources` already yields BTreeMap-key order — no sort.
+        Some(Ok(sources)) => {
             let total = sources.len();
             let sources: Vec<String> = sources
                 .into_iter()

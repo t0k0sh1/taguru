@@ -597,6 +597,9 @@ impl PassageStore {
         self.inner.read().unwrap().sources.get(source).cloned()
     }
 
+    /// The registered source ids, ASCENDING — `sources` is a
+    /// `BTreeMap`, so its keys come out sorted; callers paging by id
+    /// (`list_sources`) rely on this rather than re-sorting per page.
     pub(crate) fn source_ids(&self) -> Vec<String> {
         self.inner.read().unwrap().sources.keys().cloned().collect()
     }

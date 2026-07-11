@@ -884,6 +884,119 @@ impl Context {
         }
     }
 
+    /// Installs one brand-new edge at its FINAL totals in one shot —
+    /// the compaction primitive. Where `upsert` folds a single
+    /// assertion (count += 1) and so costs one call per historical
+    /// assertion, this sets the edge's `count`/`sum` and each
+    /// attribution's `count`/`sum`/locator directly, so rebuilding a
+    /// context is O(distinct edges + distinct attributions), not
+    /// O(total assertions) — a heavily corroborated edge no longer
+    /// turns compaction into millions of redundant interning probes.
+    ///
+    /// The caller ([`Context::compacted`]) builds a subset of an
+    /// already-valid image, so capacity cannot be exceeded; the
+    /// `ensure_room` call is the capacity guard that also produces the
+    /// `ContextFull` arm the signature promises. `attributions` carries
+    /// `(source, sum, count, paragraph)` per distinct source; the edge
+    /// total may exceed their sum when sourceless weight rode in.
+    fn install_edge(
+        &mut self,
+        subject: &str,
+        label: &str,
+        object: &str,
+        edge_count: u64,
+        edge_sum: f64,
+        attributions: &[(String, f64, u64, Option<u32>)],
+    ) -> Result<(), ContextFull> {
+        debug_assert!(edge_sum.is_finite(), "compaction must carry finite sums");
+        // One room check covers the concepts, label, edge, and the
+        // first source; every later source is one already present in the
+        // superset this context is compacting, so the arena and id
+        // ceilings it needs are provably already cleared.
+        let first_source = attributions.first().map(|(source, ..)| source.as_str());
+        self.ensure_room(subject, label, object, first_source)?;
+
+        let subject_id = self.intern_concept(subject.to_string());
+        let object_id = self.intern_concept(object.to_string());
+        let label_id = self.intern_label(label.to_string());
+
+        let edge_id = claim_id(self.edges.len(), "edge");
+        self.edge_ids
+            .insert((subject_id, label_id, object_id), edge_id);
+        self.edges.push(EdgeRecord {
+            subject: subject_id,
+            label: label_id,
+            object: object_id,
+            next_outgoing: NIL,
+            next_incoming: NIL,
+            next_labeled: NIL,
+            first_attribution: NIL,
+            last_attribution: NIL,
+            count: edge_count,
+            sum: edge_sum,
+        });
+        let node = &mut self.concepts[subject_id as usize];
+        append_to_chain(
+            &mut self.edges,
+            &mut node.first_outgoing,
+            &mut node.last_outgoing,
+            &mut node.outgoing_count,
+            edge_id,
+            |edge| &mut edge.next_outgoing,
+        );
+        let node = &mut self.concepts[object_id as usize];
+        append_to_chain(
+            &mut self.edges,
+            &mut node.first_incoming,
+            &mut node.last_incoming,
+            &mut node.incoming_count,
+            edge_id,
+            |edge| &mut edge.next_incoming,
+        );
+        let label_rec = &mut self.labels[label_id as usize];
+        append_to_chain(
+            &mut self.edges,
+            &mut label_rec.first_edge,
+            &mut label_rec.last_edge,
+            &mut label_rec.edge_count,
+            edge_id,
+            |edge| &mut edge.next_labeled,
+        );
+
+        for (source, sum, count, paragraph) in attributions {
+            let source_id = self.intern_source(source.clone());
+            let attribution_id = claim_id(self.attributions.len(), "attribution");
+            self.attributions.push(AttributionRecord {
+                source: source_id,
+                next: NIL,
+                count: *count,
+                sum: *sum,
+            });
+            self.attribution_ids
+                .insert((edge_id, source_id), attribution_id);
+            self.source_edges
+                .entry(source_id)
+                .or_default()
+                .push(edge_id);
+            if let Some(paragraph) = paragraph {
+                self.attribution_locators.push(AttributionLocatorRecord {
+                    attribution: attribution_id,
+                    paragraph: *paragraph,
+                });
+            }
+            let edge = &mut self.edges[edge_id as usize];
+            let tail = edge.last_attribution;
+            if tail == NIL {
+                edge.first_attribution = attribution_id;
+            }
+            edge.last_attribution = attribution_id;
+            if tail != NIL {
+                self.attributions[tail as usize].next = attribution_id;
+            }
+        }
+        Ok(())
+    }
+
     /// Recalls every association touching `cue`, whether it appears as the
     /// subject, the relation label, or the object. This lets a relation
     /// label (e.g. "好き") act as a search cue in its own right, not just a
@@ -1970,43 +2083,34 @@ impl Context {
                 stats.dead_edges += 1;
                 continue;
             }
-            let mut attributed_count = 0u64;
-            let mut attributed_sum = 0.0f64;
-            for attribution in &association.attributions {
-                if attribution.count == 0 {
-                    continue;
-                }
-                attributed_count += attribution.count;
-                attributed_sum += attribution.weight;
-                let per_assertion = attribution.weight / attribution.count as f64;
-                for index in 0..attribution.count {
-                    fresh.associate_from(
-                        &association.subject,
-                        &association.label,
-                        &association.object,
-                        per_assertion,
-                        &attribution.source,
-                        if index == 0 {
-                            attribution.paragraph
-                        } else {
-                            None
-                        },
-                    )?;
-                }
-            }
-            let residual_count = association.count.saturating_sub(attributed_count);
-            if residual_count > 0 {
-                let residual = (association.weight * association.count as f64 - attributed_sum)
-                    / residual_count as f64;
-                for _ in 0..residual_count {
-                    fresh.associate(
-                        &association.subject,
-                        &association.label,
-                        &association.object,
-                        residual,
-                    )?;
-                }
-            }
+            // The edge's final totals are known up front: its count is
+            // the association's, and its sum is the average weight times
+            // that count (`weight` is the average `sum / count`). Each
+            // attribution carries its own cumulative sum and count
+            // verbatim. Sourceless weight is whatever the edge total
+            // exceeds the attributed share — it needs no record, only to
+            // be inside the edge sum/count, which it already is.
+            let attributions: Vec<(String, f64, u64, Option<u32>)> = association
+                .attributions
+                .iter()
+                .filter(|attribution| attribution.count > 0)
+                .map(|attribution| {
+                    (
+                        attribution.source.clone(),
+                        attribution.weight,
+                        attribution.count,
+                        attribution.paragraph,
+                    )
+                })
+                .collect();
+            fresh.install_edge(
+                &association.subject,
+                &association.label,
+                &association.object,
+                association.count,
+                association.weight * association.count as f64,
+                &attributions,
+            )?;
         }
         for (alias, canonical) in self.concept_aliases() {
             match fresh.add_concept_alias(alias, canonical) {
@@ -2683,6 +2787,59 @@ mod tests {
         context.associate("私", "好き", "みかん", 2.0).unwrap();
         // 私はバナナが好きではありません
         context.associate("私", "好き", "バナナ", -1.0).unwrap();
+    }
+
+    /// Compaction reproduces every live edge — count, weight, and the
+    /// full per-source attribution breakdown including the paragraph
+    /// locator and sourceless residual — via the O(distinct) install
+    /// path, not the old O(total-assertion) replay. A heavily
+    /// corroborated edge (asserted many times) must round-trip exactly.
+    #[test]
+    fn compaction_reproduces_edges_at_their_final_totals() {
+        let mut context = Context::default();
+        // One edge corroborated 500 times by a.md (locator on the first),
+        // plus twice by b.md, plus one sourceless assertion.
+        for index in 0..500 {
+            context
+                .associate_from("蔵", "杜氏", "高瀬", 1.0, "a.md", (index == 0).then_some(3))
+                .unwrap();
+        }
+        context
+            .associate_from("蔵", "杜氏", "高瀬", 2.0, "b.md", None)
+            .unwrap();
+        context
+            .associate_from("蔵", "杜氏", "高瀬", 2.0, "b.md", None)
+            .unwrap();
+        context.associate("蔵", "杜氏", "高瀬", 5.0).unwrap();
+        // A second, independent edge and a fully retracted one.
+        context
+            .associate_from("蔵", "銘柄", "青嶺", 1.0, "a.md", None)
+            .unwrap();
+        context
+            .associate_from("蔵", "廃", "旧", 1.0, "x.md", None)
+            .unwrap();
+        context.retract_source("x.md");
+
+        let before = context.query(Some("蔵"), Some("杜氏"), Some("高瀬"));
+        let (fresh, stats) = context.compacted().unwrap();
+        assert_eq!(stats.dead_edges, 1, "the retracted edge sheds");
+        let after = fresh.query(Some("蔵"), Some("杜氏"), Some("高瀬"));
+        assert_eq!(
+            before, after,
+            "the corroborated edge must round-trip exactly"
+        );
+
+        let edge = &after[0];
+        assert_eq!(edge.count, 503, "500 + 2 + 1 assertions");
+        // Live edges survive; the dead one is gone.
+        assert_eq!(fresh.association_count(), 2);
+        let a_md = edge
+            .attributions
+            .iter()
+            .find(|attribution| attribution.source == "a.md")
+            .expect("a.md attribution survives");
+        assert_eq!(a_md.count, 500);
+        assert_eq!(a_md.paragraph, Some(3), "first-assertion locator preserved");
     }
 
     #[test]
