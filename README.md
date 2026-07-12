@@ -61,6 +61,13 @@ curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application
   -d '{"origins":["青嶺酒造"]}'
 ```
 
+Contexts can be bundled into **groups** (`PUT /groups/{name}`, nesting
+allowed), and the searches — `POST /recall`, `POST /query`,
+`POST /sources/search` — take `contexts` / `groups` lists to run one
+search across several contexts at once, every match tagged with the
+context it came from. Deep dives (`activate`, `explore`) stay
+per-context: search across, then pull the thread where it answered.
+
 For the endpoint list and the ingest/retrieval discipline, ask the
 running server: `GET /protocol`. A guided tour is
 [Getting started](https://t0k0sh1.github.io/taguru/getting-started.html).
@@ -203,7 +210,10 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   process at a time (serve or import) via an advisory lock — dependable
   on local disks, *not* on NFS/EFS. Deploys are stop-then-start;
   availability is restore time, not failover; scale horizontally by
-  giving independent instances disjoint sets of contexts.
+  giving independent instances disjoint sets of contexts. Note that
+  groups and cross-context search reach only the contexts of their own
+  instance — keep contexts that must be searched together on the same
+  one when sharding.
 - **Health and metrics.** `GET /health` is readiness (503 while the
   write path is degraded — route away, don't restart), `GET /live` is
   liveness, `GET /metrics` is Prometheus text. Every request lands in

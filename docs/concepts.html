@@ -109,6 +109,30 @@
     </p>
   </section>
 
+  <section id="groups">
+    <h2>Groups bundle contexts — and searches cross them</h2>
+    <p class="section-sub">A group is an organizational label over contexts, not context content.</p>
+    <p>
+      <code>/groups</code> bundles contexts many-to-many (a context may sit in several groups) and
+      may nest child groups — a shallow DAG, at most 3 groups tall, never cyclic. Membership
+      updates are deltas (<code>add_contexts</code> / <code>remove_contexts</code>,
+      <code>add_groups</code> / <code>remove_groups</code>), referential integrity is strict
+      (members must exist; deleting a context or group drops it from every group), and each
+      group persists as one <code>{name}.group</code> file beside the context files.
+    </p>
+    <p>
+      Groups are the addressing unit of <b>cross-context search</b>: <code>POST /recall</code>,
+      <code>POST /query</code>, and <code>POST /sources/search</code> take
+      <code>contexts</code> and/or <code>groups</code> lists and run one search across every
+      context reached — nested children included, overlaps deduped, every match tagged with the
+      <code>context</code> it came from. Graph matches merge on |weight| (weights share one
+      scale — evidence mass); passage hits interleave by per-context rank, because passage
+      scores are corpus-local. Deep dives (<code>activate</code>, <code>explore</code>,
+      <code>resolve</code>) stay per-context by design: search across, then pull the thread
+      inside the context that answered.
+    </p>
+  </section>
+
   <section id="index-not-archive">
     <h2>The graph is an index, not an archive</h2>
     <p class="section-sub">The skeleton goes on the graph; the flesh stays in the original text.</p>

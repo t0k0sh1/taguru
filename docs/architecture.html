@@ -150,12 +150,14 @@
 ├── {name}.passages.wal.jsonl  <span class="c"># append log of the original text</span>
 ├── {name}.bm25.bin            <span class="c"># paragraph inverted index (derived — lose it and it rebuilds; never an outage)</span>
 ├── {name}.vectors.bin         <span class="c"># embedding cache (keyed by model name)</span>
+├── {name}.group               <span class="c"># one group's record (name, description, members, children) — fsync + rename</span>
 ├── oauth.json                 <span class="c"># OAuth grants for remote MCP</span>
 └── .taguru.lock               <span class="c"># advisory lock on the data directory</span></code></pre>
     <ul>
       <li>Boot registers every context <b>cold</b> (only pinned ones preload). The first access loads transparently; past the cache budget (<code>TAGURU_CACHE_BYTES</code>) least-recently-used contexts are evicted.</li>
       <li>A write only marks its context dirty. Persistence happens on the periodic flusher (<code>TAGURU_FLUSH_SECS</code>), on eviction, and on shutdown.</li>
       <li>The truth of one context is its whole file family — back it up <b>as a set, always</b> (<a href="getting-started.html#ops">operational basics</a>).</li>
+      <li>Groups (<code>{name}.group</code>) stay resident whole and reconcile at boot: dangling members are dropped, an unparseable file is set aside as <code>{name}.group.corrupt</code> and reset empty. A group reaches only the contexts of <b>its own data directory</b> — when scaling horizontally by sharding contexts across instances, a group cannot span the shards.</li>
     </ul>
   </section>
 

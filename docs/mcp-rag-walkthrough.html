@@ -582,6 +582,15 @@
         </div>
       </div>
       <div class="tool-group">
+        <div class="tool-group-label">Groups</div>
+        <div class="chips">
+          <span class="chip">list_groups</span>
+          <span class="chip">create_group</span>
+          <span class="chip">update_group</span>
+          <span class="chip">delete_group</span>
+        </div>
+      </div>
+      <div class="tool-group">
         <div class="tool-group-label">Writes (ingest)</div>
         <div class="chips">
           <span class="chip">add_associations</span>
@@ -619,7 +628,7 @@
         </div>
       </div>
     </div>
-    <p class="note">Of the 26 tools, the six highlighted (<span class="chip used" style="padding:0.1em 0.4em;">indigo</span> = graph lane, <span class="chip used-text" style="padding:0.1em 0.4em;">vermilion</span> = text lane) are the ones actually called in the two scenarios below.</p>
+    <p class="note">Of the 30 tools, the six highlighted (<span class="chip used" style="padding:0.1em 0.4em;">indigo</span> = graph lane, <span class="chip used-text" style="padding:0.1em 0.4em;">vermilion</span> = text lane) are the ones actually called in the two scenarios below. The search tools (<code>recall</code>, <code>query</code>, <code>search_passages</code>) also take <code>contexts</code> / <code>groups</code> lists to search several contexts at once, every match tagged with the context it came from.</p>
 
     <div class="loop">
       <div class="loop-step"><span class="n">01</span><span class="t">Select</span><span class="d">pick the context with list_contexts</span></div>
