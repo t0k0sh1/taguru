@@ -125,6 +125,14 @@ Entries that change an on-disk format or a response shape say so.
 - `GET /protocol` documents the correction split: retract what should
   never have been asserted, contest with negative weight what the
   world disputes.
+- MCP parity for the backup verbs: `flush` (admin, answers the flushed
+  names), `export_context` (the import batch stream as one text
+  block), and `export_group` (the group's `taguru_group` line) ride
+  the tool surface, mapping onto `POST /flush` and the export routes
+  with their roles intact — an agent can run the documented
+  flush-then-export discipline without leaving MCP. Very large
+  contexts should still export over plain HTTP or `taguru export`
+  offline; the tool descriptions say so.
 
 ### Changed
 - doc2query `questions` now index into their paragraph's BM25 postings

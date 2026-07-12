@@ -628,6 +628,24 @@ pub fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "flush",
+            "Persist every dirty context to disk now; answers the flushed names (admin role). The backup handshake's first half: flush, then snapshot the data directory — the same discipline the operator docs describe, reachable by an agent tending its own memory.",
+            object_schema(json!({}), &[]),
+        ),
+        (
+            "export_context",
+            "The whole context as an import batch stream (JSON Lines text) — one batch per source, create block first, aliases last; `taguru import` or POST /import restores it (per-source retract-then-apply, idempotent). The portable, version-independent backup of one context. The stream rides back as one text block: for very large contexts prefer GET /contexts/{name}/export over plain HTTP, or `taguru export` offline.",
+            object_schema(json!({ "context": context }), &["context"]),
+        ),
+        (
+            "export_group",
+            "One group as its import-stream record (a single `taguru_group` JSON line — the group's complete truth); importing it restores the group as a whole-record replace. A context-scoped key exports exactly the slice its grant can read.",
+            object_schema(
+                json!({ "name": { "type": "string", "description": "Group name (from list_groups)" } }),
+                &["name"],
+            ),
+        ),
+        (
             "get_protocol",
             "The complete manual: ingest discipline and retrieval loop.",
             object_schema(json!({}), &[]),
@@ -675,6 +693,9 @@ pub fn route_tool(
     };
     Ok(match name {
         "get_protocol" => ("GET", "/protocol".to_string(), None),
+        "flush" => ("POST", "/flush".to_string(), None),
+        "export_context" => ("GET", format!("{}/export", context_path("context")?), None),
+        "export_group" => ("GET", format!("{}/export", group_path("name")?), None),
         "list_contexts" => (
             "GET",
             format!("/contexts{}", query_string(arguments, &["limit", "after"])),

@@ -6905,3 +6905,91 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
     }
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
+
+/// The operator verbs ride MCP too: flush names what it persisted and
+/// the exports hand back the same streams the HTTP routes serve — an
+/// agent can tend its own backup discipline (flush → export → import)
+/// without leaving the tool surface. Admin gating carries over from
+/// the routes the tools map onto.
+#[test]
+fn flush_and_export_ride_the_mcp_transport() {
+    // A one-hour flush interval keeps the periodic flusher out of the
+    // race: the dirty context below stays dirty until the tool runs.
+    let server = Server::start_with_env("mcp-ops", &[("TAGURU_FLUSH_SECS", "3600")]);
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "doc"},
+        ])),
+    );
+    server.ok(
+        "PUT",
+        "/groups/kura",
+        Some(json!({"description": "蔵元一式", "contexts": ["sake"]})),
+    );
+
+    let tool = |id: u64, name: &str, arguments: Value| {
+        let (status, answer) = server.call(
+            "POST",
+            "/mcp",
+            Some(json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                        "params": {"name": name, "arguments": arguments}})),
+        );
+        assert_eq!(status, 200, "{name} -> {answer}");
+        answer["result"].clone()
+    };
+
+    let flushed = tool(1, "flush", json!({}));
+    assert!(flushed.get("isError").is_none(), "{flushed}");
+    let text = flushed["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("sake"), "{text}");
+
+    let exported = tool(2, "export_context", json!({"context": "sake"}));
+    assert!(exported.get("isError").is_none(), "{exported}");
+    let text = exported["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("taguru_batch"), "{text}");
+    assert!(text.contains("青嶺酒造"), "{text}");
+
+    let group = tool(3, "export_group", json!({"name": "kura"}));
+    assert!(group.get("isError").is_none(), "{group}");
+    let text = group["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("taguru_group"), "{text}");
+    assert!(text.contains("\"kura\""), "{text}");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
+
+/// The MCP operator verbs keep their routes' roles: the outer /mcp
+/// gate admits any read-capable key, but the inner dispatch re-checks
+/// the mapped route — flush stays admin.
+#[test]
+fn the_mcp_flush_tool_stays_admin_gated() {
+    let server = Server::start_with_env(
+        "mcp-ops-auth",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,scribe:wtok"),
+            ("TAGURU_KEY_SCOPES", r#"{"scribe": "write"}"#),
+        ],
+    );
+    let call = |token: &str| {
+        let (status, answer) = server.call_with_token(
+            "POST",
+            "/mcp",
+            Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": "flush", "arguments": {}}})),
+            Some(token),
+        );
+        assert_eq!(status, 200, "{answer}");
+        answer["result"].clone()
+    };
+
+    let refused = call("wtok");
+    assert_eq!(refused["isError"], json!(true), "{refused}");
+    let text = refused["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("HTTP 403"), "{text}");
+
+    let allowed = call("atok");
+    assert!(allowed.get("isError").is_none(), "{allowed}");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
