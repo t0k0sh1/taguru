@@ -169,6 +169,37 @@ Entries that change an on-disk format or a response shape say so.
   markers. Cross-store atomicity is deliberately not attempted:
   per-source idempotency already makes the repair exact, so detection
   was the whole remaining gap.
+- Search explainability (#75): every retrieval lane can now say why an
+  expected result did not appear, in one read-only call instead of
+  orchestrating four endpoints with varied thresholds by hand.
+  `POST /contexts/{name}/sources/search/explain` takes `{query, source,
+  paragraph?, limit?}` and answers the first verdict that applies —
+  `not_stored` (never stored here, or retracted; the store keeps no
+  tombstone history to tell which), `paragraph_out_of_range`,
+  `no_query_terms`, `no_term_overlap` (both sides' terms rendered AS
+  STRINGS, so a 酒蔵-vs-酒造 spelling fork is visible on the table),
+  `below_cutoff` (the actual rank, the cutoff score at the requested
+  limit, and a `limit_to_reach` VERIFIED by rerunning the real serve
+  computation, pool caps included), or `served` — with per-term BM25
+  evidence (tf, df, idf, contribution: bit-for-bit the addends search
+  summed) and the vector lane's cosine, or the named reason that lane
+  never ran (off, no provider, query embedding failed, nothing
+  embedded, model changed). `POST /contexts/{name}/resolve/explain`
+  and `resolve_label/explain` take `{cue, expected}` plus the same
+  one-call overrides resolve honors, and answer `not_in_vocabulary`
+  (nearest stored spellings attached, lexical and semantic — the
+  register-an-alias repair is one step away), `cue_resolved_exactly`
+  (the cue IS another stored spelling; the exact tier answers alone,
+  which no floor tweak can fix), `below_floor` (the actual Dice score
+  vs the floor in effect — only the fuzzy tier is floor-gated, and
+  the verdict honors that), `below_cutoff`, `semantic_not_run` /
+  `semantic_below_floor` (whether the fallback tier joined, its gloss
+  cosine vs the semantic floor, or which precondition failed), or
+  `served`. All three ride MCP as `explain_search` /
+  `explain_resolve` / `explain_resolve_label`. No new persistence, no
+  new counters; explain shares the live scoring code paths (one term
+  walker, one BM25 addend, one fusion/trim), so it cannot disagree
+  with the search it explains.
 
 ### Changed
 - doc2query `questions` now index into their paragraph's BM25 postings

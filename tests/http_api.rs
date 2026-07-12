@@ -7032,3 +7032,384 @@ fn the_mcp_flush_tool_stays_admin_gated() {
     assert!(allowed.get("isError").is_none(), "{allowed}");
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
+
+/// The search-explain decision tree (#75): one call names the first
+/// verdict that applies — stored at all, sharing any term, ranked but
+/// cut off, or served — with the evidence that makes the verdict
+/// checkable. The 表記ゆれ case is the one the endpoint exists for:
+/// the paragraph spells 酒蔵, the query spells 酒造, and only seeing
+/// both term tables side by side says so.
+#[test]
+fn search_explain_names_the_first_verdict_that_applies() {
+    let server = Server::start("search-explain");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    // docs/many.md: seven short twin paragraphs plus one long, diluted
+    // straggler — everything shares the 霧沢 bigram, so the straggler
+    // scores, but dead last, past the default limit of 5.
+    let straggler = "霧沢について、この段落は他の段落よりも長く、余計な語を\
+                     たくさん含んでいるため、字数あたりの一致密度が下がって\
+                     順位は最下位に沈む。";
+    let twins: Vec<String> = (1..=7)
+        .map(|n| format!("霧沢と霧沢の里、その{n}。"))
+        .collect();
+    let many = format!("{}\n\n{straggler}", twins.join("\n\n"));
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {
+            "docs/kura.md": "青嶺酒造は雲居県の蔵元である。\n\n\
+                原料米には山田錦を使い、精米歩合は50パーセントまで磨く。",
+            "docs/kuramoto.md": "その酒蔵は谷あいにある。",
+            "docs/many.md": many,
+        }})),
+    );
+
+    // Verdict: served. The best showing is chosen when no paragraph is
+    // named, and the per-term table carries the addends that put it
+    // there.
+    let hits = server.ok(
+        "POST",
+        "/contexts/sake/sources/search",
+        Some(json!({"query": "精米歩合はどこまで磨く?"})),
+    );
+    assert_eq!(hits[0]["source"], json!("docs/kura.md"));
+    let served = server.ok(
+        "POST",
+        "/contexts/sake/sources/search/explain",
+        Some(json!({"query": "精米歩合はどこまで磨く?", "source": "docs/kura.md"})),
+    );
+    assert_eq!(served["verdict"], json!("served"), "{served}");
+    assert_eq!(served["paragraph"], hits[0]["paragraph"]);
+    assert_eq!(served["paragraph_named"], json!(false));
+    assert_eq!(served["ranking"]["served"], json!(true));
+    assert_eq!(served["ranking"]["rank"], json!(1));
+    assert_eq!(served["ranking"]["fused"], json!(false));
+    assert!(
+        served["bm25"]["terms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|term| term["contribution"].as_f64().unwrap() > 0.0
+                && term["df"].as_u64().unwrap() >= 1),
+        "{served}"
+    );
+    // The vector lane names why it did not run.
+    assert_eq!(served["vector"]["ran"], json!(false));
+    assert!(
+        served["vector"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no embedding provider"),
+        "{served}"
+    );
+
+    // Verdict: below_cutoff. The straggler ranks past the default
+    // limit; the reported limit_to_reach is VERIFIED — re-searching at
+    // it actually surfaces the paragraph.
+    let cutoff = server.ok(
+        "POST",
+        "/contexts/sake/sources/search/explain",
+        Some(json!({"query": "霧沢", "source": "docs/many.md", "paragraph": 7})),
+    );
+    assert_eq!(cutoff["verdict"], json!("below_cutoff"), "{cutoff}");
+    let rank = cutoff["ranking"]["rank"].as_u64().unwrap();
+    assert!(
+        rank > 5,
+        "the straggler must rank past the default limit: {cutoff}"
+    );
+    assert_eq!(cutoff["ranking"]["served"], json!(false));
+    assert!(cutoff["ranking"]["cutoff_score"].as_f64().unwrap() > 0.0);
+    let reach = cutoff["ranking"]["limit_to_reach"].as_u64().unwrap();
+    assert!(reach >= rank, "{cutoff}");
+    let wider = server.ok(
+        "POST",
+        "/contexts/sake/sources/search",
+        Some(json!({"query": "霧沢", "limit": reach})),
+    );
+    assert!(
+        wider
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["source"] == json!("docs/many.md") && hit["paragraph"] == json!(7)),
+        "limit_to_reach must actually reach it: {wider}"
+    );
+    // The straggler's own term table shows the match that was too weak.
+    assert!(
+        cutoff["bm25"]["terms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|term| term["term"] == json!("霧沢") && term["tf"].as_f64().unwrap() > 0.0),
+        "{cutoff}"
+    );
+
+    // Verdict: no_term_overlap — the 表記ゆれ case. The query spells
+    // 酒造, this source spells 酒蔵; both spellings sit in the answer.
+    let overlap = server.ok(
+        "POST",
+        "/contexts/sake/sources/search/explain",
+        Some(json!({"query": "酒造", "source": "docs/kuramoto.md"})),
+    );
+    assert_eq!(overlap["verdict"], json!("no_term_overlap"), "{overlap}");
+    assert_eq!(overlap["query_terms"], json!(["酒造"]));
+    assert!(
+        overlap["paragraph_terms"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("酒蔵")),
+        "{overlap}"
+    );
+    assert!(
+        overlap["summary"]
+            .as_str()
+            .unwrap()
+            .contains("shares no term"),
+        "{overlap}"
+    );
+
+    // Verdict: not_stored — and retraction lands in the same verdict,
+    // because the store keeps no tombstone history to tell them apart.
+    let ghost = server.ok(
+        "POST",
+        "/contexts/sake/sources/search/explain",
+        Some(json!({"query": "霧沢", "source": "docs/ghost.md"})),
+    );
+    assert_eq!(ghost["verdict"], json!("not_stored"), "{ghost}");
+    assert!(
+        ghost["summary"].as_str().unwrap().contains("retracted"),
+        "{ghost}"
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources/retract",
+        Some(json!({"source": "docs/kuramoto.md"})),
+    );
+    let retracted = server.ok(
+        "POST",
+        "/contexts/sake/sources/search/explain",
+        Some(json!({"query": "酒造", "source": "docs/kuramoto.md"})),
+    );
+    assert_eq!(retracted["verdict"], json!("not_stored"), "{retracted}");
+
+    // Verdict: paragraph_out_of_range, with the range that would fit.
+    let out = server.ok(
+        "POST",
+        "/contexts/sake/sources/search/explain",
+        Some(json!({"query": "霧沢", "source": "docs/kura.md", "paragraph": 9})),
+    );
+    assert_eq!(out["verdict"], json!("paragraph_out_of_range"), "{out}");
+    assert_eq!(out["paragraphs"], json!(2));
+
+    // Verdict: no_query_terms — punctuation tokenizes to nothing.
+    let empty = server.ok(
+        "POST",
+        "/contexts/sake/sources/search/explain",
+        Some(json!({"query": "、。", "source": "docs/kura.md"})),
+    );
+    assert_eq!(empty["verdict"], json!("no_query_terms"), "{empty}");
+
+    // Unknown context stays the outer 404, never a verdict.
+    let (status, _) = server.call(
+        "POST",
+        "/contexts/nazo/sources/search/explain",
+        Some(json!({"query": "霧沢", "source": "docs/kura.md"})),
+    );
+    assert_eq!(status, 404);
+}
+
+/// The resolve-explain decision tree (#75): membership first, then the
+/// same tiers/floors/limits the resolve endpoint runs, with the
+/// expected name located in each. The exact-tier shortcut gets its own
+/// verdict — a cue that IS another stored spelling never scores
+/// anything else, which no floor tweak can fix.
+#[test]
+fn resolve_explain_names_the_first_verdict_that_applies() {
+    let server = Server::start("resolve-explain");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0},
+            {"subject": "青嶺酒造", "label": "原料米", "object": "山田錦", "weight": 1.0},
+            {"subject": "幻の蔵元", "label": "所在", "object": "山田町", "weight": 1.0},
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/aliases",
+        Some(json!({"concepts": {"Aomine": "青嶺酒造"}})),
+    );
+
+    // Verdict: served — and an alias expectation reports its canonical.
+    let served = server.ok(
+        "POST",
+        "/contexts/sake/resolve/explain",
+        Some(json!({"cue": "青嶺酒造", "expected": "青嶺酒造"})),
+    );
+    assert_eq!(served["verdict"], json!("served"), "{served}");
+    assert_eq!(served["expected_kind"], json!("exact"));
+    assert_eq!(served["ranking"]["rank"], json!(1));
+    assert_eq!(served["lexical"]["confident"], json!(true));
+    assert_eq!(served["semantic"]["entered"], json!(false));
+    let alias = server.ok(
+        "POST",
+        "/contexts/sake/resolve/explain",
+        Some(json!({"cue": "青嶺酒", "expected": "Aomine"})),
+    );
+    assert_eq!(alias["verdict"], json!("served"), "{alias}");
+    assert_eq!(alias["canonical"], json!("青嶺酒造"));
+    assert_eq!(alias["expected_kind"], json!("alias"));
+
+    // Verdict: cue_resolved_exactly — the exact tier answers alone.
+    let eclipsed = server.ok(
+        "POST",
+        "/contexts/sake/resolve/explain",
+        Some(json!({"cue": "高瀬", "expected": "青嶺酒造"})),
+    );
+    assert_eq!(
+        eclipsed["verdict"],
+        json!("cue_resolved_exactly"),
+        "{eclipsed}"
+    );
+    assert!(
+        eclipsed["summary"].as_str().unwrap().contains("高瀬"),
+        "{eclipsed}"
+    );
+
+    // Verdict: below_floor — the actual Dice score against the floor
+    // in effect, which is also the floor that would have shown it.
+    // 青嶺の酒造り shares the 青嶺/酒造 bigrams with 青嶺酒造 without
+    // containing it: a fuzzy 0.5, gated by a request floor of 0.6.
+    let floored = server.ok(
+        "POST",
+        "/contexts/sake/resolve/explain",
+        Some(json!({"cue": "青嶺の酒造り", "expected": "青嶺酒造", "dice_floor": 0.6})),
+    );
+    assert_eq!(floored["verdict"], json!("below_floor"), "{floored}");
+    let score = floored["lexical"]["score"].as_f64().unwrap();
+    assert!((score - 0.5).abs() < 1e-9, "{floored}");
+    assert_eq!(floored["lexical"]["kind"], json!("fuzzy"));
+    assert_eq!(floored["lexical"]["floor"], json!(0.6));
+
+    // The dice floor gates ONLY the fuzzy tier: a containment hit
+    // sails past any floor, and explain reports the serve, not a
+    // fictitious floor refusal.
+    let contained = server.ok(
+        "POST",
+        "/contexts/sake/resolve/explain",
+        Some(json!({"cue": "青嶺酒", "expected": "青嶺酒造", "dice_floor": 0.9})),
+    );
+    assert_eq!(contained["verdict"], json!("served"), "{contained}");
+    assert_eq!(contained["lexical"]["kind"], json!("containment"));
+
+    // Verdict: below_cutoff — lost on limit, with a verified way back.
+    let cut = server.ok(
+        "POST",
+        "/contexts/sake/resolve/explain",
+        Some(json!({"cue": "山田", "expected": "山田錦", "limit": 1})),
+    );
+    assert_eq!(cut["verdict"], json!("below_cutoff"), "{cut}");
+    assert_eq!(cut["ranking"]["rank"], json!(2));
+    let reach = cut["ranking"]["limit_to_reach"].as_u64().unwrap();
+    let wider = server.ok(
+        "POST",
+        "/contexts/sake/resolve",
+        Some(json!({"cue": "山田", "limit": reach})),
+    );
+    assert!(
+        wider
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["name"] == json!("山田錦")),
+        "limit_to_reach must actually reach it: {wider}"
+    );
+
+    // Verdict: semantic_not_run — no lexical relation at all, and the
+    // tier that could have found it names why it never ran.
+    let semantic = server.ok(
+        "POST",
+        "/contexts/sake/resolve/explain",
+        Some(json!({"cue": "みかん", "expected": "青嶺酒造"})),
+    );
+    assert_eq!(semantic["verdict"], json!("semantic_not_run"), "{semantic}");
+    assert_eq!(semantic["semantic"]["entered"], json!(true));
+    assert!(
+        semantic["semantic"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no embedding provider"),
+        "{semantic}"
+    );
+
+    // Verdict: not_in_vocabulary — with the nearest stored spellings,
+    // so the repair (register an alias) is one step away.
+    let missing = server.ok(
+        "POST",
+        "/contexts/sake/resolve/explain",
+        Some(json!({"cue": "青嶺", "expected": "幻の蔵"})),
+    );
+    assert_eq!(missing["verdict"], json!("not_in_vocabulary"), "{missing}");
+    assert_eq!(missing["in_vocabulary"], json!(false));
+    assert_eq!(missing["nearest"]["lexical"][0]["name"], json!("幻の蔵元"));
+
+    // The label twin answers through its own route.
+    let label = server.ok(
+        "POST",
+        "/contexts/sake/resolve_label/explain",
+        Some(json!({"cue": "杜氏の職", "expected": "杜氏"})),
+    );
+    assert_eq!(label["verdict"], json!("served"), "{label}");
+    assert_eq!(label["canonical"], json!("杜氏"));
+
+    // Unknown context stays the outer 404, never a verdict.
+    let (status, _) = server.call(
+        "POST",
+        "/contexts/nazo/resolve/explain",
+        Some(json!({"cue": "青嶺", "expected": "青嶺酒造"})),
+    );
+    assert_eq!(status, 404);
+
+    // The MCP mirror diagnoses the same miss in one tool call.
+    let (_, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": {"name": "explain_resolve",
+                               "arguments": {"context": "sake", "cue": "青嶺", "expected": "幻の蔵"}}})),
+    );
+    assert!(reply["result"].get("isError").is_none(), "{reply}");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("not_in_vocabulary"), "{text}");
+    assert!(text.contains("幻の蔵元"), "{text}");
+
+    // And the search mirror rides the same registry.
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"docs/kura.md": "その酒蔵は谷あいにある。"}})),
+    );
+    let (_, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                    "params": {"name": "explain_search",
+                               "arguments": {"context": "sake", "query": "酒造",
+                                             "source": "docs/kura.md"}}})),
+    );
+    assert!(reply["result"].get("isError").is_none(), "{reply}");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("no_term_overlap"), "{text}");
+    assert!(text.contains("酒蔵"), "{text}");
+}

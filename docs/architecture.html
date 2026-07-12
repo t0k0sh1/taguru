@@ -195,6 +195,7 @@
       <li>When both lanes ran, the <code>sources/search</code> score is a rank fusion; with one lane it is that lane's raw score. Each hit's <code>lanes</code> always carries per-lane rank and raw score.</li>
       <li>Embedding requests carry <code>X-Taguru-Embed-Purpose: index | query</code> — the hook that lets a fronting proxy route asymmetric models (Cohere, Voyage) correctly. Plain OpenAI servers ignore it.</li>
       <li>Vectors are resident, capped by <code>TAGURU_PASSAGE_VECTOR_LIMIT</code> (default 20,000 rows). Past the cap the lexical lane still serves every paragraph; only the semantic side goes partial (the refresh response reports the skips).</li>
+      <li>Every retrieval path has an <b>explain twin</b> (<code>sources/search/explain</code>, <code>resolve/explain</code>, <code>resolve_label/explain</code>) that reruns the same lanes for one named expectation and answers the first verdict that applies. Explain shares the live scoring code — the same term walker, the same BM25 addends, the same fusion and trim — so its numbers are the search's numbers, not a reimplementation's.</li>
     </ul>
   </section>
 

@@ -443,6 +443,36 @@ pub fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "explain_resolve",
+            "Why didn't (or did) a concept come back for a cue — one call instead of re-running resolve with varied floors and cross-referencing by hand. Name the cue AND the concept you expected; the answer is the first verdict that applies: not_in_vocabulary (nearest stored spellings attached — register an alias?), cue_resolved_exactly (the cue IS another stored spelling; the exact tier answers alone), below_floor (its actual score vs the dice_floor in effect — the floor that would have shown it), below_cutoff (passed the floor, lost on limit), semantic_not_run / semantic_below_floor (whether the fallback tier joined, and its gloss cosine vs the semantic floor when it did), or served. Pass the same overrides as the resolve call being questioned.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "cue": { "type": "string" },
+                    "expected": { "type": "string", "description": "the concept you expected among the candidates" },
+                    "dice_floor": { "type": "number", "description": "one-call override of the fuzzy floor" },
+                    "semantic_floor": { "type": "number", "description": "one-call override of the semantic floor" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "max candidates (default/ceiling 1000)" }
+                }),
+                &["context", "cue", "expected"],
+            ),
+        ),
+        (
+            "explain_resolve_label",
+            "explain_resolve, for relation labels.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "cue": { "type": "string" },
+                    "expected": { "type": "string", "description": "the label you expected among the candidates" },
+                    "dice_floor": { "type": "number", "description": "one-call override of the fuzzy floor" },
+                    "semantic_floor": { "type": "number", "description": "one-call override of the semantic floor" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "max candidates (default/ceiling 1000)" }
+                }),
+                &["context", "cue", "expected"],
+            ),
+        ),
+        (
             "describe",
             "A concept's outline: which labels carry how many facts, per role. Check a hub here first, then query just the labels you need — never pull a whole profile blind.",
             object_schema(
@@ -578,6 +608,20 @@ pub fn tool_definitions() -> Vec<Value> {
                     "limit": { "type": "integer", "minimum": 0, "description": "default 5" }
                 }),
                 &["query"],
+            ),
+        ),
+        (
+            "explain_search",
+            "Why didn't (or did) a source appear in search_passages — one call instead of orchestrating search, citations, and lowered limits by hand. Name the query AND the source (optionally which paragraph) you expected; the answer is the first verdict that applies: not_stored (never ingested here, or retracted), no_term_overlap (the query's terms and the paragraph's terms side by side, as strings — the spelling-mismatch case: stored under 酒蔵, you searched 酒造 — register an alias or reword), below_cutoff (its actual rank, the score cutoff at your limit, and a verified limit that reaches it), or served (its rank — it WAS there). Evidence carries per-term tf/df/BM25 contributions and the vector lane's cosine or the reason that lane never ran. One context per call.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "query": { "type": "string" },
+                    "source": { "type": "string", "description": "the source you expected among the hits" },
+                    "paragraph": { "type": "integer", "description": "zero-based paragraph position; omitted picks the source's best showing" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "the search call being explained (default 5)" }
+                }),
+                &["context", "query", "source"],
             ),
         ),
         (
@@ -793,6 +837,22 @@ pub fn route_tool(
                 &["cue", "dice_floor", "semantic_floor", "limit"],
             )),
         ),
+        "explain_resolve" => (
+            "POST",
+            format!("{}/resolve/explain", context_path("context")?),
+            Some(pick(
+                arguments,
+                &["cue", "expected", "dice_floor", "semantic_floor", "limit"],
+            )),
+        ),
+        "explain_resolve_label" => (
+            "POST",
+            format!("{}/resolve_label/explain", context_path("context")?),
+            Some(pick(
+                arguments,
+                &["cue", "expected", "dice_floor", "semantic_floor", "limit"],
+            )),
+        ),
         "describe" => (
             "POST",
             format!("{}/describe", context_path("context")?),
@@ -863,6 +923,11 @@ pub fn route_tool(
             "POST",
             format!("{}/sources/search", search_base()?),
             Some(pick(arguments, &["contexts", "groups", "query", "limit"])),
+        ),
+        "explain_search" => (
+            "POST",
+            format!("{}/sources/search/explain", context_path("context")?),
+            Some(pick(arguments, &["query", "source", "paragraph", "limit"])),
         ),
         "cite_passage" => (
             "POST",
@@ -1215,6 +1280,46 @@ mod tests {
             body,
             Some(json!({"source": "docs/aomine.md", "paragraph": 1}))
         );
+    }
+
+    /// The three explain mirrors route beside their parents: per-context
+    /// POSTs, the addressing key peeled off, every override passed
+    /// through — including `expected`, which no parent tool carries.
+    #[test]
+    fn explain_tools_route_beside_their_parents() {
+        let (method, path, body) = route_tool(
+            "explain_search",
+            &json!({"context": "sake", "query": "酒造", "source": "docs/kura.md",
+                    "paragraph": 1, "limit": 5}),
+        )
+        .unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/contexts/sake/sources/search/explain");
+        assert_eq!(
+            body,
+            Some(json!({"query": "酒造", "source": "docs/kura.md", "paragraph": 1, "limit": 5}))
+        );
+
+        let (method, path, body) = route_tool(
+            "explain_resolve",
+            &json!({"context": "sake", "cue": "青嶺", "expected": "青嶺酒造", "dice_floor": 0.2}),
+        )
+        .unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/contexts/sake/resolve/explain");
+        assert_eq!(
+            body,
+            Some(json!({"cue": "青嶺", "expected": "青嶺酒造", "dice_floor": 0.2}))
+        );
+
+        let (method, path, body) = route_tool(
+            "explain_resolve_label",
+            &json!({"context": "sake", "cue": "醸す", "expected": "杜氏"}),
+        )
+        .unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/contexts/sake/resolve_label/explain");
+        assert_eq!(body, Some(json!({"cue": "醸す", "expected": "杜氏"})));
     }
 
     /// MCP clients written against the pre-#35 argument name still work:

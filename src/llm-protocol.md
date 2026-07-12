@@ -50,6 +50,12 @@ answers back into prose are your job.
    before adopting a containment/fuzzy hit — string overlap says two
    names are near, the glosses say whether they are the same thing.
    Never adopt a lookalike on score alone.
+   When a name you EXPECTED still fails to appear, don't bisect floors
+   by hand: `POST /contexts/{name}/resolve/explain` (`explain_resolve`,
+   `resolve_label/explain` for labels) with `{cue, expected}` answers
+   why in one call — down to "not in the vocabulary at all; nearest
+   stored spellings attached" (register an alias?) or "the cue is an
+   exact spelling of something else, so nothing else was ever scored".
 3. **Outline, then narrow**: `describe` a hub concept first (which
    labels, how many, per role), then `query` just the facets you need
    (`"label": ["住所","職歴"]`). Don't pull whole profiles.
@@ -89,6 +95,15 @@ answers back into prose are your job.
    - Each hit's `lanes` field says which lane surfaced it at what
      rank. A vector-only hit is the paraphrase case; a BM25-only hit
      matched wording. Both are evidence, not verdicts — read the text.
+   - **When a search misses something you know is there**, ask the
+     server why instead of re-searching with varied wording:
+     `POST /contexts/{name}/sources/search/explain` (`explain_search`)
+     with `{query, source}` names the first reason that applies —
+     never stored (or retracted), no shared term (the spelling
+     mismatch shown as strings on both sides), or ranked past your
+     limit (with a limit that verifiably reaches it). Report the
+     verdict, or repair it: register an alias, re-import the source,
+     or widen the limit.
 
 ## Ingest loop
 
@@ -261,6 +276,8 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/activate` | `{origins, decay?=0.5, limit?=20}` → `{total, matches:[{strength, path, association}]}` |
 | POST | `/contexts/{name}/resolve` | `{cue, dice_floor?, semantic_floor?, limit?}` → `[{name, score, tier, kind?, gloss?}]` concept candidates (limit default/ceiling 1000) |
 | POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?, semantic_floor?, limit?}` → `[{name, score, tier, kind?, gloss?}]` relation candidates (limit default/ceiling 1000) |
+| POST | `/contexts/{name}/resolve/explain` | `{cue, expected, dice_floor?, semantic_floor?, limit?}` → one verdict for "why didn't (or did) `expected` come back for `cue`", first that applies: `not_in_vocabulary` (nearest stored spellings attached — register an alias?) / `cue_resolved_exactly` (the cue IS another stored spelling; the exact tier answers alone) / `below_floor` (its actual score vs the floor in effect) / `below_cutoff` (rank, plus a `limit_to_reach` verified by rerunning the serve) / `semantic_not_run` / `semantic_below_floor` (gloss cosine vs the semantic floor, or which precondition failed) / `served` — same floors and limit as the resolve call being explained |
+| POST | `/contexts/{name}/resolve_label/explain` | the same, for relation labels |
 | POST | `/contexts/{name}/embeddings/refresh` | re-embed new/changed concept and label glosses (run after ingest) |
 | GET | `/contexts/{name}/labels` | `?limit=1000&after=label` → `{total, labels:[...]}` relation vocabulary (canonical only, keyset-paged by label) |
 | GET/POST/DELETE | `/contexts/{name}/aliases` | `?limit=1000&after=concept:x\|label:x` → `{total, concepts:{alias:canonical}, labels:{...}}` (one page across both namespaces, concepts first; `after` = the last entry shown) / register `{concepts:{alias:canonical}, labels:{...}}` / withdraw `{concepts:[alias], labels:[...]}` |
@@ -268,6 +285,7 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
 | POST | `/contexts/{name}/sources/search` | `{query, limit?=5}` → `[{source, paragraph, score, text, lanes}]` best PARAGRAPHS across passages (`paragraph` = its position in the source; `text` = that paragraph alone; `lanes.bm25`/`lanes.vector` = per-lane `{rank, score}`; `score` is rank-fused when the vector lane ran, raw BM25 otherwise) |
 | POST | `/sources/search` | `{contexts?:[name], groups?:[group], query, limit?=5}` → the same hits, each tagged with its `context`, across several contexts at once (groups resolve as in `POST /recall`) — merged by per-context rank (every context's best hit first); `score` compares within one context only |
+| POST | `/contexts/{name}/sources/search/explain` | `{query, source, paragraph?, limit?=5}` → one verdict for "why didn't (or did) this source appear for this query", first that applies: `not_stored` (never stored here, or retracted — the store keeps no tombstone history to tell which) / `paragraph_out_of_range` / `no_query_terms` / `no_term_overlap` (the query's terms and the paragraph's terms side by side, AS STRINGS — the spelling-mismatch case: stored 酒蔵, searched 酒造) / `below_cutoff` (its rank, the cutoff score at your `limit`, and a `limit_to_reach` verified by rerunning the real serve computation, pool caps included) / `served` — evidence carries per-term BM25 tf/df/idf/contribution (the very addends search summed) and the vector lane's cosine, or the reason that lane never ran. `paragraph` omitted picks the source's best showing |
 | POST | `/contexts/{name}/citations` | `{source, paragraph}` → `{text, source, section}` one verbatim paragraph by source and paragraph — the same paragraph `sources/search` would show at that paragraph (`section` is the label governing that paragraph, `null` outside every section the source has stored; `recall`/`query`/`explore`/`activate`/`unreachable_from` resolve the same label onto each attribution as `attributions[].section`) |
 | POST | `/contexts/{name}/sources/retract` | `{source}` → withdraw that source's contributions (diff sync) |
 | POST | `/contexts/{name}/associations/retract` | `{subject, label, object}` → `{retracted, attributions_removed}` — withdraw ONE association outright, every source's contribution to that edge (names resolve through aliases; `retracted: false` = no live edge, nothing changed; the edge row stays visible at weight 0 until compaction, and re-asserting later just works). For a fact that should never have been asserted; a fact that is merely CONTESTED wants a negative-weight assertion instead |
