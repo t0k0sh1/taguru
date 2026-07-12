@@ -1262,6 +1262,86 @@ pub async fn add_associations(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RetractAssociationRequest {
+    pub subject: String,
+    pub label: String,
+    pub object: String,
+}
+
+/// What one association retraction accomplished. `retracted: false`
+/// means the triple named no live edge — unknown names, no such edge,
+/// or one already fully retracted — and nothing was changed, the same
+/// found-nothing honesty `retract_source` answers with.
+#[derive(Serialize)]
+pub struct RetractAssociationOutcome {
+    pub retracted: bool,
+    /// How many per-source attribution records were unlinked with the
+    /// edge (0 for an edge carrying only unsourced weight).
+    pub attributions_removed: usize,
+}
+
+/// Withdraws one `(subject, label, object)` association outright —
+/// the surgical correction for a fact that should never have been
+/// asserted, where `retract_source` would discard the whole
+/// document's contribution. A fact that is merely CONTESTED wants a
+/// negative-weight assertion instead, which preserves the dispute.
+pub async fn retract_association(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+    AppJson(request): AppJson<RetractAssociationRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    for (field, value) in [
+        ("subject", &request.subject),
+        ("label", &request.label),
+        ("object", &request.object),
+    ] {
+        if let Some(refusal) = empty(field, value, started_at) {
+            return refusal;
+        }
+        if let Some(refusal) = oversized(field, value, MAX_NAME_BYTES, started_at) {
+            return refusal;
+        }
+    }
+    // The write stages a WAL op and fsyncs before returning; keep it
+    // off the async worker like every other write path.
+    let outcome = tokio::task::block_in_place(|| {
+        state.retract_association(&name, &request.subject, &request.label, &request.object)
+    });
+    match outcome {
+        Err(failure) => access_error(&state, failure, &name, started_at),
+        Ok(unlinked) => {
+            // The retracted TRIPLE lives in the body, so the access log
+            // alone cannot say what was withdrawn — the audit line can
+            // (destructive, like retract_source and the deletes).
+            tracing::info!(
+                target: "taguru::audit",
+                key = %key_name(&key),
+                context = %name,
+                subject = %request.subject,
+                label = %request.label,
+                object = %request.object,
+                retracted = unlinked.is_some(),
+                "association retracted",
+            );
+            // A retraction that found nothing changed nothing; only an
+            // effective one counts as a write.
+            if unlinked.is_some() {
+                state.note_write(&name);
+            }
+            ok(
+                RetractAssociationOutcome {
+                    retracted: unlinked.is_some(),
+                    attributions_removed: unlinked.unwrap_or(0),
+                },
+                started_at,
+            )
+        }
+    }
+}
+
 /// Cap applied to recall/query matches when the request names no limit:
 /// a hub concept must not flood an LLM client's prompt by default.
 const DEFAULT_MATCH_LIMIT: usize = 100;

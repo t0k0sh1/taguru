@@ -427,6 +427,7 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         | (&Method::PUT, "/groups/{name}")
         | (&Method::PATCH, "/groups/{name}")
         | (&Method::POST, "/contexts/{name}/associations")
+        | (&Method::POST, "/contexts/{name}/associations/retract")
         | (&Method::POST, "/contexts/{name}/aliases")
         | (&Method::DELETE, "/contexts/{name}/aliases")
         | (&Method::POST, "/contexts/{name}/sources")

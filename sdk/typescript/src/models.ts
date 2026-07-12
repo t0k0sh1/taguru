@@ -280,6 +280,16 @@ export interface RetractOutcome {
   passage_removed: boolean;
 }
 
+/**
+ * `retracted: false` means the triple named no live edge — nothing changed.
+ * `attributions_removed` counts the per-source records unlinked with the
+ * edge (0 for one carrying only unsourced weight).
+ */
+export interface RetractAssociationOutcome {
+  retracted: boolean;
+  attributions_removed: number;
+}
+
 // -- maintenance ---------------------------------------------------------------------
 
 export interface RefreshBreakdown {

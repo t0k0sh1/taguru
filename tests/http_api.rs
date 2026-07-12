@@ -6758,3 +6758,150 @@ fn doc2query_questions_land_lexically_without_embeddings() {
     );
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
+
+/// The single-association retraction end to end: a write key
+/// suffices where a read key is refused, aliases resolve, the outcome
+/// reports found-nothing honestly, the WAL makes the withdrawal
+/// survive a hard kill, and the MCP surface reaches the same handler.
+#[test]
+fn one_association_retracts_over_http_and_survives_a_hard_kill() {
+    let server = Server::start_with_env(
+        "assoc-retract",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,scribe:wtok,reader:rtok"),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"scribe": "write", "reader": "read"}"#,
+            ),
+        ],
+    );
+    let write = Some("wtok");
+    let (status, _) = server.call_with_token(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "d"})),
+        write,
+    );
+    assert_eq!(status, 200);
+    server.call_with_token(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "doc1"},
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "doc2"},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "doc1"},
+        ])),
+        write,
+    );
+    server.call_with_token(
+        "POST",
+        "/contexts/sake/aliases",
+        Some(json!({"concepts": {"Aomine Brewery": "青嶺酒造"}, "labels": {}})),
+        write,
+    );
+
+    // Reads cannot retract.
+    let (status, refused) = server.call_with_token(
+        "POST",
+        "/contexts/sake/associations/retract",
+        Some(json!({"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺"})),
+        Some("rtok"),
+    );
+    assert_eq!(status, 403, "{refused}");
+
+    // The write key retracts through an alias; both sources' shares go.
+    let (status, outcome) = server.call_with_token(
+        "POST",
+        "/contexts/sake/associations/retract",
+        Some(json!({"subject": "Aomine Brewery", "label": "代表銘柄", "object": "青嶺"})),
+        write,
+    );
+    assert_eq!(status, 200, "{outcome}");
+    assert_eq!(outcome["result"]["retracted"], json!(true), "{outcome}");
+    assert_eq!(
+        outcome["result"]["attributions_removed"],
+        json!(2),
+        "{outcome}"
+    );
+
+    // Found-nothing honesty: the second retraction changed nothing.
+    let (status, outcome) = server.call_with_token(
+        "POST",
+        "/contexts/sake/associations/retract",
+        Some(json!({"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺"})),
+        write,
+    );
+    assert_eq!(status, 200, "{outcome}");
+    assert_eq!(outcome["result"]["retracted"], json!(false), "{outcome}");
+    assert_eq!(
+        outcome["result"]["attributions_removed"],
+        json!(0),
+        "{outcome}"
+    );
+
+    // The edge row stays visible at weight 0 (compaction sheds it);
+    // the same document's other fact is untouched; activate no longer
+    // carries the dead edge.
+    let (_, queried) = server.call_with_token(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造"})),
+        write,
+    );
+    let matches = queried["result"]["matches"].as_array().unwrap();
+    let by_label = |label: &str| {
+        matches
+            .iter()
+            .find(|m| m["label"] == json!(label))
+            .unwrap_or_else(|| panic!("missing {label}: {queried}"))
+    };
+    assert_eq!(by_label("代表銘柄")["weight"], json!(0.0), "{queried}");
+    assert_eq!(by_label("代表銘柄")["count"], json!(0), "{queried}");
+    assert_eq!(by_label("杜氏")["weight"], json!(1.0), "{queried}");
+    let (_, activated) = server.call_with_token(
+        "POST",
+        "/contexts/sake/activate",
+        Some(json!({"origins": ["青嶺酒造"]})),
+        write,
+    );
+    let carried: Vec<&str> = activated["result"]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["association"]["label"].as_str().unwrap())
+        .collect();
+    assert!(
+        !carried.contains(&"代表銘柄") && carried.contains(&"杜氏"),
+        "{activated}"
+    );
+
+    // MCP reaches the same handler under the same tool vocabulary.
+    let (status, answer) = server.call_with_token(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "retract_association",
+                               "arguments": {"context": "sake", "subject": "青嶺酒造",
+                                              "label": "杜氏", "object": "高瀬"}}})),
+        write,
+    );
+    assert_eq!(status, 200, "{answer}");
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\"retracted\":true"), "{text}");
+
+    // SIGKILL: no shutdown flush — the WAL alone must carry both
+    // retractions across the boot.
+    let data_dir = server.stop_hard();
+    let server = Server::start_on("assoc-retract-reboot", data_dir);
+    let (_, queried) = server.call_with_token(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造"})),
+        write,
+    );
+    for matched in queried["result"]["matches"].as_array().unwrap() {
+        assert_eq!(matched["weight"], json!(0.0), "{queried}");
+        assert_eq!(matched["count"], json!(0), "{queried}");
+    }
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}

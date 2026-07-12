@@ -547,3 +547,26 @@ describe("groups and cross-context search", () => {
     await client.contexts.delete(tea);
   });
 });
+
+describe("retract association", () => {
+  it("withdraws one edge outright and answers found-nothing honestly", async () => {
+    const name = fresh();
+    await seed(name);
+    const ctx = client.context(name);
+
+    const outcome = await ctx.retractAssociation("青嶺酒造", "代表銘柄", "青嶺");
+    expect(outcome.retracted).toBe(true);
+    expect(outcome.attributions_removed).toBe(1);
+
+    const again = await ctx.retractAssociation("青嶺酒造", "代表銘柄", "青嶺");
+    expect(again.retracted).toBe(false);
+    expect(again.attributions_removed).toBe(0);
+
+    const toji = await ctx.query({ subject: "青嶺酒造", label: "杜氏" });
+    expect(toji.matches[0]!.object).toBe("高瀬");
+    const dead = await ctx.query({ subject: "青嶺酒造", label: "代表銘柄" });
+    expect(dead.matches[0]!.weight).toBe(0.0);
+    expect(dead.matches[0]!.count).toBe(0);
+    await client.contexts.delete(name);
+  });
+});

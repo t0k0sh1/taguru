@@ -40,6 +40,7 @@ from .._models import (
     PassageHit,
     PassageLookup,
     RefreshOutcome,
+    RetractAssociationOutcome,
     RetractOutcome,
     RetrievalResult,
     SourcePage,
@@ -713,6 +714,22 @@ class Context:
             applied += self.add_associations(chunk)
             chunks += 1
         return BatchApplyResult(applied=applied, chunks=chunks)
+
+    def retract_association(
+        self, subject: str, label: str, object: str
+    ) -> RetractAssociationOutcome:
+        """Withdraw one (subject, label, object) association outright.
+
+        Every source's contribution to that one edge goes — where
+        ``retract_source`` withdraws a whole document's. Names resolve
+        through aliases; ``retracted=False`` means the triple named no
+        live edge and nothing changed. The surgical correction for a
+        fact that should never have been asserted; a fact that is merely
+        CONTESTED wants a negative-weight assertion instead.
+        """
+        body = {"subject": subject, "label": label, "object": object}
+        result = self._post("/associations/retract", body)
+        return decode(RetractAssociationOutcome, result)  # type: ignore[no-any-return]
 
     # -- passages / sources ----------------------------------------------------
 

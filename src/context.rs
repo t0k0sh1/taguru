@@ -2061,6 +2061,64 @@ impl Context {
         Some(touched)
     }
 
+    /// Withdraws one association outright: the `(subject, label,
+    /// object)` edge — the names resolve through aliases, like every
+    /// other entry point — has every attribution unlinked and its
+    /// total zeroed, so it stops carrying knowledge entirely,
+    /// sourceless weight included. This is the surgical correction for
+    /// a fact that should never have been asserted (an extraction
+    /// error, a merge mistake); a fact that is CONTESTED wants a
+    /// negative-weight assertion instead, which preserves the dispute
+    /// as evidence.
+    ///
+    /// Returns how many attributions were unlinked, or `None` when the
+    /// triple names no live edge — unknown names, no such edge, or an
+    /// edge already fully retracted — so a replayed retraction is a
+    /// no-op, never an error.
+    ///
+    /// What it deliberately does NOT do mirrors [`Context::
+    /// retract_source`]: the concepts, the label, the edge record, and
+    /// every source name stay; the edge remains visible to `query` at
+    /// weight 0.0 / count 0 until compaction sheds it (`activate`
+    /// already skips it); the unlinked attribution records stay as
+    /// dead space in their append-only table; and re-asserting the
+    /// same triple later just works.
+    pub fn retract_association(
+        &mut self,
+        subject: &str,
+        label: &str,
+        object: &str,
+    ) -> Option<usize> {
+        let &subject_id = self.concept_ids.get(subject)?;
+        let &label_id = self.label_ids.get(label)?;
+        let &object_id = self.concept_ids.get(object)?;
+        let &edge_id = self.edge_ids.get(&(subject_id, label_id, object_id))?;
+        let edge_index = edge_id as usize;
+        if self.edges[edge_index].count == 0 && self.edges[edge_index].sum == 0.0 {
+            // Already fully retracted: nothing left to withdraw.
+            return None;
+        }
+
+        // Unlink the whole attribution chain, dropping each (edge,
+        // source) index entry — the same resurrection hazard
+        // retract_source guards: a later re-assertion must append a
+        // fresh record, never fold into an unlinked one.
+        let mut cursor = self.edges[edge_index].first_attribution;
+        let mut unlinked = 0usize;
+        while cursor != NIL {
+            let record = &self.attributions[cursor as usize];
+            self.attribution_ids.remove(&(edge_id, record.source));
+            cursor = record.next;
+            unlinked += 1;
+        }
+        let edge = &mut self.edges[edge_index];
+        edge.first_attribution = NIL;
+        edge.last_attribution = NIL;
+        edge.sum = 0.0;
+        edge.count = 0;
+        Some(unlinked)
+    }
+
     /// A fresh context holding exactly this one's LIVE content — the
     /// offline answer to append-only storage: fully retracted edges,
     /// their unlinked attribution records, arena bytes behind removed
@@ -4108,6 +4166,115 @@ mod tests {
             .associate_from("A", "r", "B", 3.0, "doc", None)
             .unwrap();
         assert_eq!(context.retract_source("doc"), Some(1));
+    }
+
+    /// The single-association counterpart of retract_source: the named
+    /// edge nets to zero — every source's contribution withdrawn at
+    /// once, unsourced weight included — while its siblings, each
+    /// document's other facts, and the vocabulary stay untouched.
+    #[test]
+    fn retract_association_withdraws_one_edge_outright() {
+        let mut context = Context::default();
+        context
+            .associate_from("a", "r", "b", 1.0, "doc1", Some(0))
+            .unwrap();
+        context
+            .associate_from("a", "r", "b", 2.0, "doc2", Some(3))
+            .unwrap();
+        context.associate("a", "r", "b", 0.5).unwrap(); // unsourced share
+        context
+            .associate_from("a", "r", "c", 1.0, "doc1", None)
+            .unwrap();
+
+        // Two attribution records (doc1, doc2) — the unsourced share
+        // never had one; it vanishes with the edge total.
+        assert_eq!(context.retract_association("a", "r", "b"), Some(2));
+        assert_eq!(weight_between(&context, "a", "r", "b"), 0.0);
+        let dead = &context.query(Some("a"), None, Some("b"))[0];
+        assert_eq!(dead.count, 0);
+        assert!(dead.attributions.is_empty());
+        // The same document's OTHER fact is untouched — the point of
+        // edge-granular retraction.
+        assert_eq!(weight_between(&context, "a", "r", "c"), 1.0);
+
+        // Idempotent: a second retraction finds nothing live.
+        assert_eq!(context.retract_association("a", "r", "b"), None);
+
+        // Re-assertion appends FRESH records — never folds into the
+        // unlinked dead space (the resurrection hazard retract_source
+        // also guards).
+        context
+            .associate_from("a", "r", "b", 3.0, "doc1", None)
+            .unwrap();
+        assert_eq!(weight_between(&context, "a", "r", "b"), 3.0);
+        assert_eq!(
+            context.query(Some("a"), None, Some("b"))[0].attributions,
+            vec![Attribution {
+                source: "doc1".to_string(),
+                weight: 3.0,
+                count: 1,
+                paragraph: None,
+            }]
+        );
+
+        // And the image — orphaned attribution records behind — must
+        // round-trip.
+        let restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
+        assert_eq!(
+            restored.query(Some("a"), None, None),
+            context.query(Some("a"), None, None)
+        );
+    }
+
+    /// Entry resolution matches every other entry point: aliases in
+    /// both namespaces resolve, unknown names answer None — and a
+    /// contested edge (net zero, still live) is retractable, while a
+    /// fully retracted one is not.
+    #[test]
+    fn retract_association_resolves_aliases_and_reports_absence() {
+        let mut context = Context::default();
+        context
+            .associate_from("青嶺酒造", "代表銘柄", "青嶺", 1.0, "doc", None)
+            .unwrap();
+        context
+            .add_concept_alias("Aomine Brewery", "青嶺酒造")
+            .unwrap();
+        context.add_label_alias("flagship", "代表銘柄").unwrap();
+
+        assert_eq!(
+            context.retract_association("未知", "代表銘柄", "青嶺"),
+            None
+        );
+        assert_eq!(
+            context.retract_association("青嶺酒造", "未知", "青嶺"),
+            None
+        );
+        assert_eq!(
+            context.retract_association("青嶺酒造", "代表銘柄", "未知"),
+            None
+        );
+
+        // Aliases from both namespaces land on the canonical edge.
+        assert_eq!(
+            context.retract_association("Aomine Brewery", "flagship", "青嶺"),
+            Some(1)
+        );
+        assert_eq!(
+            weight_between(&context, "青嶺酒造", "代表銘柄", "青嶺"),
+            0.0
+        );
+
+        // Contested is not dead: sum 0.0 with live assertions still
+        // carries the dispute, and retraction takes all of it.
+        context
+            .associate_from("x", "r", "y", 1.0, "for", None)
+            .unwrap();
+        context
+            .associate_from("x", "r", "y", -1.0, "against", None)
+            .unwrap();
+        assert_eq!(weight_between(&context, "x", "r", "y"), 0.0);
+        assert_eq!(context.retract_association("x", "r", "y"), Some(2));
+        assert_eq!(context.retract_association("x", "r", "y"), None);
     }
 
     #[test]

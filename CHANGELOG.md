@@ -102,6 +102,30 @@ Entries that change an on-disk format or a response shape say so.
   Document's metadata gains a `context` key naming where it came from
   (single-context retrievers too — additive).
 
+- Single-association retraction:
+  `POST /contexts/{name}/associations/retract` `{subject, label,
+  object}` withdraws ONE association outright — every source's
+  contribution to that edge, unsourced weight included — where
+  `sources/retract` withdraws a whole document's. The surgical
+  correction for a fact that should never have been asserted; a fact
+  that is merely contested still wants a negative-weight assertion,
+  which preserves the dispute. Names resolve through aliases; the
+  answer is `{retracted, attributions_removed}` with
+  `retracted: false` for a triple naming no live edge (nothing
+  changed, found-nothing honesty like `sources/retract`). The edge row
+  stays visible at weight 0 / count 0 until compaction sheds it
+  (`activate` already skips it), re-asserting the triple later just
+  works, and the write is WAL-staged like every other (write role;
+  one `taguru::audit` line, since the triple lives in the body). Rides
+  MCP as `retract_association` and the SDKs as
+  `Context.retract_association(subject, label, object)` →
+  `RetractAssociationOutcome`. On-disk note: the WAL grew a
+  `retract_association` op — a binary predating it refuses a log
+  holding one as corruption (the documented forward-only WAL posture).
+- `GET /protocol` documents the correction split: retract what should
+  never have been asserted, contest with negative weight what the
+  world disputes.
+
 ### Changed
 - doc2query `questions` now index into their paragraph's BM25 postings
   (terms and length both — the doc2query move itself), so a

@@ -45,6 +45,7 @@ __all__ = [
     "PassageHit",
     "Citation",
     "RetractOutcome",
+    "RetractAssociationOutcome",
     "RefreshBreakdown",
     "RefreshOutcome",
     "TwinPair",
@@ -328,6 +329,16 @@ class Citation:
 class RetractOutcome:
     associations_touched: int
     passage_removed: bool
+
+
+@dataclass(slots=True, frozen=True)
+class RetractAssociationOutcome:
+    """``retracted=False`` means the triple named no live edge — nothing
+    changed. ``attributions_removed`` counts the per-source records
+    unlinked with the edge (0 for one carrying only unsourced weight)."""
+
+    retracted: bool
+    attributions_removed: int
 
 
 @dataclass(slots=True, frozen=True)

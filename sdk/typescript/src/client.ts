@@ -33,6 +33,7 @@ import type {
   PassageLookup,
   QuestionSpec,
   RefreshOutcome,
+  RetractAssociationOutcome,
   RetractOutcome,
   RetrievalResult,
   SectionSpec,
@@ -755,6 +756,24 @@ export class Context {
       chunks += 1;
     }
     return { applied, chunks };
+  }
+
+  /**
+   * Withdraw one (subject, label, object) association outright. Every
+   * source's contribution to that one edge goes — where `retractSource`
+   * withdraws a whole document's. Names resolve through aliases;
+   * `retracted: false` means the triple named no live edge and nothing
+   * changed. The surgical correction for a fact that should never have been
+   * asserted; a fact that is merely CONTESTED wants a negative-weight
+   * assertion instead.
+   */
+  async retractAssociation(
+    subject: string,
+    label: string,
+    object: string,
+  ): Promise<RetractAssociationOutcome> {
+    const result = await this.post("/associations/retract", { subject, label, object });
+    return result as RetractAssociationOutcome;
   }
 
   // -- passages / sources ----------------------------------------------------

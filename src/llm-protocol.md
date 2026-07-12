@@ -149,6 +149,13 @@ answers back into prose are your job.
    contributions (weights, attributions, passage), then ingest the new
    version normally. Concepts and edges remain; only weights come
    down.
+8. **One fact wrong?** Pick the correction that matches what happened:
+   an extraction error or merge mistake — a fact that should never
+   have been asserted — is withdrawn outright with
+   `POST /contexts/{name}/associations/retract` `{subject, label,
+   object}` (every source's contribution to that one edge; the rest of
+   each document stays). A fact the world CONTESTS is asserted with
+   negative weight instead, which preserves the dispute as evidence.
 
 ## Procedures (ordered knowledge)
 
@@ -263,6 +270,7 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/sources/search` | `{contexts?:[name], groups?:[group], query, limit?=5}` → the same hits, each tagged with its `context`, across several contexts at once (groups resolve as in `POST /recall`) — merged by per-context rank (every context's best hit first); `score` compares within one context only |
 | POST | `/contexts/{name}/citations` | `{source, paragraph}` → `{text, source, section}` one verbatim paragraph by source and paragraph — the same paragraph `sources/search` would show at that paragraph (`section` is the label governing that paragraph, `null` outside every section the source has stored; `recall`/`query`/`explore`/`activate`/`unreachable_from` resolve the same label onto each attribution as `attributions[].section`) |
 | POST | `/contexts/{name}/sources/retract` | `{source}` → withdraw that source's contributions (diff sync) |
+| POST | `/contexts/{name}/associations/retract` | `{subject, label, object}` → `{retracted, attributions_removed}` — withdraw ONE association outright, every source's contribution to that edge (names resolve through aliases; `retracted: false` = no live edge, nothing changed; the edge row stays visible at weight 0 until compaction, and re-asserting later just works). For a fact that should never have been asserted; a fact that is merely CONTESTED wants a negative-weight assertion instead |
 | POST | `/contexts/{name}/unreachable_from` | `{origins, limit?}` → `{total, matches}` unreachable associations |
 | POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?=0.6, cosine_floor?=0.6}` → spelling/synonym fork candidates |
 | GET | `/contexts/{name}/export` | the context as an import batch stream (JSON Lines body, not the JSON envelope) — one batch per source, create block first, aliases last; `POST /import` (or `taguru import`) restores it, per-source retract-then-apply, answering `{batches: [...]}` in stream order (`taguru_group` records ride the same stream, restore after every batch as whole-record replaces, and answer under `groups: [...]`) |

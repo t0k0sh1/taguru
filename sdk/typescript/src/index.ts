@@ -70,6 +70,7 @@ export {
   type Recollection,
   type RefreshBreakdown,
   type RefreshOutcome,
+  type RetractAssociationOutcome,
   type RetractOutcome,
   type RetrievalResult,
   type SectionSpec,

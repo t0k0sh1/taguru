@@ -2153,6 +2153,34 @@ impl AppState {
         Some((concepts, labels, skipped))
     }
 
+    /// Withdraws one association from a context outright — the surgical
+    /// correction for a single fact that should never have been
+    /// asserted, where [`AppState::retract_source`] would discard the
+    /// whole document's contribution. Returns how many attributions
+    /// were unlinked, or `None` when the triple names no live edge
+    /// (nothing was changed — the caller answers honestly instead of
+    /// pretending a write happened).
+    pub fn retract_association(
+        &self,
+        name: &str,
+        subject: &str,
+        label: &str,
+        object: &str,
+    ) -> Result<Option<usize>, AccessError> {
+        let op = WalOp::RetractAssociation {
+            subject: subject.to_string(),
+            label: label.to_string(),
+            object: object.to_string(),
+        };
+        self.logged_write(
+            name,
+            std::slice::from_ref(&op),
+            |context| context.retract_association(subject, label, object),
+            // The single RetractAssociation op never fails to apply.
+            |_| 1,
+        )
+    }
+
     /// Withdraws one source from a context — its graph contributions and
     /// its registered passage — the per-document differential-sync move:
     /// retract the old version of a changed document, then re-ingest the
@@ -4425,6 +4453,16 @@ fn apply_op(context: &mut Context, op: &WalOp) -> Result<(), (String, bool)> {
         },
         WalOp::RetractSource { source } => {
             context.retract_source(source);
+            Ok(())
+        }
+        WalOp::RetractAssociation {
+            subject,
+            label,
+            object,
+        } => {
+            // A triple that names no live edge is a no-op on replay,
+            // exactly like an unknown source above.
+            context.retract_association(subject, label, object);
             Ok(())
         }
     }

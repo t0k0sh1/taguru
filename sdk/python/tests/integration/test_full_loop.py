@@ -346,3 +346,24 @@ async def test_async_client_full_smoke(server, fresh_name: str) -> None:
         exported = await ctx.export()
         assert '"taguru_batch"' in exported
         await aclient.contexts.delete(fresh_name)
+
+
+def test_retract_association_withdraws_one_edge(client: Taguru, fresh_name: str) -> None:
+    seed(client, fresh_name)
+    ctx = client.context(fresh_name)
+
+    outcome = ctx.retract_association("青嶺酒造", "代表銘柄", "青嶺")
+    assert outcome.retracted
+    assert outcome.attributions_removed == 1
+
+    # Found-nothing honesty on the second call; the document's other
+    # facts are untouched.
+    again = ctx.retract_association("青嶺酒造", "代表銘柄", "青嶺")
+    assert not again.retracted
+    assert again.attributions_removed == 0
+    toji = ctx.query(subject="青嶺酒造", label="杜氏")
+    assert toji.matches[0].object == "高瀬"
+    dead = ctx.query(subject="青嶺酒造", label="代表銘柄")
+    assert dead.matches[0].weight == 0.0
+    assert dead.matches[0].count == 0
+    client.contexts.delete(fresh_name)

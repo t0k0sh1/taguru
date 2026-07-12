@@ -101,6 +101,9 @@ classes:
       route: "POST /contexts/{name}/associations"
       args: [associations]
       options: [chunk_size, max_chunk_bytes]
+    retract_association:
+      route: "POST /contexts/{name}/associations/retract"
+      args: [subject, label, object]
     store_passages:
       route: "POST /contexts/{name}/sources"
       args: [passages]

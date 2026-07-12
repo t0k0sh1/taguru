@@ -437,6 +437,10 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
         .route("/contexts/{name}/export", get(api::export_context))
         .route("/contexts/{name}/compact", post(api::compact_context))
         .route("/contexts/{name}/associations", post(api::add_associations))
+        .route(
+            "/contexts/{name}/associations/retract",
+            post(api::retract_association),
+        )
         .route("/contexts/{name}/recall", post(api::recall))
         .route("/contexts/{name}/query", post(api::query))
         .route("/contexts/{name}/describe", post(api::describe))

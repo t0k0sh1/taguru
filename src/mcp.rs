@@ -557,6 +557,19 @@ pub fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "retract_association",
+            "Withdraw one (subject, label, object) association outright — every source's contribution to that one edge, where retract_source would discard a whole document's. The surgical correction for a fact that should never have been asserted (an extraction error, a merge mistake). A fact that is merely CONTESTED wants a negative-weight assertion instead, which preserves the dispute as evidence. Names resolve through aliases; `retracted: false` means the triple named no live edge and nothing changed. The edge row stays visible at weight 0 until compaction; re-asserting the triple later just works.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "subject": { "type": "string" },
+                    "label": { "type": "string" },
+                    "object": { "type": "string" }
+                }),
+                &["context", "subject", "label", "object"],
+            ),
+        ),
+        (
             "search_passages",
             "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. Each hit names its paragraph (source + paragraph) and reports per-lane rank/score in `lanes`; a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see. Targets one context (context) or several at once (contexts and/or groups) — cross-context hits carry their context and interleave by per-context rank; scores compare within one context only.",
             search_target_schema(
@@ -819,6 +832,11 @@ pub fn route_tool(
             "POST",
             format!("{}/sources/retract", context_path("context")?),
             Some(pick(arguments, &["source"])),
+        ),
+        "retract_association" => (
+            "POST",
+            format!("{}/associations/retract", context_path("context")?),
+            Some(pick(arguments, &["subject", "label", "object"])),
         ),
         "search_passages" => (
             "POST",
