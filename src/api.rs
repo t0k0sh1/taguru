@@ -738,6 +738,17 @@ pub struct GroupEntry {
     pub groups: BTreeSet<String>,
 }
 
+/// Whether the key's grant lets it see the named context — no scope
+/// means everything is visible. The one predicate behind every place
+/// that FILTERS to the grant rather than refusing ([`group_entry`],
+/// [`cross_targets`]'s group resolution), so "the slice a scoped key
+/// sees" is defined exactly once and the two surfaces cannot drift.
+fn scope_allows(scope: &Option<axum::Extension<crate::auth::KeyScope>>, name: &str) -> bool {
+    scope
+        .as_ref()
+        .is_none_or(|axum::Extension(scope)| scope.allows_context(name))
+}
+
 /// The scope cut on one group row. Deliberately different from
 /// `list_contexts`, which hides whole rows: a group is an
 /// organizational label over contexts, not context content, and hiding
@@ -752,11 +763,7 @@ fn group_entry(
     let contexts = record
         .contexts
         .into_iter()
-        .filter(|context| {
-            scope
-                .as_ref()
-                .is_none_or(|axum::Extension(scope)| scope.allows_context(context))
-        })
+        .filter(|context| scope_allows(scope, context))
         .collect();
     GroupEntry {
         name,
@@ -2522,34 +2529,46 @@ pub async fn recall(
     }
 }
 
-/// Vets a cross-context search's target list and returns it deduped,
-/// in first-appearance order. Refused, in order: an empty list (a
-/// search of nothing is a client bug, not an empty result — and
-/// emphatically not "every context"); a list over the input-items cap;
-/// any name beyond the key's grant ([`scope_refusal`] — whole-request,
-/// and before existence, so grants cannot probe names); and the first
-/// name that does not exist (`no_context`, before any context is
-/// searched). Duplicates dedupe silently — naming a context twice is
-/// redundant, not wrong.
+/// Vets a cross-context search's target list — the directly named
+/// contexts plus every context the named groups reach, nested children
+/// included — and returns it deduped: direct names lead in
+/// first-appearance order, group-resolved members follow in name
+/// order (the tie order the passage merge documents). Refused, in
+/// order: naming nothing at all (a search of nothing is a client bug,
+/// not an empty result — and emphatically not "every context"); either
+/// list over the input-items cap; a direct name beyond the key's grant
+/// ([`scope_refusal`] — whole-request, and before existence, so grants
+/// cannot probe names); the first direct name that does not exist
+/// (`no_context`, before any context is searched); and the first group
+/// name that is not a group (`no_group` — group rows are visible to
+/// every key, so that refusal probes nothing). Group-RESOLVED members
+/// beyond the grant are dropped, not refused: a scoped key searches
+/// its slice of a group exactly as `GET /groups` shows it that slice
+/// ([`group_entry`]) — refusing would name out-of-grant members and
+/// leak what the listing hides. The slice can come up empty; a legal
+/// request that resolves to nothing is an empty result, not an error.
 fn cross_targets(
     state: &AppState,
     scope: &Option<axum::Extension<crate::auth::KeyScope>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
     contexts: Vec<String>,
+    groups: Vec<String>,
     started_at: Instant,
 ) -> Result<Vec<String>, Box<Response>> {
-    if contexts.is_empty() {
+    if contexts.is_empty() && groups.is_empty() {
         return Err(Box::new(error(
             ErrorCode::InvalidArgument,
-            "'contexts' must name at least one context",
+            "'contexts' or 'groups' must name at least one target",
             started_at,
         )));
     }
-    if let Some(refusal) = overlong("contexts", contexts.len(), started_at) {
-        return Err(Box::new(refusal));
+    for (field, count) in [("contexts", contexts.len()), ("groups", groups.len())] {
+        if let Some(refusal) = overlong(field, count, started_at) {
+            return Err(Box::new(refusal));
+        }
     }
     let mut seen = BTreeSet::new();
-    let targets: Vec<String> = contexts
+    let mut targets: Vec<String> = contexts
         .into_iter()
         .filter(|name| seen.insert(name.clone()))
         .collect();
@@ -2563,6 +2582,15 @@ fn cross_targets(
             started_at,
         )));
     }
+    let resolved = match state.resolve_groups(&groups) {
+        Ok(resolved) => resolved,
+        Err(missing) => return Err(Box::new(group_not_found(&missing, started_at))),
+    };
+    targets.extend(
+        resolved
+            .into_iter()
+            .filter(|name| scope_allows(scope, name) && seen.insert(name.clone())),
+    );
     Ok(targets)
 }
 
@@ -2607,8 +2635,15 @@ fn cross_matches(
 
 #[derive(Debug, Deserialize)]
 pub struct CrossRecallRequest {
-    /// Full context names — no groups, no patterns.
+    /// Full context names — no patterns.
+    #[serde(default)]
     pub contexts: Vec<String>,
+    /// Group names — each adds every context it reaches, nested
+    /// children included. Overlaps, with `contexts` or between groups,
+    /// dedupe silently: a context is searched once however many ways
+    /// it was named.
+    #[serde(default)]
+    pub groups: Vec<String>,
     pub cue: String,
     /// Omitted means 100.
     pub limit: Option<usize>,
@@ -2628,7 +2663,14 @@ pub async fn cross_recall(
     AppJson(request): AppJson<CrossRecallRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    let targets = match cross_targets(&state, &scope, &key, request.contexts, started_at) {
+    let targets = match cross_targets(
+        &state,
+        &scope,
+        &key,
+        request.contexts,
+        request.groups,
+        started_at,
+    ) {
         Ok(targets) => targets,
         Err(refusal) => return *refusal,
     };
@@ -2712,8 +2754,12 @@ pub async fn query(
 
 #[derive(Debug, Deserialize)]
 pub struct CrossQueryRequest {
-    /// Full context names — no groups, no patterns.
+    /// Full context names — no patterns.
+    #[serde(default)]
     pub contexts: Vec<String>,
+    /// Group names, resolved and deduped as in [`CrossRecallRequest`].
+    #[serde(default)]
+    pub groups: Vec<String>,
     pub subject: Option<OneOrMany>,
     pub label: Option<OneOrMany>,
     pub object: Option<OneOrMany>,
@@ -2740,7 +2786,14 @@ pub async fn cross_query(
     ) {
         return refusal;
     }
-    let targets = match cross_targets(&state, &scope, &key, request.contexts, started_at) {
+    let targets = match cross_targets(
+        &state,
+        &scope,
+        &key,
+        request.contexts,
+        request.groups,
+        started_at,
+    ) {
         Ok(targets) => targets,
         Err(refusal) => return *refusal,
     };

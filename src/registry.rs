@@ -1509,6 +1509,24 @@ impl AppState {
         groups::context_closure(&self.0.groups.read().unwrap(), names)
     }
 
+    /// [`group_context_closures`] with existence semantics: the first
+    /// name that is not a registered group comes back as the error
+    /// instead of contributing nothing. The cross-context searches
+    /// resolve their `groups` targets here — a caller who NAMES a group
+    /// deserves a `no_group` refusal, not a silently empty search —
+    /// checked and walked under one lock acquisition so a concurrent
+    /// group delete cannot slip between the two.
+    pub fn resolve_groups(&self, names: &[String]) -> Result<BTreeSet<String>, String> {
+        let groups = self.0.groups.read().unwrap();
+        if let Some(missing) = first_missing(names, |name| groups.contains_key(name)) {
+            return Err(missing.clone());
+        }
+        Ok(groups::context_closure(
+            &groups,
+            names.iter().map(String::as_str),
+        ))
+    }
+
     /// One name-ordered page of groups plus the cursor-independent
     /// total. Scope filtering is the API layer's business, as with
     /// [`AppState::directory`] — but unlike the context directory,

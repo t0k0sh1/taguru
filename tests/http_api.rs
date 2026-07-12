@@ -3148,10 +3148,179 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
     );
 }
 
+/// Cross-context search by group: a `groups` name searches every
+/// context it reaches — nested children included — and combines with
+/// `contexts`, overlaps deduped, so a context is searched once however
+/// many ways it was named. Directly named contexts lead the tie order
+/// and group-resolved members follow in name order; an unknown group
+/// is `no_group`, an empty resolution is an empty result, and the MCP
+/// search tools take `groups` beside `contexts`.
+#[test]
+fn cross_context_search_resolves_groups_beside_contexts() {
+    let server = Server::start("cross-groups");
+    for (name, fact) in [
+        (
+            "izakaya",
+            json!([{"subject": "蔵", "label": "名物", "object": "燗酒",
+                    "weight": 0.5, "source": "iz.md"}]),
+        ),
+        (
+            "sakagura",
+            json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
+                    "weight": 1.0, "source": "sk.md"}]),
+        ),
+    ] {
+        server.ok("PUT", &format!("/contexts/{name}"), Some(json!({})));
+        server.ok(
+            "POST",
+            &format!("/contexts/{name}/associations"),
+            Some(fact),
+        );
+    }
+    // sakaya bundles izakaya; nomiya bundles sakagura and nests sakaya.
+    server.ok(
+        "PUT",
+        "/groups/sakaya",
+        Some(json!({"contexts": ["izakaya"]})),
+    );
+    server.ok(
+        "PUT",
+        "/groups/nomiya",
+        Some(json!({"contexts": ["sakagura"], "groups": ["sakaya"]})),
+    );
+
+    // One group name reaches both contexts through the nesting.
+    let recalled = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"groups": ["nomiya"], "cue": "蔵"})),
+    );
+    assert_eq!(recalled["total"], json!(2), "{recalled}");
+
+    // Naming a member directly AND through the group searches it once.
+    let deduped = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["izakaya"], "groups": ["nomiya", "sakaya"], "cue": "蔵"})),
+    );
+    assert_eq!(deduped["total"], json!(2), "{deduped}");
+
+    // query rides the same resolution.
+    let queried = server.ok(
+        "POST",
+        "/query",
+        Some(json!({"groups": ["nomiya"], "label": "杜氏"})),
+    );
+    assert_eq!(queried["total"], json!(1), "{queried}");
+    assert_eq!(queried["matches"][0]["context"], json!("sakagura"));
+
+    // Passage rank ties: contexts named directly lead, group-resolved
+    // members follow — sakagura outranks izakaya arriving via sakaya.
+    server.ok(
+        "POST",
+        "/contexts/izakaya/sources",
+        Some(json!({"passages": {"iz.md": "蔵元の燗酒は冬の名物。"}})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sakagura/sources",
+        Some(json!({"passages": {"sk.md": "杜氏の高瀬は蔵元を任されている。"}})),
+    );
+    let hits = server.ok(
+        "POST",
+        "/sources/search",
+        Some(json!({"contexts": ["sakagura"], "groups": ["sakaya"], "query": "蔵元"})),
+    );
+    let hits = hits.as_array().unwrap();
+    assert_eq!(hits.len(), 2, "both contexts must answer: {hits:?}");
+    assert_eq!(hits[0]["context"], json!("sakagura"), "{hits:?}");
+    assert_eq!(hits[1]["context"], json!("izakaya"), "{hits:?}");
+
+    // An empty group is an empty result, not an error…
+    server.ok("PUT", "/groups/kara", Some(json!({})));
+    let empty = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"groups": ["kara"], "cue": "蔵"})),
+    );
+    assert_eq!(empty["total"], json!(0), "{empty}");
+    assert_eq!(empty["matches"], json!([]), "{empty}");
+
+    // …an unknown group refuses before anything is searched…
+    let (status, ghost) = server.call(
+        "POST",
+        "/recall",
+        Some(json!({"groups": ["maboroshi"], "cue": "蔵"})),
+    );
+    assert_eq!(status, 404, "{ghost}");
+    assert_eq!(ghost["code"], json!("no_group"), "{ghost}");
+    assert!(
+        ghost["error"].as_str().unwrap().contains("'maboroshi'"),
+        "{ghost}"
+    );
+
+    // …naming nothing at all is a client bug, not an empty result…
+    let (status, nothing) = server.call("POST", "/recall", Some(json!({"cue": "蔵"})));
+    assert_eq!(status, 400, "{nothing}");
+    assert_eq!(nothing["code"], json!("invalid_argument"), "{nothing}");
+
+    // …and the groups list shares the input-items cap.
+    let flood: Vec<String> = (0..1001).map(|i| format!("g{i}")).collect();
+    let (status, over) = server.call(
+        "POST",
+        "/recall",
+        Some(json!({"groups": flood, "cue": "蔵"})),
+    );
+    assert_eq!(status, 400, "{over}");
+    assert_eq!(over["code"], json!("over_limit"), "{over}");
+
+    // The MCP search tools take `groups` as a cross-context form…
+    let (status, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "recall", "arguments": {
+                "groups": ["nomiya"], "cue": "蔵",
+            }},
+        })),
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_ne!(reply["result"]["isError"], json!(true), "{reply}");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("sakagura") && text.contains("izakaya"),
+        "{text}"
+    );
+
+    // …and beside `context` it is the same ambiguity as `contexts`.
+    let (status, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "recall", "arguments": {
+                "context": "izakaya", "groups": ["nomiya"], "cue": "蔵",
+            }},
+        })),
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["result"]["isError"], json!(true), "{reply}");
+    assert!(
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not both"),
+        "{reply}"
+    );
+}
+
 /// A scoped key's cross-context search is refused whole on any name
 /// beyond the grant — and because the grant check runs before the
 /// existence check, the 403 for a live out-of-grant name and for a
-/// made-up one are indistinguishable: no existence oracle.
+/// made-up one are indistinguishable: no existence oracle. A `groups`
+/// target resolves to the grant's slice instead of refusing: a refusal
+/// would name the very membership the group listings hide.
 #[test]
 fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let server = Server::start_with_env(
@@ -3243,6 +3412,82 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
         "stok",
     );
     assert_eq!(status, 403);
+
+    // A group target resolves to the grant's slice instead of refusing
+    // — the same slice `GET /groups` shows a scoped key — so nothing
+    // in the answer betrays the out-of-grant member.
+    for (context, fact) in [
+        (
+            "sake",
+            json!({"subject": "蔵", "label": "銘柄", "object": "白露"}),
+        ),
+        (
+            "bunko",
+            json!({"subject": "蔵", "label": "所蔵", "object": "写本"}),
+        ),
+    ] {
+        let (status, _) = call(
+            "POST",
+            &format!("/contexts/{context}/associations"),
+            Some(json!([{"subject": fact["subject"], "label": fact["label"],
+                         "object": fact["object"], "weight": 1.0, "source": "x.md"}])),
+            "atok",
+        );
+        assert_eq!(status, 200);
+    }
+    let (status, _) = call(
+        "PUT",
+        "/groups/zenbu",
+        Some(json!({"contexts": ["sake", "bunko"]})),
+        "atok",
+    );
+    assert_eq!(status, 200);
+    let (status, sliced) = call(
+        "POST",
+        "/recall",
+        Some(json!({"groups": ["zenbu"], "cue": "蔵"})),
+        "stok",
+    );
+    assert_eq!(status, 200, "{sliced}");
+    assert_eq!(sliced["result"]["total"], json!(1), "{sliced}");
+    assert_eq!(
+        sliced["result"]["matches"][0]["context"],
+        json!("sake"),
+        "{sliced}"
+    );
+    assert!(
+        !sliced.to_string().contains("bunko"),
+        "the slice must not name the out-of-grant member: {sliced}"
+    );
+
+    // A group with nothing in the grant answers empty, exactly as an
+    // empty group would — never a refusal naming the hidden member.
+    let (status, _) = call(
+        "PUT",
+        "/groups/soto",
+        Some(json!({"contexts": ["bunko"]})),
+        "atok",
+    );
+    assert_eq!(status, 200);
+    let (status, outside) = call(
+        "POST",
+        "/recall",
+        Some(json!({"groups": ["soto"], "cue": "蔵"})),
+        "stok",
+    );
+    assert_eq!(status, 200, "{outside}");
+    assert_eq!(outside["result"]["total"], json!(0), "{outside}");
+    assert!(!outside.to_string().contains("bunko"), "{outside}");
+
+    // Directly naming the out-of-grant context still refuses whole,
+    // groups on the request or not.
+    let (status, direct) = call(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["bunko"], "groups": ["zenbu"], "cue": "蔵"})),
+        "stok",
+    );
+    assert_eq!(status, 403, "{direct}");
 }
 
 /// The access log names the context a request addressed, and every

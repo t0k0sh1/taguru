@@ -26,8 +26,10 @@ answers back into prose are your job.
    label sample — these never go stale), and usage counters (reads,
    empty reads, writes, last-read/write unix seconds). Torn between a
    few candidates? Search them together: `POST /recall`, `/query`, and
-   `/sources/search` take `contexts: [full names]` and tag every match
-   with its context — shortlist, search once, then continue inside the
+   `/sources/search` take `contexts: [full names]` and/or
+   `groups: [group names]` (a group searches every context it reaches,
+   nested children included; overlaps dedupe) and tag every match with
+   its context — shortlist, search once, then continue inside the
    context that answered.
 2. **Resolve cues**: extract entity and relation candidates from the
    question; `resolve` (concepts) / `resolve_label` (relations). The
@@ -241,9 +243,9 @@ Source code takes the same discipline; only the naming changes.
 | DELETE | `/groups/{name}` | delete the bundling only — member contexts and child groups are untouched (deleting a context or a group also drops it from every group) |
 | POST | `/contexts/{name}/associations` | `[{subject,label,object,weight,source?,paragraph?}]` → applied count (`paragraph` locates the fact within `source` and is ignored without one) |
 | POST | `/contexts/{name}/recall` | `{cue, limit?}` → `{total, matches}` |
-| POST | `/recall` | `{contexts:[name], cue, limit?}` → `{total, matches}` — recall across several contexts at once (full names; every match tagged with its `context`; past the limit the strongest \|weight\| survives, one scale across contexts) |
+| POST | `/recall` | `{contexts?:[name], groups?:[group], cue, limit?}` → `{total, matches}` — recall across several contexts at once (full names, and/or groups: each searches every context it reaches, nested children included, overlaps deduped; every match tagged with its `context`; past the limit the strongest \|weight\| survives, one scale across contexts) |
 | POST | `/contexts/{name}/query` | `{subject?, label?, object?, limit?}` — each position a string or an array → `{total, matches}` |
-| POST | `/query` | `{contexts:[name], subject?, label?, object?, limit?}` → `{total, matches}` — query across several contexts at once, same contract as `POST /recall` |
+| POST | `/query` | `{contexts?:[name], groups?:[group], subject?, label?, object?, limit?}` → `{total, matches}` — query across several contexts at once, same contract as `POST /recall` |
 | POST | `/contexts/{name}/describe` | `{concept}` → label outline (counts per role) / null |
 | POST | `/contexts/{name}/explore` | `{origins, max_depth?, limit?}` → `{total, matches:[{distance, path, association}]}` (hop cap 10, applied when omitted; truncation keeps the nearest) |
 | POST | `/contexts/{name}/activate` | `{origins, decay?=0.5, limit?=20}` → `{total, matches:[{strength, path, association}]}` |
@@ -255,7 +257,7 @@ Source code takes the same discipline; only the naming changes.
 | GET/POST | `/contexts/{name}/sources` | `?limit=1000&after=id` → `{total, sources:[...]}` registered source ids (keyset-paged) / `{passages:{source:text}, questions?:{source:[{paragraph, question}]}, sections?:{source:[{paragraph, section}]}}` → `{stored, questions_stored, questions_dropped, sections_stored, sections_dropped}` (a dropped question or section named a paragraph its text's blank-line split does not have) |
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
 | POST | `/contexts/{name}/sources/search` | `{query, limit?=5}` → `[{source, paragraph, score, text, lanes}]` best PARAGRAPHS across passages (`paragraph` = its position in the source; `text` = that paragraph alone; `lanes.bm25`/`lanes.vector` = per-lane `{rank, score}`; `score` is rank-fused when the vector lane ran, raw BM25 otherwise) |
-| POST | `/sources/search` | `{contexts:[name], query, limit?=5}` → the same hits, each tagged with its `context`, across several contexts at once — merged by per-context rank (every context's best hit first); `score` compares within one context only |
+| POST | `/sources/search` | `{contexts?:[name], groups?:[group], query, limit?=5}` → the same hits, each tagged with its `context`, across several contexts at once (groups resolve as in `POST /recall`) — merged by per-context rank (every context's best hit first); `score` compares within one context only |
 | POST | `/contexts/{name}/citations` | `{source, paragraph}` → `{text, source, section}` one verbatim paragraph by source and paragraph — the same paragraph `sources/search` would show at that paragraph (`section` is the label governing that paragraph, `null` outside every section the source has stored; `recall`/`query`/`explore`/`activate`/`unreachable_from` resolve the same label onto each attribution as `attributions[].section`) |
 | POST | `/contexts/{name}/sources/retract` | `{source}` → withdraw that source's contributions (diff sync) |
 | POST | `/contexts/{name}/unreachable_from` | `{origins, limit?}` → `{total, matches}` unreachable associations |
@@ -280,9 +282,12 @@ Source code takes the same discipline; only the naming changes.
   naming what the key lacks; a context-scoped key sees only its grant
   in `GET /contexts`, group listings show it only the members it may
   see (child group names stay visible — they are labels, not
-  content), and a cross-context search — or a group write, counted
-  through nested children — naming any context beyond the grant is
-  refused whole. Scopes bind MCP tool calls exactly as raw HTTP.
+  content), and a cross-context search naming a context beyond the
+  grant in `contexts` — or a group write touching one, counted
+  through nested children — is refused whole. A cross-search `groups`
+  entry instead resolves to just the members the grant covers, the
+  same slice the listing shows: a refusal there would name what the
+  listing hides. Scopes bind MCP tool calls exactly as raw HTTP.
 
 ## Errors and limits
 
@@ -311,8 +316,8 @@ resend) / `unauthorized` / `forbidden` / `no_context` / `no_source` /
 - `400`: association batch over 10,000 per request (nothing applied —
   split and resend; alias batches and removals share the same cap) /
   list-shaped read input over 1,000 items (origins, query terms,
-  `sources/lookup` sources, cross-search `contexts` — split the
-  request) / weight not finite
+  `sources/lookup` sources, cross-search `contexts` and `groups` —
+  split the request) / weight not finite
   or |weight| > 1,000,000
   (whole batch refused) / name too long (subject, label, object,
   source, alias ≤ 1024 bytes — names are headings, not bodies:

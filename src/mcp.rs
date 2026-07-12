@@ -125,21 +125,32 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": properties, "required": required })
 }
 
-/// [`object_schema`] for the search tools, which target one context OR
-/// several: `context` and `contexts` join the given properties, and an
-/// `anyOf` demands one of the two (the `cite_passage` precedent).
-/// Passing both is refused by `route_tool`, where the message can say
-/// so; a schema can only say "invalid".
-fn dual_target_schema(properties: Value, required: &[&str]) -> Value {
+/// [`object_schema`] for the search tools, which target one context or
+/// several: `context`, `contexts`, and `groups` join the given
+/// properties, and an `anyOf` demands at least one (the `cite_passage`
+/// precedent). `contexts` and `groups` combine — both are the
+/// cross-context form — but `context` beside either is refused by
+/// `route_tool`, where the message can say so; a schema can only say
+/// "invalid".
+fn search_target_schema(properties: Value, required: &[&str]) -> Value {
     let mut schema = object_schema(properties, required);
     schema["properties"]["context"] =
         json!({ "type": "string", "description": "Context name (from list_contexts)" });
     schema["properties"]["contexts"] = json!({
         "type": "array",
         "items": { "type": "string" },
-        "description": "several contexts at once — full names; every match comes back tagged with its context. Pass either context or contexts, never both."
+        "description": "several contexts at once — full names; every match comes back tagged with its context. Combines with groups; don't pass context beside it."
     });
-    schema["anyOf"] = json!([{ "required": ["context"] }, { "required": ["contexts"] }]);
+    schema["properties"]["groups"] = json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "group names (from list_groups) — each resolves to every context it reaches, nested children included, deduped against contexts and each other. Combines with contexts; don't pass context beside it."
+    });
+    schema["anyOf"] = json!([
+        { "required": ["context"] },
+        { "required": ["contexts"] },
+        { "required": ["groups"] },
+    ]);
     schema
 }
 
@@ -441,8 +452,8 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "query",
-            "Position-pinned search. subject/label/object each take a string or an array (array = match any). Outline with describe, then narrow by label. Targets one context (context) or several at once (contexts) — cross-context matches carry their context, and past the limit the strongest |weight| survives (weights share one scale).",
-            dual_target_schema(
+            "Position-pinned search. subject/label/object each take a string or an array (array = match any). Outline with describe, then narrow by label. Targets one context (context) or several at once (contexts and/or groups) — cross-context matches carry their context, and past the limit the strongest |weight| survives (weights share one scale).",
+            search_target_schema(
                 json!({
                     "subject": { "type": ["string", "array"] },
                     "label": { "type": ["string", "array"] },
@@ -454,8 +465,8 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "recall",
-            "Every association touching the cue, whatever its position. Use query when the role matters. Targets one context (context) or several at once (contexts) — cross-context matches carry their context, and past the limit the strongest |weight| survives (weights share one scale).",
-            dual_target_schema(
+            "Every association touching the cue, whatever its position. Use query when the role matters. Targets one context (context) or several at once (contexts and/or groups) — cross-context matches carry their context, and past the limit the strongest |weight| survives (weights share one scale).",
+            search_target_schema(
                 json!({
                     "cue": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
@@ -547,8 +558,8 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "search_passages",
-            "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. Each hit names its paragraph (source + paragraph) and reports per-lane rank/score in `lanes`; a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see. Targets one context (context) or several at once (contexts) — cross-context hits carry their context and interleave by per-context rank; scores compare within one context only.",
-            dual_target_schema(
+            "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. Each hit names its paragraph (source + paragraph) and reports per-lane rank/score in `lanes`; a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see. Targets one context (context) or several at once (contexts and/or groups) — cross-context hits carry their context and interleave by per-context rank; scores compare within one context only.",
+            search_target_schema(
                 json!({
                     "query": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 0, "description": "default 5" }
@@ -630,21 +641,19 @@ pub fn route_tool(
     let group_path = |key: &str| -> Result<String, String> {
         Ok(format!("/groups/{}", segment(need(arguments, key)?)))
     };
-    // The search tools are dual-target: `context` prefixes the
-    // per-context path, `contexts` (an array, riding the body) means
-    // the cross-context route — no prefix. Exactly one of the two:
-    // both is ambiguous, neither names no target at all.
+    // The search tools target one context or several: `context`
+    // prefixes the per-context path; `contexts` and/or `groups`
+    // (arrays, riding the body) mean the cross-context route — no
+    // prefix. `context` beside either is ambiguous, and none at all
+    // names no target.
     let search_base = || -> Result<String, String> {
-        let one = arguments
-            .get("context")
-            .is_some_and(|value| !value.is_null());
-        let many = arguments
-            .get("contexts")
-            .is_some_and(|value| !value.is_null());
-        match (one, many) {
-            (true, true) => Err("pass either 'context' or 'contexts', not both".to_string()),
+        let given = |key: &str| arguments.get(key).is_some_and(|value| !value.is_null());
+        match (given("context"), given("contexts") || given("groups")) {
+            (true, true) => {
+                Err("pass either 'context' or 'contexts'/'groups', not both".to_string())
+            }
             (false, false) => Err(
-                "missing required argument 'context' (or 'contexts', to search several at once)"
+                "missing required argument 'context' (or 'contexts'/'groups', to search several at once)"
                     .to_string(),
             ),
             (true, false) => context_path("context"),
@@ -760,13 +769,13 @@ pub fn route_tool(
             format!("{}/query", search_base()?),
             Some(pick(
                 arguments,
-                &["contexts", "subject", "label", "object", "limit"],
+                &["contexts", "groups", "subject", "label", "object", "limit"],
             )),
         ),
         "recall" => (
             "POST",
             format!("{}/recall", search_base()?),
-            Some(pick(arguments, &["contexts", "cue", "limit"])),
+            Some(pick(arguments, &["contexts", "groups", "cue", "limit"])),
         ),
         "activate" => (
             "POST",
@@ -814,7 +823,7 @@ pub fn route_tool(
         "search_passages" => (
             "POST",
             format!("{}/sources/search", search_base()?),
-            Some(pick(arguments, &["contexts", "query", "limit"])),
+            Some(pick(arguments, &["contexts", "groups", "query", "limit"])),
         ),
         "cite_passage" => (
             "POST",
@@ -891,9 +900,10 @@ mod tests {
         }
     }
 
-    /// The search tools are dual-target: `contexts` routes to the
-    /// cross-context path with the array in the body; `context` keeps
-    /// the historical per-context route, body unchanged.
+    /// The search tools target one context or several: `contexts`
+    /// and/or `groups` route to the cross-context path with the arrays
+    /// in the body; `context` keeps the historical per-context route,
+    /// body unchanged.
     #[test]
     fn search_tools_route_to_the_cross_context_paths_on_contexts() {
         let (method, path, body) =
@@ -911,6 +921,22 @@ mod tests {
         assert_eq!(path, "/sources/search");
         assert_eq!(body.unwrap(), json!({"contexts": ["a"], "query": "q"}));
 
+        // `groups` alone reaches the same route, and beside `contexts`
+        // both ride the body.
+        let (_, path, body) = route_tool("recall", &json!({"groups": ["g"], "cue": "x"})).unwrap();
+        assert_eq!(path, "/recall");
+        assert_eq!(body.unwrap(), json!({"groups": ["g"], "cue": "x"}));
+        let (_, path, body) = route_tool(
+            "search_passages",
+            &json!({"contexts": ["a"], "groups": ["g"], "query": "q"}),
+        )
+        .unwrap();
+        assert_eq!(path, "/sources/search");
+        assert_eq!(
+            body.unwrap(),
+            json!({"contexts": ["a"], "groups": ["g"], "query": "q"})
+        );
+
         // The single-context form is untouched, and the body never
         // carries the path-bound name.
         let (_, path, body) = route_tool("recall", &json!({"context": "a", "cue": "x"})).unwrap();
@@ -918,20 +944,28 @@ mod tests {
         assert_eq!(body.unwrap(), json!({"cue": "x"}));
     }
 
-    /// Both targets at once is ambiguous and neither is no target at
-    /// all — each refusal says which way to fix the call, and an
-    /// explicit null counts as an omission (the `pick` rule).
+    /// The one-context form beside the cross-context form is ambiguous
+    /// and no target at all is no search — each refusal says which way
+    /// to fix the call, and an explicit null counts as an omission (the
+    /// `pick` rule).
     #[test]
     fn search_tools_refuse_an_ambiguous_or_absent_target() {
+        let ambiguous = "pass either 'context' or 'contexts'/'groups', not both";
         assert_eq!(
             route_tool(
                 "recall",
                 &json!({"context": "a", "contexts": ["b"], "cue": "x"})
             ),
-            Err("pass either 'context' or 'contexts', not both".to_string())
+            Err(ambiguous.to_string())
         );
-        let missing =
-            "missing required argument 'context' (or 'contexts', to search several at once)";
+        assert_eq!(
+            route_tool(
+                "recall",
+                &json!({"context": "a", "groups": ["g"], "cue": "x"})
+            ),
+            Err(ambiguous.to_string())
+        );
+        let missing = "missing required argument 'context' (or 'contexts'/'groups', to search several at once)";
         assert_eq!(
             route_tool("search_passages", &json!({"query": "q"})),
             Err(missing.to_string())

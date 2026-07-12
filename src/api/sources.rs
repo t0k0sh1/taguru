@@ -332,8 +332,13 @@ pub async fn search_passages(
 
 #[derive(Debug, Deserialize)]
 pub struct CrossSearchPassagesRequest {
-    /// Full context names — no groups, no patterns.
+    /// Full context names — no patterns.
+    #[serde(default)]
     pub contexts: Vec<String>,
+    /// Group names, resolved and deduped as in
+    /// [`super::CrossRecallRequest`].
+    #[serde(default)]
+    pub groups: Vec<String>,
     pub query: String,
     /// Omitted means 5.
     pub limit: Option<usize>,
@@ -354,7 +359,14 @@ pub async fn cross_search_passages(
     AppJson(request): AppJson<CrossSearchPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    let targets = match cross_targets(&state, &scope, &key, request.contexts, started_at) {
+    let targets = match cross_targets(
+        &state,
+        &scope,
+        &key,
+        request.contexts,
+        request.groups,
+        started_at,
+    ) {
         Ok(targets) => targets,
         Err(refusal) => return *refusal,
     };
