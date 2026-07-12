@@ -29,8 +29,14 @@
 //! and is held just long enough to look up, insert, or remove; every
 //! context sits behind its own entry lock. A caller clones the entry's
 //! `Arc` and releases the registry immediately, so a slow operation on
-//! one context never blocks the others — and a panic poisons only the
-//! context it happened in. Groups (tiny, always-resident records) sit
+//! one context never blocks the others. Locks here are parking_lot, not
+//! std::sync: a panic while one is held unwinds without poisoning it, so
+//! neither that context nor a sibling nor the registry itself bricks for
+//! the rest of the process. Safety across the panic comes from the
+//! write-ahead log, not the lock — a write is durable once it's staged
+//! and fsynced there, before it ever touches memory, so a panic mid-write
+//! loses at most the in-memory half of an update that the next load
+//! replays past anyway. Groups (tiny, always-resident records) sit
 //! behind one separate lock; the only operations that need both take
 //! `groups` BEFORE `registry` — never the other way around.
 
@@ -38,9 +44,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
 
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use taguru::context::{AliasError, Context, LabelUsage};
 
@@ -394,8 +401,8 @@ impl Entry {
     /// post-lookup lock acquisition goes through here so no path can
     /// forget the tombstone.
     #[allow(clippy::readonly_write_lock)] // some callers lock purely for exclusion
-    fn lock_unless_deleted(&self) -> Option<std::sync::RwLockWriteGuard<'_, EntryInner>> {
-        let guard = self.inner.write().unwrap();
+    fn lock_unless_deleted(&self) -> Option<parking_lot::RwLockWriteGuard<'_, EntryInner>> {
+        let guard = self.inner.write();
         (!matches!(guard.slot, Slot::Deleted)).then_some(guard)
     }
 
@@ -406,8 +413,8 @@ impl Entry {
     /// Whichever side locks first wins cleanly: a fence taken first
     /// makes the delete wait; a tombstone planted first turns the
     /// operation into a no-op instead of a file resurrection.
-    fn read_unless_deleted(&self) -> Option<std::sync::RwLockReadGuard<'_, EntryInner>> {
-        let guard = self.inner.read().unwrap();
+    fn read_unless_deleted(&self) -> Option<parking_lot::RwLockReadGuard<'_, EntryInner>> {
+        let guard = self.inner.read();
         (!matches!(guard.slot, Slot::Deleted)).then_some(guard)
     }
 
@@ -416,7 +423,6 @@ impl Entry {
     fn vectors_footprint(&self) -> usize {
         self.vectors
             .lock()
-            .unwrap()
             .as_ref()
             .map(|store| store.footprint())
             .unwrap_or(0)
@@ -426,7 +432,6 @@ impl Entry {
     fn passages_footprint(&self) -> usize {
         self.passages
             .lock()
-            .unwrap()
             .as_ref()
             .map(|store| store.footprint())
             .unwrap_or(0)
@@ -436,7 +441,6 @@ impl Entry {
     fn bm25_footprint(&self) -> usize {
         self.bm25
             .read()
-            .unwrap()
             .as_ref()
             .map(|index| index.footprint())
             .unwrap_or(0)
@@ -446,7 +450,6 @@ impl Entry {
     fn passage_vectors_footprint(&self) -> usize {
         self.passage_vectors
             .lock()
-            .unwrap()
             .as_ref()
             .map(|store| store.footprint())
             .unwrap_or(0)
@@ -1128,7 +1131,7 @@ impl AppState {
         let pinned: Vec<(String, Arc<Entry>)> = self
             .snapshot()
             .into_iter()
-            .filter(|(_, entry)| entry.inner.read().unwrap().meta.pinned)
+            .filter(|(_, entry)| entry.inner.read().meta.pinned)
             .collect();
         if pinned.is_empty() {
             return;
@@ -1142,10 +1145,10 @@ impl AppState {
             for _ in 0..workers {
                 scope.spawn(|| {
                     loop {
-                        let Some((name, entry)) = queue.lock().unwrap().next() else {
+                        let Some((name, entry)) = queue.lock().next() else {
                             break;
                         };
-                        let mut inner = entry.inner.write().unwrap();
+                        let mut inner = entry.inner.write();
                         if !inner.meta.pinned {
                             continue;
                         }
@@ -1252,7 +1255,7 @@ impl AppState {
         let mut wal_bytes = 0u64;
         let mut passages_wal_bytes = 0u64;
         for (name, entry) in snapshot {
-            let inner = entry.inner.read().unwrap();
+            let inner = entry.inner.read();
             if let Slot::Hot(context) = &inner.slot {
                 contexts_resident += 1;
                 resident_bytes += context.footprint() as u64;
@@ -1270,7 +1273,6 @@ impl AppState {
                 let resident = entry
                     .passages
                     .lock()
-                    .unwrap()
                     .as_ref()
                     .map(|store| store.pending_log_bytes());
                 resident.unwrap_or_else(|| {
@@ -1282,7 +1284,7 @@ impl AppState {
         }
         GaugeSnapshot {
             contexts_registered,
-            groups_registered: self.0.groups.read().unwrap().len() as u64,
+            groups_registered: self.0.groups.read().len() as u64,
             contexts_resident,
             resident_bytes,
             wal_bytes,
@@ -1291,7 +1293,7 @@ impl AppState {
     }
 
     pub fn context_count(&self) -> usize {
-        self.0.registry.read().unwrap().len()
+        self.0.registry.read().len()
     }
 
     /// Whether the semantic entry tier has a provider at all.
@@ -1319,15 +1321,14 @@ impl AppState {
             return Err(CreateError::InvalidName);
         }
         {
-            let registry = self.0.registry.read().unwrap();
+            let registry = self.0.registry.read();
             // A name mid-delete is still taken: its delete has left the
             // registry but is still unlinking files, and a create landing
             // now would have its fresh generation destroyed by the tail of
             // that loop. A name mid-create is equally taken. The client
             // sees the same refusal as for a live name and simply retries
             // after the other call's response.
-            if registry.contains_key(name) || self.0.pending_deletes.lock().unwrap().contains(name)
-            {
+            if registry.contains_key(name) || self.0.pending_deletes.lock().contains(name) {
                 return Err(CreateError::AlreadyExists);
             }
             // Reserving while still under the registry guard closes the
@@ -1335,20 +1336,14 @@ impl AppState {
             // inside the registry's WRITE section below, so "not in the
             // map, not reserved" cannot be observed between a sibling's
             // insert and its unreserve.
-            if !self
-                .0
-                .pending_creates
-                .lock()
-                .unwrap()
-                .insert(name.to_string())
-            {
+            if !self.0.pending_creates.lock().insert(name.to_string()) {
                 return Err(CreateError::AlreadyExists);
             }
         }
         let created = self.create_files(name, &meta);
         // Success or failure, the reservation leaves in the same
         // critical section that (on success) makes the entry visible.
-        let mut registry = self.0.registry.write().unwrap();
+        let mut registry = self.0.registry.write();
         let outcome = created.map(|(stats, usage, context)| {
             registry.insert(
                 name.to_string(),
@@ -1361,7 +1356,7 @@ impl AppState {
                 )),
             );
         });
-        self.0.pending_creates.lock().unwrap().remove(name);
+        self.0.pending_creates.lock().remove(name);
         outcome
     }
 
@@ -1435,25 +1430,25 @@ impl AppState {
     /// this one's removals.
     pub fn delete(&self, name: &str) -> Option<io::Result<()>> {
         let entry = {
-            let mut registry = self.0.registry.write().unwrap();
+            let mut registry = self.0.registry.write();
             let entry = registry.remove(name)?;
-            self.0
-                .pending_deletes
-                .lock()
-                .unwrap()
-                .insert(name.to_string());
+            self.0.pending_deletes.lock().insert(name.to_string());
             entry
         };
-        let mut in_flight = entry.inner.write().unwrap();
+        let mut in_flight = entry.inner.write();
         in_flight.slot = Slot::Deleted;
         self.recount_entry(&mut in_flight);
         entry.dirty.store(false, Ordering::Relaxed);
         // Lock order: `inner` before `passages` before `vectors`, as
         // documented on Entry.
-        *entry.passages.lock().unwrap() = None;
-        *entry.bm25.write().unwrap() = None;
-        *entry.passage_vectors.lock().unwrap() = None;
-        *entry.vectors.lock().unwrap() = None;
+        *entry.passages.lock() = None;
+        *entry.bm25.write() = None;
+        *entry.passage_vectors.lock() = None;
+        *entry.vectors.lock() = None;
+        // The rest of this function is disk I/O (marker, group sweep,
+        // unlinks) guarded by `pending_deletes`, not by `inner` — hold
+        // it no longer than the in-memory teardown above needs.
+        drop(in_flight);
         let stem = file_stem(name);
         // The durable half of the acknowledgment: while this marker
         // exists, boot resumes the unlinks — so a partial failure here
@@ -1482,7 +1477,7 @@ impl AppState {
         if outcome.is_ok() {
             let _ = fs::remove_file(&marker);
         }
-        self.0.pending_deletes.lock().unwrap().remove(name);
+        self.0.pending_deletes.lock().remove(name);
         Some(outcome)
     }
 
@@ -1508,7 +1503,7 @@ impl AppState {
         if name.is_empty() {
             return Err(CreateGroupError::InvalidName);
         }
-        let mut groups = self.0.groups.write().unwrap();
+        let mut groups = self.0.groups.write();
         if groups.contains_key(name) {
             return Err(CreateGroupError::AlreadyExists);
         }
@@ -1518,7 +1513,7 @@ impl AppState {
         // registry, not to whoever happens to call it.
         check_member_caps(&contexts, &children).map_err(CreateGroupError::OverCap)?;
         {
-            let registry = self.0.registry.read().unwrap();
+            let registry = self.0.registry.read();
             if let Some(missing) =
                 first_missing(&contexts, |context| registry.contains_key(context))
             {
@@ -1563,7 +1558,7 @@ impl AppState {
         add_groups: BTreeSet<String>,
         remove_groups: BTreeSet<String>,
     ) -> Result<GroupRecord, UpdateGroupError> {
-        let mut groups = self.0.groups.write().unwrap();
+        let mut groups = self.0.groups.write();
         if !groups.contains_key(name) {
             return Err(UpdateGroupError::NotFound);
         }
@@ -1598,7 +1593,7 @@ impl AppState {
             }
         }
         if !add_contexts.is_empty() {
-            let registry = self.0.registry.read().unwrap();
+            let registry = self.0.registry.read();
             if let Some(missing) =
                 first_missing(&add_contexts, |context| registry.contains_key(context))
             {
@@ -1656,7 +1651,7 @@ impl AppState {
         &self,
         records: &[(String, GroupRecord)],
     ) -> Result<Vec<(String, GroupRestoreOutcome)>, RestoreGroupsError> {
-        let mut groups = self.0.groups.write().unwrap();
+        let mut groups = self.0.groups.write();
         // The prospective map — what memory becomes if every write
         // lands — is what the validators judge.
         let mut prospective = groups.clone();
@@ -1679,7 +1674,7 @@ impl AppState {
         {
             // Lock order: `groups` before `registry`, as documented on
             // the field.
-            let registry = self.0.registry.read().unwrap();
+            let registry = self.0.registry.read();
             for (name, record) in records {
                 if let Some(missing) =
                     first_missing(&record.contexts, |context| registry.contains_key(context))
@@ -1746,7 +1741,7 @@ impl AppState {
     /// twin for the restore path, where children may be names the set
     /// itself brings.
     pub fn group_restore_involves(&self, records: &[(String, GroupRecord)]) -> BTreeSet<String> {
-        let groups = self.0.groups.read().unwrap();
+        let groups = self.0.groups.read();
         let roots: Vec<&str> = records.iter().map(|(name, _)| name.as_str()).collect();
         let mut involved = groups::context_closure(&groups, roots.iter().copied());
         let mut prospective = groups.clone();
@@ -1768,7 +1763,7 @@ impl AppState {
     /// the unlink fails, the surviving file re-registers the group at
     /// the next boot, and the error message says so.
     pub fn delete_group(&self, name: &str) -> Option<io::Result<()>> {
-        let mut groups = self.0.groups.write().unwrap();
+        let mut groups = self.0.groups.write();
         groups.remove(name)?;
         // Nesting must not outlive the child — the same sweep a
         // deleted context gets, on the child field, under the write
@@ -1785,7 +1780,7 @@ impl AppState {
 
     /// One group's record by name, or `None` for an unknown group.
     pub fn group(&self, name: &str) -> Option<GroupRecord> {
-        self.0.groups.read().unwrap().get(name).cloned()
+        self.0.groups.read().get(name).cloned()
     }
 
     /// Union of every context reachable from the named groups — direct
@@ -1796,7 +1791,7 @@ impl AppState {
         &self,
         names: impl IntoIterator<Item = &'a str>,
     ) -> BTreeSet<String> {
-        groups::context_closure(&self.0.groups.read().unwrap(), names)
+        groups::context_closure(&self.0.groups.read(), names)
     }
 
     /// [`group_context_closures`] with existence semantics: the first
@@ -1807,7 +1802,7 @@ impl AppState {
     /// checked and walked under one lock acquisition so a concurrent
     /// group delete cannot slip between the two.
     pub fn resolve_groups(&self, names: &[String]) -> Result<BTreeSet<String>, String> {
-        let groups = self.0.groups.read().unwrap();
+        let groups = self.0.groups.read();
         if let Some(missing) = first_missing(names, |name| groups.contains_key(name)) {
             return Err(missing.clone());
         }
@@ -1830,7 +1825,7 @@ impl AppState {
     ) -> (usize, Vec<(String, GroupRecord)>) {
         use std::ops::Bound;
 
-        let groups = self.0.groups.read().unwrap();
+        let groups = self.0.groups.read();
         let start = match after {
             Some(after) => Bound::Excluded(after),
             None => Bound::Unbounded,
@@ -1849,7 +1844,7 @@ impl AppState {
     /// a rewrite that fails leaves memory correct and the file stale,
     /// which the next boot's reconciliation heals.
     fn sweep_context_from_groups(&self, context_name: &str) {
-        let mut groups = self.0.groups.write().unwrap();
+        let mut groups = self.0.groups.write();
         sweep_membership(&self.0.data_dir, &mut groups, context_name, |record| {
             &mut record.contexts
         });
@@ -2017,7 +2012,7 @@ impl AppState {
         entry: &Entry,
         stem: &str,
     ) -> io::Result<Arc<crate::passages::PassageStore>> {
-        let mut slot = entry.passages.lock().unwrap();
+        let mut slot = entry.passages.lock();
         if let Some(store) = slot.as_ref() {
             return Ok(Arc::clone(store));
         }
@@ -2026,7 +2021,7 @@ impl AppState {
         // while it is fresh instead of re-reading a broken snapshot on
         // every passage request.
         {
-            let failure = entry.passages_load_failure.lock().unwrap();
+            let failure = entry.passages_load_failure.lock();
             if let Some((failed_at, refusal)) = &*failure
                 && failed_at.elapsed() < LOAD_FAILURE_RETRY
             {
@@ -2050,10 +2045,10 @@ impl AppState {
             true,
         )
         .inspect_err(|error| {
-            *entry.passages_load_failure.lock().unwrap() =
+            *entry.passages_load_failure.lock() =
                 Some((std::time::Instant::now(), error.to_string()));
         })?;
-        *entry.passages_load_failure.lock().unwrap() = None;
+        *entry.passages_load_failure.lock() = None;
         let store = Arc::new(store);
         *slot = Some(Arc::clone(&store));
         Ok(store)
@@ -2320,14 +2315,14 @@ impl AppState {
         // residency's first search, rebuild when tombstones have piled
         // up. Double-checked so concurrent first searches build once.
         let stale = {
-            let guard = entry.bm25.read().unwrap();
+            let guard = entry.bm25.read();
             match &*guard {
                 None => true,
                 Some(index) => index.needs_reclaim(),
             }
         };
         if stale {
-            let mut guard = entry.bm25.write().unwrap();
+            let mut guard = entry.bm25.write();
             let rebuild = match &*guard {
                 None => true,
                 Some(index) => index.needs_reclaim(),
@@ -2376,7 +2371,7 @@ impl AppState {
             }
         }
         let lexical = {
-            let guard = entry.bm25.read().unwrap();
+            let guard = entry.bm25.read();
             let index = guard.as_ref().expect("index was just built");
             index.search(&query_grams, pool)
         };
@@ -2506,7 +2501,7 @@ impl AppState {
         embedder: &dyn EmbeddingProvider,
         cue: &str,
     ) -> Result<Arc<Vec<f32>>, String> {
-        if let Some(vector) = self.0.cue_cache.lock().unwrap().get(cue) {
+        if let Some(vector) = self.0.cue_cache.lock().get(cue) {
             return Ok(vector);
         }
         match self.timed_embed(embedder, &[cue], EmbedPurpose::Query) {
@@ -2516,7 +2511,6 @@ impl AppState {
                 self.0
                     .cue_cache
                     .lock()
-                    .unwrap()
                     .insert(cue.to_string(), Arc::clone(&vector));
                 Ok(vector)
             }
@@ -2530,7 +2524,7 @@ impl AppState {
     /// The paragraph vector sidecar, loaded on first use and held until
     /// refresh replaces it or eviction clears it.
     fn entry_passage_vectors(&self, entry: &Entry, stem: &str) -> Arc<PassageVectorStore> {
-        let mut cached = entry.passage_vectors.lock().unwrap();
+        let mut cached = entry.passage_vectors.lock();
         match &*cached {
             Some(store) => Arc::clone(store),
             None => {
@@ -2554,7 +2548,7 @@ impl AppState {
         store: &crate::passages::PassageStore,
         sources: &[String],
     ) {
-        let mut guard = entry.bm25.write().unwrap();
+        let mut guard = entry.bm25.write();
         let Some(index) = guard.as_mut() else {
             return;
         };
@@ -2581,7 +2575,7 @@ impl AppState {
             return;
         };
         let bytes = {
-            let guard = entry.bm25.read().unwrap();
+            let guard = entry.bm25.read();
             match &*guard {
                 Some(index) => index.to_bytes(),
                 // Dropped since (eviction): its own save path ran.
@@ -2616,7 +2610,7 @@ impl AppState {
         // for why); held across the gloss read too, not just the embed
         // and merge, so no overlapping refresh can be mid-flight against
         // a gloss state this one hasn't seen yet.
-        let _serial = entry.vectors_refresh.lock().unwrap();
+        let _serial = entry.vectors_refresh.lock();
         let glosses = match self.read_context(name, |context| {
             let concepts: Vec<(String, String)> = context
                 .concept_names()
@@ -2744,7 +2738,7 @@ impl AppState {
             return Some(Err(format!("vector store not persisted: {error}")));
         }
         // Publish the fresh store so queries never re-read the sidecar.
-        *entry.vectors.lock().unwrap() = Some(Arc::new(store));
+        *entry.vectors.lock() = Some(Arc::new(store));
         Some(Ok((newly_embedded, total)))
     }
 
@@ -2837,7 +2831,7 @@ impl AppState {
         let entry = self.lookup(name)?;
         // One refresh per context at a time (see Entry::passage_refresh
         // for why); the diff below makes the loser's pass a no-op.
-        let _serial = entry.passage_refresh.lock().unwrap();
+        let _serial = entry.passage_refresh.lock();
         // Claim the dirty flag up front: work that lands mid-refresh
         // re-marks it, so the ticker returns — never lost, never
         // double-claimed.
@@ -2950,7 +2944,7 @@ impl AppState {
             return Some(Err(format!("passage vectors not persisted: {error}")));
         }
         let total_rows = fresh.len();
-        *entry.passage_vectors.lock().unwrap() = Some(Arc::new(fresh));
+        *entry.passage_vectors.lock() = Some(Arc::new(fresh));
         match failure {
             Some(error) => {
                 // What landed is durable; the rest stays claimed as work.
@@ -2986,7 +2980,7 @@ impl AppState {
         let entry = self.lookup(name)?;
         // One-call override beats the context setting beats the server
         // default (see [`DEFAULT_SEMANTIC_FLOOR`] for the calibration).
-        let context_floor = entry.inner.read().unwrap().meta.semantic_floor;
+        let context_floor = entry.inner.read().meta.semantic_floor;
         let floor = floor_override
             .or(context_floor)
             .unwrap_or(self.0.default_semantic_floor)
@@ -3130,7 +3124,7 @@ impl AppState {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         // Fast path: already resident, shared lock, no exclusivity.
         {
-            let inner = entry.inner.read().unwrap();
+            let inner = entry.inner.read();
             match &inner.slot {
                 Slot::Hot(context) => {
                     self.0.metrics.record_cache_hit();
@@ -3183,7 +3177,7 @@ impl AppState {
         let stem = file_stem(name);
         // Fast path: already resident, shared lock (mirrors read_context).
         {
-            let inner = entry.inner.read().unwrap();
+            let inner = entry.inner.read();
             match &inner.slot {
                 Slot::Hot(context) => {
                     self.0.metrics.record_cache_hit();
@@ -3302,12 +3296,12 @@ impl AppState {
     #[cfg(test)]
     pub fn age_load_failures(&self, name: &str, by: std::time::Duration) {
         let entry = self.lookup(name).expect("the context must be registered");
-        if let Some((failed_at, _)) = &mut entry.inner.write().unwrap().load_failure {
+        if let Some((failed_at, _)) = &mut entry.inner.write().load_failure {
             *failed_at = failed_at
                 .checked_sub(by)
                 .expect("test ages within the Instant range");
         }
-        if let Some((failed_at, _)) = &mut *entry.passages_load_failure.lock().unwrap() {
+        if let Some((failed_at, _)) = &mut *entry.passages_load_failure.lock() {
             *failed_at = failed_at
                 .checked_sub(by)
                 .expect("test ages within the Instant range");
@@ -3377,7 +3371,7 @@ impl AppState {
             return false;
         }
         let (bytes, meta, stats, watermark, generation) = {
-            let mut guard = entry.inner.write().unwrap();
+            let mut guard = entry.inner.write();
             let inner = &mut *guard;
             // Claim the flush UNDER the lock. `flushing` gates concurrent
             // flushers (a tick against the shutdown flush) so the same
@@ -3512,14 +3506,13 @@ impl AppState {
     }
 
     fn lookup(&self, name: &str) -> Option<Arc<Entry>> {
-        self.0.registry.read().unwrap().get(name).cloned()
+        self.0.registry.read().get(name).cloned()
     }
 
     fn snapshot(&self) -> Vec<(String, Arc<Entry>)> {
         self.0
             .registry
             .read()
-            .unwrap()
             .iter()
             .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
             .collect()
@@ -3856,7 +3849,7 @@ impl AppState {
     /// The entry's vector store, loaded from its sidecar on first use
     /// and held until refresh replaces it or eviction clears it.
     fn entry_vectors(&self, entry: &Entry, stem: &str) -> Arc<VectorStore> {
-        let mut cached = entry.vectors.lock().unwrap();
+        let mut cached = entry.vectors.lock();
         match &*cached {
             Some(store) => Arc::clone(store),
             None => {
@@ -3889,7 +3882,7 @@ impl AppState {
         let mut candidates: Vec<(u64, usize, String, Arc<Entry>)> = Vec::new();
         let mut total = 0usize;
         for (name, entry) in self.snapshot() {
-            let inner = entry.inner.read().unwrap();
+            let inner = entry.inner.read();
             if inner.meta.pinned {
                 continue;
             }
@@ -3950,7 +3943,7 @@ impl AppState {
     /// report `false` or the caller subtracts its bytes from the
     /// residency estimate a second time.
     fn evict_entry(&self, name: &str, entry: &Entry) -> bool {
-        let mut guard = entry.inner.write().unwrap();
+        let mut guard = entry.inner.write();
         let inner = &mut *guard;
         // Re-check under the write lock; the entry may have changed
         // between the snapshot and now.
@@ -4006,7 +3999,7 @@ impl AppState {
         // per batch); a best-effort compaction first just spares the
         // next load a replay. Failure changes neither.
         {
-            let mut passages = entry.passages.lock().unwrap();
+            let mut passages = entry.passages.lock();
             if let Some(store) = passages.take() {
                 freed = true;
                 if store.pending_log_bytes() > 0
@@ -4020,7 +4013,7 @@ impl AppState {
         // the next residency a re-tokenization, and the entry lock held
         // above keeps a racing delete away from the file.
         {
-            let mut bm25 = entry.bm25.write().unwrap();
+            let mut bm25 = entry.bm25.write();
             if let Some(index) = bm25.take() {
                 freed = true;
                 if entry.bm25_dirty.swap(false, Ordering::Relaxed)
@@ -4033,10 +4026,10 @@ impl AppState {
                 }
             }
         }
-        if entry.passage_vectors.lock().unwrap().take().is_some() {
+        if entry.passage_vectors.lock().take().is_some() {
             freed = true;
         }
-        if entry.vectors.lock().unwrap().take().is_some() {
+        if entry.vectors.lock().take().is_some() {
             freed = true;
         }
         freed
@@ -4046,7 +4039,7 @@ impl AppState {
 /// One directory row, or `None` when the entry was deleted between the
 /// caller's snapshot/lookup and this lock.
 fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
-    let inner = entry.inner.read().unwrap();
+    let inner = entry.inner.read();
     let (loaded, stats) = match &inner.slot {
         Slot::Hot(context) => (true, ContextStats::of(context)),
         Slot::Cold => (false, inner.stats.clone()),
@@ -6200,7 +6193,7 @@ mod tests {
             // iteration order, the end state must be identical: the
             // victim stays deleted.
             let decoy = state.lookup("decoy").unwrap();
-            let hold = decoy.inner.write().unwrap();
+            let hold = decoy.inner.write();
             let flusher = {
                 let state = state.clone();
                 thread::spawn(move || {
@@ -7072,7 +7065,7 @@ mod tests {
         // exactly the window where a create used to interleave and
         // have its new generation unlinked from under it.
         let entry = state.lookup("sake").unwrap();
-        let stall = entry.inner.read().unwrap();
+        let stall = entry.inner.read();
         let deleter = {
             let state = state.clone();
             std::thread::spawn(move || state.delete("sake").unwrap().unwrap())
@@ -7157,7 +7150,7 @@ mod tests {
         let entry = state.lookup("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         assert!(
-            entry.passages.lock().unwrap().is_none(),
+            entry.passages.lock().is_none(),
             "eviction must drop the resident passage store"
         );
         // Durability never depended on residency: the next access
@@ -7688,7 +7681,7 @@ mod tests {
         let entry = state.lookup("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         assert!(
-            entry.bm25.read().unwrap().is_none(),
+            entry.bm25.read().is_none(),
             "eviction must drop the resident index"
         );
         assert_eq!(
@@ -8455,7 +8448,7 @@ mod tests {
                 texts: &[&str],
                 purpose: EmbedPurpose,
             ) -> Result<Vec<Vec<f32>>, String> {
-                self.0.lock().unwrap().push(purpose);
+                self.0.lock().push(purpose);
                 Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
             }
         }
@@ -8482,7 +8475,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let seen = purposes.lock().unwrap().clone();
+        let seen = purposes.lock().clone();
         let (cue_call, refresh_calls) = seen.split_last().unwrap();
         assert!(!refresh_calls.is_empty());
         assert!(refresh_calls.iter().all(|p| *p == EmbedPurpose::Index));
@@ -9567,6 +9560,42 @@ mod tests {
         let record = state.group("drinks").unwrap();
         assert_eq!(record.description, "before");
         assert_eq!(record.contexts, BTreeSet::from(["sake".to_string()]));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// parking_lot locks don't poison: a panic while holding one just
+    /// unwinds and releases it, so neither the context that panicked, nor
+    /// a sibling, nor the registry's own listing bricks for the rest of
+    /// the process.
+    #[test]
+    fn a_panic_mid_write_bricks_only_that_context_not_a_sibling_or_the_registry() {
+        let dir = scratch_dir("panic-mid-write");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.create("cherry", ContextMeta::default()).unwrap();
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.write_context("sake", |_context| {
+                panic!("simulated failure mid-write");
+            })
+        }));
+        assert!(
+            panicked.is_err(),
+            "the panic must propagate, not be swallowed"
+        );
+
+        state
+            .write_context("sake", |_context| {})
+            .expect("the context that panicked stays usable — the lock never poisoned");
+        state
+            .write_context("cherry", |_context| {})
+            .expect("a sibling context is unaffected by the panic");
+        assert_eq!(
+            state.directory().len(),
+            2,
+            "the registry's own listing survives the panic too"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

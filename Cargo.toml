@@ -37,3 +37,6 @@ getrandom = "0.3"
 # Already in the tree through axum; made direct so the loopback
 # redirect-URI check parses the host instead of matching a prefix.
 url = "2.5"
+# std::sync locks poison on panic, bricking the whole registry for the
+# rest of the process; parking_lot's don't.
+parking_lot = "0.12"
