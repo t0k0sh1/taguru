@@ -19,8 +19,12 @@ import type {
   ConceptDescription,
   ContextMeta,
   ContextPage,
+  CrossMatchPage,
+  CrossPassageHit,
   DirectoryEntry,
   ExplorePage,
+  GroupEntry,
+  GroupPage,
   ImportOutcome,
   LabelPage,
   MatchPage,
@@ -103,6 +107,7 @@ interface SentResponse {
 /** Client for one Taguru server. */
 export class Taguru {
   readonly contexts: Contexts;
+  readonly groups: Groups;
 
   private readonly baseUrl: string;
   private readonly apiKey: string | undefined;
@@ -123,6 +128,7 @@ export class Taguru {
     }
     this.fetchImpl = options.fetch ?? fetch;
     this.contexts = new Contexts(this);
+    this.groups = new Groups(this);
   }
 
   // -- transport ---------------------------------------------------------
@@ -269,6 +275,78 @@ export class Taguru {
     return new Context(this, name);
   }
 
+  // -- cross-context search ------------------------------------------------
+
+  /**
+   * Recall across several contexts at once, every match tagged. `contexts`
+   * takes full names; each `groups` entry searches every context the group
+   * reaches (nested children included), overlaps deduped. At least one of
+   * the two must name something. Weights share one scale, so past the limit
+   * the strongest |weight| survives exactly as within one context.
+   */
+  async recall(
+    cue: string,
+    options: { contexts?: string[]; groups?: string[]; limit?: number } = {},
+  ): Promise<CrossMatchPage> {
+    const result = await this.requestJson("POST", "/recall", {
+      jsonBody: dropUndefined({
+        contexts: options.contexts,
+        groups: options.groups,
+        cue,
+        limit: options.limit,
+      }),
+    });
+    return result as CrossMatchPage;
+  }
+
+  /**
+   * Exact-position query across several contexts at once, matches tagged;
+   * the same target contract as `recall`.
+   */
+  async query(
+    options: {
+      contexts?: string[];
+      groups?: string[];
+      subject?: OneOrMany;
+      label?: OneOrMany;
+      object?: OneOrMany;
+      limit?: number;
+    } = {},
+  ): Promise<CrossMatchPage> {
+    const result = await this.requestJson("POST", "/query", {
+      jsonBody: dropUndefined({
+        contexts: options.contexts,
+        groups: options.groups,
+        subject: options.subject,
+        label: options.label,
+        object: options.object,
+        limit: options.limit,
+      }),
+    });
+    return result as CrossMatchPage;
+  }
+
+  /**
+   * Paragraph search across several contexts at once, hits tagged. Passage
+   * scores do NOT share a scale across contexts (BM25 statistics are
+   * corpus-local), so the merged order is rank interleaving — every
+   * context's best hit first; `score` compares within one context only.
+   */
+  async searchPassages(
+    query: string,
+    options: { contexts?: string[]; groups?: string[]; limit?: number } = {},
+  ): Promise<CrossPassageHit[]> {
+    const result = await this.requestJson("POST", "/sources/search", {
+      jsonBody: dropUndefined({
+        contexts: options.contexts,
+        groups: options.groups,
+        query,
+        limit: options.limit,
+      }),
+    });
+    return result as CrossPassageHit[];
+  }
+
   /**
    * Release resources. The fetch-based transport holds no persistent state,
    * so this is a no-op kept for surface parity with the Python SDK.
@@ -370,6 +448,118 @@ export class Contexts {
   async delete(name: string): Promise<boolean> {
     const result = await this.client.requestJson("DELETE", `/contexts/${encodeName(name)}`);
     return Boolean(result);
+  }
+}
+
+/**
+ * The group directory: flat context bundles (many-to-many) that may nest
+ * child groups — a shallow DAG, at most 3 storeys, never cyclic — as the
+ * addressing unit cross-context search builds on.
+ */
+export class Groups {
+  constructor(private readonly client: Taguru) {}
+
+  /** One directory page (keyset cursor: `after` = last name shown). */
+  async list(options: { limit?: number; after?: string } = {}): Promise<GroupPage> {
+    const result = await this.client.requestJson("GET", "/groups", {
+      params: { limit: options.limit, after: options.after },
+    });
+    return result as GroupPage;
+  }
+
+  /** Walk every directory page transparently. */
+  async *iter(options: { limit?: number } = {}): AsyncGenerator<GroupEntry, void, undefined> {
+    let after: string | undefined;
+    for (;;) {
+      const page = await this.list({ limit: options.limit, after });
+      if (page.groups.length === 0) {
+        return;
+      }
+      yield* page.groups;
+      if (options.limit !== undefined && page.groups.length < options.limit) {
+        return;
+      }
+      after = page.groups[page.groups.length - 1]!.name;
+    }
+  }
+
+  async get(name: string): Promise<GroupEntry> {
+    const result = await this.client.requestJson("GET", `/groups/${encodeName(name)}`);
+    return result as GroupEntry;
+  }
+
+  async exists(name: string): Promise<boolean> {
+    try {
+      await this.get(name);
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        return false;
+      }
+      throw error;
+    }
+    return true;
+  }
+
+  /**
+   * Create a group (409 ConflictError if it already exists). Every listed
+   * member — context or child group — must already exist; contexts and
+   * groups are separate namespaces.
+   */
+  async create(
+    name: string,
+    options: { description?: string; contexts?: string[]; groups?: string[] } = {},
+  ): Promise<boolean> {
+    const result = await this.client.requestJson("PUT", `/groups/${encodeName(name)}`, {
+      jsonBody: dropUndefined({
+        description: options.description ?? "",
+        contexts: options.contexts,
+        groups: options.groups,
+      }),
+      retry: "unsafe_on_ambiguous",
+    });
+    return Boolean(result);
+  }
+
+  /**
+   * Delta membership update (removals first); returns the updated row.
+   * Removing a non-member is an idempotent no-op; only additions demand the
+   * member exists. The result holds at most 1,000 member contexts and 1,000
+   * child groups — past that, split into nested child groups.
+   */
+  async update(
+    name: string,
+    options: {
+      description?: string;
+      add_contexts?: string[];
+      remove_contexts?: string[];
+      add_groups?: string[];
+      remove_groups?: string[];
+    } = {},
+  ): Promise<GroupEntry> {
+    const result = await this.client.requestJson("PATCH", `/groups/${encodeName(name)}`, {
+      jsonBody: dropUndefined({
+        description: options.description,
+        add_contexts: options.add_contexts,
+        remove_contexts: options.remove_contexts,
+        add_groups: options.add_groups,
+        remove_groups: options.remove_groups,
+      }),
+    });
+    return result as GroupEntry;
+  }
+
+  /** Delete the bundling only — member contexts and child groups stay. */
+  async delete(name: string): Promise<boolean> {
+    const result = await this.client.requestJson("DELETE", `/groups/${encodeName(name)}`);
+    return Boolean(result);
+  }
+
+  /**
+   * The group as one import-stream record (a `taguru_group` JSON line);
+   * `importBatches` restores it as a whole-record replace.
+   */
+  async export(name: string): Promise<string> {
+    return (await this.client.send("GET", `/groups/${encodeName(name)}/export`)).text;
   }
 }
 

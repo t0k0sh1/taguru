@@ -14,7 +14,7 @@ the server's own protocol document: ``client.protocol()`` (GET /protocol).
 
 from __future__ import annotations
 
-from ._async.client import AsyncContext, AsyncContexts, AsyncTaguru
+from ._async.client import AsyncContext, AsyncContexts, AsyncGroups, AsyncTaguru
 from ._errors import (
     AuthenticationError,
     ConflictError,
@@ -47,8 +47,13 @@ from ._models import (
     ContextPage,
     ContextStats,
     ContextUsage,
+    CrossAssociation,
+    CrossMatchPage,
+    CrossPassageHit,
     DirectoryEntry,
     ExplorePage,
+    GroupEntry,
+    GroupPage,
     ImportOutcome,
     LabelPage,
     LabelUsage,
@@ -69,7 +74,7 @@ from ._models import (
     VocabularyAudit,
 )
 from ._shared import citation_key
-from ._sync.client import Context, Contexts, Taguru
+from ._sync.client import Context, Contexts, Groups, Taguru
 from ._types import AssocOp, QuestionSpec, SectionSpec
 
 __version__ = "0.2.0"
@@ -83,6 +88,8 @@ __all__ = [
     "AsyncContext",
     "Contexts",
     "AsyncContexts",
+    "Groups",
+    "AsyncGroups",
     "citation_key",
     # request types
     "AssocOp",
@@ -119,8 +126,13 @@ __all__ = [
     "ContextPage",
     "ContextStats",
     "ContextUsage",
+    "CrossAssociation",
+    "CrossMatchPage",
+    "CrossPassageHit",
     "DirectoryEntry",
     "ExplorePage",
+    "GroupEntry",
+    "GroupPage",
     "ImportOutcome",
     "LabelPage",
     "LabelUsage",

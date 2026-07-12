@@ -22,6 +22,17 @@ classes:
     import_file: { route: "POST /import", args: [path] }
     wait_until_ready: { options: [timeout, interval] }
     context: { args: [name] }
+    recall:
+      route: "POST /recall"
+      args: [cue]
+      options: [contexts, groups, limit]
+    query:
+      route: "POST /query"
+      options: [contexts, groups, subject, label, object, limit]
+    search_passages:
+      route: "POST /sources/search"
+      args: [query]
+      options: [contexts, groups, limit]
     close: {}
 
   Contexts:
@@ -38,6 +49,22 @@ classes:
       args: [name]
       options: [description, pinned, dice_floor, semantic_floor]
     delete: { route: "DELETE /contexts/{name}", args: [name] }
+
+  Groups:
+    list: { route: "GET /groups", options: [limit, after] }
+    iter: { route: "GET /groups", options: [limit] }
+    get: { route: "GET /groups/{name}", args: [name] }
+    exists: { route: "GET /groups/{name}", args: [name] }
+    create:
+      route: "PUT /groups/{name}"
+      args: [name]
+      options: [description, contexts, groups]
+    update:
+      route: "PATCH /groups/{name}"
+      args: [name]
+      options: [description, add_contexts, remove_contexts, add_groups, remove_groups]
+    delete: { route: "DELETE /groups/{name}", args: [name] }
+    export: { route: "GET /groups/{name}/export", args: [name] }
 
   Context:
     resolve:

@@ -20,9 +20,14 @@ __all__ = [
     "ContextMeta",
     "DirectoryEntry",
     "ContextPage",
+    "GroupEntry",
+    "GroupPage",
     "Attribution",
     "Association",
     "MatchPage",
+    "CrossAssociation",
+    "CrossMatchPage",
+    "CrossPassageHit",
     "Recollection",
     "ExplorePage",
     "Activation",
@@ -106,6 +111,28 @@ class ContextPage:
 
 
 @dataclass(slots=True, frozen=True)
+class GroupEntry:
+    """One group row: member contexts bundled many-to-many, plus child groups.
+
+    For a context-scoped key ``contexts`` carries only the members the grant
+    allows; ``groups`` (child names — labels, not content) is never filtered.
+    """
+
+    name: str
+    description: str
+    contexts: list[str]
+    groups: list[str]
+
+
+@dataclass(slots=True, frozen=True)
+class GroupPage:
+    """One page of the group directory. ``total`` is the whole population."""
+
+    total: int
+    groups: list[GroupEntry]
+
+
+@dataclass(slots=True, frozen=True)
 class Attribution:
     """One source's contribution to an association. ``weight`` is raw cumulative."""
 
@@ -134,6 +161,27 @@ class MatchPage:
 
     total: int
     matches: list[Association]
+
+
+@dataclass(slots=True, frozen=True)
+class CrossAssociation(Association):
+    """An :class:`Association` tagged with the context it came from.
+
+    The tag is what makes a cross-context match actionable — every follow-up
+    (citations, lookups, activate) is a per-context call.
+    """
+
+    context: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class CrossMatchPage:
+    """:class:`MatchPage` across contexts: same truncation contract, every
+    match tagged. Weights share one scale (evidence mass), so the cut past
+    ``total`` means the same thing across contexts."""
+
+    total: int
+    matches: list[CrossAssociation]
 
 
 @dataclass(slots=True, frozen=True)
@@ -257,6 +305,14 @@ class PassageHit:
     score: float
     text: str
     lanes: PassageLanes = field(default_factory=PassageLanes)
+
+
+@dataclass(slots=True, frozen=True)
+class CrossPassageHit(PassageHit):
+    """A :class:`PassageHit` tagged with its context. ``score`` compares
+    within one context only — the cross-context order is rank interleaving."""
+
+    context: str = ""
 
 
 @dataclass(slots=True, frozen=True)

@@ -414,3 +414,136 @@ describe("retrieve end to end", () => {
     await client.contexts.delete(name);
   });
 });
+
+describe("groups and cross-context search", () => {
+  /** Two contexts holding one distinct fact (graph + passage) each. */
+  async function seededPair(base: string): Promise<[string, string]> {
+    const sake = `${base}-sake`;
+    const tea = `${base}-tea`;
+    await client.contexts.create(sake, { description: "酒蔵の知識" });
+    await client.contexts.create(tea, { description: "茶園の知識" });
+    await client.context(sake).addAssociations([
+      { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source: "sake.md", paragraph: 0 },
+    ]);
+    await client.context(tea).addAssociations([
+      { subject: "青嶺茶園", label: "代表銘柄", object: "露霜", weight: 1.0, source: "tea.md", paragraph: 0 },
+    ]);
+    await client.context(sake).storePassages({ "sake.md": "青嶺酒造の代表銘柄は「青嶺」である。" });
+    await client.context(tea).storePassages({ "tea.md": "青嶺茶園の代表銘柄は「露霜」である。" });
+    return [sake, tea];
+  }
+
+  it("creates, nests, updates by deltas, deletes the bundling only", async () => {
+    const base = fresh();
+    const [sake, tea] = await seededPair(base);
+    const group = `${base}-g`;
+    const child = `${base}-child`;
+
+    expect(await client.groups.exists(group)).toBe(false);
+    expect(await client.groups.create(group, { description: "蔵元一式", contexts: [sake] })).toBe(true);
+    await expect(client.groups.create(group)).rejects.toMatchObject({ code: "already_exists" });
+
+    let entry = await client.groups.get(group);
+    expect(entry.description).toBe("蔵元一式");
+    expect(entry.contexts).toEqual([sake]);
+    expect(entry.groups).toEqual([]);
+
+    // Deltas: removals are idempotent no-ops, additions demand existence.
+    entry = await client.groups.update(group, {
+      add_contexts: [tea],
+      remove_contexts: ["never-a-member"],
+    });
+    expect(entry.contexts).toEqual([sake, tea].sort());
+    await expect(
+      client.groups.update(group, { add_contexts: [`${base}-missing`] }),
+    ).rejects.toMatchObject({ code: "no_context" });
+
+    // Nesting: a child group rides the row's `groups` list.
+    expect(await client.groups.create(child, { contexts: [tea] })).toBe(true);
+    entry = await client.groups.update(group, { add_groups: [child] });
+    expect(entry.groups).toEqual([child]);
+
+    const names: string[] = [];
+    for await (const row of client.groups.iter({ limit: 2 })) {
+      names.push(row.name);
+    }
+    expect(names).toContain(group);
+    expect(names).toContain(child);
+
+    // Deleting the bundling leaves members (and the child group) alone.
+    expect(await client.groups.delete(group)).toBe(true);
+    await expect(client.groups.get(group)).rejects.toMatchObject({ code: "no_group" });
+    expect(await client.groups.exists(child)).toBe(true);
+    expect(await client.contexts.exists(sake)).toBe(true);
+
+    await expect(reader.groups.create(`${base}-denied`)).rejects.toBeInstanceOf(
+      PermissionDeniedError,
+    );
+
+    await client.groups.delete(child);
+    await client.contexts.delete(sake);
+    await client.contexts.delete(tea);
+  });
+
+  it("tags every cross-context match and resolves groups", async () => {
+    const base = fresh();
+    const [sake, tea] = await seededPair(base);
+    const group = `${base}-g`;
+    await client.groups.create(group, { contexts: [sake, tea] });
+
+    // recall: named contexts, every match tagged with its origin.
+    const page = await client.recall("代表銘柄", { contexts: [sake, tea] });
+    expect(page.total).toBe(2);
+    expect(new Set(page.matches.map((m) => m.context))).toEqual(new Set([sake, tea]));
+    expect(new Set(page.matches.map((m) => m.object))).toEqual(new Set(["青嶺", "露霜"]));
+
+    // query: a group resolves to every context it reaches; overlaps with
+    // directly named contexts dedupe silently.
+    const queried = await client.query({ label: "代表銘柄", groups: [group], contexts: [sake] });
+    expect(queried.total).toBe(2);
+    expect(new Set(queried.matches.map((m) => m.context))).toEqual(new Set([sake, tea]));
+
+    // searchPassages: rank-interleaved, hits tagged; score is per-context.
+    const hits = await client.searchPassages("代表銘柄は青嶺", {
+      contexts: [sake, tea],
+      limit: 4,
+    });
+    expect(new Set(hits.map((h) => h.context))).toEqual(new Set([sake, tea]));
+    expect(hits.every((h) => h.text.length > 0)).toBe(true);
+
+    // An empty target list is refused, an unknown group answers no_group.
+    await expect(client.recall("青嶺", { contexts: [] })).rejects.toMatchObject({
+      code: "invalid_argument",
+    });
+    await expect(client.recall("青嶺", { groups: [`${base}-missing`] })).rejects.toMatchObject({
+      code: "no_group",
+    });
+
+    await client.groups.delete(group);
+    await client.contexts.delete(sake);
+    await client.contexts.delete(tea);
+  });
+
+  it("round-trips a group through export → import", async () => {
+    const base = fresh();
+    const [sake, tea] = await seededPair(base);
+    const group = `${base}-g`;
+    await client.groups.create(group, { description: "蔵元一式", contexts: [sake, tea] });
+
+    const line = await client.groups.export(group);
+    const record = JSON.parse(line) as { taguru_group: number; name: string; contexts: string[] };
+    expect(typeof record.taguru_group).toBe("number");
+    expect(record.name).toBe(group);
+    expect(record.contexts).toEqual([sake, tea].sort());
+
+    // The record is the group's complete truth: import restores it whole.
+    await client.groups.delete(group);
+    expect(await client.groups.exists(group)).toBe(false);
+    await client.importBatches(line);
+    expect((await client.groups.get(group)).contexts).toEqual([sake, tea].sort());
+
+    await client.groups.delete(group);
+    await client.contexts.delete(sake);
+    await client.contexts.delete(tea);
+  });
+});

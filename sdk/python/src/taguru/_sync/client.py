@@ -28,8 +28,12 @@ from .._models import (
     ConceptDescription,
     ContextMeta,
     ContextPage,
+    CrossMatchPage,
+    CrossPassageHit,
     DirectoryEntry,
     ExplorePage,
+    GroupEntry,
+    GroupPage,
     ImportOutcome,
     LabelPage,
     MatchPage,
@@ -68,7 +72,7 @@ from .._shared import (
 )
 from .._types import AssocOp, QuestionSpec, SectionSpec
 
-__all__ = ["Taguru", "Contexts", "Context"]
+__all__ = ["Taguru", "Contexts", "Groups", "Context"]
 
 
 class Taguru:
@@ -107,6 +111,7 @@ class Taguru:
         self._http = http_client if http_client is not None else httpx.Client(timeout=timeout)
         self._owns_http = http_client is None
         self.contexts = Contexts(self)
+        self.groups = Groups(self)
 
     # -- transport ---------------------------------------------------------
 
@@ -234,6 +239,85 @@ class Taguru:
         """A handle bound to one context (no network call)."""
         return Context(self, name)
 
+    # -- cross-context search ------------------------------------------------
+
+    def recall(
+        self,
+        cue: str,
+        *,
+        contexts: Sequence[str] | None = None,
+        groups: Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> CrossMatchPage:
+        """Recall across several contexts at once, every match tagged.
+
+        ``contexts`` takes full names; each ``groups`` entry searches every
+        context the group reaches (nested children included), overlaps
+        deduped. At least one of the two must name something. Weights share
+        one scale, so past the limit the strongest |weight| survives exactly
+        as within one context.
+        """
+        body = drop_none(
+            {
+                "contexts": list(contexts) if contexts is not None else None,
+                "groups": list(groups) if groups is not None else None,
+                "cue": cue,
+                "limit": limit,
+            }
+        )
+        result = self._request_json("POST", "/recall", json_body=body)
+        return decode(CrossMatchPage, result)  # type: ignore[no-any-return]
+
+    def query(
+        self,
+        *,
+        contexts: Sequence[str] | None = None,
+        groups: Sequence[str] | None = None,
+        subject: str | Sequence[str] | None = None,
+        label: str | Sequence[str] | None = None,
+        object: str | Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> CrossMatchPage:
+        """Exact-position query across several contexts at once, matches
+        tagged; the same target contract as :meth:`recall`."""
+        body = drop_none(
+            {
+                "contexts": list(contexts) if contexts is not None else None,
+                "groups": list(groups) if groups is not None else None,
+                "subject": subject,
+                "label": label,
+                "object": object,
+                "limit": limit,
+            }
+        )
+        result = self._request_json("POST", "/query", json_body=body)
+        return decode(CrossMatchPage, result)  # type: ignore[no-any-return]
+
+    def search_passages(
+        self,
+        query: str,
+        *,
+        contexts: Sequence[str] | None = None,
+        groups: Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> list[CrossPassageHit]:
+        """Paragraph search across several contexts at once, hits tagged.
+
+        Passage scores do NOT share a scale across contexts (BM25 statistics
+        are corpus-local), so the merged order is rank interleaving — every
+        context's best hit first; ``score`` compares within one context only.
+        """
+        body = drop_none(
+            {
+                "contexts": list(contexts) if contexts is not None else None,
+                "groups": list(groups) if groups is not None else None,
+                "query": query,
+                "limit": limit,
+            }
+        )
+        result = self._request_json("POST", "/sources/search", json_body=body)
+        return decode(list[CrossPassageHit], result)  # type: ignore[no-any-return]
+
     def close(self) -> None:
         if self._owns_http:
             self._http.close()
@@ -335,6 +419,113 @@ class Contexts:
         """Delete a context, files included (admin role)."""
         result = self._client._request_json("DELETE", f"/contexts/{encode_name(name)}")
         return bool(result)
+
+
+class Groups:
+    """The group directory: flat context bundles (many-to-many) that may nest
+    child groups — a shallow DAG, at most 3 storeys, never cyclic — as the
+    addressing unit cross-context search builds on."""
+
+    def __init__(self, client: Taguru) -> None:
+        self._client = client
+
+    def list(self, *, limit: int | None = None, after: str | None = None) -> GroupPage:
+        """One directory page (keyset cursor: ``after`` = last name shown)."""
+        result = self._client._request_json(
+            "GET", "/groups", params=drop_none({"limit": limit, "after": after})
+        )
+        return decode(GroupPage, result)  # type: ignore[no-any-return]
+
+    def iter(self, *, limit: int | None = None) -> Iterator[GroupEntry]:
+        """Walk every directory page transparently."""
+        after: str | None = None
+        while True:
+            page = self.list(limit=limit, after=after)
+            if not page.groups:
+                return
+            for entry in page.groups:
+                yield entry
+            if limit is not None and len(page.groups) < limit:
+                return
+            after = page.groups[-1].name
+
+    def get(self, name: str) -> GroupEntry:
+        result = self._client._request_json("GET", f"/groups/{encode_name(name)}")
+        return decode(GroupEntry, result)  # type: ignore[no-any-return]
+
+    def exists(self, name: str) -> bool:
+        try:
+            self.get(name)
+        except NotFoundError:
+            return False
+        return True
+
+    def create(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        contexts: Sequence[str] | None = None,
+        groups: Sequence[str] | None = None,
+    ) -> bool:
+        """Create a group (409 ``ConflictError`` if it already exists).
+
+        Every listed member — context or child group — must already exist;
+        contexts and groups are separate namespaces.
+        """
+        body = drop_none(
+            {
+                "description": description,
+                "contexts": list(contexts) if contexts is not None else None,
+                "groups": list(groups) if groups is not None else None,
+            }
+        )
+        result = self._client._request_json(
+            "PUT",
+            f"/groups/{encode_name(name)}",
+            json_body=body,
+            retry=RetryClass.UNSAFE_ON_AMBIGUOUS,
+        )
+        return bool(result)
+
+    def update(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        add_contexts: Sequence[str] | None = None,
+        remove_contexts: Sequence[str] | None = None,
+        add_groups: Sequence[str] | None = None,
+        remove_groups: Sequence[str] | None = None,
+    ) -> GroupEntry:
+        """Delta membership update (removals first); returns the updated row.
+
+        Removing a non-member is an idempotent no-op; only additions demand
+        the member exists. The result holds at most 1,000 member contexts and
+        1,000 child groups — past that, split into nested child groups.
+        """
+        body = drop_none(
+            {
+                "description": description,
+                "add_contexts": list(add_contexts) if add_contexts is not None else None,
+                "remove_contexts": list(remove_contexts) if remove_contexts is not None else None,
+                "add_groups": list(add_groups) if add_groups is not None else None,
+                "remove_groups": list(remove_groups) if remove_groups is not None else None,
+            }
+        )
+        result = self._client._request_json("PATCH", f"/groups/{encode_name(name)}", json_body=body)
+        return decode(GroupEntry, result)  # type: ignore[no-any-return]
+
+    def delete(self, name: str) -> bool:
+        """Delete the bundling only — member contexts and child groups stay."""
+        result = self._client._request_json("DELETE", f"/groups/{encode_name(name)}")
+        return bool(result)
+
+    def export(self, name: str) -> str:
+        """The group as one import-stream record (a ``taguru_group`` JSON
+        line); ``import_batches`` restores it as a whole-record replace."""
+        response = self._client._send("GET", f"/groups/{encode_name(name)}/export")
+        return response.text
 
 
 class Context:

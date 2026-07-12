@@ -90,6 +90,26 @@ export interface ContextPage {
   contexts: DirectoryEntry[];
 }
 
+// -- groups ---------------------------------------------------------------------
+
+/**
+ * One group row: member contexts bundled many-to-many, plus child groups. For
+ * a context-scoped key `contexts` carries only the members the grant allows;
+ * `groups` (child names — labels, not content) is never filtered.
+ */
+export interface GroupEntry {
+  name: string;
+  description: string;
+  contexts: string[];
+  groups: string[];
+}
+
+/** One page of the group directory. `total` is the whole population. */
+export interface GroupPage {
+  total: number;
+  groups: GroupEntry[];
+}
+
 // -- graph shapes ---------------------------------------------------------------
 
 /** One source's contribution to an association. `weight` is raw cumulative. */
@@ -115,6 +135,25 @@ export interface Association {
 export interface MatchPage {
   total: number;
   matches: Association[];
+}
+
+/**
+ * An `Association` tagged with the context it came from. The tag is what
+ * makes a cross-context match actionable — every follow-up (citations,
+ * lookups, activate) is a per-context call.
+ */
+export interface CrossAssociation extends Association {
+  context: string;
+}
+
+/**
+ * `MatchPage` across contexts: same truncation contract, every match tagged.
+ * Weights share one scale (evidence mass), so the cut past `total` means the
+ * same thing across contexts.
+ */
+export interface CrossMatchPage {
+  total: number;
+  matches: CrossAssociation[];
 }
 
 export interface Recollection {
@@ -219,6 +258,14 @@ export interface PassageHit {
   score: number;
   text: string;
   lanes: PassageLanes;
+}
+
+/**
+ * A `PassageHit` tagged with its context. `score` compares within one context
+ * only — the cross-context order is rank interleaving.
+ */
+export interface CrossPassageHit extends PassageHit {
+  context: string;
 }
 
 /** One verbatim paragraph. `section` is null outside every stored section. */

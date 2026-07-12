@@ -21,6 +21,7 @@ SYNC_DIR = ROOT / "src" / "taguru" / "_sync"
 REPLACEMENTS = {
     "AsyncTaguru": "Taguru",
     "AsyncContexts": "Contexts",
+    "AsyncGroups": "Groups",
     "AsyncContext": "Context",
     "AsyncClient": "Client",
     "AsyncIterator": "Iterator",

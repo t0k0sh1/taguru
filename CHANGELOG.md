@@ -85,6 +85,15 @@ Entries that change an on-disk format or a response shape say so.
   would leak out-of-grant membership; directly named contexts keep the
   whole-request refusal. The MCP search tools take `groups` beside
   `contexts`.
+- SDKs: groups and cross-context search on both clients. A `groups`
+  resource (`client.groups`) mirrors `contexts` — `list`/`iter`/`get`/
+  `exists`/`create`/`update` (deltas)/`delete`/`export` — and the
+  top-level searches ride the client root: `client.recall(cue,
+  contexts=…, groups=…)`, `client.query(…)`, `client.search_passages
+  (…)` answer `CrossMatchPage`/`CrossPassageHit` rows, each match
+  tagged with the `context` it came from. New models `GroupEntry`,
+  `GroupPage`, `CrossAssociation`, `CrossMatchPage`, `CrossPassageHit`
+  in both languages; surface parity is spec-checked as always.
 
 ## [0.2.0] - 2026-07-12
 

@@ -15,7 +15,7 @@
  * `await client.protocol()` (GET /protocol).
  */
 
-export { Taguru, Contexts, Context, type TaguruOptions } from "./client.js";
+export { Taguru, Contexts, Groups, Context, type TaguruOptions } from "./client.js";
 export {
   TaguruError,
   AuthenticationError,
@@ -50,8 +50,13 @@ export {
   type ContextPage,
   type ContextStats,
   type ContextUsage,
+  type CrossAssociation,
+  type CrossMatchPage,
+  type CrossPassageHit,
   type DirectoryEntry,
   type ExplorePage,
+  type GroupEntry,
+  type GroupPage,
   type ImportOutcome,
   type LabelPage,
   type LabelUsage,
