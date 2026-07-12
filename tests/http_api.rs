@@ -151,6 +151,20 @@ impl Server {
         parsed["result"].clone()
     }
 
+    /// One MCP `tools/call` round trip: builds the JSON-RPC envelope,
+    /// asserts HTTP 200, and hands back the JSON-RPC `result` — whose
+    /// `content`/`isError` the caller judges.
+    fn call_tool(&self, id: u64, name: &str, arguments: Value) -> Value {
+        let (status, answer) = self.call(
+            "POST",
+            "/mcp",
+            Some(json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                        "params": {"name": name, "arguments": arguments}})),
+        );
+        assert_eq!(status, 200, "{name} -> {answer}");
+        answer["result"].clone()
+    }
+
     /// Graceful stop (SIGTERM), waiting for the shutdown flush.
     fn stop_gracefully(self) -> PathBuf {
         self.stop_with("-TERM")
@@ -6431,16 +6445,7 @@ fn groups_ride_the_mcp_transport() {
     let server = Server::start("groups-mcp");
     server.ok("PUT", "/contexts/sake", None);
 
-    let tool = |id: u64, name: &str, arguments: Value| {
-        let (status, answer) = server.call(
-            "POST",
-            "/mcp",
-            Some(json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
-                        "params": {"name": name, "arguments": arguments}})),
-        );
-        assert_eq!(status, 200, "{name} -> {answer}");
-        answer["result"].clone()
-    };
+    let tool = |id: u64, name: &str, arguments: Value| server.call_tool(id, name, arguments);
 
     let created = tool(
         1,
@@ -6930,16 +6935,7 @@ fn flush_and_export_ride_the_mcp_transport() {
         Some(json!({"description": "蔵元一式", "contexts": ["sake"]})),
     );
 
-    let tool = |id: u64, name: &str, arguments: Value| {
-        let (status, answer) = server.call(
-            "POST",
-            "/mcp",
-            Some(json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
-                        "params": {"name": name, "arguments": arguments}})),
-        );
-        assert_eq!(status, 200, "{name} -> {answer}");
-        answer["result"].clone()
-    };
+    let tool = |id: u64, name: &str, arguments: Value| server.call_tool(id, name, arguments);
 
     let flushed = tool(1, "flush", json!({}));
     assert!(flushed.get("isError").is_none(), "{flushed}");

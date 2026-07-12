@@ -135,18 +135,23 @@ export class TaguruRetriever extends BaseRetriever {
     }
     const members = new Set<string>();
     const seen = new Set<string>();
-    const stack = [...(this.groups ?? [])];
-    while (stack.length > 0) {
-      const group = stack.pop()!;
-      if (seen.has(group)) {
-        continue;
+    // BFS by frontier: the groups of one level are independent fetches,
+    // so each level resolves concurrently (nesting is at most 3 levels
+    // deep server-side).
+    let frontier = [...(this.groups ?? [])];
+    while (frontier.length > 0) {
+      const fetch = [...new Set(frontier)].filter((name) => !seen.has(name));
+      for (const name of fetch) {
+        seen.add(name);
       }
-      seen.add(group);
-      const entry = await this.client.groups.get(group);
-      for (const member of entry.contexts) {
-        members.add(member);
+      const entries = await Promise.all(fetch.map((name) => this.client.groups.get(name)));
+      frontier = [];
+      for (const entry of entries) {
+        for (const member of entry.contexts) {
+          members.add(member);
+        }
+        frontier.push(...entry.groups);
       }
-      stack.push(...entry.groups);
     }
     for (const name of [...members].sort()) {
       if (!targets.includes(name)) {
@@ -209,11 +214,12 @@ export class TaguruRetriever extends BaseRetriever {
     const targets = await this.resolveTargets();
     let graphDocs: Document[] = [];
     if (this.include_graph) {
-      const perTarget: Document[][] = [];
-      for (const target of targets) {
-        perTarget.push(await this.graphLane(target, query));
-      }
-      graphDocs = interleave(perTarget);
+      // Each target's lane is an independent chain of round trips, and
+      // completion order is irrelevant (interleave sorts by rank, then
+      // target order) — run them concurrently.
+      graphDocs = interleave(
+        await Promise.all(targets.map((target) => this.graphLane(target, query))),
+      );
     }
     let textHits: PassageHit[] = [];
     if (this.include_text) {

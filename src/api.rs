@@ -1324,6 +1324,7 @@ pub async fn retract_association(
                 label = %request.label,
                 object = %request.object,
                 retracted = unlinked.is_some(),
+                attributions_removed = unlinked.unwrap_or(0),
                 "association retracted",
             );
             // A retraction that found nothing changed nothing; only an

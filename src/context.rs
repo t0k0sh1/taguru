@@ -2094,8 +2094,10 @@ impl Context {
         let &object_id = self.concept_ids.get(object)?;
         let &edge_id = self.edge_ids.get(&(subject_id, label_id, object_id))?;
         let edge_index = edge_id as usize;
-        if self.edges[edge_index].count == 0 && self.edges[edge_index].sum == 0.0 {
-            // Already fully retracted: nothing left to withdraw.
+        if self.edges[edge_index].count == 0 {
+            // Already fully retracted — `count == 0` is the dead-edge
+            // test everywhere else too (`compacted`, the weight
+            // getter, the export): nothing left to withdraw.
             return None;
         }
 

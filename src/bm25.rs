@@ -18,6 +18,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::embedding::{FNV1A_OFFSET, fnv1a_fold};
 use crate::passages::PassageRecord;
 use crate::registry::passage_terms;
 
@@ -140,6 +141,11 @@ impl Bm25Index {
         let source_id = self.intern(source);
         self.tombstone(source_id);
         let slot_list = self.by_source.entry(source_id).or_default();
+        // The record's questions are sorted by paragraph, so one cursor
+        // walks them in lockstep with the paragraphs — O(paragraphs +
+        // questions), and the terms and the question hash come out of
+        // the same pass.
+        let mut questions = record.questions.iter().peekable();
         for (span, text) in record.paragraph_texts() {
             let slot = self.slots.len() as u32;
             let mut frequencies: HashMap<u64, f32> = HashMap::new();
@@ -151,21 +157,17 @@ impl Bm25Index {
             for gram in passage_terms(text) {
                 count(gram);
             }
-            for (_, question) in record
-                .questions
-                .iter()
-                .filter(|&&(paragraph, _)| paragraph == span.index)
-            {
+            let question_hash = take_questions_fold(&mut questions, span.index, |question| {
                 for gram in passage_terms(question) {
                     count(gram);
                 }
-            }
+            });
             self.slots.push(Slot {
                 source_id,
                 index: span.index,
                 length,
                 hash: span.hash,
-                question_hash: questions_fold(record, span.index),
+                question_hash,
                 alive: true,
             });
             slot_list.push(slot);
@@ -287,7 +289,7 @@ impl Bm25Index {
     pub(crate) fn source_digests(&self) -> HashMap<String, u64> {
         let mut digests = HashMap::new();
         for (&source_id, slot_list) in &self.by_source {
-            let mut digest = DIGEST_OFFSET;
+            let mut digest = FNV1A_OFFSET;
             let mut any = false;
             for &slot in slot_list {
                 let slot = &self.slots[slot as usize];
@@ -480,59 +482,48 @@ impl Bm25Index {
     }
 }
 
-const DIGEST_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const DIGEST_PRIME: u64 = 0x0000_0100_0000_01b3;
-
 /// One (paragraph index, paragraph hash, question fold) step of a
 /// source digest — FNV-1a-shaped so the fold depends on order and
 /// content both.
 fn digest_fold(digest: u64, index: u32, hash: u64, question_hash: u64) -> u64 {
-    let mut digest = digest;
-    for byte in index
-        .to_le_bytes()
-        .into_iter()
-        .chain(hash.to_le_bytes())
-        .chain(question_hash.to_le_bytes())
-    {
-        digest ^= u64::from(byte);
-        digest = digest.wrapping_mul(DIGEST_PRIME);
-    }
-    digest
+    fnv1a_fold(
+        digest,
+        index
+            .to_le_bytes()
+            .into_iter()
+            .chain(hash.to_le_bytes())
+            .chain(question_hash.to_le_bytes()),
+    )
 }
 
-/// FNV-1a over one paragraph's attached doc2query questions, in stored
-/// order, a separator byte after each so adjacent questions cannot
-/// blend — the questions' share of the drift digest, computed the same
-/// way on both sides of the comparison.
-fn questions_fold(record: &PassageRecord, paragraph: u32) -> u64 {
-    let mut digest = DIGEST_OFFSET;
-    for (_, question) in record
-        .questions
-        .iter()
-        .filter(|&&(index, _)| index == paragraph)
-    {
-        for byte in question.as_bytes().iter().copied().chain([0xff]) {
-            digest ^= u64::from(byte);
-            digest = digest.wrapping_mul(DIGEST_PRIME);
-        }
+/// Consumes the questions attached to `paragraph` off the
+/// record-ordered cursor, hands each to `each`, and returns their fold
+/// (a separator byte after every question so adjacent ones cannot
+/// blend) — the questions' share of the drift digest, computed the
+/// same way on both sides of the comparison.
+fn take_questions_fold<'r>(
+    questions: &mut std::iter::Peekable<std::slice::Iter<'r, (u32, String)>>,
+    paragraph: u32,
+    mut each: impl FnMut(&'r str),
+) -> u64 {
+    let mut digest = FNV1A_OFFSET;
+    while let Some((_, question)) = questions.next_if(|&&(index, _)| index == paragraph) {
+        each(question);
+        digest = fnv1a_fold(digest, question.bytes().chain([0xff]));
     }
     digest
 }
 
 /// The passage store's side of the drift comparison: the digest the
-/// index WOULD have for this record if it were fresh.
+/// index WOULD have for this record if it were fresh. The same
+/// lockstep cursor as `upsert_source`, so both sides cost
+/// O(paragraphs + questions).
 pub(crate) fn record_digest(record: &PassageRecord) -> u64 {
-    record
-        .paragraphs
-        .iter()
-        .fold(DIGEST_OFFSET, |digest, span| {
-            digest_fold(
-                digest,
-                span.index,
-                span.hash,
-                questions_fold(record, span.index),
-            )
-        })
+    let mut questions = record.questions.iter().peekable();
+    record.paragraphs.iter().fold(FNV1A_OFFSET, |digest, span| {
+        let question_hash = take_questions_fold(&mut questions, span.index, |_| {});
+        digest_fold(digest, span.index, span.hash, question_hash)
+    })
 }
 
 fn read_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {

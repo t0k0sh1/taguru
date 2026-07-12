@@ -97,7 +97,8 @@ Entries that change an on-disk format or a response shape say so.
 - `TaguruRetriever` (both LangChain packages) now addresses `contexts`
   and `groups` beside the single `context` (at least one required —
   the field is no longer mandatory alone). Across several contexts the
-  graph lane runs per context and interleaves by per-context rank, the
+  graph lane runs per context (concurrently, in the async clients) and
+  interleaves by per-context rank, the
   text lane rides the server's cross-context search, and every
   Document's metadata gains a `context` key naming where it came from
   (single-context retrievers too — additive).
