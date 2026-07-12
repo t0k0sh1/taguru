@@ -16,6 +16,16 @@
 //! must equal the snapshot exactly starts from a deleted (or fresh)
 //! context.
 //!
+//! A FULL export (no CONTEXT arguments) also writes every group as
+//! `{out}/{group}.group.jsonl` — one `taguru_group` record each, the
+//! group's complete truth the way a batch is a source's. Import
+//! applies group records after every batch of its run, so the files
+//! restore in any order; re-importing one REPLACES the record, the
+//! same idempotence one storey up. A subset export (explicit CONTEXT
+//! arguments) writes no groups: a group's truth spans contexts the
+//! subset may not carry, and a partial truth would shrink the group
+//! on restore.
+//!
 //! Fidelity notes, all deliberate:
 //! - An attribution asserted `count` times re-renders as `count`
 //!   association lines of its average weight, so corroboration
@@ -48,6 +58,7 @@ use serde::Serialize;
 
 use taguru::context::Association;
 
+use crate::groups::GroupRecord;
 use crate::passages::PassageRecord;
 use crate::registry::{AccessError, AppState, ContextMeta};
 
@@ -58,10 +69,14 @@ Writes each context back out of TAGURU_DATA_DIR as a JSONL batch
 stream — {out}/{context}.jsonl, the exact format `taguru import` and
 POST /import apply — offline (the server must not be running; the
 directory lock enforces it). No CONTEXT arguments means every context
-in the directory. A running server serves the same stream at
-GET /contexts/{name}/export. Re-importing a stream is idempotent
-(per-source retract-then-apply); `taguru import --dry-run` validates
-an exported file without touching anything.
+in the directory, plus every group as {out}/{group}.group.jsonl (one
+taguru_group record each; import restores groups after every batch,
+so the files re-apply in any order). Naming CONTEXTs exports just
+those, groups omitted. A running server serves the same streams at
+GET /contexts/{name}/export and GET /groups/{name}/export.
+Re-importing a stream is idempotent (per-source retract-then-apply;
+per-group replace); `taguru import --dry-run` validates an exported
+file without touching anything.
 
   --out DIR    where the streams land (created if missing)
   --config F   read KEY=VALUE environment from F (same dialect as serve)
@@ -163,6 +178,39 @@ struct AliasLine<'a> {
     alias: &'a str,
     canonical: &'a str,
     kind: &'a str,
+}
+
+/// The `taguru_group` record — [`crate::ingest`] parses the same
+/// shape. Empty fields are omitted and read back as empty, so the
+/// round trip is exact.
+#[derive(Serialize)]
+struct GroupLine<'a> {
+    taguru_group: u64,
+    name: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    description: &'a str,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    contexts: &'a BTreeSet<String>,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    groups: &'a BTreeSet<String>,
+}
+
+/// Renders one group as its import-stream record: one `taguru_group`
+/// line, newline-terminated — the group's complete truth, so
+/// re-importing REPLACES the record (a restore, never a merge).
+pub(crate) fn render_group(name: &str, record: &GroupRecord) -> String {
+    let mut line = String::new();
+    push_line(
+        &mut line,
+        &GroupLine {
+            taguru_group: crate::ingest::GROUP_VERSION,
+            name,
+            description: &record.description,
+            contexts: &record.contexts,
+            groups: &record.groups,
+        },
+    );
+    line
 }
 
 /// One source's share of the stream, accumulated before rendering.
@@ -437,7 +485,10 @@ pub(crate) fn run(args: &[String]) -> i32 {
         }
     };
 
-    let names = if names.is_empty() {
+    let explicit = !names.is_empty();
+    let names = if explicit {
+        names
+    } else {
         let all: Vec<String> = state
             .directory()
             .into_iter()
@@ -448,8 +499,6 @@ pub(crate) fn run(args: &[String]) -> i32 {
             return 1;
         }
         all
-    } else {
-        names
     };
 
     if let Err(error) = fs::create_dir_all(&out) {
@@ -467,13 +516,57 @@ pub(crate) fn run(args: &[String]) -> i32 {
             }
         }
     }
+
+    // Groups ride the FULL export only: a group's truth spans contexts
+    // a subset may not carry, and re-importing a partial truth would
+    // shrink the group (a restore replaces the record).
+    let mut group_count = 0usize;
+    let mut group_failures = 0usize;
+    if !explicit {
+        let (_, all_groups) = state.group_page(None, usize::MAX);
+        group_count = all_groups.len();
+        for (name, record) in &all_groups {
+            match export_group_file(name, record, &out) {
+                Ok(report) => println!("{report}"),
+                Err(message) => {
+                    eprintln!("taguru: export: group '{name}': {message}");
+                    group_failures += 1;
+                }
+            }
+        }
+    }
+
     println!(
-        "export: {} of {} context(s) written to {}",
+        "export: {} of {} context(s){} written to {}",
         names.len() - failures,
         names.len(),
+        match group_count {
+            0 => String::new(),
+            count => format!(" and {} of {count} group(s)", count - group_failures),
+        },
         out.display()
     );
-    if failures > 0 { 1 } else { 0 }
+    if failures + group_failures > 0 { 1 } else { 0 }
+}
+
+/// Writes one group's `taguru_group` record beside the context
+/// streams, `{out}/{stem}.group.jsonl` — a name a context stream can
+/// never claim (stems percent-encode `.`), exactly the collision
+/// argument the data directory's own `.group` extension makes.
+fn export_group_file(
+    name: &str,
+    record: &GroupRecord,
+    out: &std::path::Path,
+) -> Result<String, String> {
+    let path = out.join(format!("{}.group.jsonl", crate::registry::file_stem(name)));
+    crate::registry::write_atomic(&path, render_group(name, record).as_bytes())
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    Ok(format!(
+        "{}: group '{name}' → {} member context(s), {} child group(s)",
+        path.display(),
+        record.contexts.len(),
+        record.groups.len()
+    ))
 }
 
 fn export_one(state: &AppState, name: &str, out: &std::path::Path) -> Result<String, String> {
@@ -692,9 +785,13 @@ mod tests {
         let state_b =
             crate::registry::AppState::boot(scratch_dir("roundtrip-b"), usize::MAX, None).unwrap();
         for _ in 0..2 {
-            let batches = ingest::parse_batches(rendered.stream.as_bytes()).unwrap();
-            assert_eq!(batches.len(), 3, "a.md, b.md, and the reserved batch");
-            for batch in &batches {
+            let stream = ingest::parse_stream(rendered.stream.as_bytes()).unwrap();
+            assert_eq!(
+                stream.batches.len(),
+                3,
+                "a.md, b.md, and the reserved batch"
+            );
+            for batch in &stream.batches {
                 ingest::apply_batch(&state_b, batch)
                     .map_err(|r| r.text())
                     .unwrap();
@@ -711,7 +808,10 @@ mod tests {
             let state_c =
                 crate::registry::AppState::boot(scratch_dir("roundtrip-c"), usize::MAX, None)
                     .unwrap();
-            for batch in ingest::parse_batches(rendered_b.stream.as_bytes()).unwrap() {
+            for batch in ingest::parse_stream(rendered_b.stream.as_bytes())
+                .unwrap()
+                .batches
+            {
                 ingest::apply_batch(&state_c, &batch)
                     .map_err(|r| r.text())
                     .unwrap();
@@ -930,5 +1030,30 @@ mod tests {
         let last_lines: Vec<&str> = rendered.stream.lines().rev().take(2).collect();
         assert!(last_lines.iter().all(|line| line.contains("\"alias\"")));
         assert!(!rendered.stream.contains("orphan"));
+    }
+
+    /// One group renders as one `taguru_group` line, empties omitted,
+    /// and the parser reads it back exactly — the group half of the
+    /// stream's fixed point.
+    #[test]
+    fn a_group_renders_as_one_record_and_round_trips() {
+        let record = GroupRecord {
+            description: "蔵まとめ".to_string(),
+            contexts: ["sake", "bunko"].iter().map(|c| c.to_string()).collect(),
+            groups: ["kid"].iter().map(|g| g.to_string()).collect(),
+        };
+        let line = render_group("kura", &record);
+        assert_eq!(
+            line,
+            "{\"taguru_group\":1,\"name\":\"kura\",\"description\":\"蔵まとめ\",\
+             \"contexts\":[\"bunko\",\"sake\"],\"groups\":[\"kid\"]}\n"
+        );
+        let stream = ingest::parse_stream(line.as_bytes()).unwrap();
+        assert_eq!(stream.groups, vec![("kura".to_string(), record)]);
+
+        let bare = render_group("kid", &GroupRecord::default());
+        assert_eq!(bare, "{\"taguru_group\":1,\"name\":\"kid\"}\n");
+        let stream = ingest::parse_stream(bare.as_bytes()).unwrap();
+        assert_eq!(stream.groups[0].1, GroupRecord::default());
     }
 }

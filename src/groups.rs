@@ -85,12 +85,23 @@ pub(crate) enum NestingViolation {
 pub(crate) fn validate_nesting(
     groups: &BTreeMap<String, GroupRecord>,
 ) -> Result<(), NestingViolation> {
+    nesting_depths(groups).map(|_| ())
+}
+
+/// [`validate_nesting`]'s walk with its memo handed back: every
+/// group's chain depth (leaves are 1). The group restore writes
+/// children before the parents that name them, and this map is that
+/// order — computable only on a collection the validator accepts,
+/// which the `Result` enforces.
+pub(crate) fn nesting_depths(
+    groups: &BTreeMap<String, GroupRecord>,
+) -> Result<BTreeMap<&str, usize>, NestingViolation> {
     let mut settled = BTreeMap::new();
     let mut visiting = Vec::new();
     for name in groups.keys() {
         chain_depth(groups, name, &mut settled, &mut visiting)?;
     }
-    Ok(())
+    Ok(settled)
 }
 
 /// The number of groups on the longest chain hanging from `name`,
@@ -364,6 +375,15 @@ mod tests {
             Err(NestingViolation::Cycle("a".to_string()))
         );
         assert_eq!(validate_nesting(&map(&[("a", &[], &["ghost"])])), Ok(()));
+    }
+
+    #[test]
+    fn nesting_depths_hand_back_the_validators_memo() {
+        let groups = map(&[("a", &[], &["b"]), ("b", &[], &["c"]), ("c", &[], &[])]);
+        let depths = nesting_depths(&groups).unwrap();
+        assert_eq!(depths["a"], 3);
+        assert_eq!(depths["b"], 2);
+        assert_eq!(depths["c"], 1);
     }
 
     #[test]

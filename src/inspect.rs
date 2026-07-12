@@ -1,22 +1,29 @@
-//! `taguru inspect`: offline verification of a data directory or one
-//! `.ctx` image — the backup check that needs no server. Every image
-//! goes through the same fully validating parser the server boots
-//! with, and every WAL through the same replay parser, so "inspect
-//! says ok" and "the server will load it" are one statement. Exits 1
-//! when anything holding acknowledged data is corrupt.
+//! `taguru inspect`: offline verification of a data directory, one
+//! `.ctx` image, or one `.group` record — the backup check that needs
+//! no server. Every image goes through the same fully validating
+//! parser the server boots with, every WAL through the same replay
+//! parser, and every group file through the same record parse, so
+//! "inspect says ok" and "the server will load it" are one statement.
+//! Exits 1 when anything holding acknowledged data is corrupt — a
+//! group file that would not parse included, because boot answers
+//! that by resetting the record (the membership is acknowledged data,
+//! and this is the tool that must say so BEFORE a restore spends it).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use taguru::context::Context;
 
 use crate::cli::fmt_bytes;
+use crate::groups::{GroupRecord, MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, repair_nesting};
 use crate::registry::{
     bm25_path, meta_path, name_from_stem, passages_path, passages_wal_path, pvectors_path,
-    sources_path, vectors_path, wal_path,
+    scanned_stem_and_name, sources_path, vectors_path, wal_path,
 };
 use crate::wal;
 
-const USAGE: &str = "usage: taguru inspect PATH   (a data directory, or one .ctx image)\n";
+const USAGE: &str =
+    "usage: taguru inspect PATH   (a data directory, one .ctx image, or one .group record)\n";
 
 pub fn run(args: &[String]) -> i32 {
     let path = match args {
@@ -33,13 +40,58 @@ pub fn run(args: &[String]) -> i32 {
     if path.is_dir() {
         inspect_directory(path)
     } else if path.is_file() {
-        inspect_file(path)
+        if path.extension().and_then(|e| e.to_str()) == Some("group") {
+            inspect_group_file(path)
+        } else {
+            inspect_file(path)
+        }
     } else {
         eprintln!(
             "taguru: inspect: {} is neither a file nor a directory",
             path.display()
         );
         2
+    }
+}
+
+/// One `.group` file through the parse boot runs, read and parse kept
+/// apart — [`load_image`]'s twin one storey up, except the two failure
+/// classes cost differently (an unreadable file refuses a boot;
+/// unparseable bytes reset the record), so both callers must hear
+/// which.
+fn load_group(path: &Path) -> Result<GroupRecord, GroupFileTrouble> {
+    let bytes = std::fs::read(path).map_err(GroupFileTrouble::Unreadable)?;
+    serde_json::from_slice(&bytes).map_err(GroupFileTrouble::Corrupt)
+}
+
+enum GroupFileTrouble {
+    Unreadable(std::io::Error),
+    Corrupt(serde_json::Error),
+}
+
+/// One bare `.group` record: the "is this group file I restored
+/// intact" question, [`inspect_file`]'s twin one storey up. Reference
+/// checks need the directory around it, so a single file answers for
+/// its own parse alone.
+fn inspect_group_file(path: &Path) -> i32 {
+    match load_group(path) {
+        Ok(record) => {
+            println!(
+                "{}: ok  {} member context(s) · {} child group(s)",
+                path.display(),
+                record.contexts.len(),
+                record.groups.len()
+            );
+            0
+        }
+        Err(GroupFileTrouble::Unreadable(error)) => {
+            eprintln!("{}: UNREADABLE — {error}", path.display());
+            1
+        }
+        Err(GroupFileTrouble::Corrupt(error)) => {
+            eprintln!("{}: CORRUPT — {error}", path.display());
+            1
+        }
     }
 }
 
@@ -63,23 +115,31 @@ fn inspect_file(path: &Path) -> i32 {
 }
 
 fn inspect_directory(dir: &Path) -> i32 {
-    let mut stems: Vec<String> = match std::fs::read_dir(dir) {
-        Ok(entries) => entries
+    // One listing serves both halves: the .ctx stems here, the .group
+    // files handed to `inspect_groups` below.
+    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
+        Ok(read) => read
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("ctx"))
-            .filter_map(|path| path.file_stem().and_then(|s| s.to_str()).map(String::from))
             .collect(),
         Err(error) => {
             eprintln!("taguru: inspect: cannot read {}: {error}", dir.display());
             return 2;
         }
     };
-    stems.sort();
-    if stems.is_empty() {
-        println!("no .ctx images under {}", dir.display());
-        return 0;
-    }
+    entries.sort();
+    let stems: Vec<String> = entries
+        .iter()
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("ctx"))
+        .filter_map(|path| path.file_stem().and_then(|s| s.to_str()).map(String::from))
+        .collect();
+    // Context EXISTENCE is file presence — a corrupt image still
+    // occupies its name at boot — so this set is what the group
+    // reference warnings below judge against.
+    let context_names: BTreeSet<String> = stems
+        .iter()
+        .filter_map(|stem| name_from_stem(stem))
+        .collect();
 
     let mut failures = 0usize;
     let mut contexts = 0usize;
@@ -205,9 +265,17 @@ fn inspect_directory(dir: &Path) -> i32 {
         passages_total += passage_bytes;
     }
 
+    let (group_count, group_failures) = inspect_groups(&entries, &context_names);
+    failures += group_failures;
+
+    if stems.is_empty() && group_count == 0 && group_failures == 0 {
+        println!("no .ctx images under {}", dir.display());
+        return 0;
+    }
+
     println!(
-        "total: {contexts} contexts · images {} · WAL {} · vectors {} · index {} · passages {} · \
-         footprint if all resident {}",
+        "total: {contexts} contexts · {group_count} groups · images {} · WAL {} · vectors {} · \
+         index {} · passages {} · footprint if all resident {}",
         fmt_bytes(image_total),
         fmt_bytes(wal_total),
         fmt_bytes(vectors_total),
@@ -220,6 +288,127 @@ fn inspect_directory(dir: &Path) -> i32 {
         return 1;
     }
     0
+}
+
+/// The `.group` half of a directory inspection, same read-only
+/// discipline: every file (from the caller's one listing) goes
+/// through the parse boot runs, and what boot would ALTER is reported
+/// instead of healed — as a failure where the alteration loses
+/// acknowledged data (bytes that do not parse reset the record; an
+/// unreadable file refuses the boot itself), as a warning where it
+/// drops what is already stale (dangling references, over-cap sets,
+/// an ill-shaped nesting). Returns (groups parsed, failures).
+fn inspect_groups(
+    entries: &[std::path::PathBuf],
+    context_names: &BTreeSet<String>,
+) -> (usize, usize) {
+    let mut failures = 0usize;
+    let mut records: BTreeMap<String, GroupRecord> = BTreeMap::new();
+    for path in entries {
+        let file = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        if file.ends_with(".group.corrupt") {
+            println!(
+                "{file}: NOTE — bytes an earlier boot set aside from a group that did not \
+                 parse (evidence for hand recovery; every scan ignores it)"
+            );
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("group") {
+            continue;
+        }
+        let Some((stem, name)) = scanned_stem_and_name(path) else {
+            println!("{file}: WARNING — stem does not decode; the server will skip it");
+            continue;
+        };
+        match load_group(path) {
+            Ok(record) => {
+                records.insert(name, record);
+            }
+            Err(GroupFileTrouble::Unreadable(error)) => {
+                println!(
+                    "{name}: UNREADABLE group — {error} (a boot refuses to start while \
+                     this file cannot be read)"
+                );
+                failures += 1;
+            }
+            Err(GroupFileTrouble::Corrupt(error)) => {
+                println!(
+                    "{name}: CORRUPT group — {error} (a boot keeps the name, sets these \
+                     bytes aside as {stem}.group.corrupt, and resets the record to empty)"
+                );
+                failures += 1;
+            }
+        }
+    }
+
+    // The healing preview: what boot's reconciliation would drop.
+    for (name, record) in &records {
+        let mut warnings: Vec<String> = Vec::new();
+        let dangling_contexts = record
+            .contexts
+            .iter()
+            .filter(|context| !context_names.contains(*context))
+            .count();
+        if dangling_contexts > 0 {
+            warnings.push(format!(
+                "{dangling_contexts} member context(s) have no context here (boot drops \
+                 the references)"
+            ));
+        }
+        let dangling_children = record
+            .groups
+            .iter()
+            .filter(|child| !records.contains_key(*child))
+            .count();
+        if dangling_children > 0 {
+            warnings.push(format!(
+                "{dangling_children} child group(s) have no group here (boot drops the \
+                 references)"
+            ));
+        }
+        for (field, len) in [
+            ("member contexts", record.contexts.len()),
+            ("child groups", record.groups.len()),
+        ] {
+            if len > MAX_GROUP_MEMBERS {
+                warnings.push(format!(
+                    "{len} {field} where a group holds at most {MAX_GROUP_MEMBERS} (boot \
+                     keeps the first {MAX_GROUP_MEMBERS})"
+                ));
+            }
+        }
+        println!(
+            "{name}: ok  {} member context(s) · {} child group(s){}",
+            record.contexts.len(),
+            record.groups.len(),
+            if warnings.is_empty() {
+                String::new()
+            } else {
+                format!(" · WARNING: {}", warnings.join("; "))
+            }
+        );
+    }
+
+    // The shape preview runs the REAL repair on a scratch copy —
+    // dangling references dropped first, the order boot reconciles in
+    // (a dangling edge is not a shape violation, so the repair would
+    // keep it) — and names every edge boot would drop, not just the
+    // first violation a validator walk happens to hit.
+    let mut swept = records.clone();
+    for record in swept.values_mut() {
+        record.groups.retain(|child| records.contains_key(child));
+    }
+    let mut repaired = swept.clone();
+    repair_nesting(&mut repaired);
+    for (name, record) in &swept {
+        for child in record.groups.difference(&repaired[name].groups) {
+            println!(
+                "groups: WARNING — boot drops the nesting edge '{name}' → '{child}' \
+                 (it would close a cycle or stack more than {MAX_GROUP_DEPTH} groups)"
+            );
+        }
+    }
+    (records.len(), failures)
 }
 
 fn load_image(path: &Path) -> Result<(Context, u64), String> {

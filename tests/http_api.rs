@@ -4674,6 +4674,292 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
     assert_eq!(facts["total"], json!(2), "no doubling: {facts}");
 }
 
+/// Group records ride the import stream and restore AFTER every batch
+/// — one body can create the member contexts and the groups bundling
+/// them, in any order — as a create-or-replace of the whole record,
+/// reported under `groups: [...]` (absent when the stream carried
+/// none, so the pre-group response shape is untouched).
+#[test]
+fn import_restores_group_records_after_the_batches() {
+    let server = Server::start("http-import-groups");
+    // The group records sit FIRST: apply order is batches-then-groups,
+    // not stream order — and `kura` names `kid`, which only this same
+    // stream brings.
+    let stream = "{\"taguru_group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
+                   \"contexts\": [\"sake\", \"bunko\"], \"groups\": [\"kid\"]}\n\
+                  {\"taguru_group\": 1, \"name\": \"kid\", \"contexts\": [\"bunko\"]}\n\
+                  {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+                   \"create\": {\"description\": \"d\"}}\n\
+                  {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+                  {\"taguru_batch\": 1, \"context\": \"bunko\", \"source\": \"b.md\", \
+                   \"create\": {\"description\": \"d\"}}\n";
+    let (status, first) = post_import(&server, stream, None);
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(first["result"]["batches"].as_array().map(Vec::len), Some(2));
+    let restored = first["result"]["groups"]
+        .as_array()
+        .expect("group outcomes ride the response");
+    assert_eq!(restored.len(), 2, "{first}");
+    assert_eq!(restored[0]["name"], json!("kura"), "{first}");
+    assert_eq!(restored[0]["outcome"], json!("created"), "{first}");
+    assert_eq!(restored[0]["contexts"], json!(2), "{first}");
+    assert_eq!(restored[0]["groups"], json!(1), "{first}");
+    let row = server.ok("GET", "/groups/kura", None);
+    assert_eq!(row["contexts"], json!(["bunko", "sake"]), "{row}");
+    assert_eq!(row["groups"], json!(["kid"]), "{row}");
+    assert_eq!(row["description"], json!("蔵まとめ"), "{row}");
+
+    // Re-POSTing converges: the records already stand.
+    let (status, second) = post_import(&server, stream, None);
+    assert_eq!(status, 200, "{second}");
+    assert_eq!(
+        second["result"]["groups"][0]["outcome"],
+        json!("unchanged"),
+        "{second}"
+    );
+
+    // A stream with no group records keeps the pre-group shape: no
+    // `groups` field at all.
+    let batches_only = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"c.md\"}\n";
+    let (status, plain) = post_import(&server, batches_only, None);
+    assert_eq!(status, 200, "{plain}");
+    assert!(plain["result"].get("groups").is_none(), "{plain}");
+
+    // A restore REPLACES the record: whatever it omits drops.
+    let shrunk = "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n";
+    let (status, third) = post_import(&server, shrunk, None);
+    assert_eq!(status, 200, "{third}");
+    assert_eq!(
+        third["result"]["groups"][0]["outcome"],
+        json!("replaced"),
+        "{third}"
+    );
+    let row = server.ok("GET", "/groups/kura", None);
+    assert_eq!(row["contexts"], json!(["sake"]), "{row}");
+    assert_eq!(row["groups"], json!([]), "{row}");
+    assert_eq!(
+        row["description"],
+        json!(""),
+        "a replace is the whole record: {row}"
+    );
+}
+
+/// A group record that would dangle or misshape refuses every group
+/// record — with the batches already durable — under the API's usual
+/// codes: `no_context` for a missing member, `no_group` for a missing
+/// child, `invalid_argument` for a cycle.
+#[test]
+fn import_refuses_group_records_that_would_dangle_or_misshape() {
+    let server = Server::start("http-import-group-refuse");
+    let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+                   \"create\": {\"description\": \"d\"}}\n\
+                  {\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n";
+    let (status, refusal) = post_import(&server, stream, None);
+    assert_eq!(status, 404, "{refusal}");
+    assert_eq!(refusal["code"], json!("no_context"), "{refusal}");
+    assert!(
+        refusal["error"].as_str().unwrap().contains("ghost"),
+        "{refusal}"
+    );
+    // The batch landed; no group did.
+    let (status, _) = server.call("GET", "/contexts/sake", None);
+    assert_eq!(
+        status, 200,
+        "the batches before the group refusal are durable"
+    );
+    let (status, gone) = server.call("GET", "/groups/kura", None);
+    assert_eq!(status, 404, "{gone}");
+
+    // A child that neither exists nor rides the stream: no_group.
+    let stream = "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"], \
+                   \"groups\": [\"nope\"]}\n";
+    let (status, refusal) = post_import(&server, stream, None);
+    assert_eq!(status, 404, "{refusal}");
+    assert_eq!(refusal["code"], json!("no_group"), "{refusal}");
+
+    // A cycle the incoming set closes with itself: the request's own
+    // shape, 400.
+    let stream = "{\"taguru_group\": 1, \"name\": \"a\", \"groups\": [\"b\"]}\n\
+                  {\"taguru_group\": 1, \"name\": \"b\", \"groups\": [\"a\"]}\n";
+    let (status, refusal) = post_import(&server, stream, None);
+    assert_eq!(status, 400, "{refusal}");
+    assert_eq!(refusal["code"], json!("invalid_argument"), "{refusal}");
+
+    // Restating one group in one stream is a parse-stage refusal.
+    let stream = "{\"taguru_group\": 1, \"name\": \"a\"}\n{\"taguru_group\": 1, \"name\": \"a\"}\n";
+    let (status, refusal) = post_import(&server, stream, None);
+    assert_eq!(status, 400, "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("one record owns one group's truth"),
+        "{refusal}"
+    );
+}
+
+/// A scoped key's group records are judged like any group write — by
+/// the transitive context closure, the standing record's and the
+/// prospective one's both — before anything at all applies.
+#[test]
+fn a_scoped_key_cannot_import_group_records_beyond_its_grant() {
+    let server = Server::start_with_env(
+        "http-import-group-scope",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,curator:ctok"),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"curator": {"role": "admin", "contexts": ["sake"]}}"#,
+            ),
+        ],
+    );
+    let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
+        server.call_with_token(method, path, body, Some(token))
+    };
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/sake",
+            Some(json!({"description": "d"})),
+            "atok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/bunko",
+            Some(json!({"description": "d"})),
+            "atok"
+        )
+        .0,
+        200
+    );
+
+    // Out of grant through the record's own members: the whole request
+    // refuses — the in-grant batch beside it included.
+    let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s.md\"}\n\
+                  {\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"bunko\"]}\n";
+    let (status, refusal) = post_import(&server, stream, Some("ctok"));
+    assert_eq!(status, 403, "{refusal}");
+    assert!(
+        refusal["error"].as_str().unwrap().contains("bunko"),
+        "{refusal}"
+    );
+    let (status, _) = call("GET", "/groups/kura", None, "atok");
+    assert_eq!(status, 404, "the refusal precedes every apply");
+    let (_, sources) = call("GET", "/contexts/sake/sources", None, "atok");
+    assert!(
+        !sources.to_string().contains("s.md"),
+        "the batch must not land either: {sources}"
+    );
+
+    // Inside the grant the same key restores normally.
+    let stream = "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n";
+    let (status, applied) = post_import(&server, stream, Some("ctok"));
+    assert_eq!(status, 200, "{applied}");
+
+    // The replace side is judged too: shrinking a standing group that
+    // bundles an out-of-grant member would release that member, so the
+    // scoped replace refuses.
+    let wide = "{\"taguru_group\": 1, \"name\": \"wide\", \"contexts\": [\"sake\", \"bunko\"]}\n";
+    let (status, seeded) = post_import(&server, wide, Some("atok"));
+    assert_eq!(status, 200, "{seeded}");
+    let shrink = "{\"taguru_group\": 1, \"name\": \"wide\", \"contexts\": [\"sake\"]}\n";
+    let (status, refusal) = post_import(&server, shrink, Some("ctok"));
+    assert_eq!(status, 403, "{refusal}");
+}
+
+/// `GET /groups/{name}/export` serves one `taguru_group` record that
+/// `POST /import` restores whole — and a scoped key exports exactly
+/// the slice its grant lets it read.
+#[test]
+fn a_group_exports_as_one_import_record() {
+    let server = Server::start_with_env(
+        "http-group-export",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,curator:ctok"),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"curator": {"role": "read", "contexts": ["sake"]}}"#,
+            ),
+        ],
+    );
+    let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
+        server.call_with_token(method, path, body, Some(token))
+    };
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/sake",
+            Some(json!({"description": "d"})),
+            "atok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/bunko",
+            Some(json!({"description": "d"})),
+            "atok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(call("PUT", "/groups/kid", Some(json!({})), "atok").0, 200);
+    assert_eq!(
+        call(
+            "PUT",
+            "/groups/kura",
+            Some(
+                json!({"description": "蔵まとめ", "contexts": ["sake", "bunko"],
+                        "groups": ["kid"]})
+            ),
+            "atok"
+        )
+        .0,
+        200
+    );
+
+    // One JSONL line is itself valid JSON, so the harness hands it
+    // back parsed — assert the record's shape (the byte-exact
+    // rendering, field order and omitted empties, is pinned by
+    // export's own unit test).
+    let (status, exported) = call("GET", "/groups/kura/export", None, "atok");
+    assert_eq!(status, 200, "{exported}");
+    assert_eq!(
+        exported,
+        json!({"taguru_group": 1, "name": "kura", "description": "蔵まとめ",
+               "contexts": ["bunko", "sake"], "groups": ["kid"]})
+    );
+
+    // Deleting and re-importing the record restores the group whole.
+    assert_eq!(call("DELETE", "/groups/kura", None, "atok").0, 200);
+    let line = format!("{exported}\n");
+    let (status, restored) = post_import(&server, &line, Some("atok"));
+    assert_eq!(status, 200, "{restored}");
+    assert_eq!(
+        restored["result"]["groups"][0]["outcome"],
+        json!("created"),
+        "{restored}"
+    );
+    let (_, row) = call("GET", "/groups/kura", None, "atok");
+    assert_eq!(row["result"]["contexts"], json!(["bunko", "sake"]), "{row}");
+
+    // A scoped key exports its grant's slice — the row it can read IS
+    // the record it takes away.
+    let (status, sliced) = call("GET", "/groups/kura/export", None, "ctok");
+    assert_eq!(status, 200, "{sliced}");
+    assert_eq!(sliced["contexts"], json!(["sake"]), "{sliced}");
+
+    // Unknown group: the ordinary 404.
+    let (status, missing) = call("GET", "/groups/ghost/export", None, "atok");
+    assert_eq!(status, 404, "{missing}");
+}
+
 #[test]
 fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
     let server = Server::start("http-import-refuse");

@@ -371,16 +371,23 @@ pub async fn cross_search_passages(
         Err(refusal) => return *refusal,
     };
     let limit = clamp(request.limit, 5, MAX_MATCH_LIMIT);
+    // One rank cut for both sites below: inside the loop it holds the
+    // memory bound (hits carry their full paragraph text) — firing at
+    // twice the limit and coming back to the limit, so each firing
+    // discards at least `limit` hits instead of re-sorting per
+    // target — and after the loop it produces the page. Exact both
+    // times: (rank, index) keys are unique, later contexts only
+    // append larger indexes, and whatever sits outside a prefix
+    // pool's best `limit` sits outside every superset's.
+    let cut = |pool: &mut Vec<_>| {
+        pool.sort_by_key(|(index, rank, _)| (*rank, *index));
+        pool.truncate(limit);
+    };
     // Off the async worker, like the single-context handler: each
     // residency's first search tokenizes its whole corpus. One
     // context's failure aborts the whole response (a read has nothing
     // to half-apply); the query embedding, when the semantic lane is
     // on, is paid once — the cue cache serves the repeat contexts.
-    // Hits carry their full paragraph text, so the pool is cut back to
-    // the limit whenever it grows past it rather than once at the end:
-    // (rank, index) keys are unique and later contexts only append
-    // larger indexes, so the running cut keeps exactly the hits the
-    // one grand sort below would.
     let outcome = tokio::task::block_in_place(|| {
         let mut pool = Vec::new();
         for (index, name) in targets.iter().enumerate() {
@@ -401,9 +408,8 @@ pub async fn cross_search_passages(
                             .enumerate()
                             .map(|(rank, hit)| (index, rank, hit)),
                     );
-                    if pool.len() > limit {
-                        pool.sort_by_key(|(index, rank, _)| (*rank, *index));
-                        pool.truncate(limit);
+                    if pool.len() >= limit * 2 {
+                        cut(&mut pool);
                     }
                 }
             }
@@ -414,8 +420,7 @@ pub async fn cross_search_passages(
         Ok(pool) => pool,
         Err(refusal) => return *refusal,
     };
-    pool.sort_by_key(|(index, rank, _)| (*rank, *index));
-    pool.truncate(limit);
+    cut(&mut pool);
     if search_log_enabled() {
         tracing::info!(
             target: "taguru::search",

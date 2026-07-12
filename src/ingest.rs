@@ -30,6 +30,17 @@
 //! downtime window; [`parse_batch`] and [`apply_batch`] are that
 //! endpoint's core too, which is what keeps the two entrances from
 //! drifting apart.
+//!
+//! Beside batches, a stream may carry GROUP records: one
+//! `taguru_group` line states one group's complete truth (name,
+//! description, member contexts, child groups) the way one batch
+//! states one source's. Applying one is a create-or-replace of the
+//! whole record — never a delta — so re-importing stays idempotent.
+//! Groups apply AFTER every batch of the run (one CLI invocation, one
+//! `POST /import` body), whatever file or position carried them, so a
+//! group and the member contexts it names can travel together in any
+//! order; a member that still does not exist at that point refuses
+//! the whole group set, with every batch already durably landed.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
@@ -42,6 +53,7 @@ use crate::api::{
     MAX_ASSOCIATION_WEIGHT, MAX_ASSOCIATIONS_PER_REQUEST, MAX_CONTEXT_NAME_BYTES,
     MAX_DESCRIPTION_BYTES, MAX_NAME_BYTES,
 };
+use crate::groups::{GroupRecord, MAX_GROUP_MEMBERS};
 use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 
 const USAGE: &str = "\
@@ -52,10 +64,13 @@ not be running — the directory lock enforces it). One batch = one
 source's complete truth: import retracts the source, then applies the
 batch, so re-importing is idempotent. A file carries one batch or a
 whole stream of them (each `taguru_batch` header line starts the
-next) — `taguru export` writes such streams. A directory expands to
-its *.jsonl files, sorted by name. Format: docs/import.html. A running
-server accepts the same bodies at POST /import (authenticated), one
-file per request — live systems need no downtime window.
+next) — `taguru export` writes such streams. A `taguru_group` line
+states one group's complete truth the same way; groups restore AFTER
+every batch of the run (create-or-replace of the whole record), so
+group files re-apply in any order. A directory expands to its *.jsonl
+files, sorted by name. Format: docs/import.html. A running server
+accepts the same bodies at POST /import (authenticated), one file per
+request — live systems need no downtime window.
 
   --dry-run    validate every file and report; touch nothing
   --no-embed   skip the embedding refresh TAGURU_EMBED_URL would enable
@@ -65,6 +80,11 @@ file per request — live systems need no downtime window.
 /// The one format version this build reads and docs/import.html
 /// describes.
 const BATCH_VERSION: u64 = 1;
+
+/// The `taguru_group` record's own version stamp — separate from
+/// [`BATCH_VERSION`] so either shape can rev without dragging the
+/// other along. Export serializes it; parse refuses any other value.
+pub(crate) const GROUP_VERSION: u64 = 1;
 
 /// Per-line byte cap. Lines are one fact or one passage; past this
 /// something is wrong with the producer, and refusing early beats
@@ -127,15 +147,17 @@ pub fn run(args: &[String]) -> i32 {
     // carry one batch or a whole stream (`taguru export` output);
     // either way each batch stands alone from here on.
     let mut batches = Vec::new();
+    let mut groups: Vec<(&PathBuf, String, GroupRecord)> = Vec::new();
     let mut broken = 0;
     let mut owners: HashSet<(String, String)> = HashSet::new();
+    let mut group_owners: HashSet<String> = HashSet::new();
     for path in &files {
         let parsed = fs::File::open(path)
             .map_err(|error| error.to_string())
-            .and_then(|file| parse_batches(std::io::BufReader::new(file)));
+            .and_then(|file| parse_stream(std::io::BufReader::new(file)));
         match parsed {
-            Ok(file_batches) => {
-                for batch in file_batches {
+            Ok(stream) => {
+                for batch in stream.batches {
                     if !owners.insert((batch.context.clone(), batch.source.clone())) {
                         eprintln!(
                             "taguru: import: {}: source '{}' in context '{}' is already \
@@ -148,6 +170,18 @@ pub fn run(args: &[String]) -> i32 {
                         continue;
                     }
                     batches.push((path, batch));
+                }
+                for (name, record) in stream.groups {
+                    if !group_owners.insert(name.clone()) {
+                        eprintln!(
+                            "taguru: import: {}: group '{name}' is already stated by an \
+                             earlier file — one record owns one group's truth",
+                            path.display()
+                        );
+                        broken += 1;
+                        continue;
+                    }
+                    groups.push((path, name, record));
                 }
             }
             Err(message) => {
@@ -169,9 +203,16 @@ pub fn run(args: &[String]) -> i32 {
         for (path, batch) in &batches {
             println!("{}: {}", path.display(), batch.describe());
         }
+        for (path, name, record) in &groups {
+            println!("{}: {}", path.display(), describe_group(name, record));
+        }
         println!(
-            "dry run: {} batch(es) valid, nothing applied",
-            batches.len()
+            "dry run: {} batch(es){} valid, nothing applied",
+            batches.len(),
+            match groups.len() {
+                0 => String::new(),
+                count => format!(" and {count} group record(s)"),
+            }
         );
         return 0;
     }
@@ -225,6 +266,39 @@ pub fn run(args: &[String]) -> i32 {
             ops_since_flush = 0;
         }
     }
+
+    // Groups restore LAST — after every batch, whatever file carried
+    // them — so a record and the member contexts it names can travel
+    // in one run in any order. One set, validated whole: a member that
+    // still does not exist refuses every group record, batches
+    // untouched (they landed above; re-importing is idempotent).
+    let mut restored = 0usize;
+    let mut group_failures = 0usize;
+    if !groups.is_empty() {
+        let records: Vec<(String, GroupRecord)> = groups
+            .iter()
+            .map(|(_, name, record)| (name.clone(), record.clone()))
+            .collect();
+        match state.restore_groups(&records) {
+            Ok(outcomes) => {
+                restored = outcomes.len();
+                for ((path, name, record), (_, outcome)) in groups.iter().zip(&outcomes) {
+                    println!(
+                        "{}: {} — {}",
+                        path.display(),
+                        describe_group(name, record),
+                        outcome.as_str()
+                    );
+                }
+            }
+            Err(refusal) => {
+                restored = refusal.applied();
+                eprintln!("taguru: import: {}", refusal.text());
+                group_failures = groups.len() - restored;
+            }
+        }
+    }
+
     state.flush_dirty();
     state.persist_usage();
 
@@ -252,11 +326,27 @@ pub fn run(args: &[String]) -> i32 {
         batches.len(),
         touched.len()
     );
-    if failures > 0 || embed_failures > 0 {
+    if !groups.is_empty() {
+        println!(
+            "import: {restored} of {} group record(s) restored",
+            groups.len()
+        );
+    }
+    if failures > 0 || embed_failures > 0 || group_failures > 0 {
         1
     } else {
         0
     }
+}
+
+/// The dry-run and report line for one group record — what the batch's
+/// `describe` is to a batch.
+fn describe_group(name: &str, record: &GroupRecord) -> String {
+    format!(
+        "group '{name}': {} member context(s), {} child group(s)",
+        record.contexts.len(),
+        record.groups.len()
+    )
 }
 
 fn usage_error(message: &str) -> i32 {
@@ -291,6 +381,16 @@ fn expand(paths: &[String]) -> Result<Vec<PathBuf>, String> {
         }
     }
     Ok(files)
+}
+
+/// One parsed stream: the batches, then the group records it carried,
+/// each in stream order. The split IS the apply order — batches
+/// first, all of them, then the groups — so a group and the member
+/// contexts it names can ride one stream in any arrangement.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct Stream {
+    pub(crate) batches: Vec<Batch>,
+    pub(crate) groups: Vec<(String, GroupRecord)>,
 }
 
 /// One parsed batch file: the header's claims plus the accumulated op
@@ -377,6 +477,69 @@ struct CreateBlock {
     semantic_floor: Option<f32>,
 }
 
+/// The `taguru_group` record line: one group's complete truth, the
+/// same fields `GET /groups/{name}` serves. Absent fields read as
+/// empty — matching what export omits — so the round trip is exact.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupLine {
+    taguru_group: u64,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    contexts: Vec<String>,
+    #[serde(default)]
+    groups: Vec<String>,
+}
+
+/// Validates one group record line into the shape the registry
+/// restores. List duplicates fold into the set silently — membership
+/// is a set, exactly as over the API — but structural trouble
+/// (version, sizes, an over-cap SET) refuses with the line number.
+fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, GroupRecord), String> {
+    let line: GroupLine = serde_json::from_value(value)
+        .map_err(|error| format!("line {number}: not a group record: {error}"))?;
+    if line.taguru_group != GROUP_VERSION {
+        return Err(format!(
+            "line {number}: taguru_group {} is not a version this taguru reads (it reads \
+             {GROUP_VERSION})",
+            line.taguru_group
+        ));
+    }
+    check_size(number, "name", &line.name, MAX_CONTEXT_NAME_BYTES)?;
+    check_nonempty(number, "name", &line.name)?;
+    check_size(
+        number,
+        "description",
+        &line.description,
+        MAX_DESCRIPTION_BYTES,
+    )?;
+    let mut record = GroupRecord {
+        description: line.description,
+        contexts: BTreeSet::new(),
+        groups: BTreeSet::new(),
+    };
+    for (field, names, set) in [
+        ("contexts", line.contexts, &mut record.contexts),
+        ("groups", line.groups, &mut record.groups),
+    ] {
+        for member in names {
+            check_size(number, field, &member, MAX_CONTEXT_NAME_BYTES)?;
+            check_nonempty(number, field, &member)?;
+            set.insert(member);
+        }
+        if set.len() > MAX_GROUP_MEMBERS {
+            return Err(format!(
+                "line {number}: {} {field} where a group holds at most {MAX_GROUP_MEMBERS} \
+                 — split into nested child groups",
+                set.len()
+            ));
+        }
+    }
+    Ok((line.name, record))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AssociationLine {
@@ -425,29 +588,43 @@ struct SectionLine {
 
 /// Parses one single-batch file completely, or says which line refused
 /// and why — the shape `taguru extract` emits and re-validates. Streams
-/// that may carry several batches go through [`parse_batches`].
+/// that may carry several batches, or group records, go through
+/// [`parse_stream`].
 pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
-    let mut batches = parse_batches(reader)?;
-    if batches.len() > 1 {
+    let mut stream = parse_stream(reader)?;
+    if let Some((name, _)) = stream.groups.first() {
         return Err(format!(
-            "{} batches in one file where exactly one was expected",
-            batches.len()
+            "group record '{name}' in a file where exactly one batch was expected"
         ));
     }
-    Ok(batches.pop().expect("parse_batches refuses empty streams"))
+    if stream.batches.len() > 1 {
+        return Err(format!(
+            "{} batches in one file where exactly one was expected",
+            stream.batches.len()
+        ));
+    }
+    Ok(stream
+        .batches
+        .pop()
+        .expect("parse_stream refuses empty streams"))
 }
 
 /// Parses a batch stream: one batch, or several concatenated — the
-/// shape `taguru export` renders. Every `taguru_batch` header line
-/// closes the batch before it and opens the next; line numbers in
-/// errors count from the stream's first line. Two batches claiming one
-/// (context, source) pair refuse the whole stream — within a stream
-/// exactly as across import's files, one batch owns one source's
-/// truth.
-pub(crate) fn parse_batches(mut reader: impl BufRead) -> Result<Vec<Batch>, String> {
+/// shape `taguru export` renders — with any `taguru_group` records
+/// riding alongside. Every `taguru_batch` header line closes the batch
+/// before it and opens the next; a `taguru_group` line closes it too
+/// and stands alone, so an op line after one needs a fresh header.
+/// Line numbers in errors count from the stream's first line. Two
+/// batches claiming one (context, source) pair — or two records
+/// claiming one group — refuse the whole stream, within a stream
+/// exactly as across import's files: one batch owns one source's
+/// truth, one record one group's.
+pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
     let mut batches: Vec<Batch> = Vec::new();
+    let mut groups: Vec<(String, GroupRecord)> = Vec::new();
     let mut current: Option<Batch> = None;
     let mut owners: HashSet<(String, String)> = HashSet::new();
+    let mut group_owners: HashSet<String> = HashSet::new();
     // Per-paragraph question tally, carried as we parse so the per-line
     // cap check is a map lookup instead of a rescan of every question
     // seen so far — a batch piling questions on one paragraph would
@@ -483,14 +660,22 @@ pub(crate) fn parse_batches(mut reader: impl BufRead) -> Result<Vec<Batch>, Stri
         }
         let value: serde_json::Value = serde_json::from_str(line)
             .map_err(|error| format!("line {number}: not JSON: {error}"))?;
-        let is_header = value
-            .as_object()
-            .is_some_and(|object| object.contains_key("taguru_batch"));
-        if is_header {
+        let has_key = |key: &str| {
+            value
+                .as_object()
+                .is_some_and(|object| object.contains_key(key))
+        };
+        let is_header = has_key("taguru_batch");
+        let is_group = has_key("taguru_group");
+        if is_header || is_group {
+            // Either stream-level record closes the batch before it —
+            // one boundary step, however many marker kinds exist.
             if let Some(finished) = current.take() {
                 batches.push(finish_batch(finished)?);
                 question_counts.clear();
             }
+        }
+        if is_header {
             let batch = parse_header(value, number)?;
             if !owners.insert((batch.context.clone(), batch.source.clone())) {
                 return Err(format!(
@@ -500,6 +685,15 @@ pub(crate) fn parse_batches(mut reader: impl BufRead) -> Result<Vec<Batch>, Stri
                 ));
             }
             current = Some(batch);
+        } else if is_group {
+            let (name, record) = parse_group(value, number)?;
+            if !group_owners.insert(name.clone()) {
+                return Err(format!(
+                    "line {number}: group '{name}' is already stated by an earlier record \
+                     of this stream — one record owns one group's truth"
+                ));
+            }
+            groups.push((name, record));
         } else {
             match &mut current {
                 None => {
@@ -514,9 +708,14 @@ pub(crate) fn parse_batches(mut reader: impl BufRead) -> Result<Vec<Batch>, Stri
     }
     match current.take() {
         Some(finished) => batches.push(finish_batch(finished)?),
-        None => return Err("empty file: expected a batch header line".to_string()),
+        // A stream of group records alone is a legitimate restore; a
+        // stream of nothing is a mistake.
+        None if batches.is_empty() && groups.is_empty() => {
+            return Err("empty file: expected a batch header or group record line".to_string());
+        }
+        None => {}
     }
-    Ok(batches)
+    Ok(Stream { batches, groups })
 }
 
 /// The end-of-batch validations that need the whole batch in hand.
@@ -1079,14 +1278,15 @@ mod tests {
 
     #[test]
     fn a_stream_of_batches_parses_with_per_batch_state() {
-        let batches = parse_batches(std::io::Cursor::new(format!(
+        let batches = parse_stream(std::io::Cursor::new(format!(
             "{HEADER}\n\
              {{\"passage\": \"第1段落。\"}}\n\
              {{\"paragraph\": 0, \"question\": \"何?\"}}\n\
              {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}}\n\
              {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
         )))
-        .unwrap();
+        .unwrap()
+        .batches;
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].source, "doc-1");
         assert_eq!(batches[0].questions.len(), 1);
@@ -1100,7 +1300,7 @@ mod tests {
 
     #[test]
     fn a_stream_restating_one_source_is_refused() {
-        let error = parse_batches(std::io::Cursor::new(format!(
+        let error = parse_stream(std::io::Cursor::new(format!(
             "{HEADER}\n\
              {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
              {HEADER}\n"
@@ -1117,7 +1317,7 @@ mod tests {
         // The FIRST batch is the broken one (a question with no
         // passage); the boundary — not the end of the stream — must
         // catch it.
-        let error = parse_batches(std::io::Cursor::new(format!(
+        let error = parse_stream(std::io::Cursor::new(format!(
             "{HEADER}\n\
              {{\"paragraph\": 0, \"question\": \"何?\"}}\n\
              {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}}\n\
@@ -1218,6 +1418,109 @@ mod tests {
                 "{field}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn group_records_ride_a_stream_and_stand_alone() {
+        let stream = parse_stream(std::io::Cursor::new(format!(
+            "{HEADER}\n\
+             {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
+             {{\"taguru_group\": 1, \"name\": \"kura\", \"description\": \"蔵\", \
+               \"contexts\": [\"sake\", \"sake\"], \"groups\": [\"kid\"]}}\n\
+             {{\"taguru_group\": 1, \"name\": \"kid\"}}\n"
+        )))
+        .unwrap();
+        assert_eq!(stream.batches.len(), 1);
+        assert_eq!(stream.groups.len(), 2);
+        let (name, record) = &stream.groups[0];
+        assert_eq!(name, "kura");
+        assert_eq!(record.description, "蔵");
+        // List duplicates fold into the set — membership IS a set,
+        // exactly as over the API.
+        assert_eq!(record.contexts.len(), 1);
+        assert_eq!(record.groups.len(), 1);
+        // Absent fields read as empty, the shape export omits.
+        assert_eq!(stream.groups[1].1, GroupRecord::default());
+
+        // A group record closes the batch before it: an op line after
+        // one has no batch to join.
+        let error = parse_stream(std::io::Cursor::new(format!(
+            "{HEADER}\n\
+             {{\"taguru_group\": 1, \"name\": \"kura\"}}\n\
+             {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
+        )))
+        .unwrap_err();
+        assert!(
+            error.contains("line 3") && error.contains("not a batch header"),
+            "{error}"
+        );
+
+        // A groups-only stream is a legitimate restore; an empty one is
+        // still a mistake.
+        let alone = parse_stream(std::io::Cursor::new(
+            "{\"taguru_group\": 1, \"name\": \"kura\"}\n",
+        ))
+        .unwrap();
+        assert!(alone.batches.is_empty());
+        assert_eq!(alone.groups.len(), 1);
+        assert!(
+            parse_stream(std::io::Cursor::new("\n"))
+                .unwrap_err()
+                .contains("group record")
+        );
+    }
+
+    #[test]
+    fn group_records_validate_their_shape_with_line_numbers() {
+        let case =
+            |line: &str| parse_stream(std::io::Cursor::new(format!("{line}\n"))).unwrap_err();
+        assert!(case("{\"taguru_group\": 2, \"name\": \"g\"}").contains("taguru_group 2"));
+        assert!(case("{\"taguru_group\": 1, \"name\": \"\"}").contains("must not be empty"));
+        assert!(
+            case("{\"taguru_group\": 1, \"name\": \"g\", \"nope\": 1}").contains("unknown field")
+        );
+        let long = "x".repeat(65);
+        assert!(
+            case(&format!("{{\"taguru_group\": 1, \"name\": \"{long}\"}}")).contains("65 bytes")
+        );
+        assert!(
+            case(&format!(
+                "{{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"{long}\"]}}"
+            ))
+            .contains("65 bytes")
+        );
+
+        // Restating one group refuses the whole stream, by line.
+        let error = parse_stream(std::io::Cursor::new(
+            "{\"taguru_group\": 1, \"name\": \"g\"}\n{\"taguru_group\": 1, \"name\": \"g\"}\n",
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("line 2") && error.contains("one record owns one group's truth"),
+            "{error}"
+        );
+
+        // The member cap judges the SET: one name past it refuses.
+        let over_set: String = (0..=MAX_GROUP_MEMBERS)
+            .map(|i| format!("\"c{i:04}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let error = case(&format!(
+            "{{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [{over_set}]}}"
+        ));
+        assert!(error.contains("split into nested child groups"), "{error}");
+    }
+
+    /// The single-batch entrance (`taguru extract` re-validating its
+    /// own output) never carries group records.
+    #[test]
+    fn parse_batch_refuses_group_records() {
+        let error = parse(
+            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
+             {\"taguru_group\": 1, \"name\": \"kura\"}\n",
+        )
+        .unwrap_err();
+        assert!(error.contains("exactly one batch was expected"), "{error}");
     }
 
     /// A line longer than the cap is refused at the cap, not buffered

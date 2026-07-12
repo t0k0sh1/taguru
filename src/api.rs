@@ -217,26 +217,33 @@ fn group_not_found(name: &str, started_at: Instant) -> Response {
     )
 }
 
-/// The two shape refusals a nesting write can hear, one wire response
-/// each: a cycle is a malformed request (`invalid_argument`) while a
-/// too-tall stack trips a cap (`over_limit`) — depth is policy, not
-/// syntax. Both name a group on the offending path.
-fn nesting_refusal(violation: NestingViolation, started_at: Instant) -> Response {
+/// The one place the two nesting violations map onto the error
+/// vocabulary: a cycle is a malformed request (`invalid_argument`)
+/// while a too-tall stack trips a cap (`over_limit`) — depth is
+/// policy, not syntax. [`nesting_refusal`] and the import restore's
+/// refusal both read it here, so the two paths cannot drift onto
+/// different codes for the same condition.
+fn nesting_error_code(violation: &NestingViolation) -> ErrorCode {
     match violation {
-        NestingViolation::Cycle(group) => error(
-            ErrorCode::InvalidArgument,
-            format!("the nesting would loop back into group '{group}'; nothing was applied"),
-            started_at,
-        ),
-        NestingViolation::TooDeep(group) => error(
-            ErrorCode::OverLimit,
-            format!(
-                "the nesting would stack more than {MAX_GROUP_DEPTH} groups \
-                 (through group '{group}'); nothing was applied"
-            ),
-            started_at,
-        ),
+        NestingViolation::Cycle(_) => ErrorCode::InvalidArgument,
+        NestingViolation::TooDeep(_) => ErrorCode::OverLimit,
     }
+}
+
+/// The two shape refusals a nesting write can hear, one wire response
+/// each; both name a group on the offending path.
+fn nesting_refusal(violation: NestingViolation, started_at: Instant) -> Response {
+    let code = nesting_error_code(&violation);
+    let message = match violation {
+        NestingViolation::Cycle(group) => {
+            format!("the nesting would loop back into group '{group}'; nothing was applied")
+        }
+        NestingViolation::TooDeep(group) => format!(
+            "the nesting would stack more than {MAX_GROUP_DEPTH} groups \
+             (through group '{group}'); nothing was applied"
+        ),
+    };
+    error(code, message, started_at)
 }
 
 /// A group write whose RESULT would bundle more than
@@ -775,17 +782,26 @@ fn group_entry(
     record: GroupRecord,
     scope: &Option<axum::Extension<crate::auth::KeyScope>>,
 ) -> GroupEntry {
-    let contexts = record
-        .contexts
-        .into_iter()
-        .filter(|context| scope_allows(scope, context))
-        .collect();
     GroupEntry {
         name,
         description: record.description,
-        contexts,
+        contexts: scoped_member_contexts(record.contexts, scope),
         groups: record.groups,
     }
+}
+
+/// [`group_entry`]'s member filter on its own — the one loop behind
+/// every surface that serves a group's members (the row, the export),
+/// generic over the collection each output shape wants, so the
+/// surfaces cannot drift in what a scoped key sees.
+fn scoped_member_contexts<C: FromIterator<String>>(
+    contexts: BTreeSet<String>,
+    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+) -> C {
+    contexts
+        .into_iter()
+        .filter(|context| scope_allows(scope, context))
+        .collect()
 }
 
 /// The gate for a scoped key on any operation whose context names ride
@@ -2271,6 +2287,24 @@ pub struct ImportOutcome {
 #[derive(Serialize)]
 pub struct ImportStreamOutcome {
     pub batches: Vec<ImportOutcome>,
+    /// One entry per `taguru_group` record, stream order — absent
+    /// entirely for a stream that carried none, keeping the pre-group
+    /// response byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupImportOutcome>,
+}
+
+/// What restoring one group record accomplished. A restore is a
+/// replace of the whole record; the label says what it replaced.
+#[derive(Serialize)]
+pub struct GroupImportOutcome {
+    pub name: String,
+    /// `"created"` | `"replaced"` | `"unchanged"` — the last says the
+    /// standing record already matched, so nothing was rewritten.
+    pub outcome: &'static str,
+    /// Member counts of the record as restored.
+    pub contexts: usize,
+    pub groups: usize,
 }
 
 fn import_outcome(batch: &crate::ingest::Batch, applied: &crate::ingest::Applied) -> ImportOutcome {
@@ -2342,6 +2376,41 @@ fn import_refusal(
     }
 }
 
+/// Maps a refused group restore onto the response — the group half of
+/// [`import_refusal`]. Groups apply after every batch, so the note
+/// says what already landed; re-POSTing the corrected stream is exact
+/// (batches replace their sources, records their groups).
+fn restore_refusal(
+    state: &AppState,
+    refusal: crate::registry::RestoreGroupsError,
+    batches_landed: usize,
+    started_at: Instant,
+) -> Response {
+    use crate::registry::RestoreGroupsError;
+    let code = match &refusal {
+        RestoreGroupsError::InvalidName | RestoreGroupsError::Duplicate(_) => {
+            ErrorCode::InvalidArgument
+        }
+        RestoreGroupsError::NoSuchContext { .. } => ErrorCode::NoContext,
+        RestoreGroupsError::NoSuchChild { .. } => ErrorCode::NoGroup,
+        RestoreGroupsError::OverCap { .. } => ErrorCode::OverLimit,
+        RestoreGroupsError::Nesting(violation) => nesting_error_code(violation),
+        RestoreGroupsError::Io { .. } => {
+            state.metrics().record_error(ErrorKind::Io);
+            ErrorCode::Internal
+        }
+    };
+    error(
+        code,
+        format!(
+            "group records refused with every batch landed ({batches_landed} durable); \
+             fixing the stream and re-POSTing it whole is exact: {}",
+            refusal.text()
+        ),
+        started_at,
+    )
+}
+
 /// `POST /import` — the batch-file contract (docs/import.html) over
 /// HTTP: the body IS one batch file — or a whole stream of batches,
 /// as `GET /contexts/{name}/export` renders — applied to the live
@@ -2352,8 +2421,15 @@ fn import_refusal(
 /// as on any endpoint; embeddings ride the next flush
 /// (`TAGURU_EMBED_AUTO`) exactly as live writes do.
 ///
+/// `taguru_group` records ride the same stream and apply LAST — after
+/// every batch, wherever they sat — so a group and the member
+/// contexts it names can travel in one body in any order. Restoring a
+/// record replaces the whole group; the set is validated whole and a
+/// refusal applies no group, with every batch already durable.
+///
 /// The response is `{batches: [...]}` in stream order — a single-batch
-/// body answers the same shape with one entry. A refusal partway
+/// body answers the same shape with one entry, and a stream that
+/// carried group records adds `groups: [...]`. A refusal partway
 /// through a stream stops there — the batches before it landed
 /// durably, and because every batch is retract-then-apply,
 /// re-POSTing the whole corrected stream is exact, never
@@ -2365,8 +2441,8 @@ pub async fn import_batch(
     AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
-    let batches = match crate::ingest::parse_batches(&body[..]) {
-        Ok(batches) => batches,
+    let stream = match crate::ingest::parse_stream(&body[..]) {
+        Ok(stream) => stream,
         // Line-numbered, like the CLI's validation pass.
         Err(message) => return error(ErrorCode::MalformedRequest, message, started_at),
     };
@@ -2374,7 +2450,8 @@ pub async fn import_batch(
     // authorization check's reach — a context-scoped key is judged
     // here instead, before anything applies.
     if let Some(axum::Extension(scope)) = &scope
-        && let Some(refused) = batches
+        && let Some(refused) = stream
+            .batches
             .iter()
             .find(|batch| !scope.allows_context(&batch.context))
     {
@@ -2390,14 +2467,30 @@ pub async fn import_batch(
             started_at,
         );
     }
-    let total = batches.len();
+    // Group records are judged the way every group write is: by the
+    // context closure — the standing record's and the prospective
+    // one's both — before anything applies. Gated on the scope first,
+    // [`scoped_group_refusal`]'s discipline: an unscoped key never
+    // pays for the closure read.
+    if scope.is_some()
+        && !stream.groups.is_empty()
+        && let Some(refusal) = scope_refusal(
+            &scope,
+            &key,
+            &state.group_restore_involves(&stream.groups),
+            started_at,
+        )
+    {
+        return refusal;
+    }
+    let total = stream.batches.len();
     // Each batch is a create/retract_source/store_passages/add_associations/
     // add_aliases sequence — fsync-bearing writes, same as every other
     // mutating endpoint — run back to back; keep the whole loop off the
     // async worker rather than just one call in it.
     let outcome = tokio::task::block_in_place(|| {
         let mut outcomes: Vec<ImportOutcome> = Vec::with_capacity(total);
-        for (index, batch) in batches.iter().enumerate() {
+        for (index, batch) in stream.batches.iter().enumerate() {
             match crate::ingest::apply_batch(&state, batch) {
                 Ok(applied) => {
                     // Import is retract-then-apply — destructive — and both
@@ -2436,13 +2529,53 @@ pub async fn import_batch(
                 }
             }
         }
-        Ok(outcomes)
+        // Groups apply LAST — after every batch — so a record and the
+        // member contexts it names can ride one stream in any order.
+        let mut group_outcomes: Vec<GroupImportOutcome> = Vec::new();
+        if !stream.groups.is_empty() {
+            match state.restore_groups(&stream.groups) {
+                Ok(restored) => {
+                    for ((name, record), (_, applied)) in stream.groups.iter().zip(&restored) {
+                        // A restore replaces the whole record —
+                        // destructive like the batches above, and just
+                        // as far out of the access log's reach.
+                        tracing::info!(
+                            target: "taguru::audit",
+                            key = %key_name(&key),
+                            group = %name,
+                            outcome = applied.as_str(),
+                            contexts = record.contexts.len(),
+                            children = record.groups.len(),
+                            "import group record applied",
+                        );
+                        group_outcomes.push(GroupImportOutcome {
+                            name: name.clone(),
+                            outcome: applied.as_str(),
+                            contexts: record.contexts.len(),
+                            groups: record.groups.len(),
+                        });
+                    }
+                }
+                Err(refusal) => {
+                    return Err(Box::new(restore_refusal(
+                        &state, refusal, total, started_at,
+                    )));
+                }
+            }
+        }
+        Ok((outcomes, group_outcomes))
     });
-    let outcomes = match outcome {
-        Ok(outcomes) => outcomes,
+    let (outcomes, group_outcomes) = match outcome {
+        Ok(applied) => applied,
         Err(refusal) => return *refusal,
     };
-    ok(ImportStreamOutcome { batches: outcomes }, started_at)
+    ok(
+        ImportStreamOutcome {
+            batches: outcomes,
+            groups: group_outcomes,
+        },
+        started_at,
+    )
 }
 
 /// `POST /contexts/{name}/compact` — rebuild the image without the
@@ -2510,6 +2643,41 @@ pub async fn export_context(State(state): State<AppState>, Path(name): Path<Stri
         Ok(Err(message)) => error(ErrorCode::Conflict, message, started_at),
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
+}
+
+/// `GET /groups/{name}/export` — the group back out as its import
+/// record: one `taguru_group` line (JSON Lines body, not the JSON
+/// envelope), [`export_context`]'s twin one storey up. `POST /import`
+/// (or `taguru import`) restores it by replacing the whole record, so
+/// re-importing is idempotent; the members must exist at import time,
+/// and batches of the same stream apply first. For a context-scoped
+/// key the members are the grant's slice, exactly as
+/// `GET /groups/{name}` serves them — the export IS that key's view,
+/// and restoring it elsewhere carries only what the key could see.
+pub async fn export_group(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+) -> Response {
+    let started_at = Instant::now();
+    let Some(record) = state.group(&name) else {
+        return group_not_found(&name, started_at);
+    };
+    let filtered = GroupRecord {
+        description: record.description,
+        contexts: scoped_member_contexts(record.contexts, &scope),
+        // Child names stay whole, as on the row: labels, not content.
+        groups: record.groups,
+    };
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/x-ndjson; charset=utf-8",
+        )],
+        crate::export::render_group(&name, &filtered),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -2624,16 +2792,19 @@ type CrossPage = (usize, Vec<(String, Association)>);
 /// per-context search over every target in turn, pool the matches, cut
 /// past the limit, and only then tag the survivors with their context
 /// names — naming every match up front would allocate thousands of
-/// strings just to throw them away. The cut runs INSIDE the loop, each
-/// time the pool exceeds the limit, so the pool never holds more than
-/// the limit plus one context's matches — across every context a group
-/// can reach, the high-water mark stays what the single-context
-/// endpoint already pays. The running cut is exact, not approximate:
-/// the comparator matches [`page_by`]'s, the sort is stable, and later
-/// contexts only ever append after earlier ones, so survivors and tie
-/// order come out identical to cutting one grand pool at the end. The
-/// first per-context failure aborts the whole response (a read has
-/// nothing to half-apply).
+/// strings just to throw them away. [`page_by`] makes every cut, so
+/// there is exactly one comparator. The in-loop cut holds the MEMORY
+/// bound alone: it fires at twice the limit and comes back to the
+/// limit, so the pool never holds more than twice the limit plus one
+/// context's matches, and each firing discards at least `limit`
+/// entries — the sort work stays linearithmic in the total instead of
+/// re-sorting per target. The running cut is exact, not approximate:
+/// whatever sits outside a prefix pool's strongest `limit` sits
+/// outside every superset's, the sort is stable, and later contexts
+/// only ever append after earlier ones, so the closing [`page_by`]
+/// answers — survivors and tie order — exactly what cutting one grand
+/// pool at the end would. The first per-context failure aborts the
+/// whole response (a read has nothing to half-apply).
 fn cross_matches(
     state: &AppState,
     targets: &[String],
@@ -2651,9 +2822,8 @@ fn cross_matches(
                 state.note_search(op, name, matches.is_empty());
                 total += matches.len();
                 pool.extend(matches.into_iter().map(|found| (index, found)));
-                if pool.len() > limit {
-                    pool.sort_by(|a, b| b.1.weight.abs().total_cmp(&a.1.weight.abs()));
-                    pool.truncate(limit);
+                if pool.len() >= limit * 2 {
+                    pool = page_by(pool, Some(limit), |(_, found)| found.weight).1;
                 }
             }
             Err(failure) => {
@@ -2661,6 +2831,7 @@ fn cross_matches(
             }
         }
     }
+    let (_, pool) = page_by(pool, Some(limit), |(_, found)| found.weight);
     let tagged = pool
         .into_iter()
         .map(|(index, association)| (targets[index].clone(), association))

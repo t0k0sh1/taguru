@@ -241,6 +241,7 @@ Source code takes the same discipline; only the naming changes.
 | PUT | `/groups/{name}` | `{description?, contexts?:[name], groups?:[name]}` → create (groups and contexts are separate namespaces; every listed member — context or child group — must exist) |
 | PATCH | `/groups/{name}` | `{description?, add_contexts?, remove_contexts?, add_groups?, remove_groups?}` → the updated row (deltas, not a replacement list; removals apply first; added members must exist, removing a non-member is a no-op; the result holds at most 1000 member contexts and 1000 child groups — `over_limit` past that; split into nested child groups) |
 | DELETE | `/groups/{name}` | delete the bundling only — member contexts and child groups are untouched (deleting a context or a group also drops it from every group) |
+| GET | `/groups/{name}/export` | the group as one import-stream record (a `taguru_group` JSON Lines line, not the JSON envelope) — `POST /import` (or `taguru import`) restores it as a create-or-replace of the WHOLE record; batches in the same stream apply first, so a group and its member contexts can travel together in any order |
 | POST | `/contexts/{name}/associations` | `[{subject,label,object,weight,source?,paragraph?}]` → applied count (`paragraph` locates the fact within `source` and is ignored without one) |
 | POST | `/contexts/{name}/recall` | `{cue, limit?}` → `{total, matches}` |
 | POST | `/recall` | `{contexts?:[name], groups?:[group], cue, limit?}` → `{total, matches}` — recall across several contexts at once (full names, and/or groups: each searches every context it reaches, nested children included, overlaps deduped; every match tagged with its `context`; past the limit the strongest \|weight\| survives, one scale across contexts) |
@@ -262,7 +263,7 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/sources/retract` | `{source}` → withdraw that source's contributions (diff sync) |
 | POST | `/contexts/{name}/unreachable_from` | `{origins, limit?}` → `{total, matches}` unreachable associations |
 | POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?=0.6, cosine_floor?=0.6}` → spelling/synonym fork candidates |
-| GET | `/contexts/{name}/export` | the context as an import batch stream (JSON Lines body, not the JSON envelope) — one batch per source, create block first, aliases last; `POST /import` (or `taguru import`) restores it, per-source retract-then-apply, answering `{batches: [...]}` in stream order |
+| GET | `/contexts/{name}/export` | the context as an import batch stream (JSON Lines body, not the JSON envelope) — one batch per source, create block first, aliases last; `POST /import` (or `taguru import`) restores it, per-source retract-then-apply, answering `{batches: [...]}` in stream order (`taguru_group` records ride the same stream, restore after every batch as whole-record replaces, and answer under `groups: [...]`) |
 | POST | `/contexts/{name}/compact` | rebuild the image without dead records (admin; the context's requests wait out the rebuild) → `{bytes_before, bytes_after, dead_edges, aliases_dropped}` |
 
 ## Auth
@@ -280,9 +281,9 @@ Source code takes the same discipline; only the naming changes.
   admin (+ context and group deletion, `/import`, `/flush`) — and
   optionally a context list. Out of scope → `403` in the error shape,
   naming what the key lacks; a context-scoped key sees only its grant
-  in `GET /contexts`, group listings show it only the members it may
-  see (child group names stay visible — they are labels, not
-  content), and a cross-context search naming a context beyond the
+  in `GET /contexts`, group listings — and the group export — show it
+  only the members it may see (child group names stay visible — they
+  are labels, not content), and a cross-context search naming a context beyond the
   grant in `contexts` — or a group write touching one, counted
   through nested children — is refused whole. A cross-search `groups`
   entry instead resolves to just the members the grant covers, the

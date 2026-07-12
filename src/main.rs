@@ -428,6 +428,7 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
                 .patch(api::update_group)
                 .delete(api::delete_group),
         )
+        .route("/groups/{name}/export", get(api::export_group))
         // The cross-context searches: the per-context operation of the
         // same name, run across several contexts named in the body.
         .route("/recall", post(api::cross_recall))

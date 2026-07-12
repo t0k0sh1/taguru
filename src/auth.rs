@@ -397,6 +397,7 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         (&Method::GET, "/contexts")
         | (&Method::GET, "/groups")
         | (&Method::GET, "/groups/{name}")
+        | (&Method::GET, "/groups/{name}/export")
         | (&Method::GET, "/contexts/{name}")
         | (&Method::GET, "/contexts/{name}/labels")
         | (&Method::GET, "/contexts/{name}/aliases")
@@ -478,16 +479,19 @@ pub async fn enforce_authorization(
         );
     }
     let (mut parts, body) = request.into_parts();
-    // `{name}` is a CONTEXT name on every route but `/groups/{name}`,
-    // where it names the group itself: a group's member contexts live
-    // in the body and the stored record, out of this middleware's
-    // reach, so the group handlers judge them (`api::scope_refusal`).
-    // The exclusion names its one route exactly — deny-by-default
-    // safe: a future route whose `{name}` is not a context and is not
-    // listed here mis-answers 403 for scoped keys, never leaks open
-    // (a prefix test would silently swallow future `/groups/...`
-    // sub-routes instead of forcing that decision).
-    if scope.contexts.is_some() && route != "/groups/{name}" {
+    // `{name}` is a CONTEXT name on every route but the two `/groups`
+    // ones below, where it names the group itself: a group's member
+    // contexts live in the body and the stored record, out of this
+    // middleware's reach, so the group handlers judge them
+    // (`api::scope_refusal`) or filter to the grant (the row and the
+    // export). The exclusion names its routes exactly —
+    // deny-by-default safe: a future route whose `{name}` is not a
+    // context and is not listed here mis-answers 403 for scoped keys,
+    // never leaks open (a prefix test would silently swallow future
+    // `/groups/...` sub-routes instead of forcing that decision).
+    if scope.contexts.is_some()
+        && !matches!(route.as_str(), "/groups/{name}" | "/groups/{name}/export")
+    {
         use axum::extract::FromRequestParts as _;
         let context = axum::extract::RawPathParams::from_request_parts(&mut parts, &())
             .await
@@ -857,6 +861,10 @@ mod tests {
         );
         assert_eq!(
             required_role(&Method::GET, "/contexts/{name}/export"),
+            Role::Read
+        );
+        assert_eq!(
+            required_role(&Method::GET, "/groups/{name}/export"),
             Role::Read
         );
         assert_eq!(

@@ -38,12 +38,27 @@ Entries that change an on-disk format or a response shape say so.
   members its grant allows, and a group write touching any context
   beyond the grant — counted through nested children — is refused
   whole. Each group persists as one `{name}.group` JSON file beside
-  the context files; one new error code, `no_group` (404). Known
-  limitations this iteration: groups are not covered by
-  `taguru export`/`import`/`inspect`/`compact` (file-level backups
-  carry the `.group` files as-is), and a `DELETE /groups/{name}`
-  whose unlink fails can resurface the group at the next restart
-  (the error message says so).
+  the context files; one new error code, `no_group` (404). Groups
+  ride export/import: a `taguru_group` record — one JSON line, the
+  group's complete truth — travels the same stream batches do and
+  restores AFTER every batch of a run as a create-or-replace of the
+  whole record, so re-importing is idempotent and the files re-apply
+  in any order. The set is validated whole (existence, caps, nesting;
+  a child may be a name the same run brings) and a violation refuses
+  every group record with the batches already durable; `POST /import`
+  answers restored records under a new `groups: [...]` field (absent
+  when the stream carried none — the old shape is untouched). A full
+  `taguru export` writes each group as `{group}.group.jsonl`; a live
+  server serves one at `GET /groups/{name}/export` (a context-scoped
+  key exports its grant's slice, exactly the row it can read).
+  `taguru inspect` verifies `.group` files too: unreadable or
+  unparseable ones fail the check — a boot would refuse, or reset the
+  record — and dangling references, over-cap sets, and ill-shaped
+  nesting warn with exactly what boot's reconciliation would drop.
+  Known limitations this iteration: `taguru compact` leaves group
+  files alone (they hold nothing to compact), and a
+  `DELETE /groups/{name}` whose unlink fails can resurface the group
+  at the next restart (the error message says so).
 - `taguru_groups_registered` gauge on `/metrics`.
 - Cross-context search: `POST /recall`, `POST /query`, and
   `POST /sources/search` run one search across several contexts at

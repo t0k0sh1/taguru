@@ -22,9 +22,10 @@ USAGE:
                                         HEALTHCHECK; URL defaults to TAGURU_ADDR
                                         (the config file is applied first, so a
                                         --config deployment probes its own port)
-  taguru inspect PATH                   verify a data directory or one .ctx
-                                        image offline (backup check) — the
-                                        same validating load the server runs
+  taguru inspect PATH                   verify a data directory, one .ctx
+                                        image, or one .group record offline
+                                        (backup check) — the same validating
+                                        load the server runs
   taguru estimate --associations N ...  size memory/disk for a target corpus
                                         by building and measuring one
                                         (see: taguru estimate --help)
@@ -33,12 +34,14 @@ USAGE:
                                         loads (see: taguru import --help);
                                         the directory lock refuses to run
                                         beside a live server
-  taguru export --out DIR [CONTEXT...]  write contexts back out of the data
-                                        directory as import batch streams —
+  taguru export --out DIR [CONTEXT...]  write contexts — and, on a full
+                                        export, groups — back out of the data
+                                        directory as import batch streams,
                                         the portable backup (see: taguru
                                         export --help); a running server
                                         serves the same at
-                                        GET /contexts/{name}/export
+                                        GET /contexts/{name}/export and
+                                        GET /groups/{name}/export
   taguru compact [CONTEXT...]           rewrite context images without the
                                         dead weight the append-only format
                                         accumulates (see: taguru compact

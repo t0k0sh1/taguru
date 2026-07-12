@@ -698,6 +698,14 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
          {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n",
     )
     .expect("fixture must be writable");
+    // A group record beside the batches: groups restore after every
+    // batch of the run, so the file order never matters.
+    std::fs::write(
+        dir.join("batches/kura.jsonl"),
+        "{\"taguru_group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
+          \"contexts\": [\"sake\"]}\n",
+    )
+    .expect("fixture must be writable");
 
     let run_in = |data_dir: &std::path::Path, args: &[&str]| -> Output {
         Command::new(env!("CARGO_BIN_EXE_taguru"))
@@ -725,11 +733,20 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     let stdout = String::from_utf8_lossy(&exported.stdout);
     assert!(stdout.contains("sake.jsonl"), "{stdout}");
     assert!(stdout.contains("2 batch(es)"), "{stdout}");
+    // The full export carries the group as its own record file.
+    assert!(stdout.contains("group 'kura'"), "{stdout}");
+    assert!(stdout.contains("1 of 1 group(s)"), "{stdout}");
     let stream =
         std::fs::read_to_string(exports.join("sake.jsonl")).expect("the stream must exist");
     assert!(
         stream.contains("\"description\":\"酒蔵の知識\""),
         "{stream}"
+    );
+    let group_stream = std::fs::read_to_string(exports.join("kura.group.jsonl"))
+        .expect("the group record must exist");
+    assert!(
+        group_stream.contains("\"taguru_group\":1") && group_stream.contains("蔵まとめ"),
+        "{group_stream}"
     );
 
     // --dry-run validates the export without a data directory or lock.
@@ -739,7 +756,8 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     );
     assert_eq!(checked.status.code(), Some(0), "{checked:?}");
     assert!(
-        String::from_utf8_lossy(&checked.stdout).contains("2 batch(es) valid"),
+        String::from_utf8_lossy(&checked.stdout)
+            .contains("2 batch(es) and 1 group record(s) valid"),
         "{}",
         String::from_utf8_lossy(&checked.stdout)
     );
@@ -747,8 +765,19 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     let data_b = dir.join("data-b");
     let restored = run_in(&data_b, &["import", &exports.display().to_string()]);
     assert_eq!(restored.status.code(), Some(0), "{restored:?}");
+    assert!(
+        String::from_utf8_lossy(&restored.stdout).contains("1 of 1 group record(s) restored"),
+        "{}",
+        String::from_utf8_lossy(&restored.stdout)
+    );
     let inspected = run_in(&data_b, &["inspect", &data_b.display().to_string()]);
     assert_eq!(inspected.status.code(), Some(0), "{inspected:?}");
+    let inspected_out = String::from_utf8_lossy(&inspected.stdout);
+    assert!(inspected_out.contains("kura: ok"), "{inspected_out}");
+    assert!(
+        inspected_out.contains("total: 1 contexts · 1 groups"),
+        "{inspected_out}"
+    );
 
     let re_exports = dir.join("exports-b");
     let re_exported = run_in(
@@ -762,6 +791,121 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
         stream, re_stream,
         "a restore must re-export byte-identically"
     );
+    let re_group_stream = std::fs::read_to_string(re_exports.join("kura.group.jsonl"))
+        .expect("the group record must exist");
+    assert_eq!(
+        group_stream, re_group_stream,
+        "the group record must re-export byte-identically"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Inspect covers the group files: parse trouble fails the check (a
+/// boot would reset the record, and membership is acknowledged data),
+/// an unreadable file fails it (a boot refuses outright), and what
+/// boot's reconciliation would merely drop — dangling members,
+/// ill-shaped nesting — warns without failing, since the server
+/// accepts the directory and heals it.
+#[test]
+fn inspect_flags_group_trouble_and_previews_boot_repairs() {
+    let dir =
+        std::env::temp_dir().join(format!("taguru-cli-inspect-groups-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(
+        dir.join("kura.group"),
+        "{\"description\": \"\", \"contexts\": [\"sake\", \"ghost\"], \"groups\": []}",
+    )
+    .unwrap();
+
+    // A record that parses is ok; its dangling member is the preview
+    // of what boot would drop — a warning, never a failure.
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("kura: ok"), "{stdout}");
+    assert!(
+        stdout.contains("member context(s) have no context here"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("total: 1 contexts · 1 groups"), "{stdout}");
+
+    // A nesting the validator refuses warns the same way — the
+    // preview runs the real repair, so EVERY doomed edge is named in
+    // one run (a cycle and an over-deep chain at once), not just the
+    // first violation a walk happens to hit.
+    std::fs::write(dir.join("cyc-a.group"), "{\"groups\": [\"cyc-b\"]}").unwrap();
+    std::fs::write(dir.join("cyc-b.group"), "{\"groups\": [\"cyc-a\"]}").unwrap();
+    for (parent, child) in [("n1", "n2"), ("n2", "n3"), ("n3", "n4"), ("n4", "")] {
+        let children = if child.is_empty() {
+            "[]".to_string()
+        } else {
+            format!("[\"{child}\"]")
+        };
+        std::fs::write(
+            dir.join(format!("{parent}.group")),
+            format!("{{\"groups\": {children}}}"),
+        )
+        .unwrap();
+    }
+    let output = run(&["inspect", &dir.display().to_string()]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "shape trouble warns, never fails"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Deterministic, name-order repair: the second cycle edge and the
+    // chain's deepest edge are exactly what boot would drop.
+    assert!(
+        stdout.contains("boot drops the nesting edge 'cyc-b' → 'cyc-a'"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("boot drops the nesting edge 'n3' → 'n4'"),
+        "{stdout}"
+    );
+    for stale in ["n1", "n2", "n3", "n4"] {
+        std::fs::remove_file(dir.join(format!("{stale}.group"))).unwrap();
+    }
+    std::fs::remove_file(dir.join("cyc-a.group")).unwrap();
+    std::fs::remove_file(dir.join("cyc-b.group")).unwrap();
+
+    // Bytes that do not parse fail the inspection — restoring this
+    // backup would reset the record.
+    std::fs::write(dir.join("bad.group"), b"{not json").unwrap();
+    let output = run(&["inspect", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("CORRUPT group"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    std::fs::remove_file(dir.join("bad.group")).unwrap();
+
+    // An unreadable file fails it too — a boot refuses to start. A
+    // directory wearing the extension fails fs::read on every platform.
+    std::fs::create_dir(dir.join("locked.group")).unwrap();
+    let output = run(&["inspect", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("UNREADABLE group"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    std::fs::remove_dir(dir.join("locked.group")).unwrap();
+
+    // Single-file mode answers for one record's parse, both ways.
+    let output = run(&["inspect", &dir.join("kura.group").display().to_string()]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+    std::fs::write(dir.join("kura.group"), b"{not json").unwrap();
+    let output = run(&["inspect", &dir.join("kura.group").display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("CORRUPT"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

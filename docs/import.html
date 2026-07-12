@@ -115,7 +115,7 @@ taguru import --config prod.env a.jsonl b.jsonl</code></pre>
 
   <section id="format">
     <h2>The file format</h2>
-    <p class="section-sub">JSON Lines, UTF-8. Blank lines are ignored. The first non-blank line is the header; every following line is one operation.</p>
+    <p class="section-sub">JSON Lines, UTF-8. Blank lines are ignored. The first non-blank line is the header; every following line is one operation. (A stream may also carry <code>taguru_group</code> records — see below.)</p>
     <pre><code>{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"青嶺酒造は1907年創業。杜氏は高瀬。"</span>}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"section"</span>: <span class="s">"沿革"</span>}
@@ -193,6 +193,27 @@ taguru import --config prod.env a.jsonl b.jsonl</code></pre>
       what is stored — a separate follow-up.
     </p>
 
+    <h3>Group records</h3>
+    <p>
+      <code>{"taguru_group": 1, "name": "…", "description": "…", "contexts": […], "groups": […]}</code>
+      — one line states one <b>group's</b> complete truth, the way a batch states a source's:
+      applying it is a create-or-replace of the whole record, never a delta, so re-importing
+      stays idempotent. Only <code>name</code> is required; absent fields read as empty. A group
+      record stands alone between batches (it closes the batch before it — operation lines after
+      one need a fresh header), and <code>taguru export</code> writes each group as its own
+      <code>{group}.group.jsonl</code> beside the context streams.
+    </p>
+    <p>
+      Groups apply <b>after every batch of the run</b> — one CLI invocation, one
+      <code>POST /import</code> body — wherever the records sat, so a group and the member
+      contexts it names can travel together in any order. Referential integrity holds at that
+      point exactly as over the API: every member context must exist, every child group must
+      exist or ride the same run, the nesting must stay at most 3 groups tall and acyclic, and a
+      violation refuses <b>all</b> group records (the batches are already durably applied;
+      fixing the stream and re-importing it whole is exact). Restating one group twice in a run
+      is refused — one record owns one group's truth.
+    </p>
+
     <p class="note">Unknown fields and unrecognizable line shapes are refused, with the line number.</p>
   </section>
 
@@ -202,8 +223,9 @@ taguru import --config prod.env a.jsonl b.jsonl</code></pre>
       <table>
         <thead><tr><th>Subject</th><th>Cap</th></tr></thead>
         <tbody>
-          <tr><td>context name</td><td>64 bytes</td></tr>
+          <tr><td>context name · group name (members included)</td><td>64 bytes</td></tr>
           <tr><td>source id · subject/label/object · alias/canonical</td><td>1,024 bytes</td></tr>
+          <tr><td>group membership (member contexts / child groups, each)</td><td>1,000 names</td></tr>
           <tr><td>create.description</td><td>4,096 bytes</td></tr>
           <tr><td>weight</td><td>finite, |w| ≤ 1e6</td></tr>
           <tr><td>passage</td><td>8 MiB (the default HTTP body cap)</td></tr>

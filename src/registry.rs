@@ -557,6 +557,122 @@ pub enum UpdateGroupError {
     Io(io::Error),
 }
 
+/// Why [`AppState::restore_groups`] refused. Every arm but `Io` is a
+/// validation refusal with NOTHING applied — the set is judged whole
+/// before the first write. `Io` names how many records persisted
+/// first; either way re-importing the same stream is exact, because a
+/// restore is a replace and a replay converges.
+#[derive(Debug)]
+pub enum RestoreGroupsError {
+    /// [`CreateGroupError::InvalidName`]'s twin — the parse layers
+    /// refuse it first, but the invariant is the registry's.
+    InvalidName,
+    /// The same record name twice in one set: the set claims two
+    /// truths for one group, and "last wins" would silently discard
+    /// the other. The stream and file layers refuse duplicates with
+    /// their line and path; this is the registry's own backstop.
+    Duplicate(String),
+    /// A member of the named group is not a registered context. As
+    /// strict as [`CreateGroupError::NoSuchContext`] — batches of the
+    /// same run applied first, so "import contexts and groups
+    /// together" satisfies it, and anything else deserves the refusal.
+    NoSuchContext { group: String, context: String },
+    /// A child of the named group is neither registered nor in the
+    /// restore set itself (records in one set may reference each other
+    /// in any order — the set lands children-first).
+    NoSuchChild { group: String, child: String },
+    /// [`CreateGroupError::OverCap`]'s twin, judged per record.
+    OverCap { group: String, field: &'static str },
+    /// The set's records plus the standing groups would close a cycle
+    /// or stack more than [`groups::MAX_GROUP_DEPTH`] groups.
+    Nesting(groups::NestingViolation),
+    /// A record would not persist; the `applied` records before it did
+    /// (children-first order, so what landed never dangles on what did
+    /// not).
+    Io {
+        group: String,
+        applied: usize,
+        error: io::Error,
+    },
+}
+
+impl RestoreGroupsError {
+    /// How many records durably landed despite the refusal — zero for
+    /// every validation arm, the write count for [`Self::Io`].
+    pub fn applied(&self) -> usize {
+        match self {
+            Self::Io { applied, .. } => *applied,
+            _ => 0,
+        }
+    }
+
+    /// One sentence for both entrances, [`crate::ingest::ApplyRefusal::text`]'s
+    /// twin: the CLI prints it, the HTTP endpoint sends the same words
+    /// under the matching status.
+    pub fn text(&self) -> String {
+        match self {
+            Self::InvalidName => "a group name must not be empty".to_string(),
+            Self::Duplicate(group) => {
+                format!("group '{group}' appears twice in the restore set")
+            }
+            Self::NoSuchContext { group, context } => format!(
+                "group '{group}' names member context '{context}', which does not exist; \
+                 no group was applied (batches of the same stream apply first — import \
+                 the contexts, then the groups)"
+            ),
+            Self::NoSuchChild { group, child } => format!(
+                "group '{group}' names child group '{child}', which neither exists nor \
+                 rides this stream; no group was applied"
+            ),
+            Self::OverCap { group, field } => format!(
+                "group '{group}' would bundle more than {} {field}; no group was applied \
+                 — split into nested child groups",
+                groups::MAX_GROUP_MEMBERS
+            ),
+            Self::Nesting(groups::NestingViolation::Cycle(group)) => format!(
+                "the restored nesting would close a cycle through group '{group}'; \
+                 no group was applied"
+            ),
+            Self::Nesting(groups::NestingViolation::TooDeep(group)) => format!(
+                "the restored nesting would stack more than {} groups under group \
+                 '{group}'; no group was applied",
+                groups::MAX_GROUP_DEPTH
+            ),
+            Self::Io {
+                group,
+                applied,
+                error,
+            } => format!(
+                "group '{group}' could not be persisted after {applied} group record(s) \
+                 landed: {error} — re-importing the stream is exact"
+            ),
+        }
+    }
+}
+
+/// What restoring one group record amounted to, for the import report:
+/// the record now stands either way, and the label says what it
+/// replaced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GroupRestoreOutcome {
+    Created,
+    Replaced,
+    /// The standing record already equalled the incoming one — nothing
+    /// was rewritten, which is what makes re-importing a stream a
+    /// cheap no-op instead of a directory-wide fsync storm.
+    Unchanged,
+}
+
+impl GroupRestoreOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Replaced => "replaced",
+            Self::Unchanged => "unchanged",
+        }
+    }
+}
+
 /// What one compaction accomplished — the before/after footprint and
 /// the dead weight shed, for the CLI report and the endpoint response.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -1400,12 +1516,7 @@ impl AppState {
         // [`groups::MAX_GROUP_MEMBERS`] (a create can't say more names
         // than a group may hold), but the invariant belongs to the
         // registry, not to whoever happens to call it.
-        if contexts.len() > groups::MAX_GROUP_MEMBERS {
-            return Err(CreateGroupError::OverCap("member contexts"));
-        }
-        if children.len() > groups::MAX_GROUP_MEMBERS {
-            return Err(CreateGroupError::OverCap("child groups"));
-        }
+        check_member_caps(&contexts, &children).map_err(CreateGroupError::OverCap)?;
         {
             let registry = self.0.registry.read().unwrap();
             if let Some(missing) =
@@ -1471,6 +1582,11 @@ impl AppState {
                 ),
                 ("child groups", &record.groups, &add_groups, &remove_groups),
             ] {
+                // An empty delta cannot move a set past the cap the
+                // invariant already holds it under — skip the rebuild.
+                if add.is_empty() && remove.is_empty() {
+                    continue;
+                }
                 let mut prospective: BTreeSet<&str> = current.iter().map(String::as_str).collect();
                 for removed in remove {
                     prospective.remove(removed.as_str());
@@ -1516,6 +1632,129 @@ impl AppState {
             return Err(UpdateGroupError::Io(error));
         }
         Ok(groups[name].clone())
+    }
+
+    /// Restores a set of group records — import's create-or-replace
+    /// twin of [`Self::create_group`]/[`Self::update_group`]: each
+    /// record replaces its whole row (description and both member
+    /// sets), and a group absent from the set is untouched, parents
+    /// naming a restored group included. The SET is judged before the
+    /// first write, under the groups write lock: every member context
+    /// registered, every child registered or in the set itself, both
+    /// caps per record, and the nesting that results — the standing
+    /// map overlaid with every record — acyclic and within
+    /// [`groups::MAX_GROUP_DEPTH`]. A validation refusal applies
+    /// nothing.
+    ///
+    /// Writes land children-first (depth order over the prospective
+    /// map), so a persist failure partway strands no record dangling
+    /// on an absent child; memory tracks exactly what persisted. A
+    /// record equal to the standing row skips its write, so
+    /// re-importing a stream converges to a no-op instead of a
+    /// directory-wide fsync storm.
+    pub fn restore_groups(
+        &self,
+        records: &[(String, GroupRecord)],
+    ) -> Result<Vec<(String, GroupRestoreOutcome)>, RestoreGroupsError> {
+        let mut groups = self.0.groups.write().unwrap();
+        // The prospective map — what memory becomes if every write
+        // lands — is what the validators judge.
+        let mut prospective = groups.clone();
+        let mut incoming: BTreeSet<&str> = BTreeSet::new();
+        for (name, record) in records {
+            if name.is_empty() {
+                return Err(RestoreGroupsError::InvalidName);
+            }
+            if !incoming.insert(name) {
+                return Err(RestoreGroupsError::Duplicate(name.clone()));
+            }
+            check_member_caps(&record.contexts, &record.groups).map_err(|field| {
+                RestoreGroupsError::OverCap {
+                    group: name.clone(),
+                    field,
+                }
+            })?;
+            prospective.insert(name.clone(), record.clone());
+        }
+        {
+            // Lock order: `groups` before `registry`, as documented on
+            // the field.
+            let registry = self.0.registry.read().unwrap();
+            for (name, record) in records {
+                if let Some(missing) =
+                    first_missing(&record.contexts, |context| registry.contains_key(context))
+                {
+                    return Err(RestoreGroupsError::NoSuchContext {
+                        group: name.clone(),
+                        context: missing.clone(),
+                    });
+                }
+                if let Some(missing) =
+                    first_missing(&record.groups, |child| prospective.contains_key(child))
+                {
+                    return Err(RestoreGroupsError::NoSuchChild {
+                        group: name.clone(),
+                        child: missing.clone(),
+                    });
+                }
+            }
+        }
+        let depths = groups::nesting_depths(&prospective).map_err(RestoreGroupsError::Nesting)?;
+        let outcomes: Vec<(String, GroupRestoreOutcome)> = records
+            .iter()
+            .map(|(name, record)| {
+                let outcome = match groups.get(name) {
+                    Some(standing) if standing == record => GroupRestoreOutcome::Unchanged,
+                    Some(_) => GroupRestoreOutcome::Replaced,
+                    None => GroupRestoreOutcome::Created,
+                };
+                (name.clone(), outcome)
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..records.len()).collect();
+        // Every record's name sits in `prospective`, so the settled
+        // map has its depth — indexing panics loudly if that invariant
+        // ever breaks, where a fallback would silently misorder.
+        order.sort_by_key(|&index| depths[records[index].0.as_str()]);
+        let mut applied = 0usize;
+        for &index in &order {
+            let (name, record) = &records[index];
+            if outcomes[index].1 == GroupRestoreOutcome::Unchanged {
+                // Already standing in the desired state — it counts as
+                // landed for the Io report below.
+                applied += 1;
+                continue;
+            }
+            if let Err(error) = groups::write_group(&self.0.data_dir, &file_stem(name), record) {
+                return Err(RestoreGroupsError::Io {
+                    group: name.clone(),
+                    applied,
+                    error,
+                });
+            }
+            groups.insert(name.clone(), record.clone());
+            applied += 1;
+        }
+        Ok(outcomes)
+    }
+
+    /// Every context a scoped key must hold to restore `records`: the
+    /// closures of the named groups over the STANDING map (what the
+    /// replace would release) unioned with their closures over the
+    /// prospective one (what it would address). The import gate judges
+    /// group records with this — [`Self::group_context_closures`]'
+    /// twin for the restore path, where children may be names the set
+    /// itself brings.
+    pub fn group_restore_involves(&self, records: &[(String, GroupRecord)]) -> BTreeSet<String> {
+        let groups = self.0.groups.read().unwrap();
+        let roots: Vec<&str> = records.iter().map(|(name, _)| name.as_str()).collect();
+        let mut involved = groups::context_closure(&groups, roots.iter().copied());
+        let mut prospective = groups.clone();
+        for (name, record) in records {
+            prospective.insert(name.clone(), record.clone());
+        }
+        involved.extend(groups::context_closure(&prospective, roots.iter().copied()));
+        involved
     }
 
     /// Removes a group — the bundling only, never the member contexts
@@ -3884,6 +4123,22 @@ fn first_missing<'a>(
     exists: impl Fn(&str) -> bool,
 ) -> Option<&'a String> {
     names.into_iter().find(|name| !exists(name))
+}
+
+/// The per-set membership cap, judged wherever a WHOLE record is
+/// stated at once (create, restore): the first over-cap set's label
+/// comes back for the refusal. A delta update judges its prospective
+/// result instead — see `update_group`.
+fn check_member_caps(
+    contexts: &BTreeSet<String>,
+    children: &BTreeSet<String>,
+) -> Result<(), &'static str> {
+    for (field, set) in [("member contexts", contexts), ("child groups", children)] {
+        if set.len() > groups::MAX_GROUP_MEMBERS {
+            return Err(field);
+        }
+    }
+    Ok(())
 }
 
 /// Shared body of the two membership sweeps — a deleted context out of
@@ -8927,6 +9182,181 @@ mod tests {
             Err(UpdateGroupError::OverCap("child groups"))
         ));
         assert_eq!(state.group("g").unwrap().contexts, one);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restore_groups_replaces_whole_records_and_reports_what_stood() {
+        let dir = scratch_dir("groups-restore");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.create("bunko", ContextMeta::default()).unwrap();
+        state
+            .create_group(
+                "kura",
+                "old".to_string(),
+                BTreeSet::from(["sake".to_string(), "bunko".to_string()]),
+                BTreeSet::new(),
+            )
+            .unwrap();
+        // A standing parent naming the group must survive its replace:
+        // a restore rewrites the record, never the references to it.
+        state
+            .create_group(
+                "parent",
+                String::new(),
+                BTreeSet::new(),
+                BTreeSet::from(["kura".to_string()]),
+            )
+            .unwrap();
+
+        let record = |contexts: &[&str], children: &[&str]| GroupRecord {
+            description: "new".to_string(),
+            contexts: contexts.iter().map(|c| c.to_string()).collect(),
+            groups: children.iter().map(|g| g.to_string()).collect(),
+        };
+        // The set references its own newcomer — parent listed first,
+        // child later: order inside the set must not matter.
+        let records = vec![
+            ("kura".to_string(), record(&["sake"], &["kid"])),
+            ("kid".to_string(), record(&["bunko"], &[])),
+        ];
+        let outcomes = state.restore_groups(&records).unwrap();
+        assert_eq!(outcomes[0].1.as_str(), "replaced");
+        assert_eq!(outcomes[1].1.as_str(), "created");
+        // The replace is the WHOLE record — bunko dropped, description
+        // replaced — and parent still names kura.
+        assert_eq!(state.group("kura").unwrap(), records[0].1);
+        assert_eq!(
+            state.group("parent").unwrap().groups,
+            BTreeSet::from(["kura".to_string()])
+        );
+        // Disk agrees.
+        let on_disk: GroupRecord =
+            serde_json::from_slice(&fs::read(groups::group_path(&dir, &file_stem("kid"))).unwrap())
+                .unwrap();
+        assert_eq!(on_disk, records[1].1);
+
+        // Restoring the same set again converges to no-ops.
+        let again = state.restore_groups(&records).unwrap();
+        assert!(
+            again
+                .iter()
+                .all(|(_, outcome)| outcome.as_str() == "unchanged"),
+            "{again:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restore_groups_judges_the_whole_set_before_writing_anything() {
+        use crate::groups::NestingViolation;
+
+        let dir = scratch_dir("groups-restore-refuse");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        let record = |contexts: &[&str], children: &[&str]| GroupRecord {
+            description: String::new(),
+            contexts: contexts.iter().map(|c| c.to_string()).collect(),
+            groups: children.iter().map(|g| g.to_string()).collect(),
+        };
+
+        // A dangling member refuses the set — the valid record beside
+        // it included.
+        let refusal = state
+            .restore_groups(&[
+                ("fine".to_string(), record(&["sake"], &[])),
+                ("broken".to_string(), record(&["ghost"], &[])),
+            ])
+            .unwrap_err();
+        assert!(matches!(
+            &refusal,
+            RestoreGroupsError::NoSuchContext { group, context }
+                if group == "broken" && context == "ghost"
+        ));
+        assert_eq!(refusal.applied(), 0);
+        assert!(
+            state.group("fine").is_none(),
+            "nothing applies on a refusal"
+        );
+
+        // A child neither standing nor in the set.
+        assert!(matches!(
+            state
+                .restore_groups(&[("a".to_string(), record(&[], &["nope"]))])
+                .unwrap_err(),
+            RestoreGroupsError::NoSuchChild { group, child } if group == "a" && child == "nope"
+        ));
+
+        // A cycle the set closes with itself.
+        assert!(matches!(
+            state
+                .restore_groups(&[
+                    ("a".to_string(), record(&[], &["b"])),
+                    ("b".to_string(), record(&[], &["a"])),
+                ])
+                .unwrap_err(),
+            RestoreGroupsError::Nesting(NestingViolation::Cycle(_))
+        ));
+
+        // Depth counts the standing groups too: records stacking two
+        // more storeys under an existing 2-chain overflow the cap.
+        state
+            .create_group("mid", String::new(), BTreeSet::new(), BTreeSet::new())
+            .unwrap();
+        state
+            .create_group(
+                "top",
+                String::new(),
+                BTreeSet::new(),
+                BTreeSet::from(["mid".to_string()]),
+            )
+            .unwrap();
+        assert!(matches!(
+            state
+                .restore_groups(&[
+                    ("mid".to_string(), record(&[], &["deep"])),
+                    ("deep".to_string(), record(&[], &["deeper"])),
+                    ("deeper".to_string(), record(&[], &[])),
+                ])
+                .unwrap_err(),
+            RestoreGroupsError::Nesting(NestingViolation::TooDeep(_))
+        ));
+        assert!(state.group("deep").is_none());
+
+        // One name twice is two truths for one group.
+        assert!(matches!(
+            state
+                .restore_groups(&[
+                    ("dup".to_string(), record(&[], &[])),
+                    ("dup".to_string(), record(&["sake"], &[])),
+                ])
+                .unwrap_err(),
+            RestoreGroupsError::Duplicate(name) if name == "dup"
+        ));
+
+        // The cap judges each record's sets.
+        let over: BTreeSet<String> = (0..=groups::MAX_GROUP_MEMBERS)
+            .map(|i| format!("c{i:04}"))
+            .collect();
+        assert!(matches!(
+            state
+                .restore_groups(&[(
+                    "wide".to_string(),
+                    GroupRecord {
+                        description: String::new(),
+                        contexts: over,
+                        groups: BTreeSet::new(),
+                    }
+                )])
+                .unwrap_err(),
+            RestoreGroupsError::OverCap {
+                field: "member contexts",
+                ..
+            }
+        ));
 
         let _ = fs::remove_dir_all(dir);
     }
