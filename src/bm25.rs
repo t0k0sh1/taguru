@@ -21,7 +21,10 @@ use std::sync::Arc;
 use crate::passages::PassageRecord;
 use crate::registry::passage_terms;
 
-const INDEX_MAGIC: &[u8; 8] = b"TAGURUB1";
+// B1 → B2: slots grew a question hash (doc2query questions index into
+// this lane; the digest must notice a question-only change). An old
+// sidecar fails the magic and rebuilds — a cost, never an outage.
+const INDEX_MAGIC: &[u8; 8] = b"TAGURUB2";
 
 /// BM25 constants, shared with nothing: the paragraph is the document.
 const K1: f32 = 1.2;
@@ -59,7 +62,16 @@ struct Slot {
     source_id: u32,
     index: u32,
     length: f32,
+    /// The paragraph TEXT hash — what search hands back for the
+    /// staleness check against the store's current record. Questions
+    /// deliberately stay out: they affect scoring, not which text the
+    /// hit points at.
     hash: u64,
+    /// Fold of the paragraph's attached doc2query questions — indexed
+    /// content beyond the text, so the drift digest must carry it: a
+    /// question-only change re-upserts the source at load instead of
+    /// serving the old scoring forever.
+    question_hash: u64,
     alive: bool,
 }
 
@@ -117,6 +129,13 @@ impl Bm25Index {
     /// Replaces one source's paragraphs with `record`'s — tombstone the
     /// old, append the new. Cost is proportional to the paragraphs
     /// touched, never to the posting lists they sit in.
+    ///
+    /// A paragraph's attached doc2query questions index INTO it, terms
+    /// and length both — the doc2query move itself (append the
+    /// generated queries to the document before indexing), and the
+    /// lexical mirror of the vector lane's question rows, so a
+    /// question-shaped query lands on its answer-shaped paragraph even
+    /// on a deployment with no embedding provider at all.
     pub(crate) fn upsert_source(&mut self, source: &str, record: &PassageRecord) {
         let source_id = self.intern(source);
         self.tombstone(source_id);
@@ -125,15 +144,28 @@ impl Bm25Index {
             let slot = self.slots.len() as u32;
             let mut frequencies: HashMap<u64, f32> = HashMap::new();
             let mut length = 0f32;
-            for gram in passage_terms(text) {
+            let mut count = |gram: u64| {
                 *frequencies.entry(gram).or_insert(0.0) += 1.0;
                 length += 1.0;
+            };
+            for gram in passage_terms(text) {
+                count(gram);
+            }
+            for (_, question) in record
+                .questions
+                .iter()
+                .filter(|&&(paragraph, _)| paragraph == span.index)
+            {
+                for gram in passage_terms(question) {
+                    count(gram);
+                }
             }
             self.slots.push(Slot {
                 source_id,
                 index: span.index,
                 length,
                 hash: span.hash,
+                question_hash: questions_fold(record, span.index),
                 alive: true,
             });
             slot_list.push(slot);
@@ -247,10 +279,11 @@ impl Bm25Index {
         hits
     }
 
-    /// Per-source digest over (paragraph index, paragraph hash) of the
-    /// LIVE slots, in index order — the load-time drift detector: a
-    /// source whose digest disagrees with the passage store's current
-    /// record gets re-upserted instead of costing a full rebuild.
+    /// Per-source digest over (paragraph index, paragraph hash,
+    /// question fold) of the LIVE slots, in index order — the load-time
+    /// drift detector: a source whose digest disagrees with the passage
+    /// store's current record gets re-upserted instead of costing a
+    /// full rebuild.
     pub(crate) fn source_digests(&self) -> HashMap<String, u64> {
         let mut digests = HashMap::new();
         for (&source_id, slot_list) in &self.by_source {
@@ -259,7 +292,7 @@ impl Bm25Index {
             for &slot in slot_list {
                 let slot = &self.slots[slot as usize];
                 if slot.alive {
-                    digest = digest_fold(digest, slot.index, slot.hash);
+                    digest = digest_fold(digest, slot.index, slot.hash, slot.question_hash);
                     any = true;
                 }
             }
@@ -330,6 +363,7 @@ impl Bm25Index {
             out.extend_from_slice(&slot.index.to_le_bytes());
             out.extend_from_slice(&slot.length.to_le_bytes());
             out.extend_from_slice(&slot.hash.to_le_bytes());
+            out.extend_from_slice(&slot.question_hash.to_le_bytes());
         }
         let mut terms: Vec<u64> = self
             .postings
@@ -387,12 +421,15 @@ impl Bm25Index {
             pos += 4;
             let hash = u64::from_le_bytes(bytes.get(pos..pos + 8)?.try_into().ok()?);
             pos += 8;
+            let question_hash = u64::from_le_bytes(bytes.get(pos..pos + 8)?.try_into().ok()?);
+            pos += 8;
             let slot = index.slots.len() as u32;
             index.slots.push(Slot {
                 source_id,
                 index: paragraph,
                 length,
                 hash,
+                question_hash,
                 alive: true,
             });
             index.by_source.entry(source_id).or_default().push(slot);
@@ -444,14 +481,40 @@ impl Bm25Index {
 }
 
 const DIGEST_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const DIGEST_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// One (paragraph index, paragraph hash) step of a source digest —
-/// FNV-1a-shaped so the fold depends on order and content both.
-fn digest_fold(digest: u64, index: u32, hash: u64) -> u64 {
+/// One (paragraph index, paragraph hash, question fold) step of a
+/// source digest — FNV-1a-shaped so the fold depends on order and
+/// content both.
+fn digest_fold(digest: u64, index: u32, hash: u64, question_hash: u64) -> u64 {
     let mut digest = digest;
-    for byte in index.to_le_bytes().into_iter().chain(hash.to_le_bytes()) {
+    for byte in index
+        .to_le_bytes()
+        .into_iter()
+        .chain(hash.to_le_bytes())
+        .chain(question_hash.to_le_bytes())
+    {
         digest ^= u64::from(byte);
-        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+        digest = digest.wrapping_mul(DIGEST_PRIME);
+    }
+    digest
+}
+
+/// FNV-1a over one paragraph's attached doc2query questions, in stored
+/// order, a separator byte after each so adjacent questions cannot
+/// blend — the questions' share of the drift digest, computed the same
+/// way on both sides of the comparison.
+fn questions_fold(record: &PassageRecord, paragraph: u32) -> u64 {
+    let mut digest = DIGEST_OFFSET;
+    for (_, question) in record
+        .questions
+        .iter()
+        .filter(|&&(index, _)| index == paragraph)
+    {
+        for byte in question.as_bytes().iter().copied().chain([0xff]) {
+            digest ^= u64::from(byte);
+            digest = digest.wrapping_mul(DIGEST_PRIME);
+        }
     }
     digest
 }
@@ -463,7 +526,12 @@ pub(crate) fn record_digest(record: &PassageRecord) -> u64 {
         .paragraphs
         .iter()
         .fold(DIGEST_OFFSET, |digest, span| {
-            digest_fold(digest, span.index, span.hash)
+            digest_fold(
+                digest,
+                span.index,
+                span.hash,
+                questions_fold(record, span.index),
+            )
         })
 }
 
@@ -722,6 +790,74 @@ mod tests {
                 "both sides of the drift comparison must compute the same digest ({source})"
             );
         }
+    }
+
+    #[test]
+    fn doc2query_questions_index_into_the_lexical_lane() {
+        // The paragraph never says 「削る」; only its attached question
+        // does. Landing the hit proves the question's terms joined the
+        // paragraph's postings — the lexical mirror of the vector
+        // lane's question rows.
+        let bare = record("精米歩合は50パーセントまで磨く。");
+        let questioned = PassageRecord::for_tests_with_questions(
+            "精米歩合は50パーセントまで磨く。",
+            vec![(0, "米はどれくらい削るのか".to_string())],
+        );
+        let query = grams("米をどれくらい削る?");
+
+        let without = Bm25Index::build(&[("doc".to_string(), bare)]);
+        let with = Bm25Index::build(&[("doc".to_string(), questioned.clone())]);
+        let baseline: f32 = without
+            .search(&query, 5)
+            .first()
+            .map(|hit| hit.3)
+            .unwrap_or(0.0);
+        let hits = with.search(&query, 5);
+        assert_eq!(hits.len(), 1, "the question's terms must land the hit");
+        assert_eq!((hits[0].0.as_str(), hits[0].1), ("doc", 0));
+        assert!(
+            hits[0].3 > baseline,
+            "question terms must add scoring evidence: {} vs {baseline}",
+            hits[0].3
+        );
+
+        // The staleness handshake is untouched: the hit still hands
+        // back the paragraph TEXT hash the store validates against.
+        assert_eq!(hits[0].2, questioned.paragraphs[0].hash);
+    }
+
+    #[test]
+    fn a_question_only_change_moves_the_drift_digest() {
+        let text = "精米歩合は50パーセントまで磨く。";
+        let bare = record(text);
+        let questioned = PassageRecord::for_tests_with_questions(
+            text,
+            vec![(0, "米はどれくらい削るのか".to_string())],
+        );
+        let reworded = PassageRecord::for_tests_with_questions(
+            text,
+            vec![(0, "何パーセントまで磨くのか".to_string())],
+        );
+
+        // Same text, different questions: three distinct digests, so
+        // the load-time repair re-upserts instead of trusting a stale
+        // sidecar.
+        let digests = [
+            record_digest(&bare),
+            record_digest(&questioned),
+            record_digest(&reworded),
+        ];
+        assert_ne!(digests[0], digests[1]);
+        assert_ne!(digests[1], digests[2]);
+        assert_ne!(digests[0], digests[2]);
+
+        // Both sides of the comparison agree on a questioned record —
+        // through the byte round trip too, or the sidecar would
+        // re-upsert every boot.
+        let index = Bm25Index::build(&[("doc".to_string(), questioned.clone())]);
+        assert_eq!(index.source_digests()["doc"], record_digest(&questioned));
+        let reborn = Bm25Index::from_bytes(&index.to_bytes()).unwrap();
+        assert_eq!(reborn.source_digests()["doc"], record_digest(&questioned));
     }
 
     #[test]

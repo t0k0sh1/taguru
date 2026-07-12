@@ -135,6 +135,12 @@ impl PassageRecord {
         Self::new(Arc::from(text), Vec::new(), Vec::new()).0
     }
 
+    /// [`Self::for_tests`] with doc2query questions attached.
+    #[cfg(test)]
+    pub(crate) fn for_tests_with_questions(text: &str, questions: Vec<(u32, String)>) -> Arc<Self> {
+        Self::new(Arc::from(text), questions, Vec::new()).0
+    }
+
     /// The paragraph texts behind the spans, in order.
     pub(crate) fn paragraph_texts(&self) -> impl Iterator<Item = (&ParagraphSpan, &str)> {
         self.paragraphs

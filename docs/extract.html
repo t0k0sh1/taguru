@@ -174,8 +174,9 @@ TAGURU_EXTRACT_TIMEOUT_SECS  time budget per completion; 0 = unlimited (default 
       associations, so the indexes written out match exactly what the server validates and cannot
       drift. Generation riding the extraction call is deliberate: there is no cheap
       questions-only pass, so changing N means re-extracting (the manifest records it as a compute
-      input). A server with <code>TAGURU_EMBED_PASSAGES</code> embeds each question next to its
-      paragraph; one without stores and ignores them.
+      input). Every server indexes each question's terms into its paragraph's BM25 postings, so
+      question-shaped searches land lexically; a server with <code>TAGURU_EMBED_PASSAGES</code>
+      additionally embeds each question next to its paragraph.
     </p>
   </section>
 

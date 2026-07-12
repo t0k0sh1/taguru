@@ -113,9 +113,11 @@ answers back into prose are your job.
    paragraph. Blank lines between logical units are what make that
    split work — keep them. Optionally attach doc2query `questions` —
    per paragraph, the questions a user would type whose answer is that
-   paragraph, phrased AWAY from its wording; on servers with passage
-   embedding they index beside the paragraph and catch question-shaped
-   searches its own vector misses.
+   paragraph, phrased AWAY from its wording. They index INTO the
+   paragraph on every server: their terms join its BM25 postings (so a
+   question-shaped search lands lexically even with no embedding
+   provider), and on servers with passage embedding they also embed
+   beside the paragraph and catch what its own vector misses.
 4. Audit reachability: `POST /contexts/{name}/unreachable_from` with
    the document's main entities. Non-empty = membership edges are
    missing. If embeddings are configured, finish with

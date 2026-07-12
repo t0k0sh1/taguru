@@ -102,6 +102,18 @@ Entries that change an on-disk format or a response shape say so.
   Document's metadata gains a `context` key naming where it came from
   (single-context retrievers too — additive).
 
+### Changed
+- doc2query `questions` now index into their paragraph's BM25 postings
+  (terms and length both — the doc2query move itself), so a
+  question-shaped search lands lexically on every server; before, a
+  deployment without `TAGURU_EMBED_PASSAGES` stored questions and
+  ignored them for retrieval. Passage scores shift only where
+  questions are attached. On-disk note: the BM25 sidecar format bumped
+  (`TAGURUB1` → `TAGURUB2`, slots carry a question fold for the drift
+  digest) — a derived structure, so an old sidecar rebuilds itself on
+  the residency's first search, in either upgrade direction; no
+  action needed.
+
 ## [0.2.0] - 2026-07-12
 
 ### Added

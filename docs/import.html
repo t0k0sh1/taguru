@@ -167,8 +167,9 @@ taguru import --config prod.env a.jsonl b.jsonl</code></pre>
       <code>paragraph</code> / <code>question</code>: a retrieval question attached to one
       paragraph of this file's passage. <code>paragraph</code> is a 0-based position in the
       server's blank-line split (a question line in a file with no passage line is refused).
-      One question per line; several may target the same paragraph (up to the cap). On a server
-      with <code>TAGURU_EMBED_PASSAGES</code>, each question is embedded next to its paragraph, so
+      One question per line; several may target the same paragraph (up to the cap). A question's
+      terms index into its paragraph's BM25 postings on every server, and a server with
+      <code>TAGURU_EMBED_PASSAGES</code> also embeds it next to the paragraph — either way,
       question-shaped searches land on answer-shaped text. A question naming a paragraph that does
       not exist in the passage's split is dropped at store time and counted in the response
       (<code>questions_dropped</code>) — the usual cause is a producer's split drifting from the

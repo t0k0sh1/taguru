@@ -6691,3 +6691,70 @@ fn cross_context_search_answers_questions_that_straddle_the_split() {
     );
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
+
+/// doc2query on a lexical-only server (no embedding provider — the
+/// default deployment): the attached question's wording, absent from
+/// the paragraph itself, still lands the search on that paragraph
+/// through the BM25 lane. Before this rode the index, questions were
+/// stored and functionally inert without `TAGURU_EMBED_PASSAGES`.
+#[test]
+fn doc2query_questions_land_lexically_without_embeddings() {
+    let server = Server::start("doc2query-lexical");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    let stored = server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {
+                "doc": "精米歩合は50パーセントまで磨く。\n\n仕込み水は雲居山の伏流水を使う。"
+            },
+            "questions": {"doc": [
+                {"paragraph": 0, "question": "米はどれくらい削るのか"}
+            ]}
+        })),
+    );
+    assert_eq!(stored["questions_stored"], 1, "{stored}");
+
+    // The query shares wording with the question only — 「削る」 never
+    // appears in either paragraph.
+    let hits = server.ok(
+        "POST",
+        "/contexts/sake/sources/search",
+        Some(json!({"query": "米をどれくらい削る?"})),
+    );
+    let hits = hits.as_array().unwrap();
+    assert!(!hits.is_empty(), "the question's terms must land the hit");
+    assert_eq!(hits[0]["source"], json!("doc"), "{hits:?}");
+    assert_eq!(hits[0]["paragraph"], json!(0), "{hits:?}");
+    assert!(
+        hits[0]["lanes"]["bm25"].is_object(),
+        "the evidence must be lexical: {hits:?}"
+    );
+
+    // Replacing the source with a question-less revision withdraws the
+    // question's terms with it (the index's wholesale-replacement unit).
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {
+                "doc": "精米歩合は50パーセントまで磨く。\n\n仕込み水は雲居山の伏流水を使う。"
+            }
+        })),
+    );
+    let hits = server.ok(
+        "POST",
+        "/contexts/sake/sources/search",
+        Some(json!({"query": "米をどれくらい削る?"})),
+    );
+    assert_eq!(
+        hits.as_array().unwrap().len(),
+        0,
+        "without the question the wording matches nothing: {hits}"
+    );
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}

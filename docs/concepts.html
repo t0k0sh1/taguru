@@ -202,8 +202,9 @@
       does ("SSO is available on the Enterprise plan."). Guess a plausible declarative sentence
       and search <b>with that</b> — the guess doesn't have to be right, only the same <i>shape</i>
       as the sentence you're looking for. The complementary fix is doc2query: attach "questions
-      this paragraph answers" to paragraphs at ingest, and question-shaped searches land on the
-      question index.
+      this paragraph answers" to paragraphs at ingest — their terms join the paragraph's BM25
+      postings (and its vectors, where passage embedding is on), so question-shaped searches land
+      on the paragraph through both lanes.
     </p>
   </section>
 

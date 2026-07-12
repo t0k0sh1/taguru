@@ -214,7 +214,7 @@ taguru extract --context sake --description "酒蔵の知識" --out batches/ doc
 taguru import batches/</code></pre>
     <ul>
       <li>The manifest in <code>--out</code> records "content × model × prompt version × context" and skips unchanged documents (<code>--force</code> overrides). A nightly extract→import run pays model calls only for what changed.</li>
-      <li><code>--questions N</code> is doc2query: up to N retrieval questions per paragraph ride along. On a server with <code>TAGURU_EMBED_PASSAGES</code>, the questions are embedded next to their paragraphs, so question-shaped searches land on answer-shaped text.</li>
+      <li><code>--questions N</code> is doc2query: up to N retrieval questions per paragraph ride along. Their terms index into the paragraph's BM25 postings on every server, and a server with <code>TAGURU_EMBED_PASSAGES</code> also embeds them next to their paragraphs — either way, question-shaped searches land on answer-shaped text.</li>
       <li>Model output is not trusted; the contract is enforced on this side of the wire — invalid items are dropped and counted, and every file is re-validated with the import parser before it is written. Extract cannot produce a file import would reject.</li>
       <li>Running against a local model (Ollama etc.): <b>thinking mode OFF</b> (reasoning tokens devour the time budget), <b>a real context window</b> (<code>num_ctx 16384</code> — leaving 4k silently truncates and only quality drops), a timeout matched to the hardware via <code>TAGURU_EXTRACT_TIMEOUT_SECS</code>, and <code>--force</code> after re-pointing a serving alias — the manifest trusts the <b>model name</b>.</li>
     </ul>
