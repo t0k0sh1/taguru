@@ -31,6 +31,17 @@ FACT_ONLY_ASSOCIATION = {
     ],
 }
 
+GROUP_ROWS = {
+    "brewery": {
+        "name": "brewery",
+        "description": "蔵元一式",
+        "contexts": ["sake", "tea"],
+        "groups": [],
+    },
+    "parent": {"name": "parent", "description": "", "contexts": ["sake"], "groups": ["childg"]},
+    "childg": {"name": "childg", "description": "", "contexts": ["tea"], "groups": []},
+}
+
 
 def ok(result: object) -> httpx.Response:
     return httpx.Response(200, json={"result": result, "status": "ok", "time": 0.001})
@@ -52,6 +63,35 @@ class FakeServer:
             except json.JSONDecodeError:
                 body = request.content.decode("utf-8")
         self.calls.append((path, body))
+        if path.startswith("/groups/"):
+            row = GROUP_ROWS.get(path.removeprefix("/groups/"))
+            if row is None:
+                return httpx.Response(
+                    404,
+                    json={
+                        "status": "error",
+                        "code": "no_group",
+                        "error": "group not found",
+                        "time": 0.001,
+                    },
+                )
+            return ok(row)
+        if path == "/sources/search":
+            # The cross-context search: one tagged hit per named context,
+            # already rank-interleaved the way the server merges.
+            return ok(
+                [
+                    {
+                        "context": name,
+                        "source": f"docs/{name}.md",
+                        "paragraph": 0,
+                        "score": 2.0,
+                        "text": f"{name} の段落。",
+                        "lanes": {"bm25": {"rank": 0, "score": 2.0}},
+                    }
+                    for name in body["contexts"]
+                ]
+            )
         if path.endswith("/resolve"):
             hits = (
                 [{"name": "青嶺酒造", "score": 1.0, "tier": "lexical", "kind": "exact"}]

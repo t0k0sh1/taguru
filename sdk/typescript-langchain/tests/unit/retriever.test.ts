@@ -61,3 +61,47 @@ describe("TaguruRetriever", () => {
     expect(noFacts.every((d) => d.metadata["paragraph"] !== null)).toBe(true);
   });
 });
+
+describe("TaguruRetriever cross-context", () => {
+  it("requires a target", () => {
+    const server = new FakeServer();
+    expect(() => new TaguruRetriever({ client: server.client() })).toThrow(/name a target/);
+  });
+
+  it("tags documents and rides one cross-context text call", async () => {
+    const server = new FakeServer();
+    const retriever = new TaguruRetriever({
+      contexts: ["sake", "tea"],
+      client: server.client(),
+    });
+    const documents = await retriever.invoke("青嶺酒造");
+
+    // Every Document names the context it came from.
+    const contexts = new Set(documents.map((d) => d.metadata["context"]));
+    expect(contexts).toEqual(new Set(["sake", "tea"]));
+
+    // The graph lane ran per context; the text lane rode the server's own
+    // cross-context search — one top-level call naming both targets.
+    const resolves = server.calls.filter(([path]) => path.endsWith("/resolve")).map(([p]) => p);
+    expect(resolves).toEqual(["/contexts/sake/resolve", "/contexts/tea/resolve"]);
+    const crossSearches = server.calls
+      .filter(([path]) => path === "/sources/search")
+      .map(([, body]) => body);
+    expect(crossSearches).toEqual([{ contexts: ["sake", "tea"], query: "青嶺酒造", limit: 5 }]);
+  });
+
+  it("resolves groups to members, nested children included", async () => {
+    const server = new FakeServer();
+    const retriever = new TaguruRetriever({ groups: ["parent"], client: server.client() });
+    const documents = await retriever.invoke("青嶺酒造");
+
+    // parent reaches sake directly and tea through its child group.
+    const fetched = server.calls.filter(([path]) => path.startsWith("/groups/")).map(([p]) => p);
+    expect(new Set(fetched)).toEqual(new Set(["/groups/parent", "/groups/childg"]));
+    const crossSearches = server.calls
+      .filter(([path]) => path === "/sources/search")
+      .map(([, body]) => body);
+    expect(crossSearches).toEqual([{ contexts: ["sake", "tea"], query: "青嶺酒造", limit: 5 }]);
+    expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["sake", "tea"]));
+  });
+});

@@ -10,6 +10,12 @@ search_passages) and merge by Reciprocal Rank Fusion — activate's ``strength``
 and search's ``score`` are each meaningful only within one call, so ranks are
 the only comparable currency. Hits landing in both lanes collapse into one
 Document tagged ``lane: "graph+text"``.
+
+The retriever addresses one ``context``, several ``contexts``, or ``groups``
+(each group reaches every member context, nested children included). Across
+several contexts the graph lane runs per context and interleaves by
+per-context rank — the posture the server itself takes for passage scores —
+and the text lane rides the server's own cross-context search.
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ from langchain_core.callbacks import (
 )
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 from taguru import (
     Activation,
     AsyncTaguru,
@@ -40,20 +46,25 @@ def _rrf(rank: int) -> float:
 
 
 class TaguruRetriever(BaseRetriever):
-    """Retrieve Documents from one Taguru context, graph lane + text lane.
+    """Retrieve Documents from Taguru contexts, graph lane + text lane.
 
     Passage-backed hits carry ``page_content`` = the verbatim paragraph and
-    metadata ``{source, paragraph, section, lane, associations?, score?,
-    lanes?}``. Graph facts whose attribution has no stored passage still
-    become Documents (``page_content`` = "subject label object") when
+    metadata ``{context, source, paragraph, section, lane, associations?,
+    score?, lanes?}``. Graph facts whose attribution has no stored passage
+    still become Documents (``page_content`` = "subject label object") when
     ``include_graph_only_facts`` is on, so pure-graph deployments retrieve too.
+
+    Name at least one target: ``context`` (one name), ``contexts`` (several),
+    or ``groups`` (group names — each searches every context it reaches).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     client: Taguru | None = None
     async_client: AsyncTaguru | None = None
-    context: str
+    context: str | None = None
+    contexts: list[str] | None = None
+    groups: list[str] | None = None
     k: int = 8
     include_graph: bool = True
     include_text: bool = True
@@ -81,7 +92,74 @@ class TaguruRetriever(BaseRetriever):
             kwargs["async_client"] = AsyncTaguru(base_url, api_key, **client_kwargs)
         super().__init__(**kwargs)
 
+    @model_validator(mode="after")
+    def _require_a_target(self) -> TaguruRetriever:
+        if self.context is None and not self.contexts and not self.groups:
+            raise ValueError("name a target: context, contexts, or groups")
+        return self
+
+    def _is_cross(self) -> bool:
+        """Whether retrieval spans several contexts (or a group's worth)."""
+        return bool(self.contexts) or bool(self.groups)
+
+    def _direct_targets(self) -> list[str]:
+        targets: list[str] = []
+        if self.context is not None:
+            targets.append(self.context)
+        for name in self.contexts or []:
+            if name not in targets:
+                targets.append(name)
+        return targets
+
+    @staticmethod
+    def _with_members(targets: list[str], members: set[str]) -> list[str]:
+        """Direct contexts lead in declaration order; group-resolved members
+        follow in name order, overlaps deduped — the server's own
+        cross-search tie order."""
+        merged = list(targets)
+        for name in sorted(members):
+            if name not in merged:
+                merged.append(name)
+        return merged
+
     # -- sync lane ---------------------------------------------------------
+
+    def _resolve_targets(self, client: Taguru) -> list[str]:
+        members: set[str] = set()
+        seen: set[str] = set()
+        stack = list(self.groups or [])
+        while stack:
+            group = stack.pop()
+            if group in seen:
+                continue
+            seen.add(group)
+            entry = client.groups.get(group)
+            members.update(entry.contexts)
+            stack.extend(entry.groups)
+        return self._with_members(self._direct_targets(), members)
+
+    def _graph_lane(self, client: Taguru, target: str, query: str) -> list[Document]:
+        ctx = client.context(target)
+        candidates = ctx.resolve(
+            query,
+            dice_floor=self.dice_floor,
+            semantic_floor=self.semantic_floor,
+            limit=self.resolve_limit,
+        )
+        origins: list[str] = []
+        for candidate in candidates:
+            if candidate.name not in origins:
+                origins.append(candidate.name)
+        if not origins:
+            return []
+        page = ctx.activate(origins, decay=self.activate_decay, limit=self.activate_limit)
+        citations: dict[tuple[str, int], Citation | None] = {}
+        for wanted in _wanted_citations(page.matches):
+            try:
+                citations[wanted] = ctx.cite_passage(*wanted)
+            except NotFoundError:
+                citations[wanted] = None
+        return _graph_documents(page.matches, citations, self.include_graph_only_facts, target)
 
     def _get_relevant_documents(
         self,
@@ -92,39 +170,70 @@ class TaguruRetriever(BaseRetriever):
     ) -> list[Document]:
         if self.client is None:
             raise ValueError("this retriever was built with only an async client; use ainvoke")
-        ctx = self.client.context(self.context)
+        limit = k if k is not None else self.k
 
-        graph_docs: list[Document] = []
-        if self.include_graph:
-            candidates = ctx.resolve(
-                query,
-                dice_floor=self.dice_floor,
-                semantic_floor=self.semantic_floor,
-                limit=self.resolve_limit,
-            )
-            origins: list[str] = []
-            for candidate in candidates:
-                if candidate.name not in origins:
-                    origins.append(candidate.name)
-            if origins:
-                page = ctx.activate(origins, decay=self.activate_decay, limit=self.activate_limit)
-                citations: dict[tuple[str, int], Citation | None] = {}
-                for wanted in _wanted_citations(page.matches):
-                    try:
-                        citations[wanted] = ctx.cite_passage(*wanted)
-                    except NotFoundError:
-                        citations[wanted] = None
-                graph_docs = _graph_documents(
-                    page.matches, citations, self.include_graph_only_facts
+        if not self._is_cross():
+            target = self.context
+            assert target is not None  # _require_a_target
+            graph_docs = self._graph_lane(self.client, target, query) if self.include_graph else []
+            text_hits: list[PassageHit] = []
+            if self.include_text:
+                text_hits = self.client.context(target).search_passages(
+                    query, limit=self.text_limit
                 )
+            return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
-        text_hits: list[PassageHit] = []
+        targets = self._resolve_targets(self.client)
+        graph_docs = []
+        if self.include_graph:
+            graph_docs = _interleave(
+                [self._graph_lane(self.client, target, query) for target in targets]
+            )
+        text_hits = []
         if self.include_text:
-            text_hits = ctx.search_passages(query, limit=self.text_limit)
-
-        return _merge_lanes(graph_docs, text_hits, k if k is not None else self.k)
+            text_hits = list(
+                self.client.search_passages(query, contexts=targets, limit=self.text_limit)
+            )
+        return _merge_lanes(graph_docs, text_hits, limit)
 
     # -- async lane ----------------------------------------------------------
+
+    async def _aresolve_targets(self, client: AsyncTaguru) -> list[str]:
+        members: set[str] = set()
+        seen: set[str] = set()
+        stack = list(self.groups or [])
+        while stack:
+            group = stack.pop()
+            if group in seen:
+                continue
+            seen.add(group)
+            entry = await client.groups.get(group)
+            members.update(entry.contexts)
+            stack.extend(entry.groups)
+        return self._with_members(self._direct_targets(), members)
+
+    async def _agraph_lane(self, client: AsyncTaguru, target: str, query: str) -> list[Document]:
+        ctx = client.context(target)
+        candidates = await ctx.resolve(
+            query,
+            dice_floor=self.dice_floor,
+            semantic_floor=self.semantic_floor,
+            limit=self.resolve_limit,
+        )
+        origins: list[str] = []
+        for candidate in candidates:
+            if candidate.name not in origins:
+                origins.append(candidate.name)
+        if not origins:
+            return []
+        page = await ctx.activate(origins, decay=self.activate_decay, limit=self.activate_limit)
+        citations: dict[tuple[str, int], Citation | None] = {}
+        for wanted in _wanted_citations(page.matches):
+            try:
+                citations[wanted] = await ctx.cite_passage(*wanted)
+            except NotFoundError:
+                citations[wanted] = None
+        return _graph_documents(page.matches, citations, self.include_graph_only_facts, target)
 
     async def _aget_relevant_documents(
         self,
@@ -135,39 +244,38 @@ class TaguruRetriever(BaseRetriever):
     ) -> list[Document]:
         if self.async_client is None:
             raise ValueError("this retriever was built with only a sync client; use invoke")
-        ctx = self.async_client.context(self.context)
+        limit = k if k is not None else self.k
 
-        graph_docs: list[Document] = []
-        if self.include_graph:
-            candidates = await ctx.resolve(
-                query,
-                dice_floor=self.dice_floor,
-                semantic_floor=self.semantic_floor,
-                limit=self.resolve_limit,
+        if not self._is_cross():
+            target = self.context
+            assert target is not None  # _require_a_target
+            graph_docs = (
+                await self._agraph_lane(self.async_client, target, query)
+                if self.include_graph
+                else []
             )
-            origins: list[str] = []
-            for candidate in candidates:
-                if candidate.name not in origins:
-                    origins.append(candidate.name)
-            if origins:
-                page = await ctx.activate(
-                    origins, decay=self.activate_decay, limit=self.activate_limit
+            text_hits: list[PassageHit] = []
+            if self.include_text:
+                text_hits = await self.async_client.context(target).search_passages(
+                    query, limit=self.text_limit
                 )
-                citations: dict[tuple[str, int], Citation | None] = {}
-                for wanted in _wanted_citations(page.matches):
-                    try:
-                        citations[wanted] = await ctx.cite_passage(*wanted)
-                    except NotFoundError:
-                        citations[wanted] = None
-                graph_docs = _graph_documents(
-                    page.matches, citations, self.include_graph_only_facts
-                )
+            return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
-        text_hits: list[PassageHit] = []
+        targets = await self._aresolve_targets(self.async_client)
+        graph_docs = []
+        if self.include_graph:
+            per_target = [
+                await self._agraph_lane(self.async_client, target, query) for target in targets
+            ]
+            graph_docs = _interleave(per_target)
+        text_hits = []
         if self.include_text:
-            text_hits = await ctx.search_passages(query, limit=self.text_limit)
-
-        return _merge_lanes(graph_docs, text_hits, k if k is not None else self.k)
+            text_hits = list(
+                await self.async_client.search_passages(
+                    query, contexts=targets, limit=self.text_limit
+                )
+            )
+        return _merge_lanes(graph_docs, text_hits, limit)
 
 
 # -- lane assembly (pure functions shared by both entry points) -----------------
@@ -201,6 +309,7 @@ def _graph_documents(
     activations: list[Activation],
     citations: dict[tuple[str, int], Citation | None],
     include_graph_only_facts: bool,
+    context: str,
 ) -> list[Document]:
     """Activation matches → Documents, ranked by activation order (strongest
     first). Located attributions with a stored passage become passage-backed
@@ -226,6 +335,7 @@ def _graph_documents(
                     document = Document(
                         page_content=citation.text,
                         metadata={
+                            "context": context,
                             "source": key[0],
                             "paragraph": key[1],
                             "section": citation.section,
@@ -245,6 +355,7 @@ def _graph_documents(
                 Document(
                     page_content=f"{association.subject} {association.label} {association.object}",
                     metadata={
+                        "context": context,
                         "source": best_source,
                         "paragraph": None,
                         "section": None,
@@ -256,7 +367,26 @@ def _graph_documents(
     return ordered
 
 
-def _text_document(hit: PassageHit) -> Document:
+def _interleave(per_target: list[list[Document]]) -> list[Document]:
+    """Per-context rank interleaving — activation strengths are ordinal
+    within one call only, so ranks are the currency across contexts (the
+    posture the server's own cross-context passage merge takes)."""
+    indexed = [
+        (rank, index, document)
+        for index, documents in enumerate(per_target)
+        for rank, document in enumerate(documents)
+    ]
+    indexed.sort(key=lambda entry: (entry[0], entry[1]))
+    return [document for _rank, _index, document in indexed]
+
+
+def _hit_context(hit: PassageHit, fallback: str | None) -> str | None:
+    """A cross-context hit names its context; a per-context hit inherits the
+    retriever's own target."""
+    return getattr(hit, "context", None) or fallback
+
+
+def _text_document(hit: PassageHit, context: str | None) -> Document:
     lanes: dict[str, Any] = {}
     if hit.lanes.bm25 is not None:
         lanes["bm25"] = {"rank": hit.lanes.bm25.rank, "score": hit.lanes.bm25.score}
@@ -265,6 +395,7 @@ def _text_document(hit: PassageHit) -> Document:
     return Document(
         page_content=hit.text,
         metadata={
+            "context": context,
             "source": hit.source,
             "paragraph": hit.paragraph,
             "section": None,
@@ -275,31 +406,38 @@ def _text_document(hit: PassageHit) -> Document:
     )
 
 
-def _merge_lanes(graph_docs: list[Document], text_hits: list[PassageHit], k: int) -> list[Document]:
-    """Reciprocal Rank Fusion across lanes; (source, paragraph) hits landing
-    in both collapse into one Document tagged ``lane: "graph+text"``."""
+def _merge_lanes(
+    graph_docs: list[Document],
+    text_hits: list[PassageHit],
+    k: int,
+    fallback_context: str | None = None,
+) -> list[Document]:
+    """Reciprocal Rank Fusion across lanes; (context, source, paragraph) hits
+    landing in both collapse into one Document tagged ``lane: "graph+text"``."""
     scored: dict[object, tuple[float, Document]] = {}
 
     def key_of(document: Document) -> object:
+        context = document.metadata.get("context")
         if document.metadata.get("paragraph") is not None:
-            return (document.metadata["source"], document.metadata["paragraph"])
+            return (context, document.metadata["source"], document.metadata["paragraph"])
         associations = document.metadata.get("associations") or [{}]
         first = associations[0]
-        return ("fact", first.get("subject"), first.get("label"), first.get("object"))
+        return ("fact", context, first.get("subject"), first.get("label"), first.get("object"))
 
     for rank, document in enumerate(graph_docs):
         scored[key_of(document)] = (_rrf(rank), document)
 
     for rank, hit in enumerate(text_hits):
-        key = (hit.source, hit.paragraph)
+        context = _hit_context(hit, fallback_context)
+        key = (context, hit.source, hit.paragraph)
         existing = scored.get(key)
         if existing is None:
-            scored[key] = (_rrf(rank), _text_document(hit))
+            scored[key] = (_rrf(rank), _text_document(hit, context))
         else:
             score, document = existing
             document.metadata["lane"] = "graph+text"
             document.metadata["score"] = hit.score
-            document.metadata["lanes"] = _text_document(hit).metadata["lanes"]
+            document.metadata["lanes"] = _text_document(hit, context).metadata["lanes"]
             scored[key] = (score + _rrf(rank), document)
 
     ranked = sorted(scored.values(), key=lambda entry: entry[0], reverse=True)

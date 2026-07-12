@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError as PydanticValidationError
 from taguru import AsyncTaguru, Taguru
 
 from taguru_langchain import TaguruRetriever
@@ -90,3 +92,59 @@ def test_graph_only_facts_can_be_switched_off(
     retriever = make_retriever(sync_client, async_client, include_graph_only_facts=False)
     documents = retriever.invoke("青嶺酒造")
     assert all(d.metadata["paragraph"] is not None for d in documents)
+
+
+def test_a_target_is_required(sync_client: Taguru, async_client: AsyncTaguru) -> None:
+    with pytest.raises(PydanticValidationError, match="name a target"):
+        TaguruRetriever(client=sync_client, async_client=async_client)
+
+
+def test_cross_contexts_tag_documents_and_share_one_text_call(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    retriever = TaguruRetriever(
+        contexts=["sake", "tea"], client=sync_client, async_client=async_client
+    )
+    documents = retriever.invoke("青嶺酒造")
+
+    # Every Document names the context it came from.
+    assert all(d.metadata["context"] in {"sake", "tea"} for d in documents)
+    assert {d.metadata["context"] for d in documents} == {"sake", "tea"}
+
+    # The graph lane ran per context; the text lane rode the server's own
+    # cross-context search — one top-level call naming both targets.
+    resolves = [path for path, _ in fake_server.calls if path.endswith("/resolve")]
+    assert resolves == ["/contexts/sake/resolve", "/contexts/tea/resolve"]
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [{"contexts": ["sake", "tea"], "query": "青嶺酒造", "limit": 5}]
+
+    # Same source id in two contexts stays two Documents (keys carry context).
+    graph_backed = [d for d in documents if "graph" in d.metadata["lane"]]
+    by_context = {d.metadata["context"] for d in graph_backed}
+    assert by_context == {"sake", "tea"}
+
+
+def test_groups_resolve_to_members_nested_children_included(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    retriever = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
+    documents = retriever.invoke("青嶺酒造")
+
+    # parent reaches sake directly and tea through its child group.
+    fetched = [path for path, _ in fake_server.calls if path.startswith("/groups/")]
+    assert set(fetched) == {"/groups/parent", "/groups/childg"}
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [{"contexts": ["sake", "tea"], "query": "青嶺酒造", "limit": 5}]
+    assert {d.metadata["context"] for d in documents} == {"sake", "tea"}
+
+
+async def test_async_cross_matches_sync(sync_client: Taguru, async_client: AsyncTaguru) -> None:
+    retriever = TaguruRetriever(
+        contexts=["sake"], groups=["childg"], client=sync_client, async_client=async_client
+    )
+    sync_documents = retriever.invoke("青嶺酒造")
+    async_documents = await retriever.ainvoke("青嶺酒造")
+    assert [d.page_content for d in async_documents] == [d.page_content for d in sync_documents]
+    assert [d.metadata["context"] for d in async_documents] == [
+        d.metadata["context"] for d in sync_documents
+    ]

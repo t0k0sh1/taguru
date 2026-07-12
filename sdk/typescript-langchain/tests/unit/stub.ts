@@ -22,6 +22,12 @@ export const FACT_ONLY_ASSOCIATION = {
   attributions: [{ source: "口伝", weight: 1.0, count: 1, paragraph: null, section: null }],
 };
 
+const GROUP_ROWS: Record<string, unknown> = {
+  brewery: { name: "brewery", description: "蔵元一式", contexts: ["sake", "tea"], groups: [] },
+  parent: { name: "parent", description: "", contexts: ["sake"], groups: ["childg"] },
+  childg: { name: "childg", description: "", contexts: ["tea"], groups: [] },
+};
+
 const ok = (result: unknown): Response =>
   new Response(JSON.stringify({ result, status: "ok", time: 0.001 }), { status: 200 });
 
@@ -41,6 +47,31 @@ export class FakeServer {
       }
     }
     this.calls.push([path, body]);
+    if (path.startsWith("/groups/")) {
+      const row = GROUP_ROWS[path.slice("/groups/".length)];
+      if (row === undefined) {
+        return new Response(
+          JSON.stringify({ status: "error", code: "no_group", error: "group not found", time: 0.001 }),
+          { status: 404 },
+        );
+      }
+      return ok(row);
+    }
+    if (path === "/sources/search") {
+      // The cross-context search: one tagged hit per named context,
+      // already rank-interleaved the way the server merges.
+      const { contexts } = body as { contexts: string[] };
+      return ok(
+        contexts.map((name) => ({
+          context: name,
+          source: `docs/${name}.md`,
+          paragraph: 0,
+          score: 2.0,
+          text: `${name} の段落。`,
+          lanes: { bm25: { rank: 0, score: 2.0 } },
+        })),
+      );
+    }
     if (path.endsWith("/resolve")) {
       const cue = (body as { cue: string }).cue;
       return ok(

@@ -94,6 +94,13 @@ Entries that change an on-disk format or a response shape say so.
   tagged with the `context` it came from. New models `GroupEntry`,
   `GroupPage`, `CrossAssociation`, `CrossMatchPage`, `CrossPassageHit`
   in both languages; surface parity is spec-checked as always.
+- `TaguruRetriever` (both LangChain packages) now addresses `contexts`
+  and `groups` beside the single `context` (at least one required —
+  the field is no longer mandatory alone). Across several contexts the
+  graph lane runs per context and interleaves by per-context rank, the
+  text lane rides the server's cross-context search, and every
+  Document's metadata gains a `context` key naming where it came from
+  (single-context retrievers too — additive).
 
 ## [0.2.0] - 2026-07-12
 
