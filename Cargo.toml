@@ -29,6 +29,10 @@ tracing-opentelemetry = { version = "0.33", default-features = false }
 # Already in the tree through axum; made direct for ServiceExt::oneshot,
 # which drives the in-process dispatch behind POST /mcp.
 tower = { version = "0.5.3", features = ["util"] }
+# Already in the tree through axum; made direct for LengthLimitError,
+# which tells a capped MCP tool result apart from any other read
+# failure on the in-process dispatch response.
+http-body-util = "0.1.3"
 # OAuth needs exactly two primitives: SHA-256 (PKCE, tokens hashed at
 # rest) and a CSPRNG (token material). Both crates are tiny, pure-Rust,
 # and already ubiquitous in the wider tree.

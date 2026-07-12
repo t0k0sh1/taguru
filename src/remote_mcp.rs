@@ -15,12 +15,14 @@
 //! dispatched inner request deliberately skips re-authentication and
 //! re-counting: one client request, one budget, one log line.
 
+use std::error::Error as _;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use http_body_util::LengthLimitError;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -31,12 +33,15 @@ use crate::mcp;
 /// `instructions` is the manual exactly as GET /protocol serves it;
 /// `key` is the OUTER request's authenticated identity, stamped onto
 /// each dispatched call so a scoped key's grant holds through the MCP
-/// surface exactly as over raw HTTP.
+/// surface exactly as over raw HTTP; `max_result_bytes` bounds how
+/// much of a dispatched tool's response this transport will buffer
+/// (see [`RESULT_TOO_BIG`]).
 pub async fn serve(
     dispatch: Router,
     instructions: Arc<String>,
     key: Option<crate::auth::AuthKey>,
     body: Bytes,
+    max_result_bytes: usize,
 ) -> Response {
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
         return rpc_over_http(
@@ -83,7 +88,15 @@ pub async fn serve(
         mcp::Call::Tool { name, arguments } => {
             let outcome = match mcp::route_tool(&name, &arguments) {
                 Ok((method, path, body)) => {
-                    call_inner(dispatch, method, &path, body, key.as_ref()).await
+                    call_inner(
+                        dispatch,
+                        method,
+                        &path,
+                        body,
+                        key.as_ref(),
+                        max_result_bytes,
+                    )
+                    .await
                 }
                 Err(error) => Err(error),
             };
@@ -105,6 +118,7 @@ async fn call_inner(
     path: &str,
     body: Option<Value>,
     key: Option<&crate::auth::AuthKey>,
+    max_result_bytes: usize,
 ) -> Result<String, String> {
     let builder = Request::builder().method(method).uri(path);
     let mut request = match body {
@@ -130,15 +144,36 @@ async fn call_inner(
         Err(never) => match never {},
     };
     let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .map_err(|error| format!("response unreadable: {error}"))?;
+    let bytes = match axum::body::to_bytes(response.into_body(), max_result_bytes).await {
+        Ok(bytes) => bytes,
+        Err(error) if is_length_limit(&error) => return Err(RESULT_TOO_BIG.to_string()),
+        Err(error) => return Err(format!("response unreadable: {error}")),
+    };
     let text = String::from_utf8_lossy(&bytes).into_owned();
     if status.is_success() {
         Ok(text)
     } else {
         Err(format!("HTTP {}: {text}", status.as_u16()))
     }
+}
+
+/// A tool result too big to buffer whole (`export_context` on a large
+/// context is the common case) — names the two uncapped escape
+/// hatches instead of echoing the percent-encoded tool path (which
+/// may carry a caller-supplied context or concept name) back into the
+/// error text.
+const RESULT_TOO_BIG: &str = "tool result exceeds the MCP response cap \
+    (TAGURU_MCP_MAX_RESULT_BYTES); fetch it instead via GET /contexts/{name}/export over the \
+    raw HTTP API, or the `taguru export` CLI — both are uncapped";
+
+/// `axum::body::to_bytes` wraps a cap violation as an `axum::Error`
+/// whose `source()` is always the underlying `LengthLimitError` — the
+/// idiom axum's own docs use to tell "too big" apart from any other
+/// body read failure.
+fn is_length_limit(error: &axum::Error) -> bool {
+    error
+        .source()
+        .is_some_and(|source| source.is::<LengthLimitError>())
 }
 
 fn rpc_over_http(status: StatusCode, reply: Value) -> Response {
@@ -166,6 +201,7 @@ mod tests {
             Arc::new(String::new()),
             None,
             Bytes::from(body.to_string()),
+            usize::MAX,
         )
         .await;
         let status = response.status().as_u16();
@@ -184,5 +220,56 @@ mod tests {
                 .contains("could not build"),
             "{reply}"
         );
+    }
+
+    /// The idiom this function relies on: a capped body's error source
+    /// is always `LengthLimitError`, but any other read failure (here,
+    /// a plain io error standing in for a dropped connection) must not
+    /// be misdiagnosed as "too big".
+    #[tokio::test]
+    async fn is_length_limit_tells_a_capped_body_apart_from_any_other_read_failure() {
+        let over_cap = axum::body::to_bytes(Body::from(vec![0u8; 10]), 1)
+            .await
+            .unwrap_err();
+        assert!(is_length_limit(&over_cap));
+
+        let other_failure = axum::Error::new(std::io::Error::other("connection reset"));
+        assert!(!is_length_limit(&other_failure));
+    }
+
+    /// A dispatched tool call whose response outgrows the configured
+    /// cap comes back as a JSON-RPC success carrying an `isError` tool
+    /// result — never a panic or a half-buffered response — and the
+    /// message names both uncapped escape hatches.
+    #[tokio::test]
+    async fn a_tool_result_over_the_cap_is_refused_with_the_escape_hatches_named() {
+        let huge = Router::new().route(
+            "/contexts",
+            axum::routing::get(|| async { "x".repeat(1_000_000) }),
+        );
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_contexts", "arguments": {} },
+        });
+        let response = serve(
+            huge,
+            Arc::new(String::new()),
+            None,
+            Bytes::from(body.to_string()),
+            1024,
+        )
+        .await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("GET /contexts/{name}/export"), "{text}");
+        assert!(text.contains("taguru export"), "{text}");
     }
 }

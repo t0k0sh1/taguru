@@ -7049,6 +7049,42 @@ fn flush_and_export_ride_the_mcp_transport() {
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
 
+/// A tool result too big to buffer whole (export_context on a context
+/// with enough associations) is refused with the two uncapped escape
+/// hatches named — while the raw HTTP export route it names stays
+/// completely unaffected by the MCP cap.
+#[test]
+fn an_oversized_mcp_tool_result_is_capped_but_the_raw_export_route_is_not() {
+    let server =
+        Server::start_with_env("mcp-result-cap", &[("TAGURU_MCP_MAX_RESULT_BYTES", "1024")]);
+    server.ok("PUT", "/contexts/big", Some(json!({"description": "d"})));
+    let batch: Vec<Value> = (0..200)
+        .map(|i| {
+            json!({"subject": format!("s{i}"), "label": "rel", "object": format!("o{i}"),
+                   "weight": 1.0, "source": "doc"})
+        })
+        .collect();
+    server.ok(
+        "POST",
+        "/contexts/big/associations",
+        Some(Value::Array(batch)),
+    );
+
+    let reply = server.call_tool(1, "export_context", json!({"context": "big"}));
+    assert_eq!(reply["isError"], true, "{reply}");
+    let text = reply["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("GET /contexts/{name}/export"), "{text}");
+    assert!(text.contains("taguru export"), "{text}");
+
+    // The raw HTTP export route this message points at is uncapped —
+    // the same 200-association context exports whole over it.
+    let (status, exported) = server.call("GET", "/contexts/big/export", None);
+    assert_eq!(status, 200, "{exported}");
+    let stream = exported.as_str().expect("export body is JSONL");
+    assert!(stream.contains("\"s199\""), "{stream}");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
+
 /// The MCP operator verbs keep their routes' roles: the outer /mcp
 /// gate admits any read-capable key, but the inner dispatch re-checks
 /// the mapped route — flush stays admin.
