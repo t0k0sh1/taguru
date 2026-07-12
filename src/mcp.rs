@@ -452,7 +452,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "query",
-            "Position-pinned search. subject/label/object each take a string or an array (array = match any). Outline with describe, then narrow by label. Targets one context (context) or several at once (contexts and/or groups) — cross-context matches carry their context, and past the limit the strongest |weight| survives (weights share one scale).",
+            "Position-pinned search. subject/label/object each take a string or an array (array = match any); at least one of the three must be given — leaving all three out is refused rather than matching everything. Outline with describe, then narrow by label. Targets one context (context) or several at once (contexts and/or groups) — cross-context matches carry their context, and past the limit the strongest |weight| survives (weights share one scale).",
             search_target_schema(
                 json!({
                     "subject": { "type": ["string", "array"] },

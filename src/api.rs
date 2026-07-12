@@ -1795,6 +1795,29 @@ fn overlong_positions(
         .find_map(|(field, position)| overlong(field, as_refs(position).len(), started_at))
 }
 
+/// Refuses a query that pins nothing at all: subject, label, and
+/// object empty together would materialize and rank every edge in the
+/// context (or, cross-context, every edge in every named target)
+/// before the limit ever trims it — treated as a client bug, not a
+/// deliberate "give me everything", the same stance [`cross_targets`]
+/// takes on an empty `contexts`/`groups` pair.
+fn empty_positions(
+    subject: &Option<OneOrMany>,
+    label: &Option<OneOrMany>,
+    object: &Option<OneOrMany>,
+    started_at: Instant,
+) -> Option<Response> {
+    let nothing_pinned =
+        as_refs(subject).is_empty() && as_refs(label).is_empty() && as_refs(object).is_empty();
+    nothing_pinned.then(|| {
+        error(
+            ErrorCode::InvalidArgument,
+            "'subject', 'label', or 'object' must pin at least one value",
+            started_at,
+        )
+    })
+}
+
 /// Alias registrations, alias → canonical per namespace. Applied in
 /// sorted order (BTreeMap), aborting at the first failure with the
 /// applied count reported — like association batches, each item is
@@ -3010,6 +3033,14 @@ pub async fn query(
     ) {
         return refusal;
     }
+    if let Some(refusal) = empty_positions(
+        &request.subject,
+        &request.label,
+        &request.object,
+        started_at,
+    ) {
+        return refusal;
+    }
     match state.read_context(&name, |context| {
         context.query_any(
             &as_refs(&request.subject),
@@ -3066,6 +3097,14 @@ pub async fn cross_query(
 ) -> Response {
     let started_at = Instant::now();
     if let Some(refusal) = overlong_positions(
+        &request.subject,
+        &request.label,
+        &request.object,
+        started_at,
+    ) {
+        return refusal;
+    }
+    if let Some(refusal) = empty_positions(
         &request.subject,
         &request.label,
         &request.object,

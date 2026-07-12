@@ -2260,6 +2260,99 @@ fn oversized_input_lists_are_refused_before_any_work() {
 }
 
 #[test]
+fn queries_with_no_pinned_position_are_refused_but_one_field_is_enough() {
+    let server = Server::start("empty-query");
+    server.ok(
+        "PUT",
+        "/contexts/empty-query",
+        Some(json!({"description": "d"})),
+    );
+
+    // Single-context query: omitting subject/label/object entirely
+    // would otherwise materialize and rank every edge in the context.
+    let (status, parsed) = server.call("POST", "/contexts/empty-query/query", Some(json!({})));
+    assert_eq!(status, 400, "{parsed}");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("must pin at least one value"),
+        "{parsed}"
+    );
+
+    // Explicit nulls are indistinguishable from omission.
+    let (status, parsed) = server.call(
+        "POST",
+        "/contexts/empty-query/query",
+        Some(json!({"subject": null, "label": null, "object": null})),
+    );
+    assert_eq!(status, 400, "{parsed}");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("must pin at least one value"),
+        "{parsed}"
+    );
+
+    // Pinning just one of the three is enough to pass, even with no
+    // matches to return.
+    server.ok(
+        "POST",
+        "/contexts/empty-query/query",
+        Some(json!({"subject": "x"})),
+    );
+
+    // The cross-context route refuses the same way...
+    let (status, parsed) =
+        server.call("POST", "/query", Some(json!({"contexts": ["empty-query"]})));
+    assert_eq!(status, 400, "{parsed}");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("must pin at least one value"),
+        "{parsed}"
+    );
+
+    // ...nulls fold into the same refusal there too...
+    let (status, parsed) = server.call(
+        "POST",
+        "/query",
+        Some(json!({
+            "contexts": ["empty-query"],
+            "subject": null,
+            "label": null,
+            "object": null
+        })),
+    );
+    assert_eq!(status, 400, "{parsed}");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("must pin at least one value"),
+        "{parsed}"
+    );
+
+    // ...and one pinned field passes cross-context too.
+    server.ok(
+        "POST",
+        "/query",
+        Some(json!({"contexts": ["empty-query"], "object": "x"})),
+    );
+
+    // The refusal reaches through the MCP tool-call path as well.
+    let reply = server.call_tool(1, "query", json!({"context": "empty-query"}));
+    assert_eq!(reply["isError"], true, "{reply}");
+    let error_text = reply["content"][0]["text"].as_str().unwrap();
+    assert!(
+        error_text.contains("must pin at least one value"),
+        "{error_text}"
+    );
+}
+
+#[test]
 fn resolve_caps_its_candidate_flood_like_every_other_match_endpoint() {
     let server = Server::start("resolve-cap");
     server.ok("PUT", "/contexts/flood", Some(json!({"description": "d"})));
