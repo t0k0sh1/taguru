@@ -244,6 +244,7 @@ impl ResolveTier {
 /// rather than maintained incrementally — they cannot drift.
 pub struct GaugeSnapshot {
     pub contexts_registered: u64,
+    pub groups_registered: u64,
     pub contexts_resident: u64,
     pub resident_bytes: u64,
     /// Total bytes across every context's write-ahead log. A healthy
@@ -681,6 +682,16 @@ impl Metrics {
         ));
         push_header(
             &mut out,
+            "taguru_groups_registered",
+            "gauge",
+            "Groups known to the registry.",
+        );
+        out.push_str(&format!(
+            "taguru_groups_registered {}\n",
+            gauges.groups_registered
+        ));
+        push_header(
+            &mut out,
             "taguru_contexts_resident",
             "gauge",
             "Contexts currently resident in memory.",
@@ -803,17 +814,17 @@ pub async fn track_http(
         .as_ref()
         .map(|matched| matched.as_str().to_string())
         .unwrap_or_else(|| "<unmatched>".to_string());
-    // The context the request addressed, when the route names one.
-    // The route TEMPLATE keeps metric cardinality bounded, but a log
-    // line is no series: without the real name here, "which contexts
-    // did this key delete" has no answer after the fact. "-" mirrors
-    // the key convention below. Context names are identifiers, not
-    // memory content — the registry's own warnings already print them.
+    // The object the request addressed, when the route names one. The
+    // route TEMPLATE keeps metric cardinality bounded, but a log line
+    // is no series: without the real name here, "which contexts did
+    // this key delete" has no answer after the fact. "-" mirrors the
+    // key convention below. The names are identifiers, not memory
+    // content — the registry's own warnings already print them.
     // Extracted by hand: `RawPathParams` rejects param-less routes, so
     // it cannot ride the signature as an extractor the way MatchedPath
     // (which supports optional extraction) does.
     let (mut parts, body) = request.into_parts();
-    let context = {
+    let name = {
         use axum::extract::FromRequestParts as _;
         axum::extract::RawPathParams::from_request_parts(&mut parts, &())
             .await
@@ -825,6 +836,15 @@ pub async fn track_http(
                     .map(|(_, value)| value.to_string())
             })
             .unwrap_or_else(|| "-".to_string())
+    };
+    // The name lands in the column matching its kind — on the group
+    // routes `{name}` is a GROUP — so a log query over `context=`
+    // never silently matches group names (the audit lines and the
+    // /metrics gauges keep the same split).
+    let (context, group) = if route.starts_with("/groups") {
+        ("-".to_string(), name)
+    } else {
+        (name, "-".to_string())
     };
     let request = Request::from_parts(parts, body);
     let started = Instant::now();
@@ -851,6 +871,7 @@ pub async fn track_http(
             method = %method,
             route = %route,
             context = %context,
+            group = %group,
             status,
             key = %key,
             latency_ms = elapsed.as_secs_f64() * 1000.0,
@@ -861,6 +882,7 @@ pub async fn track_http(
             method = %method,
             route = %route,
             context = %context,
+            group = %group,
             status,
             key = %key,
             latency_ms = elapsed.as_secs_f64() * 1000.0,
@@ -993,6 +1015,7 @@ mod tests {
     fn empty_gauges() -> GaugeSnapshot {
         GaugeSnapshot {
             contexts_registered: 0,
+            groups_registered: 0,
             contexts_resident: 0,
             resident_bytes: 0,
             wal_bytes: 0,
@@ -1238,6 +1261,7 @@ mod tests {
         metrics.record_flush("a", true);
         let rendered = metrics.render_prometheus(&GaugeSnapshot {
             contexts_registered: 2,
+            groups_registered: 1,
             contexts_resident: 1,
             resident_bytes: 640,
             wal_bytes: 0,

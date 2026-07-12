@@ -247,6 +247,51 @@ pub fn tool_definitions() -> Vec<Value> {
             object_schema(json!({ "name": { "type": "string" } }), &["name"]),
         ),
         (
+            "list_groups",
+            "Group directory: every group's name, description, and member context names. A group bundles contexts flat (many-to-many, no hierarchy) — organize related contexts under one name. Groups and contexts are separate namespaces.",
+            object_schema(
+                json!({
+                    "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by name (default/ceiling 1000)" },
+                    "after": { "type": "string", "description": "only groups whose name sorts strictly after this one" }
+                }),
+                &[],
+            ),
+        ),
+        (
+            "create_group",
+            "Create a group bundling contexts. Every listed context must already exist; membership never dangles — deleting a context drops it from its groups.",
+            object_schema(
+                json!({
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "contexts": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "initial member context names (from list_contexts)"
+                    }
+                }),
+                &["name"],
+            ),
+        ),
+        (
+            "update_group",
+            "Update a group's description and/or membership. add_contexts/remove_contexts are deltas against the current members, not a replacement list; a name in both ends up a member. Added contexts must exist; removing a non-member is a no-op.",
+            object_schema(
+                json!({
+                    "name": { "type": "string" },
+                    "description": { "type": "string", "description": "omit to leave unchanged" },
+                    "add_contexts": { "type": "array", "items": { "type": "string" } },
+                    "remove_contexts": { "type": "array", "items": { "type": "string" } }
+                }),
+                &["name"],
+            ),
+        ),
+        (
+            "delete_group",
+            "Delete a group (irreversible). Only the bundling goes; the member contexts and their data are untouched.",
+            object_schema(json!({ "name": { "type": "string" } }), &["name"]),
+        ),
+        (
             "add_associations",
             "Write facts as a batch (one document = one call), a source id on every element. Discipline: check spellings with resolve/resolve_label and reuse before minting; don't re-assert paraphrases within one document; negation = positive label + negative weight; make implicit membership an explicit edge; weave ordered procedures with the three edges 最初の工程/次の工程/工程 (details in get_protocol).",
             object_schema(
@@ -560,6 +605,9 @@ pub fn route_tool(
     let context_path = |key: &str| -> Result<String, String> {
         Ok(format!("/contexts/{}", segment(need(arguments, key)?)))
     };
+    let group_path = |key: &str| -> Result<String, String> {
+        Ok(format!("/groups/{}", segment(need(arguments, key)?)))
+    };
     Ok(match name {
         "get_protocol" => ("GET", "/protocol".to_string(), None),
         "list_contexts" => (
@@ -584,6 +632,25 @@ pub fn route_tool(
             )),
         ),
         "delete_context" => ("DELETE", context_path("name")?, None),
+        "list_groups" => (
+            "GET",
+            format!("/groups{}", query_string(arguments, &["limit", "after"])),
+            None,
+        ),
+        "create_group" => (
+            "PUT",
+            group_path("name")?,
+            Some(pick(arguments, &["description", "contexts"])),
+        ),
+        "update_group" => (
+            "PATCH",
+            group_path("name")?,
+            Some(pick(
+                arguments,
+                &["description", "add_contexts", "remove_contexts"],
+            )),
+        ),
+        "delete_group" => ("DELETE", group_path("name")?, None),
         "add_associations" => {
             // Resolve `context` first so a caller who omitted BOTH hears
             // about the primary argument, not the secondary one, in the

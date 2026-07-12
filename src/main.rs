@@ -7,6 +7,7 @@ mod embedding;
 mod estimate;
 mod export;
 mod extract;
+mod groups;
 mod ingest;
 mod inspect;
 mod limits;
@@ -418,6 +419,14 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
                 .put(api::create_context)
                 .patch(api::update_context)
                 .delete(api::delete_context),
+        )
+        .route("/groups", get(api::list_groups))
+        .route(
+            "/groups/{name}",
+            get(api::get_group)
+                .put(api::create_group)
+                .patch(api::update_group)
+                .delete(api::delete_group),
         )
         .route("/contexts/{name}/export", get(api::export_context))
         .route("/contexts/{name}/compact", post(api::compact_context))

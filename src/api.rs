@@ -14,8 +14,11 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use taguru::context::{Activation, Association, Attribution, Context, Recollection, Resolution};
 
+use crate::groups::GroupRecord;
 use crate::metrics::{ErrorKind, ResolveTier, SearchOp};
-use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
+use crate::registry::{
+    AccessError, AppState, AssocOp, ContextMeta, CreateError, CreateGroupError, UpdateGroupError,
+};
 
 mod sources;
 pub use sources::{citation, list_sources, lookup_passages, retract_source, search_passages};
@@ -63,10 +66,11 @@ pub(crate) enum ErrorCode {
     NoContext,
     NoSource,
     NoParagraph,
+    NoGroup,
     UnknownPath,
     MethodNotAllowed,
     Timeout,
-    /// `PUT` on a context that already exists.
+    /// `PUT` on a resource — context or group — that already exists.
     AlreadyExists,
     /// Every other 409: alias conflicts, non-capacity partial writes,
     /// a real source colliding with a reserved export id.
@@ -94,6 +98,7 @@ impl ErrorCode {
             Self::NoContext => "no_context",
             Self::NoSource => "no_source",
             Self::NoParagraph => "no_paragraph",
+            Self::NoGroup => "no_group",
             Self::UnknownPath => "unknown_path",
             Self::MethodNotAllowed => "method_not_allowed",
             Self::Timeout => "timeout",
@@ -124,9 +129,11 @@ impl ErrorCode {
             }
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
-            Self::NoContext | Self::NoSource | Self::NoParagraph | Self::UnknownPath => {
-                StatusCode::NOT_FOUND
-            }
+            Self::NoContext
+            | Self::NoSource
+            | Self::NoParagraph
+            | Self::NoGroup
+            | Self::UnknownPath => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::Timeout => StatusCode::REQUEST_TIMEOUT,
             Self::AlreadyExists | Self::Conflict => StatusCode::CONFLICT,
@@ -196,6 +203,14 @@ fn not_found(name: &str, started_at: Instant) -> Response {
     error(
         ErrorCode::NoContext,
         format!("context '{name}' not found"),
+        started_at,
+    )
+}
+
+fn group_not_found(name: &str, started_at: Instant) -> Response {
+    error(
+        ErrorCode::NoGroup,
+        format!("group '{name}' not found"),
         started_at,
     )
 }
@@ -666,6 +681,319 @@ pub async fn delete_context(
                         format!(
                             "context '{name}' removed but its files were not: {io_error} \
                              (a deletion marker remains; the next boot resumes the removal)"
+                        ),
+                        started_at,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// A bounded group-directory page; `total` counts the whole directory,
+/// cursor-independent, exactly as [`ContextPage`]'s does.
+#[derive(Serialize)]
+pub struct GroupPage {
+    pub total: usize,
+    pub groups: Vec<GroupEntry>,
+}
+
+/// One group as served — the directory row, the single GET, and the
+/// PATCH response are all this one shape, as with [`DirectoryEntry`].
+#[derive(Serialize)]
+pub struct GroupEntry {
+    pub name: String,
+    pub description: String,
+    /// Member context names, sorted. For a context-scoped key this
+    /// carries only the members its grant allows.
+    pub contexts: Vec<String>,
+}
+
+/// The scope cut on one group row. Deliberately different from
+/// `list_contexts`, which hides whole rows: a group is an
+/// organizational label over contexts, not context content, and hiding
+/// the row would also hide it from the very key that may still add or
+/// remove its own contexts there. The members are what a grant is
+/// about, so the members are what gets filtered.
+fn group_entry(
+    name: String,
+    record: GroupRecord,
+    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+) -> GroupEntry {
+    let contexts = record
+        .contexts
+        .into_iter()
+        .filter(|context| {
+            scope
+                .as_ref()
+                .is_none_or(|axum::Extension(scope)| scope.allows_context(context))
+        })
+        .collect();
+    GroupEntry {
+        name,
+        description: record.description,
+        contexts,
+    }
+}
+
+/// The write gate for a scoped key on a group: every context the
+/// operation involves — the current members and every name the request
+/// carries — must sit inside the grant, or nothing applies (the import
+/// gate's pre-apply judgement, at membership granularity). Checked
+/// BEFORE existence on purpose: existence-first would answer 404 for a
+/// missing out-of-scope name and 403 for a live one, handing a scoped
+/// key an oracle for which context names exist beyond its grant.
+fn group_scope_refusal<'a>(
+    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    key: &Option<axum::Extension<crate::auth::AuthKey>>,
+    involved: impl IntoIterator<Item = &'a String>,
+    started_at: Instant,
+) -> Option<Response> {
+    let Some(axum::Extension(scope)) = scope else {
+        return None;
+    };
+    let refused = involved
+        .into_iter()
+        .find(|context| !scope.allows_context(context))?;
+    Some(error(
+        ErrorCode::Forbidden,
+        format!(
+            "key '{}' has no grant on context '{refused}'; nothing was applied",
+            key_name(key),
+        ),
+        started_at,
+    ))
+}
+
+/// The group directory: every group's name, description, and member
+/// contexts, name-ordered and paged like `GET /contexts`. Groups
+/// bundle contexts flat — no hierarchy — as the addressing unit that
+/// cross-context retrieval will build on.
+pub async fn list_groups(
+    State(state): State<AppState>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    AppQuery(query): AppQuery<KeysetQuery>,
+) -> Response {
+    let started_at = Instant::now();
+    let (total, page) = state.group_page(
+        query.after.as_deref(),
+        clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT),
+    );
+    let groups: Vec<_> = page
+        .into_iter()
+        .map(|(name, record)| group_entry(name, record, &scope))
+        .collect();
+    ok(GroupPage { total, groups }, started_at)
+}
+
+pub async fn get_group(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+) -> Response {
+    let started_at = Instant::now();
+    match state.group(&name) {
+        Some(record) => ok(group_entry(name, record, &scope), started_at),
+        None => group_not_found(&name, started_at),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct CreateGroupRequest {
+    pub description: String,
+    /// Initial member context names; every one must already exist.
+    pub contexts: Vec<String>,
+}
+
+pub async fn create_group(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+    AppBytes(body): AppBytes,
+) -> Response {
+    let started_at = Instant::now();
+    let request: CreateGroupRequest = match optional_body(&body, started_at) {
+        Ok(request) => request,
+        Err(refusal) => return *refusal,
+    };
+    if let Some(refusal) = oversized("the group name", &name, MAX_CONTEXT_NAME_BYTES, started_at) {
+        return refusal;
+    }
+    if let Some(refusal) = oversized(
+        "the description",
+        &request.description,
+        MAX_DESCRIPTION_BYTES,
+        started_at,
+    ) {
+        return refusal;
+    }
+    if let Some(refusal) = overlong("contexts", request.contexts.len(), started_at) {
+        return refusal;
+    }
+    if let Some(refusal) = group_scope_refusal(&scope, &key, &request.contexts, started_at) {
+        return refusal;
+    }
+    // Writes the group file (fsync + rename) like every other mutating
+    // endpoint; keep it off the async worker.
+    match tokio::task::block_in_place(|| {
+        state.create_group(
+            &name,
+            request.description,
+            request.contexts.into_iter().collect(),
+        )
+    }) {
+        Ok(()) => ok(true, started_at),
+        Err(CreateGroupError::AlreadyExists) => error(
+            ErrorCode::AlreadyExists,
+            format!("group '{name}' already exists"),
+            started_at,
+        ),
+        Err(CreateGroupError::InvalidName) => error(
+            ErrorCode::InvalidArgument,
+            "the group name must not be empty".to_string(),
+            started_at,
+        ),
+        Err(CreateGroupError::NoSuchContext(context)) => error(
+            ErrorCode::NoContext,
+            format!("context '{context}' not found; nothing was applied"),
+            started_at,
+        ),
+        Err(CreateGroupError::Io(io_error)) => {
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                ErrorCode::Internal,
+                format!("group '{name}' could not be persisted: {io_error}"),
+                started_at,
+            )
+        }
+    }
+}
+
+/// Membership updates are DELTAS, not a replacement list: two clients
+/// adding different contexts concurrently must both land, and "add
+/// this context here" is the natural operation for an LLM client —
+/// the add/remove split aliases already use. A name in both lists ends
+/// up a member (removals apply first). Removing a non-member is an
+/// idempotent no-op; only additions demand the context exists.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct UpdateGroupRequest {
+    pub description: Option<String>,
+    pub add_contexts: Vec<String>,
+    pub remove_contexts: Vec<String>,
+}
+
+pub async fn update_group(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+    AppJson(request): AppJson<UpdateGroupRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    if let Some(description) = &request.description
+        && let Some(refusal) = oversized(
+            "the description",
+            description,
+            MAX_DESCRIPTION_BYTES,
+            started_at,
+        )
+    {
+        return refusal;
+    }
+    if let Some(refusal) = overlong("add_contexts", request.add_contexts.len(), started_at) {
+        return refusal;
+    }
+    if let Some(refusal) = overlong("remove_contexts", request.remove_contexts.len(), started_at) {
+        return refusal;
+    }
+    // A scoped key is judged against every context this update touches:
+    // the current members plus every name the request carries. The
+    // read-before-write happens only on the scoped path; the common
+    // unscoped case goes straight to the update.
+    if scope.is_some() {
+        let current = state.group_contexts(&name).unwrap_or_default();
+        if let Some(refusal) = group_scope_refusal(
+            &scope,
+            &key,
+            current
+                .iter()
+                .chain(&request.add_contexts)
+                .chain(&request.remove_contexts),
+            started_at,
+        ) {
+            return refusal;
+        }
+    }
+    // Writes the group file (fsync + rename); keep it off the async
+    // worker.
+    match tokio::task::block_in_place(|| {
+        state.update_group(
+            &name,
+            request.description,
+            request.add_contexts.into_iter().collect(),
+            request.remove_contexts.into_iter().collect(),
+        )
+    }) {
+        Ok(record) => ok(group_entry(name, record, &scope), started_at),
+        Err(UpdateGroupError::NotFound) => group_not_found(&name, started_at),
+        Err(UpdateGroupError::NoSuchContext(context)) => error(
+            ErrorCode::NoContext,
+            format!("context '{context}' not found; nothing was applied"),
+            started_at,
+        ),
+        Err(UpdateGroupError::Io(io_error)) => {
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                ErrorCode::Internal,
+                format!("group update not persisted (nothing was applied): {io_error}"),
+                started_at,
+            )
+        }
+    }
+}
+
+pub async fn delete_group(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+) -> Response {
+    let started_at = Instant::now();
+    // Deleting the bundling touches every member's grant: judged like
+    // any other group write.
+    if scope.is_some() {
+        let current = state.group_contexts(&name).unwrap_or_default();
+        if let Some(refusal) = group_scope_refusal(&scope, &key, current.iter(), started_at) {
+            return refusal;
+        }
+    }
+    // Unlinks the group file; keep it off the async worker.
+    match tokio::task::block_in_place(|| state.delete_group(&name)) {
+        None => group_not_found(&name, started_at),
+        Some(outcome) => {
+            // Destructive, so it leaves a `taguru::audit` line like
+            // delete_context — the member contexts themselves are
+            // untouched and say so via their own lines only when THEY
+            // are deleted.
+            tracing::info!(
+                target: "taguru::audit",
+                key = %key_name(&key),
+                group = %name,
+                file_removed = outcome.is_ok(),
+                "group deleted",
+            );
+            match outcome {
+                Ok(()) => ok(true, started_at),
+                Err(io_error) => {
+                    state.metrics().record_error(ErrorKind::Io);
+                    error(
+                        ErrorCode::Internal,
+                        format!(
+                            "group '{name}' removed but its file was not: {io_error} \
+                             (if the file survives, the group reappears at the next restart)"
                         ),
                         started_at,
                     )

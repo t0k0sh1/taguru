@@ -395,6 +395,8 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
     match (method, route) {
         // The retrieval loop, the directory, and the manual.
         (&Method::GET, "/contexts")
+        | (&Method::GET, "/groups")
+        | (&Method::GET, "/groups/{name}")
         | (&Method::GET, "/contexts/{name}")
         | (&Method::GET, "/contexts/{name}/labels")
         | (&Method::GET, "/contexts/{name}/aliases")
@@ -418,6 +420,8 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         // drives, context creation and per-source re-sync included.
         (&Method::PUT, "/contexts/{name}")
         | (&Method::PATCH, "/contexts/{name}")
+        | (&Method::PUT, "/groups/{name}")
+        | (&Method::PATCH, "/groups/{name}")
         | (&Method::POST, "/contexts/{name}/associations")
         | (&Method::POST, "/contexts/{name}/aliases")
         | (&Method::DELETE, "/contexts/{name}/aliases")
@@ -436,8 +440,9 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
 /// drift. No key at all (auth off, or an exempt path) means no
 /// restriction, exactly as before scopes existed. The resolved
 /// [`KeyScope`] rides the request extensions for the handlers that
-/// FILTER rather than refuse (`GET /contexts`) and for `/import`,
-/// whose contexts live in the body.
+/// FILTER rather than refuse (`GET /contexts`, the group listings)
+/// and for those judging context names that live in the body or the
+/// stored record (`/import`, the group writes).
 pub async fn enforce_authorization(
     State(keyring): State<Arc<Keyring>>,
     matched: Option<MatchedPath>,
@@ -469,7 +474,16 @@ pub async fn enforce_authorization(
         );
     }
     let (mut parts, body) = request.into_parts();
-    if scope.contexts.is_some() {
+    // `{name}` is a CONTEXT name on every route but `/groups/{name}`,
+    // where it names the group itself: a group's member contexts live
+    // in the body and the stored record, out of this middleware's
+    // reach, so the group handlers judge them (`group_scope_refusal`).
+    // The exclusion names its one route exactly — deny-by-default
+    // safe: a future route whose `{name}` is not a context and is not
+    // listed here mis-answers 403 for scoped keys, never leaks open
+    // (a prefix test would silently swallow future `/groups/...`
+    // sub-routes instead of forcing that decision).
+    if scope.contexts.is_some() && route != "/groups/{name}" {
         use axum::extract::FromRequestParts as _;
         let context = axum::extract::RawPathParams::from_request_parts(&mut parts, &())
             .await

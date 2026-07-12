@@ -5102,3 +5102,376 @@ fn the_compact_endpoint_shrinks_live_and_is_admin_only() {
         "{facts}"
     );
 }
+
+// ---------------------------------------------------------------------
+// Groups: flat bundles of contexts — the addressing unit cross-context
+// retrieval will build on. This iteration is bundling only: CRUD,
+// delta membership, strict referential integrity, and the scope story.
+
+/// The whole group lifecycle over HTTP: create (with and without a
+/// body), the keyset-paged directory, single GET, delta PATCH, DELETE —
+/// and the namespace split from contexts.
+#[test]
+fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
+    let server = Server::start("groups-crud");
+    for name in ["apple", "banana", "cherry"] {
+        server.ok(
+            "PUT",
+            &format!("/contexts/{name}"),
+            Some(json!({"description": name})),
+        );
+    }
+
+    server.ok(
+        "PUT",
+        "/groups/fruit",
+        Some(json!({"description": "果物の文脈", "contexts": ["banana", "apple"]})),
+    );
+    // Create is PUT-once: a second landing answers already_exists.
+    let (status, dup) = server.call("PUT", "/groups/fruit", None);
+    assert_eq!(status, 409, "{dup}");
+    assert_eq!(dup["code"], json!("already_exists"));
+    // An absent body is a valid create (defaults) — an empty group is
+    // how "create first, fill later" starts.
+    server.ok("PUT", "/groups/empty", None);
+
+    // The directory pages by name, `total` cursor-independent, exactly
+    // like /contexts.
+    let page = server.ok("GET", "/groups", None);
+    assert_eq!(page["total"], json!(2), "{page}");
+    let names: Vec<&str> = page["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|group| group["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["empty", "fruit"], "name order");
+    assert_eq!(
+        page["groups"][1]["contexts"],
+        json!(["apple", "banana"]),
+        "members come back sorted: {page}"
+    );
+    let page = server.ok("GET", "/groups?limit=1", None);
+    assert_eq!(page["total"], json!(2));
+    assert_eq!(page["groups"][0]["name"], json!("empty"));
+    let page = server.ok("GET", "/groups?limit=1&after=empty", None);
+    assert_eq!(page["groups"][0]["name"], json!("fruit"));
+
+    let single = server.ok("GET", "/groups/fruit", None);
+    assert_eq!(single["description"], json!("果物の文脈"));
+    let (status, missing) = server.call("GET", "/groups/nope", None);
+    assert_eq!(status, 404);
+    assert_eq!(missing["code"], json!("no_group"));
+
+    // PATCH applies deltas — removals first, then adds — and answers
+    // the updated row. Removing a non-member is an idempotent no-op.
+    let updated = server.ok(
+        "PATCH",
+        "/groups/fruit",
+        Some(json!({"description": "更新後", "add_contexts": ["cherry"],
+                    "remove_contexts": ["apple", "never-was-a-member"]})),
+    );
+    assert_eq!(updated["description"], json!("更新後"));
+    assert_eq!(updated["contexts"], json!(["banana", "cherry"]));
+    let (status, missing) = server.call("PATCH", "/groups/nope", Some(json!({"description": "x"})));
+    assert_eq!(status, 404, "{missing}");
+    assert_eq!(missing["code"], json!("no_group"));
+
+    // Groups and contexts are separate namespaces: one name, both kinds.
+    server.ok("PUT", "/groups/apple", Some(json!({"description": "同名"})));
+    assert_eq!(server.call("GET", "/contexts/apple", None).0, 200);
+    assert_eq!(server.call("GET", "/groups/apple", None).0, 200);
+
+    // DELETE removes the bundling alone; the members live on.
+    assert_eq!(server.ok("DELETE", "/groups/fruit", None), json!(true));
+    assert_eq!(server.call("GET", "/groups/fruit", None).0, 404);
+    for name in ["banana", "cherry"] {
+        assert_eq!(
+            server.call("GET", &format!("/contexts/{name}"), None).0,
+            200
+        );
+    }
+    let (status, gone) = server.call("DELETE", "/groups/fruit", None);
+    assert_eq!(status, 404, "{gone}");
+    assert_eq!(gone["code"], json!("no_group"));
+}
+
+/// Strict referential integrity: an add never dangles (no_context, and
+/// NOTHING applies), and deleting a context sweeps it out of every
+/// group immediately.
+#[test]
+fn group_membership_is_strict_and_context_deletion_sweeps() {
+    let server = Server::start("groups-strict");
+    // A create naming a missing context refuses whole: no group.
+    let (status, refused) = server.call("PUT", "/groups/g", Some(json!({"contexts": ["ghost"]})));
+    assert_eq!(status, 404, "{refused}");
+    assert_eq!(refused["code"], json!("no_context"));
+    assert_eq!(server.call("GET", "/groups/g", None).0, 404);
+
+    server.ok("PUT", "/contexts/a", None);
+    server.ok("PUT", "/contexts/b", None);
+    server.ok("PUT", "/groups/g", Some(json!({"contexts": ["a", "b"]})));
+
+    // An add naming a missing context refuses whole: membership as was.
+    let (status, refused) = server.call(
+        "PATCH",
+        "/groups/g",
+        Some(json!({"add_contexts": ["ghost"], "remove_contexts": ["a"]})),
+    );
+    assert_eq!(status, 404, "{refused}");
+    assert_eq!(refused["code"], json!("no_context"));
+    assert_eq!(
+        server.ok("GET", "/groups/g", None)["contexts"],
+        json!(["a", "b"]),
+        "the refused delta must not half-apply"
+    );
+
+    // Deleting a member context drops it from the group, immediately.
+    server.ok("DELETE", "/contexts/a", None);
+    assert_eq!(
+        server.ok("GET", "/groups/g", None)["contexts"],
+        json!(["b"])
+    );
+
+    // The write-boundary caps hold for groups too.
+    let long_name = "x".repeat(65);
+    let (status, oversized) = server.call("PUT", &format!("/groups/{long_name}"), None);
+    assert_eq!(status, 400, "{oversized}");
+    assert_eq!(oversized["code"], json!("invalid_argument"));
+    let (status, oversized) = server.call(
+        "PUT",
+        "/groups/big",
+        Some(json!({"description": "x".repeat(5000)})),
+    );
+    assert_eq!(status, 400, "{oversized}");
+    let over_cap: Vec<String> = (0..1001).map(|i| format!("c{i}")).collect();
+    let (status, refused) = server.call("PUT", "/groups/big", Some(json!({"contexts": over_cap})));
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["code"], json!("over_limit"));
+}
+
+/// Groups persist across a restart, and boot reconciliation drops any
+/// dangling member a crash could have left in a group file.
+#[test]
+fn groups_survive_restart_and_boot_reconciles_dangling_members() {
+    let server = Server::start("groups-restart");
+    server.ok("PUT", "/contexts/sake", None);
+    server.ok(
+        "PUT",
+        "/groups/drinks",
+        Some(json!({"description": "飲料", "contexts": ["sake"]})),
+    );
+
+    let data_dir = server.stop_gracefully();
+    // Plant a dangling member the way a crash between a context's
+    // deletion and the sweep's rewrite would: straight into the file.
+    std::fs::write(
+        data_dir.join("drinks.group"),
+        serde_json::to_vec(&json!({"description": "飲料", "contexts": ["sake", "gone"]})).unwrap(),
+    )
+    .unwrap();
+
+    let server = Server::start_on("groups-restart2", data_dir);
+    let survived = server.ok("GET", "/groups/drinks", None);
+    assert_eq!(survived["description"], json!("飲料"));
+    assert_eq!(
+        survived["contexts"],
+        json!(["sake"]),
+        "boot must reconcile the planted dangling member: {survived}"
+    );
+    // And the fix reached the file, not just memory.
+    let on_disk = std::fs::read_to_string(server.data_dir.join("drinks.group")).unwrap();
+    assert!(!on_disk.contains("gone"), "{on_disk}");
+}
+
+/// The scope story for groups: every key sees every row but only its
+/// granted members; a write touching any context beyond the grant —
+/// current members included — refuses whole, and out-of-scope names
+/// answer the same 403 whether or not they exist (no existence oracle).
+#[test]
+fn key_scopes_filter_group_members_and_gate_group_writes() {
+    let server = Server::start_with_env(
+        "groups-scopes",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,reader:rtok,potter:stok"),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"reader": "read", "potter": {"role": "write", "contexts": ["sake"]}}"#,
+            ),
+        ],
+    );
+    let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
+        server.call_with_token(method, path, body, Some(token))
+    };
+    for context in ["sake", "bunko"] {
+        assert_eq!(
+            call("PUT", &format!("/contexts/{context}"), None, "atok").0,
+            200
+        );
+    }
+    assert_eq!(
+        call(
+            "PUT",
+            "/groups/mixed",
+            Some(json!({"contexts": ["sake", "bunko"]})),
+            "atok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "PUT",
+            "/groups/ours",
+            Some(json!({"contexts": ["sake"]})),
+            "atok"
+        )
+        .0,
+        200
+    );
+
+    // Reads: every row is visible (groups are labels, not content),
+    // but a scoped key sees only its granted members.
+    let (status, listed) = call("GET", "/groups", None, "stok");
+    assert_eq!(status, 200);
+    assert_eq!(listed["result"]["total"], json!(2), "{listed}");
+    assert_eq!(
+        listed["result"]["groups"][0]["name"],
+        json!("mixed"),
+        "{listed}"
+    );
+    assert_eq!(
+        listed["result"]["groups"][0]["contexts"],
+        json!(["sake"]),
+        "bunko must be filtered from a sake-scoped view: {listed}"
+    );
+    let (_, single) = call("GET", "/groups/mixed", None, "stok");
+    assert_eq!(single["result"]["contexts"], json!(["sake"]), "{single}");
+
+    // Role gate: read keys read, nothing more.
+    let (status, refused) = call("PUT", "/groups/new", None, "rtok");
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("needs 'write'"),
+        "{refused}"
+    );
+
+    // Writes judge every involved context — current members included.
+    // Touching a group with an out-of-grant member refuses whole, even
+    // for a description-only change.
+    let (status, refused) = call(
+        "PATCH",
+        "/groups/mixed",
+        Some(json!({"description": "mine now"})),
+        "stok",
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("no grant on context 'bunko'"),
+        "{refused}"
+    );
+
+    // The oracle stays shut: an out-of-scope name answers the same 403
+    // whether it exists (bunko) or not (ghost) — never a revealing 404.
+    let (status_real, real) = call(
+        "PATCH",
+        "/groups/ours",
+        Some(json!({"add_contexts": ["bunko"]})),
+        "stok",
+    );
+    let (status_ghost, ghost) = call(
+        "PATCH",
+        "/groups/ours",
+        Some(json!({"add_contexts": ["ghost"]})),
+        "stok",
+    );
+    assert_eq!((status_real, status_ghost), (403, 403), "{real} / {ghost}");
+    assert_eq!(real["code"], ghost["code"], "{real} / {ghost}");
+    let (_, ours) = call("GET", "/groups/ours", None, "atok");
+    assert_eq!(
+        ours["result"]["contexts"],
+        json!(["sake"]),
+        "the refused adds must not have applied: {ours}"
+    );
+
+    // Inside the grant, a scoped writer works normally...
+    assert_eq!(
+        call(
+            "PATCH",
+            "/groups/ours",
+            Some(json!({"description": "陶工の棚"})),
+            "stok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "PUT",
+            "/groups/mine",
+            Some(json!({"contexts": ["sake"]})),
+            "stok"
+        )
+        .0,
+        200
+    );
+    // ...but deletion is an operator verb (admin), like contexts.
+    assert_eq!(call("DELETE", "/groups/mine", None, "stok").0, 403);
+    assert_eq!(call("DELETE", "/groups/mine", None, "atok").0, 200);
+}
+
+/// The four group tools ride the MCP transport like every other tool —
+/// one implementation behind both the stdio bridge and POST /mcp.
+#[test]
+fn groups_ride_the_mcp_transport() {
+    let server = Server::start("groups-mcp");
+    server.ok("PUT", "/contexts/sake", None);
+
+    let tool = |id: u64, name: &str, arguments: Value| {
+        let (status, answer) = server.call(
+            "POST",
+            "/mcp",
+            Some(json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                        "params": {"name": name, "arguments": arguments}})),
+        );
+        assert_eq!(status, 200, "{name} -> {answer}");
+        answer["result"].clone()
+    };
+
+    let created = tool(
+        1,
+        "create_group",
+        json!({"name": "drinks", "description": "飲料", "contexts": ["sake"]}),
+    );
+    assert!(created.get("isError").is_none(), "{created}");
+
+    let listed = tool(2, "list_groups", json!({}));
+    let text = listed["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\"drinks\""), "{text}");
+    assert!(text.contains("\"sake\""), "{text}");
+
+    let updated = tool(
+        3,
+        "update_group",
+        json!({"name": "drinks", "remove_contexts": ["sake"]}),
+    );
+    assert!(updated.get("isError").is_none(), "{updated}");
+    let text = updated["content"][0]["text"].as_str().unwrap();
+    assert!(!text.contains("\"sake\""), "{text}");
+
+    let deleted = tool(4, "delete_group", json!({"name": "drinks"}));
+    assert!(deleted.get("isError").is_none(), "{deleted}");
+    let listed = tool(5, "list_groups", json!({}));
+    let text = listed["content"][0]["text"].as_str().unwrap();
+    assert!(!text.contains("\"drinks\""), "{text}");
+
+    // A failing group tool travels as isError content with the API's
+    // machine code visible to the agent.
+    let failed = tool(6, "delete_group", json!({"name": "drinks"}));
+    assert_eq!(failed["isError"], json!(true), "{failed}");
+    let text = failed["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("HTTP 404"), "{text}");
+}

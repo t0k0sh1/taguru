@@ -230,6 +230,11 @@ Source code takes the same discipline; only the naming changes.
 | PUT | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → create |
 | PATCH | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → update metadata |
 | DELETE | `/contexts/{name}` | delete, files included |
+| GET | `/groups` | `?limit=1000&after=name` → `{total, groups:[{name, description, contexts}]}` (keyset paging by name; a group bundles contexts flat, many-to-many — no hierarchy) |
+| GET | `/groups/{name}` | one group row / 404 |
+| PUT | `/groups/{name}` | `{description?, contexts?:[name]}` → create (groups and contexts are separate namespaces; every listed member must exist) |
+| PATCH | `/groups/{name}` | `{description?, add_contexts?, remove_contexts?}` → the updated row (deltas, not a replacement list; removals apply first; added members must exist, removing a non-member is a no-op) |
+| DELETE | `/groups/{name}` | delete the bundling only — member contexts are untouched (deleting a context also drops it from every group) |
 | POST | `/contexts/{name}/associations` | `[{subject,label,object,weight,source?,paragraph?}]` → applied count (`paragraph` locates the fact within `source` and is ignored without one) |
 | POST | `/contexts/{name}/recall` | `{cue, limit?}` → `{total, matches}` |
 | POST | `/contexts/{name}/query` | `{subject?, label?, object?, limit?}` — each position a string or an array → `{total, matches}` |
@@ -262,11 +267,13 @@ Source code takes the same discipline; only the naming changes.
   the same value on the bridge.
 - Unset = auth disabled (dev mode; never expose beyond localhost).
 - Keys may carry a scope (`TAGURU_KEY_SCOPES`): a role — read (the
-  retrieval loop) ⊂ write (+ the ingest loop) ⊂ admin (+ context
-  deletion, `/import`, `/flush`) — and optionally a context list.
-  Out of scope → `403` in the error shape, naming what the key lacks;
-  a context-scoped key sees only its grant in `GET /contexts`. Scopes
-  bind MCP tool calls exactly as raw HTTP.
+  retrieval loop) ⊂ write (+ the ingest loop, group create/update) ⊂
+  admin (+ context and group deletion, `/import`, `/flush`) — and
+  optionally a context list. Out of scope → `403` in the error shape,
+  naming what the key lacks; a context-scoped key sees only its grant
+  in `GET /contexts`, group listings show it only the members it may
+  see, and a group write touching any context beyond the grant is
+  refused whole. Scopes bind MCP tool calls exactly as raw HTTP.
 
 ## Errors and limits
 
@@ -279,14 +286,14 @@ Content-Type, mistyped shape) / `invalid_argument` (parsed, but a
 value was refused: empty or oversized name, bad weight, bad cursor) /
 `over_limit` (a batch or list over its per-request cap — split and
 resend) / `unauthorized` / `forbidden` / `no_context` / `no_source` /
-`no_paragraph` / `unknown_path` / `method_not_allowed` / `timeout` /
+`no_paragraph` / `no_group` / `unknown_path` / `method_not_allowed` / `timeout` /
 `already_exists` / `conflict` / `payload_too_large` / `rate_limited` /
 `internal` / `embeddings_unconfigured` / `embeddings_failed` /
 `overloaded` (shed at the in-flight ceiling; wait `Retry-After`) /
 `unhealthy` (the write path is degraded) / `storage_full`.
 
-- `401` auth (above). `404` unknown context. `409` duplicate create /
-  alias conflict.
+- `401` auth (above). `404` unknown context or group. `409` duplicate
+  create / alias conflict.
 - `507` context full (`ContextFull`) — the write was NOT applied;
   further knowledge goes to a new context.
 - `501` `/embeddings/refresh` without a provider configured
@@ -299,8 +306,8 @@ resend) / `unauthorized` / `forbidden` / `no_context` / `no_source` /
   or |weight| > 1,000,000
   (whole batch refused) / name too long (subject, label, object,
   source, alias ≤ 1024 bytes — names are headings, not bodies:
-  passages go to sources, long knowledge gets decomposed; context
-  name ≤ 64, description ≤ 4096). `408` timeout (default 30 s —
+  passages go to sources, long knowledge gets decomposed; context or
+  group name ≤ 64, description ≤ 4096). `408` timeout (default 30 s —
   narrow the query and retry). `413` body over the cap (default
   8 MiB).
   `429` this key is over its request budget — wait the `Retry-After`

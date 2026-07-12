@@ -30,9 +30,11 @@
 //! context sits behind its own entry lock. A caller clones the entry's
 //! `Arc` and releases the registry immediately, so a slow operation on
 //! one context never blocks the others — and a panic poisons only the
-//! context it happened in.
+//! context it happened in. Groups (tiny, always-resident records) sit
+//! behind one separate lock; the only operations that need both take
+//! `groups` BEFORE `registry` — never the other way around.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -46,6 +48,7 @@ use crate::embedding::{
     EmbedPurpose, EmbeddingProvider, PassageKey, PassageVectorStore, VectorStore, VectorTable,
     fnv1a, similarity,
 };
+use crate::groups::{self, GroupRecord};
 use crate::metrics::{GaugeSnapshot, Metrics};
 use crate::wal::{self, WalOp};
 
@@ -504,6 +507,30 @@ pub enum CreateError {
     Io(io::Error),
 }
 
+#[derive(Debug)]
+pub enum CreateGroupError {
+    AlreadyExists,
+    /// Same trap as [`CreateError::InvalidName`]: an empty name would
+    /// persist as a bare `.group` file the boot scan (keying on the
+    /// extension) never rediscovers.
+    InvalidName,
+    /// A listed member is not a registered context — carried by name so
+    /// the client hears WHICH one. Strict on purpose: an add must never
+    /// mint a dangling reference.
+    NoSuchContext(String),
+    Io(io::Error),
+}
+
+#[derive(Debug)]
+pub enum UpdateGroupError {
+    NotFound,
+    /// Same strictness as [`CreateGroupError::NoSuchContext`], for
+    /// `add_contexts`. Removals are exempt — removing a name that is
+    /// not a member is an idempotent no-op, never an error.
+    NoSuchContext(String),
+    Io(io::Error),
+}
+
 /// What one compaction accomplished — the before/after footprint and
 /// the dead weight shed, for the CLI report and the endpoint response.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -761,6 +788,13 @@ struct StateInner {
     /// larger than the whole budget still works — it just stays alone.
     cache_bytes: usize,
     registry: RwLock<HashMap<String, Arc<Entry>>>,
+    /// Groups: flat bundles of context names, each persisted as one
+    /// `{stem}.group` file. Small enough to stay resident in full, so
+    /// one lock over the whole map suffices — and it is held across the
+    /// record's own fsync on writes: a group write blocks only other
+    /// group writes, never any context operation. BTreeMap keeps the
+    /// directory listing in name order for free.
+    groups: RwLock<BTreeMap<String, GroupRecord>>,
     /// Logical clock behind `Entry::last_touch`.
     clock: AtomicU64,
     /// The optional semantic entry tier; `None` keeps resolve purely
@@ -894,12 +928,22 @@ impl AppState {
         // writer wins, silently.
         let dir_lock = lock_data_dir(&data_dir)?;
         let registry = scan_data_dir(&data_dir)?;
+        // Groups scan after contexts (the context scan also sweeps
+        // staging leftovers), then reconcile unconditionally: whatever
+        // put a dangling member into a group file — a crash between a
+        // context's deletion and the sweep's rewrite, a sweep that
+        // could not persist, a hand-edited directory — boot drops it
+        // and writes the fix back, so "a group names only live
+        // contexts" holds from the first request on, without exception.
+        let mut groups = groups::scan_groups(&data_dir)?;
+        reconcile_groups(&data_dir, &registry, &mut groups);
 
         let state = Self(Arc::new(StateInner {
             data_dir,
             _dir_lock: dir_lock,
             cache_bytes,
             registry: RwLock::new(registry),
+            groups: RwLock::new(groups),
             clock: AtomicU64::new(0),
             embedder,
             default_semantic_floor: options
@@ -1087,6 +1131,7 @@ impl AppState {
         }
         GaugeSnapshot {
             contexts_registered,
+            groups_registered: self.0.groups.read().unwrap().len() as u64,
             contexts_resident,
             resident_bytes,
             wal_bytes,
@@ -1269,6 +1314,12 @@ impl AppState {
         if let Err(error) = write_atomic(&marker, b"") {
             tracing::warn!(context = %name, %error, "deletion marker not persisted; a partial delete would not resume at boot");
         }
+        // Membership must not outlive the member: drop the name from
+        // every group now, before the unlink loop's disk time. Best
+        // effort — the delete's own durability rides on the marker
+        // alone, and a sweep that could not persist is healed by the
+        // next boot's reconciliation.
+        self.sweep_context_from_groups(name);
         let mut outcome = Ok(());
         for file in context_files(&stem) {
             if let Err(error) = fs::remove_file(self.0.data_dir.join(file))
@@ -1282,6 +1333,165 @@ impl AppState {
         }
         self.0.pending_deletes.lock().unwrap().remove(name);
         Some(outcome)
+    }
+
+    /// Registers a group and persists it immediately — the create twin
+    /// for groups, without the `pending_creates` choreography: the one
+    /// fsync happens under the groups lock, which blocks only other
+    /// group writes (see the field's doc), so nothing here needs the
+    /// reservation dance.
+    ///
+    /// Member validation happens under both locks (`groups` before
+    /// `registry` — the documented order): `contains_key` already
+    /// answers false for a name mid-delete, because delete() removes
+    /// the name and reserves it in `pending_deletes` inside one
+    /// critical section.
+    pub fn create_group(
+        &self,
+        name: &str,
+        description: String,
+        contexts: BTreeSet<String>,
+    ) -> Result<(), CreateGroupError> {
+        if name.is_empty() {
+            return Err(CreateGroupError::InvalidName);
+        }
+        let mut groups = self.0.groups.write().unwrap();
+        if groups.contains_key(name) {
+            return Err(CreateGroupError::AlreadyExists);
+        }
+        {
+            let registry = self.0.registry.read().unwrap();
+            if let Some(missing) = first_missing_context(&registry, &contexts) {
+                return Err(CreateGroupError::NoSuchContext(missing.clone()));
+            }
+        }
+        let record = GroupRecord {
+            description,
+            contexts,
+        };
+        groups::write_group(&self.0.data_dir, &file_stem(name), &record)
+            .map_err(CreateGroupError::Io)?;
+        groups.insert(name.to_string(), record);
+        Ok(())
+    }
+
+    /// Applies a delta to one group — removals first, then additions
+    /// (a name in both ends up a member), then the description — and
+    /// persists the result. Nothing applies unless everything does: a
+    /// failed persist restores the previous record, the update twin of
+    /// [`rollback_meta`].
+    pub fn update_group(
+        &self,
+        name: &str,
+        description: Option<String>,
+        add_contexts: BTreeSet<String>,
+        remove_contexts: BTreeSet<String>,
+    ) -> Result<GroupRecord, UpdateGroupError> {
+        let mut groups = self.0.groups.write().unwrap();
+        let Some(record) = groups.get_mut(name) else {
+            return Err(UpdateGroupError::NotFound);
+        };
+        if !add_contexts.is_empty() {
+            let registry = self.0.registry.read().unwrap();
+            if let Some(missing) = first_missing_context(&registry, &add_contexts) {
+                return Err(UpdateGroupError::NoSuchContext(missing.clone()));
+            }
+        }
+        let previous = record.clone();
+        for context in &remove_contexts {
+            record.contexts.remove(context);
+        }
+        record.contexts.extend(add_contexts);
+        if let Some(description) = description {
+            record.description = description;
+        }
+        if let Err(error) = groups::write_group(&self.0.data_dir, &file_stem(name), record) {
+            *record = previous;
+            return Err(UpdateGroupError::Io(error));
+        }
+        Ok(record.clone())
+    }
+
+    /// Removes a group — the bundling only, never the member contexts.
+    /// `None` for an unknown name, mirroring [`AppState::delete`].
+    ///
+    /// One file, so no deletion marker: the memory drop and the unlink
+    /// are it. The weaker guarantee is deliberate and priced in — if
+    /// the unlink fails, the surviving file re-registers the group at
+    /// the next boot, and the error message says so.
+    pub fn delete_group(&self, name: &str) -> Option<io::Result<()>> {
+        let mut groups = self.0.groups.write().unwrap();
+        groups.remove(name)?;
+        Some(groups::remove_group_file(
+            &self.0.data_dir,
+            &file_stem(name),
+        ))
+    }
+
+    /// One group's record by name, or `None` for an unknown group.
+    pub fn group(&self, name: &str) -> Option<GroupRecord> {
+        self.0.groups.read().unwrap().get(name).cloned()
+    }
+
+    /// One group's member set alone — the scoped write gate wants the
+    /// names without paying for a copy of the description too.
+    pub fn group_contexts(&self, name: &str) -> Option<BTreeSet<String>> {
+        self.0
+            .groups
+            .read()
+            .unwrap()
+            .get(name)
+            .map(|record| record.contexts.clone())
+    }
+
+    /// One name-ordered page of groups plus the cursor-independent
+    /// total. Scope filtering is the API layer's business, as with
+    /// [`AppState::directory`] — but unlike the context directory,
+    /// which clones only `Arc` handles and can hand over the whole
+    /// map, a group's record IS its data, so the page is cut here
+    /// under the read lock and only the survivors are cloned.
+    pub fn group_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> (usize, Vec<(String, GroupRecord)>) {
+        use std::ops::Bound;
+
+        let groups = self.0.groups.read().unwrap();
+        let start = match after {
+            Some(after) => Bound::Excluded(after),
+            None => Bound::Unbounded,
+        };
+        let page = groups
+            .range::<str, _>((start, Bound::Unbounded))
+            .take(limit)
+            .map(|(name, record)| (name.clone(), record.clone()))
+            .collect();
+        (groups.len(), page)
+    }
+
+    /// Drops a deleted context out of every group, persisting each
+    /// touched record. Called from [`AppState::delete`] with the
+    /// deletion marker already durable; best effort past that point —
+    /// a rewrite that fails leaves memory correct and the file stale,
+    /// which the next boot's reconciliation heals.
+    fn sweep_context_from_groups(&self, context_name: &str) {
+        let mut groups = self.0.groups.write().unwrap();
+        for (group_name, record) in groups.iter_mut() {
+            if !record.contexts.remove(context_name) {
+                continue;
+            }
+            if let Err(error) =
+                groups::write_group(&self.0.data_dir, &file_stem(group_name), record)
+            {
+                tracing::warn!(
+                    group = %group_name,
+                    context = %context_name,
+                    %error,
+                    "group membership sweep not persisted; the next boot's reconciliation drops it"
+                );
+            }
+        }
     }
 
     /// Registers original text passages behind source ids, merge-upsert,
@@ -3500,13 +3710,10 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<HashMap<String, Arc<Entry>>> {
         if extension != Some("ctx") {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        let Some((stem, name)) = scanned_stem_and_name(&path) else {
             continue;
         };
-        let Some(name) = name_from_stem(stem) else {
-            tracing::warn!("skipping {}: file name does not decode", path.display());
-            continue;
-        };
+        let stem = stem.as_str();
         let MetaFile { meta, stats, usage } = read_meta_file(data_dir, stem);
         // The gauge must see leftover logs from the first scrape, not
         // only after each context's first touch.
@@ -3519,6 +3726,70 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<HashMap<String, Arc<Entry>>> {
         );
     }
     Ok(registry)
+}
+
+/// The scan-side decode shared by the context and group sweeps: a
+/// discovered file's stem and the entity name it encodes, or `None`
+/// (logged) when the name does not decode — one function, so the two
+/// scans cannot drift on what "undecodable" means.
+pub(crate) fn scanned_stem_and_name(path: &Path) -> Option<(String, String)> {
+    let stem = path.file_stem().and_then(|s| s.to_str())?;
+    match name_from_stem(stem) {
+        Some(name) => Some((stem.to_string(), name)),
+        None => {
+            tracing::warn!("skipping {}: file name does not decode", path.display());
+            None
+        }
+    }
+}
+
+/// The strict-membership gate shared by group create and update: the
+/// first requested member that is not a registered context, if any.
+fn first_missing_context<'a>(
+    registry: &HashMap<String, Arc<Entry>>,
+    names: impl IntoIterator<Item = &'a String>,
+) -> Option<&'a String> {
+    names
+        .into_iter()
+        .find(|name| !registry.contains_key(name.as_str()))
+}
+
+/// Boot-time counterpart of the delete-path sweep: drops every group
+/// member that is not a registered context and writes each fix back to
+/// disk immediately — disk is the source of truth, and a fix that only
+/// lived in memory would leave the file lying to `taguru inspect` and
+/// to file-level backups until the next unrelated write. Runs
+/// unconditionally: the causes it heals (a crash between a context's
+/// deletion and the sweep's rewrite, a sweep that could not persist, a
+/// hand-edited data directory) leave no marker behind, and the whole
+/// collection is small enough that checking it all costs nothing.
+fn reconcile_groups(
+    data_dir: &Path,
+    registry: &HashMap<String, Arc<Entry>>,
+    groups: &mut BTreeMap<String, GroupRecord>,
+) {
+    for (name, record) in groups.iter_mut() {
+        let before = record.contexts.len();
+        record
+            .contexts
+            .retain(|context| registry.contains_key(context));
+        let dropped = before - record.contexts.len();
+        if dropped == 0 {
+            continue;
+        }
+        match groups::write_group(data_dir, &file_stem(name), record) {
+            Ok(()) => {
+                tracing::info!(group = %name, dropped, "dropped dangling group member(s) at boot");
+            }
+            Err(error) => {
+                tracing::warn!(
+                    group = %name,
+                    %error,
+                    "boot reconciliation not persisted; memory is correct, the file heals on the next successful group write"
+                );
+            }
+        }
+    }
 }
 
 /// Restores `inner.meta` to `previous` after a load or persist failure
@@ -8190,6 +8461,209 @@ mod tests {
         assert!(hits(None).is_empty());
         // ... and the one-call override still beats them both.
         assert_eq!(hits(Some(0.1))[0].0, "りんご");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn group_crud_validates_members_and_survives_a_reboot() {
+        let dir = scratch_dir("groups-crud");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.create("beer", ContextMeta::default()).unwrap();
+
+        state
+            .create_group(
+                "drinks",
+                "beverage knowledge".into(),
+                BTreeSet::from(["sake".to_string()]),
+            )
+            .unwrap();
+        assert!(matches!(
+            state.create_group("drinks", String::new(), BTreeSet::new()),
+            Err(CreateGroupError::AlreadyExists)
+        ));
+        assert!(matches!(
+            state.create_group("", String::new(), BTreeSet::new()),
+            Err(CreateGroupError::InvalidName)
+        ));
+        assert!(matches!(
+            state.create_group("ghosts", String::new(), BTreeSet::from(["nope".to_string()])),
+            Err(CreateGroupError::NoSuchContext(missing)) if missing == "nope"
+        ));
+        // The refused create left nothing behind, in memory or on disk.
+        assert!(state.group("ghosts").is_none());
+        assert!(!groups::group_path(&dir, &file_stem("ghosts")).exists());
+
+        // Deltas: removals first, then adds — and an unknown add
+        // refuses the whole update, membership untouched.
+        assert!(matches!(
+            state.update_group(
+                "drinks",
+                None,
+                BTreeSet::from(["nope".to_string()]),
+                BTreeSet::new(),
+            ),
+            Err(UpdateGroupError::NoSuchContext(missing)) if missing == "nope"
+        ));
+        assert_eq!(
+            state.group("drinks").unwrap().contexts,
+            BTreeSet::from(["sake".to_string()])
+        );
+        let updated = state
+            .update_group(
+                "drinks",
+                Some("all drinks".into()),
+                BTreeSet::from(["beer".to_string()]),
+                BTreeSet::from(["sake".to_string()]),
+            )
+            .unwrap();
+        assert_eq!(updated.description, "all drinks");
+        assert_eq!(updated.contexts, BTreeSet::from(["beer".to_string()]));
+        assert!(matches!(
+            state.update_group("ghosts", None, BTreeSet::new(), BTreeSet::new()),
+            Err(UpdateGroupError::NotFound)
+        ));
+
+        // The whole collection survives a reboot from disk alone.
+        drop(state);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let survived = state.group("drinks").unwrap();
+        assert_eq!(survived.description, "all drinks");
+        assert_eq!(survived.contexts, BTreeSet::from(["beer".to_string()]));
+
+        // Deletion removes the record and its file; the members live on.
+        state.delete_group("drinks").unwrap().unwrap();
+        assert!(state.group("drinks").is_none());
+        assert!(state.delete_group("drinks").is_none());
+        assert!(!groups::group_path(&dir, &file_stem("drinks")).exists());
+        assert_eq!(state.group_page(None, usize::MAX), (0, Vec::new()));
+        assert!(state.directory().iter().any(|entry| entry.name == "beer"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deleting_a_context_sweeps_it_out_of_every_group() {
+        let dir = scratch_dir("groups-sweep");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.create("beer", ContextMeta::default()).unwrap();
+        for group in ["drinks", "fermented"] {
+            state
+                .create_group(
+                    group,
+                    String::new(),
+                    BTreeSet::from(["sake".to_string(), "beer".to_string()]),
+                )
+                .unwrap();
+        }
+
+        state.delete("sake").unwrap().unwrap();
+
+        for group in ["drinks", "fermented"] {
+            assert_eq!(
+                state.group(group).unwrap().contexts,
+                BTreeSet::from(["beer".to_string()]),
+                "'{group}' still names the deleted context"
+            );
+        }
+        // The sweep persisted: a reboot reads the same membership.
+        drop(state);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        for group in ["drinks", "fermented"] {
+            assert_eq!(
+                state.group(group).unwrap().contexts,
+                BTreeSet::from(["beer".to_string()])
+            );
+        }
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn boot_reconciliation_drops_dangling_members_and_rewrites_the_file() {
+        let dir = scratch_dir("groups-reconcile");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        drop(state);
+
+        // A dangling member, planted the way a crash between a
+        // context's deletion and the sweep's rewrite would leave one.
+        groups::write_group(
+            &dir,
+            &file_stem("drinks"),
+            &GroupRecord {
+                description: "d".into(),
+                contexts: BTreeSet::from(["sake".to_string(), "gone".to_string()]),
+            },
+        )
+        .unwrap();
+
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        assert_eq!(
+            state.group("drinks").unwrap().contexts,
+            BTreeSet::from(["sake".to_string()])
+        );
+        // Disk is the source of truth: the fix reached the file, not
+        // just memory.
+        let on_disk = fs::read_to_string(groups::group_path(&dir, &file_stem("drinks"))).unwrap();
+        assert!(
+            !on_disk.contains("gone"),
+            "the dangling member survived on disk: {on_disk}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_corrupt_group_file_keeps_its_name_and_loses_its_content() {
+        let dir = scratch_dir("groups-corrupt");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        drop(state);
+        fs::write(
+            groups::group_path(&dir, &file_stem("mangled")),
+            b"{not json",
+        )
+        .unwrap();
+
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let record = state.group("mangled").unwrap();
+        assert_eq!(record, GroupRecord::default());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_group_persist_rolls_the_update_back() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("groups-rollback");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .create_group(
+                "drinks",
+                "before".into(),
+                BTreeSet::from(["sake".to_string()]),
+            )
+            .unwrap();
+
+        // A directory that refuses the staging write fails the persist;
+        // nothing may apply in memory either.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let outcome = state.update_group(
+            "drinks",
+            Some("after".into()),
+            BTreeSet::new(),
+            BTreeSet::from(["sake".to_string()]),
+        );
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(outcome, Err(UpdateGroupError::Io(_))));
+        let record = state.group("drinks").unwrap();
+        assert_eq!(record.description, "before");
+        assert_eq!(record.contexts, BTreeSet::from(["sake".to_string()]));
 
         let _ = fs::remove_dir_all(dir);
     }

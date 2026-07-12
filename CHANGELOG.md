@@ -7,6 +7,29 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+- Context groups: `/groups` bundles contexts flat (many-to-many, no
+  hierarchy) as the addressing unit cross-context retrieval will
+  build on. `GET /groups` (keyset-paged directory), `PUT/GET/PATCH/
+  DELETE /groups/{name}`; membership updates are deltas
+  (`add_contexts`/`remove_contexts`), and the same four operations
+  ride MCP as `list_groups`/`create_group`/`update_group`/
+  `delete_group`. Referential integrity is strict: adding a member
+  requires the context to exist (`no_context`), deleting a context
+  drops it from every group, and boot reconciles any dangling member
+  a crash could leave behind. Group reads/creates/updates need
+  read/write; deletion is admin, like contexts. A context-scoped key
+  sees every group row but only the members its grant allows, and a
+  group write touching any context beyond the grant is refused whole.
+  Each group persists as one `{name}.group` JSON file beside the
+  context files; one new error code, `no_group` (404). Known
+  limitations this iteration: groups are not covered by
+  `taguru export`/`import`/`inspect`/`compact` (file-level backups
+  carry the `.group` files as-is), and a `DELETE /groups/{name}`
+  whose unlink fails can resurface the group at the next restart
+  (the error message says so).
+- `taguru_groups_registered` gauge on `/metrics`.
+
 ## [0.2.0] - 2026-07-12
 
 ### Added
