@@ -796,6 +796,138 @@ struct FusedHit {
     vector: Option<(usize, f32, u64)>,
 }
 
+/// The outcome of locating a search-explain target, in
+/// [`CitationLookup`]'s shape: the non-`Explained` arms end the
+/// explanation before any scoring runs, and the outer
+/// `Option<io::Result<_>>` stays reserved for context-absent /
+/// store-unreachable.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) enum PassageExplainLookup {
+    /// The store holds no record for the source — never stored under
+    /// this name, or stored and later retracted: the store keeps no
+    /// tombstone history, so the two are indistinguishable by design.
+    UnknownSource,
+    IndexOutOfRange {
+        paragraphs: usize,
+    },
+    /// The query yields no searchable terms; a search of it answers
+    /// the empty list before either lane runs.
+    NoQueryTerms,
+    Explained(Box<PassageSearchExplanation>),
+}
+
+/// Everything `explain_passage_search` established, verdict-free — the
+/// registry reports what happened; the API layer names the verdict and
+/// writes the summary from it.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct PassageSearchExplanation {
+    /// The paragraph the explanation settled on.
+    pub(crate) paragraph: u32,
+    /// How many paragraphs the source holds.
+    pub(crate) paragraphs: usize,
+    /// Whether the request named the paragraph or the best showing was
+    /// chosen for it.
+    pub(crate) paragraph_named: bool,
+    /// The query's terms — every deduplicated key with its spelling,
+    /// in first-occurrence order, exactly the grams both lanes ran.
+    pub(crate) query_terms: Vec<(String, u64)>,
+    /// The lexical lane's per-term evidence for the target paragraph
+    /// (query-term order). `None` when the index holds no live,
+    /// current-text slot for it.
+    pub(crate) lexical: Option<crate::bm25::IndexEvidence>,
+    /// The target paragraph's own spellings (questions included,
+    /// deduplicated) — materialized only when the paragraph shares no
+    /// term with the query, the verdict that needs both sides shown.
+    pub(crate) paragraph_terms: Option<Vec<String>>,
+    /// The vector lane's account.
+    pub(crate) vector: VectorLaneReport,
+    /// Whether the ranking fused both lanes (RRF) or served raw BM25.
+    pub(crate) fused: bool,
+    /// The full ranking's size: every candidate either lane surfaced,
+    /// staleness-validated, nothing truncated.
+    pub(crate) ranked: usize,
+    /// The target's place in that full ranking (1-based), its score
+    /// there, and its per-lane showings.
+    pub(crate) rank: Option<usize>,
+    pub(crate) score: Option<f32>,
+    pub(crate) bm25_lane: Option<(usize, f32)>,
+    pub(crate) vector_lane: Option<(usize, f32)>,
+    /// The request's limit, whether the target is served at it, and
+    /// the weakest score that was — the bar the target had to clear.
+    pub(crate) limit: usize,
+    pub(crate) served: bool,
+    pub(crate) cutoff_score: Option<f32>,
+    /// A limit VERIFIED to serve the target by rerunning the real
+    /// serve computation, pool caps included; `None` when the target
+    /// ranks nowhere (or no limit up to the ranking's size reaches it).
+    pub(crate) limit_to_reach: Option<usize>,
+}
+
+/// The vector lane's side of an explanation: why it did not run, or
+/// what it saw when it did.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) enum VectorLaneReport {
+    /// `TAGURU_EMBED_PASSAGES` is off, or no provider is configured —
+    /// `provider_configured` says which.
+    Off { provider_configured: bool },
+    /// The lane should have run; the provider refused the query.
+    QueryEmbeddingFailed(String),
+    /// Nothing embedded yet (no sidecar rows).
+    NoVectors,
+    /// The sidecar's rows belong to another model; they are never
+    /// served, and the next refresh discards and re-embeds them.
+    ModelChanged { stored: String, current: String },
+    /// The sweep ran under `floor`; `cosine` is the target's best
+    /// current-text row (text or doc2query question), `None` when it
+    /// has none — not yet embedded, or embedded before its last edit.
+    Ran { floor: f32, cosine: Option<f32> },
+}
+
+/// Why the vector lane can or cannot sweep an entry's paragraphs —
+/// search takes the `Ready` arm and silently skips the rest; explain
+/// names them in its [`VectorLaneReport`] (which carries the
+/// provider-configured distinction itself).
+enum PassageVectorGate {
+    Disabled,
+    Empty,
+    ModelChanged { stored: String, current: String },
+    Ready(Arc<PassageVectorStore>),
+}
+
+/// How many candidates the semantic resolve tier serves — the cap
+/// [`AppState::semantic_resolve`] truncates to, and the one its
+/// explain twin reports when a floor-passing name still missed.
+pub(crate) const SEMANTIC_RESOLVE_LIMIT: usize = 5;
+
+/// The gloss lane's side of a resolve explanation:
+/// [`VectorLaneReport`]'s shape for the resolve tiers, told apart
+/// where `semantic_resolve` deliberately folds — provider off, model
+/// changed, and nothing embedded all answer the same empty list there.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) enum GlossLaneReport {
+    /// No embedding provider is configured.
+    Off,
+    /// The gloss sidecar's vectors belong to another model; the next
+    /// refresh discards and re-embeds them.
+    ModelChanged { stored: String, current: String },
+    /// The namespace holds no gloss vectors yet — no refresh has run
+    /// (or none since this context gained its vocabulary).
+    EmptyTable,
+    /// The provider refused the cue.
+    QueryEmbeddingFailed(String),
+    /// The sweep could run: the floor in effect, the expected name's
+    /// own gloss cosine (`None` when it has no vector yet — added
+    /// after the last refresh), its 1-based rank among the `passing`
+    /// floor-clearing candidates, and the tier's serving `cap`.
+    Ran {
+        floor: f32,
+        cosine: Option<f32>,
+        rank: Option<usize>,
+        passing: usize,
+        cap: usize,
+    },
+}
+
 /// What one passage embedding refresh accomplished: rows newly
 /// embedded, rows now in the sidecar, and rows the per-context limit
 /// cut off. Text rows and doc2query question rows count alike in all
@@ -2327,45 +2459,29 @@ impl AppState {
         query: &str,
         limit: usize,
     ) -> Option<io::Result<Vec<PassageSearchHit>>> {
-        const RRF_K: f32 = 60.0;
-
         let entry = self.lookup(name)?;
         if limit == 0 {
             return entry.read_unless_deleted().map(|_| Ok(Vec::new()));
         }
-        let query_grams: Vec<u64> = {
-            let mut seen = std::collections::HashSet::new();
-            passage_terms(query)
-                .into_iter()
-                .filter(|gram| seen.insert(*gram))
-                .collect()
-        };
+        let query_grams = deduped_query_grams(query);
         if query_grams.is_empty() {
             return entry.read_unless_deleted().map(|_| Ok(Vec::new()));
         }
-        // Both lanes over-fetch: fusion can promote a hit neither lane
-        // put in its own top `limit`, and the staleness checks below
-        // may drop stragglers.
-        let pool = limit.saturating_mul(4).max(50);
+        let pool = lane_pool(limit);
 
         // The semantic lane's query embedding runs BEFORE any lock: a
         // provider round trip must never extend the fence below.
-        let cue = if self.passage_embedding_enabled() {
-            let embedder = self.0.embedder.clone().expect("enabled implies a provider");
-            match self.cue_vector(&*embedder, query) {
-                Ok(vector) => Some(vector),
-                Err(error) => {
-                    // Degrade, loudly: the lexical lane still answers.
-                    tracing::warn!(
-                        context = %name,
-                        error,
-                        "passage query embedding failed; serving the lexical lane alone"
-                    );
-                    None
-                }
+        let cue = match self.passage_query_cue(query) {
+            Ok(cue) => cue,
+            Err(error) => {
+                // Degrade, loudly: the lexical lane still answers.
+                tracing::warn!(
+                    context = %name,
+                    error,
+                    "passage query embedding failed; serving the lexical lane alone"
+                );
+                None
             }
-        } else {
-            None
         };
 
         // Everything below holds the read fence: eviction and deletion
@@ -2379,9 +2495,290 @@ impl AppState {
             Err(error) => return Some(Err(error)),
         };
 
-        // Lexical lane: ensure a resident index — build on the
-        // residency's first search, rebuild when tombstones have piled
-        // up. Double-checked so concurrent first searches build once.
+        self.ensure_bm25_index(&entry, &store, name);
+        let lexical = {
+            let guard = entry.bm25.read().unwrap();
+            let index = guard.as_ref().expect("index was just built");
+            index.search(&query_grams, pool)
+        };
+
+        // Semantic lane: sweep the paragraph vectors with the
+        // pre-embedded query, then drop candidates below the same floor
+        // semantic_resolve applies to its own cosine matches — context
+        // setting beats the server default (`fence` is already this
+        // entry's read lock, taken above; search_passages has no
+        // one-call override to slot in ahead of it).
+        let semantic: Vec<(String, u32, u64, f32)> = match &cue {
+            Some(cue) => match self.passage_vector_gate(&entry, &file_stem(name)) {
+                PassageVectorGate::Ready(vectors) => semantic_lane_hits(
+                    vectors.top_matches(cue, pool),
+                    self.effective_semantic_floor(&fence.meta),
+                ),
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+
+        Some(Ok(fuse_passage_lanes(&store, lexical, semantic, limit)))
+    }
+
+    /// The whole account of one source (or one of its paragraphs)
+    /// against one query — the same search re-run with nothing
+    /// truncated, the target located in it, and each lane's reason
+    /// when it has no evidence. `paragraph: None` settles on the
+    /// source's best showing: its best-ranked paragraph, or the one
+    /// sharing the most query terms when nothing ranked. `limit` is
+    /// the search call being explained — the serve/cutoff boundary is
+    /// recomputed exactly as `search_passages(limit)` computes it,
+    /// pool caps included. Read-only, and bounded like one normal
+    /// query plus one targeted scoring.
+    pub fn explain_passage_search(
+        &self,
+        name: &str,
+        query: &str,
+        source: &str,
+        paragraph: Option<u32>,
+        limit: usize,
+    ) -> Option<io::Result<PassageExplainLookup>> {
+        let entry = self.lookup(name)?;
+        let query_terms = deduped_spelled_query_terms(query);
+        let query_grams: Vec<u64> = query_terms.iter().map(|&(_, gram)| gram).collect();
+
+        // Mirror search_passages: the embedding runs only when a search
+        // would have reached it, and before the fence.
+        let cue = if query_grams.is_empty() {
+            Ok(None)
+        } else {
+            self.passage_query_cue(query)
+        };
+
+        let fence = entry.read_unless_deleted()?;
+        let store = match self.entry_passages(&entry, &file_stem(name)) {
+            Ok(store) => store,
+            Err(error) => return Some(Err(error)),
+        };
+
+        let Some(record) = store.get(source) else {
+            return Some(Ok(PassageExplainLookup::UnknownSource));
+        };
+        let paragraphs = record.paragraphs.len();
+        if let Some(index) = paragraph
+            && (index as usize) >= paragraphs
+        {
+            return Some(Ok(PassageExplainLookup::IndexOutOfRange { paragraphs }));
+        }
+        if paragraphs == 0 {
+            return Some(Ok(PassageExplainLookup::IndexOutOfRange { paragraphs }));
+        }
+        if query_grams.is_empty() {
+            return Some(Ok(PassageExplainLookup::NoQueryTerms));
+        }
+
+        self.ensure_bm25_index(&entry, &store, name);
+        let guard = entry.bm25.read().unwrap();
+        let index = guard.as_ref().expect("index was just built");
+
+        // Sweep both lanes whole, once: a lane's pool cap is a prefix
+        // of the same deterministically ordered sweep, so every pool
+        // size fusion needs below is a `take` away.
+        let lexical_full = index.search(&query_grams, usize::MAX);
+        let floor = self.effective_semantic_floor(&fence.meta);
+        let gate = match &cue {
+            Ok(Some(_)) => Some(self.passage_vector_gate(&entry, &file_stem(name))),
+            _ => None,
+        };
+        let vector_rows: Vec<(String, u32, u64, f32)> = match (&cue, &gate) {
+            (Ok(Some(cue)), Some(PassageVectorGate::Ready(vectors))) => vectors
+                .top_matches(cue, usize::MAX)
+                .into_iter()
+                .map(|(key, score)| (key.source.clone(), key.index, key.hash, score))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let lexical_lane = |pool: usize| -> Vec<crate::bm25::IndexHit> {
+            lexical_full.iter().take(pool).cloned().collect()
+        };
+        // Pool first, floor second — the order search_passages applies
+        // them in (`top_matches(cue, pool)` then the filter).
+        let semantic_lane = |pool: usize| -> Vec<(String, u32, u64, f32)> {
+            vector_rows
+                .iter()
+                .take(pool)
+                .filter(|&&(.., score)| score >= floor)
+                .cloned()
+                .collect()
+        };
+
+        let full = fuse_passage_lanes(
+            &store,
+            lexical_lane(usize::MAX),
+            semantic_lane(usize::MAX),
+            usize::MAX,
+        );
+        // The served list exactly as `search_passages(limit)` builds it.
+        let served_hits = fuse_passage_lanes(
+            &store,
+            lexical_lane(lane_pool(limit)),
+            semantic_lane(lane_pool(limit)),
+            limit,
+        );
+
+        let chosen = paragraph
+            .or_else(|| {
+                full.iter()
+                    .find(|hit| hit.source == source)
+                    .map(|hit| hit.index)
+            })
+            .unwrap_or_else(|| {
+                // Nothing of the source ranked at all: the best showing
+                // is the paragraph sharing the most query terms (the
+                // first one, when they tie — including at zero).
+                let mut best = (0u32, 0usize);
+                for at in 0..paragraphs as u32 {
+                    let shared = index.explain(&query_grams, source, at).map_or(0, |lex| {
+                        lex.terms.iter().filter(|term| term.tf > 0.0).count()
+                    });
+                    if shared > best.1 {
+                        best = (at, shared);
+                    }
+                }
+                best.0
+            });
+        let (span, text) = record
+            .paragraph(chosen as usize)
+            .expect("the chosen paragraph is within the record");
+
+        // The index answered for the text it saw; evidence about an
+        // edited paragraph would explain the wrong bytes, so it is
+        // withheld exactly like a stale search hit.
+        let lexical = index
+            .explain(&query_grams, source, chosen)
+            .filter(|lex| lex.hash == span.hash);
+        let overlap = lexical
+            .as_ref()
+            .is_some_and(|lex| lex.terms.iter().any(|term| term.tf > 0.0));
+        let paragraph_terms = (!overlap).then(|| {
+            // Both sides of the 表記ゆれ verdict on one table: the
+            // paragraph's own spellings, questions included, deduped.
+            let mut seen = std::collections::HashSet::new();
+            let mut terms: Vec<String> = Vec::new();
+            let mut take = |raw: &str| {
+                for (spelling, gram) in spelled_passage_terms(raw) {
+                    if seen.insert(gram) {
+                        terms.push(spelling);
+                    }
+                }
+            };
+            take(text);
+            for (at, question) in &record.questions {
+                if *at == chosen {
+                    take(question);
+                }
+            }
+            terms
+        });
+
+        let vector = match (cue, gate) {
+            (Err(error), _) => VectorLaneReport::QueryEmbeddingFailed(error),
+            (Ok(None), _) | (Ok(Some(_)), Some(PassageVectorGate::Disabled)) => {
+                VectorLaneReport::Off {
+                    provider_configured: self.0.embedder.is_some(),
+                }
+            }
+            (Ok(Some(_)), Some(PassageVectorGate::Empty)) => VectorLaneReport::NoVectors,
+            (Ok(Some(_)), Some(PassageVectorGate::ModelChanged { stored, current })) => {
+                VectorLaneReport::ModelChanged { stored, current }
+            }
+            (Ok(Some(_)), Some(PassageVectorGate::Ready(_))) => {
+                // The target's best cosine across its rows (text row
+                // and doc2query question rows alike), current-text rows
+                // only — a stale row IS "not yet re-embedded". The
+                // sweep is score-descending, so the first row is the
+                // best one, floor or no floor.
+                let cosine = vector_rows
+                    .iter()
+                    .find(|&&(ref row_source, row_index, hash, _)| {
+                        row_source == source && row_index == chosen && hash == span.hash
+                    })
+                    .map(|&(.., score)| score);
+                VectorLaneReport::Ran { floor, cosine }
+            }
+            (Ok(Some(_)), None) => unreachable!("the gate is read whenever a cue exists"),
+        };
+
+        let is_target = |hit: &PassageSearchHit| hit.source == source && hit.index == chosen;
+        let rank = full.iter().position(is_target);
+        let target = rank.map(|at| &full[at]);
+        let served = served_hits.iter().any(is_target);
+
+        // The smallest VERIFIED limit that serves the target: start at
+        // its full-ranking rank (and low enough lane pools), rerun the
+        // real serve computation, and grow on a miss — RRF against
+        // capped pools can seat late double-lane candidates above a
+        // mid-pool single-lane hit, so the unbounded rank alone is a
+        // floor, not an answer.
+        let limit_to_reach = if served {
+            Some(limit)
+        } else {
+            rank.map(|at| at + 1).and_then(|first| {
+                let lane_need = target
+                    .and_then(|hit| match (hit.bm25, hit.vector) {
+                        (Some((bm25, _)), Some((vector, _))) => Some(bm25.min(vector)),
+                        (Some((lane, _)), None) | (None, Some((lane, _))) => Some(lane),
+                        (None, None) => None,
+                    })
+                    .map_or(1, |lane| lane.div_ceil(4));
+                let mut candidate = first.max(lane_need);
+                for _ in 0..8 {
+                    if candidate > full.len() {
+                        return None;
+                    }
+                    let rerun = fuse_passage_lanes(
+                        &store,
+                        lexical_lane(lane_pool(candidate)),
+                        semantic_lane(lane_pool(candidate)),
+                        candidate,
+                    );
+                    if rerun.iter().any(is_target) {
+                        return Some(candidate);
+                    }
+                    candidate = (candidate.saturating_mul(2)).min(full.len());
+                }
+                None
+            })
+        };
+
+        Some(Ok(PassageExplainLookup::Explained(Box::new(
+            PassageSearchExplanation {
+                paragraph: chosen,
+                paragraphs,
+                paragraph_named: paragraph.is_some(),
+                query_terms,
+                lexical,
+                paragraph_terms,
+                vector,
+                fused: !semantic_lane(usize::MAX).is_empty(),
+                ranked: full.len(),
+                rank: rank.map(|at| at + 1),
+                score: target.map(|hit| hit.score),
+                bm25_lane: target.and_then(|hit| hit.bm25),
+                vector_lane: target.and_then(|hit| hit.vector),
+                limit,
+                served,
+                cutoff_score: served_hits.last().map(|hit| hit.score),
+                limit_to_reach,
+            },
+        ))))
+    }
+
+    /// A resident BM25 index for this entry: build on the residency's
+    /// first search, repair a drifted sidecar per source, rebuild when
+    /// tombstones have piled up. Double-checked so concurrent first
+    /// searches build once. Called under the entry's read fence with
+    /// every passage-store lock released — the documented order for
+    /// `Entry::bm25` (holding `bm25` while READING the store is fine,
+    /// and is how the build works).
+    fn ensure_bm25_index(&self, entry: &Entry, store: &crate::passages::PassageStore, name: &str) {
         let stale = {
             let guard = entry.bm25.read().unwrap();
             match &*guard {
@@ -2438,112 +2835,47 @@ impl AppState {
                 );
             }
         }
-        let lexical = {
-            let guard = entry.bm25.read().unwrap();
-            let index = guard.as_ref().expect("index was just built");
-            index.search(&query_grams, pool)
+    }
+
+    /// The semantic lane's query embedding, run BEFORE any lock — a
+    /// provider round trip must never extend an entry fence. `Ok(None)`
+    /// when the lane is off; `Err` carries the provider's refusal for
+    /// the caller to log (search) or report (explain).
+    fn passage_query_cue(&self, query: &str) -> Result<Option<Arc<Vec<f32>>>, String> {
+        if !self.passage_embedding_enabled() {
+            return Ok(None);
+        }
+        let embedder = self.0.embedder.clone().expect("enabled implies a provider");
+        self.cue_vector(&*embedder, query).map(Some)
+    }
+
+    /// Why the vector lane can or cannot sweep this entry's paragraphs.
+    /// Search takes the `Ready` arm and silently skips the rest;
+    /// explain names them.
+    fn passage_vector_gate(&self, entry: &Entry, stem: &str) -> PassageVectorGate {
+        let Some(embedder) = self.0.embedder.as_ref().filter(|_| self.0.embed_passages) else {
+            return PassageVectorGate::Disabled;
         };
-
-        // Semantic lane: sweep the paragraph vectors with the
-        // pre-embedded query, then drop candidates below the same floor
-        // semantic_resolve applies to its own cosine matches — context
-        // setting beats the server default (`fence` is already this
-        // entry's read lock, taken above; search_passages has no
-        // one-call override to slot in ahead of it).
-        let semantic: Vec<(String, u32, u64, f32)> = match &cue {
-            Some(cue) => {
-                let vectors = self.entry_passage_vectors(&entry, &file_stem(name));
-                let model_matches = self
-                    .0
-                    .embedder
-                    .as_ref()
-                    .is_some_and(|embedder| vectors.model == embedder.model());
-                if vectors.is_empty() || !model_matches {
-                    Vec::new()
-                } else {
-                    let floor = fence
-                        .meta
-                        .semantic_floor
-                        .unwrap_or(self.0.default_semantic_floor)
-                        .clamp(0.0, 1.0);
-                    vectors
-                        .top_matches(cue, pool)
-                        .into_iter()
-                        .filter(|&(_, score)| score >= floor)
-                        .map(|(key, score)| (key.source.clone(), key.index, key.hash, score))
-                        .collect()
-                }
-            }
-            None => Vec::new(),
-        };
-
-        // Fuse by rank, then validate EACH LANE against the store's
-        // current paragraph: every lane scored the text it saw, and
-        // vectors routinely lag the text between refreshes — a stale
-        // lane must neither smuggle its outdated score onto fresh text
-        // nor veto the other lane's fresh match, so each loses exactly
-        // its own evidence (and its fusion term). The top-level score
-        // stays the raw BM25 number when no semantic lane ran, so a
-        // lexical-only deployment keeps its historical score semantics.
-        let fused = !semantic.is_empty();
-        let mut accumulated: HashMap<(String, u32), FusedHit> = HashMap::new();
-        for (rank, (source, index, hash, score)) in lexical.into_iter().enumerate() {
-            accumulated.entry((source, index)).or_default().bm25 = Some((rank + 1, score, hash));
+        let vectors = self.entry_passage_vectors(entry, stem);
+        if vectors.is_empty() {
+            return PassageVectorGate::Empty;
         }
-        for (rank, (source, index, hash, score)) in semantic.into_iter().enumerate() {
-            // A paragraph can hit this lane several times (its own text
-            // row plus its doc2query question rows); ranks ascend, so
-            // the first arrival is its best showing and later ones must
-            // not overwrite it.
-            let slot = accumulated.entry((source, index)).or_default();
-            if slot.vector.is_none() {
-                slot.vector = Some((rank + 1, score, hash));
-            }
+        if vectors.model != embedder.model() {
+            return PassageVectorGate::ModelChanged {
+                stored: vectors.model.clone(),
+                current: embedder.model().to_string(),
+            };
         }
+        PassageVectorGate::Ready(vectors)
+    }
 
-        let rrf =
-            |lane: &Option<(usize, f32)>| lane.map_or(0.0, |(rank, _)| 1.0 / (RRF_K + rank as f32));
-        let mut hits: Vec<PassageSearchHit> = Vec::new();
-        for ((source, index), lanes) in accumulated {
-            let Some(record) = store.get(&source) else {
-                continue;
-            };
-            let Some((span, text)) = record.paragraph(index as usize) else {
-                continue;
-            };
-            let bm25 = lanes
-                .bm25
-                .filter(|&(.., hash)| hash == span.hash)
-                .map(|(rank, score, _)| (rank, score));
-            let vector = lanes
-                .vector
-                .filter(|&(.., hash)| hash == span.hash)
-                .map(|(rank, score, _)| (rank, score));
-            if bm25.is_none() && vector.is_none() {
-                continue;
-            }
-            let score = if fused {
-                rrf(&bm25) + rrf(&vector)
-            } else {
-                bm25.map(|(_, score)| score).unwrap_or(0.0)
-            };
-            hits.push(PassageSearchHit {
-                source,
-                index,
-                score,
-                text: text.to_string(),
-                bm25,
-                vector,
-            });
-        }
-        hits.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.source.cmp(&b.source))
-                .then_with(|| a.index.cmp(&b.index))
-        });
-        hits.truncate(limit);
-        Some(Ok(hits))
+    /// The floor the semantic lane drops cosine matches below — the
+    /// same one `semantic_resolve` applies to its own matches; context
+    /// setting beats the server default.
+    fn effective_semantic_floor(&self, meta: &ContextMeta) -> f32 {
+        meta.semantic_floor
+            .unwrap_or(self.0.default_semantic_floor)
+            .clamp(0.0, 1.0)
     }
 
     /// One provider round trip, timed into the embed-latency histogram
@@ -3041,8 +3373,6 @@ impl AppState {
         labels: bool,
         floor_override: Option<f32>,
     ) -> Option<Result<Vec<(String, f32)>, String>> {
-        const SEMANTIC_LIMIT: usize = 5;
-
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Ok(Vec::new()));
         };
@@ -3076,8 +3406,87 @@ impl AppState {
             .filter(|&(_, score)| score >= floor)
             .collect();
         scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        scored.truncate(SEMANTIC_LIMIT);
+        scored.truncate(SEMANTIC_RESOLVE_LIMIT);
         Some(Ok(scored))
+    }
+
+    /// The gloss lane's account of one (cue, expected) pair — why
+    /// [`AppState::semantic_resolve`] could not have surfaced the
+    /// expected name (it folds provider-off, model-changed, and
+    /// nothing-embedded into one empty answer; explain needs them
+    /// apart), or exactly where it stood when the sweep could run:
+    /// its own gloss cosine against the floor in effect, and its rank
+    /// in the very ordering `semantic_resolve` truncates. `None` when
+    /// the context does not exist.
+    pub fn explain_semantic_resolve(
+        &self,
+        name: &str,
+        cue: &str,
+        expected: &str,
+        labels: bool,
+        floor_override: Option<f32>,
+    ) -> Option<GlossLaneReport> {
+        let Some(embedder) = self.0.embedder.clone() else {
+            return Some(GlossLaneReport::Off);
+        };
+        let entry = self.lookup(name)?;
+        let context_floor = entry.inner.read().unwrap().meta.semantic_floor;
+        let floor = floor_override
+            .or(context_floor)
+            .unwrap_or(self.0.default_semantic_floor)
+            .clamp(0.0, 1.0);
+        let store = self.entry_vectors(&entry, &file_stem(name));
+        // A never-refreshed sidecar is empty, whatever model string it
+        // carries — report the missing refresh, not a model change.
+        if store.concepts.is_empty() && store.labels.is_empty() {
+            return Some(GlossLaneReport::EmptyTable);
+        }
+        if store.model != embedder.model() {
+            return Some(GlossLaneReport::ModelChanged {
+                stored: store.model.clone(),
+                current: embedder.model().to_string(),
+            });
+        }
+        let table = if labels {
+            &store.labels
+        } else {
+            &store.concepts
+        };
+        if table.is_empty() {
+            return Some(GlossLaneReport::EmptyTable);
+        }
+        let cue_vector = match self.cue_vector(&*embedder, cue) {
+            Ok(vector) => vector,
+            Err(error) => return Some(GlossLaneReport::QueryEmbeddingFailed(error)),
+        };
+        let cosine = table
+            .get(expected)
+            .map(|(_, vector)| similarity(&cue_vector, vector));
+        // The expected name's 1-based rank in semantic_resolve's exact
+        // ordering (cosine desc, name asc): candidates strictly ahead
+        // of it, plus one. Counted, not sorted — one sweep.
+        let mut passing = 0usize;
+        let mut ahead = 0usize;
+        for (candidate, (_, vector)) in table.iter() {
+            let score = similarity(&cue_vector, vector);
+            if score < floor {
+                continue;
+            }
+            passing += 1;
+            if let Some(cosine) = cosine
+                && (score > cosine || (score == cosine && candidate.as_str() < expected))
+            {
+                ahead += 1;
+            }
+        }
+        let rank = cosine.filter(|&cosine| cosine >= floor).map(|_| ahead + 1);
+        Some(GlossLaneReport::Ran {
+            floor,
+            cosine,
+            rank,
+            passing,
+            cap: SEMANTIC_RESOLVE_LIMIT,
+        })
     }
 
     /// Updates the description and/or pin flag, persisting the sidecar
@@ -4690,40 +5099,242 @@ fn fnv64(bytes: &[u8]) -> u64 {
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x1_0000_01b3;
 
+/// Each lane's over-fetch for one served `limit`: fusion can promote a
+/// hit neither lane put in its own top `limit`, and the staleness
+/// checks drop stragglers.
+fn lane_pool(limit: usize) -> usize {
+    limit.saturating_mul(4).max(50)
+}
+
+/// The deduplicated term keys of one query — first occurrence of each
+/// key wins, so the stream keeps [`passage_terms`] order.
+fn deduped_query_grams(query: &str) -> Vec<u64> {
+    let mut seen = std::collections::HashSet::new();
+    passage_terms(query)
+        .into_iter()
+        .filter(|gram| seen.insert(*gram))
+        .collect()
+}
+
+/// [`deduped_query_grams`] with each key's spelling — the explain
+/// path's view of the same stream (same walker, same dedup rule).
+fn deduped_spelled_query_terms(query: &str) -> Vec<(String, u64)> {
+    let mut seen = std::collections::HashSet::new();
+    spelled_passage_terms(query)
+        .into_iter()
+        .filter(|&(_, gram)| seen.insert(gram))
+        .collect()
+}
+
+/// The floor-filtered lane view of one vector sweep, in sweep order —
+/// the pool cap is the caller's (`top_matches` already applied it).
+fn semantic_lane_hits(
+    rows: Vec<(&crate::embedding::PassageKey, f32)>,
+    floor: f32,
+) -> Vec<(String, u32, u64, f32)> {
+    rows.into_iter()
+        .filter(|&(_, score)| score >= floor)
+        .map(|(key, score)| (key.source.clone(), key.index, key.hash, score))
+        .collect()
+}
+
+/// Fuses the two lanes' pools into the served ranking. Fuse by rank,
+/// then validate EACH LANE against the store's current paragraph:
+/// every lane scored the text it saw, and vectors routinely lag the
+/// text between refreshes — a stale lane must neither smuggle its
+/// outdated score onto fresh text nor veto the other lane's fresh
+/// match, so each loses exactly its own evidence (and its fusion
+/// term). The top-level score stays the raw BM25 number when no
+/// semantic lane ran, so a lexical-only deployment keeps its
+/// historical score semantics.
+fn fuse_passage_lanes(
+    store: &crate::passages::PassageStore,
+    lexical: Vec<crate::bm25::IndexHit>,
+    semantic: Vec<(String, u32, u64, f32)>,
+    limit: usize,
+) -> Vec<PassageSearchHit> {
+    const RRF_K: f32 = 60.0;
+    let fused = !semantic.is_empty();
+    let mut accumulated: HashMap<(String, u32), FusedHit> = HashMap::new();
+    for (rank, (source, index, hash, score)) in lexical.into_iter().enumerate() {
+        accumulated.entry((source, index)).or_default().bm25 = Some((rank + 1, score, hash));
+    }
+    for (rank, (source, index, hash, score)) in semantic.into_iter().enumerate() {
+        // A paragraph can hit this lane several times (its own text
+        // row plus its doc2query question rows); ranks ascend, so
+        // the first arrival is its best showing and later ones must
+        // not overwrite it.
+        let slot = accumulated.entry((source, index)).or_default();
+        if slot.vector.is_none() {
+            slot.vector = Some((rank + 1, score, hash));
+        }
+    }
+
+    let rrf =
+        |lane: &Option<(usize, f32)>| lane.map_or(0.0, |(rank, _)| 1.0 / (RRF_K + rank as f32));
+    let mut hits: Vec<PassageSearchHit> = Vec::new();
+    for ((source, index), lanes) in accumulated {
+        let Some(record) = store.get(&source) else {
+            continue;
+        };
+        let Some((span, text)) = record.paragraph(index as usize) else {
+            continue;
+        };
+        let bm25 = lanes
+            .bm25
+            .filter(|&(.., hash)| hash == span.hash)
+            .map(|(rank, score, _)| (rank, score));
+        let vector = lanes
+            .vector
+            .filter(|&(.., hash)| hash == span.hash)
+            .map(|(rank, score, _)| (rank, score));
+        if bm25.is_none() && vector.is_none() {
+            continue;
+        }
+        let score = if fused {
+            rrf(&bm25) + rrf(&vector)
+        } else {
+            bm25.map(|(_, score)| score).unwrap_or(0.0)
+        };
+        hits.push(PassageSearchHit {
+            source,
+            index,
+            score,
+            text: text.to_string(),
+            bm25,
+            vector,
+        });
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| a.index.cmp(&b.index))
+    });
+    hits.truncate(limit);
+    hits
+}
+
+/// Where the term walkers deliver their stream. The index build wants
+/// bare hashes; the search-explain path wants the spelling each hash
+/// was computed from next to it. One walker feeds both through this
+/// sink, so the two views cannot disagree about what a term is —
+/// spelling events cost nothing when the sink ignores them.
+trait TermSink {
+    /// One character of the ASCII word being hashed, in hash order,
+    /// case-folded exactly as the hash saw it. A `word` call closes
+    /// the sequence.
+    fn word_char(&mut self, ch: char);
+    /// The word whose characters were just streamed.
+    fn word(&mut self, hash: u64);
+    /// An adjacent character pair inside a non-ASCII run.
+    fn pair(&mut self, hash: u64, first: char, second: char);
+    /// A non-ASCII run of exactly one character.
+    fn lone(&mut self, hash: u64, ch: char);
+}
+
+/// The index build's sink: hashes only.
+struct HashSink(Vec<u64>);
+
+impl TermSink for HashSink {
+    fn word_char(&mut self, _: char) {}
+
+    fn word(&mut self, hash: u64) {
+        self.0.push(hash);
+    }
+
+    fn pair(&mut self, hash: u64, _: char, _: char) {
+        self.0.push(hash);
+    }
+
+    fn lone(&mut self, hash: u64, ch: char) {
+        let _ = ch;
+        self.0.push(hash);
+    }
+}
+
+/// The explain path's sink: every hash next to its spelling.
+struct SpellingSink {
+    word: String,
+    terms: Vec<(String, u64)>,
+}
+
+impl TermSink for SpellingSink {
+    fn word_char(&mut self, ch: char) {
+        self.word.push(ch);
+    }
+
+    fn word(&mut self, hash: u64) {
+        self.terms.push((std::mem::take(&mut self.word), hash));
+    }
+
+    fn pair(&mut self, hash: u64, first: char, second: char) {
+        let mut spelling = String::with_capacity(first.len_utf8() + second.len_utf8());
+        spelling.push(first);
+        spelling.push(second);
+        self.terms.push((spelling, hash));
+    }
+
+    fn lone(&mut self, hash: u64, ch: char) {
+        self.terms.push((ch.to_string(), hash));
+    }
+}
+
 /// The terms of one passage or query: [`text_terms`] over the
 /// normalized text, plus a word term per piece of every camelCase run.
-/// The split reads an NFKC-folded but NOT lowercased view of the input:
-/// lowercasing would erase the very case boundaries that let `state`
-/// reach `AppState`, while the width fold keeps a full-width `Ａ` — which
-/// the normalized whole-word term already folds to ASCII — in the same
-/// run as its ASCII neighbors instead of breaking it (so `ＡpplePie`
-/// yields the `apple` piece, matching a plain `apple` cue). One function
-/// serves both sides of the search, so they cannot disagree about what a
-/// term is.
+/// One function serves both sides of the search, so they cannot
+/// disagree about what a term is.
 pub(crate) fn passage_terms(raw: &str) -> Vec<u64> {
+    let mut sink = HashSink(Vec::new());
+    walk_passage_terms(raw, &mut sink);
+    sink.0
+}
+
+/// [`passage_terms`] with each hash next to the spelling it was
+/// computed from — a whole lowercased word, a camelCase piece, the two
+/// characters of an adjacent pair, or a lone character. Same walker,
+/// same order; only the sink differs, so the rendered stream IS the
+/// hashed stream. Recomputed per explain call — the index keeps hashes
+/// only, and grows no reverse map for a diagnostic path.
+pub(crate) fn spelled_passage_terms(raw: &str) -> Vec<(String, u64)> {
+    let mut sink = SpellingSink {
+        word: String::new(),
+        terms: Vec::new(),
+    };
+    walk_passage_terms(raw, &mut sink);
+    sink.terms
+}
+
+/// The walker under [`passage_terms`]. The camelCase split reads an
+/// NFKC-folded but NOT lowercased view of the input: lowercasing would
+/// erase the very case boundaries that let `state` reach `AppState`,
+/// while the width fold keeps a full-width `Ａ` — which the normalized
+/// whole-word term already folds to ASCII — in the same run as its
+/// ASCII neighbors instead of breaking it (so `ＡpplePie` yields the
+/// `apple` piece, matching a plain `apple` cue).
+fn walk_passage_terms(raw: &str, sink: &mut impl TermSink) {
     use unicode_normalization::UnicodeNormalization;
-    let mut terms = text_terms(&taguru::context::normalize_entry(raw));
+    walk_text_terms(&taguru::context::normalize_entry(raw), sink);
     let mut run: Vec<char> = Vec::new();
     for ch in raw.nfkc() {
         if ch.is_ascii_alphanumeric() {
             run.push(ch);
         } else {
-            camel_pieces(&run, &mut terms);
+            camel_pieces(&run, sink);
             run.clear();
         }
     }
-    camel_pieces(&run, &mut terms);
-    terms
+    camel_pieces(&run, sink);
 }
 
-/// Appends one lowercased word term per piece of an ASCII run that
+/// Emits one lowercased word term per piece of an ASCII run that
 /// splits at case boundaries: `aB` → `a|B`, digits stick to their
 /// piece (`U64Max` → `u64|max`), and an acronym ends before its last
 /// capital (`HTTPServer` → `http|server`). A run with no boundary
-/// appends nothing — its whole-word term is already in the stream.
+/// emits nothing — its whole-word term is already in the stream.
 /// Pieces hash exactly like [`text_terms`] words, so a piece matches
 /// wherever the same word occurs standalone.
-fn camel_pieces(run: &[char], terms: &mut Vec<u64>) {
+fn camel_pieces(run: &[char], sink: &mut impl TermSink) {
     let mut starts = vec![0];
     for at in 1..run.len() {
         if !run[at].is_ascii_uppercase() {
@@ -4743,63 +5354,73 @@ fn camel_pieces(run: &[char], terms: &mut Vec<u64>) {
     for window in starts.windows(2) {
         let mut word = FNV_OFFSET;
         for ch in &run[window[0]..window[1]] {
-            word ^= ch.to_ascii_lowercase() as u64;
+            let ch = ch.to_ascii_lowercase();
+            sink.word_char(ch);
+            word ^= ch as u64;
             word = word.wrapping_mul(FNV_PRIME);
         }
-        terms.push(word | 1 << 63);
+        sink.word(word | 1 << 63);
     }
 }
 
-/// The word/bigram layer under [`passage_terms`], as u64 keys.
-/// ASCII-alphanumeric runs count as whole words; everything else
-/// contributes adjacent character pairs within its run (a run of one
-/// contributes the lone character). Space-delimited languages need
-/// word terms — character pairs occur in every English document alike,
-/// which flattens IDF to nothing — while undelimited Japanese needs
-/// the bigrams. Runs break at spaces and punctuation, and a script
-/// switch breaks the run too, so terms never straddle "第10篇"-style
-/// boundaries.
+/// [`walk_text_terms`] collected as bare keys — the tokenization tests'
+/// entrance; production goes through [`passage_terms`], which layers
+/// the camelCase pieces on top of the same walker.
+#[cfg(test)]
 fn text_terms(text: &str) -> Vec<u64> {
-    let mut terms = Vec::new();
+    let mut sink = HashSink(Vec::new());
+    walk_text_terms(text, &mut sink);
+    sink.0
+}
+
+/// The word/bigram layer under [`passage_terms`]. ASCII-alphanumeric
+/// runs count as whole words; everything else contributes adjacent
+/// character pairs within its run (a run of one contributes the lone
+/// character). Space-delimited languages need word terms — character
+/// pairs occur in every English document alike, which flattens IDF to
+/// nothing — while undelimited Japanese needs the bigrams. Runs break
+/// at spaces and punctuation, and a script switch breaks the run too,
+/// so terms never straddle "第10篇"-style boundaries.
+fn walk_text_terms(text: &str, sink: &mut impl TermSink) {
     let mut word = FNV_OFFSET; // running FNV-1a over the current ASCII word
     let mut in_word = false;
     let mut run: Option<char> = None; // previous char of the current non-ASCII run
     let mut run_len = 0usize;
-    let flush_run = |terms: &mut Vec<u64>, run: &mut Option<char>, run_len: &mut usize| {
+    fn flush_run(sink: &mut impl TermSink, run: &mut Option<char>, run_len: &mut usize) {
         if let (Some(last), 1) = (*run, *run_len) {
-            terms.push(last as u64); // below the pair space: pairs always have bits 32+
+            sink.lone(last as u64, last); // below the pair space: pairs always have bits 32+
         }
         *run = None;
         *run_len = 0;
-    };
+    }
     for ch in text.chars() {
         if ch.is_ascii_alphanumeric() {
-            flush_run(&mut terms, &mut run, &mut run_len);
+            flush_run(sink, &mut run, &mut run_len);
+            sink.word_char(ch);
             word ^= ch as u64;
             word = word.wrapping_mul(FNV_PRIME);
             in_word = true;
         } else {
             if in_word {
-                terms.push(word | 1 << 63); // disjoint from pair keys (chars < 2^21)
+                sink.word(word | 1 << 63); // disjoint from pair keys (chars < 2^21)
                 word = FNV_OFFSET;
                 in_word = false;
             }
             if ch.is_alphanumeric() {
                 if let Some(prev) = run {
-                    terms.push(((prev as u64) << 32) | ch as u64);
+                    sink.pair(((prev as u64) << 32) | ch as u64, prev, ch);
                 }
                 run = Some(ch);
                 run_len += 1;
             } else {
-                flush_run(&mut terms, &mut run, &mut run_len);
+                flush_run(sink, &mut run, &mut run_len);
             }
         }
     }
     if in_word {
-        terms.push(word | 1 << 63);
+        sink.word(word | 1 << 63);
     }
-    flush_run(&mut terms, &mut run, &mut run_len);
-    terms
+    flush_run(sink, &mut run, &mut run_len);
 }
 
 fn save_files(
@@ -5745,6 +6366,152 @@ mod tests {
             ),
             "{body}"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `semantic_resolve` deliberately folds provider-off, model-changed,
+    /// and nothing-embedded into one empty answer; its explain twin must
+    /// hold them apart, and must place an expected name in exactly the
+    /// ordering `semantic_resolve` truncates.
+    #[test]
+    fn explain_semantic_resolve_names_what_semantic_resolve_folds() {
+        let dir = scratch_dir("sem-explain");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let embedder =
+                Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            state
+                .create("fruit", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("fruit", |context| {
+                    context.associate("りんご", "分類", "果物", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+
+            // Before any refresh: nothing is embedded, and the report
+            // says that — not "empty answer", not "model changed".
+            assert!(matches!(
+                state
+                    .explain_semantic_resolve("fruit", "アップル", "りんご", false, None)
+                    .unwrap(),
+                GlossLaneReport::EmptyTable
+            ));
+
+            state.refresh_embeddings("fruit").unwrap().unwrap();
+
+            // The expected name's own cosine and its rank in the very
+            // ordering semantic_resolve serves.
+            let Some(GlossLaneReport::Ran {
+                floor,
+                cosine: Some(cosine),
+                rank,
+                passing,
+                cap,
+            }) = state.explain_semantic_resolve("fruit", "アップル", "りんご", false, None)
+            else {
+                panic!("the sweep should have run with a cosine for りんご");
+            };
+            assert!((cosine - 0.96).abs() < 1e-6);
+            assert_eq!(rank, Some(1));
+            assert_eq!(passing, 1, "果物's cosine 0.0 sits under the floor");
+            assert_eq!(cap, SEMANTIC_RESOLVE_LIMIT);
+            assert!(floor > 0.0);
+
+            // A below-floor name reports its cosine with no rank — the
+            // "scored 0.0, floor 0.35" evidence — and a floor override
+            // seats it, in semantic_resolve's exact order.
+            let Some(GlossLaneReport::Ran {
+                cosine: Some(low),
+                rank: None,
+                ..
+            }) = state.explain_semantic_resolve("fruit", "アップル", "果物", false, None)
+            else {
+                panic!("果物 has a vector; its cosine must be reported");
+            };
+            assert!(low.abs() < 1e-6);
+            let Some(GlossLaneReport::Ran {
+                rank: Some(rank),
+                passing,
+                ..
+            }) = state.explain_semantic_resolve("fruit", "アップル", "果物", false, Some(0.0))
+            else {
+                panic!("floor 0.0 must seat 果物");
+            };
+            assert_eq!((rank, passing), (2, 2));
+            let served = state
+                .semantic_resolve("fruit", "アップル", false, Some(0.0))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                served[rank - 1].0,
+                "果物",
+                "rank must match the serve order"
+            );
+
+            // A name added after the refresh has no vector yet: the
+            // sweep runs, its cosine does not exist.
+            state
+                .write_context("fruit", |context| {
+                    context.associate("バナナ", "分類", "果物", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+            assert!(matches!(
+                state
+                    .explain_semantic_resolve("fruit", "アップル", "バナナ", false, None)
+                    .unwrap(),
+                GlossLaneReport::Ran { cosine: None, .. }
+            ));
+            state.flush_dirty();
+        }
+
+        // Same sidecar, another model: named as the reason.
+        struct OtherEmbeddings;
+        impl EmbeddingProvider for OtherEmbeddings {
+            fn model(&self) -> &str {
+                "other-model"
+            }
+            fn embed(&self, texts: &[&str], _: EmbedPurpose) -> Result<Vec<Vec<f32>>, String> {
+                Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0]).collect())
+            }
+        }
+        let state = AppState::boot(
+            dir.clone(),
+            usize::MAX,
+            Some(Arc::new(OtherEmbeddings) as Arc<dyn EmbeddingProvider>),
+        )
+        .unwrap();
+        assert!(matches!(
+            state
+                .explain_semantic_resolve("fruit", "アップル", "りんご", false, None)
+                .unwrap(),
+            GlossLaneReport::ModelChanged { .. }
+        ));
+        // A context that does not exist is the outer None — but only
+        // once a provider exists to get past the Off arm.
+        assert!(
+            state
+                .explain_semantic_resolve("nazo", "アップル", "りんご", false, None)
+                .is_none()
+        );
+
+        // No provider at all: Off before any lookup, exactly where
+        // semantic_resolve answers its empty list. (Shadowing keeps the
+        // previous state — and its data-dir lock — alive to scope end,
+        // so release it by hand.)
+        drop(state);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(matches!(
+            state
+                .explain_semantic_resolve("fruit", "アップル", "りんご", false, None)
+                .unwrap(),
+            GlossLaneReport::Off
+        ));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -7133,6 +7900,33 @@ mod tests {
         // splits at the underscore, ALLCAPS and lowercase stay whole.
         assert_eq!(passage_terms("flush_dirty"), text_terms("flush_dirty"));
         assert_eq!(passage_terms("WAL replay"), text_terms("wal replay"));
+    }
+
+    #[test]
+    fn spelled_terms_are_the_hashed_terms_with_their_spellings() {
+        for text in [
+            "精米歩合は50%まで磨く。",
+            "AppState boot 水、源 第10篇 ＡpplePie",
+            "HTTPServer U64Max flush_dirty",
+        ] {
+            let spelled = spelled_passage_terms(text);
+            // Same walker, only the sink differs: the hash stream is
+            // passage_terms verbatim.
+            assert_eq!(
+                spelled.iter().map(|(_, term)| *term).collect::<Vec<_>>(),
+                passage_terms(text),
+                "spelled and bare terms diverged ({text})"
+            );
+            // Every spelling is exactly what was hashed, so hashing the
+            // spelling alone finds the same term again.
+            for (spelling, term) in &spelled {
+                assert_eq!(
+                    passage_terms(spelling).first(),
+                    Some(term),
+                    "a spelling must hash back to its own term ({spelling:?} in {text:?})"
+                );
+            }
+        }
     }
 
     #[test]

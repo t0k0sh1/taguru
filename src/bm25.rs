@@ -103,6 +103,47 @@ pub(crate) struct Bm25Index {
 /// between the index's view and the store's current record.
 pub(crate) type IndexHit = (String, u32, u64, f32);
 
+/// One query term's evidence against one paragraph, in query-gram
+/// order (the position IS the term key — the caller holds the gram
+/// list it asked about, spellings included). `carriers` (the df) and
+/// `idf` are corpus-wide, `tf` and the `contribution` are the
+/// paragraph's own. A term the paragraph lacks reports tf 0 and
+/// contribution 0.0; a term nothing carries reports carriers 0:
+/// "matched only two high-df bigrams contributing ~0" must be visible,
+/// not inferred.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct TermEvidence {
+    pub(crate) tf: f32,
+    pub(crate) carriers: u32,
+    pub(crate) idf: f32,
+    pub(crate) contribution: f32,
+}
+
+/// The index's whole account of one paragraph against one query:
+/// per-term evidence plus its sum, which is bit-for-bit the score
+/// [`Bm25Index::search`] gives the same paragraph — both sides add the
+/// same [`contribution`] values in query-gram order.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct IndexEvidence {
+    /// The indexed TEXT hash — the caller's staleness check against
+    /// the store's current record, exactly like a search hit's.
+    pub(crate) hash: u64,
+    pub(crate) score: f32,
+    pub(crate) terms: Vec<TermEvidence>,
+}
+
+/// The two factors of one term's BM25 addend, factored out of the
+/// search loop so [`Bm25Index::explain`] cannot drift from it — the
+/// expression shapes are the loop's originals, so explain reports the
+/// very numbers search summed.
+fn idf(live_total: f32, carriers: f32) -> f32 {
+    (1.0 + (live_total - carriers + 0.5) / (carriers + 0.5)).ln()
+}
+
+fn contribution(idf: f32, tf: f32, length: f32, average_length: f32) -> f32 {
+    idf * (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * length / average_length))
+}
+
 impl Bm25Index {
     pub(crate) fn empty() -> Self {
         Self {
@@ -245,7 +286,7 @@ impl Bm25Index {
             if carriers == 0.0 {
                 continue;
             }
-            let idf = (1.0 + (total - carriers + 0.5) / (carriers + 0.5)).ln();
+            let idf = idf(total, carriers);
             for posting in postings {
                 let slot = &self.slots[posting.slot as usize];
                 if !slot.alive {
@@ -254,8 +295,8 @@ impl Bm25Index {
                 if scores[posting.slot as usize] == 0.0 {
                     touched.push(posting.slot);
                 }
-                scores[posting.slot as usize] += idf * (posting.tf * (K1 + 1.0))
-                    / (posting.tf + K1 * (1.0 - B + B * slot.length / average_length));
+                scores[posting.slot as usize] +=
+                    contribution(idf, posting.tf, slot.length, average_length);
             }
         }
 
@@ -279,6 +320,70 @@ impl Bm25Index {
         });
         hits.truncate(limit);
         hits
+    }
+
+    /// One live paragraph's evidence against `query_grams` — what
+    /// [`Bm25Index::search`] computed about it and threw away with the
+    /// truncation, plus the per-term breakdown search never
+    /// materializes. `None` when the index holds no live slot for the
+    /// (source, paragraph) pair. `query_grams` deduplicated, as for
+    /// `search`.
+    pub(crate) fn explain(
+        &self,
+        query_grams: &[u64],
+        source: &str,
+        index: u32,
+    ) -> Option<IndexEvidence> {
+        let source_id = *self.source_ids.get(source)?;
+        let slot_id = *self.by_source.get(&source_id)?.iter().find(|&&slot| {
+            let slot = &self.slots[slot as usize];
+            slot.alive && slot.index == index
+        })?;
+        let slot = &self.slots[slot_id as usize];
+        let total = self.live_count as f32;
+        let average_length = (self.live_total_length / f64::from(self.live_count)).max(1.0) as f32;
+
+        let mut terms = Vec::with_capacity(query_grams.len());
+        let mut score = 0f32;
+        for &gram in query_grams {
+            let (tf, carriers) = match self.postings.get(&gram) {
+                Some(postings) => (
+                    postings
+                        .iter()
+                        .find(|posting| posting.slot == slot_id)
+                        .map_or(0.0, |posting| posting.tf),
+                    postings
+                        .iter()
+                        .filter(|posting| self.slots[posting.slot as usize].alive)
+                        .count() as u32,
+                ),
+                None => (0.0, 0),
+            };
+            // carriers 0 is "the corpus has never seen this term" — an
+            // idf for it would be an answer to a question nobody asked.
+            let idf = if carriers == 0 {
+                0.0
+            } else {
+                idf(total, carriers as f32)
+            };
+            let addend = if tf > 0.0 {
+                contribution(idf, tf, slot.length, average_length)
+            } else {
+                0.0
+            };
+            score += addend;
+            terms.push(TermEvidence {
+                tf,
+                carriers,
+                idf,
+                contribution: addend,
+            });
+        }
+        Some(IndexEvidence {
+            hash: slot.hash,
+            score,
+            terms,
+        })
     }
 
     /// Per-source digest over (paragraph index, paragraph hash,
@@ -656,6 +761,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn explain_reports_the_addends_search_summed() {
+        let records = corpus();
+        let mut index = Bm25Index::build(&records);
+        let query = grams("精米歩合はどこまで磨く?");
+
+        // Every hit's score is reproduced exactly: same addends, same
+        // order, bit for bit — explain and search share the formula.
+        let hits = index.search(&query, 10);
+        assert!(!hits.is_empty());
+        for (source, paragraph, hash, score) in &hits {
+            let evidence = index.explain(&query, source, *paragraph).unwrap();
+            assert_eq!(
+                evidence.score, *score,
+                "explain must sum exactly what search summed ({source}:{paragraph})"
+            );
+            assert_eq!(evidence.hash, *hash);
+            assert_eq!(evidence.terms.len(), query.len());
+            let sum: f32 = evidence.terms.iter().map(|term| term.contribution).sum();
+            assert_eq!(sum, evidence.score);
+            assert!(
+                evidence
+                    .terms
+                    .iter()
+                    .any(|term| term.tf > 0.0 && term.carriers > 0 && term.contribution > 0.0)
+            );
+        }
+
+        // A paragraph sharing nothing with the query still gets a full
+        // per-term table — all-zero tf IS the no_term_overlap evidence.
+        let evidence = index.explain(&query, "docs/code.md", 0).unwrap();
+        assert_eq!(evidence.score, 0.0);
+        assert_eq!(evidence.terms.len(), query.len());
+        assert!(
+            evidence
+                .terms
+                .iter()
+                .all(|term| term.tf == 0.0 && term.contribution == 0.0)
+        );
+
+        // Question terms are the paragraph's own evidence: the text
+        // never says 削る, the attached question does.
+        let questioned = PassageRecord::for_tests_with_questions(
+            "精米歩合は50パーセントまで磨く。",
+            vec![(0, "米はどれくらい削るのか".to_string())],
+        );
+        let with_question = Bm25Index::build(&[("doc".to_string(), questioned)]);
+        let evidence = with_question
+            .explain(&grams("米をどれくらい削る?"), "doc", 0)
+            .unwrap();
+        assert!(evidence.score > 0.0);
+
+        // Unknown paragraphs, unknown sources, and tombstoned sources
+        // have no index evidence to report.
+        assert!(index.explain(&query, "docs/aomine.md", 99).is_none());
+        assert!(index.explain(&query, "missing.md", 0).is_none());
+        index.remove_source("docs/aomine.md");
+        assert!(index.explain(&query, "docs/aomine.md", 0).is_none());
     }
 
     #[test]
