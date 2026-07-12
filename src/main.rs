@@ -3,6 +3,9 @@ mod auth;
 mod bm25;
 mod cli;
 mod compact;
+// The same file lib.rs includes — see src/crc32c.rs for why the
+// checksum primitive is dual-included instead of exported.
+mod crc32c;
 mod embedding;
 mod estimate;
 mod export;

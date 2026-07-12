@@ -214,6 +214,14 @@ pub async fn retract_source(
             if associations_touched > 0 || passage_removed {
                 state.note_write(&name);
             }
+            // Retracting the source is the second documented repair for
+            // a torn import (beside re-importing the batch): its truth
+            // is now consistently absent, so a surviving batch-open
+            // marker stops describing a tear. Cleared here at the
+            // operator-facing verb, NOT inside the registry primitive —
+            // import's own step 1 is that same primitive and must not
+            // clear the marker it just opened.
+            state.clear_import_marker(&name, &request.source);
             ok(
                 RetractOutcome {
                     associations_touched,

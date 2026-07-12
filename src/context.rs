@@ -2850,6 +2850,19 @@ mod tests {
         }
     }
 
+    /// Recomputes the checksum footer after a test tampers with an
+    /// image's body. The structural validators those tests pin sit
+    /// BEHIND the checksum — without resealing, every mutation would
+    /// stop at "checksum mismatch" and the validators would go
+    /// unexercised (they still matter: pre-v6 images skip the checksum,
+    /// and a hand-built image can carry any footer it likes).
+    fn resealed(mut image: Vec<u8>) -> Vec<u8> {
+        let body = image.len() - 4;
+        let crc = crate::crc32c::crc32c(&image[..body]);
+        image[body..].copy_from_slice(&crc.to_le_bytes());
+        image
+    }
+
     /// Reads the stored weight of one exact triple through the public API.
     fn weight_between(context: &Context, subject: &str, label: &str, object: &str) -> f64 {
         let matches = context.query(Some(subject), Some(label), Some(object));
@@ -3942,7 +3955,7 @@ mod tests {
         with_alias.add_concept_alias("わたし", "私").unwrap();
         let mut corrupt = with_alias.to_bytes();
         corrupt[212..216].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(Context::from_bytes(&corrupt).is_err());
+        assert!(Context::from_bytes(&resealed(corrupt)).is_err());
     }
 
     #[test]
@@ -4746,7 +4759,7 @@ mod tests {
             .unwrap();
         let mut dangling = context.to_bytes();
         dangling[252..256].copy_from_slice(&u32::MAX.to_le_bytes());
-        let error = Context::from_bytes(&dangling).unwrap_err();
+        let error = Context::from_bytes(&resealed(dangling)).unwrap_err();
         assert!(error.to_string().contains("unknown attribution"), "{error}");
 
         // Two sourced, located attributions from two distinct sources on
@@ -4765,7 +4778,7 @@ mod tests {
             .unwrap();
         let mut unsorted = two_sources.to_bytes();
         unsorted[292..296].copy_from_slice(&0u32.to_le_bytes());
-        let error = Context::from_bytes(&unsorted).unwrap_err();
+        let error = Context::from_bytes(&resealed(unsorted)).unwrap_err();
         assert!(error.to_string().contains("not sorted"), "{error}");
     }
 
@@ -4783,7 +4796,7 @@ mod tests {
             .unwrap();
         let mut corrupt = context.to_bytes();
         corrupt[64..72].copy_from_slice(&0u64.to_le_bytes());
-        let error = Context::from_bytes(&corrupt).unwrap_err();
+        let error = Context::from_bytes(&resealed(corrupt)).unwrap_err();
         assert!(error.to_string().contains("combined count"), "{error}");
     }
 
@@ -4799,7 +4812,7 @@ mod tests {
             .unwrap();
         let mut nan_edge = context.to_bytes();
         nan_edge[72..80].copy_from_slice(&f64::NAN.to_le_bytes());
-        let error = Context::from_bytes(&nan_edge).unwrap_err();
+        let error = Context::from_bytes(&resealed(nan_edge)).unwrap_err();
         assert!(
             error.to_string().contains("edge weight sum is not finite"),
             "{error}"
@@ -4810,7 +4823,7 @@ mod tests {
         // next u32, count u64 — sits at 104..112.
         let mut inf_record = context.to_bytes();
         inf_record[104..112].copy_from_slice(&f64::INFINITY.to_le_bytes());
-        let error = Context::from_bytes(&inf_record).unwrap_err();
+        let error = Context::from_bytes(&resealed(inf_record)).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -4833,7 +4846,7 @@ mod tests {
         let mut overflow = two_sources.to_bytes();
         overflow[96..104].copy_from_slice(&u64::MAX.to_le_bytes());
         overflow[120..128].copy_from_slice(&u64::MAX.to_le_bytes());
-        let error = Context::from_bytes(&overflow).unwrap_err();
+        let error = Context::from_bytes(&resealed(overflow)).unwrap_err();
         assert!(error.to_string().contains("overflows u64"), "{error}");
     }
 
@@ -4854,7 +4867,7 @@ mod tests {
             .unwrap();
         let mut duplicate = context.to_bytes();
         duplicate[112..116].copy_from_slice(&0u32.to_le_bytes());
-        let error = Context::from_bytes(&duplicate).unwrap_err();
+        let error = Context::from_bytes(&resealed(duplicate)).unwrap_err();
         assert!(
             error.to_string().contains("attributes a source twice"),
             "{error}"
@@ -4897,6 +4910,45 @@ mod tests {
     }
 
     #[test]
+    fn the_checksum_catches_silent_corruption_and_legacy_images_skip_it() {
+        let mut context = Context::default();
+        context.associate("i", "likes", "apple", 1.0).unwrap();
+        let image = context.to_bytes();
+        assert_eq!(Context::image_generation(&image), Some((6, true)));
+
+        // Flip the arena's last byte: one character of a stored name.
+        // The image stays structurally perfect — ids in range, chains
+        // intact, UTF-8 valid — it just says something else. This is
+        // the silent-bit-rot shape, and the reseal below proves the
+        // structural validators genuinely cannot see it: only the
+        // checksum stands between it and being served (and flushed
+        // back) as truth.
+        let mut flipped = image.clone();
+        let last_arena_byte = flipped.len() - 5; // 4-byte footer after it
+        flipped[last_arena_byte] ^= 0x01; // the name's final letter shifts
+        let error = Context::from_bytes(&flipped).unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"), "{error}");
+        let laundered = Context::from_bytes(&resealed(flipped))
+            .expect("structural validation alone accepts the corrupted name");
+        let assoc = &laundered.recall("i")[0];
+        assert_ne!(
+            (assoc.label.as_str(), assoc.object.as_str()),
+            ("likes", "apple"),
+            "the flipped byte changed what the image says, and it loaded anyway"
+        );
+
+        // A v5 image is the same section layout minus the footer: it
+        // loads, as unverifiable as it always was.
+        let v5 = context.to_bytes_as_version(5);
+        assert_eq!(Context::image_generation(&v5), Some((5, false)));
+        let loaded = Context::from_bytes(&v5).expect("v5 image must load");
+        assert_eq!(loaded.recall("i").len(), 1);
+
+        // Bytes that never were an image have no version to report.
+        assert_eq!(Context::image_generation(b"junk"), None);
+    }
+
+    #[test]
     fn from_bytes_rejects_inconsistent_records() {
         let mut context = Context::default();
         context.associate("私", "好き", "りんご", 1.0).unwrap();
@@ -4907,7 +4959,7 @@ mod tests {
         // Pointing it at a nonexistent concept must be caught.
         let mut dangling_subject = image.clone();
         dangling_subject[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(Context::from_bytes(&dangling_subject).is_err());
+        assert!(Context::from_bytes(&resealed(dangling_subject)).is_err());
 
         // 私's `outgoing_count` sits at offset 96: header 16, edge table
         // 8 + 40, empty attribution table 8, concept count 8, then the
@@ -4915,7 +4967,7 @@ mod tests {
         // disagrees with the actual chain must be caught.
         let mut wrong_count = image.clone();
         wrong_count[96..100].copy_from_slice(&5u32.to_le_bytes());
-        assert!(Context::from_bytes(&wrong_count).is_err());
+        assert!(Context::from_bytes(&resealed(wrong_count)).is_err());
     }
 
     #[test]

@@ -214,7 +214,11 @@ const COMPACT_FLOOR_BYTES: u64 = 4 * 1024 * 1024;
 /// (see the module doc for why a ratio, never a fixed threshold).
 const COMPACT_RATIO: u64 = 1;
 
-const SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS3";
+const SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS4";
+/// The pre-checksum snapshot format: S4's layout minus the CRC-32C
+/// footer, so its bytes can only be parsed, never verified. Read
+/// forever, written never again.
+const S3_SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS3";
 /// The pre-sections snapshot format: same layout minus the per-source
 /// section blocks. Read forever, written never again.
 const S2_SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS2";
@@ -302,13 +306,17 @@ impl PassageStore {
     /// leaves the file untouched and returns the torn fragment's size so
     /// a read-only caller — `taguru inspect` — can report it (`Ok`'s
     /// second element; `None` when the log ends clean or was healed).
+    /// `Ok`'s third element counts log records that carried no checksum
+    /// (pre-checksum writers) — meaningful only on the heal=false path,
+    /// where inspect reports how much of the log was actually verified;
+    /// the healing path reports 0 without counting.
     pub(crate) fn load(
         snapshot_path: PathBuf,
         legacy_path: &Path,
         log_path: PathBuf,
         max_log_bytes: usize,
         heal: bool,
-    ) -> io::Result<(Self, Option<u64>)> {
+    ) -> io::Result<(Self, Option<u64>, usize)> {
         let (sources, watermark, snapshot_bytes) = match fs::read(&snapshot_path) {
             Ok(bytes) => {
                 let size = bytes.len() as u64;
@@ -343,9 +351,9 @@ impl PassageStore {
         // inspect passes heal=false to leave the file as it found it and
         // learn the torn size instead. Both decode the same ops, so an
         // inspection that says ok means the server's load will succeed too.
-        let (ops, top, torn) = if heal {
+        let (ops, top, torn, unchecked) = if heal {
             let (ops, top) = wal::replay::<PassageOp>(&log_path, watermark)?;
-            (ops, top, None)
+            (ops, top, None, 0)
         } else {
             wal::replay_readonly::<PassageOp>(&log_path, watermark)?
         };
@@ -395,6 +403,7 @@ impl PassageStore {
                 max_log_bytes: max_log_bytes as u64,
             },
             torn,
+            unchecked,
         ))
     }
 
@@ -714,6 +723,11 @@ fn snapshot_to_bytes(sources: &BTreeMap<String, Arc<PassageRecord>>, watermark: 
             write_chunk(&mut out, label.as_bytes());
         }
     }
+    // The CRC-32C footer, same discipline as the context image: the
+    // snapshot holds acknowledged passages with no other copy, and
+    // structural parsing alone cannot tell bit-rot from truth.
+    let crc = crate::crc32c::crc32c(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
     out
 }
 
@@ -721,16 +735,30 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
     let mut pos = 0usize;
     let magic = bytes.get(..8)?;
     // TAGURUS1 predates questions and sections; TAGURUS2 predates only
-    // sections. Each older layout is the newest one minus its trailing
-    // per-source blocks, so one parser reads all three.
-    let (questions_on_disk, sections_on_disk) = if magic == SNAPSHOT_MAGIC {
-        (true, true)
+    // sections; TAGURUS3 predates the checksum footer. Each older
+    // layout is the newest one minus its trailing pieces, so one
+    // parser reads all four.
+    let (questions_on_disk, sections_on_disk, checksummed) = if magic == SNAPSHOT_MAGIC {
+        (true, true, true)
+    } else if magic == S3_SNAPSHOT_MAGIC {
+        (true, true, false)
     } else if magic == S2_SNAPSHOT_MAGIC {
-        (true, false)
+        (true, false, false)
     } else if magic == LEGACY_SNAPSHOT_MAGIC {
-        (false, false)
+        (false, false, false)
     } else {
         return None;
+    };
+    // Verify before trusting anything past the magic: pre-checksum
+    // generations can only be parsed, the current one is proven the
+    // bytes that were written.
+    let bytes = if checksummed {
+        let body_len = bytes.len().checked_sub(4)?;
+        let (body, footer) = bytes.split_at(body_len);
+        let stored = u32::from_le_bytes(footer.try_into().ok()?);
+        (crate::crc32c::crc32c(body) == stored).then_some(body)?
+    } else {
+        bytes
     };
     pos += 8;
     let watermark = u64::from_le_bytes(bytes.get(pos..pos + 8)?.try_into().ok()?);
@@ -1163,7 +1191,7 @@ mod tests {
         drop(store);
 
         let head = fs::read(dir.join("t.passages.bin")).unwrap();
-        assert_eq!(&head[..8], b"TAGURUS3", "the rewrite upgrades the format");
+        assert_eq!(&head[..8], b"TAGURUS4", "the rewrite upgrades the format");
         let reborn = open(&dir);
         assert_eq!(text(&reborn, "old-doc").as_deref(), Some("旧本文。"));
     }
@@ -1197,7 +1225,7 @@ mod tests {
         drop(store);
 
         let head = fs::read(dir.join("t.passages.bin")).unwrap();
-        assert_eq!(&head[..8], b"TAGURUS3", "the rewrite upgrades the format");
+        assert_eq!(&head[..8], b"TAGURUS4", "the rewrite upgrades the format");
         let reborn = open(&dir);
         assert_eq!(text(&reborn, "old-doc").as_deref(), Some("旧本文。"));
     }
@@ -1229,6 +1257,38 @@ mod tests {
             snapshot_from_bytes(&padded).is_none(),
             "trailing bytes are corruption, not slack"
         );
+    }
+
+    #[test]
+    fn snapshot_checksum_rejects_a_flipped_byte_and_s3_loads_unchecked() {
+        let sources: BTreeMap<String, Arc<PassageRecord>> = [(
+            "doc".to_string(),
+            PassageRecord::new(Arc::from("第1段落。"), Vec::new(), Vec::new()).0,
+        )]
+        .into_iter()
+        .collect();
+        let bytes = snapshot_to_bytes(&sources, 7);
+        assert!(bytes.starts_with(SNAPSHOT_MAGIC));
+        assert!(snapshot_from_bytes(&bytes).is_some());
+
+        // Flip one watermark byte: structurally the snapshot still
+        // parses perfectly — it just carries a different watermark.
+        // Only the checksum can refuse it.
+        let mut flipped = bytes.clone();
+        flipped[9] ^= 0x01;
+        assert!(
+            snapshot_from_bytes(&flipped).is_none(),
+            "a parseable bitflip must fail the checksum"
+        );
+
+        // The same bytes as an S3 snapshot — body without the footer,
+        // pre-checksum magic — load exactly as they did before the
+        // footer existed: parsed, unverifiable.
+        let mut s3 = bytes[..bytes.len() - 4].to_vec();
+        s3[..8].copy_from_slice(S3_SNAPSHOT_MAGIC);
+        let (parsed, watermark) = snapshot_from_bytes(&s3).expect("S3 must keep loading");
+        assert_eq!(watermark, 7);
+        assert_eq!(parsed["doc"].text.as_ref(), "第1段落。");
     }
 
     #[test]

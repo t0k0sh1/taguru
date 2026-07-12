@@ -4525,6 +4525,49 @@ fn the_import_endpoint_applies_batches_to_a_live_server() {
     assert_eq!(edge["result"]["matches"][0]["weight"], json!(2.0));
 }
 
+/// A live import that stops partway leaves its batch-open marker on
+/// disk — the tear detection #59 adds; boot and `taguru inspect`
+/// report it — and the operator-facing repair verb (retract the
+/// source) clears it. The other repair, re-importing the corrected
+/// batch, is covered beside `apply_batch` itself.
+#[test]
+fn a_torn_live_import_leaves_its_marker_until_the_source_is_retracted() {
+    let server = Server::start("http-import-marker");
+    // An alias whose canonical nothing interned fails AFTER the
+    // retraction step — a genuinely half-applied source.
+    let torn = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-torn\", \
+                 \"create\": {\"description\": \"d\"}}\n\
+                 {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
+    let (status, body) = post_import(&server, torn, None);
+    assert_ne!(status, 200, "the batch must be refused: {body}");
+
+    let markers = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("importing"))
+            .collect()
+    };
+    let surviving = markers(&server.data_dir);
+    assert_eq!(surviving.len(), 1, "the refused batch keeps its marker");
+    let content: Value = serde_json::from_slice(&std::fs::read(&surviving[0]).unwrap()).unwrap();
+    assert_eq!(content["context"], json!("sake"));
+    assert_eq!(content["source"], json!("doc-torn"));
+
+    // Retracting the source makes its truth consistently absent — the
+    // marker stops describing a tear and the verb removes it.
+    server.ok(
+        "POST",
+        "/contexts/sake/sources/retract",
+        Some(json!({"source": "doc-torn"})),
+    );
+    assert!(
+        markers(&server.data_dir).is_empty(),
+        "retraction clears the marker"
+    );
+}
+
 #[test]
 fn the_import_endpoint_reports_section_bookkeeping() {
     let server = Server::start("http-import-sections");
