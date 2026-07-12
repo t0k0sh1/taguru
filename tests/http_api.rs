@@ -6486,3 +6486,208 @@ fn groups_ride_the_mcp_transport() {
     let text = failed["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("HTTP 404"), "{text}");
 }
+
+/// The changelog's stated limitation, pinned: compaction — the live
+/// endpoint and the offline CLI both — leaves `.group` files
+/// byte-for-byte alone. Groups hold nothing to compact, and a rewrite
+/// here would be a regression in disguise.
+#[test]
+fn compact_leaves_group_files_byte_for_byte() {
+    let server = Server::start("compact-groups");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
+            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources/retract",
+        Some(json!({"source": "gone.md"})),
+    );
+    server.ok(
+        "PUT",
+        "/groups/kura",
+        Some(json!({"description": "蔵元一式", "contexts": ["sake"]})),
+    );
+    let group_file = server.data_dir.join("kura.group");
+    let before = std::fs::read(&group_file).expect("the group file must exist");
+
+    // The live endpoint rewrites the context image, not the group file.
+    let shed = server.ok("POST", "/contexts/sake/compact", None);
+    assert_eq!(shed["dead_edges"], json!(1), "{shed}");
+    let after_live = std::fs::read(&group_file).expect("the group file must survive");
+    assert_eq!(
+        before, after_live,
+        "live compact must not touch group files"
+    );
+
+    // The offline CLI sweep over the whole directory: same statement.
+    let data_dir = server.stop_gracefully();
+    let compacted = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .args(["compact"])
+        .env("TAGURU_DATA_DIR", &data_dir)
+        .env_remove("TAGURU_CONFIG")
+        .env_remove("TAGURU_EMBED_URL")
+        .output()
+        .expect("binary must run");
+    assert_eq!(compacted.status.code(), Some(0), "{compacted:?}");
+    let after_cli = std::fs::read(&group_file).expect("the group file must survive");
+    assert_eq!(
+        before, after_cli,
+        "offline compact must not touch group files"
+    );
+
+    // And the untouched record still boots: the group answers as stored.
+    let server = Server::start_on("compact-groups-reboot", data_dir);
+    let row = server.ok("GET", "/groups/kura", None);
+    assert_eq!(row["contexts"], json!(["sake"]), "{row}");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
+
+/// The changelog's other stated limitation, pinned: a DELETE whose
+/// unlink fails answers 500, says the group will reappear, drops it
+/// from the live directory — and the next boot really does resurface
+/// it, because the file survived as the on-disk truth.
+#[cfg(unix)]
+#[test]
+fn a_failed_group_unlink_resurfaces_the_group_at_restart() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = Server::start("group-unlink-fail");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "PUT",
+        "/groups/kura",
+        Some(json!({"description": "蔵元一式", "contexts": ["sake"]})),
+    );
+    // Nothing dirty may remain: the flusher must not collide with the
+    // read-only window below.
+    server.ok("POST", "/flush", None);
+
+    // Unlink needs write permission on the PARENT directory; freezing
+    // the data directory makes exactly the unlink fail.
+    let frozen = std::fs::Permissions::from_mode(0o555);
+    std::fs::set_permissions(&server.data_dir, frozen).expect("chmod must apply");
+    let (status, refusal) = server.call("DELETE", "/groups/kura", None);
+    let restored = std::fs::Permissions::from_mode(0o755);
+    std::fs::set_permissions(&server.data_dir, restored).expect("chmod must restore");
+    assert_eq!(status, 500, "{refusal}");
+    assert_eq!(refusal["code"], json!("internal"), "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("reappears at the next restart"),
+        "{refusal}"
+    );
+
+    // The live directory dropped the record, as the error admits…
+    let (status, missing) = server.call("GET", "/groups/kura", None);
+    assert_eq!(status, 404, "{missing}");
+
+    // …and the surviving file resurfaces it at the next boot.
+    let data_dir = server.stop_gracefully();
+    assert!(
+        data_dir.join("kura.group").exists(),
+        "the unlink must have failed"
+    );
+    let server = Server::start_on("group-unlink-reboot", data_dir);
+    let row = server.ok("GET", "/groups/kura", None);
+    assert_eq!(row["contexts"], json!(["sake"]), "{row}");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
+
+/// A golden-question floor for cross-context retrieval: the 青嶺
+/// corpus split across a brewery context and a region context, grouped,
+/// and asked questions whose needed facts straddle the split. The
+/// plumbing tests above prove the merge mechanics; this pins that a
+/// question spanning contexts actually comes back whole.
+#[test]
+fn cross_context_search_answers_questions_that_straddle_the_split() {
+    let server = Server::start("cross-golden");
+    server.ok(
+        "PUT",
+        "/contexts/brewery",
+        Some(json!({"description": "青嶺酒造という蔵元の知識"})),
+    );
+    server.ok(
+        "PUT",
+        "/contexts/region",
+        Some(json!({"description": "霧沢町という土地の知識"})),
+    );
+    // 蔵元の事実は brewery に、土地の事実は region に — どちらの
+    // コンテキストも単独では下の質問に答え切れない。
+    server.ok(
+        "POST",
+        "/contexts/brewery/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "所在地", "object": "霧沢町", "weight": 1.0, "source": "第1段落"},
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "第1段落"},
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "第1段落"},
+            {"subject": "青嶺酒造", "label": "開く", "object": "蔵開きの祭り", "weight": 1.0, "source": "第5段落"},
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/region/associations",
+        Some(json!([
+            {"subject": "霧沢町", "label": "所在する県", "object": "雲居県", "weight": 1.0, "source": "地誌1"},
+            {"subject": "霧沢町", "label": "力を入れる", "object": "酒蔵観光", "weight": 1.0, "source": "地誌2"},
+            {"subject": "蔵開きの祭り", "label": "時期", "object": "毎年2月", "weight": 1.0, "source": "地誌2"},
+        ])),
+    );
+    server.ok(
+        "PUT",
+        "/groups/kirisawa",
+        Some(json!({"description": "霧沢の酒", "contexts": ["brewery", "region"]})),
+    );
+
+    // 「青嶺酒造はどの県にあるか」— 所在地 (brewery) と 所在する県
+    // (region) の両方が要る。ひとつの group 検索で両方が、それぞれの
+    // 出所タグ付きで返ること。
+    let answer = server.ok(
+        "POST",
+        "/query",
+        Some(json!({
+            "groups": ["kirisawa"],
+            "subject": ["青嶺酒造", "霧沢町"],
+            "label": ["所在地", "所在する県"],
+        })),
+    );
+    assert_eq!(answer["total"], json!(2), "{answer}");
+    let matches = answer["matches"].as_array().unwrap();
+    let fact = |subject: &str| {
+        matches
+            .iter()
+            .find(|m| m["subject"] == json!(subject))
+            .unwrap_or_else(|| panic!("missing fact for {subject}: {answer}"))
+    };
+    assert_eq!(fact("青嶺酒造")["context"], json!("brewery"), "{answer}");
+    assert_eq!(fact("青嶺酒造")["object"], json!("霧沢町"), "{answer}");
+    assert_eq!(fact("霧沢町")["context"], json!("region"), "{answer}");
+    assert_eq!(fact("霧沢町")["object"], json!("雲居県"), "{answer}");
+
+    // 「蔵開きの祭りについて知っていること」— recall がグループ越しに
+    // 両コンテキストの事実を集める (brewery: 開く, region: 時期)。
+    let recalled = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"groups": ["kirisawa"], "cue": "蔵開きの祭り"})),
+    );
+    assert_eq!(recalled["total"], json!(2), "{recalled}");
+    let contexts: Vec<&str> = recalled["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["context"].as_str().unwrap())
+        .collect();
+    assert!(
+        contexts.contains(&"brewery") && contexts.contains(&"region"),
+        "{recalled}"
+    );
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
