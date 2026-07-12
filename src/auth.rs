@@ -403,6 +403,9 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         | (&Method::GET, "/contexts/{name}/sources")
         | (&Method::GET, "/contexts/{name}/export")
         | (&Method::GET, "/protocol")
+        | (&Method::POST, "/recall")
+        | (&Method::POST, "/query")
+        | (&Method::POST, "/sources/search")
         | (&Method::POST, "/contexts/{name}/recall")
         | (&Method::POST, "/contexts/{name}/query")
         | (&Method::POST, "/contexts/{name}/describe")
@@ -442,7 +445,8 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
 /// [`KeyScope`] rides the request extensions for the handlers that
 /// FILTER rather than refuse (`GET /contexts`, the group listings)
 /// and for those judging context names that live in the body or the
-/// stored record (`/import`, the group writes).
+/// stored record (`/import`, the group writes, the cross-context
+/// searches).
 pub async fn enforce_authorization(
     State(keyring): State<Arc<Keyring>>,
     matched: Option<MatchedPath>,
@@ -477,7 +481,7 @@ pub async fn enforce_authorization(
     // `{name}` is a CONTEXT name on every route but `/groups/{name}`,
     // where it names the group itself: a group's member contexts live
     // in the body and the stored record, out of this middleware's
-    // reach, so the group handlers judge them (`group_scope_refusal`).
+    // reach, so the group handlers judge them (`api::scope_refusal`).
     // The exclusion names its one route exactly — deny-by-default
     // safe: a future route whose `{name}` is not a context and is not
     // listed here mis-answers 403 for scoped keys, never leaks open

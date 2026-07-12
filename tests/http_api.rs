@@ -2969,6 +2969,282 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
     );
 }
 
+/// Cross-context search: one request over several full context names,
+/// every match tagged with the context it came from. recall/query
+/// merge on |weight| (one scale across contexts), passage hits
+/// interleave by per-context rank, duplicate targets dedupe, and the
+/// refusals — empty list, missing name, over-cap list — land before
+/// anything is searched. The MCP search tools ride the same routes
+/// through their `contexts` argument.
+#[test]
+fn cross_context_search_merges_tagged_matches_across_named_contexts() {
+    let server = Server::start("cross-search");
+    for (name, fact) in [
+        (
+            "izakaya",
+            json!([{"subject": "蔵", "label": "名物", "object": "燗酒",
+                    "weight": 0.5, "source": "iz.md"}]),
+        ),
+        (
+            "sakagura",
+            json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
+                    "weight": 1.0, "source": "sk.md"}]),
+        ),
+        // Never named in a target list below — must never leak in.
+        (
+            "noise",
+            json!([{"subject": "蔵", "label": "場所", "object": "港",
+                    "weight": 2.0, "source": "no.md"}]),
+        ),
+    ] {
+        server.ok("PUT", &format!("/contexts/{name}"), Some(json!({})));
+        server.ok(
+            "POST",
+            &format!("/contexts/{name}/associations"),
+            Some(fact),
+        );
+    }
+
+    // recall across two of the three: both matches, each tagged.
+    let recalled = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["izakaya", "sakagura"], "cue": "蔵"})),
+    );
+    assert_eq!(recalled["total"], json!(2), "{recalled}");
+    let tag_of = |matches: &Value, object: &str| -> String {
+        matches
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|found| found["object"] == json!(object))
+            .unwrap_or_else(|| panic!("no match with object {object}: {matches}"))["context"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(tag_of(&recalled["matches"], "高瀬"), "sakagura");
+    assert_eq!(tag_of(&recalled["matches"], "燗酒"), "izakaya");
+
+    // Past the limit the strongest |weight| survives, across contexts.
+    let cut = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["izakaya", "sakagura"], "cue": "蔵", "limit": 1})),
+    );
+    assert_eq!(cut["total"], json!(2), "{cut}");
+    assert_eq!(cut["matches"].as_array().unwrap().len(), 1, "{cut}");
+    assert_eq!(cut["matches"][0]["context"], json!("sakagura"), "{cut}");
+
+    // Naming a context twice is redundant, not double.
+    let deduped = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["izakaya", "izakaya", "sakagura"], "cue": "蔵"})),
+    );
+    assert_eq!(deduped["total"], json!(2), "{deduped}");
+
+    // query: position-pinned, same tagging contract.
+    let queried = server.ok(
+        "POST",
+        "/query",
+        Some(json!({"contexts": ["izakaya", "sakagura"], "label": "杜氏"})),
+    );
+    assert_eq!(queried["total"], json!(1), "{queried}");
+    assert_eq!(queried["matches"][0]["context"], json!("sakagura"));
+    assert_eq!(queried["matches"][0]["object"], json!("高瀬"));
+
+    // The text lane: hits carry their context and interleave by
+    // per-context rank — both rank-0 hits lead, in target-list order.
+    server.ok(
+        "POST",
+        "/contexts/izakaya/sources",
+        Some(json!({"passages": {"iz.md": "蔵元の燗酒は冬の名物。"}})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sakagura/sources",
+        Some(json!({"passages": {"sk.md": "杜氏の高瀬は蔵元を任されている。"}})),
+    );
+    let hits = server.ok(
+        "POST",
+        "/sources/search",
+        Some(json!({"contexts": ["izakaya", "sakagura"], "query": "蔵元"})),
+    );
+    let hits = hits.as_array().unwrap();
+    assert_eq!(hits.len(), 2, "both contexts must answer: {hits:?}");
+    assert_eq!(hits[0]["context"], json!("izakaya"), "{hits:?}");
+    assert_eq!(hits[1]["context"], json!("sakagura"), "{hits:?}");
+    assert_eq!(hits[0]["source"], json!("iz.md"), "{hits:?}");
+
+    // Refusals, each before anything is searched.
+    let (status, empty) = server.call(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": [], "cue": "蔵"})),
+    );
+    assert_eq!(status, 400, "{empty}");
+    assert_eq!(empty["code"], json!("invalid_argument"), "{empty}");
+
+    let (status, missing) = server.call(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["izakaya", "ghost"], "cue": "蔵"})),
+    );
+    assert_eq!(status, 404, "{missing}");
+    assert_eq!(missing["code"], json!("no_context"), "{missing}");
+    assert!(
+        missing["error"].as_str().unwrap().contains("'ghost'"),
+        "{missing}"
+    );
+
+    let flood: Vec<String> = (0..1001).map(|i| format!("c{i}")).collect();
+    let (status, over) = server.call(
+        "POST",
+        "/query",
+        Some(json!({"contexts": flood, "label": "l"})),
+    );
+    assert_eq!(status, 400, "{over}");
+    assert_eq!(over["code"], json!("over_limit"), "{over}");
+
+    // The MCP search tools take `contexts` as the cross-context form…
+    let (status, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "recall", "arguments": {
+                "contexts": ["izakaya", "sakagura"], "cue": "蔵",
+            }},
+        })),
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_ne!(reply["result"]["isError"], json!(true), "{reply}");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("sakagura") && text.contains("izakaya"),
+        "{text}"
+    );
+
+    // …and refuse the ambiguous both-at-once form.
+    let (status, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "recall", "arguments": {
+                "context": "izakaya", "contexts": ["sakagura"], "cue": "蔵",
+            }},
+        })),
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["result"]["isError"], json!(true), "{reply}");
+    assert!(
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not both"),
+        "{reply}"
+    );
+}
+
+/// A scoped key's cross-context search is refused whole on any name
+/// beyond the grant — and because the grant check runs before the
+/// existence check, the 403 for a live out-of-grant name and for a
+/// made-up one are indistinguishable: no existence oracle.
+#[test]
+fn cross_context_search_respects_grants_without_an_existence_oracle() {
+    let server = Server::start_with_env(
+        "cross-scopes",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,potter:stok"),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"potter": {"role": "read", "contexts": ["sake"]}}"#,
+            ),
+        ],
+    );
+    let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
+        server.call_with_token(method, path, body, Some(token))
+    };
+    for name in ["sake", "bunko"] {
+        assert_eq!(
+            call("PUT", &format!("/contexts/{name}"), Some(json!({})), "atok").0,
+            200
+        );
+    }
+
+    // Inside the grant: answers.
+    let (status, inside) = call(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["sake"], "cue": "蔵"})),
+        "stok",
+    );
+    assert_eq!(status, 200, "{inside}");
+
+    // One out-of-grant name refuses the whole request…
+    let (status, live) = call(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["sake", "bunko"], "cue": "蔵"})),
+        "stok",
+    );
+    assert_eq!(status, 403, "{live}");
+    assert_eq!(live["code"], json!("forbidden"), "{live}");
+    assert!(
+        live["error"]
+            .as_str()
+            .unwrap()
+            .contains("no grant on context 'bunko'"),
+        "{live}"
+    );
+
+    // …and a nonexistent out-of-grant name answers the IDENTICAL
+    // refusal — never the 404 that would betray which names exist.
+    let (status, ghost) = call(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["sake", "ghost"], "cue": "蔵"})),
+        "stok",
+    );
+    assert_eq!(status, 403, "{ghost}");
+    assert_eq!(
+        ghost["error"]
+            .as_str()
+            .unwrap()
+            .replace("'ghost'", "'bunko'"),
+        live["error"].as_str().unwrap(),
+        "the refusals must differ in nothing but the echoed name"
+    );
+
+    // The unscoped admin hears the truth about the same request.
+    let (status, truth) = call(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["sake", "ghost"], "cue": "蔵"})),
+        "atok",
+    );
+    assert_eq!(status, 404, "{truth}");
+    assert_eq!(truth["code"], json!("no_context"), "{truth}");
+
+    // The other two searches run the same gate.
+    let (status, _) = call(
+        "POST",
+        "/query",
+        Some(json!({"contexts": ["sake", "bunko"], "label": "l"})),
+        "stok",
+    );
+    assert_eq!(status, 403);
+    let (status, _) = call(
+        "POST",
+        "/sources/search",
+        Some(json!({"contexts": ["sake", "bunko"], "query": "蔵元"})),
+        "stok",
+    );
+    assert_eq!(status, 403);
+}
+
 /// The access log names the context a request addressed, and every
 /// destructive operation leaves one `taguru::audit` line saying who
 /// did what to which object — the route template alone cannot answer

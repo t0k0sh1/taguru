@@ -2768,6 +2768,15 @@ impl AppState {
         describe_entry(name.to_string(), &entry)
     }
 
+    /// Whether a context exists, by registry membership. The
+    /// cross-context search entrances vet their whole target list up
+    /// front, so a mistyped name refuses before any context is
+    /// searched; a context deleted between this check and its read is
+    /// still caught by the read itself.
+    pub fn context_exists(&self, name: &str) -> bool {
+        self.lookup(name).is_some()
+    }
+
     /// Runs a read-only operation on one context, loading it first if
     /// cold. A hot context is served under the SHARED lock, so
     /// concurrent reads of one context run in parallel — a long explore

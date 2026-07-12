@@ -9,8 +9,8 @@ use crate::metrics::{ErrorKind, SearchOp};
 use crate::registry::{AppState, CitationLookup};
 
 use super::{
-    AppJson, AppQuery, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, access_error, clamp, error,
-    not_found, ok, overlong, search_log_enabled,
+    AppJson, AppQuery, CrossMatch, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, access_error, clamp,
+    cross_targets, error, not_found, ok, overlong, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -271,6 +271,21 @@ impl LaneEvidence {
     }
 }
 
+impl From<crate::registry::PassageSearchHit> for PassageHit {
+    fn from(hit: crate::registry::PassageSearchHit) -> Self {
+        Self {
+            source: hit.source,
+            paragraph: hit.index,
+            score: hit.score,
+            text: hit.text,
+            lanes: PassageLanes {
+                bm25: LaneEvidence::from_lane(hit.bm25),
+                vector: LaneEvidence::from_lane(hit.vector),
+            },
+        }
+    }
+}
+
 pub async fn search_passages(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -308,22 +323,98 @@ pub async fn search_passages(
                 );
             }
             ok(
-                hits.into_iter()
-                    .map(|hit| PassageHit {
-                        source: hit.source,
-                        paragraph: hit.index,
-                        score: hit.score,
-                        text: hit.text,
-                        lanes: PassageLanes {
-                            bm25: LaneEvidence::from_lane(hit.bm25),
-                            vector: LaneEvidence::from_lane(hit.vector),
-                        },
-                    })
-                    .collect::<Vec<_>>(),
+                hits.into_iter().map(PassageHit::from).collect::<Vec<_>>(),
                 started_at,
             )
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CrossSearchPassagesRequest {
+    /// Full context names — no groups, no patterns.
+    pub contexts: Vec<String>,
+    pub query: String,
+    /// Omitted means 5.
+    pub limit: Option<usize>,
+}
+
+/// [`search_passages`] across several named contexts at once, every
+/// hit tagged with its context. Unlike the graph lanes' weights,
+/// passage scores do NOT share a scale across contexts (BM25
+/// statistics are corpus-local; fusion numbers are rank arithmetic),
+/// so the merged order is rank interleaving — every context's best
+/// hit, then every second hit, ties broken by target-list order: the
+/// same rank-fusion posture the endpoint already takes across its two
+/// lanes. `score` stays what it was, per-context evidence.
+pub async fn cross_search_passages(
+    State(state): State<AppState>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+    AppJson(request): AppJson<CrossSearchPassagesRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    let targets = match cross_targets(&state, &scope, &key, request.contexts, started_at) {
+        Ok(targets) => targets,
+        Err(refusal) => return *refusal,
+    };
+    let limit = clamp(request.limit, 5, MAX_MATCH_LIMIT);
+    // Off the async worker, like the single-context handler: each
+    // residency's first search tokenizes its whole corpus. One
+    // context's failure aborts the whole response (a read has nothing
+    // to half-apply); the query embedding, when the semantic lane is
+    // on, is paid once — the cue cache serves the repeat contexts.
+    let outcome = tokio::task::block_in_place(|| {
+        let mut pool = Vec::new();
+        for (index, name) in targets.iter().enumerate() {
+            match state.search_passages(name, &request.query, limit) {
+                None => return Err(Box::new(not_found(name, started_at))),
+                Some(Err(io_error)) => {
+                    return Err(Box::new(passages_unreadable(&state, io_error, started_at)));
+                }
+                Some(Ok(hits)) => {
+                    state.note_search(SearchOp::SearchPassages, name, hits.is_empty());
+                    for hit in &hits {
+                        state
+                            .metrics()
+                            .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
+                    }
+                    pool.extend(
+                        hits.into_iter()
+                            .enumerate()
+                            .map(|(rank, hit)| (index, rank, hit)),
+                    );
+                }
+            }
+        }
+        Ok(pool)
+    });
+    let mut pool = match outcome {
+        Ok(pool) => pool,
+        Err(refusal) => return *refusal,
+    };
+    pool.sort_by_key(|(index, rank, _)| (*rank, *index));
+    pool.truncate(limit);
+    if search_log_enabled() {
+        tracing::info!(
+            target: "taguru::search",
+            contexts = %targets.join(","),
+            op = "search_passages",
+            cue = %request.query,
+            hits = pool.len(),
+            top_score = pool.first().map_or(0.0, |(_, _, hit)| f64::from(hit.score)),
+            "search",
+        );
+    }
+    ok(
+        pool.into_iter()
+            .map(|(index, _, hit)| CrossMatch {
+                context: targets[index].clone(),
+                inner: PassageHit::from(hit),
+            })
+            .collect::<Vec<_>>(),
+        started_at,
+    )
 }
 
 #[cfg(test)]

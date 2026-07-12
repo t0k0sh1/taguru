@@ -21,7 +21,9 @@ use crate::registry::{
 };
 
 mod sources;
-pub use sources::{citation, list_sources, lookup_passages, retract_source, search_passages};
+pub use sources::{
+    citation, cross_search_passages, list_sources, lookup_passages, retract_source, search_passages,
+};
 
 #[derive(Serialize)]
 pub struct ApiResponse<T> {
@@ -764,16 +766,16 @@ fn group_entry(
     }
 }
 
-/// The write gate for a scoped key on a group: every context the
-/// operation involves — the group's transitive members (nested
-/// children read through, since the group ADDRESSES them) and every
-/// name the request carries — must sit inside the grant, or nothing
-/// applies (the import gate's pre-apply judgement, at membership
-/// granularity). Checked BEFORE existence on purpose: existence-first
-/// would answer 404 for a missing out-of-scope name and 403 for a live
-/// one, handing a scoped key an oracle for which context names exist
-/// beyond its grant.
-fn group_scope_refusal<'a>(
+/// The gate for a scoped key on any operation whose context names ride
+/// the body or the stored record rather than the path — group writes
+/// (through [`scoped_group_refusal`], at membership granularity, the
+/// import gate's pre-apply judgement) and the cross-context searches:
+/// one involved context beyond the grant refuses the request whole.
+/// Checked BEFORE existence on purpose: existence-first would answer
+/// 404 for a missing out-of-scope name and 403 for a live one, handing
+/// a scoped key an oracle for which context names exist beyond its
+/// grant.
+fn scope_refusal<'a>(
     scope: &Option<axum::Extension<crate::auth::KeyScope>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
     involved: impl IntoIterator<Item = &'a String>,
@@ -796,7 +798,7 @@ fn group_scope_refusal<'a>(
 }
 
 /// The gate every group write runs, wrapped around
-/// [`group_scope_refusal`]: resolves what the operation involves — the
+/// [`scope_refusal`]: resolves what the operation involves — the
 /// transitive context closures of the `closure_roots` groups plus the
 /// `direct` context names — and refuses if any of it sits beyond the
 /// grant. An unscoped key passes immediately, without paying for the
@@ -814,7 +816,7 @@ fn scoped_group_refusal<'r, 'd>(
     }
     let mut involved = state.group_context_closures(closure_roots);
     involved.extend(direct.into_iter().cloned());
-    group_scope_refusal(scope, key, &involved, started_at)
+    scope_refusal(scope, key, &involved, started_at)
 }
 
 /// The group directory: every group's name, description, member
@@ -1395,6 +1397,25 @@ pub struct MatchPage {
     pub matches: Vec<AssociationOut>,
 }
 
+/// One cross-context result: the per-context wire shape, tagged with
+/// the context it came from — the tag is what makes the result
+/// actionable, since every follow-up (citations, lookups, activate)
+/// is a per-context call.
+#[derive(Serialize)]
+pub struct CrossMatch<T> {
+    pub context: String,
+    #[serde(flatten)]
+    pub inner: T,
+}
+
+/// [`MatchPage`], cross-context: same `total`-above-count truncation
+/// contract, every match tagged.
+#[derive(Serialize)]
+pub struct CrossMatchPage {
+    pub total: usize,
+    pub matches: Vec<CrossMatch<AssociationOut>>,
+}
+
 /// Bounds a match list: within the limit the library's insertion order
 /// is preserved; past it, the strongest knowledge (|weight|, the same
 /// magnitude-ranks philosophy as activate) survives the cut, ties in
@@ -1402,11 +1423,22 @@ pub struct MatchPage {
 /// resolved to their wire shape — callers still need to run them
 /// through `resolve_sections`/`association_out`, and `page` itself has
 /// no context name to resolve against.
-fn page(mut matches: Vec<Association>, limit: Option<usize>) -> (usize, Vec<Association>) {
+fn page(matches: Vec<Association>, limit: Option<usize>) -> (usize, Vec<Association>) {
+    page_by(matches, limit, |association| association.weight)
+}
+
+/// [`page`]'s bound over any match shape, the weight read through an
+/// accessor — the cross-context pages carry `(context, association)`
+/// pairs rather than bare associations.
+fn page_by<T>(
+    mut matches: Vec<T>,
+    limit: Option<usize>,
+    weight: impl Fn(&T) -> f64,
+) -> (usize, Vec<T>) {
     let total = matches.len();
     let limit = clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT);
     if total > limit {
-        matches.sort_by(|a, b| b.weight.abs().total_cmp(&a.weight.abs()));
+        matches.sort_by(|a, b| weight(b).abs().total_cmp(&weight(a).abs()));
         matches.truncate(limit);
     }
     (total, matches)
@@ -1567,6 +1599,38 @@ fn recollections_out(
         .collect()
 }
 
+/// [`associations_out`] for a cross-context page: section labels
+/// resolve against the context each match came from — one
+/// `resolve_sections` call per distinct context on the page, not one
+/// per match (and none for a context whose page entries carry no
+/// paragraph locator; `resolve_sections` short-circuits on an empty
+/// key set).
+fn cross_associations_out(
+    state: &AppState,
+    page: Vec<(String, Association)>,
+) -> Vec<CrossMatch<AssociationOut>> {
+    let mut locators: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
+    for (context, association) in &page {
+        locators
+            .entry(context.clone())
+            .or_default()
+            .extend(locator_keys(std::iter::once(association)));
+    }
+    let sections: BTreeMap<String, HashMap<(String, u32), String>> = locators
+        .into_iter()
+        .map(|(context, keys)| {
+            let resolved = state.resolve_sections(&context, keys.into_iter());
+            (context, resolved)
+        })
+        .collect();
+    page.into_iter()
+        .map(|(context, association)| {
+            let inner = association_out(association, &sections[&context]);
+            CrossMatch { context, inner }
+        })
+        .collect()
+}
+
 /// Same as [`associations_out`], for activations (activate's results).
 fn activations_out(state: &AppState, name: &str, matches: Vec<Activation>) -> Vec<ActivationOut> {
     let sections = state.resolve_sections(
@@ -1594,6 +1658,20 @@ fn as_refs(position: &Option<OneOrMany>) -> Vec<&str> {
         Some(OneOrMany::One(name)) => vec![name.as_str()],
         Some(OneOrMany::Many(names)) => names.iter().map(String::as_str).collect(),
     }
+}
+
+/// The shared cap on a query's three positions: subject, label, and
+/// object are each list-shaped read input, bounded like every other
+/// list ([`overlong`]) — `query` and `cross_query` run one check.
+fn overlong_positions(
+    subject: &Option<OneOrMany>,
+    label: &Option<OneOrMany>,
+    object: &Option<OneOrMany>,
+    started_at: Instant,
+) -> Option<Response> {
+    [("subject", subject), ("label", label), ("object", object)]
+        .into_iter()
+        .find_map(|(field, position)| overlong(field, as_refs(position).len(), started_at))
 }
 
 /// Alias registrations, alias → canonical per namespace. Applied in
@@ -2444,6 +2522,142 @@ pub async fn recall(
     }
 }
 
+/// Vets a cross-context search's target list and returns it deduped,
+/// in first-appearance order. Refused, in order: an empty list (a
+/// search of nothing is a client bug, not an empty result — and
+/// emphatically not "every context"); a list over the input-items cap;
+/// any name beyond the key's grant ([`scope_refusal`] — whole-request,
+/// and before existence, so grants cannot probe names); and the first
+/// name that does not exist (`no_context`, before any context is
+/// searched). Duplicates dedupe silently — naming a context twice is
+/// redundant, not wrong.
+fn cross_targets(
+    state: &AppState,
+    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    key: &Option<axum::Extension<crate::auth::AuthKey>>,
+    contexts: Vec<String>,
+    started_at: Instant,
+) -> Result<Vec<String>, Box<Response>> {
+    if contexts.is_empty() {
+        return Err(Box::new(error(
+            ErrorCode::InvalidArgument,
+            "'contexts' must name at least one context",
+            started_at,
+        )));
+    }
+    if let Some(refusal) = overlong("contexts", contexts.len(), started_at) {
+        return Err(Box::new(refusal));
+    }
+    let mut seen = BTreeSet::new();
+    let targets: Vec<String> = contexts
+        .into_iter()
+        .filter(|name| seen.insert(name.clone()))
+        .collect();
+    if let Some(refusal) = scope_refusal(scope, key, &targets, started_at) {
+        return Err(Box::new(refusal));
+    }
+    if let Some(missing) = targets.iter().find(|name| !state.context_exists(name)) {
+        return Err(Box::new(error(
+            ErrorCode::NoContext,
+            format!("context '{missing}' not found"),
+            started_at,
+        )));
+    }
+    Ok(targets)
+}
+
+/// One cross-context result page: the pre-cut total, and the surviving
+/// `(context, association)` pairs in page order.
+type CrossPage = (usize, Vec<(String, Association)>);
+
+/// The shared middle of the cross-context graph searches: run the
+/// per-context search over every target in turn, pool the matches, cut
+/// the pool with [`page_by`], and only then tag the survivors with
+/// their context names — the pre-cut pool can be every match in every
+/// target, and naming it all up front would allocate thousands of
+/// strings just to throw them away. The first per-context failure
+/// aborts the whole response (a read has nothing to half-apply).
+fn cross_matches(
+    state: &AppState,
+    targets: &[String],
+    op: SearchOp,
+    limit: Option<usize>,
+    search: impl Fn(&Context) -> Vec<Association>,
+    started_at: Instant,
+) -> Result<CrossPage, Box<Response>> {
+    let mut pool: Vec<(usize, Association)> = Vec::new();
+    for (index, name) in targets.iter().enumerate() {
+        match state.read_context(name, &search) {
+            Ok(matches) => {
+                state.note_search(op, name, matches.is_empty());
+                pool.extend(matches.into_iter().map(|found| (index, found)));
+            }
+            Err(failure) => {
+                return Err(Box::new(access_error(state, failure, name, started_at)));
+            }
+        }
+    }
+    let (total, page) = page_by(pool, limit, |(_, association)| association.weight);
+    let tagged = page
+        .into_iter()
+        .map(|(index, association)| (targets[index].clone(), association))
+        .collect();
+    Ok((total, tagged))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CrossRecallRequest {
+    /// Full context names — no groups, no patterns.
+    pub contexts: Vec<String>,
+    pub cue: String,
+    /// Omitted means 100.
+    pub limit: Option<usize>,
+}
+
+/// [`recall`] across several named contexts at once, every match
+/// tagged with the context it came from. `total` sums the per-context
+/// match counts, and past the limit the strongest |weight| survives
+/// exactly as within one context — weights share one scale (evidence
+/// mass), so the cut means the same thing across contexts. Contexts
+/// are searched in turn; the first per-context failure aborts the
+/// whole response (a read has nothing to half-apply).
+pub async fn cross_recall(
+    State(state): State<AppState>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+    AppJson(request): AppJson<CrossRecallRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    let targets = match cross_targets(&state, &scope, &key, request.contexts, started_at) {
+        Ok(targets) => targets,
+        Err(refusal) => return *refusal,
+    };
+    let outcome = cross_matches(
+        &state,
+        &targets,
+        SearchOp::Recall,
+        request.limit,
+        |context| context.recall(&request.cue),
+        started_at,
+    );
+    let (total, page) = match outcome {
+        Ok(result) => result,
+        Err(refusal) => return *refusal,
+    };
+    if search_log_enabled() {
+        tracing::info!(
+            target: "taguru::search",
+            contexts = %targets.join(","),
+            op = "recall",
+            cue = %request.cue,
+            hits = total,
+            "search",
+        );
+    }
+    let matches = cross_associations_out(&state, page);
+    ok(CrossMatchPage { total, matches }, started_at)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct QueryRequest {
     pub subject: Option<OneOrMany>,
@@ -2459,14 +2673,13 @@ pub async fn query(
     AppJson(request): AppJson<QueryRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    for (field, position) in [
-        ("subject", &request.subject),
-        ("label", &request.label),
-        ("object", &request.object),
-    ] {
-        if let Some(refusal) = overlong(field, as_refs(position).len(), started_at) {
-            return refusal;
-        }
+    if let Some(refusal) = overlong_positions(
+        &request.subject,
+        &request.label,
+        &request.object,
+        started_at,
+    ) {
+        return refusal;
     }
     match state.read_context(&name, |context| {
         context.query_any(
@@ -2495,6 +2708,74 @@ pub async fn query(
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CrossQueryRequest {
+    /// Full context names — no groups, no patterns.
+    pub contexts: Vec<String>,
+    pub subject: Option<OneOrMany>,
+    pub label: Option<OneOrMany>,
+    pub object: Option<OneOrMany>,
+    /// Omitted means 100.
+    pub limit: Option<usize>,
+}
+
+/// [`query`] across several named contexts at once — the same
+/// cross-context contract as [`cross_recall`]: tagged matches, summed
+/// `total`, strongest |weight| past the limit, first per-context
+/// failure aborts.
+pub async fn cross_query(
+    State(state): State<AppState>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+    AppJson(request): AppJson<CrossQueryRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    if let Some(refusal) = overlong_positions(
+        &request.subject,
+        &request.label,
+        &request.object,
+        started_at,
+    ) {
+        return refusal;
+    }
+    let targets = match cross_targets(&state, &scope, &key, request.contexts, started_at) {
+        Ok(targets) => targets,
+        Err(refusal) => return *refusal,
+    };
+    let outcome = cross_matches(
+        &state,
+        &targets,
+        SearchOp::Query,
+        request.limit,
+        |context| {
+            context.query_any(
+                &as_refs(&request.subject),
+                &as_refs(&request.label),
+                &as_refs(&request.object),
+            )
+        },
+        started_at,
+    );
+    let (total, page) = match outcome {
+        Ok(result) => result,
+        Err(refusal) => return *refusal,
+    };
+    if search_log_enabled() {
+        tracing::info!(
+            target: "taguru::search",
+            contexts = %targets.join(","),
+            op = "query",
+            subject = %as_refs(&request.subject).join(","),
+            label = %as_refs(&request.label).join(","),
+            object = %as_refs(&request.object).join(","),
+            hits = total,
+            "search",
+        );
+    }
+    let matches = cross_associations_out(&state, page);
+    ok(CrossMatchPage { total, matches }, started_at)
 }
 
 #[derive(Debug, Deserialize)]

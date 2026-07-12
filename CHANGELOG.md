@@ -35,6 +35,19 @@ Entries that change an on-disk format or a response shape say so.
   whose unlink fails can resurface the group at the next restart
   (the error message says so).
 - `taguru_groups_registered` gauge on `/metrics`.
+- Cross-context search: `POST /recall`, `POST /query`, and
+  `POST /sources/search` run one search across several contexts at
+  once — `contexts: [full names]` beside the usual arguments (groups
+  are not resolved here yet). Every match carries the `context` it
+  came from; recall/query merge on |weight| (weights share one scale —
+  evidence mass) and passage hits interleave by per-context rank,
+  since passage scores are corpus-local. The target list is vetted up
+  front: a name beyond a scoped key's grant refuses the request whole
+  (checked before existence, so grants cannot probe names), a missing
+  name is `no_context`, an empty list is `invalid_argument`, and the
+  list caps at the usual 1,000 items. The MCP search tools (`recall`,
+  `query`, `search_passages`) take `contexts` as an alternative to
+  `context`.
 
 ## [0.2.0] - 2026-07-12
 
