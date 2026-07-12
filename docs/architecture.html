@@ -128,7 +128,7 @@
     <p class="section-sub"><code>context.rs</code>. The invariant that all state fits in one flat buffer is what keeps everything below it simple.</p>
     <ul>
       <li>State is "a UTF-8 string arena + seven tables of fixed-width <code>#[repr(C)]</code> records". Adjacency lists are intrusive chains threaded through the edge records, so pointer chasing allocates nothing.</li>
-      <li>Every mutation is an append or a field update. So the whole state round-trips as one image through <code>to_bytes</code>/<code>from_bytes</code> — little-endian, fully validated on load.</li>
+      <li>Every mutation is an append or a field update. So the whole state round-trips as one image through <code>to_bytes</code>/<code>from_bytes</code> — little-endian, fully validated on load, closed by a CRC-32C footer so bit-rot cannot load as truth.</li>
       <li>Capacity is the u32 space: ~4.29 billion records per table, 4 GiB of interned text. Overflow is a <code>ContextFull</code> error, not a panic (507 over HTTP, and the write was not applied).</li>
       <li>The retrieval entrance is normalization (NFKC, case folding, katakana→hiragana) plus a bigram inverted index. Aliases are entry-only alternative spellings; results always carry the canonical spelling.</li>
     </ul>
@@ -169,7 +169,7 @@
       <li>Replay is driven by sequence numbers alone: every record carries a monotonic <code>seq</code>, and the image header carries a "burned in up to here" watermark. Double-apply and dropped records are structurally impossible.</li>
       <li>The WAL truncates after every successful flush. It only nears its ceiling (default 256 MiB) when flushes keep failing — past it, writes are <b>refused</b> with 500: better to say "cannot write" early than to grow the log forever.</li>
       <li>Original text has its own durability path: a compacted snapshot plus an always-on append log. The predecessor rewrote one whole file every time, so importing N documents wrote O(N²) bytes — now it is the same "snapshot + log" shape as the graph.</li>
-      <li>Every writer is fsync + rename. A filesystem snapshot is safe at any instant, and <code>taguru inspect</code> verifies a backup with the same fully-validating load + WAL replay the server does.</li>
+      <li>Every writer is fsync + rename. A filesystem snapshot is safe at any instant, and <code>taguru inspect</code> verifies a backup with the same fully-validating, checksum-verifying load + WAL replay the server does (images, passage snapshots, and WAL records all carry CRC-32C).</li>
     </ul>
   </section>
 

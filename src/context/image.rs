@@ -39,30 +39,49 @@ const IMAGE_MAGIC: [u8; 8] = *b"TAGURUC\0";
 /// 5 splits `EdgeRecord`/`AttributionRecord`'s cumulative `weight` into
 /// a `(count, sum)` pair, growing the records to 48 and 24 bytes so the
 /// public `weight` can be derived as `sum / count` (see
-/// [`super::Association`]).
+/// [`super::Association`]); 6 appends a CRC-32C footer over every
+/// preceding byte, verified on load — the bit-rot check the structural
+/// validation below cannot give, since corruption that happens to keep
+/// every invariant would otherwise load as truth and be flushed back
+/// as the new canonical bytes.
 /// Older images still load (empty alias/locator tables, watermark 0,
-/// legacy edge/attribution rows migrated with a synthesized `count`);
+/// legacy edge/attribution rows migrated with a synthesized `count`,
+/// pre-6 bytes unverifiable and accepted as they always were);
 /// writing always produces the current version.
-const IMAGE_VERSION: u32 = 5;
+const IMAGE_VERSION: u32 = 6;
 /// Magic + version + 4 bytes of padding (so what follows is 8-byte
 /// aligned) + the u64 durability watermark.
 const IMAGE_HEADER_SIZE: usize = 24;
 /// Eight record tables plus the arena, each section prefixed by a u64
 /// length.
 const IMAGE_SECTIONS: usize = 9;
+/// The little-endian CRC-32C of everything before it, closing every
+/// v6+ image.
+const IMAGE_FOOTER_SIZE: usize = 4;
 
 impl Context {
     /// Serializes the whole network into one contiguous byte image.
     ///
-    /// The image is the storage buffers written back to back: a 16-byte
+    /// The image is the storage buffers written back to back: a 24-byte
     /// header, then each record table as a u64 count followed by its
     /// fixed-width records field by field in little-endian, then the
-    /// string arena. Sections are ordered by descending alignment (the
+    /// string arena, then the checksum footer over everything before
+    /// it. Sections are ordered by descending alignment (the
     /// f64-bearing tables first), so every record sits naturally aligned
     /// within the image as well — the layout stays open to zero-copy
     /// mapping later. The derived hash indexes are not written;
     /// [`Context::from_bytes`] rebuilds them.
     pub fn to_bytes(&self) -> Vec<u8> {
+        let mut image = self.image_body(IMAGE_VERSION);
+        image.extend_from_slice(&crate::crc32c::crc32c(&image).to_le_bytes());
+        image
+    }
+
+    /// Header and sections in the current record shapes, stamped with
+    /// `version` — everything but the checksum footer. [`Context::to_bytes`]
+    /// seals it; the test-only v5 writer emits it bare, because v5 IS the
+    /// current layout minus the footer.
+    fn image_body(&self, version: u32) -> Vec<u8> {
         let mut image = Vec::with_capacity(
             IMAGE_HEADER_SIZE
                 + IMAGE_SECTIONS * size_of::<u64>()
@@ -73,10 +92,11 @@ impl Context {
                 + self.sources.len() * SourceRecord::SIZE
                 + (self.concept_aliases.len() + self.label_aliases.len()) * AliasRecord::SIZE
                 + self.attribution_locators.len() * AttributionLocatorRecord::SIZE
-                + self.arena.len(),
+                + self.arena.len()
+                + IMAGE_FOOTER_SIZE,
         );
         image.extend_from_slice(&IMAGE_MAGIC);
-        image.extend_from_slice(&IMAGE_VERSION.to_le_bytes());
+        image.extend_from_slice(&version.to_le_bytes());
         image.extend_from_slice(&[0; 4]);
         image.extend_from_slice(&self.applied_seq.to_le_bytes());
         store_table(&self.edges, &mut image);
@@ -92,20 +112,38 @@ impl Context {
         image
     }
 
-    /// Test-only counterpart to [`Context::to_bytes`] that writes the
-    /// pre-v5, `weight`-only edge/attribution shape and lets the section
-    /// list be trimmed to an older version. `to_bytes` always writes the
-    /// current version, so the version-compatibility tests need this to
-    /// build a genuine legacy image byte-for-byte instead of slicing
-    /// `to_bytes`'s output — which, since v5, has record widths a legacy
-    /// reader would misparse.
+    /// The format version stamped in `image`'s header and whether that
+    /// generation carries a verified checksum footer, or `None` when
+    /// the bytes do not even begin as an image. Diagnostic sugar for
+    /// `taguru inspect`: after a successful load it says whether the
+    /// bytes were actually PROVEN intact (v6+) or merely predate
+    /// verifiability — without leaking the version cut-over into the
+    /// caller.
+    pub fn image_generation(image: &[u8]) -> Option<(u32, bool)> {
+        let version = image.get(IMAGE_MAGIC.len()..IMAGE_MAGIC.len() + 4)?;
+        image.starts_with(&IMAGE_MAGIC).then(|| {
+            let version = u32::from_le_bytes(version.try_into().unwrap());
+            (version, version >= 6)
+        })
+    }
+
+    /// Test-only counterpart to [`Context::to_bytes`] that writes a
+    /// genuine older-version image byte-for-byte, so the
+    /// version-compatibility tests need not slice `to_bytes`'s
+    /// (always-current) output. Version 5 is the current sections
+    /// without the checksum footer; versions 1–4 additionally write the
+    /// pre-v5, `weight`-only edge/attribution shape, whose records a
+    /// current slice would misparse.
     #[cfg(test)]
     pub(super) fn to_bytes_as_version(&self, version: u32) -> Vec<u8> {
         debug_assert!(
             version < IMAGE_VERSION,
-            "to_bytes_as_version always writes the legacy, weight-only shape; \
-             version must predate it, or from_bytes will misparse the result"
+            "to_bytes_as_version writes legacy images; \
+             the current version is what to_bytes is for"
         );
+        if version == 5 {
+            return self.image_body(5);
+        }
         let legacy_edges: Vec<LegacyEdgeRecord> = self
             .edges
             .iter()
@@ -180,6 +218,25 @@ impl Context {
         // images the moment a third version existed.)
         if !(1..=IMAGE_VERSION).contains(&version) {
             return Err(CorruptImage("image format version is not supported"));
+        }
+        // The checksum footer comes off — and gets verified — before
+        // anything else is trusted: structural validation proves the
+        // image consistent, only the checksum proves it the bytes that
+        // were written. Pre-6 images have no footer and load exactly as
+        // they always did, unverifiable.
+        if version >= 6 {
+            let body_len = image
+                .len()
+                .checked_sub(IMAGE_FOOTER_SIZE)
+                .ok_or(CorruptImage("image ends inside its checksum footer"))?;
+            let (body, footer) = image.split_at(body_len);
+            let stored = u32::from_le_bytes(footer.try_into().unwrap());
+            if crate::crc32c::crc32c(body) != stored {
+                return Err(CorruptImage(
+                    "image checksum mismatch — the bytes changed after they were written",
+                ));
+            }
+            reader.bytes = body;
         }
         reader.take(4)?; // header padding
         // Version 3 adds the durability watermark; older images carry
@@ -271,7 +328,9 @@ impl Context {
         let arena_len = usize::try_from(reader.read_u64()?)
             .map_err(|_| CorruptImage("arena length overflows this platform"))?;
         let arena = reader.take(arena_len)?.to_vec();
-        if reader.pos != image.len() {
+        // Against the reader's own slice, not `image`: on v6+ the
+        // checksum footer was already split off above.
+        if reader.pos != reader.bytes.len() {
             return Err(CorruptImage("image carries trailing bytes"));
         }
 

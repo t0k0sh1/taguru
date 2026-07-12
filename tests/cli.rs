@@ -342,10 +342,39 @@ fn inspect_verifies_a_directory_and_a_single_image() {
     assert!(stdout.contains("1 associations"), "{stdout}");
     assert!(stdout.contains("2 concepts"), "{stdout}");
     assert!(stdout.contains("total: 1 contexts"), "{stdout}");
+    // "ok" must state HOW MUCH was proven: a current image was
+    // checksum-verified, and the line says so.
+    assert!(stdout.contains("checksum verified"), "{stdout}");
 
     let output = run(&["inspect", &image.display().to_string()]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn inspect_fails_an_image_whose_bytes_rotted_in_place() {
+    // The backup-verification case the checksum footer exists for: one
+    // flipped bit in a stored name leaves the image structurally
+    // perfect — every id in range, every chain intact — so before the
+    // footer this passed inspection and loaded as truth. Now it must
+    // fail, loudly, BEFORE a restore spends it.
+    let dir = std::env::temp_dir().join(format!("taguru-cli-bitrot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut context = taguru::context::Context::default();
+    context.associate("i", "likes", "apple", 1.0).unwrap();
+    let mut image = context.to_bytes();
+    let last_arena_byte = image.len() - 5; // the 4-byte footer follows
+    image[last_arena_byte] ^= 0x01;
+    std::fs::write(dir.join("sake.ctx"), &image).unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("CORRUPT image"), "{stdout}");
+    assert!(stdout.contains("checksum mismatch"), "{stdout}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -448,6 +477,54 @@ fn inspect_reports_a_torn_wal_tail_without_healing_it() {
         std::fs::read(&wal).unwrap(),
         bytes,
         "inspect must not heal (truncate) the WAL it audits"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn inspect_reports_a_torn_import_marker_without_failing() {
+    // A surviving batch-open marker means an import stopped between
+    // its four separately-durable steps: every store parses clean, so
+    // the marker is the only witness. inspect must SAY so (with the
+    // repair) yet exit 0 — the bytes are intact; the tear has a
+    // documented fix.
+    let dir = std::env::temp_dir().join(format!("taguru-cli-import-marker-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    // The marker as the server writes it: {stem}.{source-hash}.importing,
+    // the (context, source) pair in the content. The exact hash is
+    // irrelevant to reporting — content is what gets read.
+    std::fs::write(
+        dir.join("sake.00000000deadbeef.importing"),
+        br#"{"context":"sake","source":"doc-1"}"#,
+    )
+    .unwrap();
+    // A marker whose context is gone: noted, not warned — the server's
+    // next boot removes it.
+    std::fs::write(
+        dir.join("ghost.00000000deadbeef.importing"),
+        br#"{"context":"ghost","source":"doc-9"}"#,
+    )
+    .unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("WARNING") && stdout.contains("doc-1"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("never completed"), "{stdout}");
+    assert!(
+        stdout.contains("re-import") || stdout.contains("retract"),
+        "the repair must be named: {stdout}"
+    );
+    assert!(
+        stdout.contains("no longer exists here"),
+        "the moot marker gets its NOTE: {stdout}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

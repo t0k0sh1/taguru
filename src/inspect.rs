@@ -17,8 +17,8 @@ use taguru::context::Context;
 use crate::cli::fmt_bytes;
 use crate::groups::{GroupRecord, MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, repair_nesting};
 use crate::registry::{
-    bm25_path, meta_path, name_from_stem, passages_path, passages_wal_path, pvectors_path,
-    scanned_stem_and_name, sources_path, vectors_path, wal_path,
+    IMPORT_MARKER_EXTENSION, ImportMarker, bm25_path, meta_path, name_from_stem, passages_path,
+    passages_wal_path, pvectors_path, scanned_stem_and_name, sources_path, vectors_path, wal_path,
 };
 use crate::wal;
 
@@ -99,11 +99,11 @@ fn inspect_group_file(path: &Path) -> i32 {
 /// question.
 fn inspect_file(path: &Path) -> i32 {
     match load_image(path) {
-        Ok((context, image_bytes)) => {
+        Ok((context, image_bytes, generation)) => {
             println!(
                 "{}: ok  {}",
                 path.display(),
-                stats_line(&context, image_bytes)
+                stats_line(&context, image_bytes, &generation)
             );
             0
         }
@@ -161,7 +161,7 @@ fn inspect_directory(dir: &Path) -> i32 {
             }
         };
         let image = dir.join(format!("{stem}.ctx"));
-        let (context, image_bytes) = match load_image(&image) {
+        let (context, image_bytes, generation) = match load_image(&image) {
             Ok(loaded) => loaded,
             Err(error) => {
                 println!("{name}: CORRUPT image — {error}");
@@ -177,9 +177,9 @@ fn inspect_directory(dir: &Path) -> i32 {
         // torn size to report. Records at or below the image's watermark
         // are inert; the ones above are acknowledged writes the image
         // does not carry yet.
-        let (pending, wal_torn) =
+        let (pending, wal_torn, wal_unchecked) =
             match wal::replay_readonly::<wal::WalOp>(&wal_path(dir, stem), context.applied_seq()) {
-                Ok((ops, _, torn)) => (ops.len(), torn),
+                Ok((ops, _, torn, unchecked)) => (ops.len(), torn, unchecked),
                 Err(error) => {
                     println!("{name}: CORRUPT WAL — {error}");
                     failures += 1;
@@ -192,20 +192,21 @@ fn inspect_directory(dir: &Path) -> i32 {
         // (legacy .sources.json keeps its lenient contract inside it),
         // but with heal=false so this stays read-only. Vectors stay a
         // size: a derived cache's corruption costs a re-embed, never data.
-        let (passage_count, passages_torn) = match crate::passages::PassageStore::load(
-            passages_path(dir, stem),
-            &sources_path(dir, stem),
-            passages_wal_path(dir, stem),
-            0,
-            false,
-        ) {
-            Ok((store, torn)) => (store.source_ids().len(), torn),
-            Err(error) => {
-                println!("{name}: CORRUPT passages — {error}");
-                failures += 1;
-                continue;
-            }
-        };
+        let (passage_count, passages_torn, passages_unchecked) =
+            match crate::passages::PassageStore::load(
+                passages_path(dir, stem),
+                &sources_path(dir, stem),
+                passages_wal_path(dir, stem),
+                0,
+                false,
+            ) {
+                Ok((store, torn, unchecked)) => (store.source_ids().len(), torn, unchecked),
+                Err(error) => {
+                    println!("{name}: CORRUPT passages — {error}");
+                    failures += 1;
+                    continue;
+                }
+            };
 
         // Meta is self-healing on the server side (defaults + warning),
         // so a broken one is reported without failing the inspection.
@@ -237,6 +238,26 @@ fn inspect_directory(dir: &Path) -> i32 {
             )
         };
 
+        // Checksummed records were verified byte-for-byte by the replay
+        // above; records from a pre-checksum writer can only be parsed.
+        // Say so — "inspect says ok" must not overclaim on a log that
+        // predates verifiability.
+        let mut unverified_parts = Vec::new();
+        if wal_unchecked > 0 {
+            unverified_parts.push(format!("{wal_unchecked} WAL record(s)"));
+        }
+        if passages_unchecked > 0 {
+            unverified_parts.push(format!("{passages_unchecked} passages WAL record(s)"));
+        }
+        let unverified_note = if unverified_parts.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " · NOTE: {} predate checksums — parsed, but not verifiable bit-for-bit",
+                unverified_parts.join(" and ")
+            )
+        };
+
         let wal_bytes = file_size(&wal_path(dir, stem));
         // The vector sidecars and the BM25 index are derived caches —
         // size-only here.
@@ -248,8 +269,8 @@ fn inspect_directory(dir: &Path) -> i32 {
             + file_size(&sources_path(dir, stem));
         println!(
             "{name}: ok  {} · WAL {} ({pending} pending) · vectors {} · index {} · passages {} \
-             ({passage_count} sources){meta_note}{torn_note}",
-            stats_line(&context, image_bytes),
+             ({passage_count} sources){meta_note}{torn_note}{unverified_note}",
+            stats_line(&context, image_bytes, &generation),
             fmt_bytes(wal_bytes),
             fmt_bytes(vector_bytes),
             fmt_bytes(index_bytes),
@@ -263,6 +284,46 @@ fn inspect_directory(dir: &Path) -> i32 {
         vectors_total += vector_bytes;
         index_total += index_bytes;
         passages_total += passage_bytes;
+    }
+
+    // Surviving import batch markers: each names a source whose
+    // multi-store import (retract → passages → associations → aliases)
+    // opened and never finished. The stores are individually
+    // consistent, so the marker is the only witness that the source's
+    // truth may be half-applied. A warning, not a failure: the bytes
+    // are intact and the repair is documented — re-import the batch
+    // file (per-source retract-then-apply is idempotent) or retract
+    // the source.
+    for path in &entries {
+        if path.extension().and_then(|e| e.to_str()) != Some(IMPORT_MARKER_EXTENSION) {
+            continue;
+        }
+        let file = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        let parsed = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ImportMarker>(&bytes).ok());
+        match parsed {
+            Some(marker) if context_names.contains(&marker.context) => {
+                println!(
+                    "{}: WARNING — the import of source '{}' never completed; its truth \
+                     may be half-applied — re-import its batch file or retract the source",
+                    marker.context, marker.source
+                );
+            }
+            Some(marker) => {
+                println!(
+                    "{file}: NOTE — import marker for context '{}', which no longer \
+                     exists here (the server's next boot removes it)",
+                    marker.context
+                );
+            }
+            None => {
+                println!(
+                    "{file}: WARNING — unreadable import marker; an import batch may be \
+                     half-applied, but which source is unrecoverable"
+                );
+            }
+        }
     }
 
     let (group_count, group_failures) = inspect_groups(&entries, &context_names);
@@ -411,15 +472,24 @@ fn inspect_groups(
     (records.len(), failures)
 }
 
-fn load_image(path: &Path) -> Result<(Context, u64), String> {
+fn load_image(path: &Path) -> Result<(Context, u64, String), String> {
     let bytes = std::fs::read(path).map_err(|error| format!("unreadable: {error}"))?;
     let context = Context::from_bytes(&bytes).map_err(|error| error.to_string())?;
-    Ok((context, bytes.len() as u64))
+    // From the same bytes the successful load just proved: v6+ means
+    // the checksum was verified in that load, older versions have no
+    // checksum to verify — say which, because a backup check that
+    // "says ok" must not overclaim on pre-checksum bytes.
+    let generation = match Context::image_generation(&bytes) {
+        Some((version, true)) => format!("v{version}, checksum verified"),
+        Some((version, false)) => format!("v{version} — predates checksums, parsed unverified"),
+        None => unreachable!("from_bytes checked the magic"),
+    };
+    Ok((context, bytes.len() as u64, generation))
 }
 
-fn stats_line(context: &Context, image_bytes: u64) -> String {
+fn stats_line(context: &Context, image_bytes: u64, generation: &str) -> String {
     format!(
-        "image {} · {} associations · {} concepts · {} labels · {} sources · \
+        "image {} ({generation}) · {} associations · {} concepts · {} labels · {} sources · \
          footprint {} · applied_seq {}",
         fmt_bytes(image_bytes),
         context.association_count(),

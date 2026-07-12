@@ -226,7 +226,9 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   instant; back up each context's file family as a set) — or take the
   portable JSONL stream with `taguru export` and restore anywhere
   through `taguru import` / `POST /import`. Verify either with
-  `taguru inspect`. Reclaim revision-heavy contexts with
+  `taguru inspect` — images, passage snapshots, and WAL records carry
+  CRC-32C checksums, so "ok" means the bytes were proven intact, not
+  just parseable. Reclaim revision-heavy contexts with
   `taguru compact`; size targets with `taguru estimate`.
 
 Worked deployments, probe wiring, and the reasoning behind them:

@@ -1411,6 +1411,16 @@ impl AppState {
                 return Err(CreateError::Io(error));
             }
         }
+        // Stale import markers are part of the same earlier generation:
+        // left beside the new files, boot would report the fresh
+        // context as carrying a torn import it never ran.
+        for stale in import_marker_paths(&self.0.data_dir, &stem) {
+            if let Err(error) = fs::remove_file(&stale)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(CreateError::Io(error));
+            }
+        }
         let mut context = Context::default();
         context.set_dice_floor(meta.dice_floor);
         let stats = ContextStats::of(&context);
@@ -1474,6 +1484,18 @@ impl AppState {
         let mut outcome = Ok(());
         for file in context_files(&stem) {
             if let Err(error) = fs::remove_file(self.0.data_dir.join(file))
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                outcome = Err(error);
+            }
+        }
+        // Import markers go with the family: deletion makes any
+        // half-applied batch moot, and a survivor would have boot
+        // report a tear in a context that no longer exists. Same
+        // failure handling as the fixed files — a miss keeps the
+        // `.deleted` marker, and boot finishes the job.
+        for path in import_marker_paths(&self.0.data_dir, &stem) {
+            if let Err(error) = fs::remove_file(&path)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 outcome = Err(error);
@@ -2041,8 +2063,9 @@ impl AppState {
             }
         }
         // The live server heals a torn tail on load; the torn indicator
-        // is for read-only inspection, so drop it here.
-        let (store, _torn) = crate::passages::PassageStore::load(
+        // and the unverified-record count are for read-only inspection,
+        // so drop them here.
+        let (store, _torn, _unchecked) = crate::passages::PassageStore::load(
             passages_path(&self.0.data_dir, stem),
             &sources_path(&self.0.data_dir, stem),
             passages_wal_path(&self.0.data_dir, stem),
@@ -2233,6 +2256,46 @@ impl AppState {
             }
         };
         Ok((touched, passage_removed))
+    }
+
+    /// Opens the batch-open marker for one source's import — see
+    /// [`import_marker_path`] for what it means while it exists. Called
+    /// by `apply_batch` before the batch's first mutation; an error
+    /// refuses the batch, because proceeding would silently reintroduce
+    /// the undetectable-tear gap the marker exists to close (and a disk
+    /// that cannot land a hundred-byte marker is not going to land the
+    /// batch either). `write_atomic` makes it durable, directory entry
+    /// included, before any batch write can need it.
+    pub fn open_import_marker(&self, context: &str, source: &str) -> io::Result<()> {
+        let marker = ImportMarker {
+            context: context.to_string(),
+            source: source.to_string(),
+        };
+        let body = serde_json::to_vec(&marker).map_err(io::Error::from)?;
+        write_atomic(
+            &import_marker_path(&self.0.data_dir, &file_stem(context), source),
+            &body,
+        )
+    }
+
+    /// Removes one source's batch-open marker: the batch completed, or
+    /// the operator repaired the tear by retracting the source outright
+    /// (either way the source's truth is consistent again). Best
+    /// effort, loudly: a marker that cannot be removed only means boot
+    /// keeps reporting a tear that is no longer one, until a re-import
+    /// or a hand unlink clears it.
+    pub fn clear_import_marker(&self, context: &str, source: &str) {
+        let path = import_marker_path(&self.0.data_dir, &file_stem(context), source);
+        if let Err(error) = fs::remove_file(&path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                context,
+                source,
+                %error,
+                "import marker not removed; boot will keep reporting this batch as torn",
+            );
+        }
     }
 
     /// Full-text search over the registered passages — the second lane
@@ -4098,11 +4161,18 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<HashMap<String, Arc<Entry>>> {
         }
     }
     let mut registry = HashMap::new();
+    let mut import_markers: Vec<PathBuf> = Vec::new();
     for dir_entry in fs::read_dir(data_dir)? {
         let path = dir_entry?.path();
         let extension = path.extension().and_then(|e| e.to_str());
         if extension.is_some_and(|e| e.starts_with("tmp")) {
             let _ = fs::remove_file(&path);
+            continue;
+        }
+        // Import markers are judged after the scan, once it is known
+        // which contexts exist — collect them on the way through.
+        if extension == Some(IMPORT_MARKER_EXTENSION) {
+            import_markers.push(path);
             continue;
         }
         if extension != Some("ctx") {
@@ -4122,6 +4192,40 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<HashMap<String, Arc<Entry>>> {
             name,
             Arc::new(Entry::new(meta, stats, Slot::Cold, wal_bytes, usage)),
         );
+    }
+
+    // Surviving import markers: each says a multi-store batch opened
+    // and never finished — a crash (or an unretried refusal) between
+    // retract_source, store_passages, add_associations, and
+    // add_aliases. Every store is individually consistent, so this
+    // marker is the ONLY thing that can say the source's truth is
+    // half-applied. Report the live ones every boot until a re-import
+    // or a retraction clears them; a marker whose context no longer
+    // exists is moot (deletion destroys the batch's target) and is
+    // removed here, completing delete()'s own best-effort sweep.
+    for path in import_markers {
+        let parsed = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ImportMarker>(&bytes).ok());
+        let Some(marker) = parsed else {
+            tracing::warn!(
+                path = %path.display(),
+                "unreadable import marker — an import batch may be half-applied, \
+                 but which source is unrecoverable; remove the file once investigated",
+            );
+            continue;
+        };
+        if registry.contains_key(&marker.context) {
+            tracing::warn!(
+                context = %marker.context,
+                source = %marker.source,
+                "an import batch for this source never completed — its truth may be \
+                 half-applied (passages without associations, or associations without \
+                 aliases); re-import the batch file or retract the source",
+            );
+        } else {
+            let _ = fs::remove_file(&path);
+        }
     }
     Ok(registry)
 }
@@ -4511,6 +4615,76 @@ pub(crate) fn wal_path(dir: &Path, stem: &str) -> PathBuf {
 /// would otherwise make the next boot delete the new context.
 pub(crate) fn deleted_marker_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.deleted"))
+}
+
+/// The batch-open marker's file extension — `.deleted`'s sibling for
+/// imports. Shared by the path builder, the boot sweep, and inspect,
+/// so the three can never disagree about what counts as a marker.
+pub(crate) const IMPORT_MARKER_EXTENSION: &str = "importing";
+
+/// One import batch's in-flight marker: `{stem}.{fnv64(source)}.importing`,
+/// written before the first of the batch's four separately-durable
+/// mutations (retract_source → store_passages → add_associations →
+/// add_aliases) and removed only after the last. While it exists, the
+/// source's truth may be HALF-APPLIED — a crash between the steps
+/// leaves passages without their associations, or associations without
+/// their aliases, and every store is individually consistent, so
+/// nothing else can tell. Boot and `taguru inspect` report survivors;
+/// the repair is the documented one (re-import the batch file, whose
+/// retract-then-apply is idempotent, or retract the source).
+///
+/// The source's name rides INSIDE the file (see [`ImportMarker`]); the
+/// file name only needs to be unique per (context, source) and safe,
+/// which the hash gives without an encoding scheme. Stems contain no
+/// dots, so the `{stem}.` prefix plus the extension identifies a
+/// marker's context unambiguously.
+pub(crate) fn import_marker_path(dir: &Path, stem: &str, source: &str) -> PathBuf {
+    dir.join(format!(
+        "{stem}.{:016x}.{IMPORT_MARKER_EXTENSION}",
+        fnv64(source.as_bytes())
+    ))
+}
+
+/// Every import marker beside `stem`'s files — the enumeration the
+/// delete and create sweeps need, since markers (unlike the fixed
+/// `context_files` family) exist per in-flight source. Read failures
+/// yield the empty list: both sweeps treat markers as best-effort
+/// hygiene backed by boot's own pass.
+pub(crate) fn import_marker_paths(dir: &Path, stem: &str) -> Vec<PathBuf> {
+    let prefix = format!("{stem}.");
+    let suffix = format!(".{IMPORT_MARKER_EXTENSION}");
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(&suffix))
+        })
+        .collect()
+}
+
+/// What an import marker file says: which source's batch was open, in
+/// which context — self-describing, so boot and inspect report the
+/// human-readable pair without decoding file names.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ImportMarker {
+    pub(crate) context: String,
+    pub(crate) source: String,
+}
+
+/// FNV-1a over raw bytes — the same primitive the search terms build
+/// on, exposed for the one non-search need (import marker file names).
+fn fnv64(bytes: &[u8]) -> u64 {
+    let mut hash = FNV_OFFSET;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -5164,6 +5338,113 @@ mod tests {
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(count, 1, "its data must be intact");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The import batch-open marker: opened before a batch's first
+    /// mutation, cleared only after its last — while it exists, boot
+    /// and inspect can name a half-applied source nothing else sees.
+    #[test]
+    fn import_markers_open_clear_and_sweep_with_their_context() {
+        let dir = scratch_dir("import-markers");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        state.open_import_marker("sake", "doc-1").unwrap();
+        let marker = import_marker_path(&dir, "sake", "doc-1");
+        assert!(marker.exists(), "open writes the marker");
+        // Distinct sources get distinct files — concurrent imports of
+        // one context never race on a shared marker.
+        state.open_import_marker("sake", "doc-2").unwrap();
+        assert_eq!(import_marker_paths(&dir, "sake").len(), 2);
+        // The content names the pair, so reports never decode filenames.
+        let parsed: ImportMarker = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(
+            (parsed.context.as_str(), parsed.source.as_str()),
+            ("sake", "doc-1")
+        );
+
+        state.clear_import_marker("sake", "doc-1");
+        assert!(!marker.exists(), "clear removes exactly its own marker");
+        assert_eq!(import_marker_paths(&dir, "sake").len(), 1);
+
+        // Deletion takes the survivors with the family: a marker must
+        // not have boot report a tear in a context that is gone.
+        state.delete("sake").unwrap().unwrap();
+        assert!(
+            import_marker_paths(&dir, "sake").is_empty(),
+            "delete sweeps markers"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Boot's marker pass: a surviving marker whose context exists is
+    /// the torn-import report (and stays on disk for the next boot to
+    /// repeat, until re-import or retraction); one whose context is
+    /// gone is moot and is removed — it completes delete()'s own
+    /// best-effort sweep.
+    #[test]
+    fn boot_keeps_a_live_torn_import_marker_and_removes_a_moot_one() {
+        let dir = scratch_dir("import-marker-boot");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            // The crash-shaped state: batches opened their markers and
+            // the process died between the four mutations.
+            state.open_import_marker("sake", "doc-1").unwrap();
+            state.open_import_marker("ghost", "doc-9").unwrap();
+            state.flush_dirty();
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            import_marker_path(&dir, "sake", "doc-1").exists(),
+            "a live context's tear stays visible until the repair runs"
+        );
+        assert!(
+            !import_marker_path(&dir, "ghost", "doc-9").exists(),
+            "a marker without its context is moot; boot removes it"
+        );
+        drop(state);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `.deleted`'s recreate rule, for import markers: a marker the
+    /// delete sweep could not remove must not survive into a freshly
+    /// created context of the same name — boot would report the new
+    /// generation as carrying a tear it never ran.
+    #[test]
+    fn creating_a_context_clears_stale_import_markers() {
+        let dir = scratch_dir("import-marker-recreate");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state.delete("sake").unwrap().unwrap();
+        // The failure delete() cannot fully guard: its marker sweep
+        // missed one (crash, held handle), so the file outlives the
+        // name.
+        fs::write(
+            import_marker_path(&dir, "sake", "doc-1"),
+            b"{\"context\":\"sake\",\"source\":\"doc-1\"}",
+        )
+        .unwrap();
+
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "recreate")
+            .unwrap();
+        assert!(
+            import_marker_paths(&dir, "sake").is_empty(),
+            "create clears the earlier generation's markers"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -135,6 +135,41 @@ Entries that change an on-disk format or a response shape say so.
   contexts should still export over plain HTTP or `taguru export`
   offline; the tool descriptions say so.
 
+- Integrity checksums in every on-disk format that holds acknowledged
+  data (#59). The context image gains a whole-file CRC-32C footer
+  (format v5 → v6), verified before anything else is trusted on load;
+  the passage snapshot does the same (`TAGURUS3` → `TAGURUS4`); and
+  every WAL record — graph and passages — now carries a `crc` field
+  verified on replay. Structural validation alone accepts silent
+  corruption that happens to keep the invariants (a flipped byte
+  inside a stored name loads, serves, and flushes back as truth);
+  the checksums close exactly that gap, and `taguru inspect` now says
+  what was *verified* versus merely parsed (image/snapshot generation
+  in each ok-line, a NOTE counting pre-checksum WAL records).
+  On-disk notes: older images and snapshots keep loading forever,
+  unverified, and writing always produces the checksummed formats — so
+  after the first flush a DOWNGRADED binary refuses the image as an
+  unsupported version (roll back onto a pre-upgrade backup, or through
+  export/import). The WAL change is additive in both directions: a
+  pre-checksum binary ignores the field, and pre-checksum records
+  replay unchecked.
+- Torn-import detection (#59): one import batch applies as four
+  separately durable steps (retract the source → store the passage →
+  add associations → add aliases), each store individually consistent,
+  so a crash — or an unrepaired mid-batch refusal — used to leave the
+  source half-applied with nothing able to say so. Now a per-source
+  batch-open marker (`{stem}.{source-hash}.importing`, the pair named
+  in its content) is written before the first step and removed only
+  after the last: the server's next boot warns for every surviving
+  marker whose context still exists (and removes moot ones), and
+  `taguru inspect` reports the same tear with its repair. Both
+  documented repairs clear it — re-importing the batch file (offline
+  or `POST /import`; retract-then-apply keeps the retry exact) or
+  retracting the source. Deleting or recreating the context sweeps its
+  markers. Cross-store atomicity is deliberately not attempted:
+  per-source idempotency already makes the repair exact, so detection
+  was the whole remaining gap.
+
 ### Changed
 - doc2query `questions` now index into their paragraph's BM25 postings
   (terms and length both — the doc2query move itself), so a
