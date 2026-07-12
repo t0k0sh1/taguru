@@ -16,12 +16,22 @@ Entries that change an on-disk format or a response shape say so.
   groups}`, membership updates are deltas (`add_contexts`/
   `remove_contexts`, `add_groups`/`remove_groups`), and the same four
   operations ride MCP as `list_groups`/`create_group`/`update_group`/
-  `delete_group`. Referential integrity is strict: adding a member
-  requires the context (`no_context`) or child group (`no_group`) to
-  exist, deleting a context or a group drops it from every group, and
-  boot reconciles any dangling member — or hand-written cycle or
-  over-deep chain — a crash or an edited data directory could leave
-  behind. Nesting refusals answer `invalid_argument` (cycle) or
+  `delete_group`. A group bundles at most 1,000 member contexts and
+  1,000 child groups: the delta lists were already capped per request,
+  and the RESULT now is too (`over_limit`; removals apply first, so
+  one request can trade members within the cap — past it, split into
+  nested child groups). Referential integrity is strict: adding a
+  member requires the context (`no_context`) or child group
+  (`no_group`) to exist, deleting a context or a group drops it from
+  every group, and boot reconciles any dangling member — or
+  hand-written over-cap set, cycle, or over-deep chain — a crash or an
+  edited data directory could leave behind. A group file that reads
+  but does not parse keeps its name with empty content, its bytes set
+  aside as `{name}.group.corrupt` and a fresh empty record written in
+  their place; an UNREADABLE group file refuses the boot outright —
+  registering it empty would let the next write silently overwrite
+  membership that was never loaded. Nesting refusals answer
+  `invalid_argument` (cycle) or
   `over_limit` (depth). Group reads/creates/updates need read/write;
   deletion is admin, like contexts. A context-scoped key sees every
   group row (child names included — labels, not content) but only the

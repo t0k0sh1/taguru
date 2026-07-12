@@ -288,7 +288,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "create_group",
-            "Create a group bundling contexts and, optionally, child groups (nesting: at most 3 groups tall, never cyclic). Every listed context and child group must already exist; membership never dangles — deleting a context or a group drops it from every group.",
+            "Create a group bundling contexts and, optionally, child groups (nesting: at most 3 groups tall, never cyclic; each set holds at most 1000 names — past that, split into nested child groups). Every listed context and child group must already exist; membership never dangles — deleting a context or a group drops it from every group.",
             object_schema(
                 json!({
                     "name": { "type": "string" },
@@ -309,7 +309,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "update_group",
-            "Update a group's description and/or membership. add_contexts/remove_contexts and add_groups/remove_groups are deltas against the current members, not a replacement list; a name in both ends up a member. Added contexts and child groups must exist; removing a non-member is a no-op; nesting stays at most 3 groups tall and acyclic.",
+            "Update a group's description and/or membership. add_contexts/remove_contexts and add_groups/remove_groups are deltas against the current members, not a replacement list; a name in both ends up a member. Added contexts and child groups must exist; removing a non-member is a no-op; nesting stays at most 3 groups tall and acyclic, and the resulting membership at most 1000 member contexts and 1000 child groups (removals apply first, so one request can trade members within the cap).",
             object_schema(
                 json!({
                     "name": { "type": "string" },

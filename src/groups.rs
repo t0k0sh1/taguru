@@ -32,6 +32,16 @@ use crate::registry::{scanned_stem_and_name, write_atomic};
 /// One constant to raise if that judgement changes.
 pub(crate) const MAX_GROUP_DEPTH: usize = 3;
 
+/// Ceiling on one group's DIRECT membership — member contexts and
+/// child groups each. The per-request delta lists already cap at the
+/// same figure, but deltas accumulate: without a cap on the RESULT, a
+/// group could be grown without bound patch by patch, and every row
+/// serves its full membership (the group directory does not page
+/// within a row). Matches the request-list cap, so anything a single
+/// create can say is exactly what a group can hold; past it, split
+/// into nested child groups.
+pub(crate) const MAX_GROUP_MEMBERS: usize = 1000;
+
 /// One group: the prose half of the grouping (same routing role as a
 /// context's description) plus the member context names and the child
 /// group names. Sorted sets so membership is deduplicated and every
@@ -164,6 +174,35 @@ pub(crate) fn repair_nesting(groups: &mut BTreeMap<String, GroupRecord>) {
     }
 }
 
+/// Trims every record's direct membership back under `cap` names per
+/// set — member contexts and child groups each — keeping the FIRST
+/// `cap` in name order, so the repair is deterministic. Nothing
+/// running can persist an over-cap set (the write paths refuse
+/// first); this is boot's counterpart for a hand-edited file, handed
+/// [`MAX_GROUP_MEMBERS`] by the reconciler and a small cap by tests.
+pub(crate) fn trim_membership(groups: &mut BTreeMap<String, GroupRecord>, cap: usize) {
+    for (name, record) in groups.iter_mut() {
+        for (field, set) in [
+            ("contexts", &mut record.contexts),
+            ("child groups", &mut record.groups),
+        ] {
+            if set.len() <= cap {
+                continue;
+            }
+            let dropped = set.len() - cap;
+            while set.len() > cap {
+                set.pop_last();
+            }
+            tracing::warn!(
+                group = %name,
+                field,
+                dropped,
+                "dropped membership past the {cap}-name cap; the first {cap} names survive"
+            );
+        }
+    }
+}
+
 /// Every context reachable from the named roots — direct members plus
 /// everything nested children bundle, transitively. The scoped write
 /// gate judges a group by this closure: a grant must cover what the
@@ -219,11 +258,23 @@ pub(crate) fn remove_group_file(dir: &Path, stem: &str) -> io::Result<()> {
 }
 
 /// One boot-time pass for groups, run after the context scan (which
-/// also sweeps staging leftovers). An unreadable or corrupt file keeps
-/// its name and loses its content: the entity must not vanish because
-/// one read failed. Louder than a context's sidecar read, which treats
-/// absence as the normal never-written case — here the directory scan
-/// just listed the file, so a failed read is always news.
+/// also sweeps staging leftovers). Failures are loud on purpose — the
+/// directory scan just listed the file, so trouble reading it is
+/// always news (contrast a context's sidecar read, which treats
+/// absence as the normal never-written case):
+///
+/// - An UNREADABLE file refuses the boot. The group's real membership
+///   is out of reach, and registering the name over an empty record
+///   would hand the next write to that group a license to overwrite
+///   whatever the file still holds — a transient permission hiccup
+///   must not turn into silent membership loss.
+/// - A file that reads but does not PARSE keeps its name and loses
+///   its content: the entity must not vanish because its record got
+///   mangled. The mangled bytes are set aside as
+///   `{stem}.group.corrupt` (evidence for hand recovery; every other
+///   scan ignores the extension) and a fresh empty record takes their
+///   place on disk, so disk and memory agree from the first request
+///   and no later write clobbers bytes that were never loaded.
 pub(crate) fn scan_groups(dir: &Path) -> io::Result<BTreeMap<String, GroupRecord>> {
     let mut groups = BTreeMap::new();
     for dir_entry in fs::read_dir(dir)? {
@@ -231,16 +282,31 @@ pub(crate) fn scan_groups(dir: &Path) -> io::Result<BTreeMap<String, GroupRecord
         if path.extension().and_then(|e| e.to_str()) != Some("group") {
             continue;
         }
-        let Some((_, name)) = scanned_stem_and_name(&path) else {
+        let Some((stem, name)) = scanned_stem_and_name(&path) else {
             continue;
         };
-        let record = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-                tracing::warn!("group '{name}' has a corrupt file, keeping it empty: {error}");
-                GroupRecord::default()
-            }),
+        let bytes = fs::read(&path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "group '{name}' is unreadable ({}): {error} — restore the file \
+                     (or move it out of the data directory) and start again",
+                    path.display()
+                ),
+            )
+        })?;
+        let record = match serde_json::from_slice(&bytes) {
+            Ok(record) => record,
             Err(error) => {
-                tracing::warn!("group '{name}' could not be read, keeping it empty: {error}");
+                let set_aside = path.with_extension("group.corrupt");
+                tracing::warn!(
+                    group = %name,
+                    bytes_at = %set_aside.display(),
+                    %error,
+                    "group file does not parse; keeping the group empty and setting the bytes aside"
+                );
+                fs::rename(&path, &set_aside)?;
+                write_group(dir, &stem, &GroupRecord::default())?;
                 GroupRecord::default()
             }
         };
@@ -325,6 +391,28 @@ mod tests {
         let mut repaired = valid.clone();
         repair_nesting(&mut repaired);
         assert_eq!(repaired, valid);
+    }
+
+    #[test]
+    fn trim_keeps_the_first_cap_names_of_each_set_and_leaves_the_rest_alone() {
+        let mut groups = map(&[
+            ("wide", &["c1", "c2", "c3"], &["g1", "g2", "g3"]),
+            ("fits", &["c1", "c2"], &[]),
+        ]);
+        trim_membership(&mut groups, 2);
+        assert_eq!(
+            groups["wide"].contexts,
+            ["c1", "c2"].iter().map(|c| c.to_string()).collect()
+        );
+        assert_eq!(
+            groups["wide"].groups,
+            ["g1", "g2"].iter().map(|g| g.to_string()).collect()
+        );
+        assert_eq!(
+            groups["fits"].contexts.len(),
+            2,
+            "within the cap: untouched"
+        );
     }
 
     #[test]

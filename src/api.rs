@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use taguru::context::{Activation, Association, Attribution, Context, Recollection, Resolution};
 
-use crate::groups::{GroupRecord, MAX_GROUP_DEPTH, NestingViolation};
+use crate::groups::{GroupRecord, MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, NestingViolation};
 use crate::metrics::{ErrorKind, ResolveTier, SearchOp};
 use crate::registry::{
     AccessError, AppState, AssocOp, ContextMeta, CreateError, CreateGroupError, UpdateGroupError,
@@ -237,6 +237,21 @@ fn nesting_refusal(violation: NestingViolation, started_at: Instant) -> Response
             started_at,
         ),
     }
+}
+
+/// A group write whose RESULT would bundle more than
+/// [`MAX_GROUP_MEMBERS`] names in one set — `field` says which
+/// ("member contexts" / "child groups"). The delta caps already bound
+/// each request; this bounds what the deltas accumulate to.
+fn over_cap_refusal(field: &'static str, started_at: Instant) -> Response {
+    error(
+        ErrorCode::OverLimit,
+        format!(
+            "the group would bundle more than {MAX_GROUP_MEMBERS} {field}; nothing was \
+             applied — split into nested child groups"
+        ),
+        started_at,
+    )
 }
 
 /// The credential behind a request, for the `taguru::audit` lines —
@@ -947,6 +962,7 @@ pub async fn create_group(
             started_at,
         ),
         Err(CreateGroupError::Nesting(violation)) => nesting_refusal(violation, started_at),
+        Err(CreateGroupError::OverCap(field)) => over_cap_refusal(field, started_at),
         Err(CreateGroupError::Io(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
@@ -1048,6 +1064,7 @@ pub async fn update_group(
             started_at,
         ),
         Err(UpdateGroupError::Nesting(violation)) => nesting_refusal(violation, started_at),
+        Err(UpdateGroupError::OverCap(field)) => over_cap_refusal(field, started_at),
         Err(UpdateGroupError::Io(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
@@ -2582,15 +2599,20 @@ fn cross_targets(
             started_at,
         )));
     }
-    let resolved = match state.resolve_groups(&groups) {
-        Ok(resolved) => resolved,
-        Err(missing) => return Err(Box::new(group_not_found(&missing, started_at))),
-    };
-    targets.extend(
-        resolved
-            .into_iter()
-            .filter(|name| scope_allows(scope, name) && seen.insert(name.clone())),
-    );
+    // Resolution is skipped outright when no groups were named: a
+    // context-only search must never queue behind a group write's
+    // fsync on the groups lock (see the registry field's doc).
+    if !groups.is_empty() {
+        let resolved = match state.resolve_groups(&groups) {
+            Ok(resolved) => resolved,
+            Err(missing) => return Err(Box::new(group_not_found(&missing, started_at))),
+        };
+        targets.extend(
+            resolved
+                .into_iter()
+                .filter(|name| scope_allows(scope, name) && seen.insert(name.clone())),
+        );
+    }
     Ok(targets)
 }
 
@@ -2600,11 +2622,18 @@ type CrossPage = (usize, Vec<(String, Association)>);
 
 /// The shared middle of the cross-context graph searches: run the
 /// per-context search over every target in turn, pool the matches, cut
-/// the pool with [`page_by`], and only then tag the survivors with
-/// their context names — the pre-cut pool can be every match in every
-/// target, and naming it all up front would allocate thousands of
-/// strings just to throw them away. The first per-context failure
-/// aborts the whole response (a read has nothing to half-apply).
+/// past the limit, and only then tag the survivors with their context
+/// names — naming every match up front would allocate thousands of
+/// strings just to throw them away. The cut runs INSIDE the loop, each
+/// time the pool exceeds the limit, so the pool never holds more than
+/// the limit plus one context's matches — across every context a group
+/// can reach, the high-water mark stays what the single-context
+/// endpoint already pays. The running cut is exact, not approximate:
+/// the comparator matches [`page_by`]'s, the sort is stable, and later
+/// contexts only ever append after earlier ones, so survivors and tie
+/// order come out identical to cutting one grand pool at the end. The
+/// first per-context failure aborts the whole response (a read has
+/// nothing to half-apply).
 fn cross_matches(
     state: &AppState,
     targets: &[String],
@@ -2613,20 +2642,26 @@ fn cross_matches(
     search: impl Fn(&Context) -> Vec<Association>,
     started_at: Instant,
 ) -> Result<CrossPage, Box<Response>> {
+    let limit = clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    let mut total = 0;
     let mut pool: Vec<(usize, Association)> = Vec::new();
     for (index, name) in targets.iter().enumerate() {
         match state.read_context(name, &search) {
             Ok(matches) => {
                 state.note_search(op, name, matches.is_empty());
+                total += matches.len();
                 pool.extend(matches.into_iter().map(|found| (index, found)));
+                if pool.len() > limit {
+                    pool.sort_by(|a, b| b.1.weight.abs().total_cmp(&a.1.weight.abs()));
+                    pool.truncate(limit);
+                }
             }
             Err(failure) => {
                 return Err(Box::new(access_error(state, failure, name, started_at)));
             }
         }
     }
-    let (total, page) = page_by(pool, limit, |(_, association)| association.weight);
-    let tagged = page
+    let tagged = pool
         .into_iter()
         .map(|(index, association)| (targets[index].clone(), association))
         .collect();

@@ -239,7 +239,7 @@ Source code takes the same discipline; only the naming changes.
 | GET | `/groups` | `?limit=1000&after=name` → `{total, groups:[{name, description, contexts, groups}]}` (keyset paging by name; a group bundles contexts many-to-many and may nest child groups — `groups` — at most 3 tall, cycles refused) |
 | GET | `/groups/{name}` | one group row / 404 |
 | PUT | `/groups/{name}` | `{description?, contexts?:[name], groups?:[name]}` → create (groups and contexts are separate namespaces; every listed member — context or child group — must exist) |
-| PATCH | `/groups/{name}` | `{description?, add_contexts?, remove_contexts?, add_groups?, remove_groups?}` → the updated row (deltas, not a replacement list; removals apply first; added members must exist, removing a non-member is a no-op) |
+| PATCH | `/groups/{name}` | `{description?, add_contexts?, remove_contexts?, add_groups?, remove_groups?}` → the updated row (deltas, not a replacement list; removals apply first; added members must exist, removing a non-member is a no-op; the result holds at most 1000 member contexts and 1000 child groups — `over_limit` past that; split into nested child groups) |
 | DELETE | `/groups/{name}` | delete the bundling only — member contexts and child groups are untouched (deleting a context or a group also drops it from every group) |
 | POST | `/contexts/{name}/associations` | `[{subject,label,object,weight,source?,paragraph?}]` → applied count (`paragraph` locates the fact within `source` and is ignored without one) |
 | POST | `/contexts/{name}/recall` | `{cue, limit?}` → `{total, matches}` |

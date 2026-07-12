@@ -526,6 +526,11 @@ pub enum CreateGroupError {
     /// The children exist but the shape is not allowed: a cycle, or a
     /// chain of more than [`groups::MAX_GROUP_DEPTH`] groups.
     Nesting(groups::NestingViolation),
+    /// One of the two membership sets would hold more than
+    /// [`groups::MAX_GROUP_MEMBERS`] names; carries which one
+    /// ("member contexts" / "child groups"). Judged before existence,
+    /// like the request-list caps: a count needs no lookups.
+    OverCap(&'static str),
     Io(io::Error),
 }
 
@@ -543,6 +548,12 @@ pub enum UpdateGroupError {
     /// (or an ancestor) as its own child passes the existence gate and
     /// lands in the validator's lap.
     Nesting(groups::NestingViolation),
+    /// [`CreateGroupError::OverCap`]'s twin, judged on the RESULT of
+    /// the delta: removals apply first, so trading members out makes
+    /// room in the same request. Checked before existence — the count
+    /// needs no lookups, and a delta that cannot fit should not spend
+    /// them.
+    OverCap(&'static str),
     Io(io::Error),
 }
 
@@ -805,12 +816,17 @@ struct StateInner {
     registry: RwLock<HashMap<String, Arc<Entry>>>,
     /// Groups: bundles of context names and child-group names (a
     /// shallow DAG, at most [`groups::MAX_GROUP_DEPTH`] groups tall and
-    /// never cyclic), each persisted as one `{stem}.group` file. Small
-    /// enough to stay resident in full, so one lock over the whole map
+    /// never cyclic, each set at most [`groups::MAX_GROUP_MEMBERS`]
+    /// names), each persisted as one `{stem}.group` file. Small enough
+    /// to stay resident in full, so one lock over the whole map
     /// suffices — and it is held across the record's own fsync on
-    /// writes: a group write blocks only other group writes, never any
-    /// context operation. BTreeMap keeps the directory listing in name
-    /// order for free.
+    /// writes. That fsync therefore stalls group READS too (the
+    /// directory, and any search that names a group) — briefly, and
+    /// only when a group write is in flight — but never a context
+    /// operation: a request that names no group never touches this
+    /// lock (the cross-context searches skip group resolution for an
+    /// empty list). BTreeMap keeps the directory listing in name order
+    /// for free.
     groups: RwLock<BTreeMap<String, GroupRecord>>,
     /// Logical clock behind `Entry::last_touch`.
     clock: AtomicU64,
@@ -1380,6 +1396,16 @@ impl AppState {
         if groups.contains_key(name) {
             return Err(CreateGroupError::AlreadyExists);
         }
+        // Unreachable through HTTP while the request-list cap equals
+        // [`groups::MAX_GROUP_MEMBERS`] (a create can't say more names
+        // than a group may hold), but the invariant belongs to the
+        // registry, not to whoever happens to call it.
+        if contexts.len() > groups::MAX_GROUP_MEMBERS {
+            return Err(CreateGroupError::OverCap("member contexts"));
+        }
+        if children.len() > groups::MAX_GROUP_MEMBERS {
+            return Err(CreateGroupError::OverCap("child groups"));
+        }
         {
             let registry = self.0.registry.read().unwrap();
             if let Some(missing) =
@@ -1429,6 +1455,31 @@ impl AppState {
         let mut groups = self.0.groups.write().unwrap();
         if !groups.contains_key(name) {
             return Err(UpdateGroupError::NotFound);
+        }
+        // The cap is judged on the delta's RESULT — removals first,
+        // exactly as they will apply — and before the existence
+        // lookups: counting needs none, and refusing here lets the
+        // membership tests speak in names that need not exist.
+        {
+            let record = &groups[name];
+            for (field, current, add, remove) in [
+                (
+                    "member contexts",
+                    &record.contexts,
+                    &add_contexts,
+                    &remove_contexts,
+                ),
+                ("child groups", &record.groups, &add_groups, &remove_groups),
+            ] {
+                let mut prospective: BTreeSet<&str> = current.iter().map(String::as_str).collect();
+                for removed in remove {
+                    prospective.remove(removed.as_str());
+                }
+                prospective.extend(add.iter().map(String::as_str));
+                if prospective.len() > groups::MAX_GROUP_MEMBERS {
+                    return Err(UpdateGroupError::OverCap(field));
+                }
+            }
         }
         if !add_contexts.is_empty() {
             let registry = self.0.registry.read().unwrap();
@@ -3865,7 +3916,8 @@ fn sweep_membership(
 
 /// Boot-time counterpart of the delete-path sweeps: drops every group
 /// member that is not a registered context, every child that is not a
-/// scanned group, and every nesting edge that would close a cycle or
+/// scanned group, every name past the [`groups::MAX_GROUP_MEMBERS`]
+/// per-set cap, and every nesting edge that would close a cycle or
 /// stack more than [`groups::MAX_GROUP_DEPTH`] groups (hand-edits
 /// only — nothing running can persist such a shape). Each fix is
 /// written back to disk immediately — disk is the source of truth, and
@@ -3887,9 +3939,11 @@ fn reconcile_groups(
             .retain(|context| registry.contains_key(context));
         record.groups.retain(|child| scanned.contains_key(child));
     }
-    // The dangling references are gone; what remains can still be the
-    // wrong SHAPE — the repair drops exactly the edges the validator
-    // refuses, deterministically.
+    // Dangling names never count toward the cap — they were just
+    // dropped — so the trim runs on what actually remains…
+    groups::trim_membership(groups, groups::MAX_GROUP_MEMBERS);
+    // …and what remains can still be the wrong SHAPE — the repair
+    // drops exactly the edges the validator refuses, deterministically.
     groups::repair_nesting(groups);
     for (name, record) in groups.iter() {
         let before = &scanned[name];
@@ -3902,7 +3956,7 @@ fn reconcile_groups(
                     group = %name,
                     dropped_contexts = before.contexts.len() - record.contexts.len(),
                     dropped_children = before.groups.len() - record.groups.len(),
-                    "dropped dangling or ill-nested group reference(s) at boot"
+                    "dropped dangling, over-cap, or ill-nested group reference(s) at boot"
                 );
             }
             Err(error) => {
@@ -8760,19 +8814,119 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_group_file_keeps_its_name_and_loses_its_content() {
+    fn a_corrupt_group_file_keeps_its_name_and_sets_the_bytes_aside() {
         let dir = scratch_dir("groups-corrupt");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         drop(state);
-        fs::write(
-            groups::group_path(&dir, &file_stem("mangled")),
-            b"{not json",
-        )
-        .unwrap();
+        let live = groups::group_path(&dir, &file_stem("mangled"));
+        fs::write(&live, b"{not json").unwrap();
 
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         let record = state.group("mangled").unwrap();
         assert_eq!(record, GroupRecord::default());
+        // The mangled bytes moved aside for hand recovery, and a fresh
+        // empty record took their place — a later write to this group
+        // overwrites nothing that was never loaded.
+        assert_eq!(
+            fs::read(live.with_extension("group.corrupt")).unwrap(),
+            b"{not json",
+            "the original bytes must survive, set aside"
+        );
+        let on_disk: GroupRecord = serde_json::from_slice(&fs::read(&live).unwrap()).unwrap();
+        assert_eq!(on_disk, GroupRecord::default());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unreadable_group_file_refuses_the_boot() {
+        let dir = scratch_dir("groups-unreadable");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        drop(state);
+        // A directory wearing the extension: fs::read fails on it, on
+        // every platform, the way a permission hiccup would — and boot
+        // must refuse rather than register 'locked' over an empty
+        // record a later write would persist.
+        let imposter = dir.join("locked.group");
+        fs::create_dir(&imposter).unwrap();
+        let message = match AppState::boot(dir.clone(), 1 << 20, None) {
+            Ok(_) => panic!("boot must refuse while a group file is unreadable"),
+            Err(error) => error.to_string(),
+        };
+        assert!(message.contains("locked"), "names the group: {message}");
+        // Clearing the obstacle heals without further ceremony.
+        fs::remove_dir(&imposter).unwrap();
+        assert!(AppState::boot(dir.clone(), 1 << 20, None).is_ok());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn group_membership_is_capped_per_set_and_judged_before_existence() {
+        let dir = scratch_dir("groups-cap");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        state.create("real", ContextMeta::default()).unwrap();
+        // One name past the cap refuses — before existence, so the
+        // names need not exist to hear it — and nothing lands.
+        let over: BTreeSet<String> = (0..=groups::MAX_GROUP_MEMBERS)
+            .map(|i| format!("c{i:04}"))
+            .collect();
+        assert!(matches!(
+            state.create_group("g", String::new(), over.clone(), BTreeSet::new()),
+            Err(CreateGroupError::OverCap("member contexts"))
+        ));
+        assert!(matches!(
+            state.create_group("g", String::new(), BTreeSet::new(), over.clone()),
+            Err(CreateGroupError::OverCap("child groups"))
+        ));
+        assert!(state.group("g").is_none());
+
+        // A delta is judged on its RESULT: 1 member + cap-many adds is
+        // one too many, but trading the member out in the same request
+        // makes room — the cap passes and the existence gate speaks
+        // next, proving the judgement order.
+        let one = BTreeSet::from(["real".to_string()]);
+        state
+            .create_group("g", String::new(), one.clone(), BTreeSet::new())
+            .unwrap();
+        let cap_many: BTreeSet<String> = (0..groups::MAX_GROUP_MEMBERS)
+            .map(|i| format!("c{i:04}"))
+            .collect();
+        assert!(matches!(
+            state.update_group(
+                "g",
+                None,
+                cap_many.clone(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new()
+            ),
+            Err(UpdateGroupError::OverCap("member contexts"))
+        ));
+        assert!(matches!(
+            state.update_group(
+                "g",
+                None,
+                cap_many.clone(),
+                one.clone(),
+                BTreeSet::new(),
+                BTreeSet::new()
+            ),
+            Err(UpdateGroupError::NoSuchContext(missing)) if missing == "c0000"
+        ));
+        // Child groups ride the same cap on their own set.
+        assert!(matches!(
+            state.update_group(
+                "g",
+                None,
+                BTreeSet::new(),
+                BTreeSet::new(),
+                over,
+                BTreeSet::new()
+            ),
+            Err(UpdateGroupError::OverCap("child groups"))
+        ));
+        assert_eq!(state.group("g").unwrap().contexts, one);
 
         let _ = fs::remove_dir_all(dir);
     }

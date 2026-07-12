@@ -5771,6 +5771,53 @@ fn group_membership_is_strict_and_context_deletion_sweeps() {
     assert_eq!(refused["code"], json!("over_limit"));
 }
 
+/// Membership is capped in TOTAL, not just per request: deltas cannot
+/// grow a group past 1,000 names per set. The cap is judged on the
+/// delta's result, before existence — so these ghosts never need to
+/// exist to hear it — and removals apply first, making room in the
+/// same request.
+#[test]
+fn group_membership_cannot_be_grown_past_the_cap_by_deltas() {
+    let server = Server::start("groups-total-cap");
+    server.ok("PUT", "/contexts/a", None);
+    server.ok("PUT", "/groups/g", Some(json!({"contexts": ["a"]})));
+    server.ok("PUT", "/groups/kid", None);
+    server.ok("PATCH", "/groups/g", Some(json!({"add_groups": ["kid"]})));
+
+    // 1 member + 1,000 adds = one past the cap: refused whole.
+    let ghosts: Vec<String> = (0..1000).map(|i| format!("ghost{i:04}")).collect();
+    let (status, refused) =
+        server.call("PATCH", "/groups/g", Some(json!({"add_contexts": ghosts})));
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["code"], json!("over_limit"), "{refused}");
+    // Child groups ride the same cap on their own set.
+    let ghost_kids: Vec<String> = (0..1000).map(|i| format!("gg{i:04}")).collect();
+    let (status, refused) = server.call(
+        "PATCH",
+        "/groups/g",
+        Some(json!({"add_groups": ghost_kids})),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["code"], json!("over_limit"), "{refused}");
+
+    // Removing the member in the same request makes room — the cap
+    // passes and the EXISTENCE gate answers next, proving the cap is
+    // judged on the result and before existence.
+    let ghosts: Vec<String> = (0..1000).map(|i| format!("ghost{i:04}")).collect();
+    let (status, refused) = server.call(
+        "PATCH",
+        "/groups/g",
+        Some(json!({"add_contexts": ghosts, "remove_contexts": ["a"]})),
+    );
+    assert_eq!(status, 404, "{refused}");
+    assert_eq!(refused["code"], json!("no_context"), "{refused}");
+
+    // Nothing half-applied anywhere along the way.
+    let row = server.ok("GET", "/groups/g", None);
+    assert_eq!(row["contexts"], json!(["a"]), "{row}");
+    assert_eq!(row["groups"], json!(["kid"]), "{row}");
+}
+
 /// Nesting: a group may hold child groups — at most three storeys,
 /// never a cycle, children must exist — child deltas patch like
 /// context deltas, and deleting a child sweeps it out of every parent.
