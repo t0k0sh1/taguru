@@ -2422,8 +2422,9 @@ pub async fn audit_vocabulary(
 
     // The lexical half already spent the budget checking its own
     // deadline; skip the semantic half rather than fail a request that
-    // did real, useful work — SWEEP_CAP/PAIR_CAP already bound it, so
-    // this is a courtesy skip, not a correctness guard.
+    // did real, useful work — semantic_twins also checks this same
+    // deadline internally (its own pairwise sweep can still be large),
+    // so this is a courtesy early-out on top of that, not the only guard.
     if deadline.expired() {
         return ok(
             VocabularyAudit {
@@ -2436,7 +2437,8 @@ pub async fn audit_vocabulary(
             started_at,
         );
     }
-    let semantic = tokio::task::block_in_place(|| state.semantic_twins(&name, cosine_floor));
+    let semantic =
+        tokio::task::block_in_place(|| state.semantic_twins(&name, cosine_floor, deadline));
     let Some((semantic_concepts, semantic_labels, semantic_note)) = semantic else {
         return not_found(&name, started_at);
     };
@@ -2858,7 +2860,7 @@ pub async fn export_context(
     let rendered = tokio::task::block_in_place(|| {
         state
             .export_context(&name)
-            .map(|snapshot| crate::export::render(&name, &snapshot))
+            .map(|snapshot| crate::export::render(&name, &snapshot, deadline))
     });
     match rendered {
         Ok(Ok(rendered)) => (
@@ -2870,6 +2872,12 @@ pub async fn export_context(
             rendered.stream,
         )
             .into_response(),
+        // Mirrors search_passages: render()'s own loop over a large
+        // context's associations/aliases can outlast the budget after
+        // the entry check above already passed — reclassify by asking
+        // the same deadline again rather than by matching render()'s
+        // message text.
+        Ok(Err(_)) if deadline.expired() => deadline_exceeded(started_at),
         // A real source colliding with a reserved export id — the one
         // thing a context can hold that the stream cannot say.
         Ok(Err(message)) => error(ErrorCode::Conflict, message, started_at),

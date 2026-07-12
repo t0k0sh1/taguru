@@ -174,8 +174,9 @@ async fn call_inner(
 /// may carry a caller-supplied context or concept name) back into the
 /// error text.
 const RESULT_TOO_BIG: &str = "tool result exceeds the MCP response cap \
-    (TAGURU_MCP_MAX_RESULT_BYTES); fetch it instead via GET /contexts/{name}/export over the \
-    raw HTTP API, or the `taguru export` CLI — both are uncapped";
+    (TAGURU_MCP_MAX_RESULT_BYTES); narrow the call (a smaller `limit` works for most tools), or \
+    for a full-context export use GET /contexts/{name}/export over the raw HTTP API, or the \
+    `taguru export` CLI — both are uncapped";
 
 /// `axum::body::to_bytes` wraps a cap violation as an `axum::Error`
 /// whose `source()` is always the underlying `LengthLimitError` — the

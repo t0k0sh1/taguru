@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use taguru::context::{AliasError, CompactionError, Context, LabelUsage};
-use taguru::deadline::Deadline;
+use taguru::deadline::{Deadline, DeadlineExceeded};
 
 use crate::embedding::{
     EmbedPurpose, EmbeddingProvider, PassageKey, PassageVectorStore, VectorStore, VectorTable,
@@ -2071,6 +2071,7 @@ impl AppState {
         &self,
         name: &str,
         cosine_floor: f32,
+        deadline: Deadline,
     ) -> Option<(
         Vec<(String, String, f32)>,
         Vec<(String, String, f32)>,
@@ -2113,6 +2114,12 @@ impl AppState {
             };
             let mut pairs = Vec::new();
             for (i, (name_a, vector_a)) in entries.iter().enumerate() {
+                if deadline.expired() {
+                    *skipped = Some(
+                        "意味的検出は期限切れのため途中で打ち切り (一部の結果のみ)".to_string(),
+                    );
+                    break;
+                }
                 for (name_b, vector_b) in &entries[i + 1..] {
                     let score = similarity(vector_a, vector_b);
                     if score >= floor {
@@ -2340,6 +2347,9 @@ impl AppState {
                 Some(index) => index.needs_reclaim(),
             };
             if rebuild {
+                if deadline.expired() {
+                    return Some(Err(io::Error::other(DeadlineExceeded)));
+                }
                 let records = store.snapshot();
                 let built_at = std::time::Instant::now();
                 let index = if guard.take().is_some() {
@@ -2800,6 +2810,9 @@ impl AppState {
             .collect();
         let mut embedded = VectorTable::new();
         for chunk in stale.chunks(128) {
+            if deadline.expired() {
+                return Err(DeadlineExceeded.to_string());
+            }
             let texts: Vec<&str> = chunk.iter().map(|(_, gloss, _)| gloss.as_str()).collect();
             match self.timed_embed(embedder, &texts, EmbedPurpose::Index, deadline) {
                 Ok(vectors) => {
@@ -2953,6 +2966,10 @@ impl AppState {
         let mut embedded = 0usize;
         let mut failure: Option<String> = None;
         for chunk in to_embed.chunks(128) {
+            if deadline.expired() {
+                failure = Some(DeadlineExceeded.to_string());
+                break;
+            }
             let texts: Vec<&str> = chunk.iter().map(|(_, text)| text.as_str()).collect();
             match self.timed_embed(embedder.as_ref(), &texts, EmbedPurpose::Index, deadline) {
                 Ok(vectors) => {
@@ -9008,7 +9025,9 @@ mod tests {
             .unwrap();
 
         // Before any vectors exist the semantic half is skipped, loudly.
-        let (concepts, labels, note) = state.semantic_twins("sake", 0.6).unwrap();
+        let (concepts, labels, note) = state
+            .semantic_twins("sake", 0.6, Deadline::unbounded())
+            .unwrap();
         assert!(concepts.is_empty() && labels.is_empty());
         assert!(note.is_some());
 
@@ -9016,7 +9035,9 @@ mod tests {
             .refresh_embeddings("sake", Deadline::unbounded())
             .unwrap()
             .unwrap();
-        let (concepts, labels, note) = state.semantic_twins("sake", 0.6).unwrap();
+        let (concepts, labels, note) = state
+            .semantic_twins("sake", 0.6, Deadline::unbounded())
+            .unwrap();
         assert!(note.is_none());
         // Directly connected concepts (青嶺酒造 —創業年→ 1907年) are
         // related, not duplicates, and must be filtered out however
@@ -9041,7 +9062,11 @@ mod tests {
         // (2 namespaces) — stored vectors are compared directly.
         assert_eq!(calls.load(Ordering::Relaxed), 2);
 
-        assert!(state.semantic_twins("nope", 0.6).is_none());
+        assert!(
+            state
+                .semantic_twins("nope", 0.6, Deadline::unbounded())
+                .is_none()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

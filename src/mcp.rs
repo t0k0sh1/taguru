@@ -154,6 +154,16 @@ fn search_target_schema(properties: Value, required: &[&str]) -> Value {
     schema
 }
 
+/// Layers a second `anyOf` onto a [`search_target_schema`] result via
+/// `allOf`, so both constraints hold at once — assigning straight into
+/// `schema["anyOf"]` would silently replace the target-selection one
+/// instead of adding to it.
+fn require_any_of(mut schema: Value, alternatives: Value) -> Value {
+    let target_any_of = schema.as_object_mut().unwrap().remove("anyOf").unwrap();
+    schema["allOf"] = json!([{ "anyOf": target_any_of }, { "anyOf": alternatives }]);
+    schema
+}
+
 /// Pulls a required string argument, telling an absent one apart from a
 /// present-but-wrong-typed one — folding both into "missing" sends a
 /// caller who passed `{"name": 42}` hunting for an argument they did
@@ -453,14 +463,21 @@ pub fn tool_definitions() -> Vec<Value> {
         (
             "query",
             "Position-pinned search. subject/label/object each take a string or an array (array = match any); at least one of the three must be given — leaving all three out is refused rather than matching everything. Outline with describe, then narrow by label. Targets one context (context) or several at once (contexts and/or groups) — cross-context matches carry their context, and past the limit the strongest |weight| survives (weights share one scale).",
-            search_target_schema(
-                json!({
-                    "subject": { "type": ["string", "array"] },
-                    "label": { "type": ["string", "array"] },
-                    "object": { "type": ["string", "array"] },
-                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
-                }),
-                &[],
+            require_any_of(
+                search_target_schema(
+                    json!({
+                        "subject": { "type": ["string", "array"] },
+                        "label": { "type": ["string", "array"] },
+                        "object": { "type": ["string", "array"] },
+                        "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
+                    }),
+                    &[],
+                ),
+                json!([
+                    { "required": ["subject"] },
+                    { "required": ["label"] },
+                    { "required": ["object"] },
+                ]),
             ),
         ),
         (
@@ -1252,6 +1269,41 @@ mod tests {
         assert_eq!(
             schema["anyOf"],
             json!([{ "required": ["paragraph"] }, { "required": ["index"] }])
+        );
+    }
+
+    /// `query`'s description says subject/label/object need at least
+    /// one; the schema must say so too, on top of (not instead of) the
+    /// target-selection `anyOf` `search_target_schema` already adds.
+    #[test]
+    fn query_schema_requires_a_position_alongside_a_target() {
+        let tool = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "query")
+            .expect("query is defined");
+        let schema = &tool["inputSchema"];
+        assert!(
+            schema.get("anyOf").is_none(),
+            "the target-selection anyOf should move under allOf, not stay alongside it: {schema}"
+        );
+        assert_eq!(
+            schema["allOf"],
+            json!([
+                {
+                    "anyOf": [
+                        { "required": ["context"] },
+                        { "required": ["contexts"] },
+                        { "required": ["groups"] },
+                    ]
+                },
+                {
+                    "anyOf": [
+                        { "required": ["subject"] },
+                        { "required": ["label"] },
+                        { "required": ["object"] },
+                    ]
+                },
+            ])
         );
     }
 

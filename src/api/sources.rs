@@ -325,6 +325,11 @@ pub async fn search_passages(
     });
     match outcome {
         None => not_found(&name, started_at),
+        // A rebuild the lexical lane needed refused to start once the
+        // budget was already gone — the same "before it could start"
+        // shape as the entry check above, just discovered later, past
+        // the embedding call this search's semantic lane also makes.
+        Some(Err(_)) if deadline.expired() => deadline_exceeded(started_at),
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(hits)) => {
             state.note_search(SearchOp::SearchPassages, &name, hits.is_empty());

@@ -2179,9 +2179,9 @@ impl Context {
     /// never silent. The caller re-applies configuration the image
     /// never holds (`applied_seq`, `dice_floor`).
     ///
-    /// `deadline` is checked once per association — not inside
-    /// `query_any` itself, which collects every association up front
-    /// (its fast path for an all-wildcard query) before this loop ever
+    /// `deadline` is checked once per association and once per alias —
+    /// not inside `query_any` itself, which collects every association
+    /// up front (its fast path for an all-wildcard query) before this loop ever
     /// runs, so a deadline that is already tight when this is called
     /// cannot shorten that initial O(edges) collection.
     ///
@@ -2234,6 +2234,9 @@ impl Context {
             )?;
         }
         for (alias, canonical) in self.concept_aliases() {
+            if deadline.expired() {
+                return Err(CompactionError::DeadlineExceeded);
+            }
             match fresh.add_concept_alias(alias, canonical) {
                 Ok(()) => {}
                 Err(AliasError::Full(full)) => return Err(full.into()),
@@ -2241,6 +2244,9 @@ impl Context {
             }
         }
         for (alias, canonical) in self.label_aliases() {
+            if deadline.expired() {
+                return Err(CompactionError::DeadlineExceeded);
+            }
             match fresh.add_label_alias(alias, canonical) {
                 Ok(()) => {}
                 Err(AliasError::Full(full)) => return Err(full.into()),
