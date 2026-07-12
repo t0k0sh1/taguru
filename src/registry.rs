@@ -518,6 +518,14 @@ pub enum CreateGroupError {
     /// the client hears WHICH one. Strict on purpose: an add must never
     /// mint a dangling reference.
     NoSuchContext(String),
+    /// A listed child is not a registered group — the same strictness,
+    /// one namespace over. A create can never trip the cycle check
+    /// through this gate: a child naming the group being created is
+    /// not registered yet, so it refuses here first.
+    NoSuchGroup(String),
+    /// The children exist but the shape is not allowed: a cycle, or a
+    /// chain of more than [`groups::MAX_GROUP_DEPTH`] groups.
+    Nesting(groups::NestingViolation),
     Io(io::Error),
 }
 
@@ -528,6 +536,13 @@ pub enum UpdateGroupError {
     /// `add_contexts`. Removals are exempt — removing a name that is
     /// not a member is an idempotent no-op, never an error.
     NoSuchContext(String),
+    /// [`CreateGroupError::NoSuchGroup`]'s twin, for `add_groups`.
+    NoSuchGroup(String),
+    /// [`CreateGroupError::Nesting`]'s twin — and here the cycle arm is
+    /// reachable: the group being updated IS registered, so adding it
+    /// (or an ancestor) as its own child passes the existence gate and
+    /// lands in the validator's lap.
+    Nesting(groups::NestingViolation),
     Io(io::Error),
 }
 
@@ -788,12 +803,14 @@ struct StateInner {
     /// larger than the whole budget still works — it just stays alone.
     cache_bytes: usize,
     registry: RwLock<HashMap<String, Arc<Entry>>>,
-    /// Groups: flat bundles of context names, each persisted as one
-    /// `{stem}.group` file. Small enough to stay resident in full, so
-    /// one lock over the whole map suffices — and it is held across the
-    /// record's own fsync on writes: a group write blocks only other
-    /// group writes, never any context operation. BTreeMap keeps the
-    /// directory listing in name order for free.
+    /// Groups: bundles of context names and child-group names (a
+    /// shallow DAG, at most [`groups::MAX_GROUP_DEPTH`] groups tall and
+    /// never cyclic), each persisted as one `{stem}.group` file. Small
+    /// enough to stay resident in full, so one lock over the whole map
+    /// suffices — and it is held across the record's own fsync on
+    /// writes: a group write blocks only other group writes, never any
+    /// context operation. BTreeMap keeps the directory listing in name
+    /// order for free.
     groups: RwLock<BTreeMap<String, GroupRecord>>,
     /// Logical clock behind `Entry::last_touch`.
     clock: AtomicU64,
@@ -930,11 +947,13 @@ impl AppState {
         let registry = scan_data_dir(&data_dir)?;
         // Groups scan after contexts (the context scan also sweeps
         // staging leftovers), then reconcile unconditionally: whatever
-        // put a dangling member into a group file — a crash between a
-        // context's deletion and the sweep's rewrite, a sweep that
-        // could not persist, a hand-edited directory — boot drops it
-        // and writes the fix back, so "a group names only live
-        // contexts" holds from the first request on, without exception.
+        // put a dangling member, a dangling child, or an illegal
+        // nesting into a group file — a crash between a deletion and
+        // the sweep's rewrite, a sweep that could not persist, a
+        // hand-edited directory — boot drops it and writes the fix
+        // back, so "a group names only live contexts and live groups,
+        // acyclically, within the depth cap" holds from the first
+        // request on, without exception.
         let mut groups = groups::scan_groups(&data_dir)?;
         reconcile_groups(&data_dir, &registry, &mut groups);
 
@@ -1345,12 +1364,14 @@ impl AppState {
     /// `registry` — the documented order): `contains_key` already
     /// answers false for a name mid-delete, because delete() removes
     /// the name and reserves it in `pending_deletes` inside one
-    /// critical section.
+    /// critical section. Child groups are judged against the same map
+    /// the write lock already holds.
     pub fn create_group(
         &self,
         name: &str,
         description: String,
         contexts: BTreeSet<String>,
+        children: BTreeSet<String>,
     ) -> Result<(), CreateGroupError> {
         if name.is_empty() {
             return Err(CreateGroupError::InvalidName);
@@ -1361,59 +1382,96 @@ impl AppState {
         }
         {
             let registry = self.0.registry.read().unwrap();
-            if let Some(missing) = first_missing_context(&registry, &contexts) {
+            if let Some(missing) =
+                first_missing(&contexts, |context| registry.contains_key(context))
+            {
                 return Err(CreateGroupError::NoSuchContext(missing.clone()));
             }
+        }
+        if let Some(missing) = first_missing(&children, |child| groups.contains_key(child)) {
+            return Err(CreateGroupError::NoSuchGroup(missing.clone()));
         }
         let record = GroupRecord {
             description,
             contexts,
+            groups: children,
         };
-        groups::write_group(&self.0.data_dir, &file_stem(name), &record)
-            .map_err(CreateGroupError::Io)?;
+        // The nesting validator wants the prospective map, so insert
+        // first and unwind on refusal — nothing escapes the write lock
+        // half-done.
         groups.insert(name.to_string(), record);
+        if let Err(violation) = groups::validate_nesting(&groups) {
+            groups.remove(name);
+            return Err(CreateGroupError::Nesting(violation));
+        }
+        if let Err(error) = groups::write_group(&self.0.data_dir, &file_stem(name), &groups[name]) {
+            groups.remove(name);
+            return Err(CreateGroupError::Io(error));
+        }
         Ok(())
     }
 
-    /// Applies a delta to one group — removals first, then additions
-    /// (a name in both ends up a member), then the description — and
-    /// persists the result. Nothing applies unless everything does: a
-    /// failed persist restores the previous record, the update twin of
-    /// [`rollback_meta`].
+    /// Applies a delta to one group — context and child removals
+    /// first, then additions (a name in both ends up a member), then
+    /// the description — validates the nesting that results, and
+    /// persists. Nothing applies unless everything does: a refused
+    /// nesting or a failed persist restores the previous record, the
+    /// update twin of [`rollback_meta`].
     pub fn update_group(
         &self,
         name: &str,
         description: Option<String>,
         add_contexts: BTreeSet<String>,
         remove_contexts: BTreeSet<String>,
+        add_groups: BTreeSet<String>,
+        remove_groups: BTreeSet<String>,
     ) -> Result<GroupRecord, UpdateGroupError> {
         let mut groups = self.0.groups.write().unwrap();
-        let Some(record) = groups.get_mut(name) else {
+        if !groups.contains_key(name) {
             return Err(UpdateGroupError::NotFound);
-        };
+        }
         if !add_contexts.is_empty() {
             let registry = self.0.registry.read().unwrap();
-            if let Some(missing) = first_missing_context(&registry, &add_contexts) {
+            if let Some(missing) =
+                first_missing(&add_contexts, |context| registry.contains_key(context))
+            {
                 return Err(UpdateGroupError::NoSuchContext(missing.clone()));
             }
         }
+        // `name` itself IS registered, so a self-add passes this gate —
+        // and lands in the validator's lap as the smallest cycle.
+        if let Some(missing) = first_missing(&add_groups, |child| groups.contains_key(child)) {
+            return Err(UpdateGroupError::NoSuchGroup(missing.clone()));
+        }
+        let record = groups.get_mut(name).unwrap();
         let previous = record.clone();
         for context in &remove_contexts {
             record.contexts.remove(context);
         }
         record.contexts.extend(add_contexts);
+        for group in &remove_groups {
+            record.groups.remove(group);
+        }
+        record.groups.extend(add_groups);
         if let Some(description) = description {
             record.description = description;
         }
-        if let Err(error) = groups::write_group(&self.0.data_dir, &file_stem(name), record) {
-            *record = previous;
+        if let Err(violation) = groups::validate_nesting(&groups) {
+            *groups.get_mut(name).unwrap() = previous;
+            return Err(UpdateGroupError::Nesting(violation));
+        }
+        if let Err(error) = groups::write_group(&self.0.data_dir, &file_stem(name), &groups[name]) {
+            *groups.get_mut(name).unwrap() = previous;
             return Err(UpdateGroupError::Io(error));
         }
-        Ok(record.clone())
+        Ok(groups[name].clone())
     }
 
-    /// Removes a group — the bundling only, never the member contexts.
-    /// `None` for an unknown name, mirroring [`AppState::delete`].
+    /// Removes a group — the bundling only, never the member contexts
+    /// nor the child groups. `None` for an unknown name, mirroring
+    /// [`AppState::delete`]. Parents naming the group are swept inside
+    /// the same critical section, so no reader ever observes a
+    /// dangling child.
     ///
     /// One file, so no deletion marker: the memory drop and the unlink
     /// are it. The weaker guarantee is deliberate and priced in — if
@@ -1422,6 +1480,13 @@ impl AppState {
     pub fn delete_group(&self, name: &str) -> Option<io::Result<()>> {
         let mut groups = self.0.groups.write().unwrap();
         groups.remove(name)?;
+        // Nesting must not outlive the child — the same sweep a
+        // deleted context gets, on the child field, under the write
+        // lock already held (best effort past the removal; boot
+        // reconciliation heals a sweep that could not persist).
+        sweep_membership(&self.0.data_dir, &mut groups, name, |record| {
+            &mut record.groups
+        });
         Some(groups::remove_group_file(
             &self.0.data_dir,
             &file_stem(name),
@@ -1433,15 +1498,15 @@ impl AppState {
         self.0.groups.read().unwrap().get(name).cloned()
     }
 
-    /// One group's member set alone — the scoped write gate wants the
-    /// names without paying for a copy of the description too.
-    pub fn group_contexts(&self, name: &str) -> Option<BTreeSet<String>> {
-        self.0
-            .groups
-            .read()
-            .unwrap()
-            .get(name)
-            .map(|record| record.contexts.clone())
+    /// Union of every context reachable from the named groups — direct
+    /// members plus everything nested children bundle, transitively.
+    /// The scoped write gate judges a group by what it ADDRESSES, so
+    /// this is its view; unknown names contribute nothing.
+    pub fn group_context_closures<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> BTreeSet<String> {
+        groups::context_closure(&self.0.groups.read().unwrap(), names)
     }
 
     /// One name-ordered page of groups plus the cursor-independent
@@ -1477,21 +1542,9 @@ impl AppState {
     /// which the next boot's reconciliation heals.
     fn sweep_context_from_groups(&self, context_name: &str) {
         let mut groups = self.0.groups.write().unwrap();
-        for (group_name, record) in groups.iter_mut() {
-            if !record.contexts.remove(context_name) {
-                continue;
-            }
-            if let Err(error) =
-                groups::write_group(&self.0.data_dir, &file_stem(group_name), record)
-            {
-                tracing::warn!(
-                    group = %group_name,
-                    context = %context_name,
-                    %error,
-                    "group membership sweep not persisted; the next boot's reconciliation drops it"
-                );
-            }
-        }
+        sweep_membership(&self.0.data_dir, &mut groups, context_name, |record| {
+            &mut record.contexts
+        });
     }
 
     /// Registers original text passages behind source ids, merge-upsert,
@@ -3743,23 +3796,55 @@ pub(crate) fn scanned_stem_and_name(path: &Path) -> Option<(String, String)> {
     }
 }
 
-/// The strict-membership gate shared by group create and update: the
-/// first requested member that is not a registered context, if any.
-fn first_missing_context<'a>(
-    registry: &HashMap<String, Arc<Entry>>,
+/// The strict-membership gate shared by the group writes: the first
+/// requested name the given namespace does not have, if any. Strict on
+/// purpose — an add must never mint a dangling reference — and one
+/// function for both namespaces (member contexts, child groups): the
+/// caller supplies the existence test.
+fn first_missing<'a>(
     names: impl IntoIterator<Item = &'a String>,
+    exists: impl Fn(&str) -> bool,
 ) -> Option<&'a String> {
-    names
-        .into_iter()
-        .find(|name| !registry.contains_key(name.as_str()))
+    names.into_iter().find(|name| !exists(name))
 }
 
-/// Boot-time counterpart of the delete-path sweep: drops every group
-/// member that is not a registered context and writes each fix back to
-/// disk immediately — disk is the source of truth, and a fix that only
-/// lived in memory would leave the file lying to `taguru inspect` and
-/// to file-level backups until the next unrelated write. Runs
-/// unconditionally: the causes it heals (a crash between a context's
+/// Shared body of the two membership sweeps — a deleted context out of
+/// every group's members, a deleted group out of every parent's
+/// children: removes `stale` from the chosen set field of every record
+/// and persists each touched one. Best effort by design — a rewrite
+/// that fails leaves memory correct and the file stale, which the next
+/// boot's reconciliation heals. Lock-free on purpose: every caller
+/// already holds the groups write lock.
+fn sweep_membership(
+    data_dir: &Path,
+    groups: &mut BTreeMap<String, GroupRecord>,
+    stale: &str,
+    field: impl Fn(&mut GroupRecord) -> &mut BTreeSet<String>,
+) {
+    for (group_name, record) in groups.iter_mut() {
+        if !field(record).remove(stale) {
+            continue;
+        }
+        if let Err(error) = groups::write_group(data_dir, &file_stem(group_name), record) {
+            tracing::warn!(
+                group = %group_name,
+                removed = %stale,
+                %error,
+                "group membership sweep not persisted; the next boot's reconciliation drops it"
+            );
+        }
+    }
+}
+
+/// Boot-time counterpart of the delete-path sweeps: drops every group
+/// member that is not a registered context, every child that is not a
+/// scanned group, and every nesting edge that would close a cycle or
+/// stack more than [`groups::MAX_GROUP_DEPTH`] groups (hand-edits
+/// only — nothing running can persist such a shape). Each fix is
+/// written back to disk immediately — disk is the source of truth, and
+/// a fix that only lived in memory would leave the file lying to
+/// `taguru inspect` and to file-level backups until the next unrelated
+/// write. Runs unconditionally: the causes it heals (a crash between a
 /// deletion and the sweep's rewrite, a sweep that could not persist, a
 /// hand-edited data directory) leave no marker behind, and the whole
 /// collection is small enough that checking it all costs nothing.
@@ -3768,18 +3853,30 @@ fn reconcile_groups(
     registry: &HashMap<String, Arc<Entry>>,
     groups: &mut BTreeMap<String, GroupRecord>,
 ) {
-    for (name, record) in groups.iter_mut() {
-        let before = record.contexts.len();
+    let scanned = groups.clone();
+    for record in groups.values_mut() {
         record
             .contexts
             .retain(|context| registry.contains_key(context));
-        let dropped = before - record.contexts.len();
-        if dropped == 0 {
+        record.groups.retain(|child| scanned.contains_key(child));
+    }
+    // The dangling references are gone; what remains can still be the
+    // wrong SHAPE — the repair drops exactly the edges the validator
+    // refuses, deterministically.
+    groups::repair_nesting(groups);
+    for (name, record) in groups.iter() {
+        let before = &scanned[name];
+        if before == record {
             continue;
         }
         match groups::write_group(data_dir, &file_stem(name), record) {
             Ok(()) => {
-                tracing::info!(group = %name, dropped, "dropped dangling group member(s) at boot");
+                tracing::info!(
+                    group = %name,
+                    dropped_contexts = before.contexts.len() - record.contexts.len(),
+                    dropped_children = before.groups.len() - record.groups.len(),
+                    "dropped dangling or ill-nested group reference(s) at boot"
+                );
             }
             Err(error) => {
                 tracing::warn!(
@@ -8477,18 +8574,24 @@ mod tests {
                 "drinks",
                 "beverage knowledge".into(),
                 BTreeSet::from(["sake".to_string()]),
+                BTreeSet::new(),
             )
             .unwrap();
         assert!(matches!(
-            state.create_group("drinks", String::new(), BTreeSet::new()),
+            state.create_group("drinks", String::new(), BTreeSet::new(), BTreeSet::new()),
             Err(CreateGroupError::AlreadyExists)
         ));
         assert!(matches!(
-            state.create_group("", String::new(), BTreeSet::new()),
+            state.create_group("", String::new(), BTreeSet::new(), BTreeSet::new()),
             Err(CreateGroupError::InvalidName)
         ));
         assert!(matches!(
-            state.create_group("ghosts", String::new(), BTreeSet::from(["nope".to_string()])),
+            state.create_group(
+                "ghosts",
+                String::new(),
+                BTreeSet::from(["nope".to_string()]),
+                BTreeSet::new()
+            ),
             Err(CreateGroupError::NoSuchContext(missing)) if missing == "nope"
         ));
         // The refused create left nothing behind, in memory or on disk.
@@ -8503,6 +8606,8 @@ mod tests {
                 None,
                 BTreeSet::from(["nope".to_string()]),
                 BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
             ),
             Err(UpdateGroupError::NoSuchContext(missing)) if missing == "nope"
         ));
@@ -8516,12 +8621,21 @@ mod tests {
                 Some("all drinks".into()),
                 BTreeSet::from(["beer".to_string()]),
                 BTreeSet::from(["sake".to_string()]),
+                BTreeSet::new(),
+                BTreeSet::new(),
             )
             .unwrap();
         assert_eq!(updated.description, "all drinks");
         assert_eq!(updated.contexts, BTreeSet::from(["beer".to_string()]));
         assert!(matches!(
-            state.update_group("ghosts", None, BTreeSet::new(), BTreeSet::new()),
+            state.update_group(
+                "ghosts",
+                None,
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new()
+            ),
             Err(UpdateGroupError::NotFound)
         ));
 
@@ -8555,6 +8669,7 @@ mod tests {
                     group,
                     String::new(),
                     BTreeSet::from(["sake".to_string(), "beer".to_string()]),
+                    BTreeSet::new(),
                 )
                 .unwrap();
         }
@@ -8596,6 +8711,7 @@ mod tests {
             &GroupRecord {
                 description: "d".into(),
                 contexts: BTreeSet::from(["sake".to_string(), "gone".to_string()]),
+                groups: BTreeSet::new(),
             },
         )
         .unwrap();
@@ -8634,6 +8750,141 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn groups_nest_to_the_cap_without_cycles_and_sweep_deleted_children() {
+        use crate::groups::NestingViolation;
+
+        let dir = scratch_dir("groups-nesting");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        for context in ["sake", "beer", "tea"] {
+            state.create(context, ContextMeta::default()).unwrap();
+        }
+        let one = |name: &str| BTreeSet::from([name.to_string()]);
+        state
+            .create_group("leaf", String::new(), one("tea"), BTreeSet::new())
+            .unwrap();
+        state
+            .create_group("mid", String::new(), one("beer"), one("leaf"))
+            .unwrap();
+        state
+            .create_group("top", String::new(), one("sake"), one("mid"))
+            .unwrap();
+
+        // The closure reads through the nesting; the record stays flat.
+        assert_eq!(
+            state.group_context_closures(["top"]),
+            ["sake", "beer", "tea"]
+                .iter()
+                .map(|c| c.to_string())
+                .collect()
+        );
+        assert_eq!(state.group("top").unwrap().contexts, one("sake"));
+
+        // A fourth storey over a full chain refuses, and nothing lands.
+        assert!(matches!(
+            state.create_group("over", String::new(), BTreeSet::new(), one("top")),
+            Err(CreateGroupError::Nesting(NestingViolation::TooDeep(_)))
+        ));
+        assert!(state.group("over").is_none());
+        assert!(!groups::group_path(&dir, &file_stem("over")).exists());
+
+        // Closing the chain into a cycle refuses — the self-loop
+        // included — and an unknown child answers in the group
+        // namespace; the record survives every refusal unchanged.
+        assert!(matches!(
+            state.update_group(
+                "leaf",
+                None,
+                BTreeSet::new(),
+                BTreeSet::new(),
+                one("top"),
+                BTreeSet::new()
+            ),
+            Err(UpdateGroupError::Nesting(NestingViolation::Cycle(_)))
+        ));
+        assert!(matches!(
+            state.update_group(
+                "leaf",
+                None,
+                BTreeSet::new(),
+                BTreeSet::new(),
+                one("leaf"),
+                BTreeSet::new()
+            ),
+            Err(UpdateGroupError::Nesting(NestingViolation::Cycle(_)))
+        ));
+        assert!(matches!(
+            state.update_group(
+                "leaf",
+                None,
+                BTreeSet::new(),
+                BTreeSet::new(),
+                one("nope"),
+                BTreeSet::new()
+            ),
+            Err(UpdateGroupError::NoSuchGroup(missing)) if missing == "nope"
+        ));
+        assert_eq!(state.group("leaf").unwrap().groups, BTreeSet::new());
+
+        // Deleting a child sweeps it out of every parent, durably.
+        state.delete_group("mid").unwrap().unwrap();
+        assert_eq!(state.group("top").unwrap().groups, BTreeSet::new());
+        drop(state);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        assert_eq!(state.group("top").unwrap().groups, BTreeSet::new());
+        assert_eq!(state.group("leaf").unwrap().contexts, one("tea"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn boot_reconciliation_untangles_hand_written_nesting() {
+        let dir = scratch_dir("groups-reconcile-nesting");
+        drop(AppState::boot(dir.clone(), 1 << 20, None).unwrap());
+        let write = |name: &str, children: &[&str]| {
+            groups::write_group(
+                &dir,
+                &file_stem(name),
+                &GroupRecord {
+                    description: String::new(),
+                    contexts: BTreeSet::new(),
+                    groups: children.iter().map(|child| child.to_string()).collect(),
+                },
+            )
+            .unwrap();
+        };
+        // A two-cycle, a four-group chain, and a child that exists
+        // nowhere — none of which a running server can persist.
+        write("cyc-a", &["cyc-b"]);
+        write("cyc-b", &["cyc-a"]);
+        write("n1", &["ghost", "n2"]);
+        write("n2", &["n3"]);
+        write("n3", &["n4"]);
+        write("n4", &[]);
+
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        // The dangling child is gone, the cycle is open, the chain fits
+        // the cap — deterministically: edges re-admitted in name order,
+        // so (cyc-b, cyc-a) and (n3, n4) are the ones that fall.
+        let children =
+            |name: &str| -> BTreeSet<String> { state.group(name).unwrap().groups.clone() };
+        assert_eq!(children("n1"), BTreeSet::from(["n2".to_string()]));
+        assert_eq!(children("n2"), BTreeSet::from(["n3".to_string()]));
+        assert_eq!(children("n3"), BTreeSet::new());
+        assert_eq!(children("cyc-a"), BTreeSet::from(["cyc-b".to_string()]));
+        assert_eq!(children("cyc-b"), BTreeSet::new());
+        // Disk is the source of truth: the repairs reached the files.
+        for (group, dropped) in [("cyc-b", "cyc-a"), ("n3", "n4"), ("n1", "ghost")] {
+            let on_disk = fs::read_to_string(groups::group_path(&dir, &file_stem(group))).unwrap();
+            assert!(
+                !on_disk.contains(dropped),
+                "'{group}' still names '{dropped}' on disk: {on_disk}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_failed_group_persist_rolls_the_update_back() {
@@ -8647,6 +8898,7 @@ mod tests {
                 "drinks",
                 "before".into(),
                 BTreeSet::from(["sake".to_string()]),
+                BTreeSet::new(),
             )
             .unwrap();
 
@@ -8658,6 +8910,8 @@ mod tests {
             Some("after".into()),
             BTreeSet::new(),
             BTreeSet::from(["sake".to_string()]),
+            BTreeSet::new(),
+            BTreeSet::new(),
         );
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(outcome, Err(UpdateGroupError::Io(_))));

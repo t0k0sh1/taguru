@@ -8,21 +8,27 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
-- Context groups: `/groups` bundles contexts flat (many-to-many, no
-  hierarchy) as the addressing unit cross-context retrieval will
+- Context groups: `/groups` bundles contexts (many-to-many) and may
+  nest child groups — a shallow DAG, at most 3 groups tall, cycles
+  refused — as the addressing unit cross-context retrieval will
   build on. `GET /groups` (keyset-paged directory), `PUT/GET/PATCH/
-  DELETE /groups/{name}`; membership updates are deltas
-  (`add_contexts`/`remove_contexts`), and the same four operations
-  ride MCP as `list_groups`/`create_group`/`update_group`/
+  DELETE /groups/{name}`; each row is `{name, description, contexts,
+  groups}`, membership updates are deltas (`add_contexts`/
+  `remove_contexts`, `add_groups`/`remove_groups`), and the same four
+  operations ride MCP as `list_groups`/`create_group`/`update_group`/
   `delete_group`. Referential integrity is strict: adding a member
-  requires the context to exist (`no_context`), deleting a context
-  drops it from every group, and boot reconciles any dangling member
-  a crash could leave behind. Group reads/creates/updates need
-  read/write; deletion is admin, like contexts. A context-scoped key
-  sees every group row but only the members its grant allows, and a
-  group write touching any context beyond the grant is refused whole.
-  Each group persists as one `{name}.group` JSON file beside the
-  context files; one new error code, `no_group` (404). Known
+  requires the context (`no_context`) or child group (`no_group`) to
+  exist, deleting a context or a group drops it from every group, and
+  boot reconciles any dangling member — or hand-written cycle or
+  over-deep chain — a crash or an edited data directory could leave
+  behind. Nesting refusals answer `invalid_argument` (cycle) or
+  `over_limit` (depth). Group reads/creates/updates need read/write;
+  deletion is admin, like contexts. A context-scoped key sees every
+  group row (child names included — labels, not content) but only the
+  members its grant allows, and a group write touching any context
+  beyond the grant — counted through nested children — is refused
+  whole. Each group persists as one `{name}.group` JSON file beside
+  the context files; one new error code, `no_group` (404). Known
   limitations this iteration: groups are not covered by
   `taguru export`/`import`/`inspect`/`compact` (file-level backups
   carry the `.group` files as-is), and a `DELETE /groups/{name}`

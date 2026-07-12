@@ -3,7 +3,7 @@
 //! around the library — never retrieval semantics of its own — so each
 //! handler is a lock, a library call, and a serialized reply.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 
 use axum::Json;
@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use taguru::context::{Activation, Association, Attribution, Context, Recollection, Resolution};
 
-use crate::groups::GroupRecord;
+use crate::groups::{GroupRecord, MAX_GROUP_DEPTH, NestingViolation};
 use crate::metrics::{ErrorKind, ResolveTier, SearchOp};
 use crate::registry::{
     AccessError, AppState, AssocOp, ContextMeta, CreateError, CreateGroupError, UpdateGroupError,
@@ -213,6 +213,28 @@ fn group_not_found(name: &str, started_at: Instant) -> Response {
         format!("group '{name}' not found"),
         started_at,
     )
+}
+
+/// The two shape refusals a nesting write can hear, one wire response
+/// each: a cycle is a malformed request (`invalid_argument`) while a
+/// too-tall stack trips a cap (`over_limit`) — depth is policy, not
+/// syntax. Both name a group on the offending path.
+fn nesting_refusal(violation: NestingViolation, started_at: Instant) -> Response {
+    match violation {
+        NestingViolation::Cycle(group) => error(
+            ErrorCode::InvalidArgument,
+            format!("the nesting would loop back into group '{group}'; nothing was applied"),
+            started_at,
+        ),
+        NestingViolation::TooDeep(group) => error(
+            ErrorCode::OverLimit,
+            format!(
+                "the nesting would stack more than {MAX_GROUP_DEPTH} groups \
+                 (through group '{group}'); nothing was applied"
+            ),
+            started_at,
+        ),
+    }
 }
 
 /// The credential behind a request, for the `taguru::audit` lines —
@@ -707,6 +729,11 @@ pub struct GroupEntry {
     /// Member context names, sorted. For a context-scoped key this
     /// carries only the members its grant allows.
     pub contexts: Vec<String>,
+    /// Child group names, sorted — never scope-filtered (so the set
+    /// moves straight from the record): like the row itself, a group's
+    /// name is an organizational label, not context content, and the
+    /// contexts BEHIND a child stay filtered wherever they are served.
+    pub groups: BTreeSet<String>,
 }
 
 /// The scope cut on one group row. Deliberately different from
@@ -733,16 +760,19 @@ fn group_entry(
         name,
         description: record.description,
         contexts,
+        groups: record.groups,
     }
 }
 
 /// The write gate for a scoped key on a group: every context the
-/// operation involves — the current members and every name the request
-/// carries — must sit inside the grant, or nothing applies (the import
-/// gate's pre-apply judgement, at membership granularity). Checked
-/// BEFORE existence on purpose: existence-first would answer 404 for a
-/// missing out-of-scope name and 403 for a live one, handing a scoped
-/// key an oracle for which context names exist beyond its grant.
+/// operation involves — the group's transitive members (nested
+/// children read through, since the group ADDRESSES them) and every
+/// name the request carries — must sit inside the grant, or nothing
+/// applies (the import gate's pre-apply judgement, at membership
+/// granularity). Checked BEFORE existence on purpose: existence-first
+/// would answer 404 for a missing out-of-scope name and 403 for a live
+/// one, handing a scoped key an oracle for which context names exist
+/// beyond its grant.
 fn group_scope_refusal<'a>(
     scope: &Option<axum::Extension<crate::auth::KeyScope>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
@@ -765,10 +795,34 @@ fn group_scope_refusal<'a>(
     ))
 }
 
-/// The group directory: every group's name, description, and member
-/// contexts, name-ordered and paged like `GET /contexts`. Groups
-/// bundle contexts flat — no hierarchy — as the addressing unit that
-/// cross-context retrieval will build on.
+/// The gate every group write runs, wrapped around
+/// [`group_scope_refusal`]: resolves what the operation involves — the
+/// transitive context closures of the `closure_roots` groups plus the
+/// `direct` context names — and refuses if any of it sits beyond the
+/// grant. An unscoped key passes immediately, without paying for the
+/// closure read.
+fn scoped_group_refusal<'r, 'd>(
+    state: &AppState,
+    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    key: &Option<axum::Extension<crate::auth::AuthKey>>,
+    closure_roots: impl IntoIterator<Item = &'r str>,
+    direct: impl IntoIterator<Item = &'d String>,
+    started_at: Instant,
+) -> Option<Response> {
+    if scope.is_none() {
+        return None;
+    }
+    let mut involved = state.group_context_closures(closure_roots);
+    involved.extend(direct.into_iter().cloned());
+    group_scope_refusal(scope, key, &involved, started_at)
+}
+
+/// The group directory: every group's name, description, member
+/// contexts, and child groups, name-ordered and paged like
+/// `GET /contexts`. Groups bundle contexts and may nest child groups —
+/// a shallow DAG, at most [`MAX_GROUP_DEPTH`] storeys and never cyclic
+/// — as the addressing unit that cross-context retrieval will build
+/// on.
 pub async fn list_groups(
     State(state): State<AppState>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
@@ -804,6 +858,10 @@ pub struct CreateGroupRequest {
     pub description: String,
     /// Initial member context names; every one must already exist.
     pub contexts: Vec<String>,
+    /// Initial child group names; every one must already exist, and
+    /// the nesting that results must stay acyclic and at most
+    /// [`MAX_GROUP_DEPTH`] groups tall.
+    pub groups: Vec<String>,
 }
 
 pub async fn create_group(
@@ -832,7 +890,20 @@ pub async fn create_group(
     if let Some(refusal) = overlong("contexts", request.contexts.len(), started_at) {
         return refusal;
     }
-    if let Some(refusal) = group_scope_refusal(&scope, &key, &request.contexts, started_at) {
+    if let Some(refusal) = overlong("groups", request.groups.len(), started_at) {
+        return refusal;
+    }
+    // A scoped key is judged against everything the new group would
+    // address: the listed contexts plus every context reachable
+    // through the listed children.
+    if let Some(refusal) = scoped_group_refusal(
+        &state,
+        &scope,
+        &key,
+        request.groups.iter().map(String::as_str),
+        &request.contexts,
+        started_at,
+    ) {
         return refusal;
     }
     // Writes the group file (fsync + rename) like every other mutating
@@ -842,6 +913,7 @@ pub async fn create_group(
             &name,
             request.description,
             request.contexts.into_iter().collect(),
+            request.groups.into_iter().collect(),
         )
     }) {
         Ok(()) => ok(true, started_at),
@@ -860,6 +932,12 @@ pub async fn create_group(
             format!("context '{context}' not found; nothing was applied"),
             started_at,
         ),
+        Err(CreateGroupError::NoSuchGroup(group)) => error(
+            ErrorCode::NoGroup,
+            format!("group '{group}' not found; nothing was applied"),
+            started_at,
+        ),
+        Err(CreateGroupError::Nesting(violation)) => nesting_refusal(violation, started_at),
         Err(CreateGroupError::Io(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
@@ -876,13 +954,17 @@ pub async fn create_group(
 /// this context here" is the natural operation for an LLM client —
 /// the add/remove split aliases already use. A name in both lists ends
 /// up a member (removals apply first). Removing a non-member is an
-/// idempotent no-op; only additions demand the context exists.
+/// idempotent no-op; only additions demand the context — or, for
+/// `add_groups`, the child group — exists. Child additions must also
+/// leave the nesting acyclic and within [`MAX_GROUP_DEPTH`] storeys.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct UpdateGroupRequest {
     pub description: Option<String>,
     pub add_contexts: Vec<String>,
     pub remove_contexts: Vec<String>,
+    pub add_groups: Vec<String>,
+    pub remove_groups: Vec<String>,
 }
 
 pub async fn update_group(
@@ -909,23 +991,28 @@ pub async fn update_group(
     if let Some(refusal) = overlong("remove_contexts", request.remove_contexts.len(), started_at) {
         return refusal;
     }
+    if let Some(refusal) = overlong("add_groups", request.add_groups.len(), started_at) {
+        return refusal;
+    }
+    if let Some(refusal) = overlong("remove_groups", request.remove_groups.len(), started_at) {
+        return refusal;
+    }
     // A scoped key is judged against every context this update touches:
-    // the current members plus every name the request carries. The
-    // read-before-write happens only on the scoped path; the common
-    // unscoped case goes straight to the update.
-    if scope.is_some() {
-        let current = state.group_contexts(&name).unwrap_or_default();
-        if let Some(refusal) = group_scope_refusal(
-            &scope,
-            &key,
-            current
-                .iter()
-                .chain(&request.add_contexts)
-                .chain(&request.remove_contexts),
-            started_at,
-        ) {
-            return refusal;
-        }
+    // the group's transitive members plus every name the request
+    // carries — context names directly, group names through their own
+    // closures.
+    if let Some(refusal) = scoped_group_refusal(
+        &state,
+        &scope,
+        &key,
+        [name.as_str()]
+            .into_iter()
+            .chain(request.add_groups.iter().map(String::as_str))
+            .chain(request.remove_groups.iter().map(String::as_str)),
+        request.add_contexts.iter().chain(&request.remove_contexts),
+        started_at,
+    ) {
+        return refusal;
     }
     // Writes the group file (fsync + rename); keep it off the async
     // worker.
@@ -935,6 +1022,8 @@ pub async fn update_group(
             request.description,
             request.add_contexts.into_iter().collect(),
             request.remove_contexts.into_iter().collect(),
+            request.add_groups.into_iter().collect(),
+            request.remove_groups.into_iter().collect(),
         )
     }) {
         Ok(record) => ok(group_entry(name, record, &scope), started_at),
@@ -944,6 +1033,12 @@ pub async fn update_group(
             format!("context '{context}' not found; nothing was applied"),
             started_at,
         ),
+        Err(UpdateGroupError::NoSuchGroup(group)) => error(
+            ErrorCode::NoGroup,
+            format!("group '{group}' not found; nothing was applied"),
+            started_at,
+        ),
+        Err(UpdateGroupError::Nesting(violation)) => nesting_refusal(violation, started_at),
         Err(UpdateGroupError::Io(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
@@ -962,13 +1057,17 @@ pub async fn delete_group(
     key: Option<axum::Extension<crate::auth::AuthKey>>,
 ) -> Response {
     let started_at = Instant::now();
-    // Deleting the bundling touches every member's grant: judged like
-    // any other group write.
-    if scope.is_some() {
-        let current = state.group_contexts(&name).unwrap_or_default();
-        if let Some(refusal) = group_scope_refusal(&scope, &key, current.iter(), started_at) {
-            return refusal;
-        }
+    // Deleting the bundling touches every member's grant — nested
+    // members included: judged like any other group write.
+    if let Some(refusal) = scoped_group_refusal(
+        &state,
+        &scope,
+        &key,
+        [name.as_str()],
+        std::iter::empty(),
+        started_at,
+    ) {
+        return refusal;
     }
     // Unlinks the group file; keep it off the async worker.
     match tokio::task::block_in_place(|| state.delete_group(&name)) {

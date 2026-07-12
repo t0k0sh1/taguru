@@ -248,7 +248,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_groups",
-            "Group directory: every group's name, description, and member context names. A group bundles contexts flat (many-to-many, no hierarchy) — organize related contexts under one name. Groups and contexts are separate namespaces.",
+            "Group directory: every group's name, description, member context names, and child group names. A group bundles contexts (many-to-many) and may nest child groups up to 3 levels (cycles refused) — organize related contexts under one name. Groups and contexts are separate namespaces.",
             object_schema(
                 json!({
                     "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by name (default/ceiling 1000)" },
@@ -259,7 +259,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "create_group",
-            "Create a group bundling contexts. Every listed context must already exist; membership never dangles — deleting a context drops it from its groups.",
+            "Create a group bundling contexts and, optionally, child groups (nesting: at most 3 groups tall, never cyclic). Every listed context and child group must already exist; membership never dangles — deleting a context or a group drops it from every group.",
             object_schema(
                 json!({
                     "name": { "type": "string" },
@@ -268,6 +268,11 @@ pub fn tool_definitions() -> Vec<Value> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "initial member context names (from list_contexts)"
+                    },
+                    "groups": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "initial child group names (from list_groups)"
                     }
                 }),
                 &["name"],
@@ -275,20 +280,22 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "update_group",
-            "Update a group's description and/or membership. add_contexts/remove_contexts are deltas against the current members, not a replacement list; a name in both ends up a member. Added contexts must exist; removing a non-member is a no-op.",
+            "Update a group's description and/or membership. add_contexts/remove_contexts and add_groups/remove_groups are deltas against the current members, not a replacement list; a name in both ends up a member. Added contexts and child groups must exist; removing a non-member is a no-op; nesting stays at most 3 groups tall and acyclic.",
             object_schema(
                 json!({
                     "name": { "type": "string" },
                     "description": { "type": "string", "description": "omit to leave unchanged" },
                     "add_contexts": { "type": "array", "items": { "type": "string" } },
-                    "remove_contexts": { "type": "array", "items": { "type": "string" } }
+                    "remove_contexts": { "type": "array", "items": { "type": "string" } },
+                    "add_groups": { "type": "array", "items": { "type": "string" } },
+                    "remove_groups": { "type": "array", "items": { "type": "string" } }
                 }),
                 &["name"],
             ),
         ),
         (
             "delete_group",
-            "Delete a group (irreversible). Only the bundling goes; the member contexts and their data are untouched.",
+            "Delete a group (irreversible). Only the bundling goes; the member contexts, the child groups, and their data are untouched — parents naming the group just drop the child.",
             object_schema(json!({ "name": { "type": "string" } }), &["name"]),
         ),
         (
@@ -640,14 +647,20 @@ pub fn route_tool(
         "create_group" => (
             "PUT",
             group_path("name")?,
-            Some(pick(arguments, &["description", "contexts"])),
+            Some(pick(arguments, &["description", "contexts", "groups"])),
         ),
         "update_group" => (
             "PATCH",
             group_path("name")?,
             Some(pick(
                 arguments,
-                &["description", "add_contexts", "remove_contexts"],
+                &[
+                    "description",
+                    "add_contexts",
+                    "remove_contexts",
+                    "add_groups",
+                    "remove_groups",
+                ],
             )),
         ),
         "delete_group" => ("DELETE", group_path("name")?, None),

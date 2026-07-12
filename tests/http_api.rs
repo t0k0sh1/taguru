@@ -5250,6 +5250,92 @@ fn group_membership_is_strict_and_context_deletion_sweeps() {
     assert_eq!(refused["code"], json!("over_limit"));
 }
 
+/// Nesting: a group may hold child groups — at most three storeys,
+/// never a cycle, children must exist — child deltas patch like
+/// context deltas, and deleting a child sweeps it out of every parent.
+#[test]
+fn groups_nest_with_a_depth_cap_and_no_cycles() {
+    let server = Server::start("groups-nesting");
+    for name in ["a", "b"] {
+        server.ok("PUT", &format!("/contexts/{name}"), None);
+    }
+    server.ok("PUT", "/groups/leaf", Some(json!({"contexts": ["a"]})));
+    server.ok(
+        "PUT",
+        "/groups/mid",
+        Some(json!({"groups": ["leaf"], "contexts": ["b"]})),
+    );
+    server.ok("PUT", "/groups/top", Some(json!({"groups": ["mid"]})));
+
+    // Rows carry their children; members stay the direct ones.
+    let row = server.ok("GET", "/groups/mid", None);
+    assert_eq!(row["groups"], json!(["leaf"]), "{row}");
+    assert_eq!(row["contexts"], json!(["b"]));
+    let page = server.ok("GET", "/groups", None);
+    assert_eq!(page["groups"][2]["name"], json!("top"), "{page}");
+    assert_eq!(page["groups"][2]["groups"], json!(["mid"]));
+
+    // A fourth storey refuses as a cap, a cycle (the self-loop
+    // included) as a bad argument, an unknown child in the group
+    // namespace's own 404 — and nothing half-applies.
+    let (status, refused) = server.call("PUT", "/groups/over", Some(json!({"groups": ["top"]})));
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["code"], json!("over_limit"));
+    assert_eq!(server.call("GET", "/groups/over", None).0, 404);
+    let (status, refused) = server.call(
+        "PATCH",
+        "/groups/leaf",
+        Some(json!({"add_groups": ["top"]})),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["code"], json!("invalid_argument"));
+    let (status, refused) = server.call(
+        "PATCH",
+        "/groups/leaf",
+        Some(json!({"add_groups": ["leaf"]})),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["code"], json!("invalid_argument"));
+    let (status, refused) = server.call(
+        "PATCH",
+        "/groups/top",
+        Some(json!({"add_groups": ["ghost"], "remove_groups": ["mid"]})),
+    );
+    assert_eq!(status, 404, "{refused}");
+    assert_eq!(refused["code"], json!("no_group"));
+    assert_eq!(
+        server.ok("GET", "/groups/top", None)["groups"],
+        json!(["mid"]),
+        "the refused delta must not half-apply"
+    );
+
+    // Child deltas move like context deltas — and a child may sit
+    // under two parents at once: the shape is a DAG, not a tree.
+    let updated = server.ok(
+        "PATCH",
+        "/groups/top",
+        Some(json!({"add_groups": ["leaf"], "remove_groups": ["mid"]})),
+    );
+    assert_eq!(updated["groups"], json!(["leaf"]));
+    assert_eq!(
+        server.ok("GET", "/groups/mid", None)["groups"],
+        json!(["leaf"])
+    );
+
+    // Deleting a child sweeps it from every parent; its member
+    // contexts live on untouched.
+    server.ok("DELETE", "/groups/leaf", None);
+    assert_eq!(server.ok("GET", "/groups/top", None)["groups"], json!([]));
+    assert_eq!(server.ok("GET", "/groups/mid", None)["groups"], json!([]));
+    assert_eq!(server.call("GET", "/contexts/a", None).0, 200);
+
+    // The children list rides the same input ceiling as contexts.
+    let over_cap: Vec<String> = (0..1001).map(|i| format!("g{i}")).collect();
+    let (status, refused) = server.call("PUT", "/groups/wide", Some(json!({"groups": over_cap})));
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["code"], json!("over_limit"));
+}
+
 /// Groups persist across a restart, and boot reconciliation drops any
 /// dangling member a crash could have left in a group file.
 #[test]
@@ -5263,11 +5349,14 @@ fn groups_survive_restart_and_boot_reconciles_dangling_members() {
     );
 
     let data_dir = server.stop_gracefully();
-    // Plant a dangling member the way a crash between a context's
-    // deletion and the sweep's rewrite would: straight into the file.
+    // Plant a dangling member and a dangling child the way a crash
+    // between a deletion and the sweep's rewrite would: straight into
+    // the file.
     std::fs::write(
         data_dir.join("drinks.group"),
-        serde_json::to_vec(&json!({"description": "飲料", "contexts": ["sake", "gone"]})).unwrap(),
+        serde_json::to_vec(&json!({"description": "飲料", "contexts": ["sake", "gone"],
+                                   "groups": ["nowhere"]}))
+        .unwrap(),
     )
     .unwrap();
 
@@ -5279,9 +5368,15 @@ fn groups_survive_restart_and_boot_reconciles_dangling_members() {
         json!(["sake"]),
         "boot must reconcile the planted dangling member: {survived}"
     );
+    assert_eq!(
+        survived["groups"],
+        json!([]),
+        "boot must reconcile the planted dangling child: {survived}"
+    );
     // And the fix reached the file, not just memory.
     let on_disk = std::fs::read_to_string(server.data_dir.join("drinks.group")).unwrap();
     assert!(!on_disk.contains("gone"), "{on_disk}");
+    assert!(!on_disk.contains("nowhere"), "{on_disk}");
 }
 
 /// The scope story for groups: every key sees every row but only its
@@ -5421,6 +5516,58 @@ fn key_scopes_filter_group_members_and_gate_group_writes() {
     // ...but deletion is an operator verb (admin), like contexts.
     assert_eq!(call("DELETE", "/groups/mine", None, "stok").0, 403);
     assert_eq!(call("DELETE", "/groups/mine", None, "atok").0, 200);
+
+    // Nesting counts through: a child whose members sit beyond the
+    // grant poisons every write on the parent — the child's NAME stays
+    // visible (labels, not content), but its contexts are what a grant
+    // is about, wherever they hang.
+    assert_eq!(
+        call(
+            "PUT",
+            "/groups/shelf",
+            Some(json!({"contexts": ["bunko"]})),
+            "atok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "PATCH",
+            "/groups/ours",
+            Some(json!({"add_groups": ["shelf"]})),
+            "atok"
+        )
+        .0,
+        200
+    );
+    let (_, nested) = call("GET", "/groups/ours", None, "stok");
+    assert_eq!(nested["result"]["groups"], json!(["shelf"]), "{nested}");
+    assert_eq!(nested["result"]["contexts"], json!(["sake"]), "{nested}");
+    let (status, refused) = call(
+        "PATCH",
+        "/groups/ours",
+        Some(json!({"description": "still mine"})),
+        "stok",
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("no grant on context 'bunko'"),
+        "{refused}"
+    );
+    // Naming such a child in a delta refuses the same way — a scoped
+    // key cannot create a parent over contexts it has no grant on.
+    let (status, refused) = call(
+        "PUT",
+        "/groups/annex",
+        Some(json!({"groups": ["shelf"]})),
+        "stok",
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert_eq!(call("GET", "/groups/annex", None, "atok").0, 404);
 }
 
 /// The four group tools ride the MCP transport like every other tool —
@@ -5447,14 +5594,21 @@ fn groups_ride_the_mcp_transport() {
         json!({"name": "drinks", "description": "飲料", "contexts": ["sake"]}),
     );
     assert!(created.get("isError").is_none(), "{created}");
+    // Nesting rides the same tools: a child at create, deltas at update.
+    let nested = tool(
+        2,
+        "create_group",
+        json!({"name": "bar", "groups": ["drinks"]}),
+    );
+    assert!(nested.get("isError").is_none(), "{nested}");
 
-    let listed = tool(2, "list_groups", json!({}));
+    let listed = tool(3, "list_groups", json!({}));
     let text = listed["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("\"drinks\""), "{text}");
     assert!(text.contains("\"sake\""), "{text}");
 
     let updated = tool(
-        3,
+        4,
         "update_group",
         json!({"name": "drinks", "remove_contexts": ["sake"]}),
     );
@@ -5462,15 +5616,18 @@ fn groups_ride_the_mcp_transport() {
     let text = updated["content"][0]["text"].as_str().unwrap();
     assert!(!text.contains("\"sake\""), "{text}");
 
-    let deleted = tool(4, "delete_group", json!({"name": "drinks"}));
+    let deleted = tool(5, "delete_group", json!({"name": "drinks"}));
     assert!(deleted.get("isError").is_none(), "{deleted}");
-    let listed = tool(5, "list_groups", json!({}));
+    let listed = tool(6, "list_groups", json!({}));
     let text = listed["content"][0]["text"].as_str().unwrap();
+    // The child's deletion also swept it out of "bar", so the name is
+    // gone from the whole directory, parent row included.
     assert!(!text.contains("\"drinks\""), "{text}");
+    assert!(text.contains("\"bar\""), "{text}");
 
     // A failing group tool travels as isError content with the API's
     // machine code visible to the agent.
-    let failed = tool(6, "delete_group", json!({"name": "drinks"}));
+    let failed = tool(7, "delete_group", json!({"name": "drinks"}));
     assert_eq!(failed["isError"], json!(true), "{failed}");
     let text = failed["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("HTTP 404"), "{text}");
