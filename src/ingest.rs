@@ -48,6 +48,7 @@ use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use taguru::deadline::Deadline;
 
 use crate::api::{
     MAX_ASSOCIATION_WEIGHT, MAX_ASSOCIATIONS_PER_REQUEST, MAX_CONTEXT_NAME_BYTES,
@@ -305,7 +306,7 @@ pub fn run(args: &[String]) -> i32 {
     let mut embed_failures = 0;
     if state.embeddings_configured() {
         for name in &touched {
-            match state.refresh_embeddings(name) {
+            match state.refresh_embeddings(name, Deadline::unbounded()) {
                 None | Some(Ok((0, _))) => {}
                 Some(Ok((embedded, _))) => println!("{name}: embedded {embedded} glosses"),
                 Some(Err(error)) => {
@@ -1013,6 +1014,12 @@ impl ApplyRefusal {
             Self::Access(AccessError::Unpersisted(error)) => {
                 format!("the WAL refused the write: {error}")
             }
+            // `import_refusal` (api.rs) routes the Access variant to
+            // `access_error_noted` directly and never calls `text()`
+            // on it; the CLI import path runs with
+            // Deadline::unbounded(). Unreachable either way, kept for
+            // exhaustiveness.
+            Self::Access(AccessError::DeadlineExceeded) => "deadline exceeded".to_string(),
             Self::Partial { message, .. } => message.clone(),
         }
     }
@@ -1113,7 +1120,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
     let mut associations = 0;
     for chunk in associations_to_apply.chunks(MAX_ASSOCIATIONS_PER_REQUEST) {
         match state
-            .add_associations(&batch.context, chunk.to_vec())
+            .add_associations(&batch.context, chunk.to_vec(), Deadline::unbounded())
             .map_err(ApplyRefusal::Access)?
         {
             Ok(applied) => associations += applied,

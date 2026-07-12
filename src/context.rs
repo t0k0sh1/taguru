@@ -6,6 +6,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::deadline::{Deadline, DeadlineExceeded};
+
 mod image;
 
 /// Dense id of an interned concept string within one `Context`.
@@ -109,6 +111,36 @@ pub enum AliasError {
 pub struct CompactionStats {
     pub dead_edges: usize,
     pub aliases_dropped: usize,
+}
+
+/// Why [`Context::compacted`] did not finish. Either way the source
+/// context is untouched — the rebuild only ever writes into a fresh
+/// `Context` and is swapped in by the caller on full success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactionError {
+    /// Structurally unreachable — the rebuild holds a subset of what
+    /// the source context already held — but the write API this
+    /// delegates to says it, so this signature does too.
+    Full(ContextFull),
+    /// The deadline elapsed partway through the rebuild.
+    DeadlineExceeded,
+}
+
+impl fmt::Display for CompactionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CompactionError::Full(full) => full.fmt(f),
+            CompactionError::DeadlineExceeded => write!(f, "compaction exceeded its deadline"),
+        }
+    }
+}
+
+impl Error for CompactionError {}
+
+impl From<ContextFull> for CompactionError {
+    fn from(full: ContextFull) -> Self {
+        CompactionError::Full(full)
+    }
 }
 
 impl fmt::Display for AliasError {
@@ -1623,14 +1655,27 @@ impl Context {
     /// verdicts: containment pairs are often legitimately distinct
     /// (青嶺 the brand vs 青嶺酒造 the brewery). Aliases pointing at one
     /// record are intentional and never reported.
-    pub fn similar_concepts(&self, dice_floor: f64) -> Vec<(String, String, f64)> {
-        self.scored_twins(&self.concept_index, Self::concept_name, dice_floor)
+    pub fn similar_concepts(
+        &self,
+        dice_floor: f64,
+        deadline: Deadline,
+    ) -> Result<Vec<(String, String, f64)>, DeadlineExceeded> {
+        self.scored_twins(
+            &self.concept_index,
+            Self::concept_name,
+            dice_floor,
+            deadline,
+        )
     }
 
     /// [`Context::similar_concepts`] for relation labels — where forks
     /// hurt most, since label-pinned queries silently miss the twin.
-    pub fn similar_labels(&self, dice_floor: f64) -> Vec<(String, String, f64)> {
-        self.scored_twins(&self.label_index, Self::label_name, dice_floor)
+    pub fn similar_labels(
+        &self,
+        dice_floor: f64,
+        deadline: Deadline,
+    ) -> Result<Vec<(String, String, f64)>, DeadlineExceeded> {
+        self.scored_twins(&self.label_index, Self::label_name, dice_floor, deadline)
     }
 
     /// The shared sweep behind both twin detectors: run one namespace's
@@ -1640,9 +1685,10 @@ impl Context {
         index: &EntryIndex,
         name_of: fn(&Self, u32) -> &str,
         dice_floor: f64,
-    ) -> Vec<(String, String, f64)> {
-        index
-            .twins(clamp_unit_or(dice_floor, 1.0))
+        deadline: Deadline,
+    ) -> Result<Vec<(String, String, f64)>, DeadlineExceeded> {
+        Ok(index
+            .twins(clamp_unit_or(dice_floor, 1.0), deadline)?
             .into_iter()
             .map(|(a, b, dice)| {
                 (
@@ -1651,7 +1697,7 @@ impl Context {
                     dice,
                 )
             })
-            .collect()
+            .collect())
     }
 
     /// Facts a concept gloss carries when the caller has no reason to
@@ -2133,15 +2179,27 @@ impl Context {
     /// never silent. The caller re-applies configuration the image
     /// never holds (`applied_seq`, `dice_floor`).
     ///
+    /// `deadline` is checked once per association — not inside
+    /// `query_any` itself, which collects every association up front
+    /// (its fast path for an all-wildcard query) before this loop ever
+    /// runs, so a deadline that is already tight when this is called
+    /// cannot shorten that initial O(edges) collection.
+    ///
     /// # Errors
     ///
     /// [`ContextFull`] is structurally unreachable — the rebuild holds
     /// a subset of what this context already held — but the write API
     /// says it, so this signature does too.
-    pub fn compacted(&self) -> Result<(Context, CompactionStats), ContextFull> {
+    pub fn compacted(
+        &self,
+        deadline: Deadline,
+    ) -> Result<(Context, CompactionStats), CompactionError> {
         let mut fresh = Context::default();
         let mut stats = CompactionStats::default();
         for association in self.query_any(&[], &[], &[]) {
+            if deadline.expired() {
+                return Err(CompactionError::DeadlineExceeded);
+            }
             if association.count == 0 {
                 stats.dead_edges += 1;
                 continue;
@@ -2178,14 +2236,14 @@ impl Context {
         for (alias, canonical) in self.concept_aliases() {
             match fresh.add_concept_alias(alias, canonical) {
                 Ok(()) => {}
-                Err(AliasError::Full(full)) => return Err(full),
+                Err(AliasError::Full(full)) => return Err(full.into()),
                 Err(_) => stats.aliases_dropped += 1,
             }
         }
         for (alias, canonical) in self.label_aliases() {
             match fresh.add_label_alias(alias, canonical) {
                 Ok(()) => {}
-                Err(AliasError::Full(full)) => return Err(full),
+                Err(AliasError::Full(full)) => return Err(full.into()),
                 Err(_) => stats.aliases_dropped += 1,
             }
         }
@@ -2686,7 +2744,11 @@ impl EntryIndex {
     /// and are excluded. Returns (target_a, target_b, dice), strongest
     /// first. Cost is O(Σ posting_len²) — an explicit-audit price, not
     /// a query-path one.
-    fn twins(&self, dice_floor: f64) -> Vec<(u32, u32, f64)> {
+    fn twins(
+        &self,
+        dice_floor: f64,
+        deadline: Deadline,
+    ) -> Result<Vec<(u32, u32, f64)>, DeadlineExceeded> {
         let stop_gram = (self.spans.len() / 20).max(64);
         let is_stop = |bigram: u64| {
             self.bigrams
@@ -2705,6 +2767,12 @@ impl EntryIndex {
 
         let mut shared: HashMap<(u32, u32), u32> = HashMap::new();
         for postings in self.bigrams.values() {
+            // The inner double loop is bounded by stop_gram (postings
+            // this long are skipped outright), so checking only here —
+            // once per outer bigram, not once per pair — is enough.
+            if deadline.expired() {
+                return Err(DeadlineExceeded);
+            }
             if postings.len() > stop_gram {
                 continue;
             }
@@ -2745,7 +2813,7 @@ impl EntryIndex {
             y.2.total_cmp(&x.2)
                 .then_with(|| (x.0, x.1).cmp(&(y.0, y.1)))
         });
-        twins
+        Ok(twins)
     }
 
     /// Rough resident bytes of this index, for cache budgeting.
@@ -2902,7 +2970,7 @@ mod tests {
         context.retract_source("x.md");
 
         let before = context.query(Some("蔵"), Some("杜氏"), Some("高瀬"));
-        let (fresh, stats) = context.compacted().unwrap();
+        let (fresh, stats) = context.compacted(Deadline::unbounded()).unwrap();
         assert_eq!(stats.dead_edges, 1, "the retracted edge sheds");
         let after = fresh.query(Some("蔵"), Some("杜氏"), Some("高瀬"));
         assert_eq!(
@@ -4397,12 +4465,24 @@ mod tests {
 
         // The two spellings share 2 of 3 informative bigrams each:
         // Dice = 2·2/(3+3) ≈ 0.667 — admitted by a lax floor ...
-        assert!(is_the_pair(&context.similar_concepts(0.5)));
+        assert!(is_the_pair(
+            &context
+                .similar_concepts(0.5, Deadline::unbounded())
+                .unwrap()
+        ));
         // ... excluded by a floor stricter than their score ...
-        assert!(!is_the_pair(&context.similar_concepts(1.0)));
+        assert!(!is_the_pair(
+            &context
+                .similar_concepts(1.0, Deadline::unbounded())
+                .unwrap()
+        ));
         // ... and a NaN floor must exclude it the same way, not flood
         // it back in the way an unclamped `dice < NaN` comparison would.
-        assert!(!is_the_pair(&context.similar_concepts(f64::NAN)));
+        assert!(!is_the_pair(
+            &context
+                .similar_concepts(f64::NAN, Deadline::unbounded())
+                .unwrap()
+        ));
     }
 
     #[test]
@@ -4988,7 +5068,9 @@ mod tests {
         context.add_concept_alias("青嶺酒屋", "青嶺酒造").unwrap();
 
         // 青嶺酒蔵×青嶺酒造 share 2 of 3 bigrams each: dice 2/3.
-        let twins = context.similar_concepts(0.6);
+        let twins = context
+            .similar_concepts(0.6, Deadline::unbounded())
+            .unwrap();
         assert_eq!(twins.len(), 1, "{twins:?}");
         assert_eq!(
             (twins[0].0.as_str(), twins[0].1.as_str()),
@@ -4997,11 +5079,17 @@ mod tests {
         assert!((twins[0].2 - 2.0 / 3.0).abs() < 1e-9);
         // The brand/brewery containment pair (dice 0.5) stays below the
         // floor, and the alias never pairs with its own canonical.
-        assert!(context.similar_concepts(0.55).len() == 1);
+        assert!(
+            context
+                .similar_concepts(0.55, Deadline::unbounded())
+                .unwrap()
+                .len()
+                == 1
+        );
 
         // Label forks are the costliest kind; the shared 住み込む stem
         // pushes the pair over the floor for review.
-        let labels = context.similar_labels(0.6);
+        let labels = context.similar_labels(0.6, Deadline::unbounded()).unwrap();
         assert_eq!(
             (labels[0].0.as_str(), labels[0].1.as_str()),
             ("住み込む場所", "住み込む期間")

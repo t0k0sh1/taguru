@@ -2049,6 +2049,46 @@ fn a_custom_request_timeout_does_not_disturb_fast_requests() {
     assert_eq!(server.call("GET", "/contexts", None).0, 200);
 }
 
+/// The wall-clock proof for the `block_in_place` deadline work: a
+/// multi-batch import large enough that landing every batch takes far
+/// longer than the configured budget must still answer in roughly the
+/// budget's time, not in the time the whole loop would take to drain.
+#[test]
+fn a_tight_timeout_cuts_a_multi_batch_import_short_instead_of_running_it_to_completion() {
+    const BATCH_COUNT: usize = 8_000;
+    let server = Server::start_with_env("timeout-import", &[("TAGURU_REQUEST_TIMEOUT_SECS", "1")]);
+    let mut stream = String::new();
+    stream.push_str(
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-0\", \
+         \"create\": {\"description\": \"d\"}}\n",
+    );
+    stream
+        .push_str("{\"subject\": \"s0\", \"label\": \"l\", \"object\": \"o0\", \"weight\": 1.0}\n");
+    for i in 1..BATCH_COUNT {
+        stream.push_str(&format!(
+            "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-{i}\"}}\n"
+        ));
+        stream.push_str(&format!(
+            "{{\"subject\": \"s{i}\", \"label\": \"l\", \"object\": \"o{i}\", \"weight\": 1.0}}\n"
+        ));
+    }
+
+    let started = std::time::Instant::now();
+    let (status, body) = post_import(&server, &stream, None);
+    let elapsed = started.elapsed();
+
+    assert_eq!(status, 408, "{body}");
+    assert_eq!(body["code"], json!("timeout"), "{body}");
+    // Each fsync-bearing batch costs roughly 10ms, so draining all
+    // 8,000 would take over a minute; answering near the 1-second
+    // budget instead is the point of this test.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "took {elapsed:?} — the deadline check inside the batch loop should have cut \
+         this short instead of letting every batch land first"
+    );
+}
+
 #[test]
 fn metrics_expose_prometheus_text_reflecting_traffic() {
     let server = Server::start("metrics");

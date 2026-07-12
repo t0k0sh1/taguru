@@ -576,6 +576,10 @@ fn export_one(state: &AppState, name: &str, out: &std::path::Path) -> Result<Str
             AccessError::NotFound => "no such context".to_string(),
             AccessError::Load(error) => error,
             AccessError::Unpersisted(error) => error,
+            // The CLI runs with Deadline::unbounded(), which never
+            // expires — unreachable in practice, kept for
+            // exhaustiveness.
+            AccessError::DeadlineExceeded => "deadline exceeded".to_string(),
         })?;
     let rendered = render(name, &snapshot)?;
     let path = out.join(format!("{}.jsonl", crate::registry::file_stem(name)));
@@ -612,6 +616,7 @@ fn usage_error(message: &str) -> i32 {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use taguru::deadline::Deadline;
 
     use taguru::context::Attribution;
 
@@ -735,6 +740,7 @@ mod tests {
                     // Will be fully retracted: must shed on export.
                     op("青嶺酒造", "廃止銘柄", "旧銘", 1.0, Some("gone.md"), None),
                 ],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();

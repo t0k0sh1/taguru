@@ -10,6 +10,8 @@
 
 use std::path::PathBuf;
 
+use taguru::deadline::Deadline;
+
 use crate::registry::AccessError;
 
 const USAGE: &str = "\
@@ -80,7 +82,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
 
     let mut failures = 0usize;
     for name in &names {
-        match state.compact_context(name) {
+        match state.compact_context(name, Deadline::unbounded()) {
             Ok(outcome) => println!(
                 "context '{name}': {} → {} ({} dead edge(s) shed{})",
                 crate::cli::fmt_bytes(outcome.bytes_before as u64),
@@ -97,6 +99,10 @@ pub(crate) fn run(args: &[String]) -> i32 {
                     AccessError::NotFound => "no such context".to_string(),
                     AccessError::Load(error) => error,
                     AccessError::Unpersisted(error) => error,
+                    // The CLI runs with Deadline::unbounded(), which
+                    // never expires — unreachable in practice, kept for
+                    // exhaustiveness.
+                    AccessError::DeadlineExceeded => "deadline exceeded".to_string(),
                 };
                 eprintln!("taguru: compact: context '{name}': {message}");
                 failures += 1;

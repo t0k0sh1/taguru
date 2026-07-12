@@ -13,6 +13,7 @@ use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use taguru::context::{Activation, Association, Attribution, Context, Recollection, Resolution};
+use taguru::deadline::Deadline;
 
 use crate::groups::{GroupRecord, MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, NestingViolation};
 use crate::metrics::{ErrorKind, ResolveTier, SearchOp};
@@ -205,6 +206,19 @@ fn not_found(name: &str, started_at: Instant) -> Response {
     error(
         ErrorCode::NoContext,
         format!("context '{name}' not found"),
+        started_at,
+    )
+}
+
+/// The entry guard every `block_in_place` site checks before paying
+/// for its blocking work: a budget already spent (queueing, an
+/// earlier retry, a slow body read) means the operation would run
+/// past `enforce_timeout`'s race anyway, so refuse now instead of
+/// starting work nobody will read the result of.
+fn deadline_exceeded(started_at: Instant) -> Response {
+    error(
+        ErrorCode::Timeout,
+        "request exceeded its budget before this operation could start; narrow the query or raise TAGURU_REQUEST_TIMEOUT_SECS",
         started_at,
     )
 }
@@ -423,6 +437,14 @@ fn access_error_noted(
                 started_at,
             )
         }
+        AccessError::DeadlineExceeded => error(
+            ErrorCode::Timeout,
+            format!(
+                "{note}request exceeded its budget; narrow the query \
+                 (TAGURU_REQUEST_TIMEOUT_SECS tunes this)"
+            ),
+            started_at,
+        ),
     }
 }
 
@@ -499,6 +521,7 @@ pub async fn list_contexts(
 pub async fn flush_all(
     State(state): State<AppState>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
     if let Some(axum::Extension(scope)) = &scope
@@ -510,6 +533,9 @@ pub async fn flush_all(
              key cannot call it",
             started_at,
         );
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     let flushed = tokio::task::block_in_place(|| state.flush_dirty());
     ok(flushed, started_at)
@@ -592,6 +618,7 @@ pub struct CreateContextRequest {
 pub async fn create_context(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
@@ -621,6 +648,9 @@ pub async fn create_context(
         dice_floor: request.dice_floor.map(|floor| floor.clamp(0.0, 1.0)),
         semantic_floor: request.semantic_floor.map(|floor| floor.clamp(0.0, 1.0)),
     };
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Writes the sidecar (fsync + rename) like every other mutating
     // endpoint; keep it off the async worker.
     match tokio::task::block_in_place(|| state.create(&name, meta)) {
@@ -657,6 +687,7 @@ pub struct UpdateContextRequest {
 pub async fn update_context(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<UpdateContextRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -669,6 +700,9 @@ pub async fn update_context(
         )
     {
         return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     // Writes the sidecar (fsync + rename) like every other mutating
     // endpoint, and a pin toggle can additionally load the context from
@@ -699,8 +733,12 @@ pub async fn delete_context(
     State(state): State<AppState>,
     Path(name): Path<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Writes a durable marker (fsync) then unlinks every sidecar file;
     // keep it off the async worker like every other mutating endpoint.
     match tokio::task::block_in_place(|| state.delete(&name)) {
@@ -909,6 +947,7 @@ pub async fn create_group(
     Path(name): Path<String>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
@@ -945,6 +984,9 @@ pub async fn create_group(
         started_at,
     ) {
         return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     // Writes the group file (fsync + rename) like every other mutating
     // endpoint; keep it off the async worker.
@@ -1013,6 +1055,7 @@ pub async fn update_group(
     Path(name): Path<String>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<UpdateGroupRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -1054,6 +1097,9 @@ pub async fn update_group(
         started_at,
     ) {
         return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     // Writes the group file (fsync + rename); keep it off the async
     // worker.
@@ -1097,6 +1143,7 @@ pub async fn delete_group(
     Path(name): Path<String>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
     // Deleting the bundling touches every member's grant — nested
@@ -1110,6 +1157,9 @@ pub async fn delete_group(
         started_at,
     ) {
         return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     // Unlinks the group file; keep it off the async worker.
     match tokio::task::block_in_place(|| state.delete_group(&name)) {
@@ -1151,6 +1201,7 @@ pub async fn delete_group(
 pub async fn add_associations(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(associations): AppJson<Vec<AssocOp>>,
 ) -> Response {
     let started_at = Instant::now();
@@ -1222,10 +1273,13 @@ pub async fn add_associations(
             }
         }
     }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     let total = associations.len();
     // The write stages ops in the WAL and fsyncs before returning, so
     // keep it off the async worker like `store_passages` and the flush.
-    match tokio::task::block_in_place(|| state.add_associations(&name, associations)) {
+    match tokio::task::block_in_place(|| state.add_associations(&name, associations, deadline)) {
         Err(failure) => access_error(&state, failure, &name, started_at),
         Ok(Ok(applied)) => {
             // An empty batch reaches here as `applied == 0`: nothing
@@ -1290,6 +1344,7 @@ pub async fn retract_association(
     State(state): State<AppState>,
     Path(name): Path<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RetractAssociationRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -1304,6 +1359,9 @@ pub async fn retract_association(
         if let Some(refusal) = oversized(field, value, MAX_NAME_BYTES, started_at) {
             return refusal;
         }
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     // The write stages a WAL op and fsyncs before returning; keep it
     // off the async worker like every other write path.
@@ -1852,6 +1910,7 @@ pub struct KeysetQuery {
 pub async fn add_aliases(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<AliasRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -1892,6 +1951,9 @@ pub async fn add_aliases(
                 }
             }
         }
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     // Same fsync-bearing WAL write as add_associations; keep it off the
     // async worker.
@@ -1944,6 +2006,7 @@ pub async fn remove_aliases(
     State(state): State<AppState>,
     Path(name): Path<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RemoveAliasesRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -1966,6 +2029,9 @@ pub async fn remove_aliases(
             ),
             started_at,
         );
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     // Same fsync-bearing WAL write; keep it off the async worker.
     match tokio::task::block_in_place(|| {
@@ -2127,6 +2193,7 @@ pub struct StoredPassages {
 pub async fn store_passages(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<StorePassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -2247,6 +2314,9 @@ pub async fn store_passages(
             )
         })
         .collect();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Off the async worker: the store fsyncs its log, and folding the
     // new paragraphs into a resident index tokenizes them.
     let outcome = tokio::task::block_in_place(|| state.store_passages(&name, passages));
@@ -2317,6 +2387,7 @@ fn twin_pairs<S>(pairs: Vec<(String, String, S)>) -> Vec<TwinPair<S>> {
 pub async fn audit_vocabulary(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
@@ -2333,16 +2404,38 @@ pub async fn audit_vocabulary(
     // the lexical half inline, a handful of concurrent audits pinned
     // every worker and starved every other request, /health included.
     let lexical = match tokio::task::block_in_place(|| {
-        state.read_context(&name, |context| {
-            (
-                context.similar_concepts(dice_floor),
-                context.similar_labels(dice_floor),
-            )
-        })
+        state
+            .read_context(&name, |context| {
+                let concepts = context
+                    .similar_concepts(dice_floor, deadline)
+                    .map_err(|_| AccessError::DeadlineExceeded)?;
+                let labels = context
+                    .similar_labels(dice_floor, deadline)
+                    .map_err(|_| AccessError::DeadlineExceeded)?;
+                Ok((concepts, labels))
+            })
+            .and_then(std::convert::identity)
     }) {
         Ok(lexical) => lexical,
         Err(failure) => return access_error(&state, failure, &name, started_at),
     };
+
+    // The lexical half already spent the budget checking its own
+    // deadline; skip the semantic half rather than fail a request that
+    // did real, useful work — SWEEP_CAP/PAIR_CAP already bound it, so
+    // this is a courtesy skip, not a correctness guard.
+    if deadline.expired() {
+        return ok(
+            VocabularyAudit {
+                lexical_concepts: twin_pairs(lexical.0),
+                lexical_labels: twin_pairs(lexical.1),
+                semantic_concepts: Vec::new(),
+                semantic_labels: Vec::new(),
+                semantic_note: Some("意味的検出はスキップ (期限切れ)".to_string()),
+            },
+            started_at,
+        );
+    }
     let semantic = tokio::task::block_in_place(|| state.semantic_twins(&name, cosine_floor));
     let Some((semantic_concepts, semantic_labels, semantic_note)) = semantic else {
         return not_found(&name, started_at);
@@ -2542,6 +2635,7 @@ pub async fn import_batch(
     State(state): State<AppState>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
@@ -2595,6 +2689,32 @@ pub async fn import_batch(
     let outcome = tokio::task::block_in_place(|| {
         let mut outcomes: Vec<ImportOutcome> = Vec::with_capacity(total);
         for (index, batch) in stream.batches.iter().enumerate() {
+            // Each landed batch is durable (retract-then-apply), so a
+            // budget that runs out partway is safe to report as a
+            // resumable prefix rather than an all-or-nothing failure.
+            if deadline.expired() {
+                let note = if total > 1 {
+                    format!(
+                        "batch {} of {total} (context '{}', source '{}') not attempted — \
+                         the {} batch(es) before it landed durably; re-POSTing the \
+                         remaining stream is exact (each batch replaces its own source): ",
+                        index + 1,
+                        batch.context,
+                        batch.source,
+                        outcomes.len(),
+                    )
+                } else {
+                    String::new()
+                };
+                return Err(Box::new(error(
+                    ErrorCode::Timeout,
+                    format!(
+                        "{note}request exceeded its budget partway through a multi-batch \
+                         import (TAGURU_REQUEST_TIMEOUT_SECS tunes this)"
+                    ),
+                    started_at,
+                )));
+            }
             match crate::ingest::apply_batch(&state, batch) {
                 Ok(applied) => {
                     // Import is retract-then-apply — destructive — and both
@@ -2693,9 +2813,10 @@ pub async fn compact_context(
     State(state): State<AppState>,
     Path(name): Path<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
-    match tokio::task::block_in_place(|| state.compact_context(&name)) {
+    match tokio::task::block_in_place(|| state.compact_context(&name, deadline)) {
         Ok(outcome) => {
             // Maintenance that rewrites the image is audit-worthy even
             // though no knowledge changes.
@@ -2725,8 +2846,15 @@ pub async fn compact_context(
 /// Materialized under one registry fence (a concurrent write cannot
 /// shear the graph against the passages) and rendered off the async
 /// runtime, the way vocabulary/audit steps aside.
-pub async fn export_context(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+pub async fn export_context(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
+) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     let rendered = tokio::task::block_in_place(|| {
         state
             .export_context(&name)
@@ -3457,6 +3585,7 @@ fn resolve_with_fallback(
     name: &str,
     request: &ResolveRequest,
     labels: bool,
+    deadline: Deadline,
     started_at: Instant,
 ) -> Response {
     let limit = clamp(request.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
@@ -3481,7 +3610,7 @@ fn resolve_with_fallback(
     let served = if confident {
         lexical_tier(lexical)
     } else {
-        match semantic_fallback(state, name, request, labels, lexical, started_at) {
+        match semantic_fallback(state, name, request, labels, lexical, deadline, started_at) {
             Ok(served) => served,
             Err(response) => return response,
         }
@@ -3520,12 +3649,13 @@ fn semantic_fallback(
     request: &ResolveRequest,
     labels: bool,
     lexical: Vec<Resolution>,
+    deadline: Deadline,
     started_at: Instant,
 ) -> Result<Vec<TieredResolution>, Response> {
     // The provider round trip can take hundreds of milliseconds; tell
     // the runtime this thread will block so other tasks migrate off it.
     match tokio::task::block_in_place(|| {
-        state.semantic_resolve(name, &request.cue, labels, request.semantic_floor)
+        state.semantic_resolve(name, &request.cue, labels, request.semantic_floor, deadline)
     }) {
         None => Err(not_found(name, started_at)),
         Some(Ok(semantic)) => Ok(merge_tiers(lexical, semantic)),
@@ -3535,6 +3665,14 @@ fn semantic_fallback(
         Some(Err(message)) if !lexical.is_empty() => {
             tracing::warn!("semantic entry failed (serving weak lexical results): {message}");
             Ok(lexical_tier(lexical))
+        }
+        Some(Err(message)) if deadline.expired() => {
+            tracing::warn!("semantic entry failed with nothing lexical to fall back on: {message}");
+            Err(error(
+                ErrorCode::Timeout,
+                format!("semantic entry failed: {message}"),
+                started_at,
+            ))
         }
         Some(Err(message)) => {
             tracing::warn!("semantic entry failed with nothing lexical to fall back on: {message}");
@@ -3566,19 +3704,21 @@ fn resolve_tier_of(served: &[TieredResolution]) -> ResolveTier {
 pub async fn resolve(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    resolve_with_fallback(&state, &name, &request, false, started_at)
+    resolve_with_fallback(&state, &name, &request, false, deadline, started_at)
 }
 
 pub async fn resolve_label(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    resolve_with_fallback(&state, &name, &request, true, started_at)
+    resolve_with_fallback(&state, &name, &request, true, deadline, started_at)
 }
 
 /// What one embedding refresh accomplished. `embedded`/`total` stay
@@ -3606,6 +3746,7 @@ pub struct RefreshBreakdown {
 pub async fn refresh_embeddings(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
     if !state.embeddings_configured() {
@@ -3615,11 +3756,21 @@ pub async fn refresh_embeddings(
             started_at,
         );
     }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Refresh batches can talk to the provider for seconds; keep the
     // runtime's workers unstarved while this one blocks.
-    let glosses = match tokio::task::block_in_place(|| state.refresh_embeddings(&name)) {
+    let glosses = match tokio::task::block_in_place(|| state.refresh_embeddings(&name, deadline)) {
         None => return not_found(&name, started_at),
         Some(Ok(counts)) => counts,
+        Some(Err(message)) if deadline.expired() => {
+            return error(
+                ErrorCode::Timeout,
+                format!("embedding refresh failed: {message}"),
+                started_at,
+            );
+        }
         Some(Err(message)) => {
             return error(
                 ErrorCode::EmbeddingsFailed,
@@ -3640,7 +3791,7 @@ pub async fn refresh_embeddings(
             started_at,
         );
     }
-    match tokio::task::block_in_place(|| state.refresh_passage_embeddings(&name)) {
+    match tokio::task::block_in_place(|| state.refresh_passage_embeddings(&name, deadline)) {
         None => not_found(&name, started_at),
         Some(Ok(passages)) => ok(
             RefreshOutcome {
@@ -3662,6 +3813,11 @@ pub async fn refresh_embeddings(
         // The gloss half already succeeded and partial passage progress
         // is persisted — but the caller asked for a refresh and did not
         // fully get one; say so.
+        Some(Err(message)) if deadline.expired() => error(
+            ErrorCode::Timeout,
+            format!("passage embedding refresh failed partway (progress is saved): {message}"),
+            started_at,
+        ),
         Some(Err(message)) => error(
             ErrorCode::EmbeddingsFailed,
             format!("passage embedding refresh failed partway (progress is saved): {message}"),

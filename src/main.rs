@@ -29,6 +29,7 @@ use axum::Router;
 use axum::routing::{get, post};
 use embedding::EmbeddingProvider;
 use registry::AppState;
+use taguru::deadline::Deadline;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
@@ -260,13 +261,16 @@ async fn serve() {
     let app = app.route(
         "/mcp",
         post(
-            move |key: Option<axum::Extension<auth::AuthKey>>, body: axum::body::Bytes| {
+            move |deadline: axum::Extension<Deadline>,
+                  key: Option<axum::Extension<auth::AuthKey>>,
+                  body: axum::body::Bytes| {
                 remote_mcp::serve(
                     mcp_dispatch.clone(),
                     Arc::clone(&mcp_instructions),
                     key.map(|extension| extension.0),
                     body,
                     mcp_max_result_bytes,
+                    deadline.0,
                 )
             },
         ),
@@ -513,7 +517,7 @@ fn spawn_flusher(state: AppState, flush_secs: usize, auto_embed: bool) {
             if auto_embed && !flushed.is_empty() {
                 tokio::task::block_in_place(|| {
                     for name in &flushed {
-                        match state.refresh_embeddings(name) {
+                        match state.refresh_embeddings(name, Deadline::unbounded()) {
                             None | Some(Ok((0, _))) => {}
                             Some(Ok((embedded, _))) => {
                                 info!(context = %name, embedded, "auto-embedded glosses");
@@ -533,7 +537,7 @@ fn spawn_flusher(state: AppState, flush_secs: usize, auto_embed: bool) {
                 if !stale.is_empty() {
                     tokio::task::block_in_place(|| {
                         for name in &stale {
-                            match state.refresh_passage_embeddings(name) {
+                            match state.refresh_passage_embeddings(name, Deadline::unbounded()) {
                                 None => {}
                                 Some(Ok(outcome)) if outcome.embedded == 0 => {}
                                 Some(Ok(outcome)) => {

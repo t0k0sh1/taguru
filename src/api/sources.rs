@@ -4,13 +4,14 @@ use std::time::Instant;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
+use taguru::deadline::Deadline;
 
 use crate::metrics::{ErrorKind, SearchOp};
 use crate::registry::{AppState, CitationLookup};
 
 use super::{
     AppJson, AppQuery, CrossMatch, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, access_error, clamp,
-    cross_targets, error, not_found, ok, overlong, search_log_enabled,
+    cross_targets, deadline_exceeded, error, not_found, ok, overlong, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +31,7 @@ pub struct PassageLookup {
 pub async fn lookup_passages(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<LookupPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -37,6 +39,9 @@ pub async fn lookup_passages(
     // scales with this list, so the list itself is what gets bounded.
     if let Some(refusal) = overlong("sources", request.sources.len(), started_at) {
         return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     // A residency's first passage access loads the store from disk
     // (sources.json/passages.bin/WAL replay); keep that off the async
@@ -77,9 +82,13 @@ pub struct Citation {
 pub async fn citation(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<CitationRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Same cold-load path as lookup_passages; keep it off the async
     // worker.
     match tokio::task::block_in_place(|| state.citation(&name, &request.source, request.paragraph))
@@ -130,10 +139,14 @@ pub struct SourcePage {
 pub async fn list_sources(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
     let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Same cold-load path as lookup_passages; keep it off the async
     // worker.
     match tokio::task::block_in_place(|| state.passage_sources(&name)) {
@@ -190,9 +203,13 @@ pub async fn retract_source(
     State(state): State<AppState>,
     Path(name): Path<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RetractSourceRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Retraction stages a WAL op and fsyncs before returning; keep that
     // synchronous write off the async worker like every other write path.
     match tokio::task::block_in_place(|| state.retract_source(&name, &request.source)) {
@@ -289,9 +306,13 @@ impl From<crate::registry::PassageSearchHit> for PassageHit {
 pub async fn search_passages(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<SearchPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Off the async worker: a residency's first search tokenizes the
     // whole corpus into the index (the audit endpoints' rule).
     let outcome = tokio::task::block_in_place(|| {
@@ -299,6 +320,7 @@ pub async fn search_passages(
             &name,
             &request.query,
             clamp(request.limit, 5, MAX_MATCH_LIMIT),
+            deadline,
         )
     });
     match outcome {
@@ -356,6 +378,7 @@ pub async fn cross_search_passages(
     State(state): State<AppState>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<CrossSearchPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -391,7 +414,20 @@ pub async fn cross_search_passages(
     let outcome = tokio::task::block_in_place(|| {
         let mut pool = Vec::new();
         for (index, name) in targets.iter().enumerate() {
-            match state.search_passages(name, &request.query, limit) {
+            // One context's failure already aborts the whole response
+            // (see the doc comment above); a spent budget is the same
+            // kind of failure, checked before paying for another
+            // context's search.
+            if deadline.expired() {
+                return Err(Box::new(error(
+                    ErrorCode::Timeout,
+                    "request exceeded its budget partway through a cross-context search \
+                     (TAGURU_REQUEST_TIMEOUT_SECS tunes this)"
+                        .to_string(),
+                    started_at,
+                )));
+            }
+            match state.search_passages(name, &request.query, limit, deadline) {
                 None => return Err(Box::new(not_found(name, started_at))),
                 Some(Err(io_error)) => {
                     return Err(Box::new(passages_unreadable(&state, io_error, started_at)));

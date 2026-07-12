@@ -49,7 +49,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use taguru::context::{AliasError, Context, LabelUsage};
+use taguru::context::{AliasError, CompactionError, Context, LabelUsage};
+use taguru::deadline::Deadline;
 
 use crate::embedding::{
     EmbedPurpose, EmbeddingProvider, PassageKey, PassageVectorStore, VectorStore, VectorTable,
@@ -696,6 +697,10 @@ pub enum AccessError {
     /// NOTHING was applied — the client must never hold a 200 the
     /// disk cannot replay.
     Unpersisted(String),
+    /// The request's time budget ran out partway through a
+    /// `block_in_place` section. Never produced by the CLI binaries —
+    /// they pass `Deadline::unbounded()` — only by HTTP handlers.
+    DeadlineExceeded,
 }
 
 /// One requested association — the wire shape of the associations
@@ -2144,6 +2149,12 @@ impl AppState {
                     "関連ペアの除外はスキップ (グラフ未ロード: {message})"
                 ));
             }
+            // read_context never consults a deadline itself — the
+            // caller checks its own budget before calling in —
+            // unreachable in practice, kept for exhaustiveness.
+            Err(AccessError::DeadlineExceeded) => {
+                skipped = Some("関連ペアの除外はスキップ (期限切れ)".to_string());
+            }
         }
         Some((concepts, labels, skipped))
     }
@@ -2258,6 +2269,7 @@ impl AppState {
         name: &str,
         query: &str,
         limit: usize,
+        deadline: Deadline,
     ) -> Option<io::Result<Vec<PassageSearchHit>>> {
         const RRF_K: f32 = 60.0;
 
@@ -2284,7 +2296,7 @@ impl AppState {
         // provider round trip must never extend the fence below.
         let cue = if self.passage_embedding_enabled() {
             let embedder = self.0.embedder.clone().expect("enabled implies a provider");
-            match self.cue_vector(&*embedder, query) {
+            match self.cue_vector(&*embedder, query, deadline) {
                 Ok(vector) => Some(vector),
                 Err(error) => {
                     // Degrade, loudly: the lexical lane still answers.
@@ -2486,9 +2498,10 @@ impl AppState {
         embedder: &dyn EmbeddingProvider,
         texts: &[&str],
         purpose: EmbedPurpose,
+        deadline: Deadline,
     ) -> Result<Vec<Vec<f32>>, String> {
         let started = std::time::Instant::now();
-        let outcome = embedder.embed(texts, purpose);
+        let outcome = embedder.embed(texts, purpose, deadline);
         self.0.metrics.record_embed_latency(started.elapsed());
         outcome
     }
@@ -2500,11 +2513,12 @@ impl AppState {
         &self,
         embedder: &dyn EmbeddingProvider,
         cue: &str,
+        deadline: Deadline,
     ) -> Result<Arc<Vec<f32>>, String> {
         if let Some(vector) = self.0.cue_cache.lock().get(cue) {
             return Ok(vector);
         }
-        match self.timed_embed(embedder, &[cue], EmbedPurpose::Query) {
+        match self.timed_embed(embedder, &[cue], EmbedPurpose::Query, deadline) {
             Ok(mut vectors) => {
                 self.0.metrics.record_embed_resolve(true);
                 let vector = Arc::new(vectors.pop().unwrap_or_default());
@@ -2598,7 +2612,11 @@ impl AppState {
     /// operator calls this after ingesting, so embedding spend stays
     /// intentional. Returns (newly embedded, total vectors), or `None`
     /// for an unknown context.
-    pub fn refresh_embeddings(&self, name: &str) -> Option<Result<(usize, usize), String>> {
+    pub fn refresh_embeddings(
+        &self,
+        name: &str,
+        deadline: Deadline,
+    ) -> Option<Result<(usize, usize), String>> {
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Err(
                 "no embedding provider is configured (set TAGURU_EMBED_URL and TAGURU_EMBED_MODEL)"
@@ -2639,6 +2657,12 @@ impl AppState {
             Err(AccessError::Load(message)) | Err(AccessError::Unpersisted(message)) => {
                 return Some(Err(message));
             }
+            // read_context never consults a deadline itself — the
+            // caller checks its own budget before calling in —
+            // unreachable in practice, kept for exhaustiveness.
+            Err(AccessError::DeadlineExceeded) => {
+                return Some(Err("request deadline exceeded".to_string()));
+            }
         };
         let (concepts, labels) = glosses;
         let path = vectors_path(&self.0.data_dir, &file_stem(name));
@@ -2651,13 +2675,18 @@ impl AppState {
         // whatever the previous refresh (if any) already published.
         let existing = VectorStore::load(&path);
         let mut fresh_model = existing.model != embedder.model();
-        let mut embedded_concepts =
-            match self.embed_stale(&*embedder, &existing.concepts, &concepts, fresh_model) {
-                Ok(embedded) => embedded,
-                Err(error) => return Some(Err(error)),
-            };
+        let mut embedded_concepts = match self.embed_stale(
+            &*embedder,
+            &existing.concepts,
+            &concepts,
+            fresh_model,
+            deadline,
+        ) {
+            Ok(embedded) => embedded,
+            Err(error) => return Some(Err(error)),
+        };
         let mut embedded_labels =
-            match self.embed_stale(&*embedder, &existing.labels, &labels, fresh_model) {
+            match self.embed_stale(&*embedder, &existing.labels, &labels, fresh_model, deadline) {
                 Ok(embedded) => embedded,
                 Err(error) => return Some(Err(error)),
             };
@@ -2679,7 +2708,12 @@ impl AppState {
             && fresh_width.is_none()
             && let Some((_, gloss)) = concepts.first().or_else(|| labels.first())
         {
-            match self.timed_embed(embedder.as_ref(), &[gloss.as_str()], EmbedPurpose::Index) {
+            match self.timed_embed(
+                embedder.as_ref(),
+                &[gloss.as_str()],
+                EmbedPurpose::Index,
+                deadline,
+            ) {
                 Ok(vectors) => {
                     self.0.metrics.record_embed_refresh(true);
                     fresh_width = vectors.first().map(Vec::len);
@@ -2703,14 +2737,15 @@ impl AppState {
             );
             fresh_model = true;
             embedded_concepts =
-                match self.embed_stale(&*embedder, &existing.concepts, &concepts, true) {
+                match self.embed_stale(&*embedder, &existing.concepts, &concepts, true, deadline) {
                     Ok(embedded) => embedded,
                     Err(error) => return Some(Err(error)),
                 };
-            embedded_labels = match self.embed_stale(&*embedder, &existing.labels, &labels, true) {
-                Ok(embedded) => embedded,
-                Err(error) => return Some(Err(error)),
-            };
+            embedded_labels =
+                match self.embed_stale(&*embedder, &existing.labels, &labels, true, deadline) {
+                    Ok(embedded) => embedded,
+                    Err(error) => return Some(Err(error)),
+                };
         }
         let newly_embedded = embedded_concepts.len() + embedded_labels.len();
 
@@ -2752,6 +2787,7 @@ impl AppState {
         stored: &VectorTable,
         entries: &[(String, String)],
         fresh_model: bool,
+        deadline: Deadline,
     ) -> Result<VectorTable, String> {
         let stale: Vec<(String, String, u64)> = entries
             .iter()
@@ -2765,7 +2801,7 @@ impl AppState {
         let mut embedded = VectorTable::new();
         for chunk in stale.chunks(128) {
             let texts: Vec<&str> = chunk.iter().map(|(_, gloss, _)| gloss.as_str()).collect();
-            match self.timed_embed(embedder, &texts, EmbedPurpose::Index) {
+            match self.timed_embed(embedder, &texts, EmbedPurpose::Index, deadline) {
                 Ok(vectors) => {
                     self.0.metrics.record_embed_refresh(true);
                     embedded.extend(
@@ -2816,6 +2852,7 @@ impl AppState {
     pub fn refresh_passage_embeddings(
         &self,
         name: &str,
+        deadline: Deadline,
     ) -> Option<Result<PassageRefreshOutcome, String>> {
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Err(
@@ -2917,7 +2954,7 @@ impl AppState {
         let mut failure: Option<String> = None;
         for chunk in to_embed.chunks(128) {
             let texts: Vec<&str> = chunk.iter().map(|(_, text)| text.as_str()).collect();
-            match self.timed_embed(embedder.as_ref(), &texts, EmbedPurpose::Index) {
+            match self.timed_embed(embedder.as_ref(), &texts, EmbedPurpose::Index, deadline) {
                 Ok(vectors) => {
                     self.0.metrics.record_embed_refresh(true);
                     for ((key, _), vector) in chunk.iter().zip(vectors) {
@@ -2971,6 +3008,7 @@ impl AppState {
         cue: &str,
         labels: bool,
         floor_override: Option<f32>,
+        deadline: Deadline,
     ) -> Option<Result<Vec<(String, f32)>, String>> {
         const SEMANTIC_LIMIT: usize = 5;
 
@@ -2997,7 +3035,7 @@ impl AppState {
         if table.is_empty() {
             return Some(Ok(Vec::new()));
         }
-        let cue_vector = match self.cue_vector(&*embedder, cue) {
+        let cue_vector = match self.cue_vector(&*embedder, cue, deadline) {
             Ok(vector) => vector,
             Err(error) => return Some(Err(error)),
         };
@@ -3248,7 +3286,11 @@ impl AppState {
     /// construction: the fresh context carries the old WAL watermark,
     /// so a crash before the flush lands simply boots the old image
     /// and replays the same log — compaction lost, nothing corrupted.
-    pub fn compact_context(&self, name: &str) -> Result<CompactOutcome, AccessError> {
+    pub fn compact_context(
+        &self,
+        name: &str,
+        deadline: Deadline,
+    ) -> Result<CompactOutcome, AccessError> {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let outcome = offload(|| {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
@@ -3258,9 +3300,15 @@ impl AppState {
                 unreachable!("ensure_hot leaves the slot hot");
             };
             let bytes_before = context.footprint();
-            let (mut fresh, stats) = context
-                .compacted()
-                .map_err(|full| AccessError::Load(format!("compaction refused: {full}")))?;
+            let (mut fresh, stats) =
+                context
+                    .compacted(deadline)
+                    .map_err(|failure| match failure {
+                        CompactionError::Full(full) => {
+                            AccessError::Load(format!("compaction refused: {full}"))
+                        }
+                        CompactionError::DeadlineExceeded => AccessError::DeadlineExceeded,
+                    })?;
             // Config the image never carries, re-applied exactly as a
             // load would; the watermark keeps WAL replay monotonic.
             fresh.set_applied_seq(context.applied_seq());
@@ -3729,7 +3777,11 @@ impl AppState {
         &self,
         name: &str,
         ops: Vec<AssocOp>,
+        deadline: Deadline,
     ) -> Result<Result<usize, PartialWrite>, AccessError> {
+        if deadline.expired() {
+            return Err(AccessError::DeadlineExceeded);
+        }
         let ops = self.clamp_out_of_range_paragraphs(name, ops);
         let wal_ops: Vec<WalOp> = ops.into_iter().map(WalOp::Associate).collect();
         self.logged_write(
@@ -5086,6 +5138,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -5138,6 +5191,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -5204,13 +5258,16 @@ mod tests {
                         assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
                         assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
                     ],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
             state.retract_source("sake", "gone.md").unwrap();
             before = live_facts(&state);
 
-            let outcome = state.compact_context("sake").unwrap();
+            let outcome = state
+                .compact_context("sake", Deadline::unbounded())
+                .unwrap();
             assert!(
                 outcome.bytes_after < outcome.bytes_before,
                 "{outcome:?} must shrink"
@@ -5225,6 +5282,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("蔵", "創業年", "1907年", 1.0, Some("keep.md"))],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -5260,6 +5318,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -5411,6 +5470,7 @@ mod tests {
                 &self,
                 _texts: &[&str],
                 _purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 Err("provider down".to_string())
             }
@@ -5432,7 +5492,10 @@ mod tests {
                 })
                 .map_err(|_| "write")
                 .unwrap();
-            state.refresh_embeddings("fruit").unwrap().unwrap();
+            state
+                .refresh_embeddings("fruit", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
             // One batch per namespace: two successful provider calls.
             assert!(rendered(&state).contains(
                 "taguru_embedding_requests_total{operation=\"refresh\",outcome=\"ok\"} 2"
@@ -5446,7 +5509,7 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false, None)
+                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
                 .unwrap()
                 .is_err()
         );
@@ -5497,6 +5560,7 @@ mod tests {
                         1.0,
                         Some("第1段落"),
                     )],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -5543,6 +5607,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "所在地", "京都酒造", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -5618,6 +5683,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "所在地", "京都酒造", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -5697,6 +5763,7 @@ mod tests {
             .add_associations(
                 "victim",
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
@@ -5838,6 +5905,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -5857,6 +5925,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "杜氏", "高瀬", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -5889,10 +5958,18 @@ mod tests {
             .map_err(|_| "create")
             .unwrap();
         state
-            .add_associations("sake", vec![assoc_op("a", "l", "b", 1.0, None)])
+            .add_associations(
+                "sake",
+                vec![assoc_op("a", "l", "b", 1.0, None)],
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
-        let refused = state.add_associations("sake", vec![assoc_op("c", "l", "d", 1.0, None)]);
+        let refused = state.add_associations(
+            "sake",
+            vec![assoc_op("c", "l", "d", 1.0, None)],
+            Deadline::unbounded(),
+        );
         assert!(
             matches!(refused, Err(AccessError::Unpersisted(_))),
             "over the cap the write must be refused: {refused:?}"
@@ -5917,6 +5994,7 @@ mod tests {
             .add_associations(
                 "sake",
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
@@ -5933,6 +6011,7 @@ mod tests {
             .add_associations(
                 "sake",
                 vec![assoc_op("青嶺酒造", "杜氏", "高瀬", 1.0, None)],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
@@ -5967,6 +6046,7 @@ mod tests {
                             .add_associations(
                                 "sake",
                                 vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
+                                Deadline::unbounded(),
                             )
                             .unwrap()
                             .unwrap();
@@ -6007,6 +6087,7 @@ mod tests {
             .add_associations(
                 "sake",
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
@@ -6090,6 +6171,7 @@ mod tests {
             .add_associations(
                 "sake",
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
@@ -6155,6 +6237,7 @@ mod tests {
             state.add_associations(
                 "victim",
                 vec![assoc_op("幽霊", "は", "残らない", 1.0, None)],
+                Deadline::unbounded(),
             ),
             Err(AccessError::NotFound)
         ));
@@ -6180,6 +6263,7 @@ mod tests {
                     .add_associations(
                         name,
                         vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                        Deadline::unbounded(),
                     )
                     .unwrap()
                     .unwrap();
@@ -6246,6 +6330,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "創業年", "1907年", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6291,6 +6376,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6341,6 +6427,7 @@ mod tests {
                         assoc_op("青嶺酒造", "仕込み水", "伏流水", 1.0, Some("第2段落")),
                         assoc_op("青嶺酒造", "仕込み水", "伏流水", 1.0, Some("第5段落")),
                     ],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6390,6 +6477,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6471,6 +6559,7 @@ mod tests {
         let outcome = state.add_associations(
             "sake",
             vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+            Deadline::unbounded(),
         );
         assert!(matches!(outcome, Err(AccessError::Unpersisted(_))));
         // Refused cleanly: nothing reached the graph.
@@ -6505,6 +6594,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6568,6 +6658,7 @@ mod tests {
                             .add_associations(
                                 name,
                                 vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
+                                Deadline::unbounded(),
                             )
                             .unwrap()
                             .unwrap();
@@ -6625,6 +6716,7 @@ mod tests {
                         .add_associations(
                             "sake",
                             vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
+                            Deadline::unbounded(),
                         )
                         .unwrap()
                         .unwrap();
@@ -6635,7 +6727,7 @@ mod tests {
             let state = state.clone();
             thread::spawn(move || {
                 for _ in 0..ROUNDS {
-                    let _ = state.compact_context("sake");
+                    let _ = state.compact_context("sake", Deadline::unbounded());
                 }
             })
         };
@@ -7306,7 +7398,7 @@ mod tests {
         // The procedural question never became a triple; the text lane
         // must still hand back the passage that answers it, first.
         let hits = state
-            .search_passages("sake", "精米歩合はどこまで磨く?", 3)
+            .search_passages("sake", "精米歩合はどこまで磨く?", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第2段落");
@@ -7315,12 +7407,16 @@ mod tests {
         // No shared bigrams at all → nothing, not noise.
         assert!(
             state
-                .search_passages("sake", "unrelated english words", 3)
+                .search_passages("sake", "unrelated english words", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
         );
-        assert!(state.search_passages("nope", "x", 3).is_none());
+        assert!(
+            state
+                .search_passages("nope", "x", 3, Deadline::unbounded())
+                .is_none()
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -7361,7 +7457,12 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("papers", "ambition must be made to counteract ambition", 2)
+            .search_passages(
+                "papers",
+                "ambition must be made to counteract ambition",
+                2,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第51篇");
@@ -7394,7 +7495,10 @@ mod tests {
             .unwrap();
 
         for query in ["state", "State", "app", "path"] {
-            let hits = state.search_passages("code", query, 3).unwrap().unwrap();
+            let hits = state
+                .search_passages("code", query, 3, Deadline::unbounded())
+                .unwrap()
+                .unwrap();
             assert_eq!(
                 hits.first().map(|hit| hit.source.as_str()),
                 Some("src/registry.rs:AppState"),
@@ -7425,7 +7529,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("sake", "精米歩合はどこまで磨く?", 3)
+            .search_passages("sake", "精米歩合はどこまで磨く?", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -7459,7 +7563,7 @@ mod tests {
         // First search builds the resident index.
         assert!(
             !state
-                .search_passages("sake", "創業はいつ", 3)
+                .search_passages("sake", "創業はいつ", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -7475,7 +7579,7 @@ mod tests {
         );
         state.store_passages("sake", plain(more)).unwrap().unwrap();
         let hits = state
-            .search_passages("sake", "杜氏の出身", 3)
+            .search_passages("sake", "杜氏の出身", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第2章");
@@ -7484,7 +7588,7 @@ mod tests {
         state.retract_source("sake", "第2章").unwrap();
         assert!(
             state
-                .search_passages("sake", "杜氏の出身", 3)
+                .search_passages("sake", "杜氏の出身", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .iter()
@@ -7512,7 +7616,7 @@ mod tests {
                 .unwrap();
             // First search builds and marks dirty; the tick persists.
             state
-                .search_passages("sake", "創業はいつ", 3)
+                .search_passages("sake", "創業はいつ", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -7521,7 +7625,7 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let hits = state
-            .search_passages("sake", "創業はいつ", 3)
+            .search_passages("sake", "創業はいつ", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第1章");
@@ -7550,7 +7654,10 @@ mod tests {
                 .store_passages("sake", plain(passages))
                 .unwrap()
                 .unwrap();
-            state.search_passages("sake", "杜氏", 3).unwrap().unwrap();
+            state
+                .search_passages("sake", "杜氏", 3, Deadline::unbounded())
+                .unwrap()
+                .unwrap();
             state.flush_dirty(); // the sidecar now says 高瀬
         }
 
@@ -7564,7 +7671,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let hits = state
-            .search_passages("sake", "杜氏は誰", 3)
+            .search_passages("sake", "杜氏は誰", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(
@@ -7601,7 +7708,7 @@ mod tests {
         fs::write(bm25_path(&dir, &file_stem("sake")), b"not an index").unwrap();
 
         let hits = state
-            .search_passages("sake", "蔵開きの祭り", 3)
+            .search_passages("sake", "蔵開きの祭り", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第1章");
@@ -7632,7 +7739,7 @@ mod tests {
             .unwrap()
             .unwrap();
         state
-            .search_passages("sake", "麹室の湿度", 3)
+            .search_passages("sake", "麹室の湿度", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -7644,7 +7751,7 @@ mod tests {
         );
         // The next residency loads it clean instead of re-tokenizing.
         state
-            .search_passages("sake", "麹室の湿度", 3)
+            .search_passages("sake", "麹室の湿度", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         let entry = state.lookup("sake").unwrap();
@@ -7672,7 +7779,7 @@ mod tests {
             .unwrap();
         assert!(
             !state
-                .search_passages("sake", "蔵開きの祭り", 3)
+                .search_passages("sake", "蔵開きの祭り", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -7686,7 +7793,7 @@ mod tests {
         );
         assert_eq!(
             state
-                .search_passages("sake", "蔵開きの祭り", 3)
+                .search_passages("sake", "蔵開きの祭り", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap()[0]
                 .source,
@@ -7752,7 +7859,10 @@ mod tests {
             "a store marks the context for the auto ticker"
         );
 
-        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total, outcome.skipped_over_limit),
             (3, 3, 0)
@@ -7768,7 +7878,10 @@ mod tests {
         );
 
         // Unchanged corpus: nothing embeds, nobody talks to the provider.
-        let again = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let again = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!((again.embedded, again.total), (0, 3));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
 
@@ -7794,7 +7907,10 @@ mod tests {
             .store_passages("sake", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let mut updated = BTreeMap::new();
         updated.insert(
@@ -7805,7 +7921,10 @@ mod tests {
             .store_passages("sake", plain(updated))
             .unwrap()
             .unwrap();
-        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             outcome.embedded, 1,
             "the unchanged paragraph rides its hash, only the edit re-embeds"
@@ -7832,10 +7951,16 @@ mod tests {
             .store_passages("sake", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         state.retract_source("sake", "doc-b").unwrap();
-        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total),
             (0, 1),
@@ -7866,7 +7991,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total, outcome.skipped_over_limit),
             (2, 2, 1),
@@ -7891,6 +8019,7 @@ mod tests {
                 &self,
                 texts: &[&str],
                 _purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 let call = self.calls.fetch_add(1, Ordering::Relaxed);
                 if call == self.fail_on {
@@ -7927,7 +8056,7 @@ mod tests {
             .unwrap();
 
         let error = state
-            .refresh_passage_embeddings("sake")
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
             .unwrap()
             .unwrap_err();
         assert!(error.contains("hiccup"), "{error}");
@@ -7944,7 +8073,10 @@ mod tests {
         );
 
         // The next refresh buys only the missing paragraph.
-        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!((outcome.embedded, outcome.total), (1, 129));
 
         let _ = fs::remove_dir_all(dir);
@@ -7970,7 +8102,10 @@ mod tests {
             },
         );
         state.store_passages("fruit", passages).unwrap().unwrap();
-        let outcome = state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total),
             (2, 2),
@@ -7981,7 +8116,7 @@ mod tests {
         // both rows point at the same paragraph, so the lane must fold
         // them into one hit at the question row's better rank.
         let hits = state
-            .search_passages("fruit", "アップル", 3)
+            .search_passages("fruit", "アップル", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits.len(), 1, "one paragraph, one hit — never a dup");
@@ -8023,13 +8158,19 @@ mod tests {
             .store_passages("fruit", submission("アップルはどんな色?"))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         state
             .store_passages("fruit", submission("アップルは何色ですか?"))
             .unwrap()
             .unwrap();
-        let outcome = state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total),
             (1, 2),
@@ -8061,7 +8202,10 @@ mod tests {
             },
         );
         state.store_passages("fruit", passages).unwrap().unwrap();
-        let outcome = state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total, outcome.skipped_over_limit),
             (2, 2, 1),
@@ -8091,10 +8235,13 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let hits = state
-            .search_passages("fruit", "アップル", 3)
+            .search_passages("fruit", "アップル", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "doc-a");
@@ -8130,10 +8277,13 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんごは真っ赤", 3)
+            .search_passages("fruit", "りんごは真っ赤", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "doc-a");
@@ -8171,7 +8321,10 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         // The text changes; the vector sidecar is NOT refreshed.
         let mut edited = BTreeMap::new();
@@ -8185,7 +8338,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3)
+            .search_passages("fruit", "りんご", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "doc-a");
@@ -8222,6 +8375,7 @@ mod tests {
                 &self,
                 texts: &[&str],
                 _purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 let call = self.calls.fetch_add(1, Ordering::Relaxed);
                 if call == self.fail_on {
@@ -8250,10 +8404,13 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3)
+            .search_passages("fruit", "りんご", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -8286,7 +8443,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3)
+            .search_passages("fruit", "りんご", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(hits[0].vector.is_none());
@@ -8318,10 +8475,13 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3)
+            .search_passages("fruit", "みかん", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(
@@ -8353,14 +8513,17 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         state
             .update_meta("fruit", None, None, None, Some(0.2))
             .unwrap()
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3)
+            .search_passages("fruit", "みかん", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
@@ -8383,7 +8546,7 @@ mod tests {
             .map_err(|_| "create")
             .unwrap();
         let error = state
-            .refresh_passage_embeddings("sake")
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
             .unwrap()
             .unwrap_err();
         assert!(error.contains("TAGURU_EMBED_PASSAGES"), "{error}");
@@ -8418,7 +8581,12 @@ mod tests {
             "mock"
         }
 
-        fn embed(&self, texts: &[&str], _purpose: EmbedPurpose) -> Result<Vec<Vec<f32>>, String> {
+        fn embed(
+            &self,
+            texts: &[&str],
+            _purpose: EmbedPurpose,
+            _deadline: Deadline,
+        ) -> Result<Vec<Vec<f32>>, String> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(texts
                 .iter()
@@ -8447,6 +8615,7 @@ mod tests {
                 &self,
                 texts: &[&str],
                 purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 self.0.lock().push(purpose);
                 Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
@@ -8469,9 +8638,12 @@ mod tests {
             })
             .map_err(|_| "write")
             .unwrap();
-        state.refresh_embeddings("p").unwrap().unwrap();
         state
-            .semantic_resolve("p", "cue", false, None)
+            .refresh_embeddings("p", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        state
+            .semantic_resolve("p", "cue", false, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -8500,6 +8672,7 @@ mod tests {
                 &self,
                 texts: &[&str],
                 _purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 Ok(texts
                     .iter()
@@ -8526,7 +8699,10 @@ mod tests {
                 })
                 .map_err(|_| "write")
                 .unwrap();
-            let (embedded, total) = state.refresh_embeddings("w").unwrap().unwrap();
+            let (embedded, total) = state
+                .refresh_embeddings("w", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
             assert_eq!((embedded, total), (3, 3)); // a, b, and the label l
             state.flush_dirty();
         }
@@ -8536,7 +8712,10 @@ mod tests {
         // sidecar must be uniformly the new width.
         let embedder = Some(Arc::new(WidthEmbeddings(3)) as Arc<dyn EmbeddingProvider>);
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
-        let (embedded, total) = state.refresh_embeddings("w").unwrap().unwrap();
+        let (embedded, total) = state
+            .refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!((embedded, total), (3, 3));
         let store = VectorStore::load(&vectors_path(&dir, &file_stem("w")));
         assert!(
@@ -8550,7 +8729,10 @@ mod tests {
 
         // A no-op refresh against the same-width provider stays a no-op
         // (the probe embeds one gloss but re-embeds nothing).
-        let (embedded, total) = state.refresh_embeddings("w").unwrap().unwrap();
+        let (embedded, total) = state
+            .refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!((embedded, total), (0, 3));
 
         let _ = fs::remove_dir_all(dir);
@@ -8584,6 +8766,7 @@ mod tests {
                 &self,
                 texts: &[&str],
                 _purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                 self.peak.fetch_max(now, Ordering::SeqCst);
@@ -8618,7 +8801,10 @@ mod tests {
         for _ in 0..2 {
             let state = state.clone();
             refreshers.push(thread::spawn(move || {
-                state.refresh_embeddings("fruit").unwrap().unwrap();
+                state
+                    .refresh_embeddings("fruit", Deadline::unbounded())
+                    .unwrap()
+                    .unwrap();
             }));
         }
         for refresher in refreshers {
@@ -8663,7 +8849,7 @@ mod tests {
         assert!(lexical.is_empty());
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false, None)
+                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -8671,15 +8857,25 @@ mod tests {
 
         // Refresh embeds every canonical name's gloss once; a second run
         // is a no-op.
-        let (embedded, total) = state.refresh_embeddings("fruit").unwrap().unwrap();
+        let (embedded, total) = state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(embedded, 3); // りんご, 果物 + label 分類
         assert_eq!(total, 3);
-        assert_eq!(state.refresh_embeddings("fruit").unwrap().unwrap().0, 0);
+        assert_eq!(
+            state
+                .refresh_embeddings("fruit", Deadline::unbounded())
+                .unwrap()
+                .unwrap()
+                .0,
+            0
+        );
 
         // Now the paraphrase lands on the stored spelling by cosine, and
         // unrelated names stay under the floor.
         let hits = state
-            .semantic_resolve("fruit", "アップル", false, None)
+            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
@@ -8696,11 +8892,18 @@ mod tests {
             })
             .map_err(|_| "write")
             .unwrap();
-        let (embedded, total) = state.refresh_embeddings("fruit").unwrap().unwrap();
+        let (embedded, total) = state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(embedded, 3);
         assert_eq!(total, 5);
 
-        assert!(state.semantic_resolve("nope", "x", false, None).is_none());
+        assert!(
+            state
+                .semantic_resolve("nope", "x", false, None, Deadline::unbounded())
+                .is_none()
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -8721,19 +8924,22 @@ mod tests {
             })
             .map_err(|_| "write")
             .unwrap();
-        state.refresh_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         // One batch per namespace: concepts, then labels.
         assert_eq!(calls.load(Ordering::Relaxed), 2);
 
         // First query embeds the cue; repeating the wording does not.
         let first = state
-            .semantic_resolve("fruit", "アップル", false, None)
+            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(first[0].0, "りんご");
         assert_eq!(calls.load(Ordering::Relaxed), 3);
         state
-            .semantic_resolve("fruit", "アップル", false, None)
+            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 3, "cue must come from cache");
@@ -8742,7 +8948,7 @@ mod tests {
         // file gone, the same query keeps answering.
         fs::remove_file(vectors_path(&dir, &file_stem("fruit"))).unwrap();
         let held = state
-            .semantic_resolve("fruit", "アップル", false, None)
+            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(held[0].0, "りんご");
@@ -8761,7 +8967,7 @@ mod tests {
             .unwrap();
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false, None)
+                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -8806,7 +9012,10 @@ mod tests {
         assert!(concepts.is_empty() && labels.is_empty());
         assert!(note.is_some());
 
-        state.refresh_embeddings("sake").unwrap().unwrap();
+        state
+            .refresh_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         let (concepts, labels, note) = state.semantic_twins("sake", 0.6).unwrap();
         assert!(note.is_none());
         // Directly connected concepts (青嶺酒造 —創業年→ 1907年) are
@@ -8852,12 +9061,15 @@ mod tests {
             })
             .map_err(|_| "write")
             .unwrap();
-        state.refresh_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         // みかん×りんご sits at cosine 0.28 — under the 0.35 default.
         let miss = |floor: Option<f32>| {
             state
-                .semantic_resolve("fruit", "みかん", false, floor)
+                .semantic_resolve("fruit", "みかん", false, floor, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
         };
@@ -8906,11 +9118,14 @@ mod tests {
             })
             .map_err(|_| "write")
             .unwrap();
-        state.refresh_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let hits = |floor: Option<f32>| {
             state
-                .semantic_resolve("fruit", "みかん", false, floor)
+                .semantic_resolve("fruit", "みかん", false, floor, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
         };

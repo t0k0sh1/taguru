@@ -24,6 +24,7 @@ use axum::http::{Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use http_body_util::LengthLimitError;
 use serde_json::{Value, json};
+use taguru::deadline::Deadline;
 use tower::ServiceExt;
 
 use crate::mcp;
@@ -35,13 +36,17 @@ use crate::mcp;
 /// each dispatched call so a scoped key's grant holds through the MCP
 /// surface exactly as over raw HTTP; `max_result_bytes` bounds how
 /// much of a dispatched tool's response this transport will buffer
-/// (see [`RESULT_TOO_BIG`]).
+/// (see [`RESULT_TOO_BIG`]); `deadline` is the OUTER request's budget,
+/// stamped onto the dispatched call the same way — without this, a
+/// tool call would run past `enforce_timeout`'s race unchecked, since
+/// the dispatched request never passes back through that layer.
 pub async fn serve(
     dispatch: Router,
     instructions: Arc<String>,
     key: Option<crate::auth::AuthKey>,
     body: Bytes,
     max_result_bytes: usize,
+    deadline: Deadline,
 ) -> Response {
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
         return rpc_over_http(
@@ -95,6 +100,7 @@ pub async fn serve(
                         body,
                         key.as_ref(),
                         max_result_bytes,
+                        deadline,
                     )
                     .await
                 }
@@ -119,6 +125,7 @@ async fn call_inner(
     body: Option<Value>,
     key: Option<&crate::auth::AuthKey>,
     max_result_bytes: usize,
+    deadline: Deadline,
 ) -> Result<String, String> {
     let builder = Request::builder().method(method).uri(path);
     let mut request = match body {
@@ -139,6 +146,10 @@ async fn call_inner(
     if let Some(key) = key {
         request.extensions_mut().insert(key.clone());
     }
+    // Likewise the outer request's time budget: dispatched calls never
+    // pass back through `enforce_timeout`, so this is the only way a
+    // handler's own deadline check sees it.
+    request.extensions_mut().insert(deadline);
     let response = match dispatch.oneshot(request).await {
         Ok(response) => response,
         Err(never) => match never {},
@@ -182,6 +193,8 @@ fn rpc_over_http(status: StatusCode, reply: Value) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use axum::Extension;
+
     use super::*;
 
     /// A context name long enough that its percent-encoded path exceeds
@@ -202,6 +215,7 @@ mod tests {
             None,
             Bytes::from(body.to_string()),
             usize::MAX,
+            Deadline::unbounded(),
         )
         .await;
         let status = response.status().as_u16();
@@ -259,6 +273,7 @@ mod tests {
             None,
             Bytes::from(body.to_string()),
             1024,
+            Deadline::unbounded(),
         )
         .await;
         let status = response.status().as_u16();
@@ -271,5 +286,43 @@ mod tests {
         let text = reply["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("GET /contexts/{name}/export"), "{text}");
         assert!(text.contains("taguru export"), "{text}");
+    }
+
+    /// The outer request's deadline never passes back through
+    /// `enforce_timeout` on the dispatched call — `call_inner` must
+    /// stamp it on directly, or a downstream handler's own budget
+    /// check always sees an unbounded deadline regardless of what the
+    /// caller actually has left.
+    #[tokio::test]
+    async fn the_outer_deadline_is_stamped_onto_the_dispatched_request() {
+        let echo = Router::new().route(
+            "/contexts",
+            axum::routing::get(|Extension(deadline): Extension<Deadline>| async move {
+                deadline.expired().to_string()
+            }),
+        );
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_contexts", "arguments": {} },
+        });
+        let already_expired = Deadline::after(std::time::Duration::ZERO);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let response = serve(
+            echo,
+            Arc::new(String::new()),
+            None,
+            Bytes::from(body.to_string()),
+            usize::MAX,
+            already_expired,
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("true"), "{reply}");
     }
 }
