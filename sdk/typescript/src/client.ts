@@ -480,6 +480,7 @@ export class Contexts {
   async rename(name: string, to: string): Promise<boolean> {
     const result = await this.client.requestJson("POST", `/contexts/${encodeName(name)}/rename`, {
       jsonBody: { to },
+      retry: "unsafe_on_ambiguous",
     });
     return Boolean(result);
   }
@@ -595,6 +596,7 @@ export class Groups {
   async rename(name: string, to: string): Promise<boolean> {
     const result = await this.client.requestJson("POST", `/groups/${encodeName(name)}/rename`, {
       jsonBody: { to },
+      retry: "unsafe_on_ambiguous",
     });
     return Boolean(result);
   }

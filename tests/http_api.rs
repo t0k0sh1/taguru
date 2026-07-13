@@ -1813,6 +1813,14 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
     );
     assert_eq!(status, 400, "{body}");
 
+    // A rename's destination rides in the body, not the path — it
+    // needs its own cap, for both the context and the group route.
+    let (status, body) = server.call("POST", "/contexts/sake/rename", Some(json!({"to": long})));
+    assert_eq!(status, 400, "{body}");
+    server.ok("PUT", "/groups/kura", Some(json!({})));
+    let (status, body) = server.call("POST", "/groups/kura/rename", Some(json!({"to": long})));
+    assert_eq!(status, 400, "{body}");
+
     // Nothing landed anywhere.
     let directory = server.ok("GET", "/contexts", None);
     assert_eq!(directory["contexts"][0]["stats"]["associations"], json!(0));
@@ -5582,6 +5590,89 @@ fn a_scoped_key_cannot_import_group_records_beyond_its_grant() {
     let shrink = "{\"taguru_group\": 1, \"name\": \"wide\", \"contexts\": [\"sake\"]}\n";
     let (status, refusal) = post_import(&server, shrink, Some("ctok"));
     assert_eq!(status, 403, "{refusal}");
+}
+
+/// The destination of `POST /contexts/{name}/rename` rides in the
+/// body, out of the authorization middleware's reach — so a
+/// context-scoped key must not be able to move its data to a name
+/// beyond its grant, whether that name is already someone else's
+/// context or brand new.
+#[test]
+fn a_scoped_key_cannot_rename_a_context_to_a_destination_beyond_its_grant() {
+    let server = Server::start_with_env(
+        "http-rename-scope",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,curator:ctok,wide:wtok"),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"curator": {"role": "admin", "contexts": ["sake"]},
+                    "wide": {"role": "admin", "contexts": ["sake", "shochu"]}}"#,
+            ),
+        ],
+    );
+    let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
+        server.call_with_token(method, path, body, Some(token))
+    };
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/sake",
+            Some(json!({"description": "d"})),
+            "atok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/bunko",
+            Some(json!({"description": "d"})),
+            "atok"
+        )
+        .0,
+        200
+    );
+
+    // Destination already exists, but beyond the grant: refused, the
+    // message naming the destination so the caller knows what to fix.
+    let (status, refusal) = call(
+        "POST",
+        "/contexts/sake/rename",
+        Some(json!({"to": "bunko"})),
+        "ctok",
+    );
+    assert_eq!(status, 403, "{refusal}");
+    assert!(
+        refusal["error"].as_str().unwrap().contains("bunko"),
+        "{refusal}"
+    );
+
+    // Destination is brand new, still beyond the grant: refused the
+    // same way — existence is not what is being checked.
+    let (status, refusal) = call(
+        "POST",
+        "/contexts/sake/rename",
+        Some(json!({"to": "shochu"})),
+        "ctok",
+    );
+    assert_eq!(status, 403, "{refusal}");
+
+    // Neither refusal moved anything.
+    assert_eq!(call("GET", "/contexts/sake", None, "atok").0, 200);
+    assert_eq!(call("GET", "/contexts/shochu", None, "atok").0, 404);
+
+    // A key scoped to BOTH names may rename between them — the grant
+    // check is about the names involved, not a blanket ban.
+    let (status, applied) = call(
+        "POST",
+        "/contexts/sake/rename",
+        Some(json!({"to": "shochu"})),
+        "wtok",
+    );
+    assert_eq!(status, 200, "{applied}");
+    assert_eq!(call("GET", "/contexts/shochu", None, "atok").0, 200);
+    assert_eq!(call("GET", "/contexts/sake", None, "atok").0, 404);
 }
 
 /// `GET /groups/{name}/export` serves one `taguru_group` record that

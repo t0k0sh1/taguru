@@ -457,7 +457,10 @@ class AsyncContexts:
         """Rename a context (admin role): the whole file family moves to
         ``to``, and every group naming it is rewritten to match."""
         result = await self._client._request_json(
-            "POST", f"/contexts/{encode_name(name)}/rename", json_body={"to": to}
+            "POST",
+            f"/contexts/{encode_name(name)}/rename",
+            json_body={"to": to},
+            retry=RetryClass.UNSAFE_ON_AMBIGUOUS,
         )
         return bool(result)
 
@@ -568,7 +571,10 @@ class AsyncGroups:
         """Rename a group (admin role): the group's file moves to ``to``,
         and every OTHER group naming it as a child is rewritten to match."""
         result = await self._client._request_json(
-            "POST", f"/groups/{encode_name(name)}/rename", json_body={"to": to}
+            "POST",
+            f"/groups/{encode_name(name)}/rename",
+            json_body={"to": to},
+            retry=RetryClass.UNSAFE_ON_AMBIGUOUS,
         )
         return bool(result)
 

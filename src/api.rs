@@ -808,11 +808,15 @@ pub struct RenameRequest {
 /// role (unclassified in [`crate::auth::required_role`], so it fails
 /// closed there); `{name}` is a context name like every other
 /// `/contexts/{name}...` route, so the authorization middleware's own
-/// per-context grant check already covers it — no
-/// [`scope_refusal`] call belongs here.
+/// per-context grant check already covers the SOURCE. The
+/// DESTINATION lives in the body, out of that middleware's reach —
+/// same discipline as `import_batch` — so this handler gates it with
+/// [`scope_refusal`] before renaming: otherwise a context-scoped key
+/// could move its data to an unscoped name.
 pub async fn rename_context(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RenameRequest>,
@@ -824,6 +828,9 @@ pub async fn rename_context(
         MAX_CONTEXT_NAME_BYTES,
         started_at,
     ) {
+        return refusal;
+    }
+    if let Some(refusal) = scope_refusal(&scope, &key, [&request.to], started_at) {
         return refusal;
     }
     if deadline.expired() {
@@ -1311,6 +1318,14 @@ pub async fn rename_group(
     AppJson(request): AppJson<RenameRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = oversized(
+        "the destination name",
+        &request.to,
+        MAX_CONTEXT_NAME_BYTES,
+        started_at,
+    ) {
+        return refusal;
+    }
     // Renaming the bundling touches every member's grant — nested
     // members included — exactly like deleting it.
     if let Some(refusal) = scoped_group_refusal(

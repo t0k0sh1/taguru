@@ -2162,11 +2162,26 @@ impl Context {
     /// many edges this source touches, without unlinking anything —
     /// `POST /import?dry_run=true`'s preview of what a retraction
     /// would report.
+    ///
+    /// `source_edges` is not pruned by [`Self::retract_association`],
+    /// which can unlink this source's attribution on one of its edges
+    /// without touching the reverse index — so a raw `Vec::len` would
+    /// overcount past that edge. Each candidate is confirmed live
+    /// against `attribution_ids`, the same check `retract_source`
+    /// itself relies on to skip a dead entry.
     pub fn count_source_edges(&self, source: &str) -> usize {
         let Some(&source_id) = self.source_ids.get(source) else {
             return 0;
         };
-        self.source_edges.get(&source_id).map(Vec::len).unwrap_or(0)
+        self.source_edges
+            .get(&source_id)
+            .map(|edges| {
+                edges
+                    .iter()
+                    .filter(|&&edge_id| self.attribution_ids.contains_key(&(edge_id, source_id)))
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     /// Withdraws one association outright: the `(subject, label,
@@ -4390,6 +4405,29 @@ mod tests {
         // count, and the real retraction afterward still sees both edges.
         assert_eq!(context.count_source_edges("旧版"), 2);
         assert_eq!(context.retract_source("旧版"), Some(2));
+        assert_eq!(context.count_source_edges("旧版"), 0);
+    }
+
+    #[test]
+    fn count_source_edges_ignores_an_edge_retracted_via_retract_association() {
+        let mut context = Context::default();
+        context
+            .associate_from("a", "r", "b", 1.0, "旧版", None)
+            .unwrap();
+        context
+            .associate_from("a", "r", "c", 1.0, "旧版", None)
+            .unwrap();
+        assert_eq!(context.count_source_edges("旧版"), 2);
+
+        // retract_association unlinks (a, r, b) outright, every source
+        // included — the reverse index still lists the edge under
+        // "旧版", but the attribution itself is gone.
+        assert_eq!(context.retract_association("a", "r", "b"), Some(1));
+        assert_eq!(context.count_source_edges("旧版"), 1);
+
+        // retract_source must agree with the preview: only the one
+        // still-live edge is actually touched.
+        assert_eq!(context.retract_source("旧版"), Some(1));
         assert_eq!(context.count_source_edges("旧版"), 0);
     }
 

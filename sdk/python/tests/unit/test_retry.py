@@ -98,6 +98,21 @@ def test_ambiguous_failure_never_retries_add_associations() -> None:
     assert handler.calls == 1
 
 
+def test_ambiguous_failure_never_retries_rename() -> None:
+    """A phantom retry could rename an already-renamed context again."""
+    handler = FlakyHandler(1, lambda: httpx.ReadTimeout("mid-flight"))
+    client = sync_client(handler)
+    with pytest.raises(TransportError):
+        client.contexts.rename("sake", "shochu")
+    assert handler.calls == 1
+
+    handler = FlakyHandler(1, lambda: httpx.ReadTimeout("mid-flight"))
+    client = sync_client(handler)
+    with pytest.raises(TransportError):
+        client.groups.rename("kura", "gura")
+    assert handler.calls == 1
+
+
 def test_retries_zero_disables_retry() -> None:
     handler = FlakyHandler(1, lambda: err_response(429, "budget", {"retry-after": "0"}))
     client = sync_client(handler, retries=0)
