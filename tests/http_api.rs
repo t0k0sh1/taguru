@@ -107,19 +107,20 @@ impl Server {
         body: Option<Value>,
         token: Option<&str>,
     ) -> (u16, Value) {
-        let mut request = ureq::AgentBuilder::new()
-            .build()
-            .request(method, &format!("{}{path}", self.base));
+        let mut request = ureq::http::Request::builder()
+            .method(method)
+            .uri(format!("{}{path}", self.base));
         if let Some(token) = token {
-            request = request.set("Authorization", &format!("Bearer {token}"));
+            request = request.header("Authorization", format!("Bearer {token}"));
         }
         let response = match body {
             Some(body) => request
-                .set("Content-Type", "application/json")
-                .send_string(&body.to_string()),
-            None => request.call(),
+                .header("Content-Type", "application/json")
+                .body(body.to_string())
+                .map(|request| test_agent().run(request)),
+            None => request.body(()).map(|request| test_agent().run(request)),
         };
-        finish(response, method, path)
+        finish(response.expect("request must assemble"), method, path)
     }
 
     /// A raw request: the body goes out as-is, with a Content-Type only
@@ -132,17 +133,17 @@ impl Server {
         body: Option<&str>,
         content_type: Option<&str>,
     ) -> (u16, Value) {
-        let mut request = ureq::AgentBuilder::new()
-            .build()
-            .request(method, &format!("{}{path}", self.base));
+        let mut request = ureq::http::Request::builder()
+            .method(method)
+            .uri(format!("{}{path}", self.base));
         if let Some(content_type) = content_type {
-            request = request.set("Content-Type", content_type);
+            request = request.header("Content-Type", content_type);
         }
         let response = match body {
-            Some(body) => request.send_string(body),
-            None => request.call(),
+            Some(body) => request.body(body).map(|request| test_agent().run(request)),
+            None => request.body(()).map(|request| test_agent().run(request)),
         };
-        finish(response, method, path)
+        finish(response.expect("request must assemble"), method, path)
     }
 
     fn ok(&self, method: &str, path: &str, body: Option<Value>) -> Value {
@@ -190,17 +191,49 @@ impl Server {
     }
 }
 
+/// The tests' HTTP client: 4xx/5xx come back as responses — the
+/// helpers assert on status, they never want an error for one.
+fn test_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
+/// [`test_agent`], except redirects come back unfollowed — for the
+/// OAuth flows that assert on the 303 itself (and must not chase a
+/// Location pointing at the real external callback host).
+fn no_redirect_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
+/// One header as text, "" when absent — ureq 2's `header()` accessor,
+/// which half these tests were written against.
+fn header_text(response: &ureq::http::Response<ureq::Body>, name: &str) -> String {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Shared response tail: status plus parsed JSON body (or the raw
 /// text when it is not JSON).
-fn finish(response: Result<ureq::Response, ureq::Error>, method: &str, path: &str) -> (u16, Value) {
+fn finish(
+    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    method: &str,
+    path: &str,
+) -> (u16, Value) {
     let (status, text) = match response {
-        Ok(response) => {
-            let status = response.status();
-            (status, response.into_string().unwrap_or_default())
-        }
-        Err(ureq::Error::Status(status, response)) => {
-            (status, response.into_string().unwrap_or_default())
-        }
+        Ok(mut response) => (
+            response.status().as_u16(),
+            response.body_mut().read_to_string().unwrap_or_default(),
+        ),
         Err(error) => panic!("request {method} {path} failed: {error}"),
     };
     let parsed = serde_json::from_str(&text).unwrap_or(Value::String(text));
@@ -282,20 +315,20 @@ fn oauth_flow_delegates_a_key_to_a_remote_mcp_client() {
             ("TAGURU_PUBLIC_URL", "http://taguru.test"),
         ],
     );
-    let no_redirect = ureq::AgentBuilder::new().redirects(0).build();
+    let no_redirect = no_redirect_agent();
 
     // An anonymous /mcp names the discovery document (RFC 9728)...
-    let www_authenticate = match no_redirect
+    let response = no_redirect
         .post(&format!("{}/mcp", server.base))
-        .set("Content-Type", "application/json")
-        .send_string("{}")
-    {
-        Err(ureq::Error::Status(401, response)) => response
-            .header("www-authenticate")
-            .expect("401 must carry WWW-Authenticate")
-            .to_string(),
-        other => panic!("anonymous /mcp must be a 401, got {other:?}"),
-    };
+        .header("Content-Type", "application/json")
+        .send("{}")
+        .expect("anonymous /mcp must answer");
+    assert_eq!(response.status(), 401, "anonymous /mcp must be a 401");
+    let www_authenticate = header_text(&response, "www-authenticate");
+    assert!(
+        !www_authenticate.is_empty(),
+        "401 must carry WWW-Authenticate"
+    );
     assert!(
         www_authenticate.contains(
             "resource_metadata=\"http://taguru.test/.well-known/oauth-protected-resource\""
@@ -352,11 +385,11 @@ fn oauth_flow_delegates_a_key_to_a_remote_mcp_client() {
     // The real key approves: back to the callback with code and state.
     let approved = no_redirect
         .post(&format!("{}/oauth/authorize", server.base))
-        .set("Content-Type", "application/x-www-form-urlencoded")
-        .send_string(&format!("{authorize_query}&key=tok-op"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send(format!("{authorize_query}&key=tok-op"))
         .expect("approval must answer with a redirect");
     assert_eq!(approved.status(), 303);
-    let location = approved.header("location").unwrap().to_string();
+    let location = header_text(&approved, "location");
     assert!(
         location.starts_with("https://claude.ai/api/mcp/auth_callback?code="),
         "{location}"
@@ -459,7 +492,7 @@ fn oauth_authorize_percent_encodes_state_in_redirects() {
             ("TAGURU_PUBLIC_URL", "http://taguru.test"),
         ],
     );
-    let no_redirect = ureq::AgentBuilder::new().redirects(0).build();
+    let no_redirect = no_redirect_agent();
 
     let (_, registered) = server.call(
         "POST",
@@ -479,11 +512,11 @@ fn oauth_authorize_percent_encodes_state_in_redirects() {
     // The success redirect (consent approved)...
     let approved = no_redirect
         .post(&format!("{}/oauth/authorize", server.base))
-        .set("Content-Type", "application/x-www-form-urlencoded")
-        .send_string(&format!("{authorize_query}&key=tok-op"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send(format!("{authorize_query}&key=tok-op"))
         .expect("approval must answer with a redirect");
     assert_eq!(approved.status(), 303);
-    let location = approved.header("location").unwrap().to_string();
+    let location = header_text(&approved, "location");
     assert_eq!(
         location.matches("code=").count(),
         1,
@@ -509,7 +542,7 @@ fn oauth_authorize_percent_encodes_state_in_redirects() {
         .call()
         .expect("a bad code_challenge_method must still redirect with ?error=");
     assert_eq!(refused_get.status(), 303);
-    let get_error_location = refused_get.header("location").unwrap().to_string();
+    let get_error_location = header_text(&refused_get, "location");
     assert_eq!(
         get_error_location.matches("error=").count(),
         1,
@@ -521,11 +554,11 @@ fn oauth_authorize_percent_encodes_state_in_redirects() {
     );
     let refused = no_redirect
         .post(&format!("{}/oauth/authorize", server.base))
-        .set("Content-Type", "application/x-www-form-urlencoded")
-        .send_string(&format!("{bad_query}&key=tok-op"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send(format!("{bad_query}&key=tok-op"))
         .expect("a bad code_challenge_method must still redirect with ?error=");
     assert_eq!(refused.status(), 303);
-    let error_location = refused.header("location").unwrap().to_string();
+    let error_location = header_text(&refused, "location");
     assert_eq!(
         error_location.matches("error=").count(),
         1,
@@ -626,19 +659,15 @@ fn oauth_http_layer_refuses_bad_client_redirect_and_grant_parameters() {
 
     // Past that check, each individual parameter mistake comes back as
     // its own OAuth error redirect to the (now verified) client.
-    let no_redirect = ureq::AgentBuilder::new().redirects(0).build();
+    let no_redirect = no_redirect_agent();
     let authorize = |query: &str| -> (u16, String) {
         match no_redirect
             .get(&format!("{}/oauth/authorize?{query}", server.base))
             .call()
         {
             Ok(response) => (
-                response.status(),
-                response.header("location").unwrap_or_default().to_string(),
-            ),
-            Err(ureq::Error::Status(status, response)) => (
-                status,
-                response.header("location").unwrap_or_default().to_string(),
+                response.status().as_u16(),
+                header_text(&response, "location"),
             ),
             Err(error) => panic!("GET /oauth/authorize failed: {error}"),
         }
@@ -3037,10 +3066,9 @@ fn a_request_span_reaches_the_collector_carrying_the_inbound_trace_identity() {
     );
 
     // The upstream (a mesh, another service) already started a trace.
-    let response = ureq::AgentBuilder::new()
-        .build()
-        .request("GET", &format!("{}/health", server.base))
-        .set(
+    let response = test_agent()
+        .get(&format!("{}/health", server.base))
+        .header(
             "traceparent",
             "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
         )
@@ -3112,10 +3140,9 @@ fn the_access_log_carries_the_trace_id_when_export_is_configured() {
         }
     };
 
-    let response = ureq::AgentBuilder::new()
-        .build()
-        .request("GET", &format!("{base}/health"))
-        .set(
+    let response = test_agent()
+        .get(&format!("{base}/health"))
+        .header(
             "traceparent",
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
         )
@@ -4036,22 +4063,22 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
     };
 
     let call = |method: &str, path: &str, body: Option<Value>| {
-        let request = ureq::AgentBuilder::new()
-            .build()
-            .request(method, &format!("{base}{path}"))
-            .set("Authorization", "Bearer opskey");
+        let request = ureq::http::Request::builder()
+            .method(method)
+            .uri(format!("{base}{path}"))
+            .header("Authorization", "Bearer opskey");
         let response = match body {
             Some(body) => request
-                .set("Content-Type", "application/json")
-                .send_string(&body.to_string()),
-            None => request.call(),
+                .header("Content-Type", "application/json")
+                .body(body.to_string())
+                .map(|request| test_agent().run(request)),
+            None => request.body(()).map(|request| test_agent().run(request)),
         };
         response
-            .map(|reply| reply.status())
-            .unwrap_or_else(|error| match error {
-                ureq::Error::Status(status, _) => status,
-                other => panic!("{method} {path}: {other}"),
-            })
+            .expect("request must assemble")
+            .unwrap_or_else(|error| panic!("{method} {path}: {error}"))
+            .status()
+            .as_u16()
     };
     assert_eq!(
         call("PUT", "/contexts/sake", Some(json!({"description": "d"}))),
@@ -4086,19 +4113,16 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
     // An import batch (retract-then-apply) and a compaction: both
     // destructive, both audited. Import is NDJSON, so send it raw
     // rather than through the JSON `call` helper.
-    let import_status = ureq::AgentBuilder::new()
-        .build()
-        .request("POST", &format!("{base}/import"))
-        .set("Authorization", "Bearer opskey")
-        .send_string(
+    let import_status = test_agent()
+        .post(format!("{base}/import"))
+        .header("Authorization", "Bearer opskey")
+        .send(
             "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\n\
              {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
         )
-        .map(|reply| reply.status())
-        .unwrap_or_else(|error| match error {
-            ureq::Error::Status(status, _) => status,
-            other => panic!("import: {other}"),
-        });
+        .unwrap_or_else(|error| panic!("import: {error}"))
+        .status()
+        .as_u16();
     assert_eq!(import_status, 200);
     assert_eq!(call("POST", "/contexts/sake/compact", None), 200);
     assert_eq!(
@@ -4188,18 +4212,18 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
 /// sessions below run outside the `Server` harness so they can own
 /// stderr. Returns the status; bodies are irrelevant to log tests.
 fn raw_call(base: &str, method: &str, path: &str, body: Option<Value>) -> u16 {
-    let request = ureq::AgentBuilder::new()
-        .build()
-        .request(method, &format!("{base}{path}"));
+    let request = ureq::http::Request::builder()
+        .method(method)
+        .uri(format!("{base}{path}"));
     let response = match body {
         Some(body) => request
-            .set("Content-Type", "application/json")
-            .send_string(&body.to_string()),
-        None => request.call(),
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .map(|request| test_agent().run(request)),
+        None => request.body(()).map(|request| test_agent().run(request)),
     };
-    match response {
-        Ok(response) => response.status(),
-        Err(ureq::Error::Status(status, _)) => status,
+    match response.expect("request must assemble") {
+        Ok(response) => response.status().as_u16(),
         Err(error) => panic!("{method} {path} failed: {error}"),
     }
 }
@@ -4976,13 +5000,11 @@ fn a_malformed_file_refuses_the_whole_import_before_any_write() {
 /// document, so the JSON helpers cannot carry it) and an optional
 /// bearer token.
 fn post_import(server: &Server, body: &str, token: Option<&str>) -> (u16, Value) {
-    let mut request = ureq::AgentBuilder::new()
-        .build()
-        .request("POST", &format!("{}/import", server.base));
+    let mut request = test_agent().post(format!("{}/import", server.base));
     if let Some(token) = token {
-        request = request.set("Authorization", &format!("Bearer {token}"));
+        request = request.header("Authorization", format!("Bearer {token}"));
     }
-    finish(request.send_string(body), "POST", "/import")
+    finish(request.send(body), "POST", "/import")
 }
 
 #[test]
@@ -5993,7 +6015,8 @@ fn the_extract_timeout_knob_bounds_a_stalled_provider() {
         &["--context", "c", doc.to_str().unwrap()],
     );
     assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("timed out"), "{stderr}");
+    // ureq 3 renders its timeout error as "timeout: <phase>".
+    assert!(stderr.contains("timeout"), "{stderr}");
     // Two 1-second attempts plus the retry pause — nowhere near the
     // 300-second default this knob overrides.
     assert!(
