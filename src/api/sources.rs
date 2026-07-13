@@ -5,14 +5,15 @@ use std::time::Instant;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
+use taguru::deadline::Deadline;
 
 use crate::metrics::{ErrorKind, SearchOp};
 use crate::registry::{AppState, CitationLookup, PassageExplainLookup};
 
 use super::{
     AppJson, AppQuery, CrossMatch, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, access_error,
-    bounded_parallel_map, clamp, cross_search_concurrency, cross_targets, error, not_found, ok,
-    overlong, search_log_enabled,
+    bounded_parallel_map, clamp, cross_search_concurrency, cross_targets, deadline_exceeded, error,
+    not_found, ok, overlong, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +33,7 @@ pub struct PassageLookup {
 pub async fn lookup_passages(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<LookupPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -39,6 +41,9 @@ pub async fn lookup_passages(
     // scales with this list, so the list itself is what gets bounded.
     if let Some(refusal) = overlong("sources", request.sources.len(), started_at) {
         return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     // A residency's first passage access loads the store from disk
     // (sources.json/passages.bin/WAL replay); keep that off the async
@@ -79,9 +84,13 @@ pub struct Citation {
 pub async fn citation(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<CitationRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Same cold-load path as lookup_passages; keep it off the async
     // worker.
     match tokio::task::block_in_place(|| state.citation(&name, &request.source, request.paragraph))
@@ -132,10 +141,14 @@ pub struct SourcePage {
 pub async fn list_sources(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
     let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Same cold-load path as lookup_passages; keep it off the async
     // worker.
     match tokio::task::block_in_place(|| state.passage_sources(&name)) {
@@ -192,9 +205,13 @@ pub async fn retract_source(
     State(state): State<AppState>,
     Path(name): Path<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RetractSourceRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Retraction stages a WAL op and fsyncs before returning; keep that
     // synchronous write off the async worker like every other write path.
     match tokio::task::block_in_place(|| state.retract_source(&name, &request.source)) {
@@ -299,9 +316,13 @@ impl From<crate::registry::PassageSearchHit> for PassageHit {
 pub async fn search_passages(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<SearchPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Off the async worker: a residency's first search tokenizes the
     // whole corpus into the index (the audit endpoints' rule).
     let outcome = tokio::task::block_in_place(|| {
@@ -309,10 +330,16 @@ pub async fn search_passages(
             &name,
             &request.query,
             clamp(request.limit, 5, MAX_MATCH_LIMIT),
+            deadline,
         )
     });
     match outcome {
         None => not_found(&name, started_at),
+        // A rebuild the lexical lane needed refused to start once the
+        // budget was already gone — the same "before it could start"
+        // shape as the entry check above, just discovered later, past
+        // the embedding call this search's semantic lane also makes.
+        Some(Err(_)) if deadline.expired() => deadline_exceeded(started_at),
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(hits)) => {
             state.note_search(SearchOp::SearchPassages, &name, hits.is_empty());
@@ -692,9 +719,13 @@ impl SearchExplanation {
 pub async fn explain_search_passages(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ExplainSearchRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Off the async worker: a residency's first search tokenizes the
     // whole corpus into the index (the audit endpoints' rule).
     let outcome = tokio::task::block_in_place(|| {
@@ -704,10 +735,14 @@ pub async fn explain_search_passages(
             &request.source,
             request.paragraph,
             clamp(request.limit, 5, MAX_MATCH_LIMIT),
+            deadline,
         )
     });
     match outcome {
         None => not_found(&name, started_at),
+        // Mirrors search_passages: a rebuild the lexical lane needed
+        // refused to start once the budget was already gone.
+        Some(Err(_)) if deadline.expired() => deadline_exceeded(started_at),
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(lookup)) => {
             // A lookup that never reached scoring is the unproductive
@@ -754,6 +789,7 @@ pub async fn cross_search_passages(
     State(state): State<AppState>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<CrossSearchPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -781,15 +817,25 @@ pub async fn cross_search_passages(
         pool.sort_by_key(|(index, rank, _)| (*rank, *index));
         pool.truncate(limit);
     };
+    // A budget already spent when the request arrived shouldn't pay to
+    // tokenize even one context — checked once before the fan-out
+    // starts, mirroring the single-context handler's pre-flight cost
+    // discipline.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Each residency's first search tokenizes its whole corpus, so the
     // fetch belongs on the blocking pool — bounded and concurrent, the
     // same `bounded_parallel_map` shape as `cross_matches`'s gather.
+    // `deadline` is `Copy`, so every job carries its own value and can
+    // bail out mid-tokenize the same way the single-context handler
+    // does.
     let permits = cross_search_concurrency().min(targets.len().max(1));
     let owned_targets = Arc::clone(&targets);
     let query = request.query.clone();
     let job_state = state.clone();
     let fetched = bounded_parallel_map(targets.len(), permits, move |index| {
-        job_state.search_passages(&owned_targets[index], &query, limit)
+        job_state.search_passages(&owned_targets[index], &query, limit, deadline)
     })
     .await;
 
@@ -798,11 +844,15 @@ pub async fn cross_search_passages(
     // response (a read has nothing to half-apply) — in target-list
     // order now that every fetch runs concurrently, not the first one
     // hit in real time, though the response is identical either way.
+    // Mirrors the single-context handler: an error surfacing once the
+    // budget is gone is reported as a timeout, not as whatever shape
+    // the abandoned work happened to fail with.
     let mut pool = Vec::new();
     for (index, outcome) in fetched.into_iter().enumerate() {
         let name = &targets[index];
         match outcome {
             None => return not_found(name, started_at),
+            Some(Err(_)) if deadline.expired() => return deadline_exceeded(started_at),
             Some(Err(io_error)) => return passages_unreadable(&state, io_error, started_at),
             Some(Ok(hits)) => {
                 state.note_search(SearchOp::SearchPassages, name, hits.is_empty());

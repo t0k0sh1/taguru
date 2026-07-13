@@ -51,6 +51,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e "sdk/python[dev]" -e "sdk/python-langchain[dev]"
+      - name: Audit dependencies (core)
+        run: pip-audit sdk/python
+      - name: Audit dependencies (langchain)
+        run: pip-audit sdk/python-langchain
       - name: Lint (core)
         run: |
           ruff check sdk/python/src sdk/python/scripts sdk/python/tests
@@ -106,6 +110,9 @@ jobs:
       - run: chmod +x bin/taguru
       - name: Install workspace
         run: npm install --no-fund --no-audit
+        working-directory: sdk
+      - name: Audit dependencies
+        run: npm audit --workspaces --audit-level=high
         working-directory: sdk
       - name: Build packages (langchain-taguru consumes taguru's dist; the examples consume both)
         run: |

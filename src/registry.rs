@@ -29,8 +29,14 @@
 //! and is held just long enough to look up, insert, or remove; every
 //! context sits behind its own entry lock. A caller clones the entry's
 //! `Arc` and releases the registry immediately, so a slow operation on
-//! one context never blocks the others — and a panic poisons only the
-//! context it happened in. Groups (tiny, always-resident records) sit
+//! one context never blocks the others. Locks here are parking_lot, not
+//! std::sync: a panic while one is held unwinds without poisoning it, so
+//! neither that context nor a sibling nor the registry itself bricks for
+//! the rest of the process. Safety across the panic comes from the
+//! write-ahead log, not the lock — a write is durable once it's staged
+//! and fsynced there, before it ever touches memory, so a panic mid-write
+//! loses at most the in-memory half of an update that the next load
+//! replays past anyway. Groups (tiny, always-resident records) sit
 //! behind one separate lock; the only operations that need both take
 //! `groups` BEFORE `registry` — never the other way around.
 
@@ -38,11 +44,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
 
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use taguru::context::{AliasError, Context, LabelUsage};
+use taguru::context::{AliasError, CompactionError, Context, LabelUsage};
+use taguru::deadline::{Deadline, DeadlineExceeded};
 
 use crate::embedding::{
     EmbedPurpose, EmbeddingProvider, PassageKey, PassageVectorStore, VectorStore, VectorTable,
@@ -394,8 +402,8 @@ impl Entry {
     /// post-lookup lock acquisition goes through here so no path can
     /// forget the tombstone.
     #[allow(clippy::readonly_write_lock)] // some callers lock purely for exclusion
-    fn lock_unless_deleted(&self) -> Option<std::sync::RwLockWriteGuard<'_, EntryInner>> {
-        let guard = self.inner.write().unwrap();
+    fn lock_unless_deleted(&self) -> Option<parking_lot::RwLockWriteGuard<'_, EntryInner>> {
+        let guard = self.inner.write();
         (!matches!(guard.slot, Slot::Deleted)).then_some(guard)
     }
 
@@ -406,8 +414,8 @@ impl Entry {
     /// Whichever side locks first wins cleanly: a fence taken first
     /// makes the delete wait; a tombstone planted first turns the
     /// operation into a no-op instead of a file resurrection.
-    fn read_unless_deleted(&self) -> Option<std::sync::RwLockReadGuard<'_, EntryInner>> {
-        let guard = self.inner.read().unwrap();
+    fn read_unless_deleted(&self) -> Option<parking_lot::RwLockReadGuard<'_, EntryInner>> {
+        let guard = self.inner.read();
         (!matches!(guard.slot, Slot::Deleted)).then_some(guard)
     }
 
@@ -416,7 +424,6 @@ impl Entry {
     fn vectors_footprint(&self) -> usize {
         self.vectors
             .lock()
-            .unwrap()
             .as_ref()
             .map(|store| store.footprint())
             .unwrap_or(0)
@@ -426,7 +433,6 @@ impl Entry {
     fn passages_footprint(&self) -> usize {
         self.passages
             .lock()
-            .unwrap()
             .as_ref()
             .map(|store| store.footprint())
             .unwrap_or(0)
@@ -436,7 +442,6 @@ impl Entry {
     fn bm25_footprint(&self) -> usize {
         self.bm25
             .read()
-            .unwrap()
             .as_ref()
             .map(|index| index.footprint())
             .unwrap_or(0)
@@ -446,7 +451,6 @@ impl Entry {
     fn passage_vectors_footprint(&self) -> usize {
         self.passage_vectors
             .lock()
-            .unwrap()
             .as_ref()
             .map(|store| store.footprint())
             .unwrap_or(0)
@@ -693,12 +697,17 @@ pub enum AccessError {
     /// NOTHING was applied — the client must never hold a 200 the
     /// disk cannot replay.
     Unpersisted(String),
+    /// The request's time budget ran out partway through a
+    /// `block_in_place` section. Never produced by the CLI binaries —
+    /// they pass `Deadline::unbounded()` — only by HTTP handlers.
+    DeadlineExceeded,
 }
 
 /// One requested association — the wire shape of the associations
 /// endpoint and the WAL payload, one struct for both so they cannot
 /// drift apart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct AssocOp {
     pub subject: String,
     pub label: String,
@@ -1263,7 +1272,7 @@ impl AppState {
         let pinned: Vec<(String, Arc<Entry>)> = self
             .snapshot()
             .into_iter()
-            .filter(|(_, entry)| entry.inner.read().unwrap().meta.pinned)
+            .filter(|(_, entry)| entry.inner.read().meta.pinned)
             .collect();
         if pinned.is_empty() {
             return;
@@ -1277,10 +1286,10 @@ impl AppState {
             for _ in 0..workers {
                 scope.spawn(|| {
                     loop {
-                        let Some((name, entry)) = queue.lock().unwrap().next() else {
+                        let Some((name, entry)) = queue.lock().next() else {
                             break;
                         };
-                        let mut inner = entry.inner.write().unwrap();
+                        let mut inner = entry.inner.write();
                         if !inner.meta.pinned {
                             continue;
                         }
@@ -1387,7 +1396,7 @@ impl AppState {
         let mut wal_bytes = 0u64;
         let mut passages_wal_bytes = 0u64;
         for (name, entry) in snapshot {
-            let inner = entry.inner.read().unwrap();
+            let inner = entry.inner.read();
             if let Slot::Hot(context) = &inner.slot {
                 contexts_resident += 1;
                 resident_bytes += context.footprint() as u64;
@@ -1405,7 +1414,6 @@ impl AppState {
                 let resident = entry
                     .passages
                     .lock()
-                    .unwrap()
                     .as_ref()
                     .map(|store| store.pending_log_bytes());
                 resident.unwrap_or_else(|| {
@@ -1417,7 +1425,7 @@ impl AppState {
         }
         GaugeSnapshot {
             contexts_registered,
-            groups_registered: self.0.groups.read().unwrap().len() as u64,
+            groups_registered: self.0.groups.read().len() as u64,
             contexts_resident,
             resident_bytes,
             wal_bytes,
@@ -1426,7 +1434,7 @@ impl AppState {
     }
 
     pub fn context_count(&self) -> usize {
-        self.0.registry.read().unwrap().len()
+        self.0.registry.read().len()
     }
 
     /// Whether the semantic entry tier has a provider at all.
@@ -1454,15 +1462,14 @@ impl AppState {
             return Err(CreateError::InvalidName);
         }
         {
-            let registry = self.0.registry.read().unwrap();
+            let registry = self.0.registry.read();
             // A name mid-delete is still taken: its delete has left the
             // registry but is still unlinking files, and a create landing
             // now would have its fresh generation destroyed by the tail of
             // that loop. A name mid-create is equally taken. The client
             // sees the same refusal as for a live name and simply retries
             // after the other call's response.
-            if registry.contains_key(name) || self.0.pending_deletes.lock().unwrap().contains(name)
-            {
+            if registry.contains_key(name) || self.0.pending_deletes.lock().contains(name) {
                 return Err(CreateError::AlreadyExists);
             }
             // Reserving while still under the registry guard closes the
@@ -1470,20 +1477,14 @@ impl AppState {
             // inside the registry's WRITE section below, so "not in the
             // map, not reserved" cannot be observed between a sibling's
             // insert and its unreserve.
-            if !self
-                .0
-                .pending_creates
-                .lock()
-                .unwrap()
-                .insert(name.to_string())
-            {
+            if !self.0.pending_creates.lock().insert(name.to_string()) {
                 return Err(CreateError::AlreadyExists);
             }
         }
         let created = self.create_files(name, &meta);
         // Success or failure, the reservation leaves in the same
         // critical section that (on success) makes the entry visible.
-        let mut registry = self.0.registry.write().unwrap();
+        let mut registry = self.0.registry.write();
         let outcome = created.map(|(stats, usage, context)| {
             registry.insert(
                 name.to_string(),
@@ -1496,7 +1497,7 @@ impl AppState {
                 )),
             );
         });
-        self.0.pending_creates.lock().unwrap().remove(name);
+        self.0.pending_creates.lock().remove(name);
         outcome
     }
 
@@ -1580,25 +1581,25 @@ impl AppState {
     /// this one's removals.
     pub fn delete(&self, name: &str) -> Option<io::Result<()>> {
         let entry = {
-            let mut registry = self.0.registry.write().unwrap();
+            let mut registry = self.0.registry.write();
             let entry = registry.remove(name)?;
-            self.0
-                .pending_deletes
-                .lock()
-                .unwrap()
-                .insert(name.to_string());
+            self.0.pending_deletes.lock().insert(name.to_string());
             entry
         };
-        let mut in_flight = entry.inner.write().unwrap();
+        let mut in_flight = entry.inner.write();
         in_flight.slot = Slot::Deleted;
         self.recount_entry(&mut in_flight);
         entry.dirty.store(false, Ordering::Relaxed);
         // Lock order: `inner` before `passages` before `vectors`, as
         // documented on Entry.
-        *entry.passages.lock().unwrap() = None;
-        *entry.bm25.write().unwrap() = None;
-        *entry.passage_vectors.lock().unwrap() = None;
-        *entry.vectors.lock().unwrap() = None;
+        *entry.passages.lock() = None;
+        *entry.bm25.write() = None;
+        *entry.passage_vectors.lock() = None;
+        *entry.vectors.lock() = None;
+        // The rest of this function is disk I/O (marker, group sweep,
+        // unlinks) guarded by `pending_deletes`, not by `inner` — hold
+        // it no longer than the in-memory teardown above needs.
+        drop(in_flight);
         let stem = file_stem(name);
         // The durable half of the acknowledgment: while this marker
         // exists, boot resumes the unlinks — so a partial failure here
@@ -1639,7 +1640,7 @@ impl AppState {
         if outcome.is_ok() {
             let _ = fs::remove_file(&marker);
         }
-        self.0.pending_deletes.lock().unwrap().remove(name);
+        self.0.pending_deletes.lock().remove(name);
         Some(outcome)
     }
 
@@ -1665,7 +1666,7 @@ impl AppState {
         if name.is_empty() {
             return Err(CreateGroupError::InvalidName);
         }
-        let mut groups = self.0.groups.write().unwrap();
+        let mut groups = self.0.groups.write();
         if groups.contains_key(name) {
             return Err(CreateGroupError::AlreadyExists);
         }
@@ -1675,7 +1676,7 @@ impl AppState {
         // registry, not to whoever happens to call it.
         check_member_caps(&contexts, &children).map_err(CreateGroupError::OverCap)?;
         {
-            let registry = self.0.registry.read().unwrap();
+            let registry = self.0.registry.read();
             if let Some(missing) =
                 first_missing(&contexts, |context| registry.contains_key(context))
             {
@@ -1720,7 +1721,7 @@ impl AppState {
         add_groups: BTreeSet<String>,
         remove_groups: BTreeSet<String>,
     ) -> Result<GroupRecord, UpdateGroupError> {
-        let mut groups = self.0.groups.write().unwrap();
+        let mut groups = self.0.groups.write();
         if !groups.contains_key(name) {
             return Err(UpdateGroupError::NotFound);
         }
@@ -1755,7 +1756,7 @@ impl AppState {
             }
         }
         if !add_contexts.is_empty() {
-            let registry = self.0.registry.read().unwrap();
+            let registry = self.0.registry.read();
             if let Some(missing) =
                 first_missing(&add_contexts, |context| registry.contains_key(context))
             {
@@ -1813,7 +1814,7 @@ impl AppState {
         &self,
         records: &[(String, GroupRecord)],
     ) -> Result<Vec<(String, GroupRestoreOutcome)>, RestoreGroupsError> {
-        let mut groups = self.0.groups.write().unwrap();
+        let mut groups = self.0.groups.write();
         // The prospective map — what memory becomes if every write
         // lands — is what the validators judge.
         let mut prospective = groups.clone();
@@ -1836,7 +1837,7 @@ impl AppState {
         {
             // Lock order: `groups` before `registry`, as documented on
             // the field.
-            let registry = self.0.registry.read().unwrap();
+            let registry = self.0.registry.read();
             for (name, record) in records {
                 if let Some(missing) =
                     first_missing(&record.contexts, |context| registry.contains_key(context))
@@ -1903,7 +1904,7 @@ impl AppState {
     /// twin for the restore path, where children may be names the set
     /// itself brings.
     pub fn group_restore_involves(&self, records: &[(String, GroupRecord)]) -> BTreeSet<String> {
-        let groups = self.0.groups.read().unwrap();
+        let groups = self.0.groups.read();
         let roots: Vec<&str> = records.iter().map(|(name, _)| name.as_str()).collect();
         let mut involved = groups::context_closure(&groups, roots.iter().copied());
         let mut prospective = groups.clone();
@@ -1925,7 +1926,7 @@ impl AppState {
     /// the unlink fails, the surviving file re-registers the group at
     /// the next boot, and the error message says so.
     pub fn delete_group(&self, name: &str) -> Option<io::Result<()>> {
-        let mut groups = self.0.groups.write().unwrap();
+        let mut groups = self.0.groups.write();
         groups.remove(name)?;
         // Nesting must not outlive the child — the same sweep a
         // deleted context gets, on the child field, under the write
@@ -1942,7 +1943,7 @@ impl AppState {
 
     /// One group's record by name, or `None` for an unknown group.
     pub fn group(&self, name: &str) -> Option<GroupRecord> {
-        self.0.groups.read().unwrap().get(name).cloned()
+        self.0.groups.read().get(name).cloned()
     }
 
     /// Union of every context reachable from the named groups — direct
@@ -1953,7 +1954,7 @@ impl AppState {
         &self,
         names: impl IntoIterator<Item = &'a str>,
     ) -> BTreeSet<String> {
-        groups::context_closure(&self.0.groups.read().unwrap(), names)
+        groups::context_closure(&self.0.groups.read(), names)
     }
 
     /// [`group_context_closures`] with existence semantics: the first
@@ -1964,7 +1965,7 @@ impl AppState {
     /// checked and walked under one lock acquisition so a concurrent
     /// group delete cannot slip between the two.
     pub fn resolve_groups(&self, names: &[String]) -> Result<BTreeSet<String>, String> {
-        let groups = self.0.groups.read().unwrap();
+        let groups = self.0.groups.read();
         if let Some(missing) = first_missing(names, |name| groups.contains_key(name)) {
             return Err(missing.clone());
         }
@@ -1987,7 +1988,7 @@ impl AppState {
     ) -> (usize, Vec<(String, GroupRecord)>) {
         use std::ops::Bound;
 
-        let groups = self.0.groups.read().unwrap();
+        let groups = self.0.groups.read();
         let start = match after {
             Some(after) => Bound::Excluded(after),
             None => Bound::Unbounded,
@@ -2006,7 +2007,7 @@ impl AppState {
     /// a rewrite that fails leaves memory correct and the file stale,
     /// which the next boot's reconciliation heals.
     fn sweep_context_from_groups(&self, context_name: &str) {
-        let mut groups = self.0.groups.write().unwrap();
+        let mut groups = self.0.groups.write();
         sweep_membership(&self.0.data_dir, &mut groups, context_name, |record| {
             &mut record.contexts
         });
@@ -2174,7 +2175,7 @@ impl AppState {
         entry: &Entry,
         stem: &str,
     ) -> io::Result<Arc<crate::passages::PassageStore>> {
-        let mut slot = entry.passages.lock().unwrap();
+        let mut slot = entry.passages.lock();
         if let Some(store) = slot.as_ref() {
             return Ok(Arc::clone(store));
         }
@@ -2183,7 +2184,7 @@ impl AppState {
         // while it is fresh instead of re-reading a broken snapshot on
         // every passage request.
         {
-            let failure = entry.passages_load_failure.lock().unwrap();
+            let failure = entry.passages_load_failure.lock();
             if let Some((failed_at, refusal)) = &*failure
                 && failed_at.elapsed() < LOAD_FAILURE_RETRY
             {
@@ -2208,10 +2209,10 @@ impl AppState {
             true,
         )
         .inspect_err(|error| {
-            *entry.passages_load_failure.lock().unwrap() =
+            *entry.passages_load_failure.lock() =
                 Some((std::time::Instant::now(), error.to_string()));
         })?;
-        *entry.passages_load_failure.lock().unwrap() = None;
+        *entry.passages_load_failure.lock() = None;
         let store = Arc::new(store);
         *slot = Some(Arc::clone(&store));
         Ok(store)
@@ -2229,6 +2230,7 @@ impl AppState {
         &self,
         name: &str,
         cosine_floor: f32,
+        deadline: Deadline,
     ) -> Option<(
         Vec<(String, String, f32)>,
         Vec<(String, String, f32)>,
@@ -2271,6 +2273,12 @@ impl AppState {
             };
             let mut pairs = Vec::new();
             for (i, (name_a, vector_a)) in entries.iter().enumerate() {
+                if deadline.expired() {
+                    *skipped = Some(
+                        "意味的検出は期限切れのため途中で打ち切り (一部の結果のみ)".to_string(),
+                    );
+                    break;
+                }
                 for (name_b, vector_b) in &entries[i + 1..] {
                     let score = similarity(vector_a, vector_b);
                     if score >= floor {
@@ -2306,6 +2314,12 @@ impl AppState {
                 skipped = Some(format!(
                     "関連ペアの除外はスキップ (グラフ未ロード: {message})"
                 ));
+            }
+            // read_context never consults a deadline itself — the
+            // caller checks its own budget before calling in —
+            // unreachable in practice, kept for exhaustiveness.
+            Err(AccessError::DeadlineExceeded) => {
+                skipped = Some("関連ペアの除外はスキップ (期限切れ)".to_string());
             }
         }
         Some((concepts, labels, skipped))
@@ -2461,6 +2475,7 @@ impl AppState {
         name: &str,
         query: &str,
         limit: usize,
+        deadline: Deadline,
     ) -> Option<io::Result<Vec<PassageSearchHit>>> {
         let entry = self.lookup(name)?;
         if limit == 0 {
@@ -2474,7 +2489,7 @@ impl AppState {
 
         // The semantic lane's query embedding runs BEFORE any lock: a
         // provider round trip must never extend the fence below.
-        let cue = match self.passage_query_cue(query) {
+        let cue = match self.passage_query_cue(query, deadline) {
             Ok(cue) => cue,
             Err(error) => {
                 // Degrade, loudly: the lexical lane still answers.
@@ -2498,9 +2513,14 @@ impl AppState {
             Err(error) => return Some(Err(error)),
         };
 
-        self.ensure_bm25_index(&entry, &store, name);
+        if self
+            .ensure_bm25_index(&entry, &store, name, deadline)
+            .is_err()
+        {
+            return Some(Err(io::Error::other(DeadlineExceeded)));
+        }
         let lexical = {
-            let guard = entry.bm25.read().unwrap();
+            let guard = entry.bm25.read();
             let index = guard.as_ref().expect("index was just built");
             index.search(&query_grams, pool)
         };
@@ -2542,6 +2562,7 @@ impl AppState {
         source: &str,
         paragraph: Option<u32>,
         limit: usize,
+        deadline: Deadline,
     ) -> Option<io::Result<PassageExplainLookup>> {
         let entry = self.lookup(name)?;
         let query_terms = deduped_spelled_query_terms(query);
@@ -2552,7 +2573,7 @@ impl AppState {
         let cue = if query_grams.is_empty() {
             Ok(None)
         } else {
-            self.passage_query_cue(query)
+            self.passage_query_cue(query, deadline)
         };
 
         let fence = entry.read_unless_deleted()?;
@@ -2577,8 +2598,13 @@ impl AppState {
             return Some(Ok(PassageExplainLookup::NoQueryTerms));
         }
 
-        self.ensure_bm25_index(&entry, &store, name);
-        let guard = entry.bm25.read().unwrap();
+        if self
+            .ensure_bm25_index(&entry, &store, name, deadline)
+            .is_err()
+        {
+            return Some(Err(io::Error::other(DeadlineExceeded)));
+        }
+        let guard = entry.bm25.read();
         let index = guard.as_ref().expect("index was just built");
 
         // Sweep both lanes whole, once: a lane's pool cap is a prefix
@@ -2780,22 +2806,32 @@ impl AppState {
     /// searches build once. Called under the entry's read fence with
     /// every passage-store lock released — the documented order for
     /// `Entry::bm25` (holding `bm25` while READING the store is fine,
-    /// and is how the build works).
-    fn ensure_bm25_index(&self, entry: &Entry, store: &crate::passages::PassageStore, name: &str) {
+    /// and is how the build works). `Err` when `deadline` expires
+    /// before a needed rebuild starts; the index is left as it was.
+    fn ensure_bm25_index(
+        &self,
+        entry: &Entry,
+        store: &crate::passages::PassageStore,
+        name: &str,
+        deadline: Deadline,
+    ) -> Result<(), DeadlineExceeded> {
         let stale = {
-            let guard = entry.bm25.read().unwrap();
+            let guard = entry.bm25.read();
             match &*guard {
                 None => true,
                 Some(index) => index.needs_reclaim(),
             }
         };
         if stale {
-            let mut guard = entry.bm25.write().unwrap();
+            let mut guard = entry.bm25.write();
             let rebuild = match &*guard {
                 None => true,
                 Some(index) => index.needs_reclaim(),
             };
             if rebuild {
+                if deadline.expired() {
+                    return Err(DeadlineExceeded);
+                }
                 let records = store.snapshot();
                 let built_at = std::time::Instant::now();
                 let index = if guard.take().is_some() {
@@ -2838,18 +2874,23 @@ impl AppState {
                 );
             }
         }
+        Ok(())
     }
 
     /// The semantic lane's query embedding, run BEFORE any lock — a
     /// provider round trip must never extend an entry fence. `Ok(None)`
     /// when the lane is off; `Err` carries the provider's refusal for
     /// the caller to log (search) or report (explain).
-    fn passage_query_cue(&self, query: &str) -> Result<Option<Arc<Vec<f32>>>, String> {
+    fn passage_query_cue(
+        &self,
+        query: &str,
+        deadline: Deadline,
+    ) -> Result<Option<Arc<Vec<f32>>>, String> {
         if !self.passage_embedding_enabled() {
             return Ok(None);
         }
         let embedder = self.0.embedder.clone().expect("enabled implies a provider");
-        self.cue_vector(&*embedder, query).map(Some)
+        self.cue_vector(&*embedder, query, deadline).map(Some)
     }
 
     /// Why the vector lane can or cannot sweep this entry's paragraphs.
@@ -2889,9 +2930,10 @@ impl AppState {
         embedder: &dyn EmbeddingProvider,
         texts: &[&str],
         purpose: EmbedPurpose,
+        deadline: Deadline,
     ) -> Result<Vec<Vec<f32>>, String> {
         let started = std::time::Instant::now();
-        let outcome = embedder.embed(texts, purpose);
+        let outcome = embedder.embed(texts, purpose, deadline);
         self.0.metrics.record_embed_latency(started.elapsed());
         outcome
     }
@@ -2903,18 +2945,18 @@ impl AppState {
         &self,
         embedder: &dyn EmbeddingProvider,
         cue: &str,
+        deadline: Deadline,
     ) -> Result<Arc<Vec<f32>>, String> {
-        if let Some(vector) = self.0.cue_cache.lock().unwrap().get(cue) {
+        if let Some(vector) = self.0.cue_cache.lock().get(cue) {
             return Ok(vector);
         }
-        match self.timed_embed(embedder, &[cue], EmbedPurpose::Query) {
+        match self.timed_embed(embedder, &[cue], EmbedPurpose::Query, deadline) {
             Ok(mut vectors) => {
                 self.0.metrics.record_embed_resolve(true);
                 let vector = Arc::new(vectors.pop().unwrap_or_default());
                 self.0
                     .cue_cache
                     .lock()
-                    .unwrap()
                     .insert(cue.to_string(), Arc::clone(&vector));
                 Ok(vector)
             }
@@ -2928,7 +2970,7 @@ impl AppState {
     /// The paragraph vector sidecar, loaded on first use and held until
     /// refresh replaces it or eviction clears it.
     fn entry_passage_vectors(&self, entry: &Entry, stem: &str) -> Arc<PassageVectorStore> {
-        let mut cached = entry.passage_vectors.lock().unwrap();
+        let mut cached = entry.passage_vectors.lock();
         match &*cached {
             Some(store) => Arc::clone(store),
             None => {
@@ -2952,7 +2994,7 @@ impl AppState {
         store: &crate::passages::PassageStore,
         sources: &[String],
     ) {
-        let mut guard = entry.bm25.write().unwrap();
+        let mut guard = entry.bm25.write();
         let Some(index) = guard.as_mut() else {
             return;
         };
@@ -2979,7 +3021,7 @@ impl AppState {
             return;
         };
         let bytes = {
-            let guard = entry.bm25.read().unwrap();
+            let guard = entry.bm25.read();
             match &*guard {
                 Some(index) => index.to_bytes(),
                 // Dropped since (eviction): its own save path ran.
@@ -3002,7 +3044,11 @@ impl AppState {
     /// operator calls this after ingesting, so embedding spend stays
     /// intentional. Returns (newly embedded, total vectors), or `None`
     /// for an unknown context.
-    pub fn refresh_embeddings(&self, name: &str) -> Option<Result<(usize, usize), String>> {
+    pub fn refresh_embeddings(
+        &self,
+        name: &str,
+        deadline: Deadline,
+    ) -> Option<Result<(usize, usize), String>> {
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Err(
                 "no embedding provider is configured (set TAGURU_EMBED_URL and TAGURU_EMBED_MODEL)"
@@ -3014,7 +3060,7 @@ impl AppState {
         // for why); held across the gloss read too, not just the embed
         // and merge, so no overlapping refresh can be mid-flight against
         // a gloss state this one hasn't seen yet.
-        let _serial = entry.vectors_refresh.lock().unwrap();
+        let _serial = entry.vectors_refresh.lock();
         let glosses = match self.read_context(name, |context| {
             let concepts: Vec<(String, String)> = context
                 .concept_names()
@@ -3043,6 +3089,12 @@ impl AppState {
             Err(AccessError::Load(message)) | Err(AccessError::Unpersisted(message)) => {
                 return Some(Err(message));
             }
+            // read_context never consults a deadline itself — the
+            // caller checks its own budget before calling in —
+            // unreachable in practice, kept for exhaustiveness.
+            Err(AccessError::DeadlineExceeded) => {
+                return Some(Err("request deadline exceeded".to_string()));
+            }
         };
         let (concepts, labels) = glosses;
         let path = vectors_path(&self.0.data_dir, &file_stem(name));
@@ -3055,13 +3107,18 @@ impl AppState {
         // whatever the previous refresh (if any) already published.
         let existing = VectorStore::load(&path);
         let mut fresh_model = existing.model != embedder.model();
-        let mut embedded_concepts =
-            match self.embed_stale(&*embedder, &existing.concepts, &concepts, fresh_model) {
-                Ok(embedded) => embedded,
-                Err(error) => return Some(Err(error)),
-            };
+        let mut embedded_concepts = match self.embed_stale(
+            &*embedder,
+            &existing.concepts,
+            &concepts,
+            fresh_model,
+            deadline,
+        ) {
+            Ok(embedded) => embedded,
+            Err(error) => return Some(Err(error)),
+        };
         let mut embedded_labels =
-            match self.embed_stale(&*embedder, &existing.labels, &labels, fresh_model) {
+            match self.embed_stale(&*embedder, &existing.labels, &labels, fresh_model, deadline) {
                 Ok(embedded) => embedded,
                 Err(error) => return Some(Err(error)),
             };
@@ -3083,7 +3140,12 @@ impl AppState {
             && fresh_width.is_none()
             && let Some((_, gloss)) = concepts.first().or_else(|| labels.first())
         {
-            match self.timed_embed(embedder.as_ref(), &[gloss.as_str()], EmbedPurpose::Index) {
+            match self.timed_embed(
+                embedder.as_ref(),
+                &[gloss.as_str()],
+                EmbedPurpose::Index,
+                deadline,
+            ) {
                 Ok(vectors) => {
                     self.0.metrics.record_embed_refresh(true);
                     fresh_width = vectors.first().map(Vec::len);
@@ -3107,14 +3169,15 @@ impl AppState {
             );
             fresh_model = true;
             embedded_concepts =
-                match self.embed_stale(&*embedder, &existing.concepts, &concepts, true) {
+                match self.embed_stale(&*embedder, &existing.concepts, &concepts, true, deadline) {
                     Ok(embedded) => embedded,
                     Err(error) => return Some(Err(error)),
                 };
-            embedded_labels = match self.embed_stale(&*embedder, &existing.labels, &labels, true) {
-                Ok(embedded) => embedded,
-                Err(error) => return Some(Err(error)),
-            };
+            embedded_labels =
+                match self.embed_stale(&*embedder, &existing.labels, &labels, true, deadline) {
+                    Ok(embedded) => embedded,
+                    Err(error) => return Some(Err(error)),
+                };
         }
         let newly_embedded = embedded_concepts.len() + embedded_labels.len();
 
@@ -3142,7 +3205,7 @@ impl AppState {
             return Some(Err(format!("vector store not persisted: {error}")));
         }
         // Publish the fresh store so queries never re-read the sidecar.
-        *entry.vectors.lock().unwrap() = Some(Arc::new(store));
+        *entry.vectors.lock() = Some(Arc::new(store));
         Some(Ok((newly_embedded, total)))
     }
 
@@ -3156,6 +3219,7 @@ impl AppState {
         stored: &VectorTable,
         entries: &[(String, String)],
         fresh_model: bool,
+        deadline: Deadline,
     ) -> Result<VectorTable, String> {
         let stale: Vec<(String, String, u64)> = entries
             .iter()
@@ -3168,8 +3232,11 @@ impl AppState {
             .collect();
         let mut embedded = VectorTable::new();
         for chunk in stale.chunks(128) {
+            if deadline.expired() {
+                return Err(DeadlineExceeded.to_string());
+            }
             let texts: Vec<&str> = chunk.iter().map(|(_, gloss, _)| gloss.as_str()).collect();
-            match self.timed_embed(embedder, &texts, EmbedPurpose::Index) {
+            match self.timed_embed(embedder, &texts, EmbedPurpose::Index, deadline) {
                 Ok(vectors) => {
                     self.0.metrics.record_embed_refresh(true);
                     embedded.extend(
@@ -3220,6 +3287,7 @@ impl AppState {
     pub fn refresh_passage_embeddings(
         &self,
         name: &str,
+        deadline: Deadline,
     ) -> Option<Result<PassageRefreshOutcome, String>> {
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Err(
@@ -3235,7 +3303,7 @@ impl AppState {
         let entry = self.lookup(name)?;
         // One refresh per context at a time (see Entry::passage_refresh
         // for why); the diff below makes the loser's pass a no-op.
-        let _serial = entry.passage_refresh.lock().unwrap();
+        let _serial = entry.passage_refresh.lock();
         // Claim the dirty flag up front: work that lands mid-refresh
         // re-marks it, so the ticker returns — never lost, never
         // double-claimed.
@@ -3320,8 +3388,12 @@ impl AppState {
         let mut embedded = 0usize;
         let mut failure: Option<String> = None;
         for chunk in to_embed.chunks(128) {
+            if deadline.expired() {
+                failure = Some(DeadlineExceeded.to_string());
+                break;
+            }
             let texts: Vec<&str> = chunk.iter().map(|(_, text)| text.as_str()).collect();
-            match self.timed_embed(embedder.as_ref(), &texts, EmbedPurpose::Index) {
+            match self.timed_embed(embedder.as_ref(), &texts, EmbedPurpose::Index, deadline) {
                 Ok(vectors) => {
                     self.0.metrics.record_embed_refresh(true);
                     for ((key, _), vector) in chunk.iter().zip(vectors) {
@@ -3348,7 +3420,7 @@ impl AppState {
             return Some(Err(format!("passage vectors not persisted: {error}")));
         }
         let total_rows = fresh.len();
-        *entry.passage_vectors.lock().unwrap() = Some(Arc::new(fresh));
+        *entry.passage_vectors.lock() = Some(Arc::new(fresh));
         match failure {
             Some(error) => {
                 // What landed is durable; the rest stays claimed as work.
@@ -3375,6 +3447,7 @@ impl AppState {
         cue: &str,
         labels: bool,
         floor_override: Option<f32>,
+        deadline: Deadline,
     ) -> Option<Result<Vec<(String, f32)>, String>> {
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Ok(Vec::new()));
@@ -3382,7 +3455,7 @@ impl AppState {
         let entry = self.lookup(name)?;
         // One-call override beats the context setting beats the server
         // default (see [`DEFAULT_SEMANTIC_FLOOR`] for the calibration).
-        let context_floor = entry.inner.read().unwrap().meta.semantic_floor;
+        let context_floor = entry.inner.read().meta.semantic_floor;
         let floor = floor_override
             .or(context_floor)
             .unwrap_or(self.0.default_semantic_floor)
@@ -3399,7 +3472,7 @@ impl AppState {
         if table.is_empty() {
             return Some(Ok(Vec::new()));
         }
-        let cue_vector = match self.cue_vector(&*embedder, cue) {
+        let cue_vector = match self.cue_vector(&*embedder, cue, deadline) {
             Ok(vector) => vector,
             Err(error) => return Some(Err(error)),
         };
@@ -3428,12 +3501,13 @@ impl AppState {
         expected: &str,
         labels: bool,
         floor_override: Option<f32>,
+        deadline: Deadline,
     ) -> Option<GlossLaneReport> {
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(GlossLaneReport::Off);
         };
         let entry = self.lookup(name)?;
-        let context_floor = entry.inner.read().unwrap().meta.semantic_floor;
+        let context_floor = entry.inner.read().meta.semantic_floor;
         let floor = floor_override
             .or(context_floor)
             .unwrap_or(self.0.default_semantic_floor)
@@ -3458,7 +3532,7 @@ impl AppState {
         if table.is_empty() {
             return Some(GlossLaneReport::EmptyTable);
         }
-        let cue_vector = match self.cue_vector(&*embedder, cue) {
+        let cue_vector = match self.cue_vector(&*embedder, cue, deadline) {
             Ok(vector) => vector,
             Err(error) => return Some(GlossLaneReport::QueryEmbeddingFailed(error)),
         };
@@ -3591,7 +3665,7 @@ impl AppState {
         use std::ops::Bound;
 
         let (total, slice) = {
-            let registry = self.0.registry.read().unwrap();
+            let registry = self.0.registry.read();
             let start = match after {
                 Some(after) => Bound::Excluded(after),
                 None => Bound::Unbounded,
@@ -3642,7 +3716,7 @@ impl AppState {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         // Fast path: already resident, shared lock, no exclusivity.
         {
-            let inner = entry.inner.read().unwrap();
+            let inner = entry.inner.read();
             match &inner.slot {
                 Slot::Hot(context) => {
                     self.0.metrics.record_cache_hit();
@@ -3690,16 +3764,21 @@ impl AppState {
     /// materialization. It is a per-context stall, off the async runtime
     /// (`block_in_place` at the HTTP layer); a streaming, lock-light
     /// export is future work, not a v1 promise.
-    pub fn export_context(&self, name: &str) -> Result<crate::export::ExportSnapshot, AccessError> {
+    pub fn export_context(
+        &self,
+        name: &str,
+        deadline: Deadline,
+    ) -> Result<crate::export::ExportSnapshot, AccessError> {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let stem = file_stem(name);
         // Fast path: already resident, shared lock (mirrors read_context).
         {
-            let inner = entry.inner.read().unwrap();
+            let inner = entry.inner.read();
             match &inner.slot {
                 Slot::Hot(context) => {
                     self.0.metrics.record_cache_hit();
-                    let snapshot = self.export_snapshot(&entry, &stem, &inner.meta, context);
+                    let snapshot =
+                        self.export_snapshot(&entry, &stem, &inner.meta, context, deadline);
                     drop(inner);
                     self.touch(&entry);
                     self.enforce_budget(name);
@@ -3721,7 +3800,7 @@ impl AppState {
             let Slot::Hot(context) = &inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
             };
-            self.export_snapshot(&entry, &stem, &inner.meta, context)
+            self.export_snapshot(&entry, &stem, &inner.meta, context, deadline)
         })?;
         self.touch(&entry);
         self.enforce_budget(name);
@@ -3731,13 +3810,24 @@ impl AppState {
     /// The materialization inside [`AppState::export_context`]'s fence.
     /// Lock order: the caller holds `inner`; `entry_passages` takes
     /// `passages` — the documented `inner` → `passages` order.
+    ///
+    /// `deadline` is checked once, before any of it — not inside
+    /// `context.query_any(&[], &[], &[])` below, which collects every
+    /// association up front (its all-wildcard fast path), so a deadline
+    /// that is already tight when this is called cannot shorten that
+    /// initial O(edges) collection (the same limitation documented on
+    /// [`Context::compacted`]).
     fn export_snapshot(
         &self,
         entry: &Entry,
         stem: &str,
         meta: &ContextMeta,
         context: &Context,
+        deadline: Deadline,
     ) -> Result<crate::export::ExportSnapshot, AccessError> {
+        if deadline.expired() {
+            return Err(AccessError::DeadlineExceeded);
+        }
         let passages = self
             .entry_passages(entry, stem)
             .map_err(|error| AccessError::Load(format!("passage store: {error}")))?
@@ -3766,7 +3856,11 @@ impl AppState {
     /// construction: the fresh context carries the old WAL watermark,
     /// so a crash before the flush lands simply boots the old image
     /// and replays the same log — compaction lost, nothing corrupted.
-    pub fn compact_context(&self, name: &str) -> Result<CompactOutcome, AccessError> {
+    pub fn compact_context(
+        &self,
+        name: &str,
+        deadline: Deadline,
+    ) -> Result<CompactOutcome, AccessError> {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let outcome = offload(|| {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
@@ -3776,9 +3870,15 @@ impl AppState {
                 unreachable!("ensure_hot leaves the slot hot");
             };
             let bytes_before = context.footprint();
-            let (mut fresh, stats) = context
-                .compacted()
-                .map_err(|full| AccessError::Load(format!("compaction refused: {full}")))?;
+            let (mut fresh, stats) =
+                context
+                    .compacted(deadline)
+                    .map_err(|failure| match failure {
+                        CompactionError::Full(full) => {
+                            AccessError::Load(format!("compaction refused: {full}"))
+                        }
+                        CompactionError::DeadlineExceeded => AccessError::DeadlineExceeded,
+                    })?;
             // Config the image never carries, re-applied exactly as a
             // load would; the watermark keeps WAL replay monotonic.
             fresh.set_applied_seq(context.applied_seq());
@@ -3814,12 +3914,12 @@ impl AppState {
     #[cfg(test)]
     pub fn age_load_failures(&self, name: &str, by: std::time::Duration) {
         let entry = self.lookup(name).expect("the context must be registered");
-        if let Some((failed_at, _)) = &mut entry.inner.write().unwrap().load_failure {
+        if let Some((failed_at, _)) = &mut entry.inner.write().load_failure {
             *failed_at = failed_at
                 .checked_sub(by)
                 .expect("test ages within the Instant range");
         }
-        if let Some((failed_at, _)) = &mut *entry.passages_load_failure.lock().unwrap() {
+        if let Some((failed_at, _)) = &mut *entry.passages_load_failure.lock() {
             *failed_at = failed_at
                 .checked_sub(by)
                 .expect("test ages within the Instant range");
@@ -3889,7 +3989,7 @@ impl AppState {
             return false;
         }
         let (bytes, meta, stats, watermark, generation) = {
-            let mut guard = entry.inner.write().unwrap();
+            let mut guard = entry.inner.write();
             let inner = &mut *guard;
             // Claim the flush UNDER the lock. `flushing` gates concurrent
             // flushers (a tick against the shutdown flush) so the same
@@ -4024,14 +4124,13 @@ impl AppState {
     }
 
     fn lookup(&self, name: &str) -> Option<Arc<Entry>> {
-        self.0.registry.read().unwrap().get(name).cloned()
+        self.0.registry.read().get(name).cloned()
     }
 
     fn snapshot(&self) -> Vec<(String, Arc<Entry>)> {
         self.0
             .registry
             .read()
-            .unwrap()
             .iter()
             .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
             .collect()
@@ -4248,7 +4347,11 @@ impl AppState {
         &self,
         name: &str,
         ops: Vec<AssocOp>,
+        deadline: Deadline,
     ) -> Result<Result<usize, PartialWrite>, AccessError> {
+        if deadline.expired() {
+            return Err(AccessError::DeadlineExceeded);
+        }
         let ops = self.clamp_out_of_range_paragraphs(name, ops);
         let wal_ops: Vec<WalOp> = ops.into_iter().map(WalOp::Associate).collect();
         self.logged_write(
@@ -4368,7 +4471,7 @@ impl AppState {
     /// The entry's vector store, loaded from its sidecar on first use
     /// and held until refresh replaces it or eviction clears it.
     fn entry_vectors(&self, entry: &Entry, stem: &str) -> Arc<VectorStore> {
-        let mut cached = entry.vectors.lock().unwrap();
+        let mut cached = entry.vectors.lock();
         match &*cached {
             Some(store) => Arc::clone(store),
             None => {
@@ -4401,7 +4504,7 @@ impl AppState {
         let mut candidates: Vec<(u64, usize, String, Arc<Entry>)> = Vec::new();
         let mut total = 0usize;
         for (name, entry) in self.snapshot() {
-            let inner = entry.inner.read().unwrap();
+            let inner = entry.inner.read();
             if inner.meta.pinned {
                 continue;
             }
@@ -4462,7 +4565,7 @@ impl AppState {
     /// report `false` or the caller subtracts its bytes from the
     /// residency estimate a second time.
     fn evict_entry(&self, name: &str, entry: &Entry) -> bool {
-        let mut guard = entry.inner.write().unwrap();
+        let mut guard = entry.inner.write();
         let inner = &mut *guard;
         // Re-check under the write lock; the entry may have changed
         // between the snapshot and now.
@@ -4518,7 +4621,7 @@ impl AppState {
         // per batch); a best-effort compaction first just spares the
         // next load a replay. Failure changes neither.
         {
-            let mut passages = entry.passages.lock().unwrap();
+            let mut passages = entry.passages.lock();
             if let Some(store) = passages.take() {
                 freed = true;
                 if store.pending_log_bytes() > 0
@@ -4532,7 +4635,7 @@ impl AppState {
         // the next residency a re-tokenization, and the entry lock held
         // above keeps a racing delete away from the file.
         {
-            let mut bm25 = entry.bm25.write().unwrap();
+            let mut bm25 = entry.bm25.write();
             if let Some(index) = bm25.take() {
                 freed = true;
                 if entry.bm25_dirty.swap(false, Ordering::Relaxed)
@@ -4545,10 +4648,10 @@ impl AppState {
                 }
             }
         }
-        if entry.passage_vectors.lock().unwrap().take().is_some() {
+        if entry.passage_vectors.lock().take().is_some() {
             freed = true;
         }
-        if entry.vectors.lock().unwrap().take().is_some() {
+        if entry.vectors.lock().take().is_some() {
             freed = true;
         }
         freed
@@ -4558,7 +4661,7 @@ impl AppState {
 /// One directory row, or `None` when the entry was deleted between the
 /// caller's snapshot/lookup and this lock.
 fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
-    let inner = entry.inner.read().unwrap();
+    let inner = entry.inner.read();
     let (loaded, stats) = match &inner.slot {
         Slot::Hot(context) => (true, ContextStats::of(context)),
         Slot::Cold => (false, inner.stats.clone()),
@@ -5928,6 +6031,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -5980,6 +6084,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6153,13 +6258,16 @@ mod tests {
                         assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
                         assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
                     ],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
             state.retract_source("sake", "gone.md").unwrap();
             before = live_facts(&state);
 
-            let outcome = state.compact_context("sake").unwrap();
+            let outcome = state
+                .compact_context("sake", Deadline::unbounded())
+                .unwrap();
             assert!(
                 outcome.bytes_after < outcome.bytes_before,
                 "{outcome:?} must shrink"
@@ -6174,6 +6282,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("蔵", "創業年", "1907年", 1.0, Some("keep.md"))],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6209,6 +6318,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6360,6 +6470,7 @@ mod tests {
                 &self,
                 _texts: &[&str],
                 _purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 Err("provider down".to_string())
             }
@@ -6381,7 +6492,10 @@ mod tests {
                 })
                 .map_err(|_| "write")
                 .unwrap();
-            state.refresh_embeddings("fruit").unwrap().unwrap();
+            state
+                .refresh_embeddings("fruit", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
             // One batch per namespace: two successful provider calls.
             assert!(rendered(&state).contains(
                 "taguru_embedding_requests_total{operation=\"refresh\",outcome=\"ok\"} 2"
@@ -6395,7 +6509,7 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false, None)
+                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
                 .unwrap()
                 .is_err()
         );
@@ -6437,12 +6551,22 @@ mod tests {
             // says that — not "empty answer", not "model changed".
             assert!(matches!(
                 state
-                    .explain_semantic_resolve("fruit", "アップル", "りんご", false, None)
+                    .explain_semantic_resolve(
+                        "fruit",
+                        "アップル",
+                        "りんご",
+                        false,
+                        None,
+                        Deadline::unbounded()
+                    )
                     .unwrap(),
                 GlossLaneReport::EmptyTable
             ));
 
-            state.refresh_embeddings("fruit").unwrap().unwrap();
+            state
+                .refresh_embeddings("fruit", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
 
             // The expected name's own cosine and its rank in the very
             // ordering semantic_resolve serves.
@@ -6452,7 +6576,14 @@ mod tests {
                 rank,
                 passing,
                 cap,
-            }) = state.explain_semantic_resolve("fruit", "アップル", "りんご", false, None)
+            }) = state.explain_semantic_resolve(
+                "fruit",
+                "アップル",
+                "りんご",
+                false,
+                None,
+                Deadline::unbounded(),
+            )
             else {
                 panic!("the sweep should have run with a cosine for りんご");
             };
@@ -6469,7 +6600,14 @@ mod tests {
                 cosine: Some(low),
                 rank: None,
                 ..
-            }) = state.explain_semantic_resolve("fruit", "アップル", "果物", false, None)
+            }) = state.explain_semantic_resolve(
+                "fruit",
+                "アップル",
+                "果物",
+                false,
+                None,
+                Deadline::unbounded(),
+            )
             else {
                 panic!("果物 has a vector; its cosine must be reported");
             };
@@ -6478,13 +6616,20 @@ mod tests {
                 rank: Some(rank),
                 passing,
                 ..
-            }) = state.explain_semantic_resolve("fruit", "アップル", "果物", false, Some(0.0))
+            }) = state.explain_semantic_resolve(
+                "fruit",
+                "アップル",
+                "果物",
+                false,
+                Some(0.0),
+                Deadline::unbounded(),
+            )
             else {
                 panic!("floor 0.0 must seat 果物");
             };
             assert_eq!((rank, passing), (2, 2));
             let served = state
-                .semantic_resolve("fruit", "アップル", false, Some(0.0))
+                .semantic_resolve("fruit", "アップル", false, Some(0.0), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             assert_eq!(
@@ -6503,7 +6648,14 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 state
-                    .explain_semantic_resolve("fruit", "アップル", "バナナ", false, None)
+                    .explain_semantic_resolve(
+                        "fruit",
+                        "アップル",
+                        "バナナ",
+                        false,
+                        None,
+                        Deadline::unbounded(),
+                    )
                     .unwrap(),
                 GlossLaneReport::Ran { cosine: None, .. }
             ));
@@ -6516,7 +6668,12 @@ mod tests {
             fn model(&self) -> &str {
                 "other-model"
             }
-            fn embed(&self, texts: &[&str], _: EmbedPurpose) -> Result<Vec<Vec<f32>>, String> {
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
                 Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0]).collect())
             }
         }
@@ -6528,7 +6685,14 @@ mod tests {
         .unwrap();
         assert!(matches!(
             state
-                .explain_semantic_resolve("fruit", "アップル", "りんご", false, None)
+                .explain_semantic_resolve(
+                    "fruit",
+                    "アップル",
+                    "りんご",
+                    false,
+                    None,
+                    Deadline::unbounded(),
+                )
                 .unwrap(),
             GlossLaneReport::ModelChanged { .. }
         ));
@@ -6536,7 +6700,14 @@ mod tests {
         // once a provider exists to get past the Off arm.
         assert!(
             state
-                .explain_semantic_resolve("nazo", "アップル", "りんご", false, None)
+                .explain_semantic_resolve(
+                    "nazo",
+                    "アップル",
+                    "りんご",
+                    false,
+                    None,
+                    Deadline::unbounded(),
+                )
                 .is_none()
         );
 
@@ -6548,7 +6719,14 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert!(matches!(
             state
-                .explain_semantic_resolve("fruit", "アップル", "りんご", false, None)
+                .explain_semantic_resolve(
+                    "fruit",
+                    "アップル",
+                    "りんご",
+                    false,
+                    None,
+                    Deadline::unbounded(),
+                )
                 .unwrap(),
             GlossLaneReport::Off
         ));
@@ -6592,6 +6770,7 @@ mod tests {
                         1.0,
                         Some("第1段落"),
                     )],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6638,6 +6817,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "所在地", "京都酒造", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6713,6 +6893,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "所在地", "京都酒造", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6792,6 +6973,7 @@ mod tests {
             .add_associations(
                 "victim",
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
@@ -6933,6 +7115,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6952,6 +7135,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "杜氏", "高瀬", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -6984,10 +7168,18 @@ mod tests {
             .map_err(|_| "create")
             .unwrap();
         state
-            .add_associations("sake", vec![assoc_op("a", "l", "b", 1.0, None)])
+            .add_associations(
+                "sake",
+                vec![assoc_op("a", "l", "b", 1.0, None)],
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
-        let refused = state.add_associations("sake", vec![assoc_op("c", "l", "d", 1.0, None)]);
+        let refused = state.add_associations(
+            "sake",
+            vec![assoc_op("c", "l", "d", 1.0, None)],
+            Deadline::unbounded(),
+        );
         assert!(
             matches!(refused, Err(AccessError::Unpersisted(_))),
             "over the cap the write must be refused: {refused:?}"
@@ -7012,6 +7204,7 @@ mod tests {
             .add_associations(
                 "sake",
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
@@ -7028,6 +7221,7 @@ mod tests {
             .add_associations(
                 "sake",
                 vec![assoc_op("青嶺酒造", "杜氏", "高瀬", 1.0, None)],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
@@ -7062,6 +7256,7 @@ mod tests {
                             .add_associations(
                                 "sake",
                                 vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
+                                Deadline::unbounded(),
                             )
                             .unwrap()
                             .unwrap();
@@ -7102,6 +7297,7 @@ mod tests {
             .add_associations(
                 "sake",
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
@@ -7185,6 +7381,7 @@ mod tests {
             .add_associations(
                 "sake",
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
@@ -7250,6 +7447,7 @@ mod tests {
             state.add_associations(
                 "victim",
                 vec![assoc_op("幽霊", "は", "残らない", 1.0, None)],
+                Deadline::unbounded(),
             ),
             Err(AccessError::NotFound)
         ));
@@ -7275,6 +7473,7 @@ mod tests {
                     .add_associations(
                         name,
                         vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                        Deadline::unbounded(),
                     )
                     .unwrap()
                     .unwrap();
@@ -7288,7 +7487,7 @@ mod tests {
             // iteration order, the end state must be identical: the
             // victim stays deleted.
             let decoy = state.lookup("decoy").unwrap();
-            let hold = decoy.inner.write().unwrap();
+            let hold = decoy.inner.write();
             let flusher = {
                 let state = state.clone();
                 thread::spawn(move || {
@@ -7341,6 +7540,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "創業年", "1907年", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -7386,6 +7586,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -7436,6 +7637,7 @@ mod tests {
                         assoc_op("青嶺酒造", "仕込み水", "伏流水", 1.0, Some("第2段落")),
                         assoc_op("青嶺酒造", "仕込み水", "伏流水", 1.0, Some("第5段落")),
                     ],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -7485,6 +7687,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -7566,6 +7769,7 @@ mod tests {
         let outcome = state.add_associations(
             "sake",
             vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+            Deadline::unbounded(),
         );
         assert!(matches!(outcome, Err(AccessError::Unpersisted(_))));
         // Refused cleanly: nothing reached the graph.
@@ -7600,6 +7804,7 @@ mod tests {
                 .add_associations(
                     "sake",
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
@@ -7663,6 +7868,7 @@ mod tests {
                             .add_associations(
                                 name,
                                 vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
+                                Deadline::unbounded(),
                             )
                             .unwrap()
                             .unwrap();
@@ -7720,6 +7926,7 @@ mod tests {
                         .add_associations(
                             "sake",
                             vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
+                            Deadline::unbounded(),
                         )
                         .unwrap()
                         .unwrap();
@@ -7730,7 +7937,7 @@ mod tests {
             let state = state.clone();
             thread::spawn(move || {
                 for _ in 0..ROUNDS {
-                    let _ = state.compact_context("sake");
+                    let _ = state.compact_context("sake", Deadline::unbounded());
                 }
             })
         };
@@ -8187,7 +8394,7 @@ mod tests {
         // exactly the window where a create used to interleave and
         // have its new generation unlinked from under it.
         let entry = state.lookup("sake").unwrap();
-        let stall = entry.inner.read().unwrap();
+        let stall = entry.inner.read();
         let deleter = {
             let state = state.clone();
             std::thread::spawn(move || state.delete("sake").unwrap().unwrap())
@@ -8272,7 +8479,7 @@ mod tests {
         let entry = state.lookup("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         assert!(
-            entry.passages.lock().unwrap().is_none(),
+            entry.passages.lock().is_none(),
             "eviction must drop the resident passage store"
         );
         // Durability never depended on residency: the next access
@@ -8428,7 +8635,7 @@ mod tests {
         // The procedural question never became a triple; the text lane
         // must still hand back the passage that answers it, first.
         let hits = state
-            .search_passages("sake", "精米歩合はどこまで磨く?", 3)
+            .search_passages("sake", "精米歩合はどこまで磨く?", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第2段落");
@@ -8437,12 +8644,16 @@ mod tests {
         // No shared bigrams at all → nothing, not noise.
         assert!(
             state
-                .search_passages("sake", "unrelated english words", 3)
+                .search_passages("sake", "unrelated english words", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
         );
-        assert!(state.search_passages("nope", "x", 3).is_none());
+        assert!(
+            state
+                .search_passages("nope", "x", 3, Deadline::unbounded())
+                .is_none()
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -8483,7 +8694,12 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("papers", "ambition must be made to counteract ambition", 2)
+            .search_passages(
+                "papers",
+                "ambition must be made to counteract ambition",
+                2,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第51篇");
@@ -8516,7 +8732,10 @@ mod tests {
             .unwrap();
 
         for query in ["state", "State", "app", "path"] {
-            let hits = state.search_passages("code", query, 3).unwrap().unwrap();
+            let hits = state
+                .search_passages("code", query, 3, Deadline::unbounded())
+                .unwrap()
+                .unwrap();
             assert_eq!(
                 hits.first().map(|hit| hit.source.as_str()),
                 Some("src/registry.rs:AppState"),
@@ -8547,7 +8766,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("sake", "精米歩合はどこまで磨く?", 3)
+            .search_passages("sake", "精米歩合はどこまで磨く?", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -8581,7 +8800,7 @@ mod tests {
         // First search builds the resident index.
         assert!(
             !state
-                .search_passages("sake", "創業はいつ", 3)
+                .search_passages("sake", "創業はいつ", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -8597,7 +8816,7 @@ mod tests {
         );
         state.store_passages("sake", plain(more)).unwrap().unwrap();
         let hits = state
-            .search_passages("sake", "杜氏の出身", 3)
+            .search_passages("sake", "杜氏の出身", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第2章");
@@ -8606,7 +8825,7 @@ mod tests {
         state.retract_source("sake", "第2章").unwrap();
         assert!(
             state
-                .search_passages("sake", "杜氏の出身", 3)
+                .search_passages("sake", "杜氏の出身", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .iter()
@@ -8634,7 +8853,7 @@ mod tests {
                 .unwrap();
             // First search builds and marks dirty; the tick persists.
             state
-                .search_passages("sake", "創業はいつ", 3)
+                .search_passages("sake", "創業はいつ", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -8643,7 +8862,7 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let hits = state
-            .search_passages("sake", "創業はいつ", 3)
+            .search_passages("sake", "創業はいつ", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第1章");
@@ -8672,7 +8891,10 @@ mod tests {
                 .store_passages("sake", plain(passages))
                 .unwrap()
                 .unwrap();
-            state.search_passages("sake", "杜氏", 3).unwrap().unwrap();
+            state
+                .search_passages("sake", "杜氏", 3, Deadline::unbounded())
+                .unwrap()
+                .unwrap();
             state.flush_dirty(); // the sidecar now says 高瀬
         }
 
@@ -8686,7 +8908,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let hits = state
-            .search_passages("sake", "杜氏は誰", 3)
+            .search_passages("sake", "杜氏は誰", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(
@@ -8723,7 +8945,7 @@ mod tests {
         fs::write(bm25_path(&dir, &file_stem("sake")), b"not an index").unwrap();
 
         let hits = state
-            .search_passages("sake", "蔵開きの祭り", 3)
+            .search_passages("sake", "蔵開きの祭り", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第1章");
@@ -8754,7 +8976,7 @@ mod tests {
             .unwrap()
             .unwrap();
         state
-            .search_passages("sake", "麹室の湿度", 3)
+            .search_passages("sake", "麹室の湿度", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -8766,7 +8988,7 @@ mod tests {
         );
         // The next residency loads it clean instead of re-tokenizing.
         state
-            .search_passages("sake", "麹室の湿度", 3)
+            .search_passages("sake", "麹室の湿度", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         let entry = state.lookup("sake").unwrap();
@@ -8794,7 +9016,7 @@ mod tests {
             .unwrap();
         assert!(
             !state
-                .search_passages("sake", "蔵開きの祭り", 3)
+                .search_passages("sake", "蔵開きの祭り", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -8803,12 +9025,12 @@ mod tests {
         let entry = state.lookup("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         assert!(
-            entry.bm25.read().unwrap().is_none(),
+            entry.bm25.read().is_none(),
             "eviction must drop the resident index"
         );
         assert_eq!(
             state
-                .search_passages("sake", "蔵開きの祭り", 3)
+                .search_passages("sake", "蔵開きの祭り", 3, Deadline::unbounded())
                 .unwrap()
                 .unwrap()[0]
                 .source,
@@ -8874,7 +9096,10 @@ mod tests {
             "a store marks the context for the auto ticker"
         );
 
-        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total, outcome.skipped_over_limit),
             (3, 3, 0)
@@ -8890,7 +9115,10 @@ mod tests {
         );
 
         // Unchanged corpus: nothing embeds, nobody talks to the provider.
-        let again = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let again = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!((again.embedded, again.total), (0, 3));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
 
@@ -8916,7 +9144,10 @@ mod tests {
             .store_passages("sake", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let mut updated = BTreeMap::new();
         updated.insert(
@@ -8927,7 +9158,10 @@ mod tests {
             .store_passages("sake", plain(updated))
             .unwrap()
             .unwrap();
-        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             outcome.embedded, 1,
             "the unchanged paragraph rides its hash, only the edit re-embeds"
@@ -8954,10 +9188,16 @@ mod tests {
             .store_passages("sake", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         state.retract_source("sake", "doc-b").unwrap();
-        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total),
             (0, 1),
@@ -8988,7 +9228,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total, outcome.skipped_over_limit),
             (2, 2, 1),
@@ -9013,6 +9256,7 @@ mod tests {
                 &self,
                 texts: &[&str],
                 _purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 let call = self.calls.fetch_add(1, Ordering::Relaxed);
                 if call == self.fail_on {
@@ -9049,7 +9293,7 @@ mod tests {
             .unwrap();
 
         let error = state
-            .refresh_passage_embeddings("sake")
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
             .unwrap()
             .unwrap_err();
         assert!(error.contains("hiccup"), "{error}");
@@ -9066,7 +9310,10 @@ mod tests {
         );
 
         // The next refresh buys only the missing paragraph.
-        let outcome = state.refresh_passage_embeddings("sake").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!((outcome.embedded, outcome.total), (1, 129));
 
         let _ = fs::remove_dir_all(dir);
@@ -9092,7 +9339,10 @@ mod tests {
             },
         );
         state.store_passages("fruit", passages).unwrap().unwrap();
-        let outcome = state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total),
             (2, 2),
@@ -9103,7 +9353,7 @@ mod tests {
         // both rows point at the same paragraph, so the lane must fold
         // them into one hit at the question row's better rank.
         let hits = state
-            .search_passages("fruit", "アップル", 3)
+            .search_passages("fruit", "アップル", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits.len(), 1, "one paragraph, one hit — never a dup");
@@ -9145,13 +9395,19 @@ mod tests {
             .store_passages("fruit", submission("アップルはどんな色?"))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         state
             .store_passages("fruit", submission("アップルは何色ですか?"))
             .unwrap()
             .unwrap();
-        let outcome = state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total),
             (1, 2),
@@ -9183,7 +9439,10 @@ mod tests {
             },
         );
         state.store_passages("fruit", passages).unwrap().unwrap();
-        let outcome = state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (outcome.embedded, outcome.total, outcome.skipped_over_limit),
             (2, 2, 1),
@@ -9213,10 +9472,13 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let hits = state
-            .search_passages("fruit", "アップル", 3)
+            .search_passages("fruit", "アップル", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "doc-a");
@@ -9252,10 +9514,13 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんごは真っ赤", 3)
+            .search_passages("fruit", "りんごは真っ赤", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "doc-a");
@@ -9293,7 +9558,10 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         // The text changes; the vector sidecar is NOT refreshed.
         let mut edited = BTreeMap::new();
@@ -9307,7 +9575,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3)
+            .search_passages("fruit", "りんご", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "doc-a");
@@ -9344,6 +9612,7 @@ mod tests {
                 &self,
                 texts: &[&str],
                 _purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 let call = self.calls.fetch_add(1, Ordering::Relaxed);
                 if call == self.fail_on {
@@ -9372,10 +9641,13 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3)
+            .search_passages("fruit", "りんご", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -9408,7 +9680,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3)
+            .search_passages("fruit", "りんご", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(hits[0].vector.is_none());
@@ -9440,10 +9712,13 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3)
+            .search_passages("fruit", "みかん", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(
@@ -9475,14 +9750,17 @@ mod tests {
             .store_passages("fruit", plain(passages))
             .unwrap()
             .unwrap();
-        state.refresh_passage_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         state
             .update_meta("fruit", None, None, None, Some(0.2))
             .unwrap()
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3)
+            .search_passages("fruit", "みかん", 3, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
@@ -9505,7 +9783,7 @@ mod tests {
             .map_err(|_| "create")
             .unwrap();
         let error = state
-            .refresh_passage_embeddings("sake")
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
             .unwrap()
             .unwrap_err();
         assert!(error.contains("TAGURU_EMBED_PASSAGES"), "{error}");
@@ -9540,7 +9818,12 @@ mod tests {
             "mock"
         }
 
-        fn embed(&self, texts: &[&str], _purpose: EmbedPurpose) -> Result<Vec<Vec<f32>>, String> {
+        fn embed(
+            &self,
+            texts: &[&str],
+            _purpose: EmbedPurpose,
+            _deadline: Deadline,
+        ) -> Result<Vec<Vec<f32>>, String> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(texts
                 .iter()
@@ -9569,8 +9852,9 @@ mod tests {
                 &self,
                 texts: &[&str],
                 purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
-                self.0.lock().unwrap().push(purpose);
+                self.0.lock().push(purpose);
                 Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
             }
         }
@@ -9591,13 +9875,16 @@ mod tests {
             })
             .map_err(|_| "write")
             .unwrap();
-        state.refresh_embeddings("p").unwrap().unwrap();
         state
-            .semantic_resolve("p", "cue", false, None)
+            .refresh_embeddings("p", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        state
+            .semantic_resolve("p", "cue", false, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
 
-        let seen = purposes.lock().unwrap().clone();
+        let seen = purposes.lock().clone();
         let (cue_call, refresh_calls) = seen.split_last().unwrap();
         assert!(!refresh_calls.is_empty());
         assert!(refresh_calls.iter().all(|p| *p == EmbedPurpose::Index));
@@ -9622,6 +9909,7 @@ mod tests {
                 &self,
                 texts: &[&str],
                 _purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 Ok(texts
                     .iter()
@@ -9648,7 +9936,10 @@ mod tests {
                 })
                 .map_err(|_| "write")
                 .unwrap();
-            let (embedded, total) = state.refresh_embeddings("w").unwrap().unwrap();
+            let (embedded, total) = state
+                .refresh_embeddings("w", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
             assert_eq!((embedded, total), (3, 3)); // a, b, and the label l
             state.flush_dirty();
         }
@@ -9658,7 +9949,10 @@ mod tests {
         // sidecar must be uniformly the new width.
         let embedder = Some(Arc::new(WidthEmbeddings(3)) as Arc<dyn EmbeddingProvider>);
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
-        let (embedded, total) = state.refresh_embeddings("w").unwrap().unwrap();
+        let (embedded, total) = state
+            .refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!((embedded, total), (3, 3));
         let store = VectorStore::load(&vectors_path(&dir, &file_stem("w")));
         assert!(
@@ -9672,7 +9966,10 @@ mod tests {
 
         // A no-op refresh against the same-width provider stays a no-op
         // (the probe embeds one gloss but re-embeds nothing).
-        let (embedded, total) = state.refresh_embeddings("w").unwrap().unwrap();
+        let (embedded, total) = state
+            .refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!((embedded, total), (0, 3));
 
         let _ = fs::remove_dir_all(dir);
@@ -9706,6 +10003,7 @@ mod tests {
                 &self,
                 texts: &[&str],
                 _purpose: EmbedPurpose,
+                _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                 self.peak.fetch_max(now, Ordering::SeqCst);
@@ -9740,7 +10038,10 @@ mod tests {
         for _ in 0..2 {
             let state = state.clone();
             refreshers.push(thread::spawn(move || {
-                state.refresh_embeddings("fruit").unwrap().unwrap();
+                state
+                    .refresh_embeddings("fruit", Deadline::unbounded())
+                    .unwrap()
+                    .unwrap();
             }));
         }
         for refresher in refreshers {
@@ -9785,7 +10086,7 @@ mod tests {
         assert!(lexical.is_empty());
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false, None)
+                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -9793,15 +10094,25 @@ mod tests {
 
         // Refresh embeds every canonical name's gloss once; a second run
         // is a no-op.
-        let (embedded, total) = state.refresh_embeddings("fruit").unwrap().unwrap();
+        let (embedded, total) = state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(embedded, 3); // りんご, 果物 + label 分類
         assert_eq!(total, 3);
-        assert_eq!(state.refresh_embeddings("fruit").unwrap().unwrap().0, 0);
+        assert_eq!(
+            state
+                .refresh_embeddings("fruit", Deadline::unbounded())
+                .unwrap()
+                .unwrap()
+                .0,
+            0
+        );
 
         // Now the paraphrase lands on the stored spelling by cosine, and
         // unrelated names stay under the floor.
         let hits = state
-            .semantic_resolve("fruit", "アップル", false, None)
+            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
@@ -9818,11 +10129,18 @@ mod tests {
             })
             .map_err(|_| "write")
             .unwrap();
-        let (embedded, total) = state.refresh_embeddings("fruit").unwrap().unwrap();
+        let (embedded, total) = state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(embedded, 3);
         assert_eq!(total, 5);
 
-        assert!(state.semantic_resolve("nope", "x", false, None).is_none());
+        assert!(
+            state
+                .semantic_resolve("nope", "x", false, None, Deadline::unbounded())
+                .is_none()
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -9843,19 +10161,22 @@ mod tests {
             })
             .map_err(|_| "write")
             .unwrap();
-        state.refresh_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         // One batch per namespace: concepts, then labels.
         assert_eq!(calls.load(Ordering::Relaxed), 2);
 
         // First query embeds the cue; repeating the wording does not.
         let first = state
-            .semantic_resolve("fruit", "アップル", false, None)
+            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(first[0].0, "りんご");
         assert_eq!(calls.load(Ordering::Relaxed), 3);
         state
-            .semantic_resolve("fruit", "アップル", false, None)
+            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 3, "cue must come from cache");
@@ -9864,7 +10185,7 @@ mod tests {
         // file gone, the same query keeps answering.
         fs::remove_file(vectors_path(&dir, &file_stem("fruit"))).unwrap();
         let held = state
-            .semantic_resolve("fruit", "アップル", false, None)
+            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(held[0].0, "りんご");
@@ -9883,7 +10204,7 @@ mod tests {
             .unwrap();
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false, None)
+                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -9924,12 +10245,19 @@ mod tests {
             .unwrap();
 
         // Before any vectors exist the semantic half is skipped, loudly.
-        let (concepts, labels, note) = state.semantic_twins("sake", 0.6).unwrap();
+        let (concepts, labels, note) = state
+            .semantic_twins("sake", 0.6, Deadline::unbounded())
+            .unwrap();
         assert!(concepts.is_empty() && labels.is_empty());
         assert!(note.is_some());
 
-        state.refresh_embeddings("sake").unwrap().unwrap();
-        let (concepts, labels, note) = state.semantic_twins("sake", 0.6).unwrap();
+        state
+            .refresh_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        let (concepts, labels, note) = state
+            .semantic_twins("sake", 0.6, Deadline::unbounded())
+            .unwrap();
         assert!(note.is_none());
         // Directly connected concepts (青嶺酒造 —創業年→ 1907年) are
         // related, not duplicates, and must be filtered out however
@@ -9954,7 +10282,11 @@ mod tests {
         // (2 namespaces) — stored vectors are compared directly.
         assert_eq!(calls.load(Ordering::Relaxed), 2);
 
-        assert!(state.semantic_twins("nope", 0.6).is_none());
+        assert!(
+            state
+                .semantic_twins("nope", 0.6, Deadline::unbounded())
+                .is_none()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -9974,12 +10306,15 @@ mod tests {
             })
             .map_err(|_| "write")
             .unwrap();
-        state.refresh_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         // みかん×りんご sits at cosine 0.28 — under the 0.35 default.
         let miss = |floor: Option<f32>| {
             state
-                .semantic_resolve("fruit", "みかん", false, floor)
+                .semantic_resolve("fruit", "みかん", false, floor, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
         };
@@ -10028,11 +10363,14 @@ mod tests {
             })
             .map_err(|_| "write")
             .unwrap();
-        state.refresh_embeddings("fruit").unwrap().unwrap();
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
 
         let hits = |floor: Option<f32>| {
             state
-                .semantic_resolve("fruit", "みかん", false, floor)
+                .semantic_resolve("fruit", "みかん", false, floor, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
         };
@@ -10710,6 +11048,42 @@ mod tests {
         let record = state.group("drinks").unwrap();
         assert_eq!(record.description, "before");
         assert_eq!(record.contexts, BTreeSet::from(["sake".to_string()]));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// parking_lot locks don't poison: a panic while holding one just
+    /// unwinds and releases it, so neither the context that panicked, nor
+    /// a sibling, nor the registry's own listing bricks for the rest of
+    /// the process.
+    #[test]
+    fn a_panic_mid_write_bricks_only_that_context_not_a_sibling_or_the_registry() {
+        let dir = scratch_dir("panic-mid-write");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.create("cherry", ContextMeta::default()).unwrap();
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.write_context("sake", |_context| {
+                panic!("simulated failure mid-write");
+            })
+        }));
+        assert!(
+            panicked.is_err(),
+            "the panic must propagate, not be swallowed"
+        );
+
+        state
+            .write_context("sake", |_context| {})
+            .expect("the context that panicked stays usable — the lock never poisoned");
+        state
+            .write_context("cherry", |_context| {})
+            .expect("a sibling context is unaffected by the panic");
+        assert_eq!(
+            state.directory().len(),
+            2,
+            "the registry's own listing survives the panic too"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

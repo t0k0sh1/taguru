@@ -13,6 +13,7 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::Response;
+use taguru::deadline::Deadline;
 
 use crate::api;
 use crate::auth;
@@ -47,12 +48,18 @@ pub(crate) fn peer_ip(request: &Request) -> Option<Arc<str>> {
 /// future race cannot preempt — those requests only see the deadline
 /// after the blocking call returns. With TAGURU_EMBED_URL configured,
 /// set the budget above the provider's own 60s ceiling.
+///
+/// Stamps a [`Deadline`] onto the request before handing it to `next`,
+/// so a `block_in_place` section downstream — invisible to this race
+/// once entered — can still check the same budget on its own and give
+/// up early instead of running to completion regardless.
 pub async fn enforce_timeout(
     State(budget): State<Duration>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let started_at = Instant::now();
+    request.extensions_mut().insert(Deadline::after(budget));
     match tokio::time::timeout(budget, next.run(request)).await {
         Ok(response) => response,
         Err(_) => api::error(

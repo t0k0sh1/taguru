@@ -17,6 +17,8 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
+use taguru::deadline::Deadline;
+
 /// Why a batch is being embedded: glosses entering the store (`Index`)
 /// or a live cue looking things up (`Query`). Modern embedding APIs
 /// (Cohere, Voyage) encode documents and queries asymmetrically; the
@@ -44,7 +46,15 @@ impl EmbedPurpose {
 pub trait EmbeddingProvider: Send + Sync {
     fn model(&self) -> &str;
     /// Returns one vector per input text, all the same dimension.
-    fn embed(&self, texts: &[&str], purpose: EmbedPurpose) -> Result<Vec<Vec<f32>>, String>;
+    /// `deadline` bounds retries, not the first attempt — a single slow
+    /// round trip can still run past it (the provider's own timeout is
+    /// the only ceiling on one attempt's wall time).
+    fn embed(
+        &self,
+        texts: &[&str],
+        purpose: EmbedPurpose,
+        deadline: Deadline,
+    ) -> Result<Vec<Vec<f32>>, String>;
 }
 
 /// OpenAI-compatible `/embeddings` client: `{model, input: [...]}` in,
@@ -106,7 +116,12 @@ impl EmbeddingProvider for HttpEmbeddings {
         &self.model
     }
 
-    fn embed(&self, texts: &[&str], purpose: EmbedPurpose) -> Result<Vec<Vec<f32>>, String> {
+    fn embed(
+        &self,
+        texts: &[&str],
+        purpose: EmbedPurpose,
+        deadline: Deadline,
+    ) -> Result<Vec<Vec<f32>>, String> {
         // A client span per provider round trip — the one downstream
         // call whose latency Taguru's own timings cannot explain. Runs
         // on the caller's thread (block_in_place), so a request span
@@ -125,7 +140,9 @@ impl EmbeddingProvider for HttpEmbeddings {
         loop {
             match self.attempt(texts, purpose) {
                 Ok(vectors) => return Ok(vectors),
-                Err(refusal) if refusal.retryable && attempt < RETRY_ATTEMPTS => {
+                Err(refusal)
+                    if refusal.retryable && attempt < RETRY_ATTEMPTS && !deadline.expired() =>
+                {
                     attempt += 1;
                     tracing::warn!(
                         attempt,
@@ -133,7 +150,7 @@ impl EmbeddingProvider for HttpEmbeddings {
                         error = %refusal.message,
                         "transient embedding failure; retrying"
                     );
-                    std::thread::sleep(backoff);
+                    std::thread::sleep(backoff.min(deadline.remaining()));
                     backoff *= 5;
                 }
                 Err(refusal) => return Err(refusal.message),
@@ -804,7 +821,9 @@ mod tests {
                 .timeout(Duration::from_secs(5))
                 .build(),
         };
-        let vectors = provider.embed(&["x"], EmbedPurpose::Query).unwrap();
+        let vectors = provider
+            .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap();
         assert_eq!(vectors, vec![vec![0.6, 0.8]]);
         assert_eq!(hits.load(Ordering::SeqCst), 3, "503, 503, then the 200");
 
@@ -831,7 +850,9 @@ mod tests {
                 .timeout(Duration::from_secs(5))
                 .build(),
         };
-        let error = provider.embed(&["x"], EmbedPurpose::Query).unwrap_err();
+        let error = provider
+            .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap_err();
         assert!(error.contains("401"), "{error}");
         assert_eq!(hits.load(Ordering::SeqCst), 1, "a 4xx never retries");
     }
@@ -868,7 +889,7 @@ mod tests {
                 .build(),
         };
         let vectors = provider
-            .embed(&["こんにちは"], EmbedPurpose::Query)
+            .embed(&["こんにちは"], EmbedPurpose::Query, Deadline::unbounded())
             .unwrap();
         // 3-4-5 triangle, normalized on receipt.
         assert_eq!(vectors, vec![vec![0.6, 0.8]]);
@@ -920,7 +941,7 @@ mod tests {
                 .build(),
         };
         let error = provider
-            .embed(&["こんにちは"], EmbedPurpose::Query)
+            .embed(&["こんにちは"], EmbedPurpose::Query, Deadline::unbounded())
             .unwrap_err();
         assert!(error.contains("refusing to buffer"), "{error}");
     }
@@ -957,7 +978,11 @@ mod tests {
                 .build(),
         };
         let vectors = provider
-            .embed(&["first", "second"], EmbedPurpose::Query)
+            .embed(
+                &["first", "second"],
+                EmbedPurpose::Query,
+                Deadline::unbounded(),
+            )
             .unwrap();
         served.join().unwrap();
         // Input 0 keeps index 0's vector (3-4-5 → 0.6, 0.8); input 1 keeps
@@ -997,7 +1022,11 @@ mod tests {
                 .build(),
         };
         let error = provider
-            .embed(&["first", "second"], EmbedPurpose::Query)
+            .embed(
+                &["first", "second"],
+                EmbedPurpose::Query,
+                Deadline::unbounded(),
+            )
             .unwrap_err();
         served.join().unwrap();
         assert!(error.contains("widths"), "{error}");
@@ -1033,7 +1062,9 @@ mod tests {
                 .timeout(Duration::from_secs(5))
                 .build(),
         };
-        let error = provider.embed(&["first"], EmbedPurpose::Query).unwrap_err();
+        let error = provider
+            .embed(&["first"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap_err();
         served.join().unwrap();
         assert!(error.contains("non-numeric"), "{error}");
     }
@@ -1111,5 +1142,167 @@ mod tests {
         assert_eq!(fnv1a(""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(fnv1a("a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(fnv1a("foobar"), 0x8594_4171_f739_67e8);
+    }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn proptest_config() -> ProptestConfig {
+            let cases = std::env::var("PROPTEST_CASES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32);
+            ProptestConfig {
+                cases,
+                ..ProptestConfig::default()
+            }
+        }
+
+        fn finite_f32_strategy() -> impl Strategy<Value = f32> {
+            -1000.0f32..1000.0f32
+        }
+
+        fn name_strategy() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just("りんご"),
+                Just("バナナ"),
+                Just("好き"),
+                Just("嫌い"),
+                Just("concept-a"),
+                Just("concept-b"),
+                Just("label-x"),
+            ]
+            .prop_map(|s| s.to_string())
+        }
+
+        fn vector_table_strategy() -> impl Strategy<Value = VectorTable> {
+            prop::collection::hash_map(
+                name_strategy(),
+                (
+                    any::<u64>(),
+                    prop::collection::vec(finite_f32_strategy(), 0..8),
+                ),
+                0..8,
+            )
+        }
+
+        fn vector_store_strategy() -> impl Strategy<Value = VectorStore> {
+            (
+                "[a-z0-9-]{1,12}",
+                vector_table_strategy(),
+                vector_table_strategy(),
+            )
+                .prop_map(|(model, concepts, labels)| VectorStore {
+                    model,
+                    concepts,
+                    labels,
+                })
+        }
+
+        fn passage_key_strategy() -> impl Strategy<Value = PassageKey> {
+            (
+                "[a-z/.]{1,12}",
+                any::<u32>(),
+                any::<u64>(),
+                prop::option::of(any::<u64>()),
+            )
+                .prop_map(|(source, index, hash, question_hash)| PassageKey {
+                    source,
+                    index,
+                    hash,
+                    question_hash,
+                })
+        }
+
+        /// Every row in one store shares a dimension (as `push` enforces),
+        /// so the dimension is fixed once and then threaded through every
+        /// generated row.
+        fn passage_rows_strategy() -> impl Strategy<Value = Vec<(PassageKey, Vec<f32>)>> {
+            (1usize..6).prop_flat_map(|dim| {
+                prop::collection::vec(
+                    (
+                        passage_key_strategy(),
+                        prop::collection::vec(finite_f32_strategy(), dim..=dim),
+                    ),
+                    0..8,
+                )
+            })
+        }
+
+        proptest! {
+            #![proptest_config(proptest_config())]
+
+            #[test]
+            fn vector_store_round_trips_through_bytes(store in vector_store_strategy()) {
+                let bytes = store.to_bytes();
+                let loaded = VectorStore::from_bytes(&bytes)
+                    .expect("a freshly serialized store must always decode");
+                prop_assert_eq!(loaded.model, store.model);
+                prop_assert_eq!(loaded.concepts, store.concepts);
+                prop_assert_eq!(loaded.labels, store.labels);
+            }
+
+            #[test]
+            fn vector_store_from_bytes_never_panics_on_arbitrary_bytes(
+                bytes in prop::collection::vec(any::<u8>(), 0..512),
+            ) {
+                let _ = VectorStore::from_bytes(&bytes);
+            }
+
+            #[test]
+            fn vector_store_from_bytes_never_panics_on_mutated_valid_bytes(
+                store in vector_store_strategy(),
+                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..16),
+            ) {
+                let mut bytes = store.to_bytes();
+                for (pick, value) in mutations {
+                    *pick.get_mut(&mut bytes) = value;
+                }
+                let _ = VectorStore::from_bytes(&bytes);
+            }
+
+            #[test]
+            fn passage_vector_store_round_trips_through_bytes(rows in passage_rows_strategy()) {
+                let mut store = PassageVectorStore::new("test-model");
+                for (key, vector) in rows.clone() {
+                    store.push(key, vector);
+                }
+                prop_assert_eq!(store.len(), rows.len(), "matching dims never get dropped");
+
+                let bytes = store.to_bytes();
+                let loaded = PassageVectorStore::from_bytes(&bytes)
+                    .expect("a freshly serialized store must always decode");
+                prop_assert_eq!(&loaded.model, "test-model");
+                let actual: Vec<(PassageKey, Vec<f32>)> = loaded
+                    .iter()
+                    .map(|(key, vector)| (key.clone(), vector.to_vec()))
+                    .collect();
+                prop_assert_eq!(actual, rows);
+            }
+
+            #[test]
+            fn passage_vector_store_from_bytes_never_panics_on_arbitrary_bytes(
+                bytes in prop::collection::vec(any::<u8>(), 0..512),
+            ) {
+                let _ = PassageVectorStore::from_bytes(&bytes);
+            }
+
+            #[test]
+            fn passage_vector_store_from_bytes_never_panics_on_mutated_valid_bytes(
+                rows in passage_rows_strategy(),
+                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..16),
+            ) {
+                let mut store = PassageVectorStore::new("test-model");
+                for (key, vector) in rows {
+                    store.push(key, vector);
+                }
+                let mut bytes = store.to_bytes();
+                for (pick, value) in mutations {
+                    *pick.get_mut(&mut bytes) = value;
+                }
+                let _ = PassageVectorStore::from_bytes(&bytes);
+            }
+        }
     }
 }
