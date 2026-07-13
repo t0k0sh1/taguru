@@ -5648,12 +5648,24 @@ mod tests {
             },
         }
 
-        /// Generates a batch of association ops, then alias ops whose
+        #[derive(Clone, Debug)]
+        enum RetractionInput {
+            Source(&'static str),
+            Association {
+                subject: &'static str,
+                label: &'static str,
+                object: &'static str,
+            },
+        }
+
+        /// Generates a batch of association ops, alias ops whose
         /// `canonical` is always drawn from a name that batch actually
         /// interns — so `add_concept_alias`/`add_label_alias` only ever
         /// fail with `Conflict` (an alias spelling reused across two ops
-        /// in the same batch), never `UnknownCanonical`.
-        fn scenario_strategy() -> impl Strategy<Value = (Vec<AssocInput>, Vec<AliasInput>)> {
+        /// in the same batch), never `UnknownCanonical` — then retractions
+        /// drawn from associations and sources the batch actually created.
+        fn scenario_strategy()
+        -> impl Strategy<Value = (Vec<AssocInput>, Vec<AliasInput>, Vec<RetractionInput>)> {
             prop::collection::vec(assoc_input_strategy(), 1..12).prop_flat_map(|assoc_ops| {
                 let mut concept_names: Vec<&'static str> = assoc_ops
                     .iter()
@@ -5679,9 +5691,33 @@ mod tests {
                         .prop_map(|(alias, canonical)| AliasInput::Label { alias, canonical }),
                 ];
 
+                let associations: Vec<_> = assoc_ops
+                    .iter()
+                    .map(|op| (op.subject, op.label, op.object))
+                    .collect();
+                let association_retraction =
+                    prop::sample::select(associations).prop_map(|(subject, label, object)| {
+                        RetractionInput::Association {
+                            subject,
+                            label,
+                            object,
+                        }
+                    });
+                let sources: Vec<_> = assoc_ops.iter().filter_map(|op| op.source).collect();
+                let retraction_strategy = if sources.is_empty() {
+                    association_retraction.boxed()
+                } else {
+                    prop_oneof![
+                        association_retraction,
+                        prop::sample::select(sources).prop_map(RetractionInput::Source),
+                    ]
+                    .boxed()
+                };
+
                 (
                     Just(assoc_ops),
                     prop::collection::vec(alias_op_strategy, 0..6),
+                    prop::collection::vec(retraction_strategy, 0..6),
                 )
             })
         }
@@ -5692,7 +5728,11 @@ mod tests {
         /// alias spelling must leave the context unchanged, and that is
         /// exactly what the round trip below is checking for, not just
         /// the happy path.
-        fn build_context(assoc_ops: &[AssocInput], alias_ops: &[AliasInput]) -> Context {
+        fn build_context(
+            assoc_ops: &[AssocInput],
+            alias_ops: &[AliasInput],
+            retractions: &[RetractionInput],
+        ) -> Context {
             let mut context = Context::default();
             for op in assoc_ops {
                 match op.source {
@@ -5721,6 +5761,20 @@ mod tests {
                     }
                 }
             }
+            for retraction in retractions {
+                match retraction {
+                    RetractionInput::Source(source) => {
+                        let _ = context.retract_source(source);
+                    }
+                    RetractionInput::Association {
+                        subject,
+                        label,
+                        object,
+                    } => {
+                        let _ = context.retract_association(subject, label, object);
+                    }
+                }
+            }
             context
         }
 
@@ -5729,13 +5783,17 @@ mod tests {
 
             #[test]
             fn context_round_trips_through_bytes(
-                (assoc_ops, alias_ops) in scenario_strategy(),
+                (assoc_ops, alias_ops, retractions) in scenario_strategy(),
                 applied_seq in any::<u64>(),
+                dice_floor in prop::option::of(-1.0f64..2.0),
             ) {
-                let mut context = build_context(&assoc_ops, &alias_ops);
+                let mut context = build_context(&assoc_ops, &alias_ops, &retractions);
                 context.set_applied_seq(applied_seq);
+                context.set_dice_floor(dice_floor);
 
-                let restored = Context::from_bytes(&context.to_bytes()).unwrap();
+                let image = context.to_bytes();
+                let restored = Context::from_bytes(&image).unwrap();
+                prop_assert_eq!(restored.to_bytes(), image);
                 prop_assert_eq!(
                     restored.query(None, None, None),
                     context.query(None, None, None)
@@ -5743,6 +5801,7 @@ mod tests {
                 prop_assert_eq!(restored.concept_aliases(), context.concept_aliases());
                 prop_assert_eq!(restored.label_aliases(), context.label_aliases());
                 prop_assert_eq!(restored.applied_seq(), context.applied_seq());
+                prop_assert_eq!(restored.dice_floor(), DICE_FLOOR);
             }
 
             #[test]
@@ -5753,31 +5812,54 @@ mod tests {
             }
 
             #[test]
-            fn from_bytes_never_panics_on_mutated_v6_bytes(
-                (assoc_ops, alias_ops) in scenario_strategy(),
-                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..24),
+            fn changed_v6_bytes_return_a_structured_error(
+                (assoc_ops, alias_ops, retractions) in scenario_strategy(),
+                byte in any::<prop::sample::Index>(),
+                mask in 1u8..=u8::MAX,
             ) {
-                let context = build_context(&assoc_ops, &alias_ops);
+                let context = build_context(&assoc_ops, &alias_ops, &retractions);
                 let mut bytes = context.to_bytes();
-                for (pick, value) in mutations {
-                    *pick.get_mut(&mut bytes) = value;
-                }
-                let mutated = resealed(bytes);
-                let _ = Context::from_bytes(&mutated);
+                *byte.get_mut(&mut bytes) ^= mask;
+                prop_assert!(Context::from_bytes(&bytes).is_err());
+            }
+
+            #[test]
+            fn truncated_v6_bytes_return_a_structured_error(
+                (assoc_ops, alias_ops, retractions) in scenario_strategy(),
+                cut in any::<prop::sample::Index>(),
+            ) {
+                let context = build_context(&assoc_ops, &alias_ops, &retractions);
+                let mut bytes = context.to_bytes();
+                let keep = cut.index(bytes.len());
+                bytes.truncate(keep);
+                prop_assert!(Context::from_bytes(&bytes).is_err());
             }
 
             #[test]
             fn from_bytes_never_panics_on_mutated_legacy_bytes(
-                (assoc_ops, alias_ops) in scenario_strategy(),
+                (assoc_ops, alias_ops, retractions) in scenario_strategy(),
                 version in 1u32..=5,
                 mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..24),
             ) {
-                let context = build_context(&assoc_ops, &alias_ops);
+                let context = build_context(&assoc_ops, &alias_ops, &retractions);
                 let mut bytes = context.to_bytes_as_version(version);
                 for (pick, value) in mutations {
                     *pick.get_mut(&mut bytes) = value;
                 }
                 let _ = Context::from_bytes(&bytes);
+            }
+
+            #[test]
+            fn truncated_legacy_bytes_return_a_structured_error(
+                (assoc_ops, alias_ops, retractions) in scenario_strategy(),
+                version in 1u32..=5,
+                cut in any::<prop::sample::Index>(),
+            ) {
+                let context = build_context(&assoc_ops, &alias_ops, &retractions);
+                let mut bytes = context.to_bytes_as_version(version);
+                let keep = cut.index(bytes.len());
+                bytes.truncate(keep);
+                prop_assert!(Context::from_bytes(&bytes).is_err());
             }
         }
     }
