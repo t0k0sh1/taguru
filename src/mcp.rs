@@ -351,7 +351,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "add_associations",
-            "Write facts as a batch (one document = one call), a source id on every element; single-fact calls cost a full durable write each, so collect a document's facts first. Discipline: check spellings with resolve/resolve_label and reuse before minting; don't re-assert paraphrases within one document; negation = positive label + negative weight; make implicit membership an explicit edge; weave ordered procedures with the three edges 最初の工程/次の工程/工程 (details in get_protocol).",
+            "Write facts as a batch (one document = one call, up to 10,000 associations; split larger documents), a source id on every element; single-fact calls cost a full durable write each, so collect a document's facts first. Discipline: check spellings with resolve/resolve_label and reuse before minting; don't re-assert paraphrases within one document; negation = positive label + negative weight; make implicit membership an explicit edge; weave ordered procedures with the three edges 最初の工程/次の工程/工程 (details in get_protocol).",
             object_schema(
                 json!({
                     "context": context,
