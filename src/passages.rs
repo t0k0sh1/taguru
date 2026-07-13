@@ -97,7 +97,7 @@ impl PassageRecord {
     /// validation point both the live path and replay go through, so
     /// they can never disagree. Returns how many questions and how
     /// many sections were dropped.
-    fn new(
+    pub(crate) fn new(
         text: Arc<str>,
         questions: Vec<(u32, String)>,
         sections: Vec<(u32, String)>,
@@ -683,7 +683,7 @@ fn read_legacy(path: &Path) -> BTreeMap<String, String> {
 /// What one resident record costs, for the running footprint: key,
 /// text, spans, questions, sections, and the per-entry overhead
 /// constant.
-fn record_bytes(source: &str, record: &PassageRecord) -> usize {
+pub(crate) fn record_bytes(source: &str, record: &PassageRecord) -> usize {
     source.len()
         + record.text.len()
         + record.paragraphs.len() * std::mem::size_of::<ParagraphSpan>()

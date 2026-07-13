@@ -342,6 +342,11 @@ fn inspect_verifies_a_directory_and_a_single_image() {
     assert!(stdout.contains("1 associations"), "{stdout}");
     assert!(stdout.contains("2 concepts"), "{stdout}");
     assert!(stdout.contains("total: 1 contexts"), "{stdout}");
+    // A freshly built image carries no dead weight: no retraction, no
+    // alias ever removed.
+    assert!(stdout.contains("0 dead edge(s) (0.0% dead)"), "{stdout}");
+    assert!(stdout.contains("0 unlinked attribution(s)"), "{stdout}");
+    assert!(stdout.contains("0 B arena slack"), "{stdout}");
     // "ok" must state HOW MUCH was proven: a current image was
     // checksum-verified, and the line says so.
     assert!(stdout.contains("checksum verified"), "{stdout}");
@@ -670,6 +675,8 @@ fn estimate_reports_memory_and_disk_for_a_target_shape() {
     assert!(stdout.contains("image"), "{stdout}");
     assert!(stdout.contains("TAGURU_CACHE_BYTES"), "{stdout}");
     assert!(stdout.contains("example benchmark"), "{stdout}");
+    assert!(stdout.contains("maintenance window"), "{stdout}");
+    assert!(stdout.contains("compaction peak"), "{stdout}");
 }
 
 #[test]
@@ -1034,4 +1041,108 @@ fn compact_rewrites_a_data_directory_offline() {
     let inspected = run_in(&["inspect", &data.display().to_string()]);
     assert_eq!(inspected.status.code(), Some(0), "{inspected:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--parallel N` must produce stdout byte-for-byte identical to the
+/// sequential (default) run, whatever N is or however its worker
+/// threads happen to race — the property the shared-queue reordering
+/// in `compact.rs` exists to guarantee.
+#[test]
+fn compact_parallel_output_matches_the_sequential_run_byte_for_byte() {
+    fn seed(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-cli-compact-par-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+        // Three contexts, each carrying one fact from a.md — created
+        // in an order (charlie, alpha, bravo) that is NOT alphabetical,
+        // so a run over "every context" only comes out sorted if
+        // something actually sorts it.
+        std::fs::write(
+            dir.join("a.jsonl"),
+            "{\"taguru_batch\": 1, \"context\": \"charlie\", \"source\": \"a.md\", \
+             \"create\": {\"description\": \"d\"}}\n\
+             {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
+             {\"taguru_batch\": 1, \"context\": \"alpha\", \"source\": \"a.md\", \
+             \"create\": {\"description\": \"d\"}}\n\
+             {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
+             {\"taguru_batch\": 1, \"context\": \"bravo\", \"source\": \"a.md\", \
+             \"create\": {\"description\": \"d\"}}\n\
+             {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n",
+        )
+        .expect("fixture must be writable");
+        // Restating a.md per context with a different fact retracts
+        // the first, leaving dead edges for compact to reclaim.
+        std::fs::write(
+            dir.join("b.jsonl"),
+            "{\"taguru_batch\": 1, \"context\": \"charlie\", \"source\": \"a.md\"}\n\
+             {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
+             {\"taguru_batch\": 1, \"context\": \"alpha\", \"source\": \"a.md\"}\n\
+             {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
+             {\"taguru_batch\": 1, \"context\": \"bravo\", \"source\": \"a.md\"}\n\
+             {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n",
+        )
+        .expect("fixture must be writable");
+        dir
+    }
+
+    fn run_in(dir: &std::path::Path, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", dir.join("data"))
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    }
+
+    let seq_dir = seed("seq");
+    let par_dir = seed("par");
+    for dir in [&seq_dir, &par_dir] {
+        let first = run_in(dir, &["import", &dir.join("a.jsonl").display().to_string()]);
+        assert_eq!(first.status.code(), Some(0), "{first:?}");
+        let second = run_in(dir, &["import", &dir.join("b.jsonl").display().to_string()]);
+        assert_eq!(second.status.code(), Some(0), "{second:?}");
+    }
+
+    let sequential = run_in(&seq_dir, &["compact"]);
+    assert_eq!(sequential.status.code(), Some(0), "{sequential:?}");
+    // More workers than contexts, so every worker races for the queue.
+    let parallel = run_in(&par_dir, &["compact", "--parallel", "8"]);
+    assert_eq!(parallel.status.code(), Some(0), "{parallel:?}");
+
+    let sequential_stdout = String::from_utf8_lossy(&sequential.stdout).into_owned();
+    let parallel_stdout = String::from_utf8_lossy(&parallel.stdout).into_owned();
+    assert!(
+        sequential_stdout.contains("3 of 3 context(s) rewritten"),
+        "{sequential_stdout}"
+    );
+    assert_eq!(
+        sequential_stdout, parallel_stdout,
+        "--parallel output must match the sequential run byte for byte"
+    );
+
+    let _ = std::fs::remove_dir_all(&seq_dir);
+    let _ = std::fs::remove_dir_all(&par_dir);
+}
+
+/// A bad `--parallel` value is refused with the usual usage-error
+/// shape, before anything boots.
+#[test]
+fn compact_rejects_a_non_positive_parallel_value() {
+    let output = run(&["compact", "--parallel", "0"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--parallel needs an integer"),
+        "{output:?}"
+    );
+
+    let output = run(&["compact", "--parallel", "nope"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--parallel needs an integer"),
+        "{output:?}"
+    );
 }
