@@ -15,8 +15,10 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use taguru::deadline::Deadline;
 
 /// Why a batch is being embedded: glosses entering the store (`Index`)
@@ -460,6 +462,12 @@ const PASSAGE_VECTOR_MAGIC: &[u8; 8] = b"TAGURUP2";
 /// re-embeds, nothing is lost but provider spend.
 const LEGACY_PASSAGE_VECTOR_MAGIC: &[u8; 8] = b"TAGURUP1";
 
+/// Below this many rows, [`PassageVectorStore::top_matches`] sweeps
+/// every row exactly — the flat layout already IS a fine index at
+/// that scale. At or above it, an approximate [`PassageAnnIndex`]
+/// narrows the sweep instead of scanning every row on every query.
+pub const PASSAGE_ANN_THRESHOLD: usize = 50_000;
+
 /// Paragraph vectors for one context, `{stem}.pvectors.bin`. Unlike
 /// the gloss [`VectorStore`] this is a FLAT table — one contiguous
 /// `Vec<f32>` of unit rows — because every query scans all of it (a
@@ -476,6 +484,14 @@ pub struct PassageVectorStore {
     dim: usize,
     keys: Vec<PassageKey>,
     data: Vec<f32>,
+    /// Built lazily by the first search that needs it (see
+    /// [`Self::top_matches`]) and cached for this store's lifetime —
+    /// nested here rather than beside it in the registry's `Entry` so
+    /// the index's lifetime is tied to the exact rows it was built
+    /// from: a refresh replaces the whole `Arc<PassageVectorStore>`
+    /// rather than mutating this one, so there is no separate
+    /// generation to invalidate this against.
+    ann: Mutex<Option<Arc<PassageAnnIndex>>>,
 }
 
 impl PassageVectorStore {
@@ -531,14 +547,42 @@ impl PassageVectorStore {
                 .sum::<usize>()
     }
 
-    /// Top `limit` rows by cosine against a unit query (a linear sweep
-    /// — the flat layout IS the index at this store's scale). Ties
-    /// break by (source, index) ascending for deterministic output; a
-    /// query of the wrong dimension matches nothing.
-    pub fn top_matches(&self, query: &[f32], limit: usize) -> Vec<(&PassageKey, f32)> {
+    /// Top `limit` rows by cosine against a unit query. Ties break by
+    /// (source, index) ascending for deterministic output; a query of
+    /// the wrong dimension matches nothing.
+    ///
+    /// A caller asking for every row (`limit >= len()`, as
+    /// `explain_passage_search` always does) always gets an exact
+    /// sweep — the only way to honestly return every row is to look at
+    /// every row. Below [`PASSAGE_ANN_THRESHOLD`] every caller does,
+    /// full stop. At or above it, a narrower request instead consults
+    /// a [`PassageAnnIndex`] built lazily here (within `deadline`) and
+    /// cached on this store for as long as it lives. A `deadline` too
+    /// tight to build the index yet falls back to the same exact sweep
+    /// — approximation is an optimization here, never a requirement.
+    pub fn top_matches(
+        &self,
+        query: &[f32],
+        limit: usize,
+        deadline: Deadline,
+    ) -> Vec<(&PassageKey, f32)> {
         if self.dim == 0 || query.len() != self.dim {
             return Vec::new();
         }
+        if limit < self.len()
+            && self.len() >= PASSAGE_ANN_THRESHOLD
+            && let Some(index) = self.ensure_ann_index(deadline)
+        {
+            return index.search(self, query, limit);
+        }
+        self.exact_top_matches(query, limit)
+    }
+
+    /// The linear cosine sweep [`Self::top_matches`] takes below
+    /// [`PASSAGE_ANN_THRESHOLD`], and always for a `limit` covering the
+    /// whole store — the flat layout alone IS a fine index at that
+    /// scale or for that shape of query.
+    fn exact_top_matches(&self, query: &[f32], limit: usize) -> Vec<(&PassageKey, f32)> {
         let mut scored: Vec<(&PassageKey, f32)> = self
             .iter()
             .map(|(key, row)| (key, similarity(query, row)))
@@ -550,6 +594,23 @@ impl PassageVectorStore {
         });
         scored.truncate(limit);
         scored
+    }
+
+    /// The cached index, building it first if this is the first search
+    /// to need one. `None` only when `deadline` is already spent —
+    /// the caller falls back to the exact sweep for just this call and
+    /// tries again next time.
+    fn ensure_ann_index(&self, deadline: Deadline) -> Option<Arc<PassageAnnIndex>> {
+        let mut cached = self.ann.lock();
+        if let Some(index) = &*cached {
+            return Some(Arc::clone(index));
+        }
+        if deadline.expired() {
+            return None;
+        }
+        let index = Arc::new(PassageAnnIndex::build(self, deadline));
+        *cached = Some(Arc::clone(&index));
+        Some(index)
     }
 
     /// Reads the sidecar, returning an empty store on any problem — a
@@ -656,7 +717,157 @@ impl PassageVectorStore {
             dim,
             keys,
             data,
+            ann: Mutex::new(None),
         })
+    }
+}
+
+/// How many extra candidate rows [`PassageAnnIndex::search`] gathers
+/// beyond `limit` before scoring exactly, to absorb the
+/// approximation's ragged edges — a true top-`limit` row landing in
+/// the 2nd- or 3rd-nearest cluster rather than the closest one.
+const PASSAGE_ANN_OVERSAMPLE: usize = 8;
+/// A floor under the oversample product so a small `limit` (a narrow
+/// rerank pool) still probes enough of the index for reasonable
+/// recall.
+const PASSAGE_ANN_MIN_CANDIDATES: usize = 256;
+
+/// A coarse IVF (inverted-file) index over one [`PassageVectorStore`]'s
+/// rows: past [`PASSAGE_ANN_THRESHOLD`] rows, sweeping every one of
+/// them on every query stops paying for itself, so
+/// [`PassageVectorStore::top_matches`] narrows the sweep to whichever
+/// clusters are nearest the query instead. Hand-rolled rather than an
+/// external ANN crate, matching every other binary index in this
+/// codebase (BM25, the graph image itself).
+///
+/// Centroids come from one deterministic farthest-point pass (greedy
+/// k-center: pick a seed row, then repeatedly add whichever remaining
+/// row is least similar to every centroid chosen so far) rather than
+/// iterated k-means — no RNG, no non-convergence to guard against, and
+/// a single `O(centroids × rows)` sweep gets both the centroids AND
+/// (for free, as a side effect of tracking each row's best centroid so
+/// far) every row's list assignment in the same pass.
+///
+/// Approximate by construction — see `search`'s oversample — so this
+/// must never back an exact-ranking contract. `top_matches` keeps that
+/// guarantee structurally, via its own `limit >= len()` brute-force
+/// branch, not by asking this type to be exact.
+#[derive(Debug)]
+struct PassageAnnIndex {
+    /// Centroid rows, flat like `PassageVectorStore::data`:
+    /// `centroids.len() / dim` of them.
+    centroids: Vec<f32>,
+    /// Row indices under each centroid; `lists.len() == centroids.len() / dim`.
+    lists: Vec<Vec<u32>>,
+}
+
+impl PassageAnnIndex {
+    /// One coarse cluster per ~sqrt(rows) — the classic IVF rule of
+    /// thumb, keeping both the centroid sweep and the average list
+    /// size close to `sqrt(rows)` so neither half of a query's cost
+    /// dominates the other.
+    fn centroid_count(rows: usize) -> usize {
+        (rows as f64).sqrt().round().max(1.0) as usize
+    }
+
+    /// Builds centroids and inverted lists in one pass, stopping early
+    /// (with however many centroids it has so far) if `deadline` runs
+    /// out — callers that need every row exactly never reach here (see
+    /// [`PassageVectorStore::top_matches`]), so a coarser-than-intended
+    /// index only ever costs recall, never correctness.
+    fn build(store: &PassageVectorStore, deadline: Deadline) -> Self {
+        let n = store.len();
+        let dim = store.dim.max(1);
+        let target = Self::centroid_count(n);
+        let row = |i: usize| -> &[f32] { &store.data[i * dim..i * dim + dim] };
+
+        let mut centroids: Vec<f32> = Vec::with_capacity(target * dim);
+        // Running "similarity to the nearest centroid chosen so far"
+        // per row, and which centroid that was — updated incrementally
+        // as each new centroid is added, so the final pass over these
+        // two arrays IS the list assignment, no separate pass needed.
+        let mut best_sim = vec![f32::NEG_INFINITY; n];
+        let mut best_centroid = vec![0u32; n];
+        let mut seed = 0usize;
+        let mut built = 0usize;
+        while built < target {
+            if built > 0 && deadline.expired() {
+                break;
+            }
+            let centroid_row = row(seed);
+            centroids.extend_from_slice(centroid_row);
+            let id = built as u32;
+            for (i, slot) in best_sim.iter_mut().enumerate() {
+                let sim = similarity(row(i), centroid_row);
+                if sim > *slot {
+                    *slot = sim;
+                    best_centroid[i] = id;
+                }
+            }
+            built += 1;
+            if built < target {
+                // The farthest-from-everything-chosen-so-far row is
+                // the least-committed candidate for the next cluster.
+                seed = (0..n)
+                    .min_by(|&a, &b| best_sim[a].total_cmp(&best_sim[b]))
+                    .unwrap_or(0);
+            }
+        }
+
+        let mut lists = vec![Vec::new(); built];
+        for (i, &centroid) in best_centroid.iter().enumerate() {
+            lists[centroid as usize].push(i as u32);
+        }
+        Self { centroids, lists }
+    }
+
+    fn centroid(&self, id: usize, dim: usize) -> &[f32] {
+        &self.centroids[id * dim..id * dim + dim]
+    }
+
+    /// Scores the rows under whichever centroids are nearest `query`,
+    /// growing the probe cluster-by-cluster until there are enough
+    /// candidates for `limit` to be a meaningful cutoff (or every
+    /// cluster is in), then ranks exactly within just that candidate
+    /// set — same tie-break as [`PassageVectorStore::exact_top_matches`].
+    fn search<'a>(
+        &self,
+        store: &'a PassageVectorStore,
+        query: &[f32],
+        limit: usize,
+    ) -> Vec<(&'a PassageKey, f32)> {
+        let dim = store.dim.max(1);
+        let mut order: Vec<(u32, f32)> = (0..self.lists.len())
+            .map(|id| (id as u32, similarity(query, self.centroid(id, dim))))
+            .collect();
+        order.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        let wanted = limit
+            .saturating_mul(PASSAGE_ANN_OVERSAMPLE)
+            .max(PASSAGE_ANN_MIN_CANDIDATES);
+        let mut candidates: Vec<u32> = Vec::new();
+        for (id, _) in order {
+            candidates.extend_from_slice(&self.lists[id as usize]);
+            if candidates.len() >= wanted {
+                break;
+            }
+        }
+
+        let mut scored: Vec<(&PassageKey, f32)> = candidates
+            .into_iter()
+            .map(|row| {
+                let row = row as usize;
+                let vector = &store.data[row * dim..row * dim + dim];
+                (&store.keys[row], similarity(query, vector))
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then_with(|| a.0.source.cmp(&b.0.source))
+                .then_with(|| a.0.index.cmp(&b.0.index))
+        });
+        scored.truncate(limit);
+        scored
     }
 }
 
@@ -1144,6 +1355,260 @@ mod tests {
         let mut padded = bytes.clone();
         padded.push(0);
         assert!(PassageVectorStore::from_bytes(&padded).is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Passage ANN index
+    // -----------------------------------------------------------------
+
+    /// A small, fully deterministic "random-looking" unit vector, built
+    /// from [`fnv1a_fold`] rather than an RNG crate — every ANN test
+    /// below needs reproducible data, not entropy.
+    fn deterministic_unit_vector(seed: u64, dim: usize) -> Vec<f32> {
+        let base = fnv1a_fold(FNV1A_OFFSET, seed.to_le_bytes());
+        let mut v: Vec<f32> = (0..dim as u64)
+            .map(|d| {
+                let bits = fnv1a_fold(base, d.to_le_bytes());
+                (bits as f64 / u64::MAX as f64) as f32 * 2.0 - 1.0
+            })
+            .collect();
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in &mut v {
+                *x /= norm;
+            }
+        }
+        v
+    }
+
+    fn synthetic_passage_store(rows: usize, dim: usize) -> PassageVectorStore {
+        let mut store = PassageVectorStore::new("ann-test-model");
+        for i in 0..rows {
+            store.push(
+                PassageKey {
+                    source: format!("doc-{i}"),
+                    index: 0,
+                    hash: i as u64,
+                    question_hash: None,
+                },
+                deterministic_unit_vector(i as u64, dim),
+            );
+        }
+        store
+    }
+
+    /// Sorted descending by score, same tie-break as
+    /// [`PassageVectorStore::exact_top_matches`] — computed independently
+    /// here (not by calling that private method) so these tests stay an
+    /// honest ground truth rather than checking the code against itself.
+    fn brute_force_top<'a>(
+        store: &'a PassageVectorStore,
+        query: &[f32],
+        limit: usize,
+    ) -> Vec<(&'a PassageKey, f32)> {
+        let mut scored: Vec<(&PassageKey, f32)> = store
+            .iter()
+            .map(|(key, row)| (key, similarity(query, row)))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then_with(|| a.0.source.cmp(&b.0.source))
+                .then_with(|| a.0.index.cmp(&b.0.index))
+        });
+        scored.truncate(limit);
+        scored
+    }
+
+    #[test]
+    fn passage_ann_index_centroid_count_grows_like_sqrt_of_rows() {
+        assert_eq!(PassageAnnIndex::centroid_count(1), 1);
+        assert_eq!(PassageAnnIndex::centroid_count(100), 10);
+        assert_eq!(PassageAnnIndex::centroid_count(PASSAGE_ANN_THRESHOLD), 224);
+    }
+
+    #[test]
+    fn passage_ann_index_build_partitions_every_row_into_exactly_one_list() {
+        let rows = 500;
+        let store = synthetic_passage_store(rows, 6);
+        let index = PassageAnnIndex::build(&store, Deadline::unbounded());
+        assert_eq!(index.lists.len(), PassageAnnIndex::centroid_count(rows));
+
+        let mut seen = vec![false; rows];
+        let mut total = 0usize;
+        for list in &index.lists {
+            for &row in list {
+                assert!(!seen[row as usize], "row {row} assigned to two lists");
+                seen[row as usize] = true;
+                total += 1;
+            }
+        }
+        assert_eq!(total, rows);
+        assert!(
+            seen.into_iter().all(|hit| hit),
+            "every row must land somewhere"
+        );
+    }
+
+    #[test]
+    fn passage_ann_index_search_is_sorted_descending_and_respects_limit() {
+        let store = synthetic_passage_store(2_000, 8);
+        let index = PassageAnnIndex::build(&store, Deadline::unbounded());
+        let query = deterministic_unit_vector(999_999, 8);
+        let hits = index.search(&store, &query, 15);
+        assert_eq!(hits.len(), 15);
+        for window in hits.windows(2) {
+            assert!(window[0].1 >= window[1].1, "{hits:?}");
+        }
+    }
+
+    #[test]
+    fn top_matches_stays_exact_below_the_ann_threshold() {
+        let dim = 6;
+        let store = synthetic_passage_store(64, dim);
+        let query = deterministic_unit_vector(777, dim);
+
+        let expected = brute_force_top(&store, &query, 10);
+        let actual = store.top_matches(&query, 10, Deadline::unbounded());
+        assert_eq!(
+            actual.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
+            expected.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
+        );
+        assert!(
+            store.ann.lock().is_none(),
+            "below threshold must never build the index"
+        );
+    }
+
+    #[test]
+    fn explain_style_calls_bypass_the_ann_index_even_above_the_threshold() {
+        let dim = 12;
+        let store = synthetic_passage_store(PASSAGE_ANN_THRESHOLD, dim);
+        let query = deterministic_unit_vector(0x5EED, dim);
+
+        let expected = brute_force_top(&store, &query, store.len());
+        let actual = store.top_matches(&query, usize::MAX, Deadline::unbounded());
+        assert_eq!(actual.len(), store.len());
+        assert_eq!(
+            actual.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
+            expected.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
+        );
+        assert!(
+            store.ann.lock().is_none(),
+            "limit >= len() must never touch the index"
+        );
+    }
+
+    #[test]
+    fn top_matches_falls_back_to_the_exact_sweep_when_the_deadline_is_already_spent() {
+        let dim = 12;
+        let store = synthetic_passage_store(PASSAGE_ANN_THRESHOLD, dim);
+        let query = deterministic_unit_vector(0xFACE, dim);
+
+        let expected = brute_force_top(&store, &query, 20);
+        let spent = Deadline::after(Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(spent.expired());
+
+        let actual = store.top_matches(&query, 20, spent);
+        assert_eq!(
+            actual.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
+            expected.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
+        );
+        assert!(
+            store.ann.lock().is_none(),
+            "a spent deadline must skip building the index, not error"
+        );
+    }
+
+    #[test]
+    fn top_matches_uses_the_ann_index_at_the_threshold_and_finds_planted_matches() {
+        let dim = 16;
+        let mut store = synthetic_passage_store(PASSAGE_ANN_THRESHOLD, dim);
+        let query = deterministic_unit_vector(0xA11CE, dim);
+        // Ten scattered rows (including row 0, the deterministic first
+        // centroid seed) become exact copies of the query: an
+        // unambiguous top-10 the index must surface in full, not just
+        // "mostly".
+        let planted = [
+            0usize, 137, 4096, 9001, 15000, 22222, 30000, 37500, 44444, 49999,
+        ];
+        for &row in &planted {
+            let start = row * dim;
+            store.data[start..start + dim].copy_from_slice(&query);
+        }
+        let mut expected_keys: Vec<&PassageKey> =
+            planted.iter().map(|&row| &store.keys[row]).collect();
+        expected_keys.sort_by(|a, b| a.source.cmp(&b.source).then_with(|| a.index.cmp(&b.index)));
+
+        let hits = store.top_matches(&query, planted.len(), Deadline::unbounded());
+        assert!(
+            store.ann.lock().is_some(),
+            "a store this large, asked for far fewer rows than it has, must engage the index"
+        );
+        assert_eq!(
+            hits.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
+            expected_keys,
+            "every planted exact match must surface"
+        );
+        for &(_, score) in &hits {
+            assert!(score > 0.999, "{score}");
+        }
+    }
+
+    #[test]
+    fn top_matches_has_reasonable_recall_against_the_exact_sweep() {
+        let dim = 16;
+        let top = 50;
+        let store = synthetic_passage_store(PASSAGE_ANN_THRESHOLD, dim);
+        let query = deterministic_unit_vector(0xC0FFEE, dim);
+
+        let expected: std::collections::HashSet<(String, u32)> =
+            brute_force_top(&store, &query, top)
+                .into_iter()
+                .map(|(k, _)| (k.source.clone(), k.index))
+                .collect();
+        let actual = store.top_matches(&query, top, Deadline::unbounded());
+        assert_eq!(actual.len(), top);
+        let overlap = actual
+            .iter()
+            .filter(|&&(k, _)| expected.contains(&(k.source.clone(), k.index)))
+            .count();
+        // Observed recall on this deterministic fixture is 50/50; 80% is
+        // a comfortable margin under that so this stays a "still high
+        // recall" regression guard rather than a brittle exact pin.
+        assert!(
+            overlap * 100 >= top * 80,
+            "recall too low against the exact sweep: {overlap}/{top}"
+        );
+    }
+
+    #[test]
+    #[ignore = "wall-clock comparison for manual inspection: cargo test -- --ignored --nocapture"]
+    fn passage_ann_index_is_faster_than_the_exact_sweep_at_scale() {
+        let dim = 32;
+        let rows = 300_000;
+        let store = synthetic_passage_store(rows, dim);
+        let query = deterministic_unit_vector(0xBEEF, dim);
+
+        let started = std::time::Instant::now();
+        let exact = store.exact_top_matches(&query, 50);
+        let exact_elapsed = started.elapsed();
+
+        // Warm-up: the first call pays the one-time build cost, which
+        // this benchmark is not measuring.
+        store.top_matches(&query, 50, Deadline::unbounded());
+        let started = std::time::Instant::now();
+        let approx = store.top_matches(&query, 50, Deadline::unbounded());
+        let approx_elapsed = started.elapsed();
+
+        eprintln!(
+            "exact sweep: {exact_elapsed:?} for {rows} rows; ann search: {approx_elapsed:?} (after a one-time build)"
+        );
+        assert_eq!(exact.len(), approx.len());
+        assert!(
+            approx_elapsed < exact_elapsed,
+            "expected the index to beat a full sweep at {rows} rows: exact={exact_elapsed:?} ann={approx_elapsed:?}"
+        );
     }
 
     #[test]

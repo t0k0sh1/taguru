@@ -426,6 +426,7 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
             get(move || api::protocol(protocol_trailer.clone())),
         )
         .route("/flush", post(api::flush_all))
+        .route("/maintenance/compact", post(api::maintenance_compact))
         .route("/import", post(api::import_batch))
         .route("/contexts", get(api::list_contexts))
         .route(
@@ -526,6 +527,14 @@ fn spawn_flusher(state: AppState, flush_secs: usize, auto_embed: bool) {
         ticker.tick().await; // the first tick fires immediately; skip it
         loop {
             ticker.tick().await;
+            // A maintenance sweep is already rewriting images under its
+            // own lock discipline; skip this tick rather than race it.
+            // Safe either way (the entry's `image_generation` guards a
+            // stale republish), but skipping avoids flushing an entry
+            // mid-compaction for nothing.
+            if state.metrics().maintenance_active() {
+                continue;
+            }
             // Serialization and fsyncs are blocking work; keep the
             // async workers free while images land on disk.
             let flushed = tokio::task::block_in_place(|| state.flush_dirty());

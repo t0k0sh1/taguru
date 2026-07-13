@@ -490,7 +490,8 @@ fn load_image(path: &Path) -> Result<(Context, u64, String), String> {
 fn stats_line(context: &Context, image_bytes: u64, generation: &str) -> String {
     format!(
         "image {} ({generation}) · {} associations · {} concepts · {} labels · {} sources · \
-         footprint {} · applied_seq {}",
+         footprint {} · applied_seq {} · {} dead edge(s) ({:.1}% dead) · \
+         {} unlinked attribution(s) · {} arena slack",
         fmt_bytes(image_bytes),
         context.association_count(),
         context.concept_count(),
@@ -498,6 +499,10 @@ fn stats_line(context: &Context, image_bytes: u64, generation: &str) -> String {
         context.source_count(),
         fmt_bytes(context.footprint() as u64),
         context.applied_seq(),
+        context.dead_edges(),
+        context.dead_ratio() * 100.0,
+        context.dead_attributions(),
+        fmt_bytes(context.arena_slack() as u64),
     )
 }
 
