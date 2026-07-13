@@ -253,6 +253,9 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
     if let Some(error) = injected_append_failure() {
         return Err(error);
     }
+    if let Some(error) = crate::registry::injected_persistence_failure("WAL append") {
+        return Err(error);
+    }
     let mut buffer = Vec::new();
     for (offset, op) in ops.iter().enumerate() {
         let record = canonical_record_bytes(first_seq + offset as u64, op)?;
@@ -290,7 +293,7 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
     // whose content sync then failed leave an un-synced file that every
     // later append skipped forever.)
     if created && let Err(error) = crate::registry::fsync_parent_dir(path) {
-        let _ = fs::remove_file(path);
+        let _ = crate::registry::remove_persisted_file(path);
         return Err(error);
     }
     let length_before = file.metadata()?.len();
@@ -516,6 +519,9 @@ pub fn reset(path: &Path) -> io::Result<()> {
 pub fn truncate_to(path: &Path, len: u64) -> io::Result<()> {
     #[cfg(test)]
     if let Some(error) = injected_truncate_failure() {
+        return Err(error);
+    }
+    if let Some(error) = crate::registry::injected_persistence_failure("WAL truncate") {
         return Err(error);
     }
     let file = fs::OpenOptions::new().write(true).open(path)?;
