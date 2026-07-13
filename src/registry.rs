@@ -1070,7 +1070,10 @@ struct StateInner {
     /// most recently used context is never evicted, so one context
     /// larger than the whole budget still works — it just stays alone.
     cache_bytes: usize,
-    registry: RwLock<HashMap<String, Arc<Entry>>>,
+    /// BTreeMap keeps the directory listing (and `directory_page`'s
+    /// keyset seek) in name order for free — the same reason `groups`
+    /// below does.
+    registry: RwLock<BTreeMap<String, Arc<Entry>>>,
     /// Groups: bundles of context names and child-group names (a
     /// shallow DAG, at most [`groups::MAX_GROUP_DEPTH`] groups tall and
     /// never cyclic, each set at most [`groups::MAX_GROUP_MEMBERS`]
@@ -3633,15 +3636,52 @@ impl AppState {
     }
 
     /// The routing directory: every context's name, description, policy,
-    /// residency, and stats, in name order.
+    /// residency, and stats, in name order. For large registries, prefer
+    /// [`AppState::directory_page`], which seeks a page in O(log n + k)
+    /// instead of describing every entry on every call.
     pub fn directory(&self) -> Vec<DirectoryEntry> {
-        let mut directory: Vec<DirectoryEntry> = self
-            .snapshot()
+        self.snapshot()
+            .into_iter()
+            .filter_map(|(name, entry)| describe_entry(name, &entry))
+            .collect()
+    }
+
+    /// One name-ordered page of the routing directory plus the
+    /// cursor-independent total, seeked in O(log n + k) against the
+    /// `BTreeMap`-backed registry — the paged sibling of
+    /// [`AppState::directory`]. Cuts the page under the registry lock
+    /// (cloning only `Arc` handles, same as [`AppState::snapshot`]) and
+    /// describes the survivors after dropping it: a context's
+    /// `Entry::inner` lock must never be taken while the registry lock
+    /// is held, the same ordering `directory`/`lookup` already keep.
+    /// A page can come back shorter than `limit` if a context in it is
+    /// deleted in the instant between the seek and [`describe_entry`]
+    /// reading its slot — the same race `directory` already tolerates.
+    pub fn directory_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> (usize, Vec<DirectoryEntry>) {
+        use std::ops::Bound;
+
+        let (total, slice) = {
+            let registry = self.0.registry.read();
+            let start = match after {
+                Some(after) => Bound::Excluded(after),
+                None => Bound::Unbounded,
+            };
+            let slice: Vec<(String, Arc<Entry>)> = registry
+                .range::<str, _>((start, Bound::Unbounded))
+                .take(limit)
+                .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
+                .collect();
+            (registry.len(), slice)
+        };
+        let page = slice
             .into_iter()
             .filter_map(|(name, entry)| describe_entry(name, &entry))
             .collect();
-        directory.sort_by(|a, b| a.name.cmp(&b.name));
-        directory
+        (total, page)
     }
 
     /// One directory row by name, or `None` for an unknown context.
@@ -4643,7 +4683,7 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
 /// staged writes are deleted (never published, and nothing may linger
 /// as unbounded disk litter), and every context image found is
 /// registered cold, described by its sidecar snapshot.
-fn scan_data_dir(data_dir: &Path) -> io::Result<HashMap<String, Arc<Entry>>> {
+fn scan_data_dir(data_dir: &Path) -> io::Result<BTreeMap<String, Arc<Entry>>> {
     // Unfinished deletions first: a `.deleted` marker means delete()
     // acknowledged the removal but could not unlink the whole family —
     // without this sweep, a surviving `.ctx` would RESURRECT a context
@@ -4672,7 +4712,7 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<HashMap<String, Arc<Entry>>> {
             }
         }
     }
-    let mut registry = HashMap::new();
+    let mut registry = BTreeMap::new();
     let mut import_markers: Vec<PathBuf> = Vec::new();
     for dir_entry in fs::read_dir(data_dir)? {
         let path = dir_entry?.path();
@@ -4828,7 +4868,7 @@ fn sweep_membership(
 /// collection is small enough that checking it all costs nothing.
 fn reconcile_groups(
     data_dir: &Path,
-    registry: &HashMap<String, Arc<Entry>>,
+    registry: &BTreeMap<String, Arc<Entry>>,
     groups: &mut BTreeMap<String, GroupRecord>,
 ) {
     let scanned = groups.clone();
@@ -10440,6 +10480,34 @@ mod tests {
         assert!(!groups::group_path(&dir, &file_stem("drinks")).exists());
         assert_eq!(state.group_page(None, usize::MAX), (0, Vec::new()));
         assert!(state.directory().iter().any(|entry| entry.name == "beer"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn directory_page_seeks_by_name_with_a_cursor_independent_total() {
+        let dir = scratch_dir("directory-page");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        for name in ["cherry", "apple", "banana"] {
+            state.create(name, ContextMeta::default()).unwrap();
+        }
+
+        let (total, first) = state.directory_page(None, 2);
+        assert_eq!(total, 3);
+        let names: Vec<&str> = first.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["apple", "banana"]);
+
+        let (total, second) = state.directory_page(Some("banana"), 2);
+        assert_eq!(total, 3, "total stays constant across pages");
+        let names: Vec<&str> = second.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["cherry"]);
+
+        // Deleting a context drops it from the very next page.
+        state.delete("apple").unwrap().unwrap();
+        let (total, page) = state.directory_page(None, 10);
+        assert_eq!(total, 2);
+        let names: Vec<&str> = page.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["banana", "cherry"]);
 
         let _ = fs::remove_dir_all(dir);
     }

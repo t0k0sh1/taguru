@@ -267,12 +267,12 @@ Source code takes the same discipline; only the naming changes.
 | DELETE | `/groups/{name}` | delete the bundling only — member contexts and child groups are untouched (deleting a context or a group also drops it from every group) |
 | GET | `/groups/{name}/export` | the group as one import-stream record (a `taguru_group` JSON Lines line, not the JSON envelope) — `POST /import` (or `taguru import`) restores it as a create-or-replace of the WHOLE record; batches in the same stream apply first, so a group and its member contexts can travel together in any order |
 | POST | `/contexts/{name}/associations` | `[{subject,label,object,weight,source?,paragraph?}]` → applied count (`paragraph` locates the fact within `source` and is ignored without one) |
-| POST | `/contexts/{name}/recall` | `{cue, limit?}` → `{total, matches}` |
-| POST | `/recall` | `{contexts?:[name], groups?:[group], cue, limit?}` → `{total, matches}` — recall across several contexts at once (full names, and/or groups: each searches every context it reaches, nested children included, overlaps deduped; every match tagged with its `context`; past the limit the strongest \|weight\| survives, one scale across contexts) |
-| POST | `/contexts/{name}/query` | `{subject?, label?, object?, limit?}` — each position a string or an array → `{total, matches}` |
-| POST | `/query` | `{contexts?:[name], groups?:[group], subject?, label?, object?, limit?}` → `{total, matches}` — query across several contexts at once, same contract as `POST /recall` |
+| POST | `/contexts/{name}/recall` | `{cue, limit?, after?}` → `{total, matches}` |
+| POST | `/recall` | `{contexts?:[name], groups?:[group], cue, limit?, after?}` → `{total, matches}` — recall across several contexts at once (full names, and/or groups: each searches every context it reaches, nested children included, overlaps deduped; every match tagged with its `context`; past the limit the strongest \|weight\| survives, one scale across contexts) |
+| POST | `/contexts/{name}/query` | `{subject?, label?, object?, limit?, after?}` — each position a string or an array → `{total, matches}` |
+| POST | `/query` | `{contexts?:[name], groups?:[group], subject?, label?, object?, limit?, after?}` → `{total, matches}` — query across several contexts at once, same contract as `POST /recall` |
 | POST | `/contexts/{name}/describe` | `{concept}` → label outline (counts per role) / null |
-| POST | `/contexts/{name}/explore` | `{origins, max_depth?, limit?}` → `{total, matches:[{distance, path, association}]}` (hop cap 10, applied when omitted; truncation keeps the nearest) |
+| POST | `/contexts/{name}/explore` | `{origins, max_depth?, limit?, after?}` → `{total, matches:[{distance, path, association}]}` (hop cap 10, applied when omitted; truncation keeps the nearest) |
 | POST | `/contexts/{name}/activate` | `{origins, decay?=0.5, limit?=20}` → `{total, matches:[{strength, path, association}]}` |
 | POST | `/contexts/{name}/resolve` | `{cue, dice_floor?, semantic_floor?, limit?}` → `[{name, score, tier, kind?, gloss?}]` concept candidates (limit default/ceiling 1000) |
 | POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?, semantic_floor?, limit?}` → `[{name, score, tier, kind?, gloss?}]` relation candidates (limit default/ceiling 1000) |
@@ -289,7 +289,7 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/citations` | `{source, paragraph}` → `{text, source, section}` one verbatim paragraph by source and paragraph — the same paragraph `sources/search` would show at that paragraph (`section` is the label governing that paragraph, `null` outside every section the source has stored; `recall`/`query`/`explore`/`activate`/`unreachable_from` resolve the same label onto each attribution as `attributions[].section`) |
 | POST | `/contexts/{name}/sources/retract` | `{source}` → withdraw that source's contributions (diff sync) |
 | POST | `/contexts/{name}/associations/retract` | `{subject, label, object}` → `{retracted, attributions_removed}` — withdraw ONE association outright, every source's contribution to that edge (names resolve through aliases; `retracted: false` = no live edge, nothing changed; the edge row stays visible at weight 0 until compaction, and re-asserting later just works). For a fact that should never have been asserted; a fact that is merely CONTESTED wants a negative-weight assertion instead |
-| POST | `/contexts/{name}/unreachable_from` | `{origins, limit?}` → `{total, matches}` unreachable associations |
+| POST | `/contexts/{name}/unreachable_from` | `{origins, limit?, after?}` → `{total, matches}` unreachable associations |
 | POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?=0.6, cosine_floor?=0.6}` → spelling/synonym fork candidates |
 | GET | `/contexts/{name}/export` | the context as an import batch stream (JSON Lines body, not the JSON envelope) — one batch per source, create block first, aliases last; `POST /import` (or `taguru import`) restores it, per-source retract-then-apply, answering `{batches: [...]}` in stream order (`taguru_group` records ride the same stream, restore after every batch as whole-record replaces, and answer under `groups: [...]`) |
 | POST | `/contexts/{name}/compact` | rebuild the image without dead records (admin; the context's requests wait out the rebuild) → `{bytes_before, bytes_after, dead_edges, aliases_dropped}` |
@@ -361,11 +361,17 @@ resend) / `unauthorized` / `forbidden` / `no_context` / `no_source` /
 - Off-axis errors answer in the same shape: unknown path `404`, right
   path wrong verb `405`, broken JSON `400`, wrong Content-Type `415`,
   well-formed but mistyped JSON `422`.
-- recall / query / explore / unreachable_from default `limit` to 100.
-  `total` above the returned count = truncation
-  (recall/query/unreachable_from keep the strongest |weight|, explore
-  keeps the nearest hops). Narrow or raise `limit` — capped at 1000
-  everywhere.
+- recall / query / explore / unreachable_from (and the cross-context
+  `POST /recall` / `POST /query`) default `limit` to 100. `total`
+  above the returned count = truncation (recall/query/
+  unreachable_from keep the strongest |weight|, explore keeps the
+  nearest hops). Narrow or raise `limit` — capped at 1000 everywhere —
+  or page past it with `after`: copy `weight`/`subject`/`label`/
+  `object` (plus `context` too for the cross-context forms) from the
+  last match, or `distance`/`subject`/`label`/`object` from explore's
+  last recollection, verbatim from the previous page's last row.
+  `total` stays constant across pages; stop once `matches` comes back
+  empty.
 - A write that returned 200 is durable via the WAL (it survives a
   crash and replays on restart). Only when the server runs
   `TAGURU_WAL=0` can writes inside the flush interval (default 5 s)

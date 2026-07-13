@@ -152,6 +152,49 @@ def test_query_sends_one_or_many_and_drops_none() -> None:
     assert bodies[0] == '{"subject":"高瀬","label":["住所","職歴"]}'.encode()
 
 
+def test_after_cursor_rides_the_request_body_verbatim() -> None:
+    """#60: `after` is a plain dict (TypedDict) forwarded as-is — the
+    client mints no cursor of its own, it only relays the last page's
+    last row back to the server."""
+    bodies: list[bytes] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(req.content)
+        return ok_response({"total": 0, "matches": []})
+
+    client = sync_client(handler)
+
+    client.context("sake").recall(
+        "cue", after={"weight": 0.5, "subject": "a", "label": "b", "object": "c"}
+    )
+    assert bodies[-1] == (
+        b'{"cue":"cue","after":{"weight":0.5,"subject":"a","label":"b","object":"c"}}'
+    )
+
+    client.context("sake").explore(
+        "a", after={"distance": 2, "subject": "a", "label": "b", "object": "c"}
+    )
+    assert bodies[-1] == (
+        b'{"origins":["a"],"after":{"distance":2,"subject":"a","label":"b","object":"c"}}'
+    )
+
+    client.recall(
+        "cue",
+        contexts=["sake"],
+        after={
+            "weight": 0.5,
+            "context": "sake",
+            "subject": "a",
+            "label": "b",
+            "object": "c",
+        },
+    )
+    assert bodies[-1] == (
+        b'{"contexts":["sake"],"cue":"cue","after":'
+        b'{"weight":0.5,"context":"sake","subject":"a","label":"b","object":"c"}}'
+    )
+
+
 async def test_async_client_mirrors_sync() -> None:
     client = async_client(lambda _req: ok_response(DIRECTORY_ROW))
     entry = await client.contexts.get("sake")
