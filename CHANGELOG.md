@@ -200,6 +200,33 @@ Entries that change an on-disk format or a response shape say so.
   new counters; explain shares the live scoring code paths (one term
   walker, one BM25 addend, one fusion/trim), so it cannot disagree
   with the search it explains.
+- Match pagination past the 1,000-row cap (#60): `recall`/`query`/
+  `unreachable_from` (single- and cross-context) and `explore` used to
+  hard-truncate at `limit` (max 1000) with no way to reach whatever
+  sat past it — a corpus with 5,000 matches for a cue permanently hid
+  4,000 of them from every response. Each now accepts `after`, a
+  keyset cursor copied verbatim from the last row of the previous
+  page: `{weight, subject, label, object}` for `recall`/`query`/
+  `unreachable_from`, the same plus `context` for their cross-context
+  forms `POST /recall`/`POST /query` (two different target contexts
+  can independently hold an edge at the identical triple, so `context`
+  is the tiebreak they can't share on their own), and `{distance,
+  subject, label, object}` for `explore`. `total` stays constant
+  across pages — it's the population before the cursor and before
+  truncation, the same convention `aliases`/`labels`/`/contexts`
+  already use — so a client pages until `matches` comes back empty,
+  never until `total` changes. The server never mints an opaque
+  cursor; the client always derives the next `after` from the last
+  item of the page it just received. Rides MCP (`recall`/`query`/
+  `explore`/`audit_coverage`) and both SDKs as `MatchCursor`/
+  `CrossMatchCursor`/`ExploreCursor`. Wire-visible ordering note:
+  these endpoints now always sort their results (by weight or hop
+  distance, then lexicographically on `(subject, label, object)` as
+  the tiebreak) instead of only sorting when truncation kicked in —
+  keyset pagination requires one deterministic order on every page
+  whether or not a cursor is present, so a caller relying on the old
+  insertion-order tiebreak under the limit will see a different order
+  now.
 
 ### Changed
 - doc2query `questions` now index into their paragraph's BM25 postings
@@ -212,6 +239,25 @@ Entries that change an on-disk format or a response shape say so.
   digest) — a derived structure, so an old sidecar rebuilds itself on
   the residency's first search, in either upgrade direction; no
   action needed.
+- `aliases`/`labels`/`/contexts`'s directory paging no longer
+  re-collects and re-sorts the entire namespace on every page request
+  (O(n·log n) per page, O(n²·log n) to walk the whole thing) (#60):
+  each context now keeps a `BTreeMap`/`BTreeSet` index alongside its
+  existing storage, and the server registry does the same for
+  `/contexts`, so a page is a true keyset seek — O(log n + k),
+  independent of table size, for an unscoped key. A context-scoped
+  key's allow-list has no relation to name order, so `/contexts`
+  still sorts that (typically small, operator-configured) allow-list
+  per request rather than seeking the registry — `aliases`/`labels`
+  are unaffected, since they page one context's own namespace, not
+  the registry. Cross-context search (`POST /recall`/
+  `POST /query`, and cross-context `sources/search`) also no longer
+  fans out to its target contexts with a sequential `for` loop: every
+  target is now fetched concurrently, bounded by
+  `TAGURU_CROSS_SEARCH_CONCURRENCY` (default 4), so one slow or cold
+  context no longer blocks every context listed after it. Results and
+  `total` are unchanged in both cases — only the cost/wall-clock
+  improves.
 
 ### Fixed
 - `estimate`'s synthesis walked labels by round (`round % labels`), so
