@@ -36,13 +36,32 @@ jobs:
         run: |
           version=$(cargo metadata --format-version=1 | jq -r '.packages[] | select(.name == "gungraun").version')
           cargo install gungraun-runner --version "$version"
+      # A PR that adds (or temporarily removes) the `context` bench
+      # target itself has nothing on the base side to compare against —
+      # `cargo bench --bench context` fails outright rather than
+      # producing an empty baseline. Detect that case via `cargo
+      # metadata` (safe to run without a matching target; unlike
+      # `cargo bench`, it never tries to resolve one) and skip straight
+      # to an unguarded head run instead of failing the job.
       - name: Benchmark base branch
         run: |
           git checkout ${{ github.event.pull_request.base.sha }}
-          cargo bench --bench context -- --save-baseline=pr-base
+          if cargo metadata --format-version=1 --no-deps \
+              | jq -e '.packages[].targets[] | select(.name == "context" and (.kind | index("bench")))' \
+              > /dev/null; then
+            cargo bench --bench context -- --save-baseline=pr-base
+            echo "HAS_BASELINE=true" >> "$GITHUB_ENV"
+          else
+            echo "base branch has no 'context' bench target yet — skipping the baseline capture (likely the PR that adds it); head will run unguarded this once"
+            echo "HAS_BASELINE=false" >> "$GITHUB_ENV"
+          fi
       # soft_limits in benches/context.rs fails this step (exit code 3)
       # when Ir moves outside the configured regression margin.
       - name: Benchmark PR head
         run: |
           git checkout ${{ github.event.pull_request.head.sha }}
-          cargo bench --bench context -- --baseline=pr-base
+          if [ "$HAS_BASELINE" = "true" ]; then
+            cargo bench --bench context -- --baseline=pr-base
+          else
+            cargo bench --bench context
+          fi
