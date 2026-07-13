@@ -17,6 +17,8 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
+use taguru::deadline::Deadline;
+
 /// Why a batch is being embedded: glosses entering the store (`Index`)
 /// or a live cue looking things up (`Query`). Modern embedding APIs
 /// (Cohere, Voyage) encode documents and queries asymmetrically; the
@@ -44,7 +46,15 @@ impl EmbedPurpose {
 pub trait EmbeddingProvider: Send + Sync {
     fn model(&self) -> &str;
     /// Returns one vector per input text, all the same dimension.
-    fn embed(&self, texts: &[&str], purpose: EmbedPurpose) -> Result<Vec<Vec<f32>>, String>;
+    /// `deadline` bounds retries, not the first attempt — a single slow
+    /// round trip can still run past it (the provider's own timeout is
+    /// the only ceiling on one attempt's wall time).
+    fn embed(
+        &self,
+        texts: &[&str],
+        purpose: EmbedPurpose,
+        deadline: Deadline,
+    ) -> Result<Vec<Vec<f32>>, String>;
 }
 
 /// OpenAI-compatible `/embeddings` client: `{model, input: [...]}` in,
@@ -106,7 +116,12 @@ impl EmbeddingProvider for HttpEmbeddings {
         &self.model
     }
 
-    fn embed(&self, texts: &[&str], purpose: EmbedPurpose) -> Result<Vec<Vec<f32>>, String> {
+    fn embed(
+        &self,
+        texts: &[&str],
+        purpose: EmbedPurpose,
+        deadline: Deadline,
+    ) -> Result<Vec<Vec<f32>>, String> {
         // A client span per provider round trip — the one downstream
         // call whose latency Taguru's own timings cannot explain. Runs
         // on the caller's thread (block_in_place), so a request span
@@ -125,7 +140,9 @@ impl EmbeddingProvider for HttpEmbeddings {
         loop {
             match self.attempt(texts, purpose) {
                 Ok(vectors) => return Ok(vectors),
-                Err(refusal) if refusal.retryable && attempt < RETRY_ATTEMPTS => {
+                Err(refusal)
+                    if refusal.retryable && attempt < RETRY_ATTEMPTS && !deadline.expired() =>
+                {
                     attempt += 1;
                     tracing::warn!(
                         attempt,
@@ -133,7 +150,7 @@ impl EmbeddingProvider for HttpEmbeddings {
                         error = %refusal.message,
                         "transient embedding failure; retrying"
                     );
-                    std::thread::sleep(backoff);
+                    std::thread::sleep(backoff.min(deadline.remaining()));
                     backoff *= 5;
                 }
                 Err(refusal) => return Err(refusal.message),
@@ -804,7 +821,9 @@ mod tests {
                 .timeout(Duration::from_secs(5))
                 .build(),
         };
-        let vectors = provider.embed(&["x"], EmbedPurpose::Query).unwrap();
+        let vectors = provider
+            .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap();
         assert_eq!(vectors, vec![vec![0.6, 0.8]]);
         assert_eq!(hits.load(Ordering::SeqCst), 3, "503, 503, then the 200");
 
@@ -831,7 +850,9 @@ mod tests {
                 .timeout(Duration::from_secs(5))
                 .build(),
         };
-        let error = provider.embed(&["x"], EmbedPurpose::Query).unwrap_err();
+        let error = provider
+            .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap_err();
         assert!(error.contains("401"), "{error}");
         assert_eq!(hits.load(Ordering::SeqCst), 1, "a 4xx never retries");
     }
@@ -868,7 +889,7 @@ mod tests {
                 .build(),
         };
         let vectors = provider
-            .embed(&["こんにちは"], EmbedPurpose::Query)
+            .embed(&["こんにちは"], EmbedPurpose::Query, Deadline::unbounded())
             .unwrap();
         // 3-4-5 triangle, normalized on receipt.
         assert_eq!(vectors, vec![vec![0.6, 0.8]]);
@@ -920,7 +941,7 @@ mod tests {
                 .build(),
         };
         let error = provider
-            .embed(&["こんにちは"], EmbedPurpose::Query)
+            .embed(&["こんにちは"], EmbedPurpose::Query, Deadline::unbounded())
             .unwrap_err();
         assert!(error.contains("refusing to buffer"), "{error}");
     }
@@ -957,7 +978,11 @@ mod tests {
                 .build(),
         };
         let vectors = provider
-            .embed(&["first", "second"], EmbedPurpose::Query)
+            .embed(
+                &["first", "second"],
+                EmbedPurpose::Query,
+                Deadline::unbounded(),
+            )
             .unwrap();
         served.join().unwrap();
         // Input 0 keeps index 0's vector (3-4-5 → 0.6, 0.8); input 1 keeps
@@ -997,7 +1022,11 @@ mod tests {
                 .build(),
         };
         let error = provider
-            .embed(&["first", "second"], EmbedPurpose::Query)
+            .embed(
+                &["first", "second"],
+                EmbedPurpose::Query,
+                Deadline::unbounded(),
+            )
             .unwrap_err();
         served.join().unwrap();
         assert!(error.contains("widths"), "{error}");
@@ -1033,7 +1062,9 @@ mod tests {
                 .timeout(Duration::from_secs(5))
                 .build(),
         };
-        let error = provider.embed(&["first"], EmbedPurpose::Query).unwrap_err();
+        let error = provider
+            .embed(&["first"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap_err();
         served.join().unwrap();
         assert!(error.contains("non-numeric"), "{error}");
     }

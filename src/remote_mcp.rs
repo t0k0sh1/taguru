@@ -15,13 +15,16 @@
 //! dispatched inner request deliberately skips re-authentication and
 //! re-counting: one client request, one budget, one log line.
 
+use std::error::Error as _;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use http_body_util::LengthLimitError;
 use serde_json::{Value, json};
+use taguru::deadline::Deadline;
 use tower::ServiceExt;
 
 use crate::mcp;
@@ -31,12 +34,19 @@ use crate::mcp;
 /// `instructions` is the manual exactly as GET /protocol serves it;
 /// `key` is the OUTER request's authenticated identity, stamped onto
 /// each dispatched call so a scoped key's grant holds through the MCP
-/// surface exactly as over raw HTTP.
+/// surface exactly as over raw HTTP; `max_result_bytes` bounds how
+/// much of a dispatched tool's response this transport will buffer
+/// (see [`RESULT_TOO_BIG`]); `deadline` is the OUTER request's budget,
+/// stamped onto the dispatched call the same way — without this, a
+/// tool call would run past `enforce_timeout`'s race unchecked, since
+/// the dispatched request never passes back through that layer.
 pub async fn serve(
     dispatch: Router,
     instructions: Arc<String>,
     key: Option<crate::auth::AuthKey>,
     body: Bytes,
+    max_result_bytes: usize,
+    deadline: Deadline,
 ) -> Response {
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
         return rpc_over_http(
@@ -83,7 +93,16 @@ pub async fn serve(
         mcp::Call::Tool { name, arguments } => {
             let outcome = match mcp::route_tool(&name, &arguments) {
                 Ok((method, path, body)) => {
-                    call_inner(dispatch, method, &path, body, key.as_ref()).await
+                    call_inner(
+                        dispatch,
+                        method,
+                        &path,
+                        body,
+                        key.as_ref(),
+                        max_result_bytes,
+                        deadline,
+                    )
+                    .await
                 }
                 Err(error) => Err(error),
             };
@@ -105,6 +124,8 @@ async fn call_inner(
     path: &str,
     body: Option<Value>,
     key: Option<&crate::auth::AuthKey>,
+    max_result_bytes: usize,
+    deadline: Deadline,
 ) -> Result<String, String> {
     let builder = Request::builder().method(method).uri(path);
     let mut request = match body {
@@ -125,14 +146,20 @@ async fn call_inner(
     if let Some(key) = key {
         request.extensions_mut().insert(key.clone());
     }
+    // Likewise the outer request's time budget: dispatched calls never
+    // pass back through `enforce_timeout`, so this is the only way a
+    // handler's own deadline check sees it.
+    request.extensions_mut().insert(deadline);
     let response = match dispatch.oneshot(request).await {
         Ok(response) => response,
         Err(never) => match never {},
     };
     let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .map_err(|error| format!("response unreadable: {error}"))?;
+    let bytes = match axum::body::to_bytes(response.into_body(), max_result_bytes).await {
+        Ok(bytes) => bytes,
+        Err(error) if is_length_limit(&error) => return Err(RESULT_TOO_BIG.to_string()),
+        Err(error) => return Err(format!("response unreadable: {error}")),
+    };
     let text = String::from_utf8_lossy(&bytes).into_owned();
     if status.is_success() {
         Ok(text)
@@ -141,12 +168,34 @@ async fn call_inner(
     }
 }
 
+/// A tool result too big to buffer whole (`export_context` on a large
+/// context is the common case) — names the two uncapped escape
+/// hatches instead of echoing the percent-encoded tool path (which
+/// may carry a caller-supplied context or concept name) back into the
+/// error text.
+const RESULT_TOO_BIG: &str = "tool result exceeds the MCP response cap \
+    (TAGURU_MCP_MAX_RESULT_BYTES); narrow the call (a smaller `limit` works for most tools), or \
+    for a full-context export use GET /contexts/{name}/export over the raw HTTP API, or the \
+    `taguru export` CLI — both are uncapped";
+
+/// `axum::body::to_bytes` wraps a cap violation as an `axum::Error`
+/// whose `source()` is always the underlying `LengthLimitError` — the
+/// idiom axum's own docs use to tell "too big" apart from any other
+/// body read failure.
+fn is_length_limit(error: &axum::Error) -> bool {
+    error
+        .source()
+        .is_some_and(|source| source.is::<LengthLimitError>())
+}
+
 fn rpc_over_http(status: StatusCode, reply: Value) -> Response {
     (status, axum::Json(reply)).into_response()
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::Extension;
+
     use super::*;
 
     /// A context name long enough that its percent-encoded path exceeds
@@ -166,6 +215,8 @@ mod tests {
             Arc::new(String::new()),
             None,
             Bytes::from(body.to_string()),
+            usize::MAX,
+            Deadline::unbounded(),
         )
         .await;
         let status = response.status().as_u16();
@@ -184,5 +235,95 @@ mod tests {
                 .contains("could not build"),
             "{reply}"
         );
+    }
+
+    /// The idiom this function relies on: a capped body's error source
+    /// is always `LengthLimitError`, but any other read failure (here,
+    /// a plain io error standing in for a dropped connection) must not
+    /// be misdiagnosed as "too big".
+    #[tokio::test]
+    async fn is_length_limit_tells_a_capped_body_apart_from_any_other_read_failure() {
+        let over_cap = axum::body::to_bytes(Body::from(vec![0u8; 10]), 1)
+            .await
+            .unwrap_err();
+        assert!(is_length_limit(&over_cap));
+
+        let other_failure = axum::Error::new(std::io::Error::other("connection reset"));
+        assert!(!is_length_limit(&other_failure));
+    }
+
+    /// A dispatched tool call whose response outgrows the configured
+    /// cap comes back as a JSON-RPC success carrying an `isError` tool
+    /// result — never a panic or a half-buffered response — and the
+    /// message names both uncapped escape hatches.
+    #[tokio::test]
+    async fn a_tool_result_over_the_cap_is_refused_with_the_escape_hatches_named() {
+        let huge = Router::new().route(
+            "/contexts",
+            axum::routing::get(|| async { "x".repeat(1_000_000) }),
+        );
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_contexts", "arguments": {} },
+        });
+        let response = serve(
+            huge,
+            Arc::new(String::new()),
+            None,
+            Bytes::from(body.to_string()),
+            1024,
+            Deadline::unbounded(),
+        )
+        .await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("GET /contexts/{name}/export"), "{text}");
+        assert!(text.contains("taguru export"), "{text}");
+    }
+
+    /// The outer request's deadline never passes back through
+    /// `enforce_timeout` on the dispatched call — `call_inner` must
+    /// stamp it on directly, or a downstream handler's own budget
+    /// check always sees an unbounded deadline regardless of what the
+    /// caller actually has left.
+    #[tokio::test]
+    async fn the_outer_deadline_is_stamped_onto_the_dispatched_request() {
+        let echo = Router::new().route(
+            "/contexts",
+            axum::routing::get(|Extension(deadline): Extension<Deadline>| async move {
+                deadline.expired().to_string()
+            }),
+        );
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_contexts", "arguments": {} },
+        });
+        let already_expired = Deadline::after(std::time::Duration::ZERO);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let response = serve(
+            echo,
+            Arc::new(String::new()),
+            None,
+            Bytes::from(body.to_string()),
+            usize::MAX,
+            already_expired,
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("true"), "{reply}");
     }
 }

@@ -13,6 +13,7 @@
 //! `from_bytes`.
 
 pub mod context;
+pub mod deadline;
 
 // Shared with the binaries by dual inclusion — see the module doc.
 mod crc32c;

@@ -78,6 +78,10 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_PUBLIC_URL            public base URL; enables OAuth key delegation
                                on /mcp (claude.ai custom connectors)
   TAGURU_MAX_BODY_BYTES        request body cap (8 MiB)
+  TAGURU_MCP_MAX_RESULT_BYTES  POST /mcp per-tool-result buffering cap; past
+                               it a tool call fails with the export escape
+                               hatches named instead of buffering forever
+                               (8 MiB)
   TAGURU_REQUEST_TIMEOUT_SECS  per-request budget (30)
   TAGURU_RATE_LIMIT_PER_MIN    per-key request budget; past it 429 +
                                Retry-After (0 = off)
@@ -307,7 +311,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 31] = [
+const KNOWN_KEYS: [&str; 32] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -320,6 +324,7 @@ const KNOWN_KEYS: [&str; 31] = [
     "TAGURU_KEY_SCOPES",
     "TAGURU_PUBLIC_URL",
     "TAGURU_MAX_BODY_BYTES",
+    "TAGURU_MCP_MAX_RESULT_BYTES",
     "TAGURU_REQUEST_TIMEOUT_SECS",
     "TAGURU_RATE_LIMIT_PER_MIN",
     "TAGURU_AUTH_FAIL_LIMIT_PER_MIN",

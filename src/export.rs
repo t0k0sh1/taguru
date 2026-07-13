@@ -57,6 +57,7 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use taguru::context::Association;
+use taguru::deadline::{Deadline, DeadlineExceeded};
 
 use crate::groups::GroupRecord;
 use crate::passages::PassageRecord;
@@ -221,9 +222,18 @@ struct Bucket<'a> {
 }
 
 /// Renders one context's snapshot as the import batch stream. The
-/// only refusal is a real source colliding with a reserved id —
-/// everything else a context can hold has a rendering.
-pub(crate) fn render(context: &str, snapshot: &ExportSnapshot) -> Result<Rendered, String> {
+/// only refusal is a real source colliding with a reserved id, or
+/// `deadline` running out partway through — checked once per
+/// association, passage, and alias, and once per output batch, so a
+/// context large enough to make rendering itself slow cannot run past
+/// its budget. `snapshot` is already fully materialized by the time
+/// this runs (see `AppState::export_context`), so a deadline that is
+/// already tight when this is called cannot shorten that collection.
+pub(crate) fn render(
+    context: &str,
+    snapshot: &ExportSnapshot,
+    deadline: Deadline,
+) -> Result<Rendered, String> {
     let mut buckets: BTreeMap<&str, Bucket> = BTreeMap::new();
     // Names that will be interned by an exported association line —
     // what an alias's canonical must be among to survive the trip.
@@ -231,6 +241,9 @@ pub(crate) fn render(context: &str, snapshot: &ExportSnapshot) -> Result<Rendere
     let mut live_labels: BTreeSet<&str> = BTreeSet::new();
 
     for association in &snapshot.associations {
+        if deadline.expired() {
+            return Err(DeadlineExceeded.to_string());
+        }
         if association.count == 0 {
             // Every assertion was retracted; the edge is dead space the
             // append-only image keeps and the export sheds.
@@ -295,6 +308,9 @@ pub(crate) fn render(context: &str, snapshot: &ExportSnapshot) -> Result<Rendere
     }
 
     for (source, record) in &snapshot.passages {
+        if deadline.expired() {
+            return Err(DeadlineExceeded.to_string());
+        }
         if source == UNSOURCED_SOURCE || source == EMPTY_SOURCE {
             return Err(format!(
                 "source id '{source}' is reserved by export — rename the source and re-export"
@@ -306,6 +322,9 @@ pub(crate) fn render(context: &str, snapshot: &ExportSnapshot) -> Result<Rendere
     let mut aliases: Vec<AliasLine> = Vec::new();
     let mut aliases_dropped = 0usize;
     for (alias, canonical) in &snapshot.concept_aliases {
+        if deadline.expired() {
+            return Err(DeadlineExceeded.to_string());
+        }
         if live_concepts.contains(canonical.as_str()) {
             aliases.push(AliasLine {
                 alias,
@@ -317,6 +336,9 @@ pub(crate) fn render(context: &str, snapshot: &ExportSnapshot) -> Result<Rendere
         }
     }
     for (alias, canonical) in &snapshot.label_aliases {
+        if deadline.expired() {
+            return Err(DeadlineExceeded.to_string());
+        }
         if live_labels.contains(canonical.as_str()) {
             aliases.push(AliasLine {
                 alias,
@@ -353,6 +375,9 @@ pub(crate) fn render(context: &str, snapshot: &ExportSnapshot) -> Result<Rendere
         );
     } else {
         for (index, (source, bucket)) in buckets.iter().enumerate() {
+            if deadline.expired() {
+                return Err(DeadlineExceeded.to_string());
+            }
             push_line(
                 &mut stream,
                 &HeaderLine {
@@ -571,13 +596,17 @@ fn export_group_file(
 
 fn export_one(state: &AppState, name: &str, out: &std::path::Path) -> Result<String, String> {
     let snapshot = state
-        .export_context(name)
+        .export_context(name, Deadline::unbounded())
         .map_err(|failure| match failure {
             AccessError::NotFound => "no such context".to_string(),
             AccessError::Load(error) => error,
             AccessError::Unpersisted(error) => error,
+            // The CLI runs with Deadline::unbounded(), which never
+            // expires — unreachable in practice, kept for
+            // exhaustiveness.
+            AccessError::DeadlineExceeded => "deadline exceeded".to_string(),
         })?;
-    let rendered = render(name, &snapshot)?;
+    let rendered = render(name, &snapshot, Deadline::unbounded())?;
     let path = out.join(format!("{}.jsonl", crate::registry::file_stem(name)));
     // Stage + fsync + rename, never a truncating write in place: a
     // backup that "wrote" but never reached the platter is worse than a
@@ -735,6 +764,7 @@ mod tests {
                     // Will be fully retracted: must shed on export.
                     op("青嶺酒造", "廃止銘柄", "旧銘", 1.0, Some("gone.md"), None),
                 ],
+                Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
@@ -776,8 +806,10 @@ mod tests {
             .unwrap();
         state_a.retract_source("sake", "gone.md").unwrap();
 
-        let snapshot_a = state_a.export_context("sake").unwrap();
-        let rendered = render("sake", &snapshot_a).unwrap();
+        let snapshot_a = state_a
+            .export_context("sake", Deadline::unbounded())
+            .unwrap();
+        let rendered = render("sake", &snapshot_a, Deadline::unbounded()).unwrap();
         assert_eq!(rendered.aliases_dropped, 1, "the edgeless canonical");
 
         // Restore into a fresh directory, twice — the second pass
@@ -797,13 +829,16 @@ mod tests {
                     .unwrap();
             }
         }
-        let snapshot_b = state_b.export_context("sake").unwrap();
+        let snapshot_b = state_b
+            .export_context("sake", Deadline::unbounded())
+            .unwrap();
 
         // The restored context has a REAL attribution to the reserved
         // "export:unsourced" id now (import stamped it from the batch
         // header). Re-rendering must NOT refuse — it folds back into a
         // sourceless batch — so the backup stream is a true fixed point.
-        let rendered_b = render("sake", &snapshot_b).expect("re-export must not refuse");
+        let rendered_b =
+            render("sake", &snapshot_b, Deadline::unbounded()).expect("re-export must not refuse");
         let rendered_c = {
             let state_c =
                 crate::registry::AppState::boot(scratch_dir("roundtrip-c"), usize::MAX, None)
@@ -816,7 +851,14 @@ mod tests {
                     .map_err(|r| r.text())
                     .unwrap();
             }
-            render("sake", &state_c.export_context("sake").unwrap()).unwrap()
+            render(
+                "sake",
+                &state_c
+                    .export_context("sake", Deadline::unbounded())
+                    .unwrap(),
+                Deadline::unbounded(),
+            )
+            .unwrap()
         };
         assert_eq!(
             rendered_b.stream, rendered_c.stream,
@@ -914,6 +956,7 @@ mod tests {
                     paragraph: Some(2),
                 }],
             )]),
+            Deadline::unbounded(),
         )
         .unwrap();
         assert_eq!(rendered.batches, 1);
@@ -939,7 +982,7 @@ mod tests {
             }],
         );
         edge.weight = (2.0 + 4.0) / 3.0; // attributed 2.0 + unsourced 4.0
-        let rendered = render("sake", &snapshot(vec![edge])).unwrap();
+        let rendered = render("sake", &snapshot(vec![edge]), Deadline::unbounded()).unwrap();
         assert_eq!(rendered.batches, 2);
         let unsourced: Vec<&str> = rendered
             .stream
@@ -956,7 +999,12 @@ mod tests {
 
     #[test]
     fn fully_retracted_edges_render_as_nothing() {
-        let rendered = render("sake", &snapshot(vec![association(0, Vec::new())])).unwrap();
+        let rendered = render(
+            "sake",
+            &snapshot(vec![association(0, Vec::new())]),
+            Deadline::unbounded(),
+        )
+        .unwrap();
         assert_eq!(rendered.association_lines, 0);
         assert_eq!(rendered.batches, 1, "the empty batch still carries create");
         assert!(rendered.stream.contains(EMPTY_SOURCE));
@@ -978,7 +1026,7 @@ mod tests {
                 paragraph: None,
             }],
         );
-        let rendered = render("sake", &snapshot(vec![edge])).unwrap();
+        let rendered = render("sake", &snapshot(vec![edge]), Deadline::unbounded()).unwrap();
         assert_eq!(rendered.batches, 1, "just the reserved batch");
         assert_eq!(rendered.association_lines, 2);
         assert!(
@@ -1004,7 +1052,7 @@ mod tests {
                 paragraph: None,
             }],
         );
-        let refusal = render("sake", &snapshot(vec![edge])).unwrap_err();
+        let refusal = render("sake", &snapshot(vec![edge]), Deadline::unbounded()).unwrap_err();
         assert!(refusal.contains("reserved"), "{refusal}");
     }
 
@@ -1024,7 +1072,7 @@ mod tests {
             ("orphan".to_string(), "退役した概念".to_string()),
         ];
         snapshot.label_aliases = vec![("toji".to_string(), "杜氏".to_string())];
-        let rendered = render("sake", &snapshot).unwrap();
+        let rendered = render("sake", &snapshot, Deadline::unbounded()).unwrap();
         assert_eq!(rendered.aliases, 2);
         assert_eq!(rendered.aliases_dropped, 1);
         let last_lines: Vec<&str> = rendered.stream.lines().rev().take(2).collect();

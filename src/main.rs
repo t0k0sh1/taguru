@@ -32,6 +32,7 @@ use axum::Router;
 use axum::routing::{get, post};
 use embedding::EmbeddingProvider;
 use registry::AppState;
+use taguru::deadline::Deadline;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
@@ -92,6 +93,10 @@ async fn serve() {
     let flush_secs = resolve_flush_secs(env_number("TAGURU_FLUSH_SECS", 5));
     let max_body_bytes =
         resolve_body_bytes(env_number("TAGURU_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES));
+    let mcp_max_result_bytes = resolve_mcp_max_result_bytes(env_number(
+        "TAGURU_MCP_MAX_RESULT_BYTES",
+        DEFAULT_MCP_MAX_RESULT_BYTES,
+    ));
     let timeout_secs = resolve_timeout_secs(env_number("TAGURU_REQUEST_TIMEOUT_SECS", 30));
     let rate_per_minute = resolve_per_minute(
         "TAGURU_RATE_LIMIT_PER_MIN",
@@ -259,12 +264,16 @@ async fn serve() {
     let app = app.route(
         "/mcp",
         post(
-            move |key: Option<axum::Extension<auth::AuthKey>>, body: axum::body::Bytes| {
+            move |deadline: axum::Extension<Deadline>,
+                  key: Option<axum::Extension<auth::AuthKey>>,
+                  body: axum::body::Bytes| {
                 remote_mcp::serve(
                     mcp_dispatch.clone(),
                     Arc::clone(&mcp_instructions),
                     key.map(|extension| extension.0),
                     body,
+                    mcp_max_result_bytes,
+                    deadline.0,
                 )
             },
         ),
@@ -369,6 +378,7 @@ async fn serve() {
         wal_max_mib = config.wal_max_bytes / (1024 * 1024),
         passages_wal_max_mib = config.passages_wal_max_bytes / (1024 * 1024),
         max_body_mib = max_body_bytes / (1024 * 1024),
+        mcp_max_result_mib = mcp_max_result_bytes / (1024 * 1024),
         timeout_secs,
         auth_enabled = auth_configured,
         "server ready",
@@ -522,7 +532,7 @@ fn spawn_flusher(state: AppState, flush_secs: usize, auto_embed: bool) {
             if auto_embed && !flushed.is_empty() {
                 tokio::task::block_in_place(|| {
                     for name in &flushed {
-                        match state.refresh_embeddings(name) {
+                        match state.refresh_embeddings(name, Deadline::unbounded()) {
                             None | Some(Ok((0, _))) => {}
                             Some(Ok((embedded, _))) => {
                                 info!(context = %name, embedded, "auto-embedded glosses");
@@ -542,7 +552,7 @@ fn spawn_flusher(state: AppState, flush_secs: usize, auto_embed: bool) {
                 if !stale.is_empty() {
                     tokio::task::block_in_place(|| {
                         for name in &stale {
-                            match state.refresh_passage_embeddings(name) {
+                            match state.refresh_passage_embeddings(name, Deadline::unbounded()) {
                                 None => {}
                                 Some(Ok(outcome)) if outcome.embedded == 0 => {}
                                 Some(Ok(outcome)) => {
@@ -731,6 +741,38 @@ pub(crate) fn resolve_body_bytes(requested: usize) -> usize {
     }
 }
 
+const DEFAULT_MCP_MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Below this a cap is almost certainly a fat-fingered value (a byte
+/// count typed where a kibibyte count was meant) rather than a
+/// deliberate small budget — still honored, just flagged.
+const MCP_MAX_RESULT_BYTES_WARN_FLOOR: usize = 64 * 1024;
+
+/// The same "0 = unbounded is a trap" reasoning as
+/// [`resolve_body_bytes`]: an uncapped `POST /mcp` tool result hands
+/// an allocation lever to whoever can reach a tool that returns a lot
+/// of data (`export_context` on a large context, chiefly), so 0
+/// floors to the default instead of disabling the cap. Anything
+/// nonzero but under 64 KiB is small enough to likely be a mistake —
+/// obeyed regardless, just logged.
+pub(crate) fn resolve_mcp_max_result_bytes(requested: usize) -> usize {
+    if requested == 0 {
+        warn!(
+            "TAGURU_MCP_MAX_RESULT_BYTES=0 would refuse every tool result; using the 8 MiB \
+             default (set an explicit larger cap for bigger results)"
+        );
+        return DEFAULT_MCP_MAX_RESULT_BYTES;
+    }
+    if requested < MCP_MAX_RESULT_BYTES_WARN_FLOOR {
+        warn!(
+            requested,
+            "TAGURU_MCP_MAX_RESULT_BYTES is under 64 KiB — most tool results will fit, but \
+             double check this wasn't meant to be a larger unit"
+        );
+    }
+    requested
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,6 +789,19 @@ mod tests {
         assert_eq!(resolve_timeout_secs(30), 30);
         assert_eq!(resolve_body_bytes(0), DEFAULT_MAX_BODY_BYTES);
         assert_eq!(resolve_body_bytes(1024), 1024);
+    }
+
+    #[test]
+    fn zero_mcp_result_cap_is_floored_but_a_small_one_is_still_obeyed() {
+        assert_eq!(
+            resolve_mcp_max_result_bytes(0),
+            DEFAULT_MCP_MAX_RESULT_BYTES
+        );
+        assert_eq!(resolve_mcp_max_result_bytes(1024), 1024);
+        assert_eq!(
+            resolve_mcp_max_result_bytes(DEFAULT_MCP_MAX_RESULT_BYTES),
+            DEFAULT_MCP_MAX_RESULT_BYTES
+        );
     }
 
     #[test]

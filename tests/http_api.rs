@@ -2049,6 +2049,46 @@ fn a_custom_request_timeout_does_not_disturb_fast_requests() {
     assert_eq!(server.call("GET", "/contexts", None).0, 200);
 }
 
+/// The wall-clock proof for the `block_in_place` deadline work: a
+/// multi-batch import large enough that landing every batch takes far
+/// longer than the configured budget must still answer in roughly the
+/// budget's time, not in the time the whole loop would take to drain.
+#[test]
+fn a_tight_timeout_cuts_a_multi_batch_import_short_instead_of_running_it_to_completion() {
+    const BATCH_COUNT: usize = 8_000;
+    let server = Server::start_with_env("timeout-import", &[("TAGURU_REQUEST_TIMEOUT_SECS", "1")]);
+    let mut stream = String::new();
+    stream.push_str(
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-0\", \
+         \"create\": {\"description\": \"d\"}}\n",
+    );
+    stream
+        .push_str("{\"subject\": \"s0\", \"label\": \"l\", \"object\": \"o0\", \"weight\": 1.0}\n");
+    for i in 1..BATCH_COUNT {
+        stream.push_str(&format!(
+            "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-{i}\"}}\n"
+        ));
+        stream.push_str(&format!(
+            "{{\"subject\": \"s{i}\", \"label\": \"l\", \"object\": \"o{i}\", \"weight\": 1.0}}\n"
+        ));
+    }
+
+    let started = std::time::Instant::now();
+    let (status, body) = post_import(&server, &stream, None);
+    let elapsed = started.elapsed();
+
+    assert_eq!(status, 408, "{body}");
+    assert_eq!(body["code"], json!("timeout"), "{body}");
+    // Each fsync-bearing batch costs roughly 10ms, so draining all
+    // 8,000 would take over a minute; answering near the 1-second
+    // budget instead is the point of this test.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "took {elapsed:?} — the deadline check inside the batch loop should have cut \
+         this short instead of letting every batch land first"
+    );
+}
+
 #[test]
 fn metrics_expose_prometheus_text_reflecting_traffic() {
     let server = Server::start("metrics");
@@ -2256,6 +2296,99 @@ fn oversized_input_lists_are_refused_before_any_work() {
             .unwrap()
             .contains("per-request limit"),
         "{parsed}"
+    );
+}
+
+#[test]
+fn queries_with_no_pinned_position_are_refused_but_one_field_is_enough() {
+    let server = Server::start("empty-query");
+    server.ok(
+        "PUT",
+        "/contexts/empty-query",
+        Some(json!({"description": "d"})),
+    );
+
+    // Single-context query: omitting subject/label/object entirely
+    // would otherwise materialize and rank every edge in the context.
+    let (status, parsed) = server.call("POST", "/contexts/empty-query/query", Some(json!({})));
+    assert_eq!(status, 400, "{parsed}");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("must pin at least one value"),
+        "{parsed}"
+    );
+
+    // Explicit nulls are indistinguishable from omission.
+    let (status, parsed) = server.call(
+        "POST",
+        "/contexts/empty-query/query",
+        Some(json!({"subject": null, "label": null, "object": null})),
+    );
+    assert_eq!(status, 400, "{parsed}");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("must pin at least one value"),
+        "{parsed}"
+    );
+
+    // Pinning just one of the three is enough to pass, even with no
+    // matches to return.
+    server.ok(
+        "POST",
+        "/contexts/empty-query/query",
+        Some(json!({"subject": "x"})),
+    );
+
+    // The cross-context route refuses the same way...
+    let (status, parsed) =
+        server.call("POST", "/query", Some(json!({"contexts": ["empty-query"]})));
+    assert_eq!(status, 400, "{parsed}");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("must pin at least one value"),
+        "{parsed}"
+    );
+
+    // ...nulls fold into the same refusal there too...
+    let (status, parsed) = server.call(
+        "POST",
+        "/query",
+        Some(json!({
+            "contexts": ["empty-query"],
+            "subject": null,
+            "label": null,
+            "object": null
+        })),
+    );
+    assert_eq!(status, 400, "{parsed}");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("must pin at least one value"),
+        "{parsed}"
+    );
+
+    // ...and one pinned field passes cross-context too.
+    server.ok(
+        "POST",
+        "/query",
+        Some(json!({"contexts": ["empty-query"], "object": "x"})),
+    );
+
+    // The refusal reaches through the MCP tool-call path as well.
+    let reply = server.call_tool(1, "query", json!({"context": "empty-query"}));
+    assert_eq!(reply["isError"], true, "{reply}");
+    let error_text = reply["content"][0]["text"].as_str().unwrap();
+    assert!(
+        error_text.contains("must pin at least one value"),
+        "{error_text}"
     );
 }
 
@@ -6996,6 +7129,42 @@ fn flush_and_export_ride_the_mcp_transport() {
     let text = group["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("taguru_group"), "{text}");
     assert!(text.contains("\"kura\""), "{text}");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
+
+/// A tool result too big to buffer whole (export_context on a context
+/// with enough associations) is refused with the two uncapped escape
+/// hatches named — while the raw HTTP export route it names stays
+/// completely unaffected by the MCP cap.
+#[test]
+fn an_oversized_mcp_tool_result_is_capped_but_the_raw_export_route_is_not() {
+    let server =
+        Server::start_with_env("mcp-result-cap", &[("TAGURU_MCP_MAX_RESULT_BYTES", "1024")]);
+    server.ok("PUT", "/contexts/big", Some(json!({"description": "d"})));
+    let batch: Vec<Value> = (0..200)
+        .map(|i| {
+            json!({"subject": format!("s{i}"), "label": "rel", "object": format!("o{i}"),
+                   "weight": 1.0, "source": "doc"})
+        })
+        .collect();
+    server.ok(
+        "POST",
+        "/contexts/big/associations",
+        Some(Value::Array(batch)),
+    );
+
+    let reply = server.call_tool(1, "export_context", json!({"context": "big"}));
+    assert_eq!(reply["isError"], true, "{reply}");
+    let text = reply["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("GET /contexts/{name}/export"), "{text}");
+    assert!(text.contains("taguru export"), "{text}");
+
+    // The raw HTTP export route this message points at is uncapped —
+    // the same 200-association context exports whole over it.
+    let (status, exported) = server.call("GET", "/contexts/big/export", None);
+    assert_eq!(status, 200, "{exported}");
+    let stream = exported.as_str().expect("export body is JSONL");
+    assert!(stream.contains("\"s199\""), "{stream}");
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
 
