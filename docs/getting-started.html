@@ -141,6 +141,16 @@ curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application
       reached), and the <code>attributions</code> of its sources. The full endpoint list and the
       playbook are distributed as-is by the running server at <code>GET /protocol</code>.
     </p>
+    <p class="note warn">
+      The one-fact request above is only the smallest example. In an ingest loop, collect one
+      document's facts and send them in one <code>/associations</code> request (up to 10,000
+      associations): every request pays for a durable write and stalls that context's readers
+      while its fsync lands, making single-fact calls roughly two orders of magnitude more
+      expensive per association than batches. More concurrency does not help one context — its
+      writes serialize by design — though different contexts write in parallel. For a corpus or
+      migration, use <code>POST /import</code> on a running server or <code>taguru import</code>
+      offline instead.
+    </p>
   </section>
 
   <section id="docker">
