@@ -213,6 +213,22 @@ Entries that change an on-disk format or a response shape say so.
   the residency's first search, in either upgrade direction; no
   action needed.
 
+### Fixed
+- `estimate`'s synthesis walked labels by round (`round % labels`), so
+  the number of distinct labels actually materialized in the measured
+  context was capped at the round count (`associations / concepts`),
+  not at the requested `--labels`. The default shape
+  (`concepts = associations / 2`) has exactly 2 rounds, so every
+  default-shape run measured a context holding only 2 labels while the
+  header printed the planned 50 — and an explicit `--labels N` for a
+  label-rich workload was silently capped the same way, with no
+  warning. The label index is now offset by the subject index
+  (`(round + subject_index) % labels`), so every requested label
+  appears from round 0 whenever `concepts >= labels` (every realistic
+  shape, including the default); a new warning also fires on the
+  residual case where `labels > concepts` and rounds are too few to
+  cover them all.
+
 ## [0.2.0] - 2026-07-12
 
 ### Added
