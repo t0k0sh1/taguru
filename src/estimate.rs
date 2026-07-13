@@ -78,6 +78,14 @@ pub fn run(args: &[String]) -> i32 {
             context.association_count()
         );
     }
+    if (context.label_count() as u64) < measured_labels {
+        eprintln!(
+            "taguru: estimate: warning: only {} of the requested {measured_labels} labels \
+             appeared in the measured synthesis — the estimate below is a lower bound, not a \
+             measurement of the requested shape",
+            context.label_count()
+        );
+    }
     let factor = plan.associations as f64 / measured_associations as f64;
     let footprint = (context.footprint() as f64 * factor) as u64;
     let image = (context.to_bytes().len() as f64 * factor) as u64;
@@ -254,7 +262,7 @@ fn synthesize(
     for i in 0..associations {
         let subject_index = i % concepts;
         let round = i / concepts;
-        let label_index = round % labels;
+        let label_index = (round + subject_index) % labels;
         let object_offset = 1 + (round / labels) % (concepts - 1);
         let object_index = (subject_index + object_offset) % concepts;
         let subject = synthetic_name('c', subject_index, name_bytes);
@@ -295,9 +303,22 @@ mod tests {
         assert_eq!(context.association_count(), 10_000);
         assert_eq!(context.concept_count(), 500);
         assert_eq!(context.source_count(), 100);
-        // Label coverage is bounded by the rounds (associations /
-        // concepts); at 20 rounds all 20 labels are touched.
+        // Label coverage is bounded by min(labels, concepts), not by
+        // the round count: the label index is offset by the subject
+        // index, so with concepts >= labels every label is already
+        // touched within round 0 alone.
         assert_eq!(context.label_count(), 20);
+    }
+
+    #[test]
+    fn synthesis_covers_every_label_even_with_only_a_couple_of_rounds() {
+        // The CLI default shape (concepts = associations / 2, labels =
+        // 50) yields only 2 rounds per subject. Label coverage must
+        // not depend on round count when concepts >= labels — this is
+        // the regression test for issue #74, where the default shape
+        // silently measured only 2 of the 50 planned labels.
+        let context = synthesize(1_000, 500, 50, 100, 24);
+        assert_eq!(context.label_count(), 50);
     }
 
     /// With a small explicit vocabulary, the old "offset object and
