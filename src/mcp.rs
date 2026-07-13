@@ -9,10 +9,22 @@
 //! Compiled into both binaries via `#[path]` — deliberately not part
 //! of the library surface, which stays [`crate::context`]-only.
 
+use std::collections::HashSet;
+
 use serde_json::{Value, json};
 
 /// Spoken when the client does not name a protocol version itself.
 pub const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Ceiling on the `import` tool's `stream` argument. `taguru-mcp` does
+/// not link `ingest.rs` (its only path to the server is HTTP), so
+/// `ingest::MAX_LINE_BYTES` is unreachable here — this is its own
+/// bound, checked before the stream ever leaves the process. The
+/// transport's own body cap (`TAGURU_MAX_BODY_BYTES`, 8 MiB default)
+/// is not a substitute: it wraps the *outer* `/mcp` JSON-RPC envelope,
+/// and a stream JSON-quoted into a string argument (every newline
+/// escaped to `\n`) runs close to double its raw size.
+const MAX_IMPORT_STREAM_BYTES: usize = 32 * 1024 * 1024;
 
 /// One decoded JSON-RPC message, sorted by what it obliges us to do.
 pub enum Message {
@@ -201,6 +213,7 @@ fn query_string(arguments: &Value, keys: &[&str]) -> String {
             let text = match value {
                 Value::String(text) => segment(text),
                 Value::Number(number) => number.to_string(),
+                Value::Bool(boolean) => boolean.to_string(),
                 _ => return None,
             };
             Some(format!("{key}={text}"))
@@ -247,7 +260,8 @@ pub fn tool_definitions() -> Vec<Value> {
             object_schema(
                 json!({
                     "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by name (default/ceiling 1000)" },
-                    "after": { "type": "string", "description": "only contexts whose name sorts strictly after this one" }
+                    "after": { "type": "string", "description": "only contexts whose name sorts strictly after this one" },
+                    "pinned": { "type": "boolean", "description": "only contexts with this pinned state" }
                 }),
                 &[],
             ),
@@ -284,6 +298,17 @@ pub fn tool_definitions() -> Vec<Value> {
             "delete_context",
             "Delete a context and its files (irreversible).",
             object_schema(json!({ "name": { "type": "string" } }), &["name"]),
+        ),
+        (
+            "rename_context",
+            "Rename a context (admin role): the whole file family moves to the new name and every group naming it is rewritten to match. Fails if the destination name is already taken.",
+            object_schema(
+                json!({
+                    "name": { "type": "string" },
+                    "to": { "type": "string", "description": "the new name" }
+                }),
+                &["name", "to"],
+            ),
         ),
         (
             "list_groups",
@@ -336,6 +361,17 @@ pub fn tool_definitions() -> Vec<Value> {
             "delete_group",
             "Delete a group (irreversible). Only the bundling goes; the member contexts, the child groups, and their data are untouched — parents naming the group just drop the child.",
             object_schema(json!({ "name": { "type": "string" } }), &["name"]),
+        ),
+        (
+            "rename_group",
+            "Rename a group (admin role): the group's file moves to the new name and every OTHER group naming it as a child is rewritten to match. Fails if the destination name is already taken.",
+            object_schema(
+                json!({
+                    "name": { "type": "string" },
+                    "to": { "type": "string", "description": "the new name" }
+                }),
+                &["name", "to"],
+            ),
         ),
         (
             "add_associations",
@@ -419,7 +455,8 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "limit": { "type": "integer", "minimum": 0, "description": "page size (default/ceiling 1000)" },
-                    "after": { "type": "string", "description": "only ids sorting strictly after this one" }
+                    "after": { "type": "string", "description": "only ids sorting strictly after this one" },
+                    "prefix": { "type": "string", "description": "only ids starting with this text" }
                 }),
                 &["context"],
             ),
@@ -554,7 +591,8 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "limit": { "type": "integer", "minimum": 0, "description": "page size (default/ceiling 1000)" },
-                    "after": { "type": "string", "description": "only labels sorting strictly after this one" }
+                    "after": { "type": "string", "description": "only labels sorting strictly after this one" },
+                    "prefix": { "type": "string", "description": "only labels starting with this text" }
                 }),
                 &["context"],
             ),
@@ -566,7 +604,8 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "limit": { "type": "integer", "minimum": 0, "description": "page size (default/ceiling 1000)" },
-                    "after": { "type": "string", "description": "'concept:<alias>' or 'label:<alias>' — the last entry of the previous page" }
+                    "after": { "type": "string", "description": "'concept:<alias>' or 'label:<alias>' — the last entry of the previous page" },
+                    "prefix": { "type": "string", "description": "only aliases (in either namespace) starting with this text" }
                 }),
                 &["context"],
             ),
@@ -660,6 +699,37 @@ pub fn tool_definitions() -> Vec<Value> {
             }),
         ),
         (
+            "retrieve",
+            "The composed retrieval loop the SDKs' Context.retrieve() runs, as one call: resolve each origin cue to an anchor (auto-picking the top candidate; every candidate, gloss included, still comes back under resolved so a bad auto-pick is visible), describe each anchor, gather associations (query when labels pins the facets, activate always), fetch a citation for every located attribution, and optionally fall back to passage search. origins must already be extracted entity names, not a question — decomposing a question and phrasing a declarative text_fallback_query are the caller's job. citations rides back as a list of {source, paragraph, citation} (paragraphs missing a stored passage are silently skipped, same as the SDKs).",
+            object_schema(
+                json!({
+                    "context": context,
+                    "origins": {
+                        "type": ["string", "array"],
+                        "items": { "type": "string" },
+                        "description": "cue(s) to resolve into anchors"
+                    },
+                    "labels": {
+                        "type": ["string", "array"],
+                        "items": { "type": "string" },
+                        "description": "relation labels to query on, alongside the always-run activate"
+                    },
+                    "dice_floor": { "type": "number", "description": "one-call override of the resolve fuzzy floor" },
+                    "semantic_floor": { "type": "number", "description": "one-call override of the resolve semantic floor" },
+                    "resolve_limit": { "type": "integer", "minimum": 0, "description": "max resolve candidates per origin (default/ceiling 1000)" },
+                    "auto_pick": { "type": "boolean", "description": "adopt each origin's top resolve candidate as its anchor; false uses the cue itself verbatim (default true)" },
+                    "describe_first": { "type": "boolean", "description": "describe every anchor before gathering associations (default true)" },
+                    "activate_decay": { "type": "number", "description": "activate's decay (default 0.5)" },
+                    "activate_limit": { "type": "integer", "minimum": 0, "description": "activate's limit (default 20)" },
+                    "fetch_citations": { "type": "boolean", "description": "resolve every located attribution into a cited passage (default true)" },
+                    "text_fallback_query": { "type": "string", "description": "declarative-phrasing query for a search_passages fallback pass; omitted runs no fallback" },
+                    "text_fallback_only_if_empty": { "type": "boolean", "description": "only run the fallback when no associations were gathered (default true)" },
+                    "search_limit": { "type": "integer", "minimum": 0, "description": "the fallback search_passages call's limit (default 5)" }
+                }),
+                &["context", "origins"],
+            ),
+        ),
+        (
             "refresh_embeddings",
             "After ingesting, re-embed what changed (servers with embeddings only): the glosses (name + graph context) of new or changed concepts and labels, and — where the server opted in — the stored paragraphs. Makes paraphrases and question-shaped cues land through resolve's semantic fallback and search_passages' vector lane.",
             object_schema(json!({ "context": context }), &["context"]),
@@ -704,6 +774,35 @@ pub fn tool_definitions() -> Vec<Value> {
             object_schema(
                 json!({ "name": { "type": "string", "description": "Group name (from list_groups)" } }),
                 &["name"],
+            ),
+        ),
+        (
+            "get_context",
+            "One directory row by name — the cheap existence-and-stats check, without listing everything else.",
+            object_schema(json!({ "context": context }), &["context"]),
+        ),
+        (
+            "get_group",
+            "One group's name, description, member contexts, and child groups.",
+            object_schema(
+                json!({ "name": { "type": "string", "description": "Group name (from list_groups)" } }),
+                &["name"],
+            ),
+        ),
+        (
+            "compact",
+            "Rebuild one context's on-disk image without the dead weight the append-only format accumulates (retracted edges, unlinked attributions, arena slack); answers what was shed and the resulting footprint (admin role). Content is preserved — this is maintenance, not a knowledge change.",
+            object_schema(json!({ "context": context }), &["context"]),
+        ),
+        (
+            "import",
+            "Apply (or, with dry_run: true, preview) an NDJSON import stream — the same format `taguru import`/POST /import accept: a create block, associations, aliases, and passage per source, retract-then-apply and idempotent (admin role). A dry run writes nothing; its `associations`/`aliases` counts are optimistic previews, every other field exact. `taguru_group` records in the stream are not applied through this tool (their outcome is likewise not previewed) — use POST /import directly for a stream that carries any. Capped at 32 MiB; a larger stream needs POST /import or `taguru import` directly.",
+            object_schema(
+                json!({
+                    "stream": { "type": "string", "description": "NDJSON import stream (one taguru_batch/taguru_group/fact/alias/passage line per row)" },
+                    "dry_run": { "type": "boolean", "description": "preview without writing anything (default false)" }
+                }),
+                &["stream"],
             ),
         ),
         (
@@ -757,9 +856,34 @@ pub fn route_tool(
         "flush" => ("POST", "/flush".to_string(), None),
         "export_context" => ("GET", format!("{}/export", context_path("context")?), None),
         "export_group" => ("GET", format!("{}/export", group_path("name")?), None),
+        "get_context" => ("GET", context_path("context")?, None),
+        "get_group" => ("GET", group_path("name")?, None),
+        "compact" => (
+            "POST",
+            format!("{}/compact", context_path("context")?),
+            None,
+        ),
+        "import" => {
+            let stream = need(arguments, "stream")?;
+            if stream.len() > MAX_IMPORT_STREAM_BYTES {
+                return Err(format!(
+                    "stream argument is {} bytes, over the {MAX_IMPORT_STREAM_BYTES}-byte \
+                     tool limit; split the import or POST the stream to /import directly",
+                    stream.len()
+                ));
+            }
+            (
+                "POST",
+                format!("/import{}", query_string(arguments, &["dry_run"])),
+                Some(Value::String(stream.to_string())),
+            )
+        }
         "list_contexts" => (
             "GET",
-            format!("/contexts{}", query_string(arguments, &["limit", "after"])),
+            format!(
+                "/contexts{}",
+                query_string(arguments, &["limit", "after", "pinned"])
+            ),
             None,
         ),
         "create_context" => (
@@ -779,6 +903,11 @@ pub fn route_tool(
             )),
         ),
         "delete_context" => ("DELETE", context_path("name")?, None),
+        "rename_context" => (
+            "POST",
+            format!("{}/rename", context_path("name")?),
+            Some(pick(arguments, &["to"])),
+        ),
         "list_groups" => (
             "GET",
             format!("/groups{}", query_string(arguments, &["limit", "after"])),
@@ -804,6 +933,11 @@ pub fn route_tool(
             )),
         ),
         "delete_group" => ("DELETE", group_path("name")?, None),
+        "rename_group" => (
+            "POST",
+            format!("{}/rename", group_path("name")?),
+            Some(pick(arguments, &["to"])),
+        ),
         "add_associations" => {
             // Resolve `context` first so a caller who omitted BOTH hears
             // about the primary argument, not the secondary one, in the
@@ -834,7 +968,7 @@ pub fn route_tool(
             format!(
                 "{}/sources{}",
                 context_path("context")?,
-                query_string(arguments, &["limit", "after"])
+                query_string(arguments, &["limit", "after", "prefix"])
             ),
             None,
         ),
@@ -903,7 +1037,7 @@ pub fn route_tool(
             format!(
                 "{}/labels{}",
                 context_path("context")?,
-                query_string(arguments, &["limit", "after"])
+                query_string(arguments, &["limit", "after", "prefix"])
             ),
             None,
         ),
@@ -912,7 +1046,7 @@ pub fn route_tool(
             format!(
                 "{}/aliases{}",
                 context_path("context")?,
-                query_string(arguments, &["limit", "after"])
+                query_string(arguments, &["limit", "after", "prefix"])
             ),
             None,
         ),
@@ -975,6 +1109,246 @@ pub fn route_tool(
     })
 }
 
+/// Extracts `(subject, label, object)` from an `AssociationOut`-shaped
+/// value, for `run_retrieve`'s cross-step deduplication. `None` for
+/// anything not shaped that way, which the caller treats as "keep it,
+/// nothing to dedupe against" rather than dropping it.
+fn triple_of(association: &Value) -> Option<(String, String, String)> {
+    Some((
+        association.get("subject")?.as_str()?.to_string(),
+        association.get("label")?.as_str()?.to_string(),
+        association.get("object")?.as_str()?.to_string(),
+    ))
+}
+
+/// The composed retrieval loop (`Context.retrieve()` in both SDKs),
+/// reimplemented here so an MCP-only agent gets it in one call instead
+/// of orchestrating five tool calls by hand. `route_tool` stays a pure
+/// one-shot `(method, path, body)` mapping — this is deliberately a
+/// separate function rather than another `route_tool` arm, since it
+/// issues a variable number of requests built from earlier ones'
+/// results. Each step still builds its request by calling `route_tool`
+/// itself, so this can never drift from the single-call tools it
+/// composes. `call` performs one routed request; the two transports
+/// supply it (a ureq round trip for the stdio bridge, an in-process
+/// dispatch for the HTTP transport, which must bridge onto its own
+/// async call itself).
+pub fn run_retrieve(
+    arguments: &Value,
+    mut call: impl FnMut(&'static str, String, Option<Value>) -> Result<String, String>,
+) -> Result<Value, String> {
+    let mut call_tool = |name: &'static str, args: Value| -> Result<Value, String> {
+        let (method, path, body) = route_tool(name, &args)?;
+        let text = call(method, path, body)?;
+        serde_json::from_str::<Value>(&text)
+            .map_err(|error| format!("tool '{name}' returned invalid JSON: {error}"))
+    };
+
+    let context = need(arguments, "context")?.to_string();
+    let origins: Vec<String> = match arguments.get("origins") {
+        Some(Value::String(text)) => vec![text.clone()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str().map(str::to_string).ok_or_else(|| {
+                    "argument 'origins' must be a string or an array of strings".to_string()
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        Some(Value::Null) | None => return Err("missing required argument 'origins'".to_string()),
+        Some(_) => {
+            return Err("argument 'origins' must be a string or an array of strings".to_string());
+        }
+    };
+    let auto_pick = arguments
+        .get("auto_pick")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let describe_first = arguments
+        .get("describe_first")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let fetch_citations = arguments
+        .get("fetch_citations")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let text_fallback_only_if_empty = arguments
+        .get("text_fallback_only_if_empty")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    // Step 1: resolve each origin cue, auto-picking the top candidate
+    // (or falling back to the cue itself verbatim when auto_pick is
+    // off) into a deduplicated anchor list.
+    let mut resolved = serde_json::Map::new();
+    let mut anchors: Vec<String> = Vec::new();
+    for cue in &origins {
+        let mut resolve_args = pick(arguments, &["dice_floor", "semantic_floor"]);
+        resolve_args["context"] = json!(context);
+        resolve_args["cue"] = json!(cue);
+        if let Some(limit) = arguments.get("resolve_limit").filter(|v| !v.is_null()) {
+            resolve_args["limit"] = limit.clone();
+        }
+        let candidates = call_tool("resolve", resolve_args)?
+            .get("result")
+            .cloned()
+            .unwrap_or(Value::Array(Vec::new()));
+        let picked = if auto_pick {
+            candidates
+                .as_array()
+                .and_then(|list| list.first())
+                .and_then(|first| first.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        } else {
+            Some(cue.clone())
+        };
+        resolved.insert(cue.clone(), candidates);
+        if let Some(picked) = picked
+            && !anchors.contains(&picked)
+        {
+            anchors.push(picked);
+        }
+    }
+
+    // Step 2: describe every anchor — skippable via describe_first: false.
+    let mut outline = serde_json::Map::new();
+    if describe_first {
+        for anchor in &anchors {
+            let described =
+                call_tool("describe", json!({ "context": context, "concept": anchor }))?
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+            outline.insert(anchor.clone(), described);
+        }
+    }
+
+    // Step 3: gather associations — query (only when labels pins the
+    // facets) then always activate, deduplicated by
+    // (subject, label, object) with query's matches taking priority
+    // over activate's (query runs first and wins the dedupe).
+    let mut associations: Vec<Value> = Vec::new();
+    let mut activations: Vec<Value> = Vec::new();
+    let mut seen_triples: HashSet<(String, String, String)> = HashSet::new();
+    if !anchors.is_empty() {
+        if let Some(labels) = arguments.get("labels").filter(|v| !v.is_null()) {
+            let matched = call_tool(
+                "query",
+                json!({ "context": context, "subject": anchors, "label": labels }),
+            )?;
+            for entry in matched
+                .get("result")
+                .and_then(|result| result.get("matches"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(triple) = triple_of(entry)
+                    && seen_triples.insert(triple)
+                {
+                    associations.push(entry.clone());
+                }
+            }
+        }
+        let mut activate_args = json!({ "context": context, "origins": anchors });
+        if let Some(decay) = arguments.get("activate_decay").filter(|v| !v.is_null()) {
+            activate_args["decay"] = decay.clone();
+        }
+        if let Some(limit) = arguments.get("activate_limit").filter(|v| !v.is_null()) {
+            activate_args["limit"] = limit.clone();
+        }
+        let page = call_tool("activate", activate_args)?;
+        activations = page
+            .get("result")
+            .and_then(|result| result.get("matches"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for activation in &activations {
+            let association = activation
+                .get("association")
+                .cloned()
+                .unwrap_or(Value::Null);
+            if let Some(triple) = triple_of(&association)
+                && seen_triples.insert(triple)
+            {
+                associations.push(association);
+            }
+        }
+    }
+
+    // Step 4: fetch a citation for every located attribution,
+    // deduplicated by (source, paragraph). A locator whose passage was
+    // never stored (or was retracted) is skipped rather than failing
+    // the whole call — the graph fact still stands; any other failure
+    // (auth, a downed server) aborts immediately.
+    let mut citations: Vec<Value> = Vec::new();
+    if fetch_citations {
+        let mut wanted: Vec<(String, u64)> = Vec::new();
+        let mut seen_keys: HashSet<(String, u64)> = HashSet::new();
+        for association in &associations {
+            for attribution in association
+                .get("attributions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let (Some(source), Some(paragraph)) = (
+                    attribution.get("source").and_then(Value::as_str),
+                    attribution.get("paragraph").and_then(Value::as_u64),
+                ) else {
+                    continue;
+                };
+                let key = (source.to_string(), paragraph);
+                if seen_keys.insert(key.clone()) {
+                    wanted.push(key);
+                }
+            }
+        }
+        for (source, paragraph) in wanted {
+            match call_tool(
+                "cite_passage",
+                json!({ "context": context, "source": source, "paragraph": paragraph }),
+            ) {
+                Ok(response) => citations.push(json!({
+                    "source": source,
+                    "paragraph": paragraph,
+                    "citation": response.get("result").cloned().unwrap_or(Value::Null),
+                })),
+                Err(message) if message.starts_with("HTTP 404") => continue,
+                Err(message) => return Err(message),
+            }
+        }
+    }
+
+    // Step 5: text-lane fallback — only when the caller named a
+    // fallback query, and (by default) only when no associations were
+    // gathered.
+    let mut passage_hits = Value::Array(Vec::new());
+    if let Some(text_fallback_query) = arguments.get("text_fallback_query").and_then(Value::as_str)
+        && (!text_fallback_only_if_empty || associations.is_empty())
+    {
+        let mut search_args = json!({ "context": context, "query": text_fallback_query });
+        if let Some(limit) = arguments.get("search_limit").filter(|v| !v.is_null()) {
+            search_args["limit"] = limit.clone();
+        }
+        passage_hits = call_tool("search_passages", search_args)?
+            .get("result")
+            .cloned()
+            .unwrap_or(Value::Array(Vec::new()));
+    }
+
+    Ok(json!({
+        "resolved": resolved,
+        "outline": outline,
+        "associations": associations,
+        "activations": activations,
+        "citations": citations,
+        "passage_hits": passage_hits,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -989,9 +1363,16 @@ mod tests {
             "name": "ctx", "context": "ctx", "cue": "x", "concept": "x",
             "origins": ["x"], "associations": [], "passages": {},
             "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
+            "stream": "{}", "to": "ctx2",
         });
         for tool in tool_definitions() {
             let name = tool["name"].as_str().expect("definitions carry names");
+            // retrieve is a composed multi-call tool with no single
+            // (method, path, body) to map onto — run_retrieve's own
+            // tests cover it.
+            if name == "retrieve" {
+                continue;
+            }
             let routed = route_tool(name, &arguments);
             assert!(routed.is_ok(), "tool '{name}' does not route: {routed:?}");
             let (method, path, _) = routed.unwrap();
@@ -1212,6 +1593,17 @@ mod tests {
         assert_eq!(query_string(&json!({}), &["limit", "after"]), "");
     }
 
+    /// `create_context`/`update_context` advertise `pinned: boolean`,
+    /// and item 6 (#62) added `pinned`/`prefix` boolean/string filters
+    /// to list tools — a bool argument must not silently vanish here.
+    #[test]
+    fn query_string_encodes_bool_values() {
+        let arguments = json!({"pinned": true});
+        assert_eq!(query_string(&arguments, &["pinned"]), "?pinned=true");
+        let arguments = json!({"pinned": false});
+        assert_eq!(query_string(&arguments, &["pinned"]), "?pinned=false");
+    }
+
     /// list_contexts advertises limit/after and, when the caller
     /// supplies them, routes them onto the GET request's query string
     /// — the wiring the issue tracked was missing entirely.
@@ -1239,6 +1631,82 @@ mod tests {
     fn list_contexts_without_arguments_has_no_query_string() {
         let (_, path, _) = route_tool("list_contexts", &json!({})).unwrap();
         assert_eq!(path, "/contexts");
+    }
+
+    /// #62 item 6: `pinned` filters the directory (population, not a
+    /// cursor) — advertised in the schema and routed onto the query
+    /// string like `limit`/`after`.
+    #[test]
+    fn list_contexts_schema_advertises_pinned() {
+        let list_contexts = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "list_contexts")
+            .expect("list_contexts is defined");
+        let properties = &list_contexts["inputSchema"]["properties"];
+        assert_eq!(properties["pinned"]["type"], "boolean");
+    }
+
+    #[test]
+    fn list_contexts_routes_pinned_onto_the_query_string() {
+        let (_, path, _) = route_tool("list_contexts", &json!({"pinned": true})).unwrap();
+        assert_eq!(path, "/contexts?pinned=true");
+    }
+
+    /// #62 item 6: `list_sources`/`list_labels`/`get_aliases` advertise
+    /// and route `prefix` the same way — narrows the population, so it
+    /// belongs beside `limit`/`after` in both schema and query string.
+    #[test]
+    fn list_sources_schema_advertises_prefix() {
+        let list_sources = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "list_sources")
+            .expect("list_sources is defined");
+        let properties = &list_sources["inputSchema"]["properties"];
+        assert_eq!(properties["prefix"]["type"], "string");
+    }
+
+    #[test]
+    fn list_sources_routes_prefix_onto_the_query_string() {
+        let (_, path, _) = route_tool(
+            "list_sources",
+            &json!({"context": "sake", "prefix": "doc-"}),
+        )
+        .unwrap();
+        assert_eq!(path, "/contexts/sake/sources?prefix=doc-");
+    }
+
+    #[test]
+    fn list_labels_schema_advertises_prefix() {
+        let list_labels = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "list_labels")
+            .expect("list_labels is defined");
+        let properties = &list_labels["inputSchema"]["properties"];
+        assert_eq!(properties["prefix"]["type"], "string");
+    }
+
+    #[test]
+    fn list_labels_routes_prefix_onto_the_query_string() {
+        let (_, path, _) =
+            route_tool("list_labels", &json!({"context": "sake", "prefix": "産地"})).unwrap();
+        assert_eq!(path, "/contexts/sake/labels?prefix=%E7%94%A3%E5%9C%B0");
+    }
+
+    #[test]
+    fn get_aliases_schema_advertises_prefix() {
+        let get_aliases = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "get_aliases")
+            .expect("get_aliases is defined");
+        let properties = &get_aliases["inputSchema"]["properties"];
+        assert_eq!(properties["prefix"]["type"], "string");
+    }
+
+    #[test]
+    fn get_aliases_routes_prefix_onto_the_query_string() {
+        let (_, path, _) =
+            route_tool("get_aliases", &json!({"context": "sake", "prefix": "a"})).unwrap();
+        assert_eq!(path, "/contexts/sake/aliases?prefix=a");
     }
 
     /// #39: the schema had no `limit` and `route_tool` whitelisted only
@@ -1465,5 +1933,331 @@ mod tests {
         let err = tool_response(Err("HTTP 404: gone".into()));
         assert_eq!(err["isError"], true);
         assert_eq!(err["content"][0]["text"], "HTTP 404: gone");
+    }
+
+    #[test]
+    fn import_schema_advertises_stream_and_dry_run() {
+        let import = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "import")
+            .expect("import is defined");
+        let properties = &import["inputSchema"]["properties"];
+        assert_eq!(properties["stream"]["type"], "string");
+        assert_eq!(properties["dry_run"]["type"], "boolean");
+        assert_eq!(import["inputSchema"]["required"], json!(["stream"]));
+    }
+
+    /// The stream rides the body as a raw string, not the `pick`/JSON
+    /// shape every other write tool uses — `call_inner`/`Bridge::call`
+    /// special-case `Value::String` so this reaches `import_batch` as
+    /// literal NDJSON text, newlines intact, not `\n`-escaped inside a
+    /// quoted JSON string.
+    #[test]
+    fn import_routes_the_stream_as_a_raw_string_body() {
+        let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s\"}\n";
+        let (method, path, body) = route_tool("import", &json!({"stream": stream})).unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/import");
+        assert_eq!(body, Some(Value::String(stream.to_string())));
+    }
+
+    #[test]
+    fn import_routes_dry_run_onto_the_query_string() {
+        let (_, path, _) = route_tool("import", &json!({"stream": "x", "dry_run": true})).unwrap();
+        assert_eq!(path, "/import?dry_run=true");
+
+        let (_, path, _) = route_tool("import", &json!({"stream": "x"})).unwrap();
+        assert_eq!(
+            path, "/import",
+            "dry_run absent means no query string at all"
+        );
+    }
+
+    #[test]
+    fn import_refuses_a_stream_over_the_byte_limit() {
+        let oversized = "x".repeat(MAX_IMPORT_STREAM_BYTES + 1);
+        let routed = route_tool("import", &json!({"stream": oversized}));
+        assert!(
+            routed.is_err(),
+            "a stream past the tool's own byte cap must not route"
+        );
+    }
+
+    /// A minimal HTTP-response envelope for the given `route_tool` path
+    /// suffix, mirroring `ApiResponse<T>`'s `{result, status, time}`
+    /// shape — `run_retrieve` decodes exactly that.
+    fn envelope(result: Value) -> String {
+        json!({ "result": result, "status": "ok", "time": 0.0 }).to_string()
+    }
+
+    #[test]
+    fn run_retrieve_resolves_describes_activates_and_cites_in_one_call() {
+        let arguments = json!({ "context": "sake", "origins": ["tokyo"] });
+        let result = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(
+                    json!([{"name": "Tokyo", "score": 1.0, "tier": "exact"}]),
+                ))
+            } else if path.ends_with("/describe") {
+                Ok(envelope(
+                    json!({"concept": "Tokyo", "as_subject": [], "as_object": []}),
+                ))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({
+                    "total": 1,
+                    "matches": [{
+                        "strength": 1.0,
+                        "path": ["Tokyo"],
+                        "association": {
+                            "subject": "Tokyo", "label": "capital_of", "object": "Japan",
+                            "weight": 1.0, "count": 1,
+                            "attributions": [
+                                {"source": "doc1", "weight": 1.0, "count": 1, "paragraph": 0}
+                            ]
+                        }
+                    }]
+                })))
+            } else if path.ends_with("/citations") {
+                Ok(envelope(
+                    json!({"text": "Tokyo is the capital.", "source": "doc1", "section": null}),
+                ))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+
+        assert_eq!(result["resolved"]["tokyo"][0]["name"], "Tokyo");
+        assert_eq!(result["outline"]["Tokyo"]["concept"], "Tokyo");
+        assert_eq!(result["associations"].as_array().unwrap().len(), 1);
+        assert_eq!(result["associations"][0]["subject"], "Tokyo");
+        assert_eq!(result["activations"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            result["citations"],
+            json!([{
+                "source": "doc1",
+                "paragraph": 0,
+                "citation": {"text": "Tokyo is the capital.", "source": "doc1", "section": null},
+            }])
+        );
+        assert_eq!(result["passage_hits"], json!([]));
+    }
+
+    /// query (only run when `labels` is given) and activate can surface
+    /// the same edge; the triple-keyed dedupe must collapse them to one
+    /// entry, keeping query's copy since it is gathered first.
+    #[test]
+    fn run_retrieve_dedupes_associations_across_query_and_activate() {
+        let arguments = json!({
+            "context": "sake", "origins": ["tokyo"], "labels": ["capital_of"],
+            "describe_first": false, "fetch_citations": false
+        });
+        let association = json!({
+            "subject": "Tokyo", "label": "capital_of", "object": "Japan",
+            "weight": 1.0, "count": 1, "attributions": []
+        });
+        let result = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{"name": "Tokyo"}])))
+            } else if path.ends_with("/query") {
+                Ok(envelope(json!({"total": 1, "matches": [association]})))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({
+                    "total": 1,
+                    "matches": [{"strength": 1.0, "path": ["Tokyo"], "association": association}]
+                })))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+
+        assert_eq!(
+            result["associations"].as_array().unwrap().len(),
+            1,
+            "{result}"
+        );
+        assert_eq!(result["activations"].as_array().unwrap().len(), 1);
+    }
+
+    /// A citation attribution pointing at a passage that was never
+    /// stored (or was retracted) comes back 404 from `cite_passage` —
+    /// that one locator is skipped, not the whole retrieval.
+    #[test]
+    fn run_retrieve_skips_a_404_citation_without_failing() {
+        let arguments = json!({ "context": "sake", "origins": ["tokyo"], "describe_first": false });
+        let result = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{"name": "Tokyo"}])))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({
+                    "total": 1,
+                    "matches": [{
+                        "strength": 1.0,
+                        "path": ["Tokyo"],
+                        "association": {
+                            "subject": "Tokyo", "label": "capital_of", "object": "Japan",
+                            "weight": 1.0, "count": 1,
+                            "attributions": [
+                                {"source": "doc1", "weight": 1.0, "count": 1, "paragraph": 0}
+                            ]
+                        }
+                    }]
+                })))
+            } else if path.ends_with("/citations") {
+                Err("HTTP 404: {\"error\":\"no such paragraph\"}".to_string())
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("a 404 citation must not fail the whole retrieval");
+
+        assert_eq!(result["citations"], json!([]));
+    }
+
+    /// Any citation failure other than 404 (auth, a downed server) must
+    /// abort the whole call rather than being swallowed like the 404
+    /// case above.
+    #[test]
+    fn run_retrieve_fails_outright_on_a_non_404_citation_error() {
+        let arguments = json!({ "context": "sake", "origins": ["tokyo"], "describe_first": false });
+        let result = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{"name": "Tokyo"}])))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({
+                    "total": 1,
+                    "matches": [{
+                        "strength": 1.0,
+                        "path": ["Tokyo"],
+                        "association": {
+                            "subject": "Tokyo", "label": "capital_of", "object": "Japan",
+                            "weight": 1.0, "count": 1,
+                            "attributions": [
+                                {"source": "doc1", "weight": 1.0, "count": 1, "paragraph": 0}
+                            ]
+                        }
+                    }]
+                })))
+            } else if path.ends_with("/citations") {
+                Err("HTTP 500: internal error".to_string())
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        });
+        assert_eq!(result, Err("HTTP 500: internal error".to_string()));
+    }
+
+    /// `auto_pick: false` anchors on each cue verbatim instead of
+    /// resolve's top candidate — resolve still runs (so `resolved`
+    /// still reports what was found), but an empty result must not
+    /// empty out the anchor list too.
+    #[test]
+    fn run_retrieve_with_auto_pick_off_anchors_on_the_cue_itself() {
+        let arguments = json!({
+            "context": "sake", "origins": ["Tokyo"], "auto_pick": false,
+            "describe_first": false, "fetch_citations": false
+        });
+        let result = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([])))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({"total": 0, "matches": []})))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+
+        assert_eq!(result["resolved"]["Tokyo"], json!([]));
+        assert_eq!(result["associations"], json!([]));
+    }
+
+    /// The text-lane fallback only fires when a fallback query was
+    /// given AND (by default) associations came back empty — here
+    /// resolve finds nothing, so anchors stay empty, activate never
+    /// runs, and search_passages is the only other call.
+    #[test]
+    fn run_retrieve_runs_the_text_fallback_when_associations_are_empty() {
+        let arguments = json!({
+            "context": "sake", "origins": ["nonexistent"],
+            "text_fallback_query": "some declarative fact"
+        });
+        let result = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([])))
+            } else if path.ends_with("/sources/search") {
+                Ok(envelope(json!([
+                    {"source": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
+                ])))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+
+        assert_eq!(result["passage_hits"].as_array().unwrap().len(), 1);
+    }
+
+    /// `text_fallback_only_if_empty: false` runs the fallback
+    /// unconditionally, even alongside associations already found.
+    #[test]
+    fn run_retrieve_runs_the_text_fallback_unconditionally_when_the_empty_gate_is_off() {
+        let arguments = json!({
+            "context": "sake", "origins": ["tokyo"], "describe_first": false,
+            "fetch_citations": false, "text_fallback_query": "some declarative fact",
+            "text_fallback_only_if_empty": false
+        });
+        let result = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{"name": "Tokyo"}])))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({
+                    "total": 1,
+                    "matches": [{
+                        "strength": 1.0,
+                        "path": ["Tokyo"],
+                        "association": {
+                            "subject": "Tokyo", "label": "capital_of", "object": "Japan",
+                            "weight": 1.0, "count": 1, "attributions": []
+                        }
+                    }]
+                })))
+            } else if path.ends_with("/sources/search") {
+                Ok(envelope(json!([
+                    {"source": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
+                ])))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+
+        assert_eq!(result["associations"].as_array().unwrap().len(), 1);
+        assert_eq!(result["passage_hits"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn run_retrieve_requires_context_and_origins() {
+        assert_eq!(
+            run_retrieve(&json!({"origins": ["x"]}), |_, _, _| unreachable!()),
+            Err("missing required argument 'context'".to_string())
+        );
+        assert_eq!(
+            run_retrieve(&json!({"context": "sake"}), |_, _, _| unreachable!()),
+            Err("missing required argument 'origins'".to_string())
+        );
+    }
+
+    #[test]
+    fn retrieve_is_advertised_with_context_and_origins_required() {
+        let tool = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "retrieve")
+            .expect("retrieve is defined");
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            json!(["context", "origins"])
+        );
     }
 }

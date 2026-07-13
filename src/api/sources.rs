@@ -153,6 +153,13 @@ pub async fn list_sources(
         None => not_found(&name, started_at),
         // `passage_sources` already yields BTreeMap-key order — no sort.
         Some(Ok(sources)) => {
+            let sources: Vec<String> = match query.prefix.as_deref() {
+                Some(prefix) => sources
+                    .into_iter()
+                    .filter(|source| source.starts_with(prefix))
+                    .collect(),
+                None => sources,
+            };
             let total = sources.len();
             let sources: Vec<String> = sources
                 .into_iter()

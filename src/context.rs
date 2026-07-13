@@ -2107,6 +2107,17 @@ impl Context {
         Some(touched)
     }
 
+    /// The read-only twin of [`Self::retract_source`]'s count: how
+    /// many edges this source touches, without unlinking anything —
+    /// `POST /import?dry_run=true`'s preview of what a retraction
+    /// would report.
+    pub fn count_source_edges(&self, source: &str) -> usize {
+        let Some(&source_id) = self.source_ids.get(source) else {
+            return 0;
+        };
+        self.source_edges.get(&source_id).map(Vec::len).unwrap_or(0)
+    }
+
     /// Withdraws one association outright: the `(subject, label,
     /// object)` edge — the names resolve through aliases, like every
     /// other entry point — has every attribution unlinked and its
@@ -4178,6 +4189,26 @@ mod tests {
             restored.query(Some("a"), None, None),
             context.query(Some("a"), None, None)
         );
+    }
+
+    #[test]
+    fn count_source_edges_previews_retract_source_without_touching_anything() {
+        let mut context = Context::default();
+        context
+            .associate_from("a", "r", "b", 1.0, "旧版", None)
+            .unwrap();
+        context
+            .associate_from("a", "r", "c", 1.0, "旧版", None)
+            .unwrap();
+        context.associate("a", "r", "d", 1.0).unwrap();
+
+        assert_eq!(context.count_source_edges("旧版"), 2);
+        assert_eq!(context.count_source_edges("存在しない出典"), 0);
+        // A read, not a retraction: calling it again reports the same
+        // count, and the real retraction afterward still sees both edges.
+        assert_eq!(context.count_source_edges("旧版"), 2);
+        assert_eq!(context.retract_source("旧版"), Some(2));
+        assert_eq!(context.count_source_edges("旧版"), 0);
     }
 
     /// The `(edge, source)` index the write path consults is derived, so

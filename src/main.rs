@@ -442,6 +442,7 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
                 .delete(api::delete_group),
         )
         .route("/groups/{name}/export", get(api::export_group))
+        .route("/groups/{name}/rename", post(api::rename_group))
         // The cross-context searches: the per-context operation of the
         // same name, run across several contexts named in the body.
         .route("/recall", post(api::cross_recall))
@@ -449,6 +450,7 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
         .route("/sources/search", post(api::cross_search_passages))
         .route("/contexts/{name}/export", get(api::export_context))
         .route("/contexts/{name}/compact", post(api::compact_context))
+        .route("/contexts/{name}/rename", post(api::rename_context))
         .route("/contexts/{name}/associations", post(api::add_associations))
         .route(
             "/contexts/{name}/associations/retract",

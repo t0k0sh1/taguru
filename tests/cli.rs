@@ -733,6 +733,74 @@ fn the_mcp_bridge_answers_initialize_despite_a_stalled_protocol_probe() {
     let _ = child.wait();
 }
 
+/// #62 item 1: the stdio bridge's `Bridge::call` must carry the
+/// `import` tool's NDJSON stream as raw text, exactly like the HTTP
+/// transport's `call_inner` — naively JSON-encoding a string argument
+/// would escape every newline and collapse a multi-line stream onto
+/// one unparsable line. Verified end to end against a live server
+/// rather than at the routing layer alone, since the routing test
+/// cannot see how the bridge actually serializes the request body.
+#[test]
+fn the_mcp_bridge_applies_a_multi_line_import_stream_through_a_live_server() {
+    use std::io::Write;
+
+    let (mut server, addr, dir) = spawn_server("mcp-bridge-import");
+
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_taguru-mcp"))
+        .env("TAGURU_URL", format!("http://{addr}"))
+        .env_remove("TAGURU_API_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge must spawn");
+
+    let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-bridge\", \
+                 \"create\": {\"description\": \"d\"}}\n\
+                 {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n";
+    let request = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "import", "arguments": {"stream": stream}}
+    });
+
+    let mut stdin = bridge.stdin.take().unwrap();
+    writeln!(stdin, "{request}").unwrap();
+    drop(stdin);
+
+    let stdout = bridge.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines();
+        let _ = sender.send(lines.next().and_then(Result::ok));
+    });
+    let reply = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the bridge must answer the tool call")
+        .expect("one JSON-RPC response line");
+
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let answer: serde_json::Value = serde_json::from_str(&reply).expect("reply must be JSON");
+    assert!(
+        answer["result"].get("isError").is_none(),
+        "the multi-line stream must not be mangled into one unparsable line: {reply}"
+    );
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(
+        envelope["result"]["batches"][0]["created"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        envelope["result"]["batches"][0]["associations"],
+        serde_json::json!(1)
+    );
+}
+
 #[test]
 fn estimate_prints_usage_for_help_in_any_position() {
     // The other subcommands answer --help wherever it appears; an

@@ -20,7 +20,8 @@ use taguru::deadline::Deadline;
 use crate::groups::{GroupRecord, MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, NestingViolation};
 use crate::metrics::{ErrorKind, ResolveTier, SearchOp};
 use crate::registry::{
-    AccessError, AppState, AssocOp, ContextMeta, CreateError, CreateGroupError, UpdateGroupError,
+    AccessError, AppState, AssocOp, ContextMeta, CreateError, CreateGroupError, RenameContextError,
+    RenameGroupError, UpdateGroupError,
 };
 
 mod sources;
@@ -460,6 +461,10 @@ pub struct ListContextsQuery {
     pub limit: Option<usize>,
     /// Only contexts whose name sorts strictly after this one.
     pub after: Option<String>,
+    /// Only contexts with this pinned state. Defines the population of
+    /// interest rather than a cursor, so — unlike `after`/`limit` — it
+    /// is applied before `total` is counted.
+    pub pinned: Option<bool>,
 }
 
 /// A bounded directory page. `total` names the whole directory's
@@ -489,13 +494,15 @@ pub async fn list_contexts(
     // A context-scoped key's world IS its grant: rows outside it are
     // filtered rather than refused, and `total` counts the visible
     // world so pagination stays coherent for that caller.
-    let directory: Vec<_> = match &scope {
-        Some(axum::Extension(scope)) => directory
-            .into_iter()
-            .filter(|entry| scope.allows_context(&entry.name))
-            .collect(),
-        None => directory,
-    };
+    let directory: Vec<_> = directory
+        .into_iter()
+        .filter(|entry| {
+            scope
+                .as_ref()
+                .is_none_or(|axum::Extension(scope)| scope.allows_context(&entry.name))
+                && query.pinned.is_none_or(|pinned| entry.pinned == pinned)
+        })
+        .collect();
     let total = directory.len();
     let contexts: Vec<_> = directory
         .into_iter()
@@ -773,6 +780,84 @@ pub async fn delete_context(
                     )
                 }
             }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RenameRequest {
+    pub to: String,
+}
+
+/// `POST /contexts/{name}/rename` — the whole file family moves to
+/// `to` and every group naming `name` is rewritten to match. Admin
+/// role (unclassified in [`crate::auth::required_role`], so it fails
+/// closed there); `{name}` is a context name like every other
+/// `/contexts/{name}...` route, so the authorization middleware's own
+/// per-context grant check already covers it — no
+/// [`scope_refusal`] call belongs here.
+pub async fn rename_context(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
+    AppJson(request): AppJson<RenameRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    if let Some(refusal) = oversized(
+        "the destination name",
+        &request.to,
+        MAX_CONTEXT_NAME_BYTES,
+        started_at,
+    ) {
+        return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
+    // Drains any unflushed Hot state to disk, moves the whole file
+    // family, and rewrites group membership; keep it off the async
+    // worker like every other mutating endpoint.
+    match tokio::task::block_in_place(|| state.rename_context(&name, &request.to)) {
+        Ok(()) => {
+            tracing::info!(
+                target: "taguru::audit",
+                key = %key_name(&key),
+                from = %name,
+                to = %request.to,
+                "context renamed",
+            );
+            ok(true, started_at)
+        }
+        Err(RenameContextError::NotFound) => not_found(&name, started_at),
+        Err(RenameContextError::AlreadyExists) => error(
+            ErrorCode::AlreadyExists,
+            format!("context '{}' already exists", request.to),
+            started_at,
+        ),
+        Err(RenameContextError::InvalidName) => error(
+            ErrorCode::InvalidArgument,
+            "the destination name must not be empty".to_string(),
+            started_at,
+        ),
+        Err(RenameContextError::Busy) => error(
+            ErrorCode::Conflict,
+            format!(
+                "context '{name}' or '{}' is mid-rename, -create, or -delete; retry shortly",
+                request.to
+            ),
+            started_at,
+        ),
+        Err(RenameContextError::Io(io_error)) => {
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                ErrorCode::Internal,
+                format!(
+                    "context '{name}' rename not fully persisted: {io_error} \
+                     (a rename marker remains; the next boot resumes it)"
+                ),
+                started_at,
+            )
         }
     }
 }
@@ -1193,6 +1278,74 @@ pub async fn delete_group(
                     )
                 }
             }
+        }
+    }
+}
+
+/// `POST /groups/{name}/rename` — the group's file moves to `to` and
+/// every OTHER group naming `name` as a child is rewritten to match.
+/// Unlike `rename_context`, `{name}` here is a GROUP name, so it is
+/// one of the routes the authorization middleware exempts from its
+/// per-context grant check — the scope gate belongs to this handler,
+/// exactly as `delete_group`'s does.
+pub async fn rename_group(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
+    AppJson(request): AppJson<RenameRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    // Renaming the bundling touches every member's grant — nested
+    // members included — exactly like deleting it.
+    if let Some(refusal) = scoped_group_refusal(
+        &state,
+        &scope,
+        &key,
+        [name.as_str()],
+        std::iter::empty(),
+        started_at,
+    ) {
+        return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
+    // Writes the group file (fsync + rename); keep it off the async
+    // worker.
+    match tokio::task::block_in_place(|| state.rename_group(&name, &request.to)) {
+        Ok(()) => {
+            tracing::info!(
+                target: "taguru::audit",
+                key = %key_name(&key),
+                from = %name,
+                to = %request.to,
+                "group renamed",
+            );
+            ok(true, started_at)
+        }
+        Err(RenameGroupError::NotFound) => group_not_found(&name, started_at),
+        Err(RenameGroupError::AlreadyExists) => error(
+            ErrorCode::AlreadyExists,
+            format!("group '{}' already exists", request.to),
+            started_at,
+        ),
+        Err(RenameGroupError::InvalidName) => error(
+            ErrorCode::InvalidArgument,
+            "the destination name must not be empty".to_string(),
+            started_at,
+        ),
+        Err(RenameGroupError::Io(io_error)) => {
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                ErrorCode::Internal,
+                format!(
+                    "group '{name}' rename not fully persisted: {io_error} \
+                     (a rename marker remains; the next boot resumes it)"
+                ),
+                started_at,
+            )
         }
     }
 }
@@ -1904,10 +2057,14 @@ pub struct AliasExport {
 
 /// `?limit=&after=` — the keyset page every unbounded listing takes
 /// (default and ceiling [`MAX_MATCH_LIMIT`], like the directory).
+/// `prefix` narrows the population of interest itself (like `total` on
+/// the search endpoints, not a cursor) — endpoints that support it
+/// apply it before counting `total`; `list_groups` ignores it.
 #[derive(Debug, Deserialize)]
 pub struct KeysetQuery {
     pub limit: Option<usize>,
     pub after: Option<String>,
+    pub prefix: Option<String>,
 }
 
 pub async fn add_aliases(
@@ -2116,6 +2273,10 @@ pub async fn list_aliases(
             .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
             .collect();
         labels.sort();
+        if let Some(prefix) = query.prefix.as_deref() {
+            concepts.retain(|(alias, _)| alias.starts_with(prefix));
+            labels.retain(|(alias, _)| alias.starts_with(prefix));
+        }
         let total = concepts.len() + labels.len();
         // One ordered sequence — concepts, then labels — filtered past
         // the cursor and cut at the limit, then split back into maps.
@@ -2458,6 +2619,17 @@ pub async fn audit_vocabulary(
     )
 }
 
+/// `POST /import`'s query string.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ImportQuery {
+    /// Report what the stream would do without writing anything — no
+    /// context created, no source retracted, nothing stored. See
+    /// [`crate::ingest::preview_batch`] for which counts are exact and
+    /// which are advisory.
+    pub dry_run: bool,
+}
+
 /// What `POST /import` accomplished — the same numbers the CLI's
 /// per-file report line carries.
 #[derive(Serialize)]
@@ -2636,11 +2808,23 @@ fn restore_refusal(
 /// durably, and because every batch is retract-then-apply,
 /// re-POSTing the whole corrected stream is exact, never
 /// double-counted.
+///
+/// `?dry_run=true` reports the same `{batches: [...]}` shape without
+/// writing anything — parsing and scope checks still run in full, so a
+/// malformed or forbidden stream is refused exactly as it would be for
+/// real. Two counts per batch, `associations` and `aliases`, are
+/// optimistic (see [`crate::ingest::preview_batch`]); every other
+/// field is exact. `taguru_group` records are a known gap: they apply
+/// through a separate path (`restore_groups`) that dry-run does not
+/// preview, so a stream carrying any is parsed and scope-checked like
+/// normal but its `groups` are silently not previewed — the response
+/// omits `groups` entirely rather than report a guess.
 pub async fn import_batch(
     State(state): State<AppState>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
+    AppQuery(query): AppQuery<ImportQuery>,
     AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
@@ -2698,7 +2882,18 @@ pub async fn import_batch(
             // budget that runs out partway is safe to report as a
             // resumable prefix rather than an all-or-nothing failure.
             if deadline.expired() {
-                let note = if total > 1 {
+                let note = if total > 1 && query.dry_run {
+                    format!(
+                        "batch {} of {total} (context '{}', source '{}') not previewed — \
+                         the {} batch(es) before it previewed clean (dry_run=true; \
+                         nothing is written); re-running the preview with more time or \
+                         a narrower stream is exact: ",
+                        index + 1,
+                        batch.context,
+                        batch.source,
+                        outcomes.len(),
+                    )
+                } else if total > 1 {
                     format!(
                         "batch {} of {total} (context '{}', source '{}') not attempted — \
                          the {} batch(es) before it landed durably; re-POSTing the \
@@ -2720,11 +2915,17 @@ pub async fn import_batch(
                     started_at,
                 )));
             }
-            match crate::ingest::apply_batch(&state, batch) {
+            let applied = if query.dry_run {
+                crate::ingest::preview_batch(&state, batch)
+            } else {
+                crate::ingest::apply_batch(&state, batch)
+            };
+            match applied {
                 Ok(applied) => {
                     // Import is retract-then-apply — destructive — and both
                     // the context and the replaced source live in the BODY,
                     // out of the access log's reach. One audit line each.
+                    // `dry_run` marks the ones that wrote nothing.
                     tracing::info!(
                         target: "taguru::audit",
                         key = %key_name(&key),
@@ -2733,12 +2934,24 @@ pub async fn import_batch(
                         created = applied.created,
                         retracted = applied.retracted,
                         associations = applied.associations,
+                        dry_run = query.dry_run,
                         "import batch applied",
                     );
                     outcomes.push(import_outcome(batch, &applied));
                 }
                 Err(refusal) => {
-                    let note = if total > 1 {
+                    let note = if total > 1 && query.dry_run {
+                        format!(
+                            "batch {} of {total} (context '{}', source '{}') would be \
+                             refused — the {} batch(es) before it previewed clean \
+                             (dry_run=true; nothing is written); fixing the stream and \
+                             re-running the preview is exact: ",
+                            index + 1,
+                            batch.context,
+                            batch.source,
+                            outcomes.len(),
+                        )
+                    } else if total > 1 {
                         format!(
                             "batch {} of {total} (context '{}', source '{}') refused — the {} \
                              batch(es) before it landed durably; fixing the stream and \
@@ -2760,8 +2973,12 @@ pub async fn import_batch(
         }
         // Groups apply LAST — after every batch — so a record and the
         // member contexts it names can ride one stream in any order.
+        // `taguru_group` records apply through a separate path
+        // (`restore_groups`) that has no read-only twin, so a dry run
+        // skips them entirely — the response omits `groups` rather than
+        // report a guess.
         let mut group_outcomes: Vec<GroupImportOutcome> = Vec::new();
-        if !stream.groups.is_empty() {
+        if !stream.groups.is_empty() && !query.dry_run {
             match state.restore_groups(&stream.groups) {
                 Ok(restored) => {
                     for ((name, record), (_, applied)) in stream.groups.iter().zip(&restored) {
@@ -4429,6 +4646,13 @@ pub async fn labels(
     match state.read_context(&name, |context| {
         let mut labels: Vec<String> = context.labels().into_iter().map(String::from).collect();
         labels.sort();
+        let labels: Vec<String> = match query.prefix.as_deref() {
+            Some(prefix) => labels
+                .into_iter()
+                .filter(|label| label.starts_with(prefix))
+                .collect(),
+            None => labels,
+        };
         let total = labels.len();
         let labels: Vec<String> = labels
             .into_iter()

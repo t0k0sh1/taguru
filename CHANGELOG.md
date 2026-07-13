@@ -200,6 +200,54 @@ Entries that change an on-disk format or a response shape say so.
   new counters; explain shares the live scoring code paths (one term
   walker, one BM25 addend, one fusion/trim), so it cannot disagree
   with the search it explains.
+- List filters (#62): `GET /contexts` takes `pinned: bool`;
+  `GET /contexts/{name}/sources`, `/labels`, and `/aliases` take
+  `prefix: string` — all filtered before `total` is computed,
+  consistent with the search endpoints' "total describes the filtered
+  population" contract. Chasing this down uncovered a real MCP bug:
+  `query_string` silently dropped any boolean argument (`Value::Bool`
+  had no case), so `pinned` on `create_context`/`update_context` was
+  unreachable over MCP until now.
+- MCP passthrough (#62): `compact` (admin), `get_context`, and
+  `get_group` — mirroring their HTTP routes exactly — plus a new
+  `import` tool (admin) that takes a `stream` (NDJSON, capped at
+  32MiB by a constant local to `mcp.rs`, since `taguru-mcp` does not
+  link `ingest.rs`) and an optional `dry_run`. Wiring up `stream` also
+  fixed a latent MCP transport bug: a tool argument that is already a
+  plain string was still being JSON-string-encoded before it reached
+  the HTTP body, which escaped the NDJSON's newlines and broke the
+  parser.
+- `POST /import?dry_run=true` (#62): previews an import batch —
+  creates, retractions, dropped passages/questions/associations —
+  without writing anything, reusing the real apply path's counting
+  logic wherever that is already read-only. Association/alias counts
+  are the one place dry-run is necessarily optimistic: a capacity or
+  version conflict cannot surface without actually writing, which the
+  response and the tool description both say plainly. `taguru_group`
+  records go through a separate restore path and are skipped in
+  dry-run mode (omitted from the response's `groups` field).
+- `retrieve` MCP tool (#62): runs the SDKs' resolve → describe →
+  query/activate → cite_passage → search_passages walk server-side in
+  one call, so an MCP-only client gets the same one-shot retrieval the
+  Python/TypeScript SDKs already had over HTTP. Citations come back as
+  `[{source, paragraph, citation}]`, since a JSON object cannot key on
+  a `(source, paragraph)` tuple the way the SDKs' in-memory dicts do.
+- Rename (#62): `POST /contexts/{name}/rename` and
+  `POST /groups/{name}/rename` (admin role, body `{"to": "..."}`),
+  plus `rename_context`/`rename_group` on both SDKs and as MCP tools.
+  A context rename moves its whole file family and rewrites every
+  group naming it; a group rename moves its one file and rewrites
+  every OTHER group naming it as a child. Both are crash-safe the same
+  way delete is: a durable marker (`.renaming` / `.grouprenaming`) is
+  written before anything moves, and a boot that finds one resumes the
+  file move AND the group-membership rewrite before the usual
+  dangling-reference reconciliation runs — the ordering matters, since
+  reconciliation has no notion of a rename in flight and would
+  otherwise prune the old name as dangling instead of carrying it to
+  the new one. A context rename's `from`/`to` are reserved against a
+  concurrent create or another rename; a group rename runs entirely
+  under the group table's single write lock instead, so no extra
+  reservation is needed there.
 
 ### Changed
 - doc2query `questions` now index into their paragraph's BM25 postings

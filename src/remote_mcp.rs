@@ -90,6 +90,32 @@ pub async fn serve(
         ),
         mcp::Call::Ping => mcp::response(id, json!({})),
         mcp::Call::ToolsList => mcp::response(id, mcp::tools_result()),
+        mcp::Call::Tool { name, arguments } if name == "retrieve" => {
+            // retrieve issues a variable number of dispatched calls
+            // built from earlier ones' results, so it cannot be a
+            // single `route_tool` mapping — `run_retrieve` composes
+            // them itself, synchronously, so the bridge into this
+            // async handler runs on a blocking thread: `block_in_place`
+            // frees this worker for other tasks while it's parked, and
+            // each of `run_retrieve`'s callbacks drives `call_inner`
+            // (an async fn) to completion via `Handle::block_on`.
+            let outcome = tokio::task::block_in_place(|| {
+                let handle = tokio::runtime::Handle::current();
+                mcp::run_retrieve(&arguments, |method, path, body| {
+                    handle.block_on(call_inner(
+                        dispatch.clone(),
+                        method,
+                        &path,
+                        body,
+                        key.as_ref(),
+                        max_result_bytes,
+                        deadline,
+                    ))
+                })
+            })
+            .map(|value| value.to_string());
+            mcp::response(id, mcp::tool_response(outcome))
+        }
         mcp::Call::Tool { name, arguments } => {
             let outcome = match mcp::route_tool(&name, &arguments) {
                 Ok((method, path, body)) => {
@@ -129,6 +155,13 @@ async fn call_inner(
 ) -> Result<String, String> {
     let builder = Request::builder().method(method).uri(path);
     let mut request = match body {
+        // A string argument (the `import` tool's NDJSON stream) rides
+        // as raw text — `Value::to_string()` would JSON-quote it,
+        // escaping every newline and breaking the line-oriented parse
+        // on the other end.
+        Some(Value::String(text)) => builder
+            .header(header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8")
+            .body(Body::from(text)),
         Some(body) => builder
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string())),

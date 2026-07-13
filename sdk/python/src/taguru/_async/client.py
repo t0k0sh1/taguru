@@ -342,18 +342,32 @@ class AsyncContexts:
     def __init__(self, client: AsyncTaguru) -> None:
         self._client = client
 
-    async def list(self, *, limit: int | None = None, after: str | None = None) -> ContextPage:
-        """One directory page (keyset cursor: ``after`` = last name shown)."""
+    async def list(
+        self,
+        *,
+        limit: int | None = None,
+        after: str | None = None,
+        pinned: bool | None = None,
+    ) -> ContextPage:
+        """One directory page (keyset cursor: ``after`` = last name shown).
+
+        ``pinned`` narrows to that pinned state; unlike ``after``, it
+        counts toward ``total``.
+        """
         result = await self._client._request_json(
-            "GET", "/contexts", params=drop_none({"limit": limit, "after": after})
+            "GET",
+            "/contexts",
+            params=drop_none({"limit": limit, "after": after, "pinned": pinned}),
         )
         return decode(ContextPage, result)  # type: ignore[no-any-return]
 
-    async def iter(self, *, limit: int | None = None) -> AsyncIterator[DirectoryEntry]:
+    async def iter(
+        self, *, limit: int | None = None, pinned: bool | None = None
+    ) -> AsyncIterator[DirectoryEntry]:
         """Walk every directory page transparently."""
         after: str | None = None
         while True:
-            page = await self.list(limit=limit, after=after)
+            page = await self.list(limit=limit, after=after, pinned=pinned)
             if not page.contexts:
                 return
             for entry in page.contexts:
@@ -425,6 +439,14 @@ class AsyncContexts:
     async def delete(self, name: str) -> bool:
         """Delete a context, files included (admin role)."""
         result = await self._client._request_json("DELETE", f"/contexts/{encode_name(name)}")
+        return bool(result)
+
+    async def rename(self, name: str, to: str) -> bool:
+        """Rename a context (admin role): the whole file family moves to
+        ``to``, and every group naming it is rewritten to match."""
+        result = await self._client._request_json(
+            "POST", f"/contexts/{encode_name(name)}/rename", json_body={"to": to}
+        )
         return bool(result)
 
 
@@ -528,6 +550,14 @@ class AsyncGroups:
     async def delete(self, name: str) -> bool:
         """Delete the bundling only — member contexts and child groups stay."""
         result = await self._client._request_json("DELETE", f"/groups/{encode_name(name)}")
+        return bool(result)
+
+    async def rename(self, name: str, to: str) -> bool:
+        """Rename a group (admin role): the group's file moves to ``to``,
+        and every OTHER group naming it as a child is rewritten to match."""
+        result = await self._client._request_json(
+            "POST", f"/groups/{encode_name(name)}/rename", json_body={"to": to}
+        )
         return bool(result)
 
     async def export(self, name: str) -> str:
@@ -673,17 +703,31 @@ class AsyncContext:
         result = await self._post("/unreachable_from", body)
         return decode(MatchPage, result)  # type: ignore[no-any-return]
 
-    async def list_labels(self, *, limit: int | None = None, after: str | None = None) -> LabelPage:
-        """One page of the relation vocabulary (canonical labels only)."""
+    async def list_labels(
+        self,
+        *,
+        limit: int | None = None,
+        after: str | None = None,
+        prefix: str | None = None,
+    ) -> LabelPage:
+        """One page of the relation vocabulary (canonical labels only).
+
+        ``prefix`` narrows to labels starting with that text; unlike
+        ``after``, it counts toward ``total``.
+        """
         result = await self._client._request_json(
-            "GET", self._path + "/labels", params=drop_none({"limit": limit, "after": after})
+            "GET",
+            self._path + "/labels",
+            params=drop_none({"limit": limit, "after": after, "prefix": prefix}),
         )
         return decode(LabelPage, result)  # type: ignore[no-any-return]
 
-    async def iter_labels(self, *, limit: int | None = None) -> AsyncIterator[str]:
+    async def iter_labels(
+        self, *, limit: int | None = None, prefix: str | None = None
+    ) -> AsyncIterator[str]:
         after: str | None = None
         while True:
-            page = await self.list_labels(limit=limit, after=after)
+            page = await self.list_labels(limit=limit, after=after, prefix=prefix)
             if not page.labels:
                 return
             for label in page.labels:
@@ -784,17 +828,25 @@ class AsyncContext:
         return decode(RetractOutcome, result)  # type: ignore[no-any-return]
 
     async def list_sources(
-        self, *, limit: int | None = None, after: str | None = None
+        self,
+        *,
+        limit: int | None = None,
+        after: str | None = None,
+        prefix: str | None = None,
     ) -> SourcePage:
         result = await self._client._request_json(
-            "GET", self._path + "/sources", params=drop_none({"limit": limit, "after": after})
+            "GET",
+            self._path + "/sources",
+            params=drop_none({"limit": limit, "after": after, "prefix": prefix}),
         )
         return decode(SourcePage, result)  # type: ignore[no-any-return]
 
-    async def iter_sources(self, *, limit: int | None = None) -> AsyncIterator[str]:
+    async def iter_sources(
+        self, *, limit: int | None = None, prefix: str | None = None
+    ) -> AsyncIterator[str]:
         after: str | None = None
         while True:
-            page = await self.list_sources(limit=limit, after=after)
+            page = await self.list_sources(limit=limit, after=after, prefix=prefix)
             if not page.sources:
                 return
             for source in page.sources:
@@ -810,19 +862,33 @@ class AsyncContext:
 
     # -- aliases -----------------------------------------------------------------
 
-    async def get_aliases(self, *, limit: int | None = None, after: str | None = None) -> AliasPage:
+    async def get_aliases(
+        self,
+        *,
+        limit: int | None = None,
+        after: str | None = None,
+        prefix: str | None = None,
+    ) -> AliasPage:
         """One alias page; the cursor spans both namespaces (concepts first),
-        so ``after`` takes ``"concept:<alias>"`` or ``"label:<alias>"``."""
+        so ``after`` takes ``"concept:<alias>"`` or ``"label:<alias>"``.
+
+        ``prefix`` narrows to aliases (either namespace) starting with
+        that text; unlike ``after``, it counts toward ``total``.
+        """
         result = await self._client._request_json(
-            "GET", self._path + "/aliases", params=drop_none({"limit": limit, "after": after})
+            "GET",
+            self._path + "/aliases",
+            params=drop_none({"limit": limit, "after": after, "prefix": prefix}),
         )
         return decode(AliasPage, result)  # type: ignore[no-any-return]
 
-    async def iter_aliases(self, *, limit: int | None = None) -> AsyncIterator[AliasEntry]:
+    async def iter_aliases(
+        self, *, limit: int | None = None, prefix: str | None = None
+    ) -> AsyncIterator[AliasEntry]:
         """Walk both alias namespaces as a flat stream of entries."""
         after: str | None = None
         while True:
-            page = await self.get_aliases(limit=limit, after=after)
+            page = await self.get_aliases(limit=limit, after=after, prefix=prefix)
             count = len(page.concepts) + len(page.labels)
             if count == 0:
                 return
