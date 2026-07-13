@@ -25,10 +25,10 @@ classes:
     recall:
       route: "POST /recall"
       args: [cue]
-      options: [contexts, groups, limit]
+      options: [contexts, groups, limit, after]
     query:
       route: "POST /query"
-      options: [contexts, groups, subject, label, object, limit]
+      options: [contexts, groups, subject, label, object, limit, after]
     search_passages:
       route: "POST /sources/search"
       args: [query]
@@ -80,8 +80,11 @@ classes:
     describe: { route: "POST /contexts/{name}/describe", args: [concept] }
     query:
       route: "POST /contexts/{name}/query"
-      options: [subject, label, object, limit]
-    recall: { route: "POST /contexts/{name}/recall", args: [cue], options: [limit] }
+      options: [subject, label, object, limit, after]
+    recall:
+      route: "POST /contexts/{name}/recall"
+      args: [cue]
+      options: [limit, after]
     activate:
       route: "POST /contexts/{name}/activate"
       args: [origins]
@@ -89,11 +92,11 @@ classes:
     explore:
       route: "POST /contexts/{name}/explore"
       args: [origins]
-      options: [max_depth, limit]
+      options: [max_depth, limit, after]
     unreachable_from:
       route: "POST /contexts/{name}/unreachable_from"
       args: [origins]
-      options: [limit]
+      options: [limit, after]
     list_labels: { route: "GET /contexts/{name}/labels", options: [limit, after, prefix] }
     iter_labels: { route: "GET /contexts/{name}/labels", options: [limit, prefix] }
     add_associations:

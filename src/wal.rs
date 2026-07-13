@@ -65,6 +65,50 @@ pub enum WalOp {
     },
 }
 
+#[cfg(test)]
+impl From<crate::context_proptest::GeneratedWalOp> for WalOp {
+    fn from(op: crate::context_proptest::GeneratedWalOp) -> Self {
+        use crate::context_proptest::GeneratedWalOp;
+
+        match op {
+            GeneratedWalOp::Associate(op) => Self::Associate(crate::registry::AssocOp {
+                subject: op.subject.to_string(),
+                label: op.label.to_string(),
+                object: op.object.to_string(),
+                weight: op.weight,
+                source: op.source.map(str::to_string),
+                paragraph: op.paragraph,
+            }),
+            GeneratedWalOp::AliasConcept { alias, canonical } => Self::AliasConcept {
+                alias: alias.to_string(),
+                canonical: canonical.to_string(),
+            },
+            GeneratedWalOp::AliasLabel { alias, canonical } => Self::AliasLabel {
+                alias: alias.to_string(),
+                canonical: canonical.to_string(),
+            },
+            GeneratedWalOp::UnaliasConcept(alias) => Self::UnaliasConcept {
+                alias: alias.to_string(),
+            },
+            GeneratedWalOp::UnaliasLabel(alias) => Self::UnaliasLabel {
+                alias: alias.to_string(),
+            },
+            GeneratedWalOp::RetractSource(source) => Self::RetractSource {
+                source: source.to_string(),
+            },
+            GeneratedWalOp::RetractAssociation {
+                subject,
+                label,
+                object,
+            } => Self::RetractAssociation {
+                subject: subject.to_string(),
+                label: label.to_string(),
+                object: object.to_string(),
+            },
+        }
+    }
+}
+
 /// The machinery below is generic over the op vocabulary: the graph
 /// logs [`WalOp`] into `{stem}.wal.jsonl`, and any other store with its
 /// own log supplies its own op enum (same internally-tagged shape) and
@@ -825,7 +869,12 @@ mod tests {
 
     mod proptests {
         use super::*;
+        use crate::context_proptest::wal_op_strategy as generated_op_strategy;
         use proptest::prelude::*;
+
+        fn shared_wal_op_strategy() -> impl Strategy<Value = WalOp> {
+            generated_op_strategy().prop_map(WalOp::from)
+        }
 
         fn proptest_config() -> ProptestConfig {
             let cases = std::env::var("PROPTEST_CASES")
@@ -967,6 +1016,57 @@ mod tests {
                     *pick.get_mut(&mut bytes) = value;
                 }
                 let _ = parse_log::<WalOp>(Path::new("scratch.wal.jsonl"), &bytes, 0);
+            }
+
+            #[test]
+            fn corrupting_any_interior_record_is_fatal(
+                ops in prop::collection::vec(shared_wal_op_strategy(), 2..12),
+                record_pick in any::<prop::sample::Index>(),
+                cut_pick in any::<prop::sample::Index>(),
+            ) {
+                let path = scratch_wal("property-interior-corruption");
+                append_batch(&path, 1, &ops).unwrap();
+                let mut bytes = fs::read(&path).unwrap();
+                let line_starts: Vec<_> = std::iter::once(0)
+                    .chain(
+                        bytes
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, byte)| **byte == b'\n')
+                            .map(|(index, _)| index + 1),
+                    )
+                    .collect();
+                let record = record_pick.index(ops.len() - 1);
+                let start = line_starts[record];
+                let end = line_starts[record + 1] - 1;
+                let cut = cut_pick.index(end - start);
+                // Keep the newline and every later record, but replace the
+                // selected interior record with an arbitrary strict prefix.
+                // The identical shape at EOF is a healable torn tail; here it
+                // is acknowledged data and must be fatal.
+                bytes.drain(start + cut..end);
+                fs::write(&path, bytes).unwrap();
+
+                let error = replay::<WalOp>(&path, 0).unwrap_err();
+                prop_assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            }
+
+            #[test]
+            fn a_generated_duplicate_sequence_number_keeps_the_later_op(
+                mut ops in prop::collection::vec(shared_wal_op_strategy(), 1..12),
+                replacement in shared_wal_op_strategy(),
+                duplicate_pick in any::<prop::sample::Index>(),
+            ) {
+                let path = scratch_wal("property-duplicate-seq");
+                append_batch(&path, 1, &ops).unwrap();
+                let duplicate = duplicate_pick.index(ops.len());
+                append_batch(&path, duplicate as u64 + 1, std::slice::from_ref(&replacement))
+                    .unwrap();
+
+                ops[duplicate] = replacement;
+                let (replayed, top) = replay::<WalOp>(&path, 0).unwrap();
+                prop_assert_eq!(replayed, ops.clone());
+                prop_assert_eq!(top, ops.len() as u64);
             }
         }
     }

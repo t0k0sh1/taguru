@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 
@@ -533,6 +533,20 @@ pub struct Context {
     label_ids: HashMap<String, LabelId>,
     /// Derived index: interned name → source id. Not persisted.
     source_ids: HashMap<String, SourceId>,
+    /// Derived, name-sorted index over the concept-alias namespace only
+    /// (a subset of `concept_ids`, which also carries canonical names) —
+    /// lets `concept_alias_page` seek a page with `.range()` instead of
+    /// collecting and sorting every alias on each call. Not persisted.
+    concept_alias_index: BTreeMap<String, ConceptId>,
+    /// [`Context::concept_alias_index`] for the label-alias namespace.
+    /// Not persisted.
+    label_alias_index: BTreeMap<String, LabelId>,
+    /// Derived, name-sorted set of every canonical label spelling — the
+    /// same population `labels()` enumerates, kept sorted so `label_page`
+    /// can seek instead of re-sorting the whole vocabulary on each call.
+    /// No id resolution needed: a label's name IS its public identity.
+    /// Not persisted.
+    label_name_index: BTreeSet<String>,
     /// Derived exact-triple index so a repeated `associate` accumulates
     /// into the existing edge instead of growing a parallel one. Not
     /// persisted.
@@ -1603,6 +1617,27 @@ impl Context {
             .collect()
     }
 
+    /// One name-ordered page of the relation-label vocabulary plus the
+    /// cursor-independent total, seeked in O(log n + k) against
+    /// [`Context::label_name_index`] instead of collecting and sorting
+    /// the whole vocabulary on every call — the paged sibling of
+    /// [`Context::labels`].
+    pub fn label_page(&self, after: Option<&str>, limit: usize) -> (usize, Vec<String>) {
+        use std::ops::Bound;
+
+        let start = match after {
+            Some(after) => Bound::Excluded(after),
+            None => Bound::Unbounded,
+        };
+        let page = self
+            .label_name_index
+            .range::<str, _>((start, Bound::Unbounded))
+            .take(limit)
+            .cloned()
+            .collect();
+        (self.label_name_index.len(), page)
+    }
+
     /// Every canonical concept spelling in insertion order — the
     /// vocabulary an external entry tier (e.g. an embedding index over
     /// names) enumerates to stay in sync with the network.
@@ -1850,6 +1885,13 @@ impl Context {
         let name_entries = self.concepts.len() + self.labels.len() + self.sources.len();
         let triple_entry = size_of::<(ConceptId, LabelId, ConceptId)>() + size_of::<EdgeId>();
         let attribution_entry = size_of::<(EdgeId, SourceId)>() + size_of::<AttributionId>();
+        // The three keyset indexes behind `concept_alias_page`/
+        // `label_alias_page`/`label_page` each own a second copy of a
+        // subset of names already counted once above (aliases, or
+        // canonical labels) — same coarse per-entry overhead, no
+        // separate byte count for the duplicated keys.
+        let keyset_index_entries =
+            self.concept_aliases.len() + self.label_aliases.len() + self.labels.len();
         let derived = self.arena.len() // owned keys of the name → id maps
             + name_entries * MAP_ENTRY_OVERHEAD
             + self.edges.len() * (triple_entry + MAP_ENTRY_OVERHEAD)
@@ -1859,6 +1901,7 @@ impl Context {
             // (the same population `attribution_ids` counts).
             + self.source_edges.len() * (size_of::<SourceId>() + size_of::<Vec<EdgeId>>() + MAP_ENTRY_OVERHEAD)
             + self.attribution_ids.len() * size_of::<EdgeId>()
+            + keyset_index_entries * MAP_ENTRY_OVERHEAD
             + self.concept_index.footprint()
             + self.label_index.footprint();
 
@@ -1933,9 +1976,12 @@ impl Context {
     ) -> Result<(), AliasError> {
         add_alias(
             &mut self.arena,
-            &mut self.concept_aliases,
-            &mut self.concept_index,
-            &mut self.concept_ids,
+            AliasNamespace {
+                aliases: &mut self.concept_aliases,
+                index: &mut self.concept_index,
+                ids: &mut self.concept_ids,
+                alias_index: &mut self.concept_alias_index,
+            },
             alias.into(),
             canonical,
             "the concept alias table is out of u32 ids",
@@ -1958,9 +2004,12 @@ impl Context {
     ) -> Result<(), AliasError> {
         add_alias(
             &mut self.arena,
-            &mut self.label_aliases,
-            &mut self.label_index,
-            &mut self.label_ids,
+            AliasNamespace {
+                aliases: &mut self.label_aliases,
+                index: &mut self.label_index,
+                ids: &mut self.label_ids,
+                alias_index: &mut self.label_alias_index,
+            },
             alias.into(),
             canonical,
             "the label alias table is out of u32 ids",
@@ -1983,6 +2032,7 @@ impl Context {
             .position(|record| self.arena_str(record.name_offset, record.name_len) == alias)?;
         let record = self.concept_aliases.remove(position);
         self.concept_ids.remove(alias);
+        self.concept_alias_index.remove(alias);
         self.rebuild_concept_index();
         Some(self.concept_name(record.target).to_string())
     }
@@ -1995,6 +2045,7 @@ impl Context {
             .position(|record| self.arena_str(record.name_offset, record.name_len) == alias)?;
         let record = self.label_aliases.remove(position);
         self.label_ids.remove(alias);
+        self.label_alias_index.remove(alias);
         self.rebuild_label_index();
         Some(self.label_name(record.target).to_string())
     }
@@ -2299,6 +2350,67 @@ impl Context {
             .collect()
     }
 
+    /// [`Context::concept_alias_page`]/[`Context::label_alias_page`]'s
+    /// shared body: one alias-sorted page of a `BTreeMap<String, Id>`
+    /// alias index plus its cursor-independent total, seeked in
+    /// O(log n + k) instead of collecting and sorting every alias.
+    fn alias_page<Id: Copy>(
+        index: &BTreeMap<String, Id>,
+        after: Option<&str>,
+        limit: usize,
+        name_of: impl Fn(Id) -> String,
+    ) -> (usize, Vec<(String, String)>) {
+        use std::ops::Bound;
+
+        let start = match after {
+            Some(after) => Bound::Excluded(after),
+            None => Bound::Unbounded,
+        };
+        let page = index
+            .range::<str, _>((start, Bound::Unbounded))
+            .take(limit)
+            .map(|(alias, &target)| (alias.clone(), name_of(target)))
+            .collect();
+        (index.len(), page)
+    }
+
+    /// One alias-sorted page of the concept-alias namespace plus the
+    /// cursor-independent total — the same `group_page`-shaped contract
+    /// [`crate::registry::Groups::group_page`] already uses.
+    pub fn concept_alias_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> (usize, Vec<(String, String)>) {
+        Self::alias_page(&self.concept_alias_index, after, limit, |id| {
+            self.concept_name(id).to_string()
+        })
+    }
+
+    /// [`Context::concept_alias_page`] for the label-alias namespace.
+    pub fn label_alias_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> (usize, Vec<(String, String)>) {
+        Self::alias_page(&self.label_alias_index, after, limit, |id| {
+            self.label_name(id).to_string()
+        })
+    }
+
+    /// How many concept aliases are registered, independent of any
+    /// cursor — lets a paginated caller know the concept-alias
+    /// namespace's size without walking it, e.g. to decide whether a
+    /// page that came up short spilled into the next namespace.
+    pub fn concept_alias_count(&self) -> usize {
+        self.concept_alias_index.len()
+    }
+
+    /// [`Context::concept_alias_count`] for the label-alias namespace.
+    pub fn label_alias_count(&self) -> usize {
+        self.label_alias_index.len()
+    }
+
     fn intern_concept(&mut self, name: String) -> ConceptId {
         if let Some(&id) = self.concept_ids.get(&name) {
             return id;
@@ -2334,6 +2446,7 @@ impl Context {
             edge_count: 0,
         });
         self.label_index.push(&name, id);
+        self.label_name_index.insert(name.clone());
         self.label_ids.insert(name, id);
         id
     }
@@ -2481,24 +2594,39 @@ fn intern_name(arena: &mut Vec<u8>, name: &str) -> (u32, u32) {
     (offset as u32, name.len() as u32)
 }
 
+/// One namespace's alias-side storage — the alias table, its entry
+/// index, its name-to-id lookup map, and its name-sorted keyset index —
+/// bundled so [`add_alias`] takes one namespace handle instead of four
+/// separate `&mut` parameters.
+struct AliasNamespace<'a> {
+    aliases: &'a mut Vec<AliasRecord>,
+    index: &'a mut EntryIndex,
+    ids: &'a mut HashMap<String, u32>,
+    alias_index: &'a mut BTreeMap<String, u32>,
+}
+
 /// Registers one alternative spelling in one namespace — the shared
 /// mechanics behind [`Context::add_concept_alias`] and
-/// [`Context::add_label_alias`], which differ only in which alias
-/// table, entry index, and lookup map make up their namespace.
-/// `full_message` names the alias table in the capacity error. All
-/// alias semantics live here: resolution of `canonical` through the
-/// lookup map (so aliasing to an alias lands on the true canonical
-/// record), idempotent re-registration, conflict refusal, and the
-/// all-or-nothing capacity checks before anything mutates.
+/// [`Context::add_label_alias`], which differ only in which
+/// [`AliasNamespace`] they pass. `full_message` names the alias table
+/// in the capacity error. All alias semantics live here: resolution of
+/// `canonical` through the lookup map (so aliasing to an alias lands on
+/// the true canonical record), idempotent re-registration, conflict
+/// refusal, and the all-or-nothing capacity checks before anything
+/// mutates.
 fn add_alias(
     arena: &mut Vec<u8>,
-    aliases: &mut Vec<AliasRecord>,
-    index: &mut EntryIndex,
-    ids: &mut HashMap<String, u32>,
+    namespace: AliasNamespace<'_>,
     alias: String,
     canonical: &str,
     full_message: &'static str,
 ) -> Result<(), AliasError> {
+    let AliasNamespace {
+        aliases,
+        index,
+        ids,
+        alias_index,
+    } = namespace;
     let Some(&target) = ids.get(canonical) else {
         return Err(AliasError::UnknownCanonical);
     };
@@ -2524,6 +2652,7 @@ fn add_alias(
         target,
     });
     index.push(&alias, target);
+    alias_index.insert(alias.clone(), target);
     ids.insert(alias, target);
     Ok(())
 }
@@ -3963,6 +4092,59 @@ mod tests {
             context.add_concept_alias("蔵の誕生", "創業年"),
             Err(AliasError::UnknownCanonical)
         );
+    }
+
+    #[test]
+    fn label_page_seeks_a_page_instead_of_resorting_the_whole_vocabulary() {
+        let mut context = Context::default();
+        // Interned out of alphabetical order — proves `label_page` seeks
+        // its own sorted index rather than replaying insertion order.
+        context.associate("蔵", "founded", "1907", 1.0).unwrap();
+        context.associate("蔵", "brand", "青嶺", 1.0).unwrap();
+        context.associate("蔵", "location", "霧沢町", 1.0).unwrap();
+        context.associate("蔵", "brewer", "高瀬", 1.0).unwrap();
+
+        assert_eq!(context.label_count(), 4);
+        let (total, first) = context.label_page(None, 2);
+        assert_eq!(total, 4);
+        assert_eq!(first, vec!["brand".to_string(), "brewer".to_string()]);
+
+        let (total, second) = context.label_page(Some("brewer"), 2);
+        assert_eq!(total, 4, "total stays constant across pages");
+        assert_eq!(second, vec!["founded".to_string(), "location".to_string()]);
+
+        let (_, exhausted) = context.label_page(Some("location"), 2);
+        assert!(exhausted.is_empty());
+    }
+
+    #[test]
+    fn alias_pages_seek_each_namespace_independently() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "創業年", "1907年", 1.0)
+            .unwrap();
+        context.associate("高瀬", "役職", "杜氏", 1.0).unwrap();
+
+        // Registered out of alphabetical order in both namespaces.
+        context.add_concept_alias("zeta", "青嶺酒造").unwrap();
+        context.add_concept_alias("alpha", "高瀬").unwrap();
+        context.add_label_alias("yankee", "創業年").unwrap();
+        context.add_label_alias("bravo", "役職").unwrap();
+
+        assert_eq!(context.concept_alias_count(), 2);
+        assert_eq!(context.label_alias_count(), 2);
+
+        let (total, page) = context.concept_alias_page(None, 1);
+        assert_eq!(total, 2);
+        assert_eq!(page, vec![("alpha".to_string(), "高瀬".to_string())]);
+        let (_, page) = context.concept_alias_page(Some("alpha"), 10);
+        assert_eq!(page, vec![("zeta".to_string(), "青嶺酒造".to_string())]);
+
+        let (total, page) = context.label_alias_page(None, 1);
+        assert_eq!(total, 2);
+        assert_eq!(page, vec![("bravo".to_string(), "役職".to_string())]);
+        let (_, page) = context.label_alias_page(Some("bravo"), 10);
+        assert_eq!(page, vec![("yankee".to_string(), "創業年".to_string())]);
     }
 
     #[test]
@@ -5426,114 +5608,10 @@ mod tests {
 
     mod proptests {
         use super::*;
+        use crate::context_proptest::{
+            AliasInput, AssocInput, RetractionInput, config as proptest_config, scenario_strategy,
+        };
         use proptest::prelude::*;
-
-        fn proptest_config() -> ProptestConfig {
-            let cases = std::env::var("PROPTEST_CASES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(32);
-            ProptestConfig {
-                cases,
-                ..ProptestConfig::default()
-            }
-        }
-
-        const CONCEPT_WORDS: &[&str] = &[
-            "青嶺酒造",
-            "杜氏",
-            "南部杜氏",
-            "山田錦",
-            "高瀬",
-            "state",
-            "index",
-            "boot",
-        ];
-        const LABEL_WORDS: &[&str] = &["好き", "由来", "所在地", "labelled", "linked"];
-        const SOURCE_WORDS: &[&str] = &["a.md", "b.md", "文書1", "note.txt"];
-        const CONCEPT_ALIAS_WORDS: &[&str] = &["蔵元エイリアス", "Aomine", "aliasConceptC"];
-        const LABEL_ALIAS_WORDS: &[&str] = &["設立年エイリアス", "aliasLabelC"];
-
-        #[derive(Clone, Debug)]
-        struct AssocInput {
-            subject: &'static str,
-            label: &'static str,
-            object: &'static str,
-            weight: f64,
-            source: Option<&'static str>,
-            paragraph: Option<u32>,
-        }
-
-        fn assoc_input_strategy() -> impl Strategy<Value = AssocInput> {
-            (
-                prop::sample::select(CONCEPT_WORDS),
-                prop::sample::select(LABEL_WORDS),
-                prop::sample::select(CONCEPT_WORDS),
-                -1.0e6f64..1.0e6f64,
-                prop::option::of(prop::sample::select(SOURCE_WORDS)),
-                prop::option::of(0u32..8),
-            )
-                .prop_map(|(subject, label, object, weight, source, paragraph)| {
-                    AssocInput {
-                        subject,
-                        label,
-                        object,
-                        weight,
-                        source,
-                        paragraph,
-                    }
-                })
-        }
-
-        #[derive(Clone, Debug)]
-        enum AliasInput {
-            Concept {
-                alias: &'static str,
-                canonical: &'static str,
-            },
-            Label {
-                alias: &'static str,
-                canonical: &'static str,
-            },
-        }
-
-        /// Generates a batch of association ops, then alias ops whose
-        /// `canonical` is always drawn from a name that batch actually
-        /// interns — so `add_concept_alias`/`add_label_alias` only ever
-        /// fail with `Conflict` (an alias spelling reused across two ops
-        /// in the same batch), never `UnknownCanonical`.
-        fn scenario_strategy() -> impl Strategy<Value = (Vec<AssocInput>, Vec<AliasInput>)> {
-            prop::collection::vec(assoc_input_strategy(), 1..12).prop_flat_map(|assoc_ops| {
-                let mut concept_names: Vec<&'static str> = assoc_ops
-                    .iter()
-                    .flat_map(|op| [op.subject, op.object])
-                    .collect();
-                concept_names.sort_unstable();
-                concept_names.dedup();
-                let mut label_names: Vec<&'static str> =
-                    assoc_ops.iter().map(|op| op.label).collect();
-                label_names.sort_unstable();
-                label_names.dedup();
-
-                let alias_op_strategy = prop_oneof![
-                    (
-                        prop::sample::select(CONCEPT_ALIAS_WORDS),
-                        prop::sample::select(concept_names),
-                    )
-                        .prop_map(|(alias, canonical)| AliasInput::Concept { alias, canonical }),
-                    (
-                        prop::sample::select(LABEL_ALIAS_WORDS),
-                        prop::sample::select(label_names),
-                    )
-                        .prop_map(|(alias, canonical)| AliasInput::Label { alias, canonical }),
-                ];
-
-                (
-                    Just(assoc_ops),
-                    prop::collection::vec(alias_op_strategy, 0..6),
-                )
-            })
-        }
 
         /// Applies a scenario the way a caller would: sourced/unsourced
         /// associations through the real API, then alias registrations
@@ -5541,7 +5619,11 @@ mod tests {
         /// alias spelling must leave the context unchanged, and that is
         /// exactly what the round trip below is checking for, not just
         /// the happy path.
-        fn build_context(assoc_ops: &[AssocInput], alias_ops: &[AliasInput]) -> Context {
+        fn build_context(
+            assoc_ops: &[AssocInput],
+            alias_ops: &[AliasInput],
+            retractions: &[RetractionInput],
+        ) -> Context {
             let mut context = Context::default();
             for op in assoc_ops {
                 match op.source {
@@ -5570,21 +5652,201 @@ mod tests {
                     }
                 }
             }
+            for retraction in retractions {
+                match retraction {
+                    RetractionInput::Source(source) => {
+                        let _ = context.retract_source(source);
+                    }
+                    RetractionInput::Association {
+                        subject,
+                        label,
+                        object,
+                    } => {
+                        let _ = context.retract_association(subject, label, object);
+                    }
+                }
+            }
             context
+        }
+
+        fn within_reaccumulation_error(left: f64, right: f64, terms: u64) -> bool {
+            let scale = left.abs().max(right.abs()).max(1.0);
+            let tolerance = f64::EPSILON * scale * terms.max(1) as f64 * 8.0;
+            (left - right).abs() <= tolerance
+        }
+
+        /// Checks the semantic compaction contract independently of the
+        /// rebuilt context's record layout or allocation sizes.
+        fn assert_live_content_is_exact(source: &Context, compacted: &Context) {
+            let all_before = source.query_any(&[], &[], &[]);
+            let live_before: Vec<_> = all_before
+                .iter()
+                .filter(|association| association.count > 0)
+                .collect();
+            let after = compacted.query_any(&[], &[], &[]);
+            assert_eq!(after.len(), live_before.len());
+
+            for (before, after) in live_before.iter().zip(&after) {
+                assert_eq!(
+                    (&after.subject, &after.label, &after.object),
+                    (&before.subject, &before.label, &before.object)
+                );
+                assert_eq!(after.count, before.count);
+                assert!(within_reaccumulation_error(
+                    after.weight * after.count as f64,
+                    before.weight * before.count as f64,
+                    before.count,
+                ));
+                assert_eq!(after.attributions.len(), before.attributions.len());
+                for (before, after) in before.attributions.iter().zip(&after.attributions) {
+                    assert_eq!(after.source, before.source);
+                    assert_eq!(after.count, before.count);
+                    assert_eq!(after.paragraph, before.paragraph);
+                    assert!(within_reaccumulation_error(
+                        after.weight,
+                        before.weight,
+                        before.count,
+                    ));
+                }
+            }
+
+            let live_concepts: HashSet<&str> = live_before
+                .iter()
+                .flat_map(|association| [association.subject.as_str(), association.object.as_str()])
+                .collect();
+            let live_labels: HashSet<&str> = live_before
+                .iter()
+                .map(|association| association.label.as_str())
+                .collect();
+            let expected_concept_aliases: Vec<_> = source
+                .concept_aliases()
+                .into_iter()
+                .filter(|(_, canonical)| live_concepts.contains(canonical))
+                .collect();
+            let expected_label_aliases: Vec<_> = source
+                .label_aliases()
+                .into_iter()
+                .filter(|(_, canonical)| live_labels.contains(canonical))
+                .collect();
+            assert_eq!(compacted.concept_aliases(), expected_concept_aliases);
+            assert_eq!(compacted.label_aliases(), expected_label_aliases);
         }
 
         proptest! {
             #![proptest_config(proptest_config())]
 
             #[test]
-            fn context_round_trips_through_bytes(
-                (assoc_ops, alias_ops) in scenario_strategy(),
-                applied_seq in any::<u64>(),
+            fn retract_then_reassert_matches_a_fresh_assert(
+                (assoc_ops, _, _) in scenario_strategy(),
+                target in any::<prop::sample::Index>(),
             ) {
-                let mut context = build_context(&assoc_ops, &alias_ops);
-                context.set_applied_seq(applied_seq);
+                let target = &assoc_ops[target.index(assoc_ops.len())];
+                let mut reasserted = build_context(&assoc_ops, &[], &[]);
+                let _ = reasserted.retract_association(
+                    target.subject,
+                    target.label,
+                    target.object,
+                );
+                let mut fresh = Context::default();
 
-                let restored = Context::from_bytes(&context.to_bytes()).unwrap();
+                for context in [&mut reasserted, &mut fresh] {
+                    match target.source {
+                        Some(source) => context.associate_from(
+                            target.subject,
+                            target.label,
+                            target.object,
+                            target.weight,
+                            source,
+                            target.paragraph,
+                        ).unwrap(),
+                        None => context.associate(
+                            target.subject,
+                            target.label,
+                            target.object,
+                            target.weight,
+                        ).unwrap(),
+                    }
+                }
+
+                prop_assert_eq!(
+                    reasserted.query(
+                        Some(target.subject),
+                        Some(target.label),
+                        Some(target.object),
+                    ),
+                    fresh.query(
+                        Some(target.subject),
+                        Some(target.label),
+                        Some(target.object),
+                    ),
+                );
+            }
+
+            #[test]
+            fn resolve_normalization_is_idempotent_and_canonical_hits_are_stable(
+                name in "[^\\x00]{1,32}",
+            ) {
+                let once = normalize_entry(&name);
+                prop_assert_eq!(normalize_entry(&once), once.clone());
+                prop_assume!(!once.is_empty());
+
+                let mut context = Context::default();
+                context.associate(&name, "relation", "object", 1.0).unwrap();
+                let first = context.resolve(&name);
+                prop_assert!(!first.is_empty());
+                prop_assert_eq!(first[0].name.as_str(), name.as_str());
+                prop_assert_eq!(first[0].kind, MatchKind::Exact);
+
+                let canonical = first[0].name.clone();
+                let second = context.resolve(&canonical);
+                prop_assert!(!second.is_empty());
+                prop_assert_eq!(second[0].name.as_str(), canonical.as_str());
+                prop_assert_eq!(second[0].kind, MatchKind::Exact);
+                prop_assert_eq!(second[0].score, 1.0);
+            }
+
+            #[test]
+            fn compaction_preserves_exactly_the_live_content(
+                (assoc_ops, alias_ops, retractions) in scenario_strategy(),
+            ) {
+                let context = build_context(&assoc_ops, &alias_ops, &retractions);
+                let all_before = context.query_any(&[], &[], &[]);
+                let aliases_before =
+                    context.concept_aliases().len() + context.label_aliases().len();
+
+                let (compacted, stats) = context.compacted(Deadline::unbounded()).unwrap();
+                assert_live_content_is_exact(&context, &compacted);
+                prop_assert_eq!(
+                    stats.dead_edges,
+                    all_before.iter().filter(|association| association.count == 0).count()
+                );
+                prop_assert_eq!(
+                    stats.aliases_dropped,
+                    aliases_before
+                        - compacted.concept_aliases().len()
+                        - compacted.label_aliases().len()
+                );
+
+                let canonical_image = compacted.to_bytes();
+                let (again, second_stats) =
+                    compacted.compacted(Deadline::unbounded()).unwrap();
+                prop_assert_eq!(second_stats, CompactionStats::default());
+                prop_assert_eq!(again.to_bytes(), canonical_image);
+            }
+
+            #[test]
+            fn context_round_trips_through_bytes(
+                (assoc_ops, alias_ops, retractions) in scenario_strategy(),
+                applied_seq in any::<u64>(),
+                dice_floor in prop::option::of(-1.0f64..2.0),
+            ) {
+                let mut context = build_context(&assoc_ops, &alias_ops, &retractions);
+                context.set_applied_seq(applied_seq);
+                context.set_dice_floor(dice_floor);
+
+                let image = context.to_bytes();
+                let restored = Context::from_bytes(&image).unwrap();
+                prop_assert_eq!(restored.to_bytes(), image);
                 prop_assert_eq!(
                     restored.query(None, None, None),
                     context.query(None, None, None)
@@ -5592,6 +5854,7 @@ mod tests {
                 prop_assert_eq!(restored.concept_aliases(), context.concept_aliases());
                 prop_assert_eq!(restored.label_aliases(), context.label_aliases());
                 prop_assert_eq!(restored.applied_seq(), context.applied_seq());
+                prop_assert_eq!(restored.dice_floor(), DICE_FLOOR);
             }
 
             #[test]
@@ -5602,31 +5865,54 @@ mod tests {
             }
 
             #[test]
-            fn from_bytes_never_panics_on_mutated_v6_bytes(
-                (assoc_ops, alias_ops) in scenario_strategy(),
-                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..24),
+            fn changed_v6_bytes_return_a_structured_error(
+                (assoc_ops, alias_ops, retractions) in scenario_strategy(),
+                byte in any::<prop::sample::Index>(),
+                mask in 1u8..=u8::MAX,
             ) {
-                let context = build_context(&assoc_ops, &alias_ops);
+                let context = build_context(&assoc_ops, &alias_ops, &retractions);
                 let mut bytes = context.to_bytes();
-                for (pick, value) in mutations {
-                    *pick.get_mut(&mut bytes) = value;
-                }
-                let mutated = resealed(bytes);
-                let _ = Context::from_bytes(&mutated);
+                *byte.get_mut(&mut bytes) ^= mask;
+                prop_assert!(Context::from_bytes(&bytes).is_err());
+            }
+
+            #[test]
+            fn truncated_v6_bytes_return_a_structured_error(
+                (assoc_ops, alias_ops, retractions) in scenario_strategy(),
+                cut in any::<prop::sample::Index>(),
+            ) {
+                let context = build_context(&assoc_ops, &alias_ops, &retractions);
+                let mut bytes = context.to_bytes();
+                let keep = cut.index(bytes.len());
+                bytes.truncate(keep);
+                prop_assert!(Context::from_bytes(&bytes).is_err());
             }
 
             #[test]
             fn from_bytes_never_panics_on_mutated_legacy_bytes(
-                (assoc_ops, alias_ops) in scenario_strategy(),
+                (assoc_ops, alias_ops, retractions) in scenario_strategy(),
                 version in 1u32..=5,
                 mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..24),
             ) {
-                let context = build_context(&assoc_ops, &alias_ops);
+                let context = build_context(&assoc_ops, &alias_ops, &retractions);
                 let mut bytes = context.to_bytes_as_version(version);
                 for (pick, value) in mutations {
                     *pick.get_mut(&mut bytes) = value;
                 }
                 let _ = Context::from_bytes(&bytes);
+            }
+
+            #[test]
+            fn truncated_legacy_bytes_return_a_structured_error(
+                (assoc_ops, alias_ops, retractions) in scenario_strategy(),
+                version in 1u32..=5,
+                cut in any::<prop::sample::Index>(),
+            ) {
+                let context = build_context(&assoc_ops, &alias_ops, &retractions);
+                let mut bytes = context.to_bytes_as_version(version);
+                let keep = cut.index(bytes.len());
+                bytes.truncate(keep);
+                prop_assert!(Context::from_bytes(&bytes).is_err());
             }
         }
     }

@@ -1093,7 +1093,10 @@ struct StateInner {
     /// most recently used context is never evicted, so one context
     /// larger than the whole budget still works — it just stays alone.
     cache_bytes: usize,
-    registry: RwLock<HashMap<String, Arc<Entry>>>,
+    /// BTreeMap keeps the directory listing (and `directory_page`'s
+    /// keyset seek) in name order for free — the same reason `groups`
+    /// below does.
+    registry: RwLock<BTreeMap<String, Arc<Entry>>>,
     /// Groups: bundles of context names and child-group names (a
     /// shallow DAG, at most [`groups::MAX_GROUP_DEPTH`] groups tall and
     /// never cyclic, each set at most [`groups::MAX_GROUP_MEMBERS`]
@@ -3932,15 +3935,52 @@ impl AppState {
     }
 
     /// The routing directory: every context's name, description, policy,
-    /// residency, and stats, in name order.
+    /// residency, and stats, in name order. For large registries, prefer
+    /// [`AppState::directory_page`], which seeks a page in O(log n + k)
+    /// instead of describing every entry on every call.
     pub fn directory(&self) -> Vec<DirectoryEntry> {
-        let mut directory: Vec<DirectoryEntry> = self
-            .snapshot()
+        self.snapshot()
+            .into_iter()
+            .filter_map(|(name, entry)| describe_entry(name, &entry))
+            .collect()
+    }
+
+    /// One name-ordered page of the routing directory plus the
+    /// cursor-independent total, seeked in O(log n + k) against the
+    /// `BTreeMap`-backed registry — the paged sibling of
+    /// [`AppState::directory`]. Cuts the page under the registry lock
+    /// (cloning only `Arc` handles, same as [`AppState::snapshot`]) and
+    /// describes the survivors after dropping it: a context's
+    /// `Entry::inner` lock must never be taken while the registry lock
+    /// is held, the same ordering `directory`/`lookup` already keep.
+    /// A page can come back shorter than `limit` if a context in it is
+    /// deleted in the instant between the seek and [`describe_entry`]
+    /// reading its slot — the same race `directory` already tolerates.
+    pub fn directory_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> (usize, Vec<DirectoryEntry>) {
+        use std::ops::Bound;
+
+        let (total, slice) = {
+            let registry = self.0.registry.read();
+            let start = match after {
+                Some(after) => Bound::Excluded(after),
+                None => Bound::Unbounded,
+            };
+            let slice: Vec<(String, Arc<Entry>)> = registry
+                .range::<str, _>((start, Bound::Unbounded))
+                .take(limit)
+                .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
+                .collect();
+            (registry.len(), slice)
+        };
+        let page = slice
             .into_iter()
             .filter_map(|(name, entry)| describe_entry(name, &entry))
             .collect();
-        directory.sort_by(|a, b| a.name.cmp(&b.name));
-        directory
+        (total, page)
     }
 
     /// One directory row by name, or `None` for an unknown context.
@@ -4942,7 +4982,7 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
 /// staged writes are deleted (never published, and nothing may linger
 /// as unbounded disk litter), and every context image found is
 /// registered cold, described by its sidecar snapshot.
-fn scan_data_dir(data_dir: &Path) -> io::Result<(HashMap<String, Arc<Entry>>, ResumedRenames)> {
+fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, ResumedRenames)> {
     // Unfinished deletions first: a `.deleted` marker means delete()
     // acknowledged the removal but could not unlink the whole family —
     // without this sweep, a surviving `.ctx` would RESURRECT a context
@@ -4984,7 +5024,7 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(HashMap<String, Arc<Entry>>, Re
         resume_rename_markers(data_dir, "renaming", "context", |from_stem, to_stem| {
             move_context_files(data_dir, from_stem, to_stem)
         })?;
-    let mut registry = HashMap::new();
+    let mut registry = BTreeMap::new();
     let mut import_markers: Vec<PathBuf> = Vec::new();
     for dir_entry in fs::read_dir(data_dir)? {
         let path = dir_entry?.path();
@@ -5174,7 +5214,7 @@ fn rename_in_membership(
 /// collection is small enough that checking it all costs nothing.
 fn reconcile_groups(
     data_dir: &Path,
-    registry: &HashMap<String, Arc<Entry>>,
+    registry: &BTreeMap<String, Arc<Entry>>,
     groups: &mut BTreeMap<String, GroupRecord>,
 ) {
     let scanned = groups.clone();
@@ -6244,6 +6284,11 @@ pub(crate) fn name_from_stem(stem: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context_proptest::{
+        AliasInput, AssocInput, GeneratedGroupOp, RetractionInput, config as proptest_config,
+        group_op_strategy, json_roundtrip_f64_strategy, scenario_strategy, wal_op_strategy,
+    };
+    use proptest::prelude::*;
 
     fn scratch_dir(tag: &str) -> PathBuf {
         let dir =
@@ -6721,6 +6766,200 @@ mod tests {
             "the post-compact write must replay: {after:?}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn apply_generated_context(
+        state: &AppState,
+        assoc_ops: &[AssocInput],
+        alias_ops: &[AliasInput],
+        retractions: &[RetractionInput],
+    ) {
+        let ops = assoc_ops
+            .iter()
+            .map(|op| AssocOp {
+                subject: op.subject.to_string(),
+                label: op.label.to_string(),
+                object: op.object.to_string(),
+                weight: op.weight,
+                source: op.source.map(str::to_string),
+                paragraph: op.paragraph,
+            })
+            .collect();
+        state
+            .add_associations("generated", ops, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        for alias_op in alias_ops {
+            let (concepts, labels) = match alias_op {
+                AliasInput::Concept { alias, canonical } => (
+                    BTreeMap::from([(alias.to_string(), canonical.to_string())]),
+                    BTreeMap::new(),
+                ),
+                AliasInput::Label { alias, canonical } => (
+                    BTreeMap::new(),
+                    BTreeMap::from([(alias.to_string(), canonical.to_string())]),
+                ),
+            };
+            let _ = state.add_aliases("generated", &concepts, &labels).unwrap();
+        }
+
+        for retraction in retractions {
+            match retraction {
+                RetractionInput::Source(source) => {
+                    state.retract_source("generated", source).unwrap();
+                }
+                RetractionInput::Association {
+                    subject,
+                    label,
+                    object,
+                } => {
+                    state
+                        .retract_association("generated", subject, label, object)
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(proptest_config())]
+
+        /// Any image watermark splits the acknowledged operation history into
+        /// an already-baked prefix and a replayed suffix. A further partial
+        /// record is unacknowledged crash debris: replay must heal it without
+        /// changing the state assembled from the acknowledged operations.
+        #[test]
+        fn wal_replay_from_any_acknowledged_prefix_rebuilds_the_acknowledged_state(
+            candidates in prop::collection::vec(wal_op_strategy(), 1..16),
+            watermark_pick in any::<prop::sample::Index>(),
+            torn_op in wal_op_strategy(),
+            torn_at in any::<prop::sample::Index>(),
+        ) {
+            let mut expected = Context::default();
+            let candidates: Vec<_> = candidates.into_iter().map(WalOp::from).collect();
+            let acknowledged: Vec<_> = candidates
+                .into_iter()
+                .filter(|op| apply_op(&mut expected, op).is_ok())
+                .collect();
+            let watermark = watermark_pick.index(acknowledged.len() + 1);
+
+            let dir = scratch_dir("wal-prefix-property");
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("generated.wal.jsonl");
+            wal::append_batch(&path, 1, &acknowledged).unwrap();
+            let healthy_len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+
+            let mut restored = Context::default();
+            for op in &acknowledged[..watermark] {
+                replay_op(&mut restored, op);
+            }
+            let (pending, top) = wal::replay::<WalOp>(&path, watermark as u64).unwrap();
+            for op in &pending {
+                replay_op(&mut restored, op);
+            }
+            prop_assert_eq!(restored.to_bytes(), expected.to_bytes());
+            prop_assert_eq!(top, acknowledged.len() as u64);
+
+            // Build one real checksummed record, then retain an arbitrary
+            // non-empty strict prefix: every possible cut is a torn tail.
+            let fragment_path = dir.join("fragment.wal.jsonl");
+            let torn_op = WalOp::from(torn_op);
+            wal::append_batch(&fragment_path, acknowledged.len() as u64 + 1, &[torn_op])
+                .unwrap();
+            let record = fs::read(&fragment_path).unwrap();
+            let cut = torn_at.index(record.len() - 1) + 1;
+            let mut bytes = fs::read(&path).unwrap_or_default();
+            bytes.extend_from_slice(&record[..cut]);
+            fs::write(&path, bytes).unwrap();
+
+            let (pending, top) = wal::replay::<WalOp>(&path, watermark as u64).unwrap();
+            let mut healed = Context::default();
+            for op in &acknowledged[..watermark] {
+                replay_op(&mut healed, op);
+            }
+            for op in &pending {
+                replay_op(&mut healed, op);
+            }
+            prop_assert_eq!(healed.to_bytes(), expected.to_bytes());
+            prop_assert_eq!(top, acknowledged.len() as u64);
+            prop_assert_eq!(fs::metadata(&path).unwrap().len(), healthy_len);
+
+            let _ = fs::remove_dir_all(dir);
+        }
+
+        /// The operator path installs the same canonical context as the
+        /// library rebuild, flushes it immediately, and re-applies state
+        /// that lives outside the graph image when it is loaded again.
+        #[test]
+        fn registry_compaction_flushes_and_reloads_the_canonical_image(
+            (assoc_ops, alias_ops, retractions) in scenario_strategy(),
+            dice_floor in prop::option::of(json_roundtrip_f64_strategy(-1.0f64..2.0)),
+        ) {
+            let dir = scratch_dir("compact-property");
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create(
+                    "generated",
+                    ContextMeta {
+                        dice_floor,
+                        ..ContextMeta::default()
+                    },
+                )
+                .unwrap();
+            apply_generated_context(&state, &assoc_ops, &alias_ops, &retractions);
+            // Project the current WAL watermark into the source image first;
+            // compaction must carry this known non-zero value forward.
+            prop_assert_eq!(state.flush_dirty(), vec!["generated"]);
+
+            let (expected_image, expected_seq, expected_floor, expected_stats) = state
+                .read_context("generated", |context| {
+                    let (mut canonical, stats) =
+                        context.compacted(Deadline::unbounded()).unwrap();
+                    canonical.set_applied_seq(context.applied_seq());
+                    canonical.set_dice_floor(Some(context.dice_floor()));
+                    (
+                        canonical.to_bytes(),
+                        context.applied_seq(),
+                        context.dice_floor(),
+                        stats,
+                    )
+                })
+                .unwrap();
+
+            let outcome = state
+                .compact_context("generated", Deadline::unbounded())
+                .unwrap();
+            prop_assert_eq!(outcome.dead_edges, expected_stats.dead_edges);
+            prop_assert_eq!(outcome.aliases_dropped, expected_stats.aliases_dropped);
+            state
+                .read_context("generated", |context| {
+                    assert_eq!(context.to_bytes(), expected_image);
+                    assert_eq!(context.applied_seq(), expected_seq);
+                    assert_eq!(context.dice_floor(), expected_floor);
+                })
+                .unwrap();
+            let disk_image = fs::read(image_path(&dir, &file_stem("generated"))).unwrap();
+            prop_assert_eq!(&disk_image, &expected_image);
+
+            let second = state
+                .compact_context("generated", Deadline::unbounded())
+                .unwrap();
+            prop_assert_eq!(second.dead_edges, 0);
+            prop_assert_eq!(second.aliases_dropped, 0);
+            drop(state);
+
+            let reloaded = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            reloaded
+                .read_context("generated", |context| {
+                    assert_eq!(context.to_bytes(), expected_image);
+                    assert_eq!(context.applied_seq(), expected_seq);
+                    assert_eq!(context.dice_floor(), expected_floor);
+                })
+                .unwrap();
+            drop(reloaded);
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 
     /// A context whose load failed answers the remembered refusal
@@ -10908,6 +11147,34 @@ mod tests {
     }
 
     #[test]
+    fn directory_page_seeks_by_name_with_a_cursor_independent_total() {
+        let dir = scratch_dir("directory-page");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        for name in ["cherry", "apple", "banana"] {
+            state.create(name, ContextMeta::default()).unwrap();
+        }
+
+        let (total, first) = state.directory_page(None, 2);
+        assert_eq!(total, 3);
+        let names: Vec<&str> = first.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["apple", "banana"]);
+
+        let (total, second) = state.directory_page(Some("banana"), 2);
+        assert_eq!(total, 3, "total stays constant across pages");
+        let names: Vec<&str> = second.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["cherry"]);
+
+        // Deleting a context drops it from the very next page.
+        state.delete("apple").unwrap().unwrap();
+        let (total, page) = state.directory_page(None, 10);
+        assert_eq!(total, 2);
+        let names: Vec<&str> = page.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["banana", "cherry"]);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn deleting_a_context_sweeps_it_out_of_every_group() {
         let dir = scratch_dir("groups-sweep");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
@@ -11408,6 +11675,76 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    fn assert_live_group_invariants(state: &AppState) {
+        let contexts: BTreeSet<String> = state
+            .directory()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        let groups = state.0.groups.read();
+        assert_eq!(groups::validate_nesting(&groups), Ok(()));
+        for record in groups.values() {
+            assert!(record.contexts.len() <= groups::MAX_GROUP_MEMBERS);
+            assert!(record.groups.len() <= groups::MAX_GROUP_MEMBERS);
+            assert!(record.contexts.iter().all(|name| contexts.contains(name)));
+            assert!(record.groups.iter().all(|name| groups.contains_key(name)));
+        }
+    }
+
+    proptest! {
+        #![proptest_config(proptest_config())]
+
+        #[test]
+        fn arbitrary_group_operations_continuously_preserve_store_invariants(
+            operations in prop::collection::vec(group_op_strategy(), 1..48),
+        ) {
+            let dir = scratch_dir("group-properties");
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+
+            for operation in operations {
+                match operation {
+                    GeneratedGroupOp::CreateContext(name) => {
+                        let _ = state.create(name, ContextMeta::default());
+                    }
+                    GeneratedGroupOp::DeleteContext(name) => {
+                        let _ = state.delete(name);
+                    }
+                    GeneratedGroupOp::CreateGroup { name, contexts, groups } => {
+                        let _ = state.create_group(
+                            name,
+                            String::new(),
+                            contexts.into_iter().map(str::to_string).collect(),
+                            groups.into_iter().map(str::to_string).collect(),
+                        );
+                    }
+                    GeneratedGroupOp::UpdateGroup {
+                        name,
+                        add_contexts,
+                        remove_contexts,
+                        add_groups,
+                        remove_groups,
+                    } => {
+                        let _ = state.update_group(
+                            name,
+                            None,
+                            add_contexts.into_iter().map(str::to_string).collect(),
+                            remove_contexts.into_iter().map(str::to_string).collect(),
+                            add_groups.into_iter().map(str::to_string).collect(),
+                            remove_groups.into_iter().map(str::to_string).collect(),
+                        );
+                    }
+                    GeneratedGroupOp::DeleteGroup(name) => {
+                        let _ = state.delete_group(name);
+                    }
+                }
+                assert_live_group_invariants(&state);
+            }
+
+            drop(state);
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 
     #[cfg(unix)]

@@ -71,7 +71,14 @@ from .._shared import (
     raise_for_response,
     unwrap_envelope,
 )
-from .._types import AssocOp, QuestionSpec, SectionSpec
+from .._types import (
+    AssocOp,
+    CrossMatchCursor,
+    ExploreCursor,
+    MatchCursor,
+    QuestionSpec,
+    SectionSpec,
+)
 
 __all__ = ["Taguru", "Contexts", "Groups", "Context"]
 
@@ -249,6 +256,7 @@ class Taguru:
         contexts: Sequence[str] | None = None,
         groups: Sequence[str] | None = None,
         limit: int | None = None,
+        after: CrossMatchCursor | None = None,
     ) -> CrossMatchPage:
         """Recall across several contexts at once, every match tagged.
 
@@ -256,7 +264,8 @@ class Taguru:
         context the group reaches (nested children included), overlaps
         deduped. At least one of the two must name something. Weights share
         one scale, so past the limit the strongest |weight| survives exactly
-        as within one context.
+        as within one context. ``after`` resumes past the previous page's
+        last match; ``total`` stays constant across pages.
         """
         body = drop_none(
             {
@@ -264,6 +273,7 @@ class Taguru:
                 "groups": list(groups) if groups is not None else None,
                 "cue": cue,
                 "limit": limit,
+                "after": after,
             }
         )
         result = self._request_json("POST", "/recall", json_body=body)
@@ -278,6 +288,7 @@ class Taguru:
         label: str | Sequence[str] | None = None,
         object: str | Sequence[str] | None = None,
         limit: int | None = None,
+        after: CrossMatchCursor | None = None,
     ) -> CrossMatchPage:
         """Exact-position query across several contexts at once, matches
         tagged; the same target contract as :meth:`recall`."""
@@ -289,6 +300,7 @@ class Taguru:
                 "label": label,
                 "object": object,
                 "limit": limit,
+                "after": after,
             }
         )
         result = self._request_json("POST", "/query", json_body=body)
@@ -621,9 +633,15 @@ class Context:
 
     # -- graph reads ---------------------------------------------------------
 
-    def recall(self, cue: str, *, limit: int | None = None) -> MatchPage:
-        """Associations whose subject/object entry-matches the cue."""
-        result = self._post("/recall", drop_none({"cue": cue, "limit": limit}))
+    def recall(
+        self, cue: str, *, limit: int | None = None, after: MatchCursor | None = None
+    ) -> MatchPage:
+        """Associations whose subject/object entry-matches the cue.
+
+        ``after`` resumes past the previous page's last match; ``total``
+        stays constant across pages.
+        """
+        result = self._post("/recall", drop_none({"cue": cue, "limit": limit, "after": after}))
         return decode(MatchPage, result)  # type: ignore[no-any-return]
 
     def query(
@@ -633,9 +651,18 @@ class Context:
         label: str | Sequence[str] | None = None,
         object: str | Sequence[str] | None = None,
         limit: int | None = None,
+        after: MatchCursor | None = None,
     ) -> MatchPage:
         """Exact-position query; each position takes one name or an OR-set."""
-        body = drop_none({"subject": subject, "label": label, "object": object, "limit": limit})
+        body = drop_none(
+            {
+                "subject": subject,
+                "label": label,
+                "object": object,
+                "limit": limit,
+                "after": after,
+            }
+        )
         result = self._post("/query", body)
         return decode(MatchPage, result)  # type: ignore[no-any-return]
 
@@ -650,13 +677,19 @@ class Context:
         *,
         max_depth: int | None = None,
         limit: int | None = None,
+        after: ExploreCursor | None = None,
     ) -> ExplorePage:
-        """Exhaustive hop-annotated walk (truncation keeps the nearest)."""
+        """Exhaustive hop-annotated walk (truncation keeps the nearest).
+
+        ``after`` resumes past the previous page's last recollection;
+        ``total`` stays constant across pages.
+        """
         body = drop_none(
             {
                 "origins": [origins] if isinstance(origins, str) else list(origins),
                 "max_depth": max_depth,
                 "limit": limit,
+                "after": after,
             }
         )
         result = self._post("/explore", body)
@@ -681,13 +714,22 @@ class Context:
         return decode(ActivationPage, result)  # type: ignore[no-any-return]
 
     def unreachable_from(
-        self, origins: str | Sequence[str], *, limit: int | None = None
+        self,
+        origins: str | Sequence[str],
+        *,
+        limit: int | None = None,
+        after: MatchCursor | None = None,
     ) -> MatchPage:
-        """Coverage audit: associations not reachable from the origins."""
+        """Coverage audit: associations not reachable from the origins.
+
+        ``after`` resumes past the previous page's last match; ``total``
+        stays constant across pages.
+        """
         body = drop_none(
             {
                 "origins": [origins] if isinstance(origins, str) else list(origins),
                 "limit": limit,
+                "after": after,
             }
         )
         result = self._post("/unreachable_from", body)

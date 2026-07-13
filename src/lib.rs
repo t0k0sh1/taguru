@@ -15,5 +15,8 @@
 pub mod context;
 pub mod deadline;
 
+#[cfg(test)]
+pub(crate) mod context_proptest;
+
 // Shared with the binaries by dual inclusion — see the module doc.
 mod crc32c;
