@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::{
     AliasRecord, AttributionId, AttributionLocatorRecord, AttributionRecord, ConceptId,
@@ -347,6 +347,9 @@ impl Context {
             concept_ids: HashMap::new(),
             label_ids: HashMap::new(),
             source_ids: HashMap::new(),
+            concept_alias_index: BTreeMap::new(),
+            label_alias_index: BTreeMap::new(),
+            label_name_index: BTreeSet::new(),
             edge_ids: HashMap::new(),
             attribution_ids: HashMap::new(),
             source_edges: HashMap::new(),
@@ -392,6 +395,7 @@ impl Context {
             if self.label_ids.insert(name.to_string(), id as u32).is_some() {
                 return Err(CorruptImage("two label records share one name"));
             }
+            self.label_name_index.insert(name.to_string());
         }
         for (id, record) in self.sources.iter().enumerate() {
             let name = checked_arena_str(&self.arena, record.name_offset, record.name_len)?;
@@ -422,6 +426,8 @@ impl Context {
             {
                 return Err(CorruptImage("concept alias collides with another spelling"));
             }
+            self.concept_alias_index
+                .insert(alias.to_string(), record.target);
         }
         for record in &self.label_aliases {
             let alias = checked_arena_str(&self.arena, record.name_offset, record.name_len)?;
@@ -436,6 +442,8 @@ impl Context {
             {
                 return Err(CorruptImage("label alias collides with another spelling"));
             }
+            self.label_alias_index
+                .insert(alias.to_string(), record.target);
         }
         Ok(())
     }

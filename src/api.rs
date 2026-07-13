@@ -4,6 +4,7 @@
 //! handler is a lock, a library call, and a serialized reply.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Json;
@@ -463,28 +464,38 @@ pub async fn list_contexts(
     AppQuery(query): AppQuery<ListContextsQuery>,
 ) -> Response {
     let started_at = Instant::now();
-    let directory = state.directory();
+    let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    let after = query.after.as_deref();
     // A context-scoped key's world IS its grant: rows outside it are
     // filtered rather than refused, and `total` counts the visible
-    // world so pagination stays coherent for that caller.
-    let directory: Vec<_> = match &scope {
-        Some(axum::Extension(scope)) => directory
-            .into_iter()
-            .filter(|entry| scope.allows_context(&entry.name))
-            .collect(),
-        None => directory,
+    // world so pagination stays coherent for that caller. An explicit
+    // allow-list has no relation to name order, so seeking a page of
+    // the full directory and filtering afterward could come back short
+    // even when more allowed contexts exist further along — instead,
+    // the (typically small, operator-configured) allow-list is paged
+    // as its own sorted collection. An unscoped key (or one scoped to
+    // "every context") pages the registry directly.
+    let allowed = match &scope {
+        Some(axum::Extension(scope)) => scope.contexts.clone(),
+        None => None,
     };
-    let total = directory.len();
-    let contexts: Vec<_> = directory
-        .into_iter()
-        .filter(|entry| {
-            query
-                .after
-                .as_deref()
-                .is_none_or(|after| entry.name.as_str() > after)
-        })
-        .take(clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT))
-        .collect();
+    let (total, contexts) = match allowed {
+        Some(allowed) => {
+            let mut directory: Vec<_> = allowed
+                .iter()
+                .filter_map(|name| state.directory_entry(name))
+                .collect();
+            directory.sort_by(|a, b| a.name.cmp(&b.name));
+            let total = directory.len();
+            let contexts = directory
+                .into_iter()
+                .filter(|entry| after.is_none_or(|after| entry.name.as_str() > after))
+                .take(limit)
+                .collect();
+            (total, contexts)
+        }
+        None => state.directory_page(after, limit),
+    };
     ok(ContextPage { total, contexts }, started_at)
 }
 
@@ -1540,32 +1551,194 @@ pub struct CrossMatchPage {
     pub matches: Vec<CrossMatch<AssociationOut>>,
 }
 
-/// Bounds a match list: within the limit the library's insertion order
-/// is preserved; past it, the strongest knowledge (|weight|, the same
-/// magnitude-ranks philosophy as activate) survives the cut, ties in
-/// insertion order. Returns the raw library `Association`s, not yet
-/// resolved to their wire shape — callers still need to run them
-/// through `resolve_sections`/`association_out`, and `page` itself has
-/// no context name to resolve against.
-fn page(matches: Vec<Association>, limit: Option<usize>) -> (usize, Vec<Association>) {
-    page_by(matches, limit, |association| association.weight)
+/// A match page's resume point: the rank key of the last item on the
+/// previous page. `(subject, label, object)` alone already uniquely
+/// identifies an edge within one context (the `edge_ids` bijection),
+/// so `weight` plus that triple is a total order with no possible tie
+/// — a client can always build the next `after` from the last match it
+/// received.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchCursor {
+    pub weight: f64,
+    pub subject: String,
+    pub label: String,
+    pub object: String,
 }
 
-/// [`page`]'s bound over any match shape, the weight read through an
+/// The total order every match page sorts by: strongest |weight| first
+/// (the same magnitude-ranks philosophy as activate), ties broken
+/// lexicographically on `(subject, label, object)` — deliberately NOT
+/// insertion order, since a cursor can only resume a client-visible
+/// order.
+fn rank(a: (f64, &str, &str, &str), b: (f64, &str, &str, &str)) -> std::cmp::Ordering {
+    b.0.abs()
+        .total_cmp(&a.0.abs())
+        .then_with(|| a.1.cmp(b.1))
+        .then_with(|| a.2.cmp(b.2))
+        .then_with(|| a.3.cmp(b.3))
+}
+
+/// Bounds a match list to one page: past `after` when given, ranked by
+/// [`rank`], cut at the limit. Returns the raw library `Association`s,
+/// not yet resolved to their wire shape — callers still need to run
+/// them through `resolve_sections`/`association_out`, and `page` itself
+/// has no context name to resolve against.
+fn page(
+    matches: Vec<Association>,
+    limit: Option<usize>,
+    after: Option<&MatchCursor>,
+) -> (usize, Vec<Association>) {
+    page_by(matches, limit, after, |association| {
+        (
+            association.weight,
+            association.subject.as_str(),
+            association.label.as_str(),
+            association.object.as_str(),
+        )
+    })
+}
+
+/// [`page`]'s bound over any match shape, the rank key read through an
 /// accessor — the cross-context pages carry `(context, association)`
-/// pairs rather than bare associations.
+/// pairs rather than bare associations. `total` is captured before the
+/// cursor filter and the truncate: it names the query's whole result
+/// set, not what remains past `after`, so it stays constant across
+/// every page (the same convention `labels`/`ContextPage` use).
 fn page_by<T>(
     mut matches: Vec<T>,
     limit: Option<usize>,
-    weight: impl Fn(&T) -> f64,
+    after: Option<&MatchCursor>,
+    key: impl Fn(&T) -> (f64, &str, &str, &str),
 ) -> (usize, Vec<T>) {
     let total = matches.len();
     let limit = clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT);
-    if total > limit {
-        matches.sort_by(|a, b| weight(b).abs().total_cmp(&weight(a).abs()));
-        matches.truncate(limit);
+    if let Some(cursor) = after {
+        let seat = (
+            cursor.weight,
+            cursor.subject.as_str(),
+            cursor.label.as_str(),
+            cursor.object.as_str(),
+        );
+        matches.retain(|item| rank(key(item), seat) == std::cmp::Ordering::Greater);
     }
+    matches.sort_by(|a, b| rank(key(a), key(b)));
+    matches.truncate(limit);
     (total, matches)
+}
+
+/// [`explore`]'s resume point: `Context::explore` already produces a
+/// full deterministic order via `(distance, edge_id)`, but `edge_id` is
+/// internal and never reaches the client — `(subject, label, object)`
+/// (the same externally-visible triple [`MatchCursor`] uses) stands in
+/// for it. `distance` stays in the key even though the triple alone
+/// already disambiguates the row: dropping it would let "ranks after
+/// the cursor" compare across distance bands incorrectly.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExploreCursor {
+    pub distance: usize,
+    pub subject: String,
+    pub label: String,
+    pub object: String,
+}
+
+/// [`ExploreCursor`]'s rank key for one [`Recollection`]: nearest hop
+/// first, ties broken lexicographically on `(subject, label, object)`
+/// — `path` needs no part in it, since `Context::explore`'s
+/// first-write-wins `reached.entry(edge_id)` already guarantees exactly
+/// one `Recollection` per `(subject, label, object)`.
+fn explore_rank(recollection: &Recollection) -> (usize, &str, &str, &str) {
+    let association = &recollection.association;
+    (
+        recollection.distance,
+        association.subject.as_str(),
+        association.label.as_str(),
+        association.object.as_str(),
+    )
+}
+
+/// [`page`], for `Context::explore`'s output: same cursor-then-cut
+/// contract, ranked by [`explore_rank`] instead of [`rank`]. The
+/// re-sort is NOT optional — `Context::explore` orders by
+/// `(distance, edge_id)`, and `edge_id` tracks roughly insertion order,
+/// not the lexicographic order the cursor resumes, so a same-distance
+/// tie's insertion order commonly differs from `explore_rank`'s.
+fn explore_page(
+    mut matches: Vec<Recollection>,
+    after: Option<&ExploreCursor>,
+    limit: Option<usize>,
+) -> (usize, Vec<Recollection>) {
+    let total = matches.len();
+    if let Some(cursor) = after {
+        let seat = (
+            cursor.distance,
+            cursor.subject.as_str(),
+            cursor.label.as_str(),
+            cursor.object.as_str(),
+        );
+        matches.retain(|recollection| explore_rank(recollection) > seat);
+    }
+    matches.sort_by(|a, b| explore_rank(a).cmp(&explore_rank(b)));
+    matches.truncate(clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT));
+    (total, matches)
+}
+
+/// Runs `job` for every index in `0..count` on the blocking thread
+/// pool, at most `permits` at once, and returns the results in index
+/// order (not completion order) — so callers can zip them back against
+/// whatever list `count` came from. Built for cross-context fan-out:
+/// each `job` call is one context's blocking read, and bounding
+/// concurrency keeps a large `contexts`/`groups` list from opening one
+/// blocking thread per target at once.
+async fn bounded_parallel_map<R: Send + 'static>(
+    count: usize,
+    permits: usize,
+    job: impl Fn(usize) -> R + Send + Sync + 'static,
+) -> Vec<R> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let permits = permits.clamp(1, count);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(permits));
+    let job = Arc::new(job);
+    let mut set = tokio::task::JoinSet::new();
+    for index in 0..count {
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .expect("semaphore is never closed");
+        let job = Arc::clone(&job);
+        set.spawn_blocking(move || {
+            let _permit = permit;
+            (index, job(index))
+        });
+    }
+    let mut slots: Vec<Option<R>> = (0..count).map(|_| None).collect();
+    while let Some(outcome) = set.join_next().await {
+        let (index, value) = outcome.expect("cross-search job panicked");
+        slots[index] = Some(value);
+    }
+    slots
+        .into_iter()
+        .map(|slot| slot.expect("every index was joined"))
+        .collect()
+}
+
+/// Concurrency ceiling for [`bounded_parallel_map`]'s cross-context fan
+/// out, `TAGURU_CROSS_SEARCH_CONCURRENCY`-overridable (default 4) —
+/// read once and cached, the same `OnceLock` shape as
+/// [`search_log_enabled`], since it governs a fan-out shape, not a
+/// per-request value.
+fn cross_search_concurrency() -> usize {
+    static CONCURRENCY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CONCURRENCY.get_or_init(|| {
+        std::env::var("TAGURU_CROSS_SEARCH_CONCURRENCY")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|&value: &usize| value > 0)
+            .unwrap_or(4)
+    })
 }
 
 /// `Attribution`'s wire shape: everything the library exposes, plus the
@@ -2014,45 +2187,36 @@ pub async fn list_aliases(
         },
     };
     let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    // Namespace order is concepts-then-labels, same as the wire cursor's
+    // `(is_label, alias)` ordering. A cursor already inside the label
+    // namespace means every concept alias is behind it, so the concept
+    // seek is skipped outright rather than run and immediately discarded.
+    let (concept_after, label_after, skip_concepts) = match after {
+        None => (None, None, false),
+        Some((false, alias)) => (Some(alias), None, false),
+        Some((true, alias)) => (None, Some(alias), true),
+    };
     match state.read_context(&name, |context| {
-        let mut concepts: Vec<(String, String)> = context
-            .concept_aliases()
-            .into_iter()
-            .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
-            .collect();
-        concepts.sort();
-        let mut labels: Vec<(String, String)> = context
-            .label_aliases()
-            .into_iter()
-            .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
-            .collect();
-        labels.sort();
-        let total = concepts.len() + labels.len();
-        // One ordered sequence — concepts, then labels — filtered past
-        // the cursor and cut at the limit, then split back into maps.
-        let page: Vec<(bool, (String, String))> = concepts
-            .into_iter()
-            .map(|entry| (false, entry))
-            .chain(labels.into_iter().map(|entry| (true, entry)))
-            .filter(|(is_label, (alias, _))| match after {
-                None => true,
-                Some((after_is_label, after_alias)) => {
-                    (*is_label, alias.as_str()) > (after_is_label, after_alias)
-                }
-            })
-            .take(limit)
-            .collect();
+        let total = context.concept_alias_count() + context.label_alias_count();
         let mut export = AliasExport {
             total,
             concepts: BTreeMap::new(),
             labels: BTreeMap::new(),
         };
-        for (is_label, (alias, canonical)) in page {
-            if is_label {
-                export.labels.insert(alias, canonical);
-            } else {
-                export.concepts.insert(alias, canonical);
-            }
+        let mut remaining = limit;
+        if !skip_concepts {
+            let (_, page) = context.concept_alias_page(concept_after, remaining);
+            remaining -= page.len();
+            export.concepts.extend(page);
+        }
+        // A concept page shorter than what was asked for means that
+        // namespace ran dry, so the leftover budget spills into labels,
+        // started fresh — reached only when `label_after` is `None`,
+        // since a label-namespace cursor takes the `skip_concepts`
+        // branch above and never sets `remaining` here.
+        if remaining > 0 {
+            let (_, page) = context.label_alias_page(label_after, remaining);
+            export.labels.extend(page);
         }
         export
     }) {
@@ -2769,6 +2933,8 @@ pub struct RecallRequest {
     pub cue: String,
     /// Omitted means 100.
     pub limit: Option<usize>,
+    /// Resume past a previous page's last match — see [`MatchCursor`].
+    pub after: Option<MatchCursor>,
 }
 
 pub async fn recall(
@@ -2779,7 +2945,7 @@ pub async fn recall(
     let started_at = Instant::now();
     match state.read_context(&name, |context| context.recall(&request.cue)) {
         Ok(result) => {
-            let (total, matches) = page(result, request.limit);
+            let (total, matches) = page(result, request.limit, request.after.as_ref());
             state.note_search(SearchOp::Recall, &name, total == 0);
             if search_log_enabled() {
                 tracing::info!(
@@ -2823,7 +2989,7 @@ fn cross_targets(
     contexts: Vec<String>,
     groups: Vec<String>,
     started_at: Instant,
-) -> Result<Vec<String>, Box<Response>> {
+) -> Result<Arc<[String]>, Box<Response>> {
     if contexts.is_empty() && groups.is_empty() {
         return Err(Box::new(error(
             ErrorCode::InvalidArgument,
@@ -2865,57 +3031,172 @@ fn cross_targets(
                 .filter(|name| scope_allows(scope, name) && seen.insert(name.clone())),
         );
     }
-    Ok(targets)
+    Ok(targets.into())
 }
 
 /// One cross-context result page: the pre-cut total, and the surviving
 /// `(context, association)` pairs in page order.
 type CrossPage = (usize, Vec<(String, Association)>);
 
-/// The shared middle of the cross-context graph searches: run the
-/// per-context search over every target in turn, pool the matches, cut
-/// past the limit, and only then tag the survivors with their context
-/// names — naming every match up front would allocate thousands of
-/// strings just to throw them away. [`page_by`] makes every cut, so
-/// there is exactly one comparator. The in-loop cut holds the MEMORY
-/// bound alone: it fires at twice the limit and comes back to the
-/// limit, so the pool never holds more than twice the limit plus one
-/// context's matches, and each firing discards at least `limit`
-/// entries — the sort work stays linearithmic in the total instead of
-/// re-sorting per target. The running cut is exact, not approximate:
-/// whatever sits outside a prefix pool's strongest `limit` sits
-/// outside every superset's, the sort is stable, and later contexts
-/// only ever append after earlier ones, so the closing [`page_by`]
-/// answers — survivors and tie order — exactly what cutting one grand
-/// pool at the end would. The first per-context failure aborts the
-/// whole response (a read has nothing to half-apply).
-fn cross_matches(
-    state: &AppState,
+/// [`MatchCursor`], cross-context: `(subject, label, object)` only
+/// identifies an edge *within* one context's `edge_ids` map, so two
+/// different target contexts can each hold an edge with the identical
+/// triple — `context` joins the key as a fifth field to keep the
+/// merged pool's order total. Every wire match already carries
+/// `context` ([`CrossMatch`]'s flattened shape), so a client builds
+/// this from the last match it received exactly as it builds
+/// [`MatchCursor`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrossMatchCursor {
+    pub weight: f64,
+    pub context: String,
+    pub subject: String,
+    pub label: String,
+    pub object: String,
+}
+
+/// [`CrossMatchCursor`]'s rank key for one pooled `(context,
+/// association)` pair.
+fn cross_key<'a>(
+    context: &'a str,
+    found: &'a Association,
+) -> (f64, &'a str, &'a str, &'a str, &'a str) {
+    (
+        found.weight,
+        context,
+        found.subject.as_str(),
+        found.label.as_str(),
+        found.object.as_str(),
+    )
+}
+
+/// [`rank`], cross-context: the same strongest-|weight|-first order
+/// with `context` spliced in ahead of the `(subject, label, object)`
+/// tiebreak. A separate small function rather than one generalized
+/// N-tuple comparator — the two key shapes are concretely different
+/// arities, and this codebase prefers explicit small functions over
+/// generic machinery built for two call sites.
+fn cross_rank(
+    a: (f64, &str, &str, &str, &str),
+    b: (f64, &str, &str, &str, &str),
+) -> std::cmp::Ordering {
+    b.0.abs()
+        .total_cmp(&a.0.abs())
+        .then_with(|| a.1.cmp(b.1))
+        .then_with(|| a.2.cmp(b.2))
+        .then_with(|| a.3.cmp(b.3))
+        .then_with(|| a.4.cmp(b.4))
+}
+
+/// [`page_by`], cross-context: same cursor-then-sort-then-cut contract,
+/// ranked by [`cross_rank`] instead of [`rank`]. Not generic over the
+/// pooled shape the way `page_by` is — `targets` is taken directly
+/// rather than folded into a `key` closure, since a closure generic
+/// enough to cover any `T` would have to name its output's borrows
+/// with a single elided lifetime tied to the per-item `&T` it is
+/// handed, and `targets` (this function's own parameter, borrowed for
+/// its whole call) does not fit that shape: it outlives any one
+/// comparison, but a `for<'r> Fn(&'r T) -> (..., &'r str, ...)` bound
+/// cannot say so.
+fn cross_page_by(
+    mut matches: Vec<(usize, Association)>,
+    limit: Option<usize>,
+    after: Option<&CrossMatchCursor>,
     targets: &[String],
+) -> (usize, Vec<(usize, Association)>) {
+    let total = matches.len();
+    let limit = clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    if let Some(cursor) = after {
+        let seat = (
+            cursor.weight,
+            cursor.context.as_str(),
+            cursor.subject.as_str(),
+            cursor.label.as_str(),
+            cursor.object.as_str(),
+        );
+        matches.retain(|(index, found)| {
+            cross_rank(cross_key(&targets[*index], found), seat) == std::cmp::Ordering::Greater
+        });
+    }
+    matches.sort_by(|(ia, a), (ib, b)| {
+        cross_rank(cross_key(&targets[*ia], a), cross_key(&targets[*ib], b))
+    });
+    matches.truncate(limit);
+    (total, matches)
+}
+
+/// The shared middle of the cross-context graph searches: gather every
+/// target's search concurrently ([`bounded_parallel_map`], bounded by
+/// [`cross_search_concurrency`]), pool the matches, cut past the
+/// limit, and only then tag the survivors with their context names —
+/// naming every match up front would allocate thousands of strings
+/// just to throw them away. [`cross_page_by`] makes every cut, so
+/// there is exactly one comparator.
+///
+/// The in-loop cut holds the MEMORY bound: it fires at twice the limit
+/// and comes back to the limit, so the pool never holds more than
+/// twice the limit plus one target's matches, and each firing discards
+/// at least `limit` entries. It filters by the *same* `after` cursor as
+/// the closing cut, not `None` — a cursor-blind mid-loop cut would,
+/// whenever the cursor sits deep in the ranking, keep only the
+/// strongest raw-weight items (exactly the ones that rank *before* the
+/// cursor and get discarded at the close anyway) while prematurely
+/// discarding the weaker, legitimately-after-cursor items a deep page
+/// actually needs. This is safe and exact: "ranks strictly after the
+/// cursor" is a pure per-item predicate independent of pool
+/// membership, so `retain` commutes with the incremental union the
+/// loop performs, and top-K-after-filter stays monotonic under
+/// superset growth — whatever a prefix pool's filtered-and-cut
+/// survivors exclude, every superset's does too.
+///
+/// Every target's fetch now lands concurrently rather than in list
+/// order, so "the first per-context failure aborts the whole response"
+/// means the first failure in target-list order once every fetch has
+/// landed, not the first one hit in real time — the response is
+/// identical either way, since a read has nothing to half-apply and
+/// every fetch has to land before any cut can run.
+async fn cross_matches(
+    state: &AppState,
+    targets: &Arc<[String]>,
     op: SearchOp,
     limit: Option<usize>,
-    search: impl Fn(&Context) -> Vec<Association>,
+    after: Option<&CrossMatchCursor>,
+    search: impl Fn(&Context) -> Vec<Association> + Send + Sync + 'static,
     started_at: Instant,
 ) -> Result<CrossPage, Box<Response>> {
     let limit = clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    let permits = cross_search_concurrency().min(targets.len().max(1));
+    let owned_targets = Arc::clone(targets);
+    let job_state = state.clone();
+    let fetched = bounded_parallel_map(targets.len(), permits, move |index| {
+        job_state.read_context(&owned_targets[index], &search)
+    })
+    .await;
+
     let mut total = 0;
     let mut pool: Vec<(usize, Association)> = Vec::new();
-    for (index, name) in targets.iter().enumerate() {
-        match state.read_context(name, &search) {
+    for (index, outcome) in fetched.into_iter().enumerate() {
+        match outcome {
             Ok(matches) => {
-                state.note_search(op, name, matches.is_empty());
+                state.note_search(op, &targets[index], matches.is_empty());
                 total += matches.len();
                 pool.extend(matches.into_iter().map(|found| (index, found)));
                 if pool.len() >= limit * 2 {
-                    pool = page_by(pool, Some(limit), |(_, found)| found.weight).1;
+                    pool = cross_page_by(pool, Some(limit), after, targets).1;
                 }
             }
             Err(failure) => {
-                return Err(Box::new(access_error(state, failure, name, started_at)));
+                return Err(Box::new(access_error(
+                    state,
+                    failure,
+                    &targets[index],
+                    started_at,
+                )));
             }
         }
     }
-    let (_, pool) = page_by(pool, Some(limit), |(_, found)| found.weight);
+    let (_, pool) = cross_page_by(pool, Some(limit), after, targets);
     let tagged = pool
         .into_iter()
         .map(|(index, association)| (targets[index].clone(), association))
@@ -2937,6 +3218,9 @@ pub struct CrossRecallRequest {
     pub cue: String,
     /// Omitted means 100.
     pub limit: Option<usize>,
+    /// Resume past a previous page's last match — see
+    /// [`CrossMatchCursor`].
+    pub after: Option<CrossMatchCursor>,
 }
 
 /// [`recall`] across several named contexts at once, every match
@@ -2944,8 +3228,9 @@ pub struct CrossRecallRequest {
 /// match counts, and past the limit the strongest |weight| survives
 /// exactly as within one context — weights share one scale (evidence
 /// mass), so the cut means the same thing across contexts. Contexts
-/// are searched in turn; the first per-context failure aborts the
-/// whole response (a read has nothing to half-apply).
+/// are searched concurrently (bounded by [`cross_search_concurrency`]);
+/// the first per-context failure aborts the whole response (a read has
+/// nothing to half-apply).
 pub async fn cross_recall(
     State(state): State<AppState>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
@@ -2964,14 +3249,18 @@ pub async fn cross_recall(
         Ok(targets) => targets,
         Err(refusal) => return *refusal,
     };
+    // Computed before `search` moves `cue` out of `request`.
+    let cue_log = request.cue.clone();
     let outcome = cross_matches(
         &state,
         &targets,
         SearchOp::Recall,
         request.limit,
-        |context| context.recall(&request.cue),
+        request.after.as_ref(),
+        move |context| context.recall(&request.cue),
         started_at,
-    );
+    )
+    .await;
     let (total, page) = match outcome {
         Ok(result) => result,
         Err(refusal) => return *refusal,
@@ -2981,7 +3270,7 @@ pub async fn cross_recall(
             target: "taguru::search",
             contexts = %targets.join(","),
             op = "recall",
-            cue = %request.cue,
+            cue = %cue_log,
             hits = total,
             "search",
         );
@@ -2997,6 +3286,8 @@ pub struct QueryRequest {
     pub object: Option<OneOrMany>,
     /// Omitted means 100.
     pub limit: Option<usize>,
+    /// Resume past a previous page's last match — see [`MatchCursor`].
+    pub after: Option<MatchCursor>,
 }
 
 pub async fn query(
@@ -3021,7 +3312,7 @@ pub async fn query(
         )
     }) {
         Ok(result) => {
-            let (total, matches) = page(result, request.limit);
+            let (total, matches) = page(result, request.limit, request.after.as_ref());
             state.note_search(SearchOp::Query, &name, total == 0);
             if search_log_enabled() {
                 tracing::info!(
@@ -3055,6 +3346,9 @@ pub struct CrossQueryRequest {
     pub object: Option<OneOrMany>,
     /// Omitted means 100.
     pub limit: Option<usize>,
+    /// Resume past a previous page's last match — see
+    /// [`CrossMatchCursor`].
+    pub after: Option<CrossMatchCursor>,
 }
 
 /// [`query`] across several named contexts at once — the same
@@ -3087,12 +3381,18 @@ pub async fn cross_query(
         Ok(targets) => targets,
         Err(refusal) => return *refusal,
     };
+    // Computed before `search` moves `subject`/`label`/`object` out of
+    // `request` — `OneOrMany` has no `Clone` to fall back on.
+    let subject_log = as_refs(&request.subject).join(",");
+    let label_log = as_refs(&request.label).join(",");
+    let object_log = as_refs(&request.object).join(",");
     let outcome = cross_matches(
         &state,
         &targets,
         SearchOp::Query,
         request.limit,
-        |context| {
+        request.after.as_ref(),
+        move |context| {
             context.query_any(
                 &as_refs(&request.subject),
                 &as_refs(&request.label),
@@ -3100,7 +3400,8 @@ pub async fn cross_query(
             )
         },
         started_at,
-    );
+    )
+    .await;
     let (total, page) = match outcome {
         Ok(result) => result,
         Err(refusal) => return *refusal,
@@ -3110,9 +3411,9 @@ pub async fn cross_query(
             target: "taguru::search",
             contexts = %targets.join(","),
             op = "query",
-            subject = %as_refs(&request.subject).join(","),
-            label = %as_refs(&request.label).join(","),
-            object = %as_refs(&request.object).join(","),
+            subject = %subject_log,
+            label = %label_log,
+            object = %object_log,
             hits = total,
             "search",
         );
@@ -3154,6 +3455,8 @@ pub struct ExploreRequest {
     /// Result cap. Omitted means 100, ceiling 1000 — depth bounds the
     /// walk, this bounds the response.
     pub limit: Option<usize>,
+    /// Resume past a previous page's last match — see [`ExploreCursor`].
+    pub after: Option<ExploreCursor>,
 }
 
 /// A bounded explore result: the same `{total, matches}` shape as
@@ -3185,12 +3488,11 @@ pub async fn explore(
             clamp(request.max_depth, Context::UNBOUNDED, MAX_EXPLORE_DEPTH),
         )
     }) {
-        Ok(mut matches) => {
+        Ok(matches) => {
             // Depth alone does not bound the response: one dense hub
             // can put a million edges within a single hop, and explore
             // used to return them all in one body.
-            let total = matches.len();
-            matches.truncate(clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT));
+            let (total, matches) = explore_page(matches, request.after.as_ref(), request.limit);
             state.note_search(SearchOp::Explore, &name, total == 0);
             if search_log_enabled() {
                 tracing::info!(
@@ -4218,19 +4520,7 @@ pub async fn labels(
     let started_at = Instant::now();
     let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     match state.read_context(&name, |context| {
-        let mut labels: Vec<String> = context.labels().into_iter().map(String::from).collect();
-        labels.sort();
-        let total = labels.len();
-        let labels: Vec<String> = labels
-            .into_iter()
-            .filter(|label| {
-                query
-                    .after
-                    .as_deref()
-                    .is_none_or(|after| label.as_str() > after)
-            })
-            .take(limit)
-            .collect();
+        let (total, labels) = context.label_page(query.after.as_deref(), limit);
         LabelPage { total, labels }
     }) {
         Ok(result) => ok(result, started_at),
@@ -4244,6 +4534,8 @@ pub struct UnreachableFromRequest {
     /// Omitted means 100, capped at 1000 — the audit pages exactly
     /// like recall and query, `total` telling the whole story.
     pub limit: Option<usize>,
+    /// Resume past a previous page's last match — see [`MatchCursor`].
+    pub after: Option<MatchCursor>,
 }
 
 pub async fn unreachable_from(
@@ -4260,7 +4552,7 @@ pub async fn unreachable_from(
         context.unreachable_from(&origins)
     }) {
         Ok(result) => {
-            let (total, matches) = page(result, request.limit);
+            let (total, matches) = page(result, request.limit, request.after.as_ref());
             // A graph read like recall/query/explore/activate — the
             // usage counters must agree with that grouping. Zero
             // orphans is the audit SUCCEEDING, though, not a miss, so
@@ -4430,27 +4722,152 @@ mod tests {
         let matches: Vec<Association> = (0..MAX_MATCH_LIMIT + 5)
             .map(|i| assoc(&format!("o{i}"), 1.0))
             .collect();
-        let (total, matches) = page(matches, Some(1_000_000_000));
+        let (total, matches) = page(matches, Some(1_000_000_000), None);
         assert_eq!(total, MAX_MATCH_LIMIT + 5);
         assert_eq!(matches.len(), MAX_MATCH_LIMIT);
     }
 
     #[test]
-    fn page_keeps_insertion_order_within_limit_and_strongest_past_it() {
-        let matches = vec![assoc("a", 1.0), assoc("b", -3.0), assoc("c", 2.0)];
-
-        // Within the limit nothing is reordered or dropped.
-        let (total, within) = page(matches.clone(), Some(3));
+    fn page_orders_by_magnitude_then_lexicographic_tiebreak_never_insertion_order() {
+        // Equal |weight|: (subject, label, object) breaks the tie, not
+        // the order matches arrived in — insertion here is c, a, b.
+        let matches = vec![assoc("c", 2.0), assoc("a", 2.0), assoc("b", 2.0)];
+        let (total, ranked) = page(matches, Some(3), None);
         assert_eq!(total, 3);
-        let objects: Vec<&str> = within.iter().map(|m| m.object.as_str()).collect();
+        let objects: Vec<&str> = ranked.iter().map(|m| m.object.as_str()).collect();
         assert_eq!(objects, vec!["a", "b", "c"]);
 
-        // Past it, magnitude ranks — the negative fact is the strongest
-        // knowledge — and total still reports the untruncated count.
-        let (total, truncated) = page(matches, Some(2));
+        // Past the limit, magnitude ranks first — the negative fact is
+        // the strongest knowledge — and total still reports the
+        // untruncated count.
+        let matches = vec![assoc("a", 1.0), assoc("b", -3.0), assoc("c", 2.0)];
+        let (total, truncated) = page(matches, Some(2), None);
         assert_eq!(total, 3);
         let objects: Vec<&str> = truncated.iter().map(|m| m.object.as_str()).collect();
         assert_eq!(objects, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn page_resumes_past_a_cursor_and_keeps_total_constant() {
+        let matches = vec![
+            assoc("a", 3.0),
+            assoc("b", 2.0),
+            assoc("c", 1.0),
+            assoc("d", 1.0),
+        ];
+        let (total, first) = page(matches.clone(), Some(2), None);
+        assert_eq!(total, 4);
+        let objects: Vec<&str> = first.iter().map(|m| m.object.as_str()).collect();
+        assert_eq!(objects, vec!["a", "b"]);
+
+        let last = first.last().unwrap();
+        let cursor = MatchCursor {
+            weight: last.weight,
+            subject: last.subject.clone(),
+            label: last.label.clone(),
+            object: last.object.clone(),
+        };
+        let (total, second) = page(matches, Some(2), Some(&cursor));
+        assert_eq!(total, 4, "total is the pre-cursor, pre-truncate count");
+        let objects: Vec<&str> = second.iter().map(|m| m.object.as_str()).collect();
+        assert_eq!(objects, vec!["c", "d"]);
+    }
+
+    fn recollection(object: &str, distance: usize) -> Recollection {
+        Recollection {
+            distance,
+            path: vec!["origin".to_string()],
+            association: assoc(object, 1.0),
+        }
+    }
+
+    #[test]
+    fn explore_page_resorts_same_distance_ties_lexicographically_not_by_arrival() {
+        // `Context::explore` orders same-distance ties by internal
+        // edge_id, which tracks arrival order (c, a, b here) — a
+        // retain-only cut would keep this exact wrong order.
+        let matches = vec![
+            recollection("c", 1),
+            recollection("a", 1),
+            recollection("b", 1),
+        ];
+        let (total, ranked) = explore_page(matches, None, Some(3));
+        assert_eq!(total, 3);
+        let objects: Vec<&str> = ranked
+            .iter()
+            .map(|r| r.association.object.as_str())
+            .collect();
+        assert_eq!(objects, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn explore_page_resumes_past_a_cursor_and_keeps_total_constant() {
+        let matches = vec![
+            recollection("a", 1),
+            recollection("b", 1),
+            recollection("z", 2),
+        ];
+        let (total, first) = explore_page(matches.clone(), None, Some(2));
+        assert_eq!(total, 3);
+        let objects: Vec<&str> = first
+            .iter()
+            .map(|r| r.association.object.as_str())
+            .collect();
+        assert_eq!(objects, vec!["a", "b"]);
+
+        let last = first.last().unwrap();
+        let cursor = ExploreCursor {
+            distance: last.distance,
+            subject: last.association.subject.clone(),
+            label: last.association.label.clone(),
+            object: last.association.object.clone(),
+        };
+        let (total, second) = explore_page(matches, Some(&cursor), Some(2));
+        assert_eq!(total, 3, "total is the pre-cursor, pre-truncate count");
+        let objects: Vec<&str> = second
+            .iter()
+            .map(|r| r.association.object.as_str())
+            .collect();
+        assert_eq!(objects, vec!["z"]);
+    }
+
+    #[test]
+    fn cross_page_by_breaks_a_same_triple_tie_on_context() {
+        // Two different target contexts each hold an edge with the
+        // identical (subject, label, object) and weight — (subject,
+        // label, object) alone cannot order them, so `context` must.
+        let targets = vec!["zeta".to_string(), "alpha".to_string()];
+        let matches = vec![(0, assoc("青嶺", 1.0)), (1, assoc("青嶺", 1.0))];
+        let (total, ranked) = cross_page_by(matches, Some(2), None, &targets);
+        assert_eq!(total, 2);
+        let contexts: Vec<&str> = ranked.iter().map(|(i, _)| targets[*i].as_str()).collect();
+        assert_eq!(
+            contexts,
+            vec!["alpha", "zeta"],
+            "context breaks the tie lexicographically, not target-list order"
+        );
+    }
+
+    #[test]
+    fn cross_page_by_resumes_past_a_cursor_and_keeps_total_constant() {
+        let targets = vec!["alpha".to_string(), "zeta".to_string()];
+        let matches = vec![(0, assoc("青嶺", 1.0)), (1, assoc("青嶺", 1.0))];
+        let (total, first) = cross_page_by(matches.clone(), Some(1), None, &targets);
+        assert_eq!(total, 2);
+        assert_eq!(targets[first[0].0], "alpha");
+
+        let last = &first[0].1;
+        let cursor = CrossMatchCursor {
+            weight: last.weight,
+            context: targets[first[0].0].clone(),
+            subject: last.subject.clone(),
+            label: last.label.clone(),
+            object: last.object.clone(),
+        };
+        let (total, second) = cross_page_by(matches, Some(1), Some(&cursor), &targets);
+        assert_eq!(total, 2, "total is the pre-cursor, pre-truncate count");
+        assert_eq!(second.len(), 1);
+        assert_eq!(targets[second[0].0], "zeta");
     }
 
     #[test]

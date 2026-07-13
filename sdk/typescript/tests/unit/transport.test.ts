@@ -109,6 +109,39 @@ describe("envelope and raw-body handling", () => {
     expect(bodies[0]).toBe('{"subject":"高瀬","label":["住所","職歴"]}');
   });
 
+  it("#60: after cursor rides the request body verbatim", async () => {
+    // The client mints no cursor of its own — it only relays the last
+    // page's last row back to the server, whatever shape it has.
+    const bodies: Array<string | undefined> = [];
+    const client = stubClient((req) => {
+      bodies.push(req.body);
+      return okBody({ total: 0, matches: [] });
+    });
+
+    await client
+      .context("sake")
+      .recall("cue", { after: { weight: 0.5, subject: "a", label: "b", object: "c" } });
+    expect(bodies[bodies.length - 1]).toBe(
+      '{"cue":"cue","after":{"weight":0.5,"subject":"a","label":"b","object":"c"}}',
+    );
+
+    await client
+      .context("sake")
+      .explore("a", { after: { distance: 2, subject: "a", label: "b", object: "c" } });
+    expect(bodies[bodies.length - 1]).toBe(
+      '{"origins":["a"],"after":{"distance":2,"subject":"a","label":"b","object":"c"}}',
+    );
+
+    await client.recall("cue", {
+      contexts: ["sake"],
+      after: { weight: 0.5, context: "sake", subject: "a", label: "b", object: "c" },
+    });
+    expect(bodies[bodies.length - 1]).toBe(
+      '{"contexts":["sake"],"cue":"cue","after":' +
+        '{"weight":0.5,"context":"sake","subject":"a","label":"b","object":"c"}}',
+    );
+  });
+
   it("keeps message, body, and time on errors", async () => {
     const client = stubClient(() => errBody(404, "context 'x' does not exist"), { retries: 0 });
     const error = await client.contexts.get("x").catch((caught: unknown) => caught);

@@ -230,6 +230,7 @@ fn pick_with_alias(arguments: &Value, keys: &[&str], canonical: &str, alias: &st
 /// difference gets stated, not silently dropped.
 pub fn tool_definitions() -> Vec<Value> {
     let context = json!({ "type": "string", "description": "Context name (from list_contexts)" });
+    let match_after = json!({ "type": "object", "description": "resume past the previous page's last match: copy {weight, subject, label, object} verbatim from it, plus context too when targeting several contexts. total stays constant across pages" });
     let tools = vec![
         (
             "list_contexts",
@@ -488,7 +489,8 @@ pub fn tool_definitions() -> Vec<Value> {
                     "subject": { "type": ["string", "array"] },
                     "label": { "type": ["string", "array"] },
                     "object": { "type": ["string", "array"] },
-                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" },
+                    "after": match_after
                 }),
                 &[],
             ),
@@ -499,7 +501,8 @@ pub fn tool_definitions() -> Vec<Value> {
             search_target_schema(
                 json!({
                     "cue": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" },
+                    "after": match_after
                 }),
                 &["cue"],
             ),
@@ -525,7 +528,18 @@ pub fn tool_definitions() -> Vec<Value> {
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
                     "max_depth": { "type": "integer", "description": "hop ceiling; default and max 10" },
-                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" },
+                    "after": {
+                        "type": "object",
+                        "description": "resume past the previous page's last recollection — copy every field verbatim from it. total stays constant across pages",
+                        "properties": {
+                            "distance": { "type": "integer" },
+                            "subject": { "type": "string" },
+                            "label": { "type": "string" },
+                            "object": { "type": "string" }
+                        },
+                        "required": ["distance", "subject", "label", "object"]
+                    }
                 }),
                 &["context", "origins"],
             ),
@@ -666,7 +680,18 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
-                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" },
+                    "after": {
+                        "type": "object",
+                        "description": "resume past the previous page's last match — copy every field verbatim from it. total stays constant across pages",
+                        "properties": {
+                            "weight": { "type": "number" },
+                            "subject": { "type": "string" },
+                            "label": { "type": "string" },
+                            "object": { "type": "string" }
+                        },
+                        "required": ["weight", "subject", "label", "object"]
+                    }
                 }),
                 &["context", "origins"],
             ),
@@ -863,13 +888,18 @@ pub fn route_tool(
             format!("{}/query", search_base()?),
             Some(pick(
                 arguments,
-                &["contexts", "groups", "subject", "label", "object", "limit"],
+                &[
+                    "contexts", "groups", "subject", "label", "object", "limit", "after",
+                ],
             )),
         ),
         "recall" => (
             "POST",
             format!("{}/recall", search_base()?),
-            Some(pick(arguments, &["contexts", "groups", "cue", "limit"])),
+            Some(pick(
+                arguments,
+                &["contexts", "groups", "cue", "limit", "after"],
+            )),
         ),
         "activate" => (
             "POST",
@@ -879,7 +909,7 @@ pub fn route_tool(
         "explore" => (
             "POST",
             format!("{}/explore", context_path("context")?),
-            Some(pick(arguments, &["origins", "max_depth", "limit"])),
+            Some(pick(arguments, &["origins", "max_depth", "limit", "after"])),
         ),
         "list_labels" => (
             "GET",
@@ -952,7 +982,7 @@ pub fn route_tool(
         "audit_coverage" => (
             "POST",
             format!("{}/unreachable_from", context_path("context")?),
-            Some(pick(arguments, &["origins", "limit"])),
+            Some(pick(arguments, &["origins", "limit", "after"])),
         ),
         _ => return Err(format!("unknown tool '{name}'")),
     })
@@ -1247,6 +1277,65 @@ mod tests {
         assert_eq!(method, "POST");
         assert_eq!(path, "/contexts/sake/unreachable_from");
         assert_eq!(body, Some(json!({"origins": ["x"], "limit": 500})));
+    }
+
+    /// #60: query/recall/explore/audit_coverage advertise `after` for
+    /// resuming a page past its predecessor's last row — the MCP-layer
+    /// wiring for the keyset cursors the HTTP side already accepts.
+    #[test]
+    fn search_and_audit_tools_advertise_after() {
+        for name in ["query", "recall", "explore", "audit_coverage"] {
+            let tool = tool_definitions()
+                .into_iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("{name} is defined"));
+            assert_eq!(
+                tool["inputSchema"]["properties"]["after"]["type"], "object",
+                "tool '{name}' after"
+            );
+        }
+    }
+
+    /// `after` rides straight through to the request body, whatever
+    /// shape the caller sent — single-context `MatchCursor`,
+    /// cross-context `CrossMatchCursor` (an extra `context` field), or
+    /// explore's own `{distance, subject, label, object}`. `pick`
+    /// forwards it verbatim; the downstream Rust struct is what
+    /// actually validates the shape.
+    #[test]
+    fn search_and_audit_tools_route_after_into_the_request_body() {
+        let cursor = json!({"weight": 0.5, "subject": "a", "label": "b", "object": "c"});
+        let (_, _, body) = route_tool(
+            "recall",
+            &json!({"context": "sake", "cue": "x", "after": cursor}),
+        )
+        .unwrap();
+        assert_eq!(body.unwrap()["after"], cursor);
+
+        let cross_cursor = json!({
+            "weight": 0.5, "context": "sake", "subject": "a", "label": "b", "object": "c"
+        });
+        let (_, _, body) = route_tool(
+            "query",
+            &json!({"contexts": ["sake"], "subject": "s", "after": cross_cursor}),
+        )
+        .unwrap();
+        assert_eq!(body.unwrap()["after"], cross_cursor);
+
+        let explore_cursor = json!({"distance": 2, "subject": "a", "label": "b", "object": "c"});
+        let (_, _, body) = route_tool(
+            "explore",
+            &json!({"context": "sake", "origins": ["a"], "after": explore_cursor}),
+        )
+        .unwrap();
+        assert_eq!(body.unwrap()["after"], explore_cursor);
+
+        let (_, _, body) = route_tool(
+            "audit_coverage",
+            &json!({"context": "sake", "origins": ["a"], "after": cursor}),
+        )
+        .unwrap();
+        assert_eq!(body.unwrap()["after"], cursor);
     }
 
     #[test]

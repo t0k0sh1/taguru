@@ -1398,6 +1398,67 @@ fn the_directory_pages_by_name_and_serves_single_contexts() {
     assert_eq!(body["status"], json!("error"));
 }
 
+/// A context-scoped key's directory listing pages its own allow-list,
+/// not the full registry — the allow-list has no relation to name
+/// order, so this exercises a different path from the unscoped case
+/// above.
+#[test]
+fn a_scoped_keys_directory_pages_its_allow_list_not_the_full_registry() {
+    let server = Server::start_with_env(
+        "http-scoped-dirpage",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,curator:ctok"),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"curator": {"role": "read", "contexts": ["date", "apple", "cherry"]}}"#,
+            ),
+        ],
+    );
+    for name in ["apple", "banana", "cherry", "date"] {
+        let (status, _) = server.call_with_token(
+            "PUT",
+            &format!("/contexts/{name}"),
+            Some(json!({"description": name})),
+            Some("atok"),
+        );
+        assert_eq!(status, 200);
+    }
+
+    // The unscoped admin sees everything.
+    let (status, full) = server.call_with_token("GET", "/contexts", None, Some("atok"));
+    assert_eq!(status, 200);
+    assert_eq!(full["result"]["total"], json!(4), "{full}");
+
+    // The scoped key's world is its three-context grant — "banana"
+    // never appears, and `total` counts only the visible set.
+    let (status, first) = server.call_with_token("GET", "/contexts?limit=2", None, Some("ctok"));
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(first["result"]["total"], json!(3), "{first}");
+    let names: Vec<&str> = first["result"]["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["apple", "cherry"],
+        "sorted allow-list, first page"
+    );
+
+    let (status, second) =
+        server.call_with_token("GET", "/contexts?limit=2&after=cherry", None, Some("ctok"));
+    assert_eq!(status, 200, "{second}");
+    assert_eq!(second["result"]["total"], json!(3));
+    let names: Vec<&str> = second["result"]["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["date"], "keyset picks up after the cursor");
+}
+
 #[test]
 fn a_present_body_is_parsed_whatever_the_content_type_says() {
     let server = Server::start("rawbody");
@@ -1837,6 +1898,112 @@ fn unreachable_from_pages_like_recall_and_query() {
     assert_eq!(audit["matches"].as_array().unwrap().len(), 2);
 }
 
+/// A client resumes any of the three match-page endpoints past their
+/// limit by building a [`MatchCursor`]-shaped `after` from the last
+/// match on the previous page — `total` stays constant across pages,
+/// and the walk ends when a page comes back empty.
+#[test]
+fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
+    let server = Server::start("match-cursor");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "蔵", "label": "銘柄", "object": "a", "weight": 1.0},
+            {"subject": "蔵", "label": "銘柄", "object": "b", "weight": 1.0},
+            {"subject": "蔵", "label": "銘柄", "object": "c", "weight": 1.0},
+            {"subject": "孤島1", "label": "l", "object": "先1", "weight": 1.0},
+            {"subject": "孤島2", "label": "l", "object": "先2", "weight": 1.0},
+            {"subject": "孤島3", "label": "l", "object": "先3", "weight": 1.0},
+        ])),
+    );
+    let cursor_from = |m: &Value| {
+        json!({
+            "weight": m["weight"], "subject": m["subject"],
+            "label": m["label"], "object": m["object"],
+        })
+    };
+
+    // recall: page past the limit, total constant, walk ends on empty.
+    let first = server.ok(
+        "POST",
+        "/contexts/sake/recall",
+        Some(json!({"cue": "蔵", "limit": 2})),
+    );
+    assert_eq!(first["total"], json!(3), "{first}");
+    let matches = first["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 2);
+    assert_eq!(
+        matches
+            .iter()
+            .map(|m| m["object"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+    let second = server.ok(
+        "POST",
+        "/contexts/sake/recall",
+        Some(json!({"cue": "蔵", "limit": 2, "after": cursor_from(&matches[1])})),
+    );
+    assert_eq!(second["total"], json!(3), "{second}");
+    let matches = second["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["object"], json!("c"), "{second}");
+    let third = server.ok(
+        "POST",
+        "/contexts/sake/recall",
+        Some(json!({"cue": "蔵", "limit": 2, "after": cursor_from(&matches[0])})),
+    );
+    assert_eq!(third["matches"], json!([]), "the walk has ended: {third}");
+
+    // query: same cursor shape, position-pinned search.
+    let first = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"label": "銘柄", "limit": 2})),
+    );
+    assert_eq!(first["total"], json!(3), "{first}");
+    let matches = first["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 2);
+    let second = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"label": "銘柄", "limit": 2, "after": cursor_from(&matches[1])})),
+    );
+    assert_eq!(second["total"], json!(3), "{second}");
+    assert_eq!(second["matches"].as_array().unwrap().len(), 1);
+
+    // unreachable_from: three islands past the reachable "蔵" cluster.
+    let first = server.ok(
+        "POST",
+        "/contexts/sake/unreachable_from",
+        Some(json!({"origins": ["蔵"], "limit": 2})),
+    );
+    assert_eq!(first["total"], json!(3), "{first}");
+    let matches = first["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 2);
+    let second = server.ok(
+        "POST",
+        "/contexts/sake/unreachable_from",
+        Some(json!({
+            "origins": ["蔵"], "limit": 2,
+            "after": cursor_from(&matches[1]),
+        })),
+    );
+    assert_eq!(second["total"], json!(3), "{second}");
+    assert_eq!(second["matches"].as_array().unwrap().len(), 1);
+
+    // A malformed cursor is a 422 (body fails to deserialize), not an
+    // empty page.
+    let (status, refusal) = server.call(
+        "POST",
+        "/contexts/sake/recall",
+        Some(json!({"cue": "蔵", "after": {"bogus": true}})),
+    );
+    assert_eq!(status, 422, "{refusal}");
+}
+
 #[test]
 fn explore_without_max_depth_stops_at_the_server_ceiling() {
     let server = Server::start("depthcap");
@@ -1900,6 +2067,82 @@ fn explore_pages_and_keeps_the_closest_past_the_limit() {
         matches.iter().all(|r| r["distance"] == json!(1)),
         "{walked}"
     );
+}
+
+/// A client resumes past `explore`'s limit by building an
+/// `ExploreCursor`-shaped `after` from the last match's `distance` and
+/// its association's `(subject, label, object)`. The four same-distance
+/// neighbours are inserted in a deliberately non-lexicographic order
+/// (d, b, a, c) — a retain-only cursor cut (skipping the required
+/// re-sort) would keep that exact wrong order instead of a, b, c, d.
+#[test]
+fn explore_resumes_past_a_cursor_with_same_distance_ties_in_lexicographic_order() {
+    let server = Server::start("explore-cursor");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "hub", "label": "l", "object": "d", "weight": 1.0},
+            {"subject": "hub", "label": "l", "object": "b", "weight": 1.0},
+            {"subject": "hub", "label": "l", "object": "a", "weight": 1.0},
+            {"subject": "hub", "label": "l", "object": "c", "weight": 1.0},
+        ])),
+    );
+    let objects_of = |matches: &[Value]| -> Vec<String> {
+        matches
+            .iter()
+            .map(|m| m["association"]["object"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let cursor_from = |m: &Value| {
+        json!({
+            "distance": m["distance"],
+            "subject": m["association"]["subject"],
+            "label": m["association"]["label"],
+            "object": m["association"]["object"],
+        })
+    };
+
+    let first = server.ok(
+        "POST",
+        "/contexts/sake/explore",
+        Some(json!({"origins": ["hub"], "limit": 2})),
+    );
+    assert_eq!(first["total"], json!(4), "{first}");
+    let matches = first["matches"].as_array().unwrap();
+    assert_eq!(objects_of(matches), vec!["a", "b"], "{first}");
+
+    let second = server.ok(
+        "POST",
+        "/contexts/sake/explore",
+        Some(json!({
+            "origins": ["hub"], "limit": 2,
+            "after": cursor_from(&matches[1]),
+        })),
+    );
+    assert_eq!(second["total"], json!(4), "total stays constant: {second}");
+    let matches = second["matches"].as_array().unwrap();
+    assert_eq!(objects_of(matches), vec!["c", "d"], "{second}");
+
+    let third = server.ok(
+        "POST",
+        "/contexts/sake/explore",
+        Some(json!({
+            "origins": ["hub"], "limit": 2,
+            "after": cursor_from(&matches[1]),
+        })),
+    );
+    assert_eq!(third["matches"], json!([]), "the walk has ended: {third}");
+
+    // A malformed cursor is a 422 (body fails to deserialize), not an
+    // empty page.
+    let (status, refusal) = server.call(
+        "POST",
+        "/contexts/sake/explore",
+        Some(json!({"origins": ["hub"], "after": {"bogus": true}})),
+    );
+    assert_eq!(status, 422, "{refusal}");
 }
 
 #[test]
@@ -3160,6 +3403,128 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
             .contains("not both"),
         "{reply}"
     );
+}
+
+/// Every target's fetch runs concurrently (bounded by
+/// `TAGURU_CROSS_SEARCH_CONCURRENCY`, default 4) rather than in a
+/// sequential loop — with four targets in play, a regression to
+/// per-index mishandling (e.g. a race writing the wrong slot in the
+/// gather step) would show up as a wrong total, a dropped match, or a
+/// match tagged with the wrong context, which this pins down.
+#[test]
+fn cross_recall_merges_four_targets_gathered_concurrently() {
+    let server = Server::start("cross-concurrent");
+    for (name, weight) in [("c1", 1.0), ("c2", 2.0), ("c3", 3.0), ("c4", 4.0)] {
+        server.ok("PUT", &format!("/contexts/{name}"), Some(json!({})));
+        server.ok(
+            "POST",
+            &format!("/contexts/{name}/associations"),
+            Some(json!([
+                {"subject": "蔵", "label": "l", "object": format!("o-{name}"), "weight": weight}
+            ])),
+        );
+    }
+
+    let recalled = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["c1", "c2", "c3", "c4"], "cue": "蔵"})),
+    );
+    assert_eq!(recalled["total"], json!(4), "{recalled}");
+    let matches = recalled["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 4);
+    // Every target landed, strongest |weight| first — nothing dropped
+    // or misrouted by the concurrent gather.
+    let contexts: Vec<&str> = matches
+        .iter()
+        .map(|m| m["context"].as_str().unwrap())
+        .collect();
+    assert_eq!(contexts, vec!["c4", "c3", "c2", "c1"], "{recalled}");
+    let objects: Vec<&str> = matches
+        .iter()
+        .map(|m| m["object"].as_str().unwrap())
+        .collect();
+    assert_eq!(objects, vec!["o-c4", "o-c3", "o-c2", "o-c1"], "{recalled}");
+}
+
+/// `(subject, label, object)` alone only identifies an edge *within*
+/// one target context — two different contexts can each hold an edge
+/// with the identical triple and weight, so the merged pool's cursor
+/// must break the tie on `context`. This also proves the *page* order
+/// is `cross_rank`'s doing, not an accident of the `contexts` list
+/// order in the request (deliberately given here as `["zeta",
+/// "alpha"]`, the reverse of the order the pages must come back in).
+#[test]
+fn cross_recall_pages_with_a_cursor_across_contexts() {
+    let server = Server::start("cross-cursor");
+    for name in ["zeta", "alpha"] {
+        server.ok("PUT", &format!("/contexts/{name}"), Some(json!({})));
+        server.ok(
+            "POST",
+            &format!("/contexts/{name}/associations"),
+            Some(json!([
+                {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0}
+            ])),
+        );
+    }
+
+    let first = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["zeta", "alpha"], "cue": "蔵", "limit": 1})),
+    );
+    assert_eq!(first["total"], json!(2), "{first}");
+    let matches = first["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        matches[0]["context"],
+        json!("alpha"),
+        "context breaks the identical-triple tie, lexicographically — \
+         not the ['zeta', 'alpha'] request order: {first}"
+    );
+
+    let cursor_from = |m: &Value| {
+        json!({
+            "weight": m["weight"], "context": m["context"],
+            "subject": m["subject"], "label": m["label"], "object": m["object"],
+        })
+    };
+    let second = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({
+            "contexts": ["zeta", "alpha"], "cue": "蔵", "limit": 1,
+            "after": cursor_from(&matches[0]),
+        })),
+    );
+    assert_eq!(second["total"], json!(2), "total stays constant: {second}");
+    let matches = second["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["context"], json!("zeta"), "{second}");
+
+    let third = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({
+            "contexts": ["zeta", "alpha"], "cue": "蔵", "limit": 1,
+            "after": cursor_from(&matches[0]),
+        })),
+    );
+    assert_eq!(third["matches"], json!([]), "the walk has ended: {third}");
+
+    // A cross-context cursor's extra `context` field is REQUIRED — a
+    // bare MatchCursor-shaped `after` (missing `context`) is a 422
+    // (body fails to deserialize), not silently accepted with that
+    // field dropped.
+    let (status, refusal) = server.call(
+        "POST",
+        "/recall",
+        Some(json!({
+            "contexts": ["zeta", "alpha"], "cue": "蔵",
+            "after": {"weight": 1.0, "subject": "蔵", "label": "銘柄", "object": "青嶺"},
+        })),
+    );
+    assert_eq!(status, 422, "{refusal}");
 }
 
 /// Cross-context search by group: a `groups` name searches every
