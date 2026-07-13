@@ -27,6 +27,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -38,8 +40,8 @@ use crate::ingest::MAX_PASSAGE_BYTES;
 
 const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
-                      [--config FILE] --context NAME [--description TEXT]
-                      --out DIR FILE|DIR...
+                      [--config FILE] [--parallel N] --context NAME
+                      [--description TEXT] --out DIR FILE|DIR...
 
 Reads documents (.md/.txt; a directory expands to its files, sorted by
 name) and writes one batch file per document into --out, ready for
@@ -50,6 +52,7 @@ chat endpoint:
   TAGURU_EXTRACT_MODEL    model name (required)
   TAGURU_EXTRACT_API_KEY  bearer credential (optional)
   TAGURU_EXTRACT_TIMEOUT_SECS  per-completion budget; 0 = none (300)
+  TAGURU_EXTRACT_PARALLEL  concurrent chunk completions per document (1)
 
   --dry-run           list what would extract or skip; call nothing
   --force             re-extract documents the manifest says are unchanged
@@ -57,9 +60,12 @@ chat endpoint:
   --questions N       doc2query: also propose up to N search questions per
                       paragraph (embedded beside it by servers running
                       TAGURU_EMBED_PASSAGES); rides the same model calls
+  --config F          read KEY=VALUE environment from F (same dialect as serve)
+  --parallel N        chunk completions to run concurrently within one
+                      document (1, sequential); documents themselves stay
+                      sequential — vocabulary accumulates as they land
   --context NAME      the context every batch file targets
   --description TEXT  add a create block (used only if the context is absent)
-  --config F          read KEY=VALUE environment from F (same dialect as serve)
 
 Contract and discipline: docs/extract.html.
 ";
@@ -83,6 +89,18 @@ const VOCABULARY_CAP: usize = 200;
 /// pathologically so — hence the knob (TAGURU_EXTRACT_TIMEOUT_SECS,
 /// 0 = no limit).
 const DEFAULT_TIMEOUT_SECS: usize = 300;
+
+/// Total attempts (1 initial + retries) at one chat completion before
+/// a chunk fails. `--parallel` multiplies 429 pressure, so this leans
+/// toward more attempts than a purely sequential client would need.
+const RETRY_ATTEMPTS: usize = 4;
+
+/// Full-jitter exponential backoff between attempts: the n-th retry
+/// sleeps `random(0, min(RETRY_MAX_BACKOFF, RETRY_BASE_BACKOFF *
+/// 2^(n-1)))` (see [`jittered_backoff`]). A 429 carrying `Retry-After`
+/// uses that instead, clamped to the same ceiling.
+const RETRY_BASE_BACKOFF: Duration = Duration::from_secs(1);
+const RETRY_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 const MANIFEST_NAME: &str = ".extract-manifest.json";
 
@@ -130,6 +148,21 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
     let manifest_path = args.out.join(MANIFEST_NAME);
+    // Validated with the same strength as --parallel itself: extract
+    // never initializes a tracing subscriber (it exits before serve()'s
+    // init_telemetry(), and unlike compact it has no init_logging()
+    // fallback either), so a silently-ignored bad value would have no
+    // way to reach the user.
+    let parallel = match args.parallel {
+        Some(n) => n,
+        None => match std::env::var("TAGURU_EXTRACT_PARALLEL") {
+            Ok(value) => match value.parse::<usize>() {
+                Ok(n) if n >= 1 => n,
+                _ => return usage_error("TAGURU_EXTRACT_PARALLEL needs an integer of at least 1"),
+            },
+            Err(_) => 1,
+        },
+    };
     let mut run = Run {
         context: args.context,
         description: args.description,
@@ -143,6 +176,7 @@ pub fn run(args: &[String]) -> i32 {
         manifest: Manifest::load(&manifest_path),
         vocabulary: BTreeSet::new(),
         claimed: BTreeMap::new(),
+        parallel,
     };
 
     let mut written = 0usize;
@@ -188,6 +222,10 @@ struct Args {
     /// extraction calls but still spends output tokens).
     questions: usize,
     config: Option<PathBuf>,
+    /// `None` defers to TAGURU_EXTRACT_PARALLEL, and then to 1 (today's
+    /// sequential behavior) — resolved in [`run`], not here, since the
+    /// flag must win over the environment variable.
+    parallel: Option<usize>,
     context: String,
     description: Option<String>,
     out: PathBuf,
@@ -201,6 +239,7 @@ impl Args {
         let mut no_passage = false;
         let mut questions = 0usize;
         let mut config: Option<PathBuf> = None;
+        let mut parallel: Option<usize> = None;
         let mut context: Option<String> = None;
         let mut description: Option<String> = None;
         let mut out: Option<PathBuf> = None;
@@ -230,6 +269,10 @@ impl Args {
                 "--config" => match rest.next() {
                     Some(path) => config = Some(PathBuf::from(path)),
                     None => return Err(usage_error("--config needs a file path")),
+                },
+                "--parallel" => match rest.next().map(|value| value.parse::<usize>()) {
+                    Some(Ok(n)) if n >= 1 => parallel = Some(n),
+                    _ => return Err(usage_error("--parallel needs an integer of at least 1")),
                 },
                 "--context" => match rest.next() {
                     Some(name) => context = Some(name.clone()),
@@ -285,6 +328,7 @@ impl Args {
             no_passage,
             questions,
             config,
+            parallel,
             context,
             description,
             out,
@@ -323,6 +367,10 @@ struct Run {
     manifest: Manifest,
     vocabulary: BTreeSet<String>,
     claimed: BTreeMap<String, String>,
+    /// Chunk completions to run concurrently within one document (1 =
+    /// today's sequential loop). Documents themselves always run
+    /// sequentially — see [`Run::extract_chunks`].
+    parallel: usize,
 }
 
 impl Run {
@@ -416,8 +464,15 @@ impl Run {
     /// Every chunk through the model, in order. The system prompt is
     /// fixed for the whole document: the vocabulary grows only when a
     /// document lands, so all of one document's chunks are offered the
-    /// same spellings.
+    /// same spellings. `--parallel` only ever fans out within this one
+    /// document — see [`Run::extract_chunks_concurrently`] — never
+    /// across documents, since the vocabulary above accumulates
+    /// document-to-document and concurrent documents could diverge on
+    /// label spellings.
     fn extract_chunks(&self, source: &str, chunks: &[String]) -> Result<Vec<ModelOutput>, String> {
+        if self.parallel > 1 {
+            return self.extract_chunks_concurrently(source, chunks);
+        }
         let client = self
             .client
             .as_ref()
@@ -427,6 +482,85 @@ impl Run {
         for (index, piece) in chunks.iter().enumerate() {
             let user = user_message(source, index, chunks.len(), piece);
             match extract_chunk(client, &system, &user) {
+                Ok(output) => outputs.push(output),
+                Err(message) => {
+                    return Err(format!("chunk {}/{}: {message}", index + 1, chunks.len()));
+                }
+            }
+        }
+        Ok(outputs)
+    }
+
+    /// [`Run::extract_chunks`]'s `--parallel > 1` path: a fixed pool of
+    /// workers claims chunk indexes off a shared counter (`next`) and
+    /// dispatches them through the same [`extract_chunk`] the
+    /// sequential path uses. `first_failure` tracks the lowest index
+    /// that has failed so far; a worker refuses to *claim* any index
+    /// beyond it, which is enough to reproduce the sequential contract
+    /// (the lowest-indexed failure fails the document, nothing after it
+    /// is intentionally dispatched) without cancelling calls already
+    /// in flight when the failure lands — those simply finish and are
+    /// discarded.
+    ///
+    /// Every index below the true minimum failing index `k` is
+    /// guaranteed to be claimed and to succeed: `next.fetch_add`
+    /// hands out 0, 1, 2, … in that fixed order, so every `j < k` is
+    /// claimed before `k` is claimed, and — because `k` is the
+    /// *global* minimum failure — no `j < k` ever fails, so
+    /// `first_failure` can only hold `usize::MAX` or a value `>= k`
+    /// at the moment any `j < k` performs its claim check, regardless
+    /// of thread scheduling. `next` and `first_failure` are two
+    /// independent atomics, so this claim needs `SeqCst`: it is the
+    /// single total order across *both* variables that lets a worker
+    /// claiming index `j > k` after the failure is recorded actually
+    /// observe it, instead of racing an arbitrarily stale `usize::MAX`
+    /// under a weaker ordering.
+    fn extract_chunks_concurrently(
+        &self,
+        source: &str,
+        chunks: &[String],
+    ) -> Result<Vec<ModelOutput>, String> {
+        let client = self
+            .client
+            .as_ref()
+            .expect("a non-dry run built the client");
+        let system = system_prompt(&self.vocabulary, self.questions);
+        let workers = self.parallel.min(chunks.len()).max(1);
+        let next = AtomicUsize::new(0);
+        let first_failure = AtomicUsize::new(usize::MAX);
+        let results: Vec<OnceLock<Result<ModelOutput, String>>> =
+            (0..chunks.len()).map(|_| OnceLock::new()).collect();
+
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let index = next.fetch_add(1, Ordering::SeqCst);
+                        if index >= chunks.len() || index > first_failure.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let user = user_message(source, index, chunks.len(), &chunks[index]);
+                        let outcome = extract_chunk(client, &system, &user);
+                        if outcome.is_err() {
+                            first_failure.fetch_min(index, Ordering::SeqCst);
+                        }
+                        let _ = results[index].set(outcome);
+                    }
+                });
+            }
+        });
+
+        // Every index through the true first-failure index is dispatched
+        // (see the correctness note above), and the loop below returns as
+        // soon as it reaches that index's `Err` — so it never inspects a
+        // slot past the failure, whether or not that slot was ever
+        // claimed. Nothing past the failure needs to be truncated by hand.
+        let mut outputs = Vec::new();
+        for (index, slot) in results.into_iter().enumerate() {
+            let outcome = slot
+                .into_inner()
+                .expect("every index up to the first failure was dispatched");
+            match outcome {
                 Ok(output) => outputs.push(output),
                 Err(message) => {
                     return Err(format!("chunk {}/{}: {message}", index + 1, chunks.len()));
@@ -578,8 +712,11 @@ impl ChatClient {
     }
 
     /// One chat completion, returning the assistant text. Transient
-    /// trouble — transport errors, 429, 5xx — earns a single retry;
-    /// everything else is the caller's problem.
+    /// trouble — transport errors, 429, 5xx — is retried up to
+    /// [`RETRY_ATTEMPTS`] times total, waiting [`jittered_backoff`]
+    /// between attempts; a 429 that carries `Retry-After` uses that
+    /// delay instead, verbatim. Everything else is the caller's
+    /// problem.
     fn complete(&self, messages: &[serde_json::Value]) -> Result<String, String> {
         let body = serde_json::json!({
             "model": self.model,
@@ -588,10 +725,7 @@ impl ChatClient {
         })
         .to_string();
         let mut last = String::new();
-        for attempt in 0..2 {
-            if attempt > 0 {
-                std::thread::sleep(Duration::from_secs(2));
-            }
+        for attempt in 0..RETRY_ATTEMPTS {
             let mut request = self
                 .agent
                 .post(&self.url)
@@ -599,7 +733,11 @@ impl ChatClient {
             if let Some(key) = &self.api_key {
                 request = request.header("Authorization", format!("Bearer {key}"));
             }
-            match request.send(&body) {
+            // The server's own instruction wins over a computed guess —
+            // only ever consulted on 429, and only ever shortens or
+            // lengthens THIS wait, never dilutes with jitter. `None`
+            // means "use the computed jittered backoff instead."
+            let retry_after = match request.send(&body) {
                 Ok(mut response) if response.status().as_u16() < 400 => {
                     let parsed: serde_json::Value = response
                         .body_mut()
@@ -612,21 +750,73 @@ impl ChatClient {
                 }
                 Ok(mut response) => {
                     let code = response.status().as_u16();
-                    let answered = format!(
+                    let retry_after = (code == 429)
+                        .then(|| {
+                            response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|value| value.to_str().ok())
+                                .and_then(parse_retry_after)
+                        })
+                        .flatten();
+                    last = format!(
                         "chat endpoint answered {code}: {}",
                         snippet(&response.body_mut().read_to_string().unwrap_or_default())
                     );
-                    if code == 429 || code >= 500 {
-                        last = answered;
-                    } else {
-                        return Err(answered);
+                    if code != 429 && code < 500 {
+                        return Err(last);
                     }
+                    retry_after
                 }
-                Err(error) => last = format!("chat request failed: {error}"),
+                Err(error) => {
+                    last = format!("chat request failed: {error}");
+                    None
+                }
+            };
+            if attempt + 1 < RETRY_ATTEMPTS {
+                std::thread::sleep(
+                    retry_after.unwrap_or_else(|| jittered_backoff(attempt as u32 + 1)),
+                );
             }
         }
-        Err(last)
+        Err(format!("after {RETRY_ATTEMPTS} attempts: {last}"))
     }
+}
+
+/// Full-jitter exponential backoff for the n-th retry (n ≥ 1):
+/// `random(0, min(RETRY_MAX_BACKOFF, RETRY_BASE_BACKOFF * 2^(n-1)))` —
+/// full jitter spreads retries out instead of having every stalled
+/// worker wake up at exactly the same instant.
+fn jittered_backoff(retry_number: u32) -> Duration {
+    let factor = 1u32
+        .checked_shl(retry_number.saturating_sub(1))
+        .unwrap_or(u32::MAX);
+    let exponential = RETRY_BASE_BACKOFF
+        .saturating_mul(factor)
+        .min(RETRY_MAX_BACKOFF);
+    random_duration_up_to(exponential)
+}
+
+/// A uniformly random duration in `[0, cap]`, drawn the same way
+/// `oauth.rs` draws its CSRF/PKCE bytes — no new dependency for jitter.
+fn random_duration_up_to(cap: Duration) -> Duration {
+    let cap_nanos = cap.as_nanos().min(u64::MAX as u128) as u64;
+    if cap_nanos == 0 {
+        return Duration::ZERO;
+    }
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).expect("the OS random source must work");
+    Duration::from_nanos(u64::from_le_bytes(bytes) % cap_nanos)
+}
+
+/// A `Retry-After` value as delta-seconds, clamped to
+/// `RETRY_MAX_BACKOFF` so a huge or adversarial value cannot stall a
+/// run indefinitely. HTTP-date values are not recognized — like the
+/// rest of this codebase, extract avoids pulling in a datetime-parsing
+/// dependency for the one header that would otherwise need one.
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    let seconds: u64 = value.trim().parse().ok()?;
+    Some(Duration::from_secs(seconds).min(RETRY_MAX_BACKOFF))
 }
 
 /// Provider error bodies can run long; a line is enough to act on.
@@ -1737,5 +1927,31 @@ mod tests {
         // Two long paths differing at the tail stay distinct.
         let other = format!("deep/{}/doc2.md", "x".repeat(300));
         assert_ne!(name, batch_file_name(&other));
+    }
+
+    #[test]
+    fn jittered_backoff_stays_within_the_full_jitter_bounds() {
+        assert_eq!(random_duration_up_to(Duration::ZERO), Duration::ZERO);
+        for retry_number in 1..=6u32 {
+            for _ in 0..20 {
+                let backoff = jittered_backoff(retry_number);
+                assert!(backoff <= RETRY_MAX_BACKOFF, "{retry_number}: {backoff:?}");
+            }
+        }
+        // A retry number large enough to overflow the shift must clamp
+        // to the ceiling, not panic.
+        assert!(jittered_backoff(1_000) <= RETRY_MAX_BACKOFF);
+    }
+
+    #[test]
+    fn retry_after_parses_delta_seconds_and_clamps_to_the_backoff_ceiling() {
+        assert_eq!(parse_retry_after("5"), Some(Duration::from_secs(5)));
+        assert_eq!(parse_retry_after("  7 "), Some(Duration::from_secs(7)));
+        assert_eq!(parse_retry_after("0"), Some(Duration::ZERO));
+        assert_eq!(parse_retry_after("not a number"), None);
+        // HTTP-date is not recognized — only delta-seconds.
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        // A value beyond the ceiling clamps rather than stalling a run.
+        assert_eq!(parse_retry_after("99999"), Some(RETRY_MAX_BACKOFF));
     }
 }
