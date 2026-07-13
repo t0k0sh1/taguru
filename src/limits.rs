@@ -91,6 +91,23 @@ pub async fn enforce_concurrency(
     if auth::PROBE_EXEMPT.contains(&request.uri().path()) {
         return next.run(request).await;
     }
+    // Best-effort: sheds new work a little sooner than making it wait
+    // out a `try_enter_maintenance` refusal inside the handler, which
+    // remains the one real guarantee against two sweeps overlapping.
+    // Not `record_shed()` — an intentional pause is not the same signal
+    // as saturation.
+    if state.metrics().maintenance_active() {
+        let started_at = Instant::now();
+        let mut response = api::error(
+            api::ErrorCode::Maintenance,
+            "a maintenance compaction sweep is running — retry shortly",
+            started_at,
+        );
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(1u32));
+        return response;
+    }
     if !state.metrics().admit_inflight(limit) {
         state.metrics().record_shed();
         let started_at = Instant::now();
@@ -377,6 +394,54 @@ mod tests {
         release.notify_one();
         assert_eq!(holder.await.unwrap().status(), 200);
         // The drop-guard returned the permit: capacity is back.
+        let after = app.clone().oneshot(request("/fast")).await.unwrap();
+        assert_eq!(after.status(), 200);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A maintenance sweep sheds new work with its own code (not
+    /// `Overloaded`, not the shed counter) and reopens the moment the
+    /// guard drops — independent of any in-flight ceiling.
+    #[tokio::test]
+    async fn maintenance_mode_sheds_new_work_without_touching_the_shed_counter() {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-limits-maintenance-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = crate::registry::AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let app = Router::new()
+            .route("/fast", get(|| async { "done" }))
+            .route("/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                (usize::MAX, state.clone()),
+                enforce_concurrency,
+            ));
+        let request = |path: &str| {
+            HttpRequest::builder()
+                .uri(path)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let guard = state.try_enter_maintenance().expect("first sweep admits");
+        let shed = app.clone().oneshot(request("/fast")).await.unwrap();
+        assert_eq!(shed.status(), 503);
+        assert!(shed.headers().get(header::RETRY_AFTER).is_some());
+        let bytes = axum::body::to_bytes(shed.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "maintenance");
+
+        // Probes still get through.
+        let probe = app.clone().oneshot(request("/health")).await.unwrap();
+        assert_eq!(probe.status(), 200);
+
+        // Distinct from overload: the shed counter stays at 0.
+        let rendered = state.metrics().render_prometheus(&state.gauge_snapshot());
+        assert!(
+            rendered.contains("taguru_requests_shed_total 0"),
+            "{rendered}"
+        );
+
+        drop(guard);
         let after = app.clone().oneshot(request("/fast")).await.unwrap();
         assert_eq!(after.status(), 200);
         let _ = std::fs::remove_dir_all(&dir);

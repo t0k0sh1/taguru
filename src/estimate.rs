@@ -8,9 +8,15 @@
 //! Latency and CPU are deliberately NOT estimated — the benchmark
 //! example measures them.
 
+use std::sync::Arc;
+
 use taguru::context::Context;
 
+use crate::bm25::Bm25Index;
 use crate::cli::fmt_bytes;
+use crate::embedding::{PassageKey, PassageVectorStore};
+use crate::passages::{PassageRecord, record_bytes};
+use crate::registry::DEFAULT_PASSAGE_VECTOR_LIMIT;
 
 const USAGE: &str = "\
 usage: taguru estimate --associations N [--concepts N] [--labels N]
@@ -26,6 +32,15 @@ defaults: concepts = associations/2 · labels = 50 · sources = associations/20
 /// Builds get capped here; a million associations synthesize in
 /// seconds and extrapolate linearly beyond.
 const SYNTHESIS_CAP: u64 = 1_000_000;
+
+/// Passage measurement gets its own cap, independent of the graph's:
+/// building gigabytes of synthetic text just to measure per-byte
+/// overhead would make `estimate` itself slow enough to undermine its
+/// own pitch (BUILD and measure, not chart). Every structure measured
+/// against the sample — the passage record, BM25's postings — grows
+/// linearly in input size, so it extrapolates the same way the graph
+/// synthesis above does.
+const PASSAGE_SAMPLE_CAP: u64 = 16 * 1024 * 1024;
 
 struct Plan {
     associations: u64,
@@ -99,6 +114,15 @@ pub fn run(args: &[String]) -> i32 {
         0
     };
 
+    let passages = if plan.passage_bytes > 0 {
+        Some(estimate_passages(&plan))
+    } else {
+        None
+    };
+    let passage_resident = passages
+        .as_ref()
+        .map_or(0, |p| p.store_bytes + p.bm25_bytes + p.vector_bytes);
+
     println!(
         "target shape: {} associations · {} concepts · {} labels · {} sources · {}-byte names",
         plan.associations, plan.concepts, plan.labels, plan.sources, plan.name_bytes
@@ -135,9 +159,27 @@ pub fn run(args: &[String]) -> i32 {
             embedded_names
         );
     }
+    if let Some(p) = &passages {
+        println!(
+            "  passage store      {:>12}   (original text + paragraph spans, resident with the context)",
+            fmt_bytes(p.store_bytes)
+        );
+        println!(
+            "  BM25 index         {:>12}   (lexical passage search)",
+            fmt_bytes(p.bm25_bytes)
+        );
+        if p.vector_bytes > 0 {
+            println!(
+                "  passage vectors    {:>12}   ({} of {} paragraph(s) embedded, TAGURU_PASSAGE_VECTOR_LIMIT capped)",
+                fmt_bytes(p.vector_bytes),
+                p.vectorized_paragraphs,
+                p.total_paragraphs
+            );
+        }
+    }
     println!(
         "  TAGURU_CACHE_BYTES ≥ {} to keep this context hot; footprint is modeled",
-        fmt_bytes(footprint + vectors)
+        fmt_bytes(footprint + vectors + passage_resident)
     );
     println!("  bytes, not RSS — leave ~20-30% container headroom on top.");
 
@@ -158,6 +200,15 @@ pub fn run(args: &[String]) -> i32 {
     }
     println!("  WAL                truncates after each successful flush;");
     println!("                     ceiling is TAGURU_WAL_MAX_BYTES (default 256 MiB)");
+
+    println!();
+    println!("maintenance window (per context):");
+    println!(
+        "  compaction peak    {:>12}   (transient: this context's footprint held twice — \
+live + freshly rebuilt — until the old copy drops; `taguru compact` / \
+POST /maintenance/compact)",
+        fmt_bytes(footprint)
+    );
 
     println!();
     println!("not estimated: latency and CPU — measure those with");
@@ -286,6 +337,100 @@ fn synthetic_name(prefix: char, index: u64, width: usize) -> String {
     name
 }
 
+/// Passage-related resident bytes for the requested shape. The passage
+/// store and the BM25 index are measured for real (`record_bytes`,
+/// `Bm25Index::footprint`) on a bounded sample and extrapolated
+/// linearly; the per-paragraph vector cost is arithmetic (matching how
+/// `vectors` above is computed) but the PARAGRAPH COUNT it multiplies
+/// is measured from that same sample, then capped at
+/// `DEFAULT_PASSAGE_VECTOR_LIMIT` — the ceiling the server itself
+/// enforces per context.
+struct PassageEstimate {
+    store_bytes: u64,
+    bm25_bytes: u64,
+    vector_bytes: u64,
+    total_paragraphs: u64,
+    vectorized_paragraphs: u64,
+}
+
+/// A synthetic passage body of roughly `bytes` bytes, `\n\n`-separated
+/// into paragraphs so `paragraph::split` (and so BM25 and the vector
+/// lane) sees the same shape a real document would rather than one
+/// giant paragraph.
+fn synthetic_passage_text(bytes: u64) -> String {
+    const PARAGRAPH_BYTES: usize = 400;
+    let mut text = String::with_capacity(bytes as usize + PARAGRAPH_BYTES);
+    let mut word: u64 = 0;
+    while (text.len() as u64) < bytes {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        let paragraph_start = text.len();
+        while text.len() - paragraph_start < PARAGRAPH_BYTES {
+            text.push_str("word");
+            text.push_str(&word.to_string());
+            text.push(' ');
+            word += 1;
+        }
+    }
+    text
+}
+
+fn estimate_passages(plan: &Plan) -> PassageEstimate {
+    let sample_bytes = plan.passage_bytes.min(PASSAGE_SAMPLE_CAP);
+    let factor = plan.passage_bytes as f64 / sample_bytes as f64;
+    let sample_sources = ((plan.sources as f64 / factor).round() as u64).clamp(1, plan.sources);
+    let per_source_bytes = (sample_bytes / sample_sources).max(1);
+
+    let mut records: Vec<(String, Arc<PassageRecord>)> =
+        Vec::with_capacity(sample_sources as usize);
+    let mut sample_paragraphs = 0u64;
+    for i in 0..sample_sources {
+        let text = synthetic_passage_text(per_source_bytes);
+        let source = synthetic_name('s', i, plan.name_bytes);
+        let (record, _, _) = PassageRecord::new(Arc::from(text.as_str()), Vec::new(), Vec::new());
+        sample_paragraphs += record.paragraphs.len() as u64;
+        records.push((source, record));
+    }
+
+    let store_bytes_sample: usize = records
+        .iter()
+        .map(|(source, record)| record_bytes(source, record))
+        .sum();
+    let bm25_bytes_sample = Bm25Index::build(&records).footprint();
+
+    let total_paragraphs = (sample_paragraphs as f64 * factor).round() as u64;
+    let vectorized_paragraphs = total_paragraphs.min(DEFAULT_PASSAGE_VECTOR_LIMIT as u64);
+    let vector_bytes = if plan.embedding_dims > 0 && sample_paragraphs > 0 {
+        let mut store = PassageVectorStore::new("estimate");
+        for (source, record) in &records {
+            for span in &record.paragraphs {
+                store.push(
+                    PassageKey {
+                        source: source.clone(),
+                        index: span.index,
+                        hash: span.hash,
+                        question_hash: None,
+                    },
+                    vec![0.0f32; plan.embedding_dims as usize],
+                );
+            }
+        }
+        let per_paragraph = store.footprint() as f64 / sample_paragraphs as f64;
+        (per_paragraph * vectorized_paragraphs as f64) as u64
+    } else {
+        0
+    };
+
+    PassageEstimate {
+        store_bytes: (store_bytes_sample as f64 * factor) as u64,
+        bm25_bytes: (bm25_bytes_sample as f64 * factor) as u64,
+        vector_bytes,
+        total_paragraphs,
+        vectorized_paragraphs,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +533,69 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    fn passage_plan(passage_bytes: u64, sources: u64, embedding_dims: u64) -> Plan {
+        Plan {
+            associations: 100,
+            concepts: 50,
+            labels: 5,
+            sources,
+            name_bytes: 24,
+            embedding_dims,
+            passage_bytes,
+        }
+    }
+
+    #[test]
+    fn estimate_passages_measures_store_and_bm25_bytes_without_embedding_dims() {
+        let plan = passage_plan(4096, 4, 0);
+        let estimate = estimate_passages(&plan);
+        assert!(estimate.store_bytes > 0);
+        assert!(estimate.bm25_bytes > 0);
+        assert_eq!(
+            estimate.vector_bytes, 0,
+            "embedding-dims=0 must cost nothing"
+        );
+        assert!(estimate.total_paragraphs > 0);
+        assert_eq!(estimate.vectorized_paragraphs, estimate.total_paragraphs);
+    }
+
+    #[test]
+    fn estimate_passages_sizes_vectors_when_embedding_dims_are_set() {
+        let plan = passage_plan(4096, 4, 8);
+        let estimate = estimate_passages(&plan);
+        assert!(estimate.vector_bytes > 0);
+        assert_eq!(estimate.vectorized_paragraphs, estimate.total_paragraphs);
+    }
+
+    /// Regression test for the server-side ceiling: however many
+    /// paragraphs the requested shape would produce, only
+    /// `DEFAULT_PASSAGE_VECTOR_LIMIT` of them are ever embedded, so the
+    /// estimate must cap `vectorized_paragraphs` there too rather than
+    /// pricing vectors for paragraphs the server would never embed.
+    #[test]
+    fn estimate_passages_caps_vectorized_paragraphs_at_the_server_limit() {
+        let plan = passage_plan(50_000_000, 5_000, 1536);
+        let estimate = estimate_passages(&plan);
+        assert!(estimate.total_paragraphs > DEFAULT_PASSAGE_VECTOR_LIMIT as u64);
+        assert_eq!(
+            estimate.vectorized_paragraphs,
+            DEFAULT_PASSAGE_VECTOR_LIMIT as u64
+        );
+        assert!(estimate.vector_bytes > 0);
+    }
+
+    #[test]
+    fn estimate_passages_extrapolates_past_the_sample_cap_roughly_linearly() {
+        let small = estimate_passages(&passage_plan(PASSAGE_SAMPLE_CAP, 200, 0));
+        let large = estimate_passages(&passage_plan(PASSAGE_SAMPLE_CAP * 4, 800, 0));
+        let store_ratio = large.store_bytes as f64 / small.store_bytes as f64;
+        let bm25_ratio = large.bm25_bytes as f64 / small.bm25_bytes as f64;
+        assert!(
+            (3.2..=4.8).contains(&store_ratio),
+            "store ratio {store_ratio}"
+        );
+        assert!((3.2..=4.8).contains(&bm25_ratio), "bm25 ratio {bm25_ratio}");
     }
 }

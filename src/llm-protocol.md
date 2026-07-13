@@ -293,6 +293,7 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/vocabulary/audit` | `{dice_floor?=0.6, cosine_floor?=0.6}` → spelling/synonym fork candidates |
 | GET | `/contexts/{name}/export` | the context as an import batch stream (JSON Lines body, not the JSON envelope) — one batch per source, create block first, aliases last; `POST /import` (or `taguru import`) restores it, per-source retract-then-apply, answering `{batches: [...]}` in stream order (`taguru_group` records ride the same stream, restore after every batch as whole-record replaces, and answer under `groups: [...]`) |
 | POST | `/contexts/{name}/compact` | rebuild the image without dead records (admin; the context's requests wait out the rebuild) → `{bytes_before, bytes_after, dead_edges, aliases_dropped}` |
+| POST | `/maintenance/compact` | `?min_dead_ratio=0.0` (default; any dead weight at all) → sweep every context whose live dead ratio strictly exceeds it, worst ratio first, each rebuilt like `/contexts/{name}/compact`; admin, server-wide (refused for a context-scoped key, like `/flush`) — closes the server to ordinary traffic for the sweep (`/health` answers `503 maintenance` meanwhile, distinct from an actual fault) and reopens when it ends or the deadline cuts it short → `{contexts:[{name, bytes_before, bytes_after, dead_edges, aliases_dropped}], deadline_exceeded}` |
 
 ## Auth
 
@@ -306,7 +307,8 @@ Source code takes the same discipline; only the naming changes.
 - Unset = auth disabled (dev mode; never expose beyond localhost).
 - Keys may carry a scope (`TAGURU_KEY_SCOPES`): a role — read (the
   retrieval loop) ⊂ write (+ the ingest loop, group create/update) ⊂
-  admin (+ context and group deletion, `/import`, `/flush`) — and
+  admin (+ context and group deletion, `/import`, `/flush`,
+  `/maintenance/compact`) — and
   optionally a context list. Out of scope → `403` in the error shape,
   naming what the key lacks; a context-scoped key sees only its grant
   in `GET /contexts`, group listings — and the group export — show it
@@ -333,10 +335,13 @@ resend) / `unauthorized` / `forbidden` / `no_context` / `no_source` /
 `already_exists` / `conflict` / `payload_too_large` / `rate_limited` /
 `internal` / `embeddings_unconfigured` / `embeddings_failed` /
 `overloaded` (shed at the in-flight ceiling; wait `Retry-After`) /
-`unhealthy` (the write path is degraded) / `storage_full`.
+`unhealthy` (the write path is degraded) / `maintenance` (a
+`POST /maintenance/compact` sweep is running — wait `Retry-After` and
+retry) / `storage_full`.
 
 - `401` auth (above). `404` unknown context or group. `409` duplicate
-  create / alias conflict.
+  create / alias conflict / a `POST /maintenance/compact` overlapping
+  one already running.
 - `507` context full (`ContextFull`) — the write was NOT applied;
   further knowledge goes to a new context.
 - `501` `/embeddings/refresh` without a provider configured

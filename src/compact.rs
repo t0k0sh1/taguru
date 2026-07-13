@@ -10,12 +10,13 @@
 
 use std::path::PathBuf;
 
+use parking_lot::Mutex;
 use taguru::deadline::Deadline;
 
-use crate::registry::AccessError;
+use crate::registry::{AccessError, CompactOutcome};
 
 const USAGE: &str = "\
-usage: taguru compact [--config FILE] [CONTEXT...]
+usage: taguru compact [--config FILE] [--parallel N] [CONTEXT...]
 
 Rewrites context images in TAGURU_DATA_DIR without the dead weight the
 append-only format accumulates (retracted edges, unlinked attribution
@@ -27,11 +28,15 @@ counts and paragraph locators exactly, per-source weights within
 float re-accumulation error; aliases whose canonical no longer
 carries any live association are dropped and counted.
 
-  --config F   read KEY=VALUE environment from F (same dialect as serve)
+  --config F     read KEY=VALUE environment from F (same dialect as serve)
+  --parallel N   compact up to N contexts at once (default 1, sequential);
+                 output is reordered to match the sequential run byte for
+                 byte, regardless of N or thread scheduling
 ";
 
 pub(crate) fn run(args: &[String]) -> i32 {
     let mut config: Option<PathBuf> = None;
+    let mut parallel: usize = 1;
     let mut names: Vec<String> = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -43,6 +48,10 @@ pub(crate) fn run(args: &[String]) -> i32 {
             "--config" => match rest.next() {
                 Some(path) => config = Some(PathBuf::from(path)),
                 None => return usage_error("--config needs a file path"),
+            },
+            "--parallel" => match rest.next().map(|value| value.parse::<usize>()) {
+                Some(Ok(n)) if n >= 1 => parallel = n,
+                _ => return usage_error("--parallel needs an integer of at least 1"),
             },
             other if other.starts_with('-') => {
                 return usage_error(&format!("unknown flag '{other}'"));
@@ -81,30 +90,42 @@ pub(crate) fn run(args: &[String]) -> i32 {
     };
 
     let mut failures = 0usize;
-    for name in &names {
-        match state.compact_context(name, Deadline::unbounded()) {
-            Ok(outcome) => println!(
-                "context '{name}': {} → {} ({} dead edge(s) shed{})",
-                crate::cli::fmt_bytes(outcome.bytes_before as u64),
-                crate::cli::fmt_bytes(outcome.bytes_after as u64),
-                outcome.dead_edges,
-                match outcome.aliases_dropped {
-                    0 => String::new(),
-                    dropped =>
-                        format!(", {dropped} alias(es) dropped (canonical has no live association)"),
-                },
-            ),
-            Err(failure) => {
-                let message = match failure {
-                    AccessError::NotFound => "no such context".to_string(),
-                    AccessError::Load(error) => error,
-                    AccessError::Unpersisted(error) => error,
-                    // The CLI runs with Deadline::unbounded(), which
-                    // never expires — unreachable in practice, kept for
-                    // exhaustiveness.
-                    AccessError::DeadlineExceeded => "deadline exceeded".to_string(),
-                };
-                eprintln!("taguru: compact: context '{name}': {message}");
+    if parallel <= 1 {
+        for name in &names {
+            let outcome = state.compact_context(name, Deadline::unbounded());
+            if !report_outcome(name, &outcome) {
+                failures += 1;
+            }
+        }
+    } else {
+        // Same shared work-queue pattern `preload_pinned` uses to load
+        // pinned contexts at boot: independent per-entry locks mean the
+        // workers never contend with each other.
+        let workers = parallel.min(names.len());
+        let queue = Mutex::new(names.iter().enumerate());
+        let results: Mutex<Vec<(usize, Result<CompactOutcome, AccessError>)>> =
+            Mutex::new(Vec::with_capacity(names.len()));
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    let mut local = Vec::new();
+                    loop {
+                        let Some((index, name)) = queue.lock().next() else {
+                            break;
+                        };
+                        local.push((index, state.compact_context(name, Deadline::unbounded())));
+                    }
+                    results.lock().extend(local);
+                });
+            }
+        });
+        let mut collected = results.into_inner();
+        // Reordered to the original argument order so `--parallel N`'s
+        // stdout is byte-for-byte identical to the sequential run,
+        // whatever N is or however the workers happened to race.
+        collected.sort_by_key(|(index, _)| *index);
+        for (name, (_, outcome)) in names.iter().zip(collected) {
+            if !report_outcome(name, &outcome) {
                 failures += 1;
             }
         }
@@ -120,4 +141,39 @@ pub(crate) fn run(args: &[String]) -> i32 {
 fn usage_error(message: &str) -> i32 {
     eprintln!("taguru: compact: {message} — try 'taguru compact --help'");
     2
+}
+
+/// Prints one context's outcome in the shape both the sequential and
+/// `--parallel` paths share, so the two can never drift apart. Returns
+/// whether it succeeded, for the caller's failure count.
+fn report_outcome(name: &str, result: &Result<CompactOutcome, AccessError>) -> bool {
+    match result {
+        Ok(outcome) => {
+            println!(
+                "context '{name}': {} → {} ({} dead edge(s) shed{})",
+                crate::cli::fmt_bytes(outcome.bytes_before as u64),
+                crate::cli::fmt_bytes(outcome.bytes_after as u64),
+                outcome.dead_edges,
+                match outcome.aliases_dropped {
+                    0 => String::new(),
+                    dropped =>
+                        format!(", {dropped} alias(es) dropped (canonical has no live association)"),
+                },
+            );
+            true
+        }
+        Err(failure) => {
+            let message = match failure {
+                AccessError::NotFound => "no such context".to_string(),
+                AccessError::Load(error) => error.clone(),
+                AccessError::Unpersisted(error) => error.clone(),
+                // The CLI runs with Deadline::unbounded(), which never
+                // expires — unreachable in practice, kept for
+                // exhaustiveness.
+                AccessError::DeadlineExceeded => "deadline exceeded".to_string(),
+            };
+            eprintln!("taguru: compact: context '{name}': {message}");
+            false
+        }
+    }
 }
