@@ -56,7 +56,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use taguru::context::Association;
+use taguru::context::{Association, UNSOURCED_SOURCE};
 use taguru::deadline::{Deadline, DeadlineExceeded};
 
 use crate::groups::GroupRecord;
@@ -82,14 +82,6 @@ file without touching anything.
   --out DIR    where the streams land (created if missing)
   --config F   read KEY=VALUE environment from F (same dialect as serve)
 ";
-
-/// Reserved source id for weight that was asserted without a source.
-/// A real source with this exact id has its attributions folded into
-/// the same sourceless residual rather than merged in as attributed
-/// weight (see the fixed-point note in [`render`]) — but if it also
-/// has a passage attached, export refuses the context outright rather
-/// than picking a winner silently.
-pub(crate) const UNSOURCED_SOURCE: &str = "export:unsourced";
 
 /// Reserved source id for the header-only batch an otherwise-empty
 /// context exports — a batch stream must carry at least one header

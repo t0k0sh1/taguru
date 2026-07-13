@@ -127,6 +127,9 @@ classes:
     audit_vocabulary:
       route: "POST /contexts/{name}/vocabulary/audit"
       options: [dice_floor, cosine_floor]
+    audit_drift:
+      route: "POST /contexts/{name}/drift/audit"
+      options: [unsourced_floor, limit, after, include_twins, dice_floor, cosine_floor]
     refresh_embeddings: { route: "POST /contexts/{name}/embeddings/refresh" }
     compact: { route: "POST /contexts/{name}/compact" }
     export: { route: "GET /contexts/{name}/export" }

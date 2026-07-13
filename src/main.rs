@@ -512,6 +512,7 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
             "/contexts/{name}/vocabulary/audit",
             post(api::audit_vocabulary),
         )
+        .route("/contexts/{name}/drift/audit", post(api::audit_drift))
         .fallback(api::unknown_path)
         .method_not_allowed_fallback(api::method_not_allowed)
 }

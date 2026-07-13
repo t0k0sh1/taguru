@@ -2163,6 +2163,7 @@ pub struct KeysetQuery {
 pub async fn add_aliases(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<AliasRequest>,
 ) -> Response {
@@ -2215,6 +2216,21 @@ pub async fn add_aliases(
     }) {
         Err(failure) => access_error(&state, failure, &name, started_at),
         Ok(Ok(applied)) => {
+            // Counts (not the spellings — a batch may run to
+            // thousands) reach the audit line, the access log names
+            // the context and key. Unconditional, symmetric with
+            // remove_aliases: even an empty batch (applied == 0)
+            // leaves a line, so an operator reconstructing a bad
+            // alias's live window sees every registration attempt.
+            tracing::info!(
+                target: "taguru::audit",
+                key = %key_name(&key),
+                context = %name,
+                concepts = request.concepts.len(),
+                labels = request.labels.len(),
+                applied,
+                "aliases registered",
+            );
             // Same rule as add_associations: an empty batch applies
             // nothing, so it must not bump the write counter either.
             if applied > 0 {
@@ -2628,6 +2644,65 @@ fn twin_pairs<S>(pairs: Vec<(String, String, S)>) -> Vec<TwinPair<S>> {
         .collect()
 }
 
+/// Shared body of `audit_vocabulary` and `audit_drift`'s `include_twins`
+/// section: lexical fork candidates always, semantic ones when
+/// embeddings are configured and the deadline allows. Callers run this
+/// inside `block_in_place` — it does its own CPU-bound pairwise sweeps
+/// and must never run on an async worker (see the comment this carried
+/// forward from `audit_vocabulary`, below).
+fn vocabulary_audit(
+    state: &AppState,
+    name: &str,
+    dice_floor: f64,
+    cosine_floor: f32,
+    deadline: Deadline,
+) -> Result<VocabularyAudit, AccessError> {
+    // BOTH halves are CPU-bound pairwise sweeps — the lexical one is
+    // O(Σ posting_len²) over the whole vocabulary, seconds at tens of
+    // thousands of concepts. Neither may run on an async worker: with
+    // the lexical half inline, a handful of concurrent audits pinned
+    // every worker and starved every other request, /health included.
+    let lexical = state
+        .read_context(name, |context| {
+            let concepts = context
+                .similar_concepts(dice_floor, deadline)
+                .map_err(|_| AccessError::DeadlineExceeded)?;
+            let labels = context
+                .similar_labels(dice_floor, deadline)
+                .map_err(|_| AccessError::DeadlineExceeded)?;
+            Ok((concepts, labels))
+        })
+        .and_then(std::convert::identity)?;
+
+    // The lexical half already spent the budget checking its own
+    // deadline; skip the semantic half rather than fail a request that
+    // did real, useful work — semantic_twins also checks this same
+    // deadline internally (its own pairwise sweep can still be large),
+    // so this is a courtesy early-out on top of that, not the only guard.
+    if deadline.expired() {
+        return Ok(VocabularyAudit {
+            lexical_concepts: twin_pairs(lexical.0),
+            lexical_labels: twin_pairs(lexical.1),
+            semantic_concepts: Vec::new(),
+            semantic_labels: Vec::new(),
+            semantic_note: Some("意味的検出はスキップ (期限切れ)".to_string()),
+        });
+    }
+    let Some((semantic_concepts, semantic_labels, semantic_note)) =
+        state.semantic_twins(name, cosine_floor, deadline)
+    else {
+        return Err(AccessError::NotFound);
+    };
+
+    Ok(VocabularyAudit {
+        lexical_concepts: twin_pairs(lexical.0),
+        lexical_labels: twin_pairs(lexical.1),
+        semantic_concepts: twin_pairs(semantic_concepts),
+        semantic_labels: twin_pairs(semantic_labels),
+        semantic_note,
+    })
+}
+
 pub async fn audit_vocabulary(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -2642,58 +2717,140 @@ pub async fn audit_vocabulary(
     let dice_floor = request.dice_floor.unwrap_or(0.6);
     let cosine_floor = request.cosine_floor.unwrap_or(0.6);
 
-    // BOTH halves are CPU-bound pairwise sweeps — the lexical one is
-    // O(Σ posting_len²) over the whole vocabulary, seconds at tens of
-    // thousands of concepts. Neither may run on an async worker: with
-    // the lexical half inline, a handful of concurrent audits pinned
-    // every worker and starved every other request, /health included.
-    let lexical = match tokio::task::block_in_place(|| {
+    match tokio::task::block_in_place(|| {
+        vocabulary_audit(&state, &name, dice_floor, cosine_floor, deadline)
+    }) {
+        Ok(audit) => ok(audit, started_at),
+        Err(failure) => access_error(&state, failure, &name, started_at),
+    }
+}
+
+/// One edge [`Context::unsourced_edges`] flagged, reshaped to the wire
+/// (section-resolved association, same as every other match page).
+#[derive(Serialize)]
+pub struct UnsourcedEdgeOut {
+    pub unsourced_weight: f64,
+    pub unsourced_count: u64,
+    pub association: AssociationOut,
+}
+
+/// Drift audit request: an optional floor for the unsourced-weight
+/// section, paging over it, and an opt-in for the vocabulary-twins
+/// section (skipped by default — it's the same CPU-bound pairwise
+/// sweep `audit_vocabulary` runs, not something every drift check
+/// should pay for).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct DriftAuditRequest {
+    /// Minimum unsourced weight (compared by magnitude) to include;
+    /// omitted means any amount at all.
+    pub unsourced_floor: Option<f64>,
+    /// Omitted means 100, capped at 1000 — pages exactly like recall,
+    /// query, and unreachable_from.
+    pub limit: Option<usize>,
+    /// Resume past a previous page's last match — see [`MatchCursor`].
+    pub after: Option<MatchCursor>,
+    /// Also run the lexical/semantic fork-candidate sweep
+    /// (`vocabulary_audit`) and include it as `twins`.
+    pub include_twins: bool,
+    /// Lexical (spelling) detector floor; omitted means 0.6. Ignored
+    /// unless `include_twins` is set.
+    pub dice_floor: Option<f64>,
+    /// Semantic (gloss cosine) detector floor; omitted means 0.6.
+    /// Ignored unless `include_twins` is set.
+    pub cosine_floor: Option<f32>,
+}
+
+/// The drift audit: three independent read-only checks in one
+/// response, each answering a different way the graph's current shape
+/// can have drifted from what actually happened. `unsourced`/`total`
+/// page like every other match list; the alias and twins sections are
+/// small enough in practice to return whole.
+#[derive(Serialize)]
+pub struct DriftAudit {
+    pub total: usize,
+    pub unsourced: Vec<UnsourcedEdgeOut>,
+    pub dead_concept_aliases: BTreeMap<String, String>,
+    pub dead_label_aliases: BTreeMap<String, String>,
+    /// Present only when `include_twins` was set.
+    pub twins: Option<VocabularyAudit>,
+}
+
+pub async fn audit_drift(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
+    AppBytes(body): AppBytes,
+) -> Response {
+    let started_at = Instant::now();
+    let request: DriftAuditRequest = match optional_body(&body, started_at) {
+        Ok(request) => request,
+        Err(refusal) => return *refusal,
+    };
+    let floor = request.unsourced_floor.unwrap_or(0.0);
+
+    let loaded = tokio::task::block_in_place(|| {
         state
             .read_context(&name, |context| {
-                let concepts = context
-                    .similar_concepts(dice_floor, deadline)
+                let unsourced = context
+                    .unsourced_edges(floor, deadline)
                     .map_err(|_| AccessError::DeadlineExceeded)?;
-                let labels = context
-                    .similar_labels(dice_floor, deadline)
+                let aliases = context
+                    .dead_canonical_aliases(deadline)
                     .map_err(|_| AccessError::DeadlineExceeded)?;
-                Ok((concepts, labels))
+                Ok((unsourced, aliases))
             })
             .and_then(std::convert::identity)
-    }) {
-        Ok(lexical) => lexical,
+    });
+    let (unsourced, (dead_concept_aliases, dead_label_aliases)) = match loaded {
+        Ok(loaded) => loaded,
         Err(failure) => return access_error(&state, failure, &name, started_at),
     };
 
-    // The lexical half already spent the budget checking its own
-    // deadline; skip the semantic half rather than fail a request that
-    // did real, useful work — semantic_twins also checks this same
-    // deadline internally (its own pairwise sweep can still be large),
-    // so this is a courtesy early-out on top of that, not the only guard.
-    if deadline.expired() {
-        return ok(
-            VocabularyAudit {
-                lexical_concepts: twin_pairs(lexical.0),
-                lexical_labels: twin_pairs(lexical.1),
-                semantic_concepts: Vec::new(),
-                semantic_labels: Vec::new(),
-                semantic_note: Some("意味的検出はスキップ (期限切れ)".to_string()),
-            },
-            started_at,
-        );
-    }
-    let semantic =
-        tokio::task::block_in_place(|| state.semantic_twins(&name, cosine_floor, deadline));
-    let Some((semantic_concepts, semantic_labels, semantic_note)) = semantic else {
-        return not_found(&name, started_at);
+    let (total, unsourced) = page_by(unsourced, request.limit, request.after.as_ref(), |edge| {
+        (
+            edge.weight,
+            edge.association.subject.as_str(),
+            edge.association.label.as_str(),
+            edge.association.object.as_str(),
+        )
+    });
+    // A graph read like unreachable_from — zero drift is the audit
+    // succeeding, not a miss, so it never counts as an empty read.
+    state.note_read(&name, false);
+    let sections = state.resolve_sections(
+        &name,
+        locator_keys(unsourced.iter().map(|edge| &edge.association)),
+    );
+    let unsourced = unsourced
+        .into_iter()
+        .map(|edge| UnsourcedEdgeOut {
+            unsourced_weight: edge.weight,
+            unsourced_count: edge.count,
+            association: association_out(edge.association, &sections),
+        })
+        .collect();
+
+    let twins = if request.include_twins {
+        let dice_floor = request.dice_floor.unwrap_or(0.6);
+        let cosine_floor = request.cosine_floor.unwrap_or(0.6);
+        match tokio::task::block_in_place(|| {
+            vocabulary_audit(&state, &name, dice_floor, cosine_floor, deadline)
+        }) {
+            Ok(audit) => Some(audit),
+            Err(failure) => return access_error(&state, failure, &name, started_at),
+        }
+    } else {
+        None
     };
 
     ok(
-        VocabularyAudit {
-            lexical_concepts: twin_pairs(lexical.0),
-            lexical_labels: twin_pairs(lexical.1),
-            semantic_concepts: twin_pairs(semantic_concepts),
-            semantic_labels: twin_pairs(semantic_labels),
-            semantic_note,
+        DriftAudit {
+            total,
+            unsourced,
+            dead_concept_aliases,
+            dead_label_aliases,
+            twins,
         },
         started_at,
     )

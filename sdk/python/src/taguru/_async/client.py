@@ -37,6 +37,7 @@ from .._models import (
     CrossMatchPage,
     CrossPassageHit,
     DirectoryEntry,
+    DriftAudit,
     ExplorePage,
     GroupEntry,
     GroupPage,
@@ -917,6 +918,36 @@ class AsyncContext:
         body = drop_none({"dice_floor": dice_floor, "cosine_floor": cosine_floor})
         result = await self._post("/vocabulary/audit", body)
         return decode(VocabularyAudit, result)  # type: ignore[no-any-return]
+
+    async def audit_drift(
+        self,
+        *,
+        unsourced_floor: float | None = None,
+        limit: int | None = None,
+        after: MatchCursor | None = None,
+        include_twins: bool = False,
+        dice_floor: float | None = None,
+        cosine_floor: float | None = None,
+    ) -> DriftAudit:
+        """Graph-vs-archive drift audit: unsourced weight (worst-first,
+        paginated) and dead-canonical aliases, always; vocabulary fork
+        candidates too when ``include_twins`` is set.
+
+        ``after`` resumes past the previous page's last unsourced match;
+        ``total`` stays constant across pages.
+        """
+        body = drop_none(
+            {
+                "unsourced_floor": unsourced_floor,
+                "limit": limit,
+                "after": after,
+                "include_twins": include_twins,
+                "dice_floor": dice_floor,
+                "cosine_floor": cosine_floor,
+            }
+        )
+        result = await self._post("/drift/audit", body)
+        return decode(DriftAudit, result)  # type: ignore[no-any-return]
 
     async def refresh_embeddings(self) -> RefreshOutcome:
         """Re-embed new/changed glosses (diff-only, idempotent).

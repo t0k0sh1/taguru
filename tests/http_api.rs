@@ -2033,6 +2033,143 @@ fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
     assert_eq!(status, 422, "{refusal}");
 }
 
+/// `drift/audit` answers three things at once: unsourced weight
+/// (worst-magnitude first, floor- and cursor-paginated like
+/// `unreachable_from`), dead-canonical aliases, and — opt-in — the
+/// same vocabulary-audit twins.
+#[test]
+fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
+    let server = Server::start("driftaudit");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+
+    // Empty context: every field comes back at its zero value.
+    let empty = server.ok("POST", "/contexts/sake/drift/audit", None);
+    assert_eq!(empty["total"], json!(0), "{empty}");
+    assert_eq!(empty["unsourced"], json!([]), "{empty}");
+    assert_eq!(empty["dead_concept_aliases"], json!({}), "{empty}");
+    assert_eq!(empty["dead_label_aliases"], json!({}), "{empty}");
+    assert_eq!(empty["twins"], json!(null), "{empty}");
+
+    // Three sourceless associations of increasing weight (unsourced
+    // weight), plus one sourced association retracted afterward to
+    // leave its fresh alias pointing at a dead canonical.
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "x1", "label": "l", "object": "y1", "weight": 1.0},
+            {"subject": "x2", "label": "l", "object": "y2", "weight": 2.0},
+            {"subject": "x3", "label": "l", "object": "y3", "weight": 3.0},
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([{"subject": "高瀬", "label": "杜氏", "object": "蔵",
+                     "weight": 1.0, "source": "a.md"}])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/associations/retract",
+        Some(json!({"subject": "高瀬", "label": "杜氏", "object": "蔵"})),
+    );
+    let applied = server.ok(
+        "POST",
+        "/contexts/sake/aliases",
+        Some(json!({"concepts": {"タカセ": "高瀬"}})),
+    );
+    assert_eq!(applied, json!(1), "{applied}");
+
+    // No floor, no limit: everything, worst-magnitude first.
+    let full = server.ok("POST", "/contexts/sake/drift/audit", None);
+    assert_eq!(full["total"], json!(3), "{full}");
+    let matches = full["unsourced"].as_array().unwrap();
+    assert_eq!(
+        matches
+            .iter()
+            .map(|m| m["unsourced_weight"].as_f64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![3.0, 2.0, 1.0],
+        "{full}"
+    );
+    assert_eq!(matches[0]["association"]["subject"], json!("x3"));
+    assert_eq!(matches[0]["unsourced_count"], json!(1));
+    assert_eq!(
+        full["dead_concept_aliases"],
+        json!({"タカセ": "高瀬"}),
+        "{full}"
+    );
+    assert_eq!(full["dead_label_aliases"], json!({}), "{full}");
+    assert_eq!(full["twins"], json!(null), "{full}");
+
+    // A floor past the smallest two drops them, `total` still counts
+    // only what clears it.
+    let floored = server.ok(
+        "POST",
+        "/contexts/sake/drift/audit",
+        Some(json!({"unsourced_floor": 2.5})),
+    );
+    assert_eq!(floored["total"], json!(1), "{floored}");
+    let floored_matches = floored["unsourced"].as_array().unwrap();
+    assert_eq!(floored_matches.len(), 1);
+    assert_eq!(floored_matches[0]["association"]["subject"], json!("x3"));
+
+    // limit + after pages the same worst-first order as recall/query.
+    let first = server.ok(
+        "POST",
+        "/contexts/sake/drift/audit",
+        Some(json!({"limit": 2})),
+    );
+    assert_eq!(first["total"], json!(3), "{first}");
+    let first_matches = first["unsourced"].as_array().unwrap();
+    assert_eq!(first_matches.len(), 2);
+    let last = &first_matches[1]["association"];
+    let cursor = json!({
+        "weight": first_matches[1]["unsourced_weight"],
+        "subject": last["subject"], "label": last["label"], "object": last["object"],
+    });
+    let second = server.ok(
+        "POST",
+        "/contexts/sake/drift/audit",
+        Some(json!({"limit": 2, "after": cursor})),
+    );
+    assert_eq!(second["total"], json!(3), "{second}");
+    let second_matches = second["unsourced"].as_array().unwrap();
+    assert_eq!(second_matches.len(), 1);
+    assert_eq!(second_matches[0]["association"]["subject"], json!("x1"));
+
+    // include_twins folds in the same vocabulary-audit shape, at the
+    // caller's dice_floor.
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "株式会社青嶺", "label": "kind", "object": "会社",
+             "weight": 1.0, "source": "a.md"},
+            {"subject": "青嶺株式会社", "label": "kind", "object": "会社",
+             "weight": 1.0, "source": "a.md"},
+        ])),
+    );
+    let with_twins = server.ok(
+        "POST",
+        "/contexts/sake/drift/audit",
+        Some(json!({"include_twins": true, "dice_floor": 0.4})),
+    );
+    assert!(!with_twins["twins"].is_null(), "{with_twins}");
+    assert!(
+        with_twins["twins"]["lexical_concepts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|pair| {
+                let a = pair["a"].as_str().unwrap();
+                let b = pair["b"].as_str().unwrap();
+                (a == "株式会社青嶺" || b == "株式会社青嶺") && a != b
+            }),
+        "{with_twins}"
+    );
+}
+
 #[test]
 fn explore_without_max_depth_stops_at_the_server_ceiling() {
     let server = Server::start("depthcap");
@@ -3232,6 +3369,11 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         .0,
         200
     );
+    // The unscoped admin key clears every role gate, drift/audit included.
+    assert_eq!(
+        call("POST", "/contexts/sake/drift/audit", None, "atok").0,
+        200
+    );
 
     // Read: the retrieval loop answers, the ingest loop refuses.
     assert_eq!(
@@ -3242,6 +3384,12 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
             "rtok"
         )
         .0,
+        200
+    );
+    // drift/audit is Role::Read too: the reader key reaches it directly,
+    // not just via the role hierarchy other checks here exercise.
+    assert_eq!(
+        call("POST", "/contexts/sake/drift/audit", None, "rtok").0,
         200
     );
     let (status, refusal) = call(
@@ -3266,6 +3414,12 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
             "wtok"
         )
         .0,
+        200
+    );
+    // The role hierarchy (Admin ⊃ Write ⊃ Read) puts drift/audit's
+    // Role::Read within reach of a write key too.
+    assert_eq!(
+        call("POST", "/contexts/bunko/drift/audit", None, "wtok").0,
         200
     );
     assert_eq!(call("DELETE", "/contexts/bunko", None, "wtok").0, 403);
@@ -3308,6 +3462,12 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         "{outside}"
     );
     assert_eq!(call("GET", "/contexts/bunko", None, "stok").0, 403);
+    // Role::Read still bows to the context grant: sake-scoped write
+    // reaches bunko's associations no further than bunko's drift/audit.
+    assert_eq!(
+        call("POST", "/contexts/bunko/drift/audit", None, "stok").0,
+        403
+    );
     let (status, listed) = call("GET", "/contexts", None, "stok");
     assert_eq!(status, 200);
     assert_eq!(listed["result"]["total"], json!(1), "{listed}");
@@ -4093,7 +4253,7 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
         ),
         200
     );
-    // Register then remove an alias (its own audit line).
+    // Register then remove an alias — each leaves its own audit line.
     assert_eq!(
         call(
             "POST",
@@ -4194,6 +4354,9 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
             })
             .unwrap_or_else(|| panic!("missing audit line: {message}"))
     };
+    let aliases_registered = audit_line("aliases registered");
+    assert_eq!(aliases_registered["fields"]["context"], json!("sake"));
+    assert_eq!(aliases_registered["fields"]["key"], json!("default"));
     let aliases_removed = audit_line("aliases removed");
     assert_eq!(aliases_removed["fields"]["context"], json!("sake"));
     assert_eq!(aliases_removed["fields"]["key"], json!("default"));

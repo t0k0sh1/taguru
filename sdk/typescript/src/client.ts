@@ -23,6 +23,7 @@ import type {
   CrossMatchPage,
   CrossPassageHit,
   DirectoryEntry,
+  DriftAudit,
   ExploreCursor,
   ExplorePage,
   GroupEntry,
@@ -970,6 +971,38 @@ export class Context {
       dropUndefined({ dice_floor: options.dice_floor, cosine_floor: options.cosine_floor }),
     );
     return result as VocabularyAudit;
+  }
+
+  /**
+   * Graph-vs-archive drift audit: unsourced weight (worst-first,
+   * paginated) and dead-canonical aliases, always; vocabulary fork
+   * candidates too when `include_twins` is set.
+   *
+   * `after` resumes past the previous page's last unsourced match;
+   * `total` stays constant across pages.
+   */
+  async auditDrift(
+    options: {
+      unsourced_floor?: number;
+      limit?: number;
+      after?: MatchCursor;
+      include_twins?: boolean;
+      dice_floor?: number;
+      cosine_floor?: number;
+    } = {},
+  ): Promise<DriftAudit> {
+    const result = await this.post(
+      "/drift/audit",
+      dropUndefined({
+        unsourced_floor: options.unsourced_floor,
+        limit: options.limit,
+        after: options.after,
+        include_twins: options.include_twins ?? false,
+        dice_floor: options.dice_floor,
+        cosine_floor: options.cosine_floor,
+      }),
+    );
+    return result as DriftAudit;
   }
 
   /**

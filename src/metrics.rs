@@ -275,6 +275,11 @@ pub struct GaugeSnapshot {
     /// Sum, across every context, of the lower-bound arena bytes behind
     /// removed aliases.
     pub arena_slack_total: u64,
+    /// Sum, across every context, of edges carrying weight no named
+    /// source explains — see [`taguru::context::Context::unsourced_summary`].
+    pub unsourced_edges_total: u64,
+    /// Sum, across every context, of unsourced weight (absolute value).
+    pub unsourced_weight_total: f64,
 }
 
 impl Metrics {
@@ -804,6 +809,26 @@ impl Metrics {
         ));
         push_header(
             &mut out,
+            "taguru_unsourced_edges",
+            "gauge",
+            "Live count of edges carrying weight no named source explains, across all contexts.",
+        );
+        out.push_str(&format!(
+            "taguru_unsourced_edges {}\n",
+            gauges.unsourced_edges_total
+        ));
+        push_header(
+            &mut out,
+            "taguru_unsourced_weight",
+            "gauge",
+            "Total unsourced weight (absolute value), summed across all contexts.",
+        );
+        out.push_str(&format!(
+            "taguru_unsourced_weight {}\n",
+            gauges.unsourced_weight_total
+        ));
+        push_header(
+            &mut out,
             "taguru_last_flush_success_timestamp_seconds",
             "gauge",
             "Unix time of the last successful image flush (0 = none since boot); alert on time() minus this.",
@@ -1107,6 +1132,8 @@ mod tests {
             dead_edges_total: 0,
             dead_attributions_total: 0,
             arena_slack_total: 0,
+            unsourced_edges_total: 0,
+            unsourced_weight_total: 0.0,
         }
     }
 
@@ -1409,6 +1436,8 @@ mod tests {
             dead_edges_total: 0,
             dead_attributions_total: 0,
             arena_slack_total: 0,
+            unsourced_edges_total: 0,
+            unsourced_weight_total: 0.0,
         });
 
         // Every sample line's metric name must have been introduced by

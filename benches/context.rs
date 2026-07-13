@@ -146,6 +146,15 @@ fn bench_explore_unbounded(context: Context) -> Vec<Recollection> {
     black_box(context.explore(black_box(&[CUE_CONCEPT]), black_box(Context::UNBOUNDED)))
 }
 
+// ContextStats::of, GET /contexts, and /metrics all read through this
+// on every call — a regression here is a regression on the directory
+// hot path, not just the new drift-audit verb.
+#[library_benchmark]
+#[bench::exact(setup = build_fixture)]
+fn bench_unsourced_summary(context: Context) -> (usize, f64) {
+    black_box(context.unsourced_summary())
+}
+
 library_benchmark_group!(
     name = context_reads,
     benchmarks = [
@@ -157,6 +166,7 @@ library_benchmark_group!(
         bench_query_any,
         bench_explore_depth_2,
         bench_explore_unbounded,
+        bench_unsourced_summary,
     ]
 );
 

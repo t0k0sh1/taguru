@@ -288,6 +288,45 @@ def test_vocabulary_audit_surfaces_lexical_twins(client: Taguru, fresh_name: str
     client.contexts.delete(fresh_name)
 
 
+def test_drift_audit_surfaces_unsourced_weight_and_dead_aliases(
+    client: Taguru, fresh_name: str
+) -> None:
+    client.contexts.create(fresh_name)
+    ctx = client.context(fresh_name)
+    # No `source`: this weight lands unexplained by any named source.
+    ctx.add_associations(
+        [{"subject": "青嶺酒造", "label": "kind", "object": "会社", "weight": 1.0}]
+    )
+    ctx.add_associations(
+        [
+            {
+                "subject": "高瀬",
+                "label": "kind",
+                "object": "杜氏",
+                "weight": 1.0,
+                "source": "docs/a.md",
+            }
+        ]
+    )
+    ctx.retract_association("高瀬", "kind", "杜氏")
+    assert ctx.add_aliases(concepts={"タカセ": "高瀬"}) == 1
+
+    audit = ctx.audit_drift()
+    assert audit.total == 1
+    assert audit.unsourced[0].association.subject == "青嶺酒造"
+    assert audit.unsourced[0].unsourced_weight == 1.0
+    assert audit.dead_concept_aliases == {"タカセ": "高瀬"}
+    assert audit.twins is None
+
+    floored = ctx.audit_drift(unsourced_floor=10.0)
+    assert floored.total == 0
+    assert floored.unsourced == []
+
+    with_twins = ctx.audit_drift(include_twins=True, dice_floor=0.4)
+    assert with_twins.twins is not None
+    client.contexts.delete(fresh_name)
+
+
 def test_compact_reports_shed_bytes(client: Taguru, fresh_name: str) -> None:
     seed(client, fresh_name)
     ctx = client.context(fresh_name)

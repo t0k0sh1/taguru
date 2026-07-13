@@ -347,6 +347,12 @@ fn inspect_verifies_a_directory_and_a_single_image() {
     assert!(stdout.contains("0 dead edge(s) (0.0% dead)"), "{stdout}");
     assert!(stdout.contains("0 unlinked attribution(s)"), "{stdout}");
     assert!(stdout.contains("0 B arena slack"), "{stdout}");
+    // `associate` above named no source, so the one edge it created is
+    // entirely unsourced weight.
+    assert!(
+        stdout.contains("1 unsourced edge(s) (weight 1.0)"),
+        "{stdout}"
+    );
     // "ok" must state HOW MUCH was proven: a current image was
     // checksum-verified, and the line says so.
     assert!(stdout.contains("checksum verified"), "{stdout}");
