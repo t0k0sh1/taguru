@@ -245,7 +245,12 @@ Entries that change an on-disk format or a response shape say so.
   each context now keeps a `BTreeMap`/`BTreeSet` index alongside its
   existing storage, and the server registry does the same for
   `/contexts`, so a page is a true keyset seek — O(log n + k),
-  independent of table size. Cross-context search (`POST /recall`/
+  independent of table size, for an unscoped key. A context-scoped
+  key's allow-list has no relation to name order, so `/contexts`
+  still sorts that (typically small, operator-configured) allow-list
+  per request rather than seeking the registry — `aliases`/`labels`
+  are unaffected, since they page one context's own namespace, not
+  the registry. Cross-context search (`POST /recall`/
   `POST /query`, and cross-context `sources/search`) also no longer
   fans out to its target contexts with a sequential `for` loop: every
   target is now fetched concurrently, bounded by

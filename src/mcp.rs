@@ -240,7 +240,18 @@ fn pick_with_alias(arguments: &Value, keys: &[&str], canonical: &str, alias: &st
 /// difference gets stated, not silently dropped.
 pub fn tool_definitions() -> Vec<Value> {
     let context = json!({ "type": "string", "description": "Context name (from list_contexts)" });
-    let match_after = json!({ "type": "object", "description": "resume past the previous page's last match: copy {weight, subject, label, object} verbatim from it, plus context too when targeting several contexts. total stays constant across pages" });
+    let match_after = json!({
+        "type": "object",
+        "description": "resume past the previous page's last match: copy {weight, subject, label, object} verbatim from it, plus context too when targeting several contexts. total stays constant across pages",
+        "properties": {
+            "weight": { "type": "number" },
+            "subject": { "type": "string" },
+            "label": { "type": "string" },
+            "object": { "type": "string" },
+            "context": { "type": "string", "description": "required when targeting several contexts (contexts/groups); omit for a single context" }
+        },
+        "required": ["weight", "subject", "label", "object"]
+    });
     let tools = vec![
         (
             "list_contexts",
@@ -1299,17 +1310,37 @@ mod tests {
     /// #60: query/recall/explore/audit_coverage advertise `after` for
     /// resuming a page past its predecessor's last row — the MCP-layer
     /// wiring for the keyset cursors the HTTP side already accepts.
+    /// Every field a client must copy verbatim is declared `required`,
+    /// so a caller builds a whole cursor or none — not a partial one
+    /// the downstream Rust struct would reject anyway.
     #[test]
     fn search_and_audit_tools_advertise_after() {
-        for name in ["query", "recall", "explore", "audit_coverage"] {
+        let cases: [(&str, &[&str]); 4] = [
+            ("query", &["weight", "subject", "label", "object"]),
+            ("recall", &["weight", "subject", "label", "object"]),
+            ("explore", &["distance", "subject", "label", "object"]),
+            ("audit_coverage", &["weight", "subject", "label", "object"]),
+        ];
+        for (name, required) in cases {
             let tool = tool_definitions()
                 .into_iter()
                 .find(|tool| tool["name"] == name)
                 .unwrap_or_else(|| panic!("{name} is defined"));
-            assert_eq!(
-                tool["inputSchema"]["properties"]["after"]["type"], "object",
-                "tool '{name}' after"
-            );
+            let after = &tool["inputSchema"]["properties"]["after"];
+            assert_eq!(after["type"], "object", "tool '{name}' after");
+            for field in required {
+                assert!(
+                    after["properties"].get(*field).is_some(),
+                    "tool '{name}' after.properties.{field}"
+                );
+            }
+            let actual_required: Vec<&str> = after["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("tool '{name}' after.required is an array"))
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect();
+            assert_eq!(actual_required, required, "tool '{name}' after.required");
         }
     }
 
