@@ -236,16 +236,22 @@ fn health(args: &[String]) -> i32 {
     let url = format!("{base}/health");
     // The agent timeout stays under HEALTHCHECK's own 5s deadline so
     // the verdict (and its message) comes from here, not from a kill.
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(4))
-        .build();
+    // Error statuses come back as responses so their body reaches the
+    // verdict message.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(4)))
+        .http_status_as_error(false)
+        .build()
+        .into();
     match agent.get(&url).call() {
-        Ok(response) => {
-            println!("{}", response.into_string().unwrap_or_default().trim());
+        Ok(mut response) if response.status().as_u16() < 400 => {
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            println!("{}", body.trim());
             0
         }
-        Err(ureq::Error::Status(code, response)) => {
-            let body = response.into_string().unwrap_or_default();
+        Ok(mut response) => {
+            let code = response.status().as_u16();
+            let body = response.body_mut().read_to_string().unwrap_or_default();
             eprintln!("taguru: health: {url} answered {code}: {}", body.trim());
             1
         }
