@@ -27,6 +27,10 @@ const result = await ctx.retrieve("青嶺酒造");            // resolve → des
 const hits = await ctx.searchPassages("1907年に創業した"); // text lane (phrase as an answer)
 ```
 
+Prefer one `addAssociations` call per document; for a batch above the server
+limit, `addAssociationsBatched` auto-chunks it. Each call pays for a full
+durable write.
+
 The behavioral contract is the server's own protocol document — read it from
 the deployment you target: `await client.protocol()` (`GET /protocol`).
 
