@@ -57,7 +57,7 @@ jobs:
               > /dev/null; then
             version=$(cargo metadata --format-version=1 | jq -r '.packages[] | select(.name == "gungraun").version')
             cargo install gungraun-runner --version "$version"
-            cargo bench --bench context -- --save-baseline=pr-base
+            cargo bench --bench context -- --save-baseline=pr_base
             echo "HAS_BASELINE=true" >> "$GITHUB_ENV"
           else
             echo "base branch has no 'context' bench target yet — skipping the baseline capture (likely the PR that adds it); head will run unguarded this once"
@@ -71,7 +71,7 @@ jobs:
           version=$(cargo metadata --format-version=1 | jq -r '.packages[] | select(.name == "gungraun").version')
           cargo install gungraun-runner --version "$version"
           if [ "$HAS_BASELINE" = "true" ]; then
-            cargo bench --bench context -- --baseline=pr-base
+            cargo bench --bench context -- --baseline=pr_base
           else
             cargo bench --bench context
           fi
