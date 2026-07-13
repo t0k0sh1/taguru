@@ -17,7 +17,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # The body is the CHANGELOG section for this exact version —
       # release notes are written once, in the file that outlives the
       # release page. A tag whose section is missing fails loudly:
@@ -49,7 +49,7 @@ jobs:
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # The tag must name the version Cargo.toml carries — publishing
       # v0.2.0 from a tree that still says 0.1.0 is the classic

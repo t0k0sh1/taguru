@@ -26,7 +26,7 @@ jobs:
       # default and wipe the untracked target/gungraun/ baseline the
       # first run just saved — plain `git checkout` never touches
       # untracked files, so this stays safe.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
