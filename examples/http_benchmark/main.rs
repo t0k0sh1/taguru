@@ -34,9 +34,13 @@ const CONTEXT: &str = "http-benchmark";
 fn main() {
     let config = parse_args();
     let client = Client {
-        agent: ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(30))
-            .build(),
+        // Error statuses come back as responses so the drain below can
+        // read their body to EOF and keep the connection pooled.
+        agent: ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(30)))
+            .http_status_as_error(false)
+            .build()
+            .into(),
         url: config.url.clone(),
         token: config.token.clone(),
     };
@@ -151,31 +155,34 @@ impl Client {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<(), String> {
-        let mut request = self.agent.request(method, &format!("{}{path}", self.url));
+        let mut request = ureq::http::Request::builder()
+            .method(method)
+            .uri(format!("{}{path}", self.url));
         if let Some(token) = &self.token {
-            request = request.set("Authorization", &format!("Bearer {token}"));
+            request = request.header("Authorization", format!("Bearer {token}"));
         }
         let response = match body {
             Some(body) => request
-                .set("Content-Type", "application/json")
-                .send_string(&body.to_string()),
-            None => request.call(),
+                .header("Content-Type", "application/json")
+                .body(body.to_string())
+                .map(|request| self.agent.run(request)),
+            None => request.body(()).map(|request| self.agent.run(request)),
         };
-        match response {
-            Ok(reply) => {
-                // Drain so the connection returns to the pool.
-                let _ = reply.into_string();
-                Ok(())
-            }
-            // Drain the error body too: ureq only pools a connection
+        match response.map_err(|error| format!("request assembly failed: {error}"))? {
+            // Drain even the error bodies: ureq only pools a connection
             // whose body was read to EOF, so discarding a 4xx/5xx
             // response unread closes the socket and forces the worker's
             // next request onto a fresh handshake — skewing exactly the
             // throughput/latency numbers this tool reports, worst when
             // probing the server's own 429/503 ceilings.
-            Err(ureq::Error::Status(code, reply)) => {
-                let _ = reply.into_string();
-                Err(format!("HTTP {code}"))
+            Ok(mut reply) => {
+                let code = reply.status().as_u16();
+                let _ = reply.body_mut().read_to_string();
+                if code < 400 {
+                    Ok(())
+                } else {
+                    Err(format!("HTTP {code}"))
+                }
             }
             Err(error) => Err(format!("transport: {error}")),
         }

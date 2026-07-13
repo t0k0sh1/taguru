@@ -104,9 +104,10 @@ impl HttpEmbeddings {
             url,
             model,
             api_key: std::env::var("TAGURU_EMBED_API_KEY").ok(),
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(timeout_secs as u64))
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(timeout_secs as u64)))
+                .build()
+                .into(),
         })
     }
 }
@@ -171,30 +172,29 @@ impl HttpEmbeddings {
         let mut request = self
             .agent
             .post(&self.url)
-            .set("Content-Type", "application/json")
-            .set("X-Taguru-Embed-Purpose", purpose.as_str());
+            .header("Content-Type", "application/json")
+            .header("X-Taguru-Embed-Purpose", purpose.as_str());
         if let Some(key) = &self.api_key {
-            request = request.set("Authorization", &format!("Bearer {key}"));
+            request = request.header("Authorization", format!("Bearer {key}"));
         }
         let body = serde_json::json!({ "model": self.model, "input": texts });
-        // The messages deliberately omit ureq's own Display, which
-        // embeds the provider URL: these strings travel to CLIENTS in
-        // 502 bodies (refresh, resolve's semantic tier), and the
-        // endpoint an operator configured is infrastructure detail,
-        // not client business. The status code / transport kind is
-        // what a caller can act on.
-        let response = request.send_string(&body.to_string()).map_err(|error| {
+        // The messages stay clear of the provider URL: these strings
+        // travel to CLIENTS in 502 bodies (refresh, resolve's semantic
+        // tier), and the endpoint an operator configured is
+        // infrastructure detail, not client business. The status code /
+        // transport kind is what a caller can act on.
+        let response = request.send(body.to_string()).map_err(|error| {
             let (message, retryable) = match &error {
                 // Overload and server-side failure answer differently
                 // in a moment; a 4xx refusal does not.
-                ureq::Error::Status(code, _) => (
+                ureq::Error::StatusCode(code) => (
                     format!("embedding provider answered HTTP {code}"),
                     *code == 429 || *code >= 500,
                 ),
                 // Dropped connections and timeouts are the blip the
                 // retries exist for.
-                ureq::Error::Transport(transport) => (
-                    format!("embedding provider unreachable ({})", transport.kind()),
+                transport => (
+                    format!("embedding provider unreachable ({transport})"),
                     true,
                 ),
             };
@@ -204,19 +204,24 @@ impl HttpEmbeddings {
     }
 
     /// Decodes one successful response into per-input vectors.
-    fn decode(&self, response: ureq::Response, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
-        // ureq's `into_string` caps its read at 10 MiB, but `into_json`
-        // reads without any bound — and the agent's 60s timeout bounds
-        // time, not bytes, so a misbehaving or misaddressed provider
-        // could stream this process into the ground. Read through an
-        // explicit cap instead: 64 MiB clears the largest honest reply
-        // several times over (128 inputs × 4096 dims × ~24 JSON bytes
-        // per component ≈ 13 MiB) while keeping the buffer finite.
+    fn decode(
+        &self,
+        response: ureq::http::Response<ureq::Body>,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, String> {
+        // ureq's `read_to_string`/`read_json` cap their reads at 10 MiB,
+        // below the largest honest reply — and the agent's 60s timeout
+        // bounds time, not bytes, so a misbehaving or misaddressed
+        // provider must not get an unbounded buffer either. Read through
+        // an explicit cap instead: 64 MiB clears the largest honest
+        // reply several times over (128 inputs × 4096 dims × ~24 JSON
+        // bytes per component ≈ 13 MiB) while keeping the buffer finite.
         const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
         let mut body = Vec::new();
         {
             use std::io::Read;
             response
+                .into_body()
                 .into_reader()
                 .take(MAX_RESPONSE_BYTES + 1)
                 .read_to_end(&mut body)
@@ -817,9 +822,10 @@ mod tests {
             url: format!("http://{addr}"),
             model: "stub-model".to_string(),
             api_key: None,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build()
+                .into(),
         };
         let vectors = provider
             .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
@@ -846,9 +852,10 @@ mod tests {
             url: format!("http://{addr}"),
             model: "stub-model".to_string(),
             api_key: None,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build()
+                .into(),
         };
         let error = provider
             .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
@@ -884,9 +891,10 @@ mod tests {
             url: format!("http://{addr}"),
             model: "stub-model".to_string(),
             api_key: None,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build()
+                .into(),
         };
         let vectors = provider
             .embed(&["こんにちは"], EmbedPurpose::Query, Deadline::unbounded())
@@ -936,9 +944,10 @@ mod tests {
             url: format!("http://{addr}"),
             model: "stub-model".to_string(),
             api_key: None,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(10))
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(10)))
+                .build()
+                .into(),
         };
         let error = provider
             .embed(&["こんにちは"], EmbedPurpose::Query, Deadline::unbounded())
@@ -973,9 +982,10 @@ mod tests {
             url: format!("http://{addr}"),
             model: "stub-model".to_string(),
             api_key: None,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build()
+                .into(),
         };
         let vectors = provider
             .embed(
@@ -1017,9 +1027,10 @@ mod tests {
             url: format!("http://{addr}"),
             model: "stub-model".to_string(),
             api_key: None,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build()
+                .into(),
         };
         let error = provider
             .embed(
@@ -1058,9 +1069,10 @@ mod tests {
             url: format!("http://{addr}"),
             model: "stub-model".to_string(),
             api_key: None,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build()
+                .into(),
         };
         let error = provider
             .embed(&["first"], EmbedPurpose::Query, Deadline::unbounded())

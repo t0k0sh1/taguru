@@ -563,15 +563,17 @@ impl ChatClient {
         let model = std::env::var("TAGURU_EXTRACT_MODEL")
             .map_err(|_| "TAGURU_EXTRACT_MODEL is not set".to_string())?;
         let timeout = crate::env_number("TAGURU_EXTRACT_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
-        let mut agent = ureq::AgentBuilder::new();
+        // 4xx/5xx answers carry a body `complete` quotes in its error
+        // messages, so have them come back as responses, not errors.
+        let mut config = ureq::Agent::config_builder().http_status_as_error(false);
         if timeout > 0 {
-            agent = agent.timeout(Duration::from_secs(timeout as u64));
+            config = config.timeout_global(Some(Duration::from_secs(timeout as u64)));
         }
         Ok(Self {
             url,
             model,
             api_key: std::env::var("TAGURU_EXTRACT_API_KEY").ok(),
-            agent: agent.build(),
+            agent: config.build().into(),
         })
     }
 
@@ -593,31 +595,32 @@ impl ChatClient {
             let mut request = self
                 .agent
                 .post(&self.url)
-                .set("Content-Type", "application/json");
+                .header("Content-Type", "application/json");
             if let Some(key) = &self.api_key {
-                request = request.set("Authorization", &format!("Bearer {key}"));
+                request = request.header("Authorization", format!("Bearer {key}"));
             }
-            match request.send_string(&body) {
-                Ok(response) => {
+            match request.send(&body) {
+                Ok(mut response) if response.status().as_u16() < 400 => {
                     let parsed: serde_json::Value = response
-                        .into_json()
+                        .body_mut()
+                        .read_json()
                         .map_err(|error| format!("chat response unreadable: {error}"))?;
                     return parsed["choices"][0]["message"]["content"]
                         .as_str()
                         .map(str::to_string)
                         .ok_or_else(|| "chat response carries no assistant text".to_string());
                 }
-                Err(ureq::Error::Status(code, response)) if code == 429 || code >= 500 => {
-                    last = format!(
+                Ok(mut response) => {
+                    let code = response.status().as_u16();
+                    let answered = format!(
                         "chat endpoint answered {code}: {}",
-                        snippet(&response.into_string().unwrap_or_default())
+                        snippet(&response.body_mut().read_to_string().unwrap_or_default())
                     );
-                }
-                Err(ureq::Error::Status(code, response)) => {
-                    return Err(format!(
-                        "chat endpoint answered {code}: {}",
-                        snippet(&response.into_string().unwrap_or_default())
-                    ));
+                    if code == 429 || code >= 500 {
+                        last = answered;
+                    } else {
+                        return Err(answered);
+                    }
                 }
                 Err(error) => last = format!("chat request failed: {error}"),
             }

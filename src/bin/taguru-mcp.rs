@@ -51,9 +51,7 @@ fn main() {
     let bridge = Bridge {
         base: base.trim_end_matches('/').to_string(),
         token,
-        agent: ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(timeout_secs))
-            .build(),
+        agent: bridge_agent(Duration::from_secs(timeout_secs)),
     };
 
     // The probe runs BEFORE the stdio loop: until it settles, the
@@ -69,9 +67,7 @@ fn main() {
     let probe = Bridge {
         base: bridge.base.clone(),
         token: bridge.token.clone(),
-        agent: ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(timeout_secs.min(5)))
-            .build(),
+        agent: bridge_agent(Duration::from_secs(timeout_secs.min(5))),
     };
     let instructions = probe
         .call("GET", "/protocol", None)
@@ -216,6 +212,16 @@ fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value>
     })
 }
 
+/// The bridge's HTTP client: 4xx/5xx come back as responses, not
+/// errors, so their JSON error bodies stay readable for `call`.
+fn bridge_agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
 struct Bridge {
     base: String,
     /// Sent as `Authorization: Bearer` on every request when set —
@@ -229,25 +235,33 @@ impl Bridge {
     /// One HTTP round trip; the API's JSON error body becomes the Err
     /// text so the agent reads the server's own explanation.
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<String, String> {
-        let mut request = self.agent.request(method, &format!("{}{path}", self.base));
+        let mut request = ureq::http::Request::builder()
+            .method(method)
+            .uri(format!("{}{path}", self.base));
         if let Some(token) = &self.token {
-            request = request.set("Authorization", &format!("Bearer {token}"));
+            request = request.header("Authorization", format!("Bearer {token}"));
         }
+        // Both arms run to completion inside the match: a bodiless GET
+        // and a JSON POST are differently typed requests in ureq 3.
         let response = match body {
             Some(body) => request
-                .set("Content-Type", "application/json")
-                .send_string(&body.to_string()),
-            None => request.call(),
+                .header("Content-Type", "application/json")
+                .body(body.to_string())
+                .map(|request| self.agent.run(request)),
+            None => request.body(()).map(|request| self.agent.run(request)),
         };
-        match response {
-            Ok(response) => response
-                .into_string()
-                .map_err(|error| format!("response unreadable: {error}")),
-            Err(ureq::Error::Status(code, response)) => {
-                let detail = response.into_string().unwrap_or_default();
-                Err(format!("HTTP {code}: {detail}"))
-            }
-            Err(error) => Err(format!("server unreachable at {}: {error}", self.base)),
+        let mut response = response
+            .map_err(|error| format!("request assembly failed: {error}"))?
+            .map_err(|error| format!("server unreachable at {}: {error}", self.base))?;
+        let code = response.status().as_u16();
+        if code < 400 {
+            response
+                .body_mut()
+                .read_to_string()
+                .map_err(|error| format!("response unreadable: {error}"))
+        } else {
+            let detail = response.body_mut().read_to_string().unwrap_or_default();
+            Err(format!("HTTP {code}: {detail}"))
         }
     }
 }
@@ -262,7 +276,7 @@ mod tests {
         Bridge {
             base: "http://127.0.0.1:9".to_string(),
             token: None,
-            agent: ureq::AgentBuilder::new().build(),
+            agent: bridge_agent(Duration::from_secs(1)),
         }
     }
 
