@@ -596,7 +596,7 @@ fn export_group_file(
 
 fn export_one(state: &AppState, name: &str, out: &std::path::Path) -> Result<String, String> {
     let snapshot = state
-        .export_context(name)
+        .export_context(name, Deadline::unbounded())
         .map_err(|failure| match failure {
             AccessError::NotFound => "no such context".to_string(),
             AccessError::Load(error) => error,
@@ -806,7 +806,9 @@ mod tests {
             .unwrap();
         state_a.retract_source("sake", "gone.md").unwrap();
 
-        let snapshot_a = state_a.export_context("sake").unwrap();
+        let snapshot_a = state_a
+            .export_context("sake", Deadline::unbounded())
+            .unwrap();
         let rendered = render("sake", &snapshot_a, Deadline::unbounded()).unwrap();
         assert_eq!(rendered.aliases_dropped, 1, "the edgeless canonical");
 
@@ -827,7 +829,9 @@ mod tests {
                     .unwrap();
             }
         }
-        let snapshot_b = state_b.export_context("sake").unwrap();
+        let snapshot_b = state_b
+            .export_context("sake", Deadline::unbounded())
+            .unwrap();
 
         // The restored context has a REAL attribution to the reserved
         // "export:unsourced" id now (import stamped it from the batch
@@ -849,7 +853,9 @@ mod tests {
             }
             render(
                 "sake",
-                &state_c.export_context("sake").unwrap(),
+                &state_c
+                    .export_context("sake", Deadline::unbounded())
+                    .unwrap(),
                 Deadline::unbounded(),
             )
             .unwrap()

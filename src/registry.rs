@@ -3723,7 +3723,11 @@ impl AppState {
     /// materialization. It is a per-context stall, off the async runtime
     /// (`block_in_place` at the HTTP layer); a streaming, lock-light
     /// export is future work, not a v1 promise.
-    pub fn export_context(&self, name: &str) -> Result<crate::export::ExportSnapshot, AccessError> {
+    pub fn export_context(
+        &self,
+        name: &str,
+        deadline: Deadline,
+    ) -> Result<crate::export::ExportSnapshot, AccessError> {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let stem = file_stem(name);
         // Fast path: already resident, shared lock (mirrors read_context).
@@ -3732,7 +3736,8 @@ impl AppState {
             match &inner.slot {
                 Slot::Hot(context) => {
                     self.0.metrics.record_cache_hit();
-                    let snapshot = self.export_snapshot(&entry, &stem, &inner.meta, context);
+                    let snapshot =
+                        self.export_snapshot(&entry, &stem, &inner.meta, context, deadline);
                     drop(inner);
                     self.touch(&entry);
                     self.enforce_budget(name);
@@ -3754,7 +3759,7 @@ impl AppState {
             let Slot::Hot(context) = &inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
             };
-            self.export_snapshot(&entry, &stem, &inner.meta, context)
+            self.export_snapshot(&entry, &stem, &inner.meta, context, deadline)
         })?;
         self.touch(&entry);
         self.enforce_budget(name);
@@ -3764,13 +3769,24 @@ impl AppState {
     /// The materialization inside [`AppState::export_context`]'s fence.
     /// Lock order: the caller holds `inner`; `entry_passages` takes
     /// `passages` — the documented `inner` → `passages` order.
+    ///
+    /// `deadline` is checked once, before any of it — not inside
+    /// `context.query_any(&[], &[], &[])` below, which collects every
+    /// association up front (its all-wildcard fast path), so a deadline
+    /// that is already tight when this is called cannot shorten that
+    /// initial O(edges) collection (the same limitation documented on
+    /// [`Context::compacted`]).
     fn export_snapshot(
         &self,
         entry: &Entry,
         stem: &str,
         meta: &ContextMeta,
         context: &Context,
+        deadline: Deadline,
     ) -> Result<crate::export::ExportSnapshot, AccessError> {
+        if deadline.expired() {
+            return Err(AccessError::DeadlineExceeded);
+        }
         let passages = self
             .entry_passages(entry, stem)
             .map_err(|error| AccessError::Load(format!("passage store: {error}")))?

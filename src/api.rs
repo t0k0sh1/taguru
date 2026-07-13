@@ -2862,7 +2862,7 @@ pub async fn export_context(
     }
     let rendered = tokio::task::block_in_place(|| {
         state
-            .export_context(&name)
+            .export_context(&name, deadline)
             .map(|snapshot| crate::export::render(&name, &snapshot, deadline))
     });
     match rendered {
