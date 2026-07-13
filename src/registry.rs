@@ -5821,6 +5821,10 @@ pub(crate) fn name_from_stem(stem: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context_proptest::{
+        AliasInput, AssocInput, RetractionInput, config as proptest_config, scenario_strategy,
+    };
+    use proptest::prelude::*;
 
     fn scratch_dir(tag: &str) -> PathBuf {
         let dir =
@@ -6298,6 +6302,137 @@ mod tests {
             "the post-compact write must replay: {after:?}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn apply_generated_context(
+        state: &AppState,
+        assoc_ops: &[AssocInput],
+        alias_ops: &[AliasInput],
+        retractions: &[RetractionInput],
+    ) {
+        let ops = assoc_ops
+            .iter()
+            .map(|op| AssocOp {
+                subject: op.subject.to_string(),
+                label: op.label.to_string(),
+                object: op.object.to_string(),
+                weight: op.weight,
+                source: op.source.map(str::to_string),
+                paragraph: op.paragraph,
+            })
+            .collect();
+        state
+            .add_associations("generated", ops, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        for alias_op in alias_ops {
+            let (concepts, labels) = match alias_op {
+                AliasInput::Concept { alias, canonical } => (
+                    BTreeMap::from([(alias.to_string(), canonical.to_string())]),
+                    BTreeMap::new(),
+                ),
+                AliasInput::Label { alias, canonical } => (
+                    BTreeMap::new(),
+                    BTreeMap::from([(alias.to_string(), canonical.to_string())]),
+                ),
+            };
+            let _ = state.add_aliases("generated", &concepts, &labels).unwrap();
+        }
+
+        for retraction in retractions {
+            match retraction {
+                RetractionInput::Source(source) => {
+                    state.retract_source("generated", source).unwrap();
+                }
+                RetractionInput::Association {
+                    subject,
+                    label,
+                    object,
+                } => {
+                    state
+                        .retract_association("generated", subject, label, object)
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(proptest_config())]
+
+        /// The operator path installs the same canonical context as the
+        /// library rebuild, flushes it immediately, and re-applies state
+        /// that lives outside the graph image when it is loaded again.
+        #[test]
+        fn registry_compaction_flushes_and_reloads_the_canonical_image(
+            (assoc_ops, alias_ops, retractions) in scenario_strategy(),
+            dice_floor in prop::option::of(-1.0f64..2.0),
+        ) {
+            let dir = scratch_dir("compact-property");
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create(
+                    "generated",
+                    ContextMeta {
+                        dice_floor,
+                        ..ContextMeta::default()
+                    },
+                )
+                .unwrap();
+            apply_generated_context(&state, &assoc_ops, &alias_ops, &retractions);
+            // Project the current WAL watermark into the source image first;
+            // compaction must carry this known non-zero value forward.
+            prop_assert_eq!(state.flush_dirty(), vec!["generated"]);
+
+            let (expected_image, expected_seq, expected_floor, expected_stats) = state
+                .read_context("generated", |context| {
+                    let (mut canonical, stats) =
+                        context.compacted(Deadline::unbounded()).unwrap();
+                    canonical.set_applied_seq(context.applied_seq());
+                    canonical.set_dice_floor(Some(context.dice_floor()));
+                    (
+                        canonical.to_bytes(),
+                        context.applied_seq(),
+                        context.dice_floor(),
+                        stats,
+                    )
+                })
+                .unwrap();
+
+            let outcome = state
+                .compact_context("generated", Deadline::unbounded())
+                .unwrap();
+            prop_assert_eq!(outcome.dead_edges, expected_stats.dead_edges);
+            prop_assert_eq!(outcome.aliases_dropped, expected_stats.aliases_dropped);
+            state
+                .read_context("generated", |context| {
+                    assert_eq!(context.to_bytes(), expected_image);
+                    assert_eq!(context.applied_seq(), expected_seq);
+                    assert_eq!(context.dice_floor(), expected_floor);
+                })
+                .unwrap();
+            let disk_image = fs::read(image_path(&dir, &file_stem("generated"))).unwrap();
+            prop_assert_eq!(&disk_image, &expected_image);
+
+            let second = state
+                .compact_context("generated", Deadline::unbounded())
+                .unwrap();
+            prop_assert_eq!(second.dead_edges, 0);
+            prop_assert_eq!(second.aliases_dropped, 0);
+            drop(state);
+
+            let reloaded = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            reloaded
+                .read_context("generated", |context| {
+                    assert_eq!(context.to_bytes(), expected_image);
+                    assert_eq!(context.applied_seq(), expected_seq);
+                    assert_eq!(context.dice_floor(), expected_floor);
+                })
+                .unwrap();
+            drop(reloaded);
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 
     /// A context whose load failed answers the remembered refusal
