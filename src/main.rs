@@ -64,6 +64,9 @@ use tracing::{info, warn};
 ///   per retrieval (context, op, cue, hits) for keyword analysis in
 ///   the log pipeline. Off by default: cues are memory content, and
 ///   the standard log stream carries no content.
+/// - `TAGURU_MAX_CONCURRENT_HEAVY_OPS`: shared ceiling for concurrent
+///   vocabulary audits and per-context compactions (default 2; 0 disables).
+///   Excess calls are shed immediately with 503 + `Retry-After`.
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT` (or the `_TRACES_` variant): turns
 ///   on OTLP/HTTP span export — one span per request, parented from an
 ///   inbound `traceparent` or `X-Amzn-Trace-Id`, `trace_id` stamped
@@ -118,6 +121,13 @@ async fn serve() {
         info!(
             max_in_flight = max_concurrent,
             "in-flight request ceiling enabled (past it: 503 + Retry-After)"
+        );
+    }
+    let max_concurrent_heavy = resolve_heavy_ops(env_number("TAGURU_MAX_CONCURRENT_HEAVY_OPS", 2));
+    if max_concurrent_heavy > 0 {
+        info!(
+            max_concurrent_heavy,
+            "heavy-operation ceiling enabled for vocabulary audits and context compactions"
         );
     }
     // Failed-auth attempts are throttled per source IP so the gate
@@ -243,7 +253,11 @@ async fn serve() {
 
     spawn_flusher(state.clone(), flush_secs, auto_embed);
 
-    let app = routes(protocol_trailer).with_state(state.clone());
+    let app = routes(
+        protocol_trailer,
+        limits::HeavyOpsLimiter::new(max_concurrent_heavy),
+    )
+    .with_state(state.clone());
 
     // POST /mcp speaks the MCP Streamable HTTP transport over these
     // same routes. The dispatch handle is captured BEFORE the outer
@@ -416,7 +430,21 @@ async fn serve() {
 /// the same table `POST /mcp` dispatches into. Off-axis errors answer
 /// in the ApiError shape too: unknown paths, and known paths hit with
 /// the wrong verb.
-fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
+fn routes(
+    protocol_trailer: Option<String>,
+    heavy_ops_limiter: limits::HeavyOpsLimiter,
+) -> Router<AppState> {
+    let heavy_routes = Router::new()
+        .route("/contexts/{name}/compact", post(api::compact_context))
+        .route(
+            "/contexts/{name}/vocabulary/audit",
+            post(api::audit_vocabulary),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            heavy_ops_limiter,
+            limits::enforce_heavy_ops,
+        ));
+
     Router::new()
         .route("/health", get(metrics::health))
         .route("/live", get(metrics::live))
@@ -452,7 +480,6 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
         .route("/query", post(api::cross_query))
         .route("/sources/search", post(api::cross_search_passages))
         .route("/contexts/{name}/export", get(api::export_context))
-        .route("/contexts/{name}/compact", post(api::compact_context))
         .route("/contexts/{name}/rename", post(api::rename_context))
         .route("/contexts/{name}/associations", post(api::add_associations))
         .route(
@@ -510,10 +537,7 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
             "/contexts/{name}/unreachable_from",
             post(api::unreachable_from),
         )
-        .route(
-            "/contexts/{name}/vocabulary/audit",
-            post(api::audit_vocabulary),
-        )
+        .merge(heavy_routes)
         .fallback(api::unknown_path)
         .method_not_allowed_fallback(api::method_not_allowed)
 }
@@ -716,6 +740,22 @@ pub(crate) fn resolve_per_minute(name: &str, requested: usize) -> u32 {
     })
 }
 
+/// Tokio reserves a few high bits in its semaphore permit counter and
+/// panics when constructed above `MAX_PERMITS`. An operator-provided usize
+/// must therefore be clamped before it reaches `HeavyOpsLimiter::new`.
+pub(crate) fn resolve_heavy_ops(requested: usize) -> usize {
+    if requested > tokio::sync::Semaphore::MAX_PERMITS {
+        warn!(
+            "TAGURU_MAX_CONCURRENT_HEAVY_OPS={requested} exceeds the semaphore's ceiling; \
+             clamping to {}",
+            tokio::sync::Semaphore::MAX_PERMITS
+        );
+        tokio::sync::Semaphore::MAX_PERMITS
+    } else {
+        requested
+    }
+}
+
 const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// `TAGURU_REQUEST_TIMEOUT_SECS=0` reads as "no timeout" — its
@@ -822,5 +862,15 @@ mod tests {
         assert_eq!(resolve_per_minute("X", 0), 0);
         assert_eq!(resolve_per_minute("X", 600), 600);
         assert_eq!(resolve_per_minute("X", u32::MAX as usize + 1), u32::MAX);
+    }
+
+    #[test]
+    fn heavy_operation_limits_clamp_before_semaphore_construction() {
+        assert_eq!(resolve_heavy_ops(0), 0);
+        assert_eq!(resolve_heavy_ops(2), 2);
+        assert_eq!(
+            resolve_heavy_ops(usize::MAX),
+            tokio::sync::Semaphore::MAX_PERMITS
+        );
     }
 }
