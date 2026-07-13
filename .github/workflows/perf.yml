@@ -1,0 +1,48 @@
+name: Perf
+
+# Base/head comparison needs a PR; push-to-main has nothing to compare
+# against.
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  callgrind-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Single checkout, fetch-depth: 0 so both the base and head SHAs
+      # are reachable; the two runs below then `git checkout <sha>` in
+      # place. A second `actions/checkout` would `git clean -ffdx` by
+      # default and wipe the untracked target/gungraun/ baseline the
+      # first run just saved — plain `git checkout` never touches
+      # untracked files, so this stays safe.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      # Version-matched: the runner's benchmark protocol must agree
+      # exactly with the gungraun version this crate builds against.
+      - name: Install gungraun-runner
+        run: |
+          version=$(cargo metadata --format-version=1 | jq -r '.packages[] | select(.name == "gungraun").version')
+          cargo install gungraun-runner --version "$version"
+      - name: Benchmark base branch
+        run: |
+          git checkout ${{ github.event.pull_request.base.sha }}
+          cargo bench --bench context -- --save-baseline=pr-base
+      # soft_limits in benches/context.rs fails this step (exit code 3)
+      # when Ir moves outside the configured regression margin.
+      - name: Benchmark PR head
+        run: |
+          git checkout ${{ github.event.pull_request.head.sha }}
+          cargo bench --bench context -- --baseline=pr-base

@@ -1,0 +1,12 @@
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]
+
+[advisories]
+ignore = [
+    # "RUSTSEC-0000-0000", # crate@x.y.z: reason; revisit when <condition>
+]
+yanked = "deny"

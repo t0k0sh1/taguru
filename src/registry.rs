@@ -707,6 +707,7 @@ pub enum AccessError {
 /// endpoint and the WAL payload, one struct for both so they cannot
 /// drift apart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct AssocOp {
     pub subject: String,
     pub label: String,

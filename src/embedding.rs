@@ -1143,4 +1143,166 @@ mod tests {
         assert_eq!(fnv1a("a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(fnv1a("foobar"), 0x8594_4171_f739_67e8);
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn proptest_config() -> ProptestConfig {
+            let cases = std::env::var("PROPTEST_CASES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32);
+            ProptestConfig {
+                cases,
+                ..ProptestConfig::default()
+            }
+        }
+
+        fn finite_f32_strategy() -> impl Strategy<Value = f32> {
+            -1000.0f32..1000.0f32
+        }
+
+        fn name_strategy() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just("りんご"),
+                Just("バナナ"),
+                Just("好き"),
+                Just("嫌い"),
+                Just("concept-a"),
+                Just("concept-b"),
+                Just("label-x"),
+            ]
+            .prop_map(|s| s.to_string())
+        }
+
+        fn vector_table_strategy() -> impl Strategy<Value = VectorTable> {
+            prop::collection::hash_map(
+                name_strategy(),
+                (
+                    any::<u64>(),
+                    prop::collection::vec(finite_f32_strategy(), 0..8),
+                ),
+                0..8,
+            )
+        }
+
+        fn vector_store_strategy() -> impl Strategy<Value = VectorStore> {
+            (
+                "[a-z0-9-]{1,12}",
+                vector_table_strategy(),
+                vector_table_strategy(),
+            )
+                .prop_map(|(model, concepts, labels)| VectorStore {
+                    model,
+                    concepts,
+                    labels,
+                })
+        }
+
+        fn passage_key_strategy() -> impl Strategy<Value = PassageKey> {
+            (
+                "[a-z/.]{1,12}",
+                any::<u32>(),
+                any::<u64>(),
+                prop::option::of(any::<u64>()),
+            )
+                .prop_map(|(source, index, hash, question_hash)| PassageKey {
+                    source,
+                    index,
+                    hash,
+                    question_hash,
+                })
+        }
+
+        /// Every row in one store shares a dimension (as `push` enforces),
+        /// so the dimension is fixed once and then threaded through every
+        /// generated row.
+        fn passage_rows_strategy() -> impl Strategy<Value = Vec<(PassageKey, Vec<f32>)>> {
+            (1usize..6).prop_flat_map(|dim| {
+                prop::collection::vec(
+                    (
+                        passage_key_strategy(),
+                        prop::collection::vec(finite_f32_strategy(), dim..=dim),
+                    ),
+                    0..8,
+                )
+            })
+        }
+
+        proptest! {
+            #![proptest_config(proptest_config())]
+
+            #[test]
+            fn vector_store_round_trips_through_bytes(store in vector_store_strategy()) {
+                let bytes = store.to_bytes();
+                let loaded = VectorStore::from_bytes(&bytes)
+                    .expect("a freshly serialized store must always decode");
+                prop_assert_eq!(loaded.model, store.model);
+                prop_assert_eq!(loaded.concepts, store.concepts);
+                prop_assert_eq!(loaded.labels, store.labels);
+            }
+
+            #[test]
+            fn vector_store_from_bytes_never_panics_on_arbitrary_bytes(
+                bytes in prop::collection::vec(any::<u8>(), 0..512),
+            ) {
+                let _ = VectorStore::from_bytes(&bytes);
+            }
+
+            #[test]
+            fn vector_store_from_bytes_never_panics_on_mutated_valid_bytes(
+                store in vector_store_strategy(),
+                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..16),
+            ) {
+                let mut bytes = store.to_bytes();
+                for (pick, value) in mutations {
+                    *pick.get_mut(&mut bytes) = value;
+                }
+                let _ = VectorStore::from_bytes(&bytes);
+            }
+
+            #[test]
+            fn passage_vector_store_round_trips_through_bytes(rows in passage_rows_strategy()) {
+                let mut store = PassageVectorStore::new("test-model");
+                for (key, vector) in rows.clone() {
+                    store.push(key, vector);
+                }
+                prop_assert_eq!(store.len(), rows.len(), "matching dims never get dropped");
+
+                let bytes = store.to_bytes();
+                let loaded = PassageVectorStore::from_bytes(&bytes)
+                    .expect("a freshly serialized store must always decode");
+                prop_assert_eq!(&loaded.model, "test-model");
+                let actual: Vec<(PassageKey, Vec<f32>)> = loaded
+                    .iter()
+                    .map(|(key, vector)| (key.clone(), vector.to_vec()))
+                    .collect();
+                prop_assert_eq!(actual, rows);
+            }
+
+            #[test]
+            fn passage_vector_store_from_bytes_never_panics_on_arbitrary_bytes(
+                bytes in prop::collection::vec(any::<u8>(), 0..512),
+            ) {
+                let _ = PassageVectorStore::from_bytes(&bytes);
+            }
+
+            #[test]
+            fn passage_vector_store_from_bytes_never_panics_on_mutated_valid_bytes(
+                rows in passage_rows_strategy(),
+                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..16),
+            ) {
+                let mut store = PassageVectorStore::new("test-model");
+                for (key, vector) in rows {
+                    store.push(key, vector);
+                }
+                let mut bytes = store.to_bytes();
+                for (pick, value) in mutations {
+                    *pick.get_mut(&mut bytes) = value;
+                }
+                let _ = PassageVectorStore::from_bytes(&bytes);
+            }
+        }
+    }
 }

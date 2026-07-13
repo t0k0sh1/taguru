@@ -33,6 +33,7 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "langchain-tests>=1.0.0",
+    "pip-audit>=2.7",
 ]
 
 [tool.hatch.build.targets.wheel]
