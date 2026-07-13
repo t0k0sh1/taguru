@@ -5705,6 +5705,76 @@ mod tests {
             #![proptest_config(proptest_config())]
 
             #[test]
+            fn retract_then_reassert_matches_a_fresh_assert(
+                (assoc_ops, _, _) in scenario_strategy(),
+                target in any::<prop::sample::Index>(),
+            ) {
+                let target = &assoc_ops[target.index(assoc_ops.len())];
+                let mut reasserted = build_context(&assoc_ops, &[], &[]);
+                let _ = reasserted.retract_association(
+                    target.subject,
+                    target.label,
+                    target.object,
+                );
+                let mut fresh = Context::default();
+
+                for context in [&mut reasserted, &mut fresh] {
+                    match target.source {
+                        Some(source) => context.associate_from(
+                            target.subject,
+                            target.label,
+                            target.object,
+                            target.weight,
+                            source,
+                            target.paragraph,
+                        ).unwrap(),
+                        None => context.associate(
+                            target.subject,
+                            target.label,
+                            target.object,
+                            target.weight,
+                        ).unwrap(),
+                    }
+                }
+
+                prop_assert_eq!(
+                    reasserted.query(
+                        Some(target.subject),
+                        Some(target.label),
+                        Some(target.object),
+                    ),
+                    fresh.query(
+                        Some(target.subject),
+                        Some(target.label),
+                        Some(target.object),
+                    ),
+                );
+            }
+
+            #[test]
+            fn resolve_normalization_is_idempotent_and_canonical_hits_are_stable(
+                name in "[^\\x00]{1,32}",
+            ) {
+                let once = normalize_entry(&name);
+                prop_assert_eq!(normalize_entry(&once), once.clone());
+                prop_assume!(!once.is_empty());
+
+                let mut context = Context::default();
+                context.associate(&name, "relation", "object", 1.0).unwrap();
+                let first = context.resolve(&name);
+                prop_assert!(!first.is_empty());
+                prop_assert_eq!(first[0].name.as_str(), name.as_str());
+                prop_assert_eq!(first[0].kind, MatchKind::Exact);
+
+                let canonical = first[0].name.clone();
+                let second = context.resolve(&canonical);
+                prop_assert!(!second.is_empty());
+                prop_assert_eq!(second[0].name.as_str(), canonical.as_str());
+                prop_assert_eq!(second[0].kind, MatchKind::Exact);
+                prop_assert_eq!(second[0].score, 1.0);
+            }
+
+            #[test]
             fn compaction_preserves_exactly_the_live_content(
                 (assoc_ops, alias_ops, retractions) in scenario_strategy(),
             ) {
