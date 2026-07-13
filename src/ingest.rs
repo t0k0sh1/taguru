@@ -19,6 +19,10 @@
 //! pre-checked (capacity, disk); those are reported per file and the
 //! remaining files still run — every file is one source, independent
 //! by construction, and a partially applied one heals on re-import.
+//! Until that re-import (or a retraction), the batch-open marker
+//! written around every apply keeps the tear visible: boot and
+//! `taguru inspect` name the source, however the batch stopped short
+//! (see [`apply_batch`]).
 //!
 //! The writes go through the same registry every server write goes
 //! through — WAL-staged, budget-enforced, flushed — and the data
@@ -935,6 +939,7 @@ fn check_nonempty(number: usize, field: &str, text: &str) -> Result<(), String> 
 
 /// What one batch accomplished — the CLI formats it into a report
 /// line, `POST /import` serializes it into the response.
+#[cfg_attr(test, derive(Debug))]
 pub(crate) struct Applied {
     pub(crate) created: bool,
     pub(crate) retracted: usize,
@@ -967,6 +972,7 @@ pub(crate) struct Applied {
 /// Why a batch did not (fully) apply — one shape for both entrances:
 /// the CLI prints [`ApplyRefusal::text`], the HTTP endpoint maps the
 /// variant onto a status and sends the same words.
+#[cfg_attr(test, derive(Debug))]
 pub(crate) enum ApplyRefusal {
     /// The context does not exist and the batch brought no create
     /// block (404 over HTTP).
@@ -993,8 +999,10 @@ impl ApplyRefusal {
     /// retraction, itself a durable write, so a later refusal (a
     /// passage that would not persist, a partial prefix of
     /// associations or aliases) leaves real changes behind. `Io` from
-    /// a failed create is the one over-approximation; the refresh pass
-    /// answers an absent context with its no-op `None` arm anyway.
+    /// a failed create or a failed batch-marker write is the
+    /// over-approximation (both precede the first graph write); the
+    /// refresh pass answers an absent context with its no-op `None`
+    /// arm anyway.
     pub(crate) fn wrote_anything(&self) -> bool {
         !matches!(self, Self::NoContext(_))
     }
@@ -1029,6 +1037,18 @@ impl ApplyRefusal {
 /// source, then land passage → associations → aliases. Aliases go
 /// last on purpose — an alias needs its canonical interned, and the
 /// associations just before are what intern it.
+///
+/// The four mutations are separately durable, so a crash between them
+/// leaves the source half-applied with every store individually
+/// consistent — undetectable after the fact. A batch-open marker
+/// brackets them: written before the retraction, removed only after
+/// the aliases, so boot and `taguru inspect` can name any batch that
+/// never finished. A REFUSED batch keeps its marker too — the refusal
+/// is reported once, the marker keeps saying so until the documented
+/// repair (re-import, or retract the source) actually runs.
+/// Cross-store atomicity is deliberately not attempted: per-source
+/// retract-then-apply idempotency already makes the repair exact, so
+/// detection is the whole remaining gap.
 pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, ApplyRefusal> {
     let mut created = false;
     if state.directory_entry(&batch.context).is_none() {
@@ -1057,6 +1077,15 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
                 )));
             }
         }
+    }
+
+    // The marker precedes the first mutation or the batch does not
+    // run: starting untracked would silently reopen the exact
+    // undetectable-tear window it exists to close.
+    if let Err(error) = state.open_import_marker(&batch.context, &batch.source) {
+        return Err(ApplyRefusal::Io(format!(
+            "import marker not persisted: {error} — nothing was applied"
+        )));
     }
 
     let (retracted, passage_dropped) = state
@@ -1158,6 +1187,9 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
             }
         }
     }
+
+    // Only now is the source's stated truth fully on disk.
+    state.clear_import_marker(&batch.context, &batch.source);
 
     state.note_write(&batch.context);
     Ok(Applied {
@@ -1769,6 +1801,62 @@ mod tests {
             error.contains("line 2") && error.contains("association"),
             "{error}"
         );
+    }
+
+    /// The batch-open marker around `apply_batch`'s four mutations:
+    /// absent after success, present after a mid-batch refusal (the
+    /// crash-shaped tear shares the same signature), gone again once
+    /// the documented repair — re-importing the source — completes.
+    #[test]
+    fn apply_batch_brackets_its_steps_with_the_import_marker() {
+        let dir = std::env::temp_dir().join(format!("taguru-ingest-marker-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        // A completed batch leaves no marker: its truth is fully on disk.
+        let happy = parse(
+            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \"create\": {}}\n\
+             {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+        )
+        .unwrap();
+        apply_batch(&state, &happy).unwrap();
+        assert!(
+            crate::registry::import_marker_paths(&dir, "sake").is_empty(),
+            "a completed batch clears its marker"
+        );
+
+        // A batch refused partway keeps it: the refusal is reported
+        // once, the marker keeps saying so until the repair runs. (An
+        // alias to a canonical nothing interned fails AFTER the
+        // retraction — a genuinely half-applied source.)
+        let torn = parse(
+            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
+             {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
+        )
+        .unwrap();
+        let refusal = apply_batch(&state, &torn).unwrap_err();
+        assert!(matches!(refusal, ApplyRefusal::Partial { .. }));
+        assert_eq!(
+            crate::registry::import_marker_paths(&dir, "sake").len(),
+            1,
+            "a refused batch keeps its marker"
+        );
+
+        // The documented repair — re-import a corrected file for the
+        // same source — completes and clears the tear.
+        let fixed = parse(
+            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
+             {\"subject\": \"青嶺酒造\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n\
+             {\"alias\": \"Aomine\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n",
+        )
+        .unwrap();
+        apply_batch(&state, &fixed).unwrap();
+        assert!(
+            crate::registry::import_marker_paths(&dir, "sake").is_empty(),
+            "re-import completes and clears the tear"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

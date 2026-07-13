@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use taguru::deadline::Deadline;
 
 use crate::metrics::{ErrorKind, SearchOp};
-use crate::registry::{AppState, CitationLookup};
+use crate::registry::{AppState, CitationLookup, PassageExplainLookup};
 
 use super::{
     AppJson, AppQuery, CrossMatch, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, access_error, clamp,
@@ -231,6 +231,14 @@ pub async fn retract_source(
             if associations_touched > 0 || passage_removed {
                 state.note_write(&name);
             }
+            // Retracting the source is the second documented repair for
+            // a torn import (beside re-importing the batch): its truth
+            // is now consistently absent, so a surviving batch-open
+            // marker stops describing a tear. Cleared here at the
+            // operator-facing verb, NOT inside the registry primitive —
+            // import's own step 1 is that same primitive and must not
+            // clear the marker it just opened.
+            state.clear_import_marker(&name, &request.source);
             ok(
                 RetractOutcome {
                     associations_touched,
@@ -351,6 +359,395 @@ pub async fn search_passages(
             }
             ok(
                 hits.into_iter().map(PassageHit::from).collect::<Vec<_>>(),
+                started_at,
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExplainSearchRequest {
+    pub query: String,
+    /// The thing the caller expected to see.
+    pub source: String,
+    /// Which of the source's paragraphs (0-based). Omitted means "its
+    /// best showing": the best-ranked paragraph, or the one sharing
+    /// the most query terms when nothing ranked.
+    #[serde(default, alias = "index")]
+    pub paragraph: Option<u32>,
+    /// The search call being explained; omitted means 5, the same
+    /// default `sources/search` applies.
+    pub limit: Option<usize>,
+}
+
+/// One verdict for "why didn't (or did) this source appear for this
+/// query": the first that applies, machine-readable in `verdict`,
+/// human-readable in `summary`, evidence attached for the skeptical.
+/// Every verdict is a 200 — a diagnosed miss is this endpoint's
+/// success, not its failure.
+#[derive(Serialize)]
+pub struct SearchExplanation {
+    /// `not_stored` | `paragraph_out_of_range` | `no_query_terms` |
+    /// `no_term_overlap` | `below_cutoff` | `served`, first match wins
+    /// in that order (a served paragraph is served, whatever else is
+    /// true of it).
+    pub verdict: &'static str,
+    pub summary: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraphs: Option<usize>,
+    /// Present (and false) when the endpoint picked the paragraph
+    /// because the request named none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph_named: Option<bool>,
+    /// The query's terms as strings — which words, which character
+    /// bigrams — exactly what both lanes matched against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_terms: Option<Vec<String>>,
+    /// The paragraph's own terms (doc2query questions included) — only
+    /// on `no_term_overlap`, where seeing both sides IS the diagnosis
+    /// (query says 酒造, paragraph spells 酒蔵).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph_terms: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bm25: Option<Bm25Explain>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorExplain>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ranking: Option<RankingExplain>,
+}
+
+/// The lexical lane's evidence for the target: its rank in that lane,
+/// its BM25 score, and the score's per-term addends.
+#[derive(Serialize)]
+pub struct Bm25Explain {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank: Option<usize>,
+    pub score: f32,
+    pub terms: Vec<TermContribution>,
+}
+
+/// One query term against the target paragraph: `df` paragraphs carry
+/// it corpus-wide (its `idf` follows), the target carries it `tf`
+/// times, contributing `contribution` to the BM25 score. `tf` 0 with a
+/// high `df` is the "matched only ubiquitous bigrams" signature.
+#[derive(Serialize)]
+pub struct TermContribution {
+    pub term: String,
+    pub tf: f32,
+    pub df: usize,
+    pub idf: f32,
+    pub contribution: f32,
+}
+
+/// The vector lane's evidence — or the reason there is none.
+#[derive(Serialize)]
+pub struct VectorExplain {
+    pub ran: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub floor: Option<f32>,
+    /// The target's best cosine across its rows, floor or no floor —
+    /// "scored 0.31 against floor 0.35" is the actionable half.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cosine: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank: Option<usize>,
+}
+
+/// Where the target stands in the fused ranking `sources/search`
+/// truncates: its rank against `ranked` scored candidates, the
+/// `cutoff_score` the request's `limit` served down to, and a
+/// `limit_to_reach` VERIFIED by rerunning the real serve computation
+/// (pool caps included), not read off the unbounded ranking.
+#[derive(Serialize)]
+pub struct RankingExplain {
+    pub fused: bool,
+    pub ranked: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    pub limit: usize,
+    pub served: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cutoff_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_to_reach: Option<usize>,
+}
+
+impl SearchExplanation {
+    /// A verdict-only shell for the arms that end before scoring.
+    fn shell(verdict: &'static str, summary: String, source: &str) -> Self {
+        Self {
+            verdict,
+            summary,
+            source: source.to_string(),
+            paragraph: None,
+            paragraphs: None,
+            paragraph_named: None,
+            query_terms: None,
+            paragraph_terms: None,
+            bm25: None,
+            vector: None,
+            ranking: None,
+        }
+    }
+
+    fn from_lookup(
+        name: &str,
+        request: &ExplainSearchRequest,
+        lookup: PassageExplainLookup,
+    ) -> Self {
+        match lookup {
+            PassageExplainLookup::UnknownSource => Self::shell(
+                "not_stored",
+                format!(
+                    "source '{}' has no passages in context '{name}' — never stored here, \
+                     or stored and later retracted (the store keeps no tombstone history \
+                     to tell which)",
+                    request.source
+                ),
+                &request.source,
+            ),
+            PassageExplainLookup::IndexOutOfRange { paragraphs } => {
+                let mut explanation = Self::shell(
+                    "paragraph_out_of_range",
+                    format!(
+                        "paragraph {} is out of range for source '{}' — it stores {} \
+                         paragraph(s), 0-based",
+                        request.paragraph.unwrap_or_default(),
+                        request.source,
+                        paragraphs
+                    ),
+                    &request.source,
+                );
+                explanation.paragraph = request.paragraph;
+                explanation.paragraphs = Some(paragraphs);
+                explanation
+            }
+            PassageExplainLookup::NoQueryTerms => Self::shell(
+                "no_query_terms",
+                "the query yields no searchable terms — a search of it answers the empty \
+                 list before either lane runs"
+                    .to_string(),
+                &request.source,
+            ),
+            PassageExplainLookup::Explained(explanation) => {
+                Self::from_explanation(&request.source, *explanation)
+            }
+        }
+    }
+
+    fn from_explanation(
+        source: &str,
+        explanation: crate::registry::PassageSearchExplanation,
+    ) -> Self {
+        use crate::registry::VectorLaneReport;
+
+        let verdict = if explanation.served {
+            "served"
+        } else if explanation.rank.is_some() {
+            "below_cutoff"
+        } else {
+            "no_term_overlap"
+        };
+
+        let vector = match &explanation.vector {
+            VectorLaneReport::Off {
+                provider_configured,
+            } => VectorExplain {
+                ran: false,
+                reason: Some(if *provider_configured {
+                    "passage embedding is off (TAGURU_EMBED_PASSAGES)".to_string()
+                } else {
+                    "no embedding provider is configured".to_string()
+                }),
+                floor: None,
+                cosine: None,
+                rank: None,
+            },
+            VectorLaneReport::QueryEmbeddingFailed(error) => VectorExplain {
+                ran: false,
+                reason: Some(format!("the query embedding failed: {error}")),
+                floor: None,
+                cosine: None,
+                rank: None,
+            },
+            VectorLaneReport::NoVectors => VectorExplain {
+                ran: false,
+                reason: Some(
+                    "no paragraph vectors exist yet — the embedding refresh has not \
+                     covered this context"
+                        .to_string(),
+                ),
+                floor: None,
+                cosine: None,
+                rank: None,
+            },
+            VectorLaneReport::ModelChanged { stored, current } => VectorExplain {
+                ran: false,
+                reason: Some(format!(
+                    "stored vectors belong to model '{stored}' but the provider is \
+                     '{current}' — they are never served, and the next refresh re-embeds"
+                )),
+                floor: None,
+                cosine: None,
+                rank: None,
+            },
+            VectorLaneReport::Ran { floor, cosine } => VectorExplain {
+                ran: true,
+                reason: None,
+                floor: Some(*floor),
+                cosine: *cosine,
+                rank: explanation.vector_lane.map(|(rank, _)| rank),
+            },
+        };
+
+        let summary = match verdict {
+            "served" => format!(
+                "served: paragraph {} of '{source}' ranked {} of {} at limit {}",
+                explanation.paragraph,
+                explanation.rank.unwrap_or_default(),
+                explanation.ranked,
+                explanation.limit
+            ),
+            "below_cutoff" => {
+                let reach = match explanation.limit_to_reach {
+                    Some(limit) => format!("limit {limit} reaches it"),
+                    None => format!(
+                        "no limit up to {} reaches it (pool interplay)",
+                        explanation.ranked
+                    ),
+                };
+                format!(
+                    "paragraph {} of '{source}' ranked {} of {} — the cutoff at limit {} \
+                     was score {}; {reach}",
+                    explanation.paragraph,
+                    explanation.rank.unwrap_or_default(),
+                    explanation.ranked,
+                    explanation.limit,
+                    explanation
+                        .cutoff_score
+                        .map_or_else(|| "-".to_string(), |score| format!("{score:.4}")),
+                )
+            }
+            _ => {
+                let vector_clause = match (&explanation.vector, &vector) {
+                    (VectorLaneReport::Ran { floor, cosine }, _) => match cosine {
+                        Some(cosine) => format!(
+                            "; the vector lane scored it {cosine:.4} against floor {floor:.4}"
+                        ),
+                        None => "; the vector lane ran but this paragraph has no current \
+                                 embedding yet"
+                            .to_string(),
+                    },
+                    (_, vector_explain) => format!(
+                        " and the vector lane did not run ({})",
+                        vector_explain.reason.as_deref().unwrap_or("off")
+                    ),
+                };
+                format!(
+                    "paragraph {} of '{source}' shares no term with the query{vector_clause}",
+                    explanation.paragraph
+                )
+            }
+        };
+
+        // The per-term table marries the registry's evidence (query-
+        // gram order) to its spellings (same order, same dedup rule).
+        let bm25 = explanation.lexical.map(|lexical| Bm25Explain {
+            rank: explanation.bm25_lane.map(|(rank, _)| rank),
+            score: lexical.score,
+            terms: lexical
+                .terms
+                .into_iter()
+                .zip(explanation.query_terms.iter())
+                .map(|(term, (spelling, _))| TermContribution {
+                    term: spelling.clone(),
+                    tf: term.tf,
+                    df: term.carriers as usize,
+                    idf: term.idf,
+                    contribution: term.contribution,
+                })
+                .collect(),
+        });
+
+        Self {
+            verdict,
+            summary,
+            source: source.to_string(),
+            paragraph: Some(explanation.paragraph),
+            paragraphs: Some(explanation.paragraphs),
+            paragraph_named: Some(explanation.paragraph_named),
+            query_terms: Some(
+                explanation
+                    .query_terms
+                    .into_iter()
+                    .map(|(spelling, _)| spelling)
+                    .collect(),
+            ),
+            paragraph_terms: explanation.paragraph_terms,
+            bm25,
+            vector: Some(vector),
+            ranking: Some(RankingExplain {
+                fused: explanation.fused,
+                ranked: explanation.ranked,
+                rank: explanation.rank,
+                score: explanation.score,
+                limit: explanation.limit,
+                served: explanation.served,
+                cutoff_score: explanation.cutoff_score,
+                limit_to_reach: explanation.limit_to_reach,
+            }),
+        }
+    }
+}
+
+/// `POST /contexts/{name}/sources/search/explain` — one call instead
+/// of "orchestrate four endpoints and cross-reference by hand": name
+/// the query and the source (optionally the paragraph) you expected to
+/// see, get the first verdict that applies with its evidence. Runs the
+/// same lanes the search runs (read-only, roughly one query plus one
+/// targeted scoring); the serve boundary is recomputed exactly as
+/// `sources/search` computes it, so the two cannot disagree.
+pub async fn explain_search_passages(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
+    AppJson(request): AppJson<ExplainSearchRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
+    // Off the async worker: a residency's first search tokenizes the
+    // whole corpus into the index (the audit endpoints' rule).
+    let outcome = tokio::task::block_in_place(|| {
+        state.explain_passage_search(
+            &name,
+            &request.query,
+            &request.source,
+            request.paragraph,
+            clamp(request.limit, 5, MAX_MATCH_LIMIT),
+            deadline,
+        )
+    });
+    match outcome {
+        None => not_found(&name, started_at),
+        // Mirrors search_passages: a rebuild the lexical lane needed
+        // refused to start once the budget was already gone.
+        Some(Err(_)) if deadline.expired() => deadline_exceeded(started_at),
+        Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
+        Some(Ok(lookup)) => {
+            // A lookup that never reached scoring is the unproductive
+            // read; a diagnosed miss is exactly what was asked for.
+            state.note_read(&name, !matches!(lookup, PassageExplainLookup::Explained(_)));
+            ok(
+                SearchExplanation::from_lookup(&name, &request, lookup),
                 started_at,
             )
         }

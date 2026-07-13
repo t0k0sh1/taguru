@@ -3,6 +3,9 @@ mod auth;
 mod bm25;
 mod cli;
 mod compact;
+// The same file lib.rs includes — see src/crc32c.rs for why the
+// checksum primitive is dual-included instead of exported.
+mod crc32c;
 mod embedding;
 mod estimate;
 mod export;
@@ -457,7 +460,15 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
         .route("/contexts/{name}/explore", post(api::explore))
         .route("/contexts/{name}/activate", post(api::activate))
         .route("/contexts/{name}/resolve", post(api::resolve))
+        .route(
+            "/contexts/{name}/resolve/explain",
+            post(api::explain_resolve),
+        )
         .route("/contexts/{name}/resolve_label", post(api::resolve_label))
+        .route(
+            "/contexts/{name}/resolve_label/explain",
+            post(api::explain_resolve_label),
+        )
         .route("/contexts/{name}/labels", get(api::labels))
         .route(
             "/contexts/{name}/aliases",
@@ -476,6 +487,10 @@ fn routes(protocol_trailer: Option<String>) -> Router<AppState> {
         .route(
             "/contexts/{name}/sources/search",
             post(api::search_passages),
+        )
+        .route(
+            "/contexts/{name}/sources/search/explain",
+            post(api::explain_search_passages),
         )
         .route(
             "/contexts/{name}/sources/retract",

@@ -135,6 +135,72 @@ Entries that change an on-disk format or a response shape say so.
   contexts should still export over plain HTTP or `taguru export`
   offline; the tool descriptions say so.
 
+- Integrity checksums in every on-disk format that holds acknowledged
+  data (#59). The context image gains a whole-file CRC-32C footer
+  (format v5 → v6), verified before anything else is trusted on load;
+  the passage snapshot does the same (`TAGURUS3` → `TAGURUS4`); and
+  every WAL record — graph and passages — now carries a `crc` field
+  verified on replay. Structural validation alone accepts silent
+  corruption that happens to keep the invariants (a flipped byte
+  inside a stored name loads, serves, and flushes back as truth);
+  the checksums close exactly that gap, and `taguru inspect` now says
+  what was *verified* versus merely parsed (image/snapshot generation
+  in each ok-line, a NOTE counting pre-checksum WAL records).
+  On-disk notes: older images and snapshots keep loading forever,
+  unverified, and writing always produces the checksummed formats — so
+  after the first flush a DOWNGRADED binary refuses the image as an
+  unsupported version (roll back onto a pre-upgrade backup, or through
+  export/import). The WAL change is additive in both directions: a
+  pre-checksum binary ignores the field, and pre-checksum records
+  replay unchecked.
+- Torn-import detection (#59): one import batch applies as four
+  separately durable steps (retract the source → store the passage →
+  add associations → add aliases), each store individually consistent,
+  so a crash — or an unrepaired mid-batch refusal — used to leave the
+  source half-applied with nothing able to say so. Now a per-source
+  batch-open marker (`{stem}.{source-hash}.importing`, the pair named
+  in its content) is written before the first step and removed only
+  after the last: the server's next boot warns for every surviving
+  marker whose context still exists (and removes moot ones), and
+  `taguru inspect` reports the same tear with its repair. Both
+  documented repairs clear it — re-importing the batch file (offline
+  or `POST /import`; retract-then-apply keeps the retry exact) or
+  retracting the source. Deleting or recreating the context sweeps its
+  markers. Cross-store atomicity is deliberately not attempted:
+  per-source idempotency already makes the repair exact, so detection
+  was the whole remaining gap.
+- Search explainability (#75): every retrieval lane can now say why an
+  expected result did not appear, in one read-only call instead of
+  orchestrating four endpoints with varied thresholds by hand.
+  `POST /contexts/{name}/sources/search/explain` takes `{query, source,
+  paragraph?, limit?}` and answers the first verdict that applies —
+  `not_stored` (never stored here, or retracted; the store keeps no
+  tombstone history to tell which), `paragraph_out_of_range`,
+  `no_query_terms`, `no_term_overlap` (both sides' terms rendered AS
+  STRINGS, so a 酒蔵-vs-酒造 spelling fork is visible on the table),
+  `below_cutoff` (the actual rank, the cutoff score at the requested
+  limit, and a `limit_to_reach` VERIFIED by rerunning the real serve
+  computation, pool caps included), or `served` — with per-term BM25
+  evidence (tf, df, idf, contribution: bit-for-bit the addends search
+  summed) and the vector lane's cosine, or the named reason that lane
+  never ran (off, no provider, query embedding failed, nothing
+  embedded, model changed). `POST /contexts/{name}/resolve/explain`
+  and `resolve_label/explain` take `{cue, expected}` plus the same
+  one-call overrides resolve honors, and answer `not_in_vocabulary`
+  (nearest stored spellings attached, lexical and semantic — the
+  register-an-alias repair is one step away), `cue_resolved_exactly`
+  (the cue IS another stored spelling; the exact tier answers alone,
+  which no floor tweak can fix), `below_floor` (the actual Dice score
+  vs the floor in effect — only the fuzzy tier is floor-gated, and
+  the verdict honors that), `below_cutoff`, `semantic_not_run` /
+  `semantic_below_floor` (whether the fallback tier joined, its gloss
+  cosine vs the semantic floor, or which precondition failed), or
+  `served`. All three ride MCP as `explain_search` /
+  `explain_resolve` / `explain_resolve_label`. No new persistence, no
+  new counters; explain shares the live scoring code paths (one term
+  walker, one BM25 addend, one fusion/trim), so it cannot disagree
+  with the search it explains.
+
 ### Changed
 - doc2query `questions` now index into their paragraph's BM25 postings
   (terms and length both — the doc2query move itself), so a

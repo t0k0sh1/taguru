@@ -184,6 +184,19 @@
       rulers. The floor (<code>semantic_floor</code>) is a property of the embedding model;
       switch models and <a href="bedrock.html">recalibrate</a>.
     </p>
+
+    <h3>When the expected name still doesn't appear — ask why, don't bisect</h3>
+    <p>
+      <code>resolve/explain</code> (and <code>resolve_label/explain</code>; MCP:
+      <code>explain_resolve</code>) takes the cue <b>plus the name you expected</b> and returns
+      the first verdict that applies: not in the vocabulary at all (nearest stored spellings
+      attached — register an alias?), eclipsed by an exact match (the cue IS another stored
+      spelling, so nothing else was ever scored), under the <code>dice_floor</code> in effect
+      (with the score a lower floor would have admitted), cut by <code>limit</code> (with a
+      verified limit that reaches it), or a semantic-tier reason — it never joined, or the
+      gloss cosine sat under <code>semantic_floor</code>. One call replaces the
+      re-run-with-varied-floors archaeology.
+    </p>
   </section>
 
   <section id="text-lane">
@@ -205,6 +218,16 @@
       this paragraph answers" to paragraphs at ingest — their terms join the paragraph's BM25
       postings (and its vectors, where passage embedding is on), so question-shaped searches land
       on the paragraph through both lanes.
+    </p>
+    <p>
+      When a document you <b>know</b> is stored fails to surface, <code>sources/search/explain</code>
+      (MCP: <code>explain_search</code>) answers why in one call: name the query and the source
+      you expected, and the first applicable verdict comes back — never stored (or retracted),
+      no shared term (both sides' terms shown <b>as strings</b>, which is how 酒蔵-vs-酒造
+      spelling forks become visible), or ranked past your limit (with the actual rank, the
+      cutoff score, and a limit verified to reach it). Evidence includes each query term's
+      tf/df and BM25 contribution, and the vector lane's cosine — or the reason that lane
+      never ran.
     </p>
   </section>
 

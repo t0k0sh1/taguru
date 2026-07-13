@@ -3,6 +3,14 @@
 //! appended here (JSON Lines, one fsync per batch) BEFORE it touches
 //! memory, so a crash between two image flushes loses nothing.
 //!
+//! Each record carries a CRC-32C of its own canonical bytes (the
+//! `crc` field, always last), verified on every replay: structural
+//! parsing catches truncation and garbage, but a flipped byte that
+//! stays valid JSON would otherwise replay as truth. Records written
+//! before the field existed replay unchecked, and a pre-checksum
+//! binary reading a checksummed log ignores the field — the change is
+//! additive in both directions.
+//!
 //! Replay is driven entirely by sequence numbers: records carry a
 //! monotonic `seq`, the image header carries the watermark of the last
 //! seq already baked in (see `Context::applied_seq`), and loading
@@ -66,6 +74,28 @@ struct WalRecord<Op> {
     seq: u64,
     #[serde(flatten)]
     op: Op,
+    /// CRC-32C of this record's own serialization WITHOUT this field —
+    /// the bit-rot check structural parsing cannot give (a flipped byte
+    /// that stays valid JSON replays as truth). Always the record's
+    /// LAST field, spliced in by [`append_batch`]; replay re-serializes
+    /// the parsed record crc-less and compares. The record shape stays
+    /// readable by a pre-checksum binary — its parser routes the
+    /// unknown field into the flattened op, where serde ignores it —
+    /// and records WITHOUT the field (written by one) replay unchecked,
+    /// so the format change is additive in both directions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    crc: Option<u32>,
+}
+
+/// One record's canonical crc-less bytes — the exact serialization the
+/// checksum covers, shared by the writer (which splices the field onto
+/// it) and replay (which recomputes it from the parsed record). The op
+/// vocabularies keep this reconstruction byte-exact: strings, integers,
+/// ryu-printed floats, and Vecs all round-trip through serde_json to
+/// the same bytes; none of them may grow a map field (iteration order
+/// would differ between write and verify and fail every record).
+fn canonical_record_bytes<Op: Serialize>(seq: u64, op: Op) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&WalRecord { seq, op, crc: None })
 }
 
 /// Test-only fault injection: arms the calling thread so that, after
@@ -151,12 +181,14 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
     }
     let mut buffer = Vec::new();
     for (offset, op) in ops.iter().enumerate() {
-        let record = WalRecord {
-            seq: first_seq + offset as u64,
-            op,
-        };
-        serde_json::to_writer(&mut buffer, &record)?;
-        buffer.push(b'\n');
+        let record = canonical_record_bytes(first_seq + offset as u64, op)?;
+        let crc = crate::crc32c::crc32c(&record);
+        // Splice the checksum in as the final field: identical bytes to
+        // serializing the record with `crc: Some(..)` (a struct field
+        // after a flatten lands last), for one serialization instead of
+        // two. A record is always a JSON object, so it always ends '}'.
+        buffer.extend_from_slice(&record[..record.len() - 1]);
+        buffer.extend_from_slice(format!(",\"crc\":{crc}}}\n").as_bytes());
     }
     // `create_new` tells "we made the file" from "it was already there"
     // in the open itself — the distinction the directory sync below turns
@@ -238,7 +270,10 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
 /// cannot catch; a retry (or the next write) reusing the same seq would
 /// otherwise replay BESIDE it and double-apply. Later-wins drops the
 /// unacknowledged leftover in favor of the write that actually followed.
-pub fn replay<Op: DeserializeOwned>(path: &Path, watermark: u64) -> io::Result<(Vec<Op>, u64)> {
+pub fn replay<Op: DeserializeOwned + Serialize>(
+    path: &Path,
+    watermark: u64,
+) -> io::Result<(Vec<Op>, u64)> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -246,7 +281,7 @@ pub fn replay<Op: DeserializeOwned>(path: &Path, watermark: u64) -> io::Result<(
         }
         Err(error) => return Err(error),
     };
-    let (ops, top, torn) = parse_log(path, &bytes, watermark)?;
+    let (ops, top, torn, _) = parse_log(path, &bytes, watermark)?;
     // A torn trailing record is the expected crash-mid-append shape. It
     // is already left out of `ops`; heal it off disk too, so the next
     // append does not write straight after the fragment and fuse a new
@@ -274,18 +309,21 @@ pub fn replay<Op: DeserializeOwned>(path: &Path, watermark: u64) -> io::Result<(
 /// ops and top seq exactly as `replay` would, plus — when the log's
 /// final record was torn by a crash mid-append — the byte size of that
 /// torn fragment (`Some(bytes)`), so a diagnostic caller such as `taguru
-/// inspect` can REPORT the tear rather than silently truncate it. A
-/// clean log returns `None`. The torn fragment is already excluded from
-/// the returned ops, so what this reports is exactly what the server's
-/// next `replay` would heal away.
-pub fn replay_readonly<Op: DeserializeOwned>(
+/// inspect` can REPORT the tear rather than silently truncate it (a
+/// clean log returns `None`) — plus how many intact records carried no
+/// checksum (written before the field existed), so the same caller can
+/// say how much of the log was actually VERIFIED rather than merely
+/// parsed. The torn fragment is already excluded from the returned ops,
+/// so what this reports is exactly what the server's next `replay`
+/// would heal away.
+pub fn replay_readonly<Op: DeserializeOwned + Serialize>(
     path: &Path,
     watermark: u64,
-) -> io::Result<(Vec<Op>, u64, Option<u64>)> {
+) -> io::Result<(Vec<Op>, u64, Option<u64>, usize)> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok((Vec::new(), watermark, None));
+            return Ok((Vec::new(), watermark, None, 0));
         }
         Err(error) => return Err(error),
     };
@@ -296,13 +334,18 @@ pub fn replay_readonly<Op: DeserializeOwned>(
 /// trailing fragment (returned as its byte length, `None` when the file
 /// ends clean), and decode every intact record above `watermark` in seq
 /// order — a repeated seq keeps the later record (see [`replay`] for the
-/// double-fault that can leak one). Writes nothing; whether to heal a
-/// torn tail is left to the caller.
-fn parse_log<Op: DeserializeOwned>(
+/// double-fault that can leak one). Every record carrying a checksum is
+/// verified against its canonical bytes — a mismatch is the same fatal
+/// corruption an undecodable line is, because this file holds
+/// acknowledged writes that exist nowhere else — and the count of
+/// records carrying NONE (pre-checksum writers) rides along last, for
+/// diagnostic callers. Writes nothing; whether to heal a torn tail is
+/// left to the caller.
+fn parse_log<Op: DeserializeOwned + Serialize>(
     path: &Path,
     bytes: &[u8],
     watermark: u64,
-) -> io::Result<(Vec<Op>, u64, Option<u64>)> {
+) -> io::Result<(Vec<Op>, u64, Option<u64>, usize)> {
     let mut segments: Vec<&[u8]> = bytes.split(|&byte| byte == b'\n').collect();
     // A complete file ends in '\n', making the final segment empty; a
     // torn file's final segment is the record a crash cut short. One
@@ -316,6 +359,7 @@ fn parse_log<Op: DeserializeOwned>(
     // drained in seq order (== append order for the monotonic tail).
     let mut pending: BTreeMap<u64, Op> = BTreeMap::new();
     let mut top = watermark;
+    let mut unchecked = 0usize;
     for (index, line) in segments.iter().enumerate() {
         let record: WalRecord<Op> = serde_json::from_slice(line).map_err(|error| {
             io::Error::new(
@@ -327,6 +371,31 @@ fn parse_log<Op: DeserializeOwned>(
                 ),
             )
         })?;
+        match record.crc {
+            // Every checksummed record is verified, at or below the
+            // watermark included: a watermark-covered record replays to
+            // nothing, but its corruption still says the medium is
+            // eating this file — the one thing structural parsing
+            // cannot notice and the whole reason the field exists.
+            Some(stored) => {
+                let canonical =
+                    canonical_record_bytes(record.seq, &record.op).map_err(io::Error::from)?;
+                let computed = crate::crc32c::crc32c(&canonical);
+                if computed != stored {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "corrupt WAL record at {} line {}: checksum mismatch (stored \
+                             {stored:#010x}, computed {computed:#010x}) — the bytes changed \
+                             after they were written",
+                            path.display(),
+                            index + 1
+                        ),
+                    ));
+                }
+            }
+            None => unchecked += 1,
+        }
         top = top.max(record.seq);
         if record.seq > watermark && pending.insert(record.seq, record.op).is_some() {
             tracing::warn!(
@@ -338,7 +407,7 @@ fn parse_log<Op: DeserializeOwned>(
         }
     }
     let ops = pending.into_values().collect();
-    Ok((ops, top, torn))
+    Ok((ops, top, torn, unchecked))
 }
 
 /// Empties the log in place (`set_len(0)`, same inode, no directory
@@ -423,6 +492,103 @@ mod tests {
         let (none, top) = replay::<WalOp>(&path, 9).unwrap();
         assert!(none.is_empty());
         assert_eq!(top, 9);
+    }
+
+    #[test]
+    fn records_carry_a_checksum_spliced_exactly_as_serde_would_write_it() {
+        let path = scratch_wal("crc-shape");
+        append_batch(&path, 1, &[associate("a"), associate("b")]).unwrap();
+
+        let bytes = fs::read(&path).unwrap();
+        for line in bytes.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+            // Every record ends in the checksum field...
+            let record: WalRecord<WalOp> = serde_json::from_slice(line).unwrap();
+            let stored = record.crc.expect("a fresh record carries its checksum");
+            // ...that covers the record's own crc-less serialization...
+            let canonical = canonical_record_bytes(record.seq, &record.op).unwrap();
+            assert_eq!(stored, crate::crc32c::crc32c(&canonical));
+            // ...and the splice is byte-identical to letting serde
+            // serialize `crc: Some(..)` itself — the property replay's
+            // re-serialization check rests on.
+            let full = serde_json::to_vec(&WalRecord {
+                seq: record.seq,
+                op: &record.op,
+                crc: Some(stored),
+            })
+            .unwrap();
+            assert_eq!(line, full);
+        }
+
+        let (ops, top) = replay::<WalOp>(&path, 0).unwrap();
+        assert_eq!(ops.len(), 2);
+        assert_eq!(top, 2);
+    }
+
+    #[test]
+    fn a_bitflip_that_stays_valid_json_fails_replay_as_corruption() {
+        let path = scratch_wal("crc-flip");
+        append_batch(&path, 1, &[associate("aaaa")]).unwrap();
+        append_batch(&path, 2, &[associate("z")]).unwrap();
+
+        // Silent corruption's exact shape: one byte changes, the line
+        // still parses, the seq and structure are intact. Only the
+        // checksum can tell — and it must refuse, not skip, because the
+        // record is acknowledged data with no other copy.
+        let text = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+        assert_eq!(text.matches("aaaa").count(), 1);
+        fs::write(&path, text.replace("aaaa", "aaab")).unwrap();
+
+        let error = replay::<WalOp>(&path, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("checksum mismatch"), "{error}");
+        assert!(error.to_string().contains("line 1"), "{error}");
+    }
+
+    #[test]
+    fn pre_checksum_records_replay_unchecked_and_are_counted() {
+        let path = scratch_wal("crc-legacy");
+        // A record exactly as the pre-checksum writer serialized it.
+        fs::write(
+            &path,
+            "{\"seq\":1,\"op\":\"associate\",\"subject\":\"a\",\"label\":\"好き\",\
+             \"object\":\"りんご\",\"weight\":1.0}\n",
+        )
+        .unwrap();
+        // A checksummed record appended by the current writer rides
+        // beside it — an upgraded server's log mid-transition.
+        append_batch(&path, 2, &[associate("b")]).unwrap();
+
+        let (ops, top, torn, unchecked) = replay_readonly::<WalOp>(&path, 0).unwrap();
+        assert_eq!(ops.iter().map(subject_of).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(top, 2);
+        assert_eq!(torn, None);
+        assert_eq!(unchecked, 1, "exactly the legacy record goes unverified");
+
+        // The healing replay accepts the same mix.
+        let (ops, _) = replay::<WalOp>(&path, 0).unwrap();
+        assert_eq!(ops.len(), 2);
+    }
+
+    #[test]
+    fn a_downgraded_parser_shape_reads_a_checksummed_record() {
+        // The compatibility promise in the WalRecord doc: a binary
+        // whose record shape predates `crc` must keep replaying new
+        // logs — serde routes the unknown field into the flattened op,
+        // and the op's struct ignores it.
+        #[derive(Deserialize)]
+        struct PreChecksumRecord {
+            seq: u64,
+            #[serde(flatten)]
+            op: WalOp,
+        }
+
+        let path = scratch_wal("crc-downgrade");
+        append_batch(&path, 7, &[associate("a")]).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let line = bytes.split(|&b| b == b'\n').next().unwrap();
+        let record: PreChecksumRecord = serde_json::from_slice(line).unwrap();
+        assert_eq!(record.seq, 7);
+        assert_eq!(subject_of(&record.op), "a");
     }
 
     #[test]
