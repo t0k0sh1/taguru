@@ -6746,13 +6746,20 @@ fn a_failing_chunk_fails_the_document_without_dispatching_the_tail() {
             chat_ok(&json!({"associations": []}).to_string())
         }
     });
+    let workers = 3usize;
     let (code, stdout, stderr) = run_extract(
         &out,
         &[
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", "--parallel", "3", doc_src],
+        &[
+            "--context",
+            "c",
+            "--parallel",
+            &workers.to_string(),
+            doc_src,
+        ],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
@@ -6776,6 +6783,24 @@ fn a_failing_chunk_fails_the_document_without_dispatching_the_tail() {
         seen.len() < total_chunks,
         "early stop must dispatch fewer than every chunk: saw {}/{total_chunks}",
         seen.len()
+    );
+    // A worker can only ever have one chunk in flight at a time, so once
+    // `first_failure` is recorded, at most `workers` chunks beyond it can
+    // already be claimed and running. Any index past that band was claimed
+    // strictly after the failure was recorded and visible — a deterministic
+    // bound, not a timing-dependent one, so it also catches a regression to
+    // a weaker atomic ordering that lets a worker miss the failure update.
+    let max_in_flight_past_failure = failing_index + workers;
+    let stray_indexes: Vec<usize> = seen
+        .iter()
+        .map(|body| chunk_index_of(body))
+        .filter(|&index| index > max_in_flight_past_failure)
+        .collect();
+    assert!(
+        stray_indexes.is_empty(),
+        "no worker may claim a chunk more than `workers` past the failure \
+         once it is recorded: saw claims at {stray_indexes:?} (failure at \
+         {failing_index}, {workers} workers)"
     );
 
     let _ = std::fs::remove_dir_all(&docs);

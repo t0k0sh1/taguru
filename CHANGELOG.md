@@ -325,9 +325,11 @@ Entries that change an on-disk format or a response shape say so.
   original index order, so output is byte-for-byte identical to
   `--parallel 1` regardless of `N` or thread scheduling — only
   wall-clock changes. The first chunk to fail, by index rather than by
-  which thread finishes first, still fails the whole document:
-  already in-flight calls are joined, but no chunk past the failure is
-  dispatched. Parallelism never crosses documents — each document's
+  which thread finishes first, still fails the whole document: no
+  worker claims a new chunk past the failure once it is recorded, but
+  a chunk already claimed and in flight at that moment still runs to
+  completion — its result is simply discarded. Parallelism never
+  crosses documents — each document's
   relation-label vocabulary feeds the next document's prompt, so
   documents themselves keep extracting one at a time.
 - Drift audit (#63): `unsourced weight` — an association's weight left
@@ -408,9 +410,10 @@ Entries that change an on-disk format or a response shape say so.
   sleep, 2-attempt retry with exponential backoff and full jitter (1s
   base, doubling toward a 30s ceiling; 4 attempts total — 1 initial
   plus 3 retries) (#64). A 429 response's `Retry-After` header, when
-  present, is honored verbatim (clamped to the same 30s ceiling)
-  instead of the computed backoff, since the server's own instruction
-  beats a guess; other statuses are unaffected. A non-retryable 4xx
+  present as delta-seconds (HTTP-date values are not recognized), is
+  honored verbatim (clamped to the same 30s ceiling) instead of the
+  computed backoff, since the server's own instruction beats a guess;
+  other statuses are unaffected. A non-retryable 4xx
   still fails immediately, spending none of the retry budget. The
   final error message now reports how many attempts were made.
 

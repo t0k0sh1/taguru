@@ -153,8 +153,10 @@ TAGURU_EXTRACT_PARALLEL  concurrent chunk completions per document (default 1)
       provider failure (429, 5xx, transport) is retried up to 4 attempts total, waiting a
       full-jitter exponential backoff between them — 1 s doubling toward a 30 s ceiling, randomized
       so concurrent chunks under <code>--parallel</code> don't all wake up and retry in lockstep.
-      A 429 that carries <code>Retry-After</code> uses that delay instead, verbatim (clamped to the
-      same 30 s ceiling), since the server's own instruction beats a guess. A non-retryable 4xx
+      A 429 that carries <code>Retry-After</code> as delta-seconds uses that delay instead,
+      verbatim (clamped to the same 30 s ceiling), since the server's own instruction beats a
+      guess; HTTP-date values are not recognized and fall back to the computed backoff. A
+      non-retryable 4xx
       fails immediately, spending none of the retry budget. Beyond the last attempt the document
       fails, the remaining documents continue, and the run exits 1 — a re-run re-extracts only the
       failures, because the manifest records only successes.
@@ -176,8 +178,9 @@ TAGURU_EXTRACT_PARALLEL  concurrent chunk completions per document (default 1)
       are set) runs up to N of one document's chunk completions concurrently instead of one at a
       time — the chunks still merge in their original order, so output is identical to a
       sequential run, just faster wall-clock. The first chunk to fail (by index, not by which
-      thread finishes first) still fails the document: in-flight calls are joined, but no chunk
-      past the failure is dispatched. Parallelism never crosses documents — each document's
+      thread finishes first) still fails the document: no worker claims a new chunk once the
+      failure is recorded, but a chunk already claimed and in flight at that moment still runs
+      to completion — its result is simply discarded. Parallelism never crosses documents — each document's
       relation-label vocabulary is offered to the next document's prompt, so running documents
       concurrently would race that hand-off and let labels diverge between them. Fanning out
       chunks multiplies request pressure on the provider, which is also why the retry policy

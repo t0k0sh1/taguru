@@ -509,7 +509,12 @@ impl Run {
     /// *global* minimum failure — no `j < k` ever fails, so
     /// `first_failure` can only hold `usize::MAX` or a value `>= k`
     /// at the moment any `j < k` performs its claim check, regardless
-    /// of thread scheduling.
+    /// of thread scheduling. `next` and `first_failure` are two
+    /// independent atomics, so this claim needs `SeqCst`: it is the
+    /// single total order across *both* variables that lets a worker
+    /// claiming index `j > k` after the failure is recorded actually
+    /// observe it, instead of racing an arbitrarily stale `usize::MAX`
+    /// under a weaker ordering.
     fn extract_chunks_concurrently(
         &self,
         source: &str,
@@ -530,14 +535,14 @@ impl Run {
             for _ in 0..workers {
                 scope.spawn(|| {
                     loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        if index >= chunks.len() || index > first_failure.load(Ordering::Relaxed) {
+                        let index = next.fetch_add(1, Ordering::SeqCst);
+                        if index >= chunks.len() || index > first_failure.load(Ordering::SeqCst) {
                             break;
                         }
                         let user = user_message(source, index, chunks.len(), &chunks[index]);
                         let outcome = extract_chunk(client, &system, &user);
                         if outcome.is_err() {
-                            first_failure.fetch_min(index, Ordering::Relaxed);
+                            first_failure.fetch_min(index, Ordering::SeqCst);
                         }
                         let _ = results[index].set(outcome);
                     }
