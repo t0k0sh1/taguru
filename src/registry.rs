@@ -1541,7 +1541,7 @@ impl AppState {
             // marker and deletes the context we are creating right now.
             deleted_marker_path(&self.0.data_dir, &stem),
         ] {
-            if let Err(error) = fs::remove_file(&stale)
+            if let Err(error) = remove_persisted_file(&stale)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 return Err(CreateError::Io(error));
@@ -1551,7 +1551,7 @@ impl AppState {
         // left beside the new files, boot would report the fresh
         // context as carrying a torn import it never ran.
         for stale in import_marker_paths(&self.0.data_dir, &stem) {
-            if let Err(error) = fs::remove_file(&stale)
+            if let Err(error) = remove_persisted_file(&stale)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 return Err(CreateError::Io(error));
@@ -1619,7 +1619,7 @@ impl AppState {
         self.sweep_context_from_groups(name);
         let mut outcome = Ok(());
         for file in context_files(&stem) {
-            if let Err(error) = fs::remove_file(self.0.data_dir.join(file))
+            if let Err(error) = remove_persisted_file(self.0.data_dir.join(file))
                 && error.kind() != io::ErrorKind::NotFound
             {
                 outcome = Err(error);
@@ -1631,14 +1631,14 @@ impl AppState {
         // failure handling as the fixed files — a miss keeps the
         // `.deleted` marker, and boot finishes the job.
         for path in import_marker_paths(&self.0.data_dir, &stem) {
-            if let Err(error) = fs::remove_file(&path)
+            if let Err(error) = remove_persisted_file(&path)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 outcome = Err(error);
             }
         }
         if outcome.is_ok() {
-            let _ = fs::remove_file(&marker);
+            let _ = remove_persisted_file(&marker);
         }
         self.0.pending_deletes.lock().remove(name);
         Some(outcome)
@@ -2435,7 +2435,7 @@ impl AppState {
     /// or a hand unlink clears it.
     pub fn clear_import_marker(&self, context: &str, source: &str) {
         let path = import_marker_path(&self.0.data_dir, &file_stem(context), source);
-        if let Err(error) = fs::remove_file(&path)
+        if let Err(error) = remove_persisted_file(&path)
             && error.kind() != io::ErrorKind::NotFound
         {
             tracing::warn!(
@@ -4047,7 +4047,7 @@ impl AppState {
         // tombstone invariant — so a delete that won the race while we
         // were staging must find us backing off, not recreating.
         let Some(mut guard) = entry.lock_unless_deleted() else {
-            let _ = fs::remove_file(&staged);
+            let _ = remove_persisted_file(&staged);
             entry.flushing.store(false, Ordering::Relaxed);
             return false;
         };
@@ -4066,7 +4066,7 @@ impl AppState {
         // already left `dirty` set, so backing off here costs nothing —
         // the next tick flushes the current image instead.
         if !matches!(inner.slot, Slot::Hot(_)) || inner.image_generation != generation {
-            let _ = fs::remove_file(&staged);
+            let _ = remove_persisted_file(&staged);
             entry.flushing.store(false, Ordering::Relaxed);
             return false;
         }
@@ -4099,7 +4099,7 @@ impl AppState {
             }
             Err(error) => {
                 tracing::warn!("flush of context '{name}' failed (will retry): {error}");
-                let _ = fs::remove_file(&staged);
+                let _ = remove_persisted_file(&staged);
                 entry.dirty.store(true, Ordering::Relaxed);
                 entry.usage_dirty.store(true, Ordering::Relaxed);
                 self.0.metrics.record_flush(name, false);
@@ -4700,14 +4700,14 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<BTreeMap<String, Arc<Entry>>> {
             let stem = stem.to_string();
             for file in context_files(&stem) {
                 let target = data_dir.join(file);
-                if let Err(error) = fs::remove_file(&target)
+                if let Err(error) = remove_persisted_file(&target)
                     && error.kind() != io::ErrorKind::NotFound
                 {
                     tracing::warn!(path = %target.display(), %error, "unfinished deletion: file still held");
                 }
             }
             // The marker goes last: it only leaves once the family did.
-            if fs::remove_file(&path).is_err() {
+            if remove_persisted_file(&path).is_err() {
                 tracing::warn!(path = %path.display(), "unfinished deletion: marker still held");
             }
         }
@@ -4718,7 +4718,7 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<BTreeMap<String, Arc<Entry>>> {
         let path = dir_entry?.path();
         let extension = path.extension().and_then(|e| e.to_str());
         if extension.is_some_and(|e| e.starts_with("tmp")) {
-            let _ = fs::remove_file(&path);
+            let _ = remove_persisted_file(&path);
             continue;
         }
         // Import markers are judged after the scan, once it is known
@@ -4776,7 +4776,7 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<BTreeMap<String, Arc<Entry>>> {
                  aliases); re-import the batch file or retract the source",
             );
         } else {
-            let _ = fs::remove_file(&path);
+            let _ = remove_persisted_file(&path);
         }
     }
     Ok(registry)
@@ -5634,6 +5634,75 @@ pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> 
     write_atomic_with(path, bytes, true)
 }
 
+/// Test-only deterministic fault injection for registry persistence.
+///
+/// The calling thread fails exactly one persistence operation after
+/// `successes` stage, commit, unlink, WAL append, or WAL truncate
+/// operations have run normally.
+/// Keeping the counter thread-local makes parallel tests independent,
+/// and routing every operation through shared choke points avoids a
+/// flag for each call site.
+#[cfg(test)]
+pub(crate) fn fail_persistence_ops_after(successes: u32) {
+    PERSISTENCE_FAULT.with(|cell| cell.set(Some(successes)));
+}
+
+#[cfg(test)]
+thread_local! {
+    static PERSISTENCE_FAULT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Clears an armed fault and reports whether it was still pending. A
+/// sweep uses this after each attempt: `false` means the selected op
+/// was reached and failed, while `true` means the operation had fewer
+/// persistence steps and the sweep is complete.
+#[cfg(test)]
+pub(crate) fn clear_persistence_fault() -> bool {
+    PERSISTENCE_FAULT.with(|cell| cell.take().is_some())
+}
+
+#[cfg(test)]
+pub(crate) fn injected_persistence_failure(operation: &str) -> Option<io::Error> {
+    PERSISTENCE_FAULT.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            Some(io::Error::other(format!(
+                "injected registry persistence failure during {operation}"
+            )))
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            None
+        }
+        None => None,
+    })
+}
+
+#[cfg(not(test))]
+pub(crate) fn injected_persistence_failure(_operation: &str) -> Option<io::Error> {
+    None
+}
+
+/// The unlink choke point shared by registry and group persistence.
+pub(crate) fn remove_persisted_file(path: impl AsRef<Path>) -> io::Result<()> {
+    if let Some(error) = injected_persistence_failure("unlink") {
+        return Err(error);
+    }
+    fs::remove_file(path)
+}
+
+/// The rename choke point shared by atomic publication and recovery
+/// paths that move corrupt bytes aside.
+pub(crate) fn rename_persisted_file(
+    from: impl AsRef<Path>,
+    to: impl AsRef<Path>,
+) -> io::Result<()> {
+    if let Some(error) = injected_persistence_failure("commit") {
+        return Err(error);
+    }
+    fs::rename(from, to)
+}
+
 fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
     let staged = stage_bytes(path, bytes, private)?;
     let result = commit_staged(&staged, path);
@@ -5644,7 +5713,7 @@ fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> io::Result<()>
         // after a successful rename finds nothing here: the file is
         // already `path`, and removing the stale `staged` name is a
         // harmless no-op.)
-        let _ = fs::remove_file(&staged);
+        let _ = remove_persisted_file(&staged);
     }
     result
 }
@@ -5669,6 +5738,9 @@ fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Result<PathBuf> 
     #[cfg(not(unix))]
     let _ = private;
     let staged = staging_path(path);
+    if let Some(error) = injected_persistence_failure("stage") {
+        return Err(error);
+    }
     // A private file must be BORN owner-only: create-then-chmod leaves a
     // window (the default-umask create, ~0644, before the chmod) in
     // which another local account can open() the staging file and keep
@@ -5701,7 +5773,7 @@ fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Result<PathBuf> 
             // content and was never handed to a caller — remove it
             // rather than leave a partial write behind under its
             // temporary name.
-            let _ = fs::remove_file(&staged);
+            let _ = remove_persisted_file(&staged);
             Err(error)
         }
     }
@@ -5710,7 +5782,7 @@ fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Result<PathBuf> 
 /// The cheap half of [`write_atomic`]: atomically publishes a staged
 /// file at its final path — rename plus parent-directory fsync.
 fn commit_staged(staged: &Path, path: &Path) -> io::Result<()> {
-    fs::rename(staged, path)?;
+    rename_persisted_file(staged, path)?;
     fsync_parent_dir(path)
 }
 
@@ -6059,6 +6131,65 @@ mod tests {
             "the marker leaves once the family did"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Every stage/commit/unlink position in context deletion either
+    /// finishes immediately or leaves enough durable state for boot to
+    /// finish it. The first index beyond the operation proves the sweep
+    /// did not merely sample a few hand-picked failures.
+    #[test]
+    fn every_context_delete_persistence_failure_recovers_at_boot() {
+        let mut exhausted = false;
+        for failure in 0..64 {
+            let dir = scratch_dir(&format!("delete-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+            state
+                .create_group(
+                    "breweries",
+                    String::new(),
+                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let outcome = state.delete("sake").unwrap();
+            let past_end = clear_persistence_fault();
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            assert!(
+                state.directory_entry("sake").is_none(),
+                "failure at persistence step {failure} resurrected the context: {outcome:?}"
+            );
+            assert!(
+                state.group("breweries").unwrap().contexts.is_empty(),
+                "boot did not reconcile group membership at step {failure}"
+            );
+            assert!(
+                !deleted_marker_path(&dir, "sake").exists(),
+                "boot did not finish the marker at step {failure}"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+
+            if past_end {
+                assert!(outcome.is_ok());
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "context deletion exceeded the sweep bound");
     }
 
     /// The dangerous interleaving: a delete leaves a marker behind
@@ -8168,6 +8299,56 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A flush has image stage/commit, sidecar stage/commit, and a WAL
+    /// truncate. Fail each in turn: publish failures stay dirty and
+    /// retry, while a truncate failure is harmless because the image
+    /// watermark makes the retained log replay-inert.
+    #[test]
+    fn every_flush_persistence_failure_retries_or_replays_cleanly() {
+        let mut exhausted = false;
+        for failure in 0..16 {
+            let dir = scratch_dir(&format!("flush-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let first = state.flush_dirty();
+            let past_end = clear_persistence_fault();
+            if !first.iter().any(|name| name == "sake") {
+                assert!(
+                    state.flush_dirty().iter().any(|name| name == "sake"),
+                    "dirty retry did not flush after failure at step {failure}"
+                );
+            }
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            assert_eq!(
+                state
+                    .read_context("sake", |context| context.association_count())
+                    .unwrap(),
+                1,
+                "flush failure at step {failure} lost or duplicated the write"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "flush exceeded the sweep bound");
     }
 
     #[test]
@@ -10709,6 +10890,99 @@ mod tests {
         assert_eq!(names, vec!["banana", "cherry"]);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn every_group_write_persistence_failure_rolls_back_and_retries() {
+        let mut exhausted = false;
+        for failure in 0..8 {
+            let dir = scratch_dir(&format!("group-write-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            state
+                .create_group(
+                    "drinks",
+                    "old".to_string(),
+                    BTreeSet::new(),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let first = state.update_group(
+                "drinks",
+                Some("new".to_string()),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+            );
+            let past_end = clear_persistence_fault();
+            if past_end {
+                assert!(first.is_ok());
+            } else {
+                assert!(matches!(first, Err(UpdateGroupError::Io(_))));
+                assert_eq!(state.group("drinks").unwrap().description, "old");
+                state
+                    .update_group(
+                        "drinks",
+                        Some("new".to_string()),
+                        BTreeSet::new(),
+                        BTreeSet::new(),
+                        BTreeSet::new(),
+                        BTreeSet::new(),
+                    )
+                    .unwrap();
+            }
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            assert_eq!(state.group("drinks").unwrap().description, "new");
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "group write exceeded the sweep bound");
+    }
+
+    #[test]
+    fn every_group_delete_persistence_failure_reconciles_at_boot() {
+        let mut exhausted = false;
+        for failure in 0..8 {
+            let dir = scratch_dir(&format!("group-delete-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            state
+                .create_group("leaf", String::new(), BTreeSet::new(), BTreeSet::new())
+                .unwrap();
+            state
+                .create_group(
+                    "parent",
+                    String::new(),
+                    BTreeSet::new(),
+                    BTreeSet::from(["leaf".to_string()]),
+                )
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let _ = state.delete_group("leaf").unwrap();
+            let past_end = clear_persistence_fault();
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            assert!(
+                !state.group("parent").unwrap().groups.contains("leaf"),
+                "failure at step {failure} left a dangling child after boot"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "group deletion exceeded the sweep bound");
     }
 
     #[test]
