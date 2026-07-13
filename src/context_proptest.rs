@@ -38,6 +38,8 @@ const LABEL_WORDS: &[&str] = &["好き", "由来", "所在地", "labelled", "lin
 const SOURCE_WORDS: &[&str] = &["a.md", "b.md", "文書1", "note.txt"];
 const CONCEPT_ALIAS_WORDS: &[&str] = &["蔵元エイリアス", "Aomine", "aliasConceptC"];
 const LABEL_ALIAS_WORDS: &[&str] = &["設立年エイリアス", "aliasLabelC"];
+const CONTEXT_NAMES: &[&str] = &["c0", "c1", "c2", "c3", "c4"];
+const GROUP_NAMES: &[&str] = &["g0", "g1", "g2", "g3", "g4"];
 
 #[derive(Clone, Debug)]
 pub(crate) struct AssocInput {
@@ -145,6 +147,70 @@ pub(crate) fn wal_op_strategy() -> impl Strategy<Value = GeneratedWalOp> {
                     object,
                 }
             ),
+    ]
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // consumed by the server target; the library test target shares this module
+pub(crate) enum GeneratedGroupOp {
+    CreateContext(&'static str),
+    DeleteContext(&'static str),
+    CreateGroup {
+        name: &'static str,
+        contexts: Vec<&'static str>,
+        groups: Vec<&'static str>,
+    },
+    UpdateGroup {
+        name: &'static str,
+        add_contexts: Vec<&'static str>,
+        remove_contexts: Vec<&'static str>,
+        add_groups: Vec<&'static str>,
+        remove_groups: Vec<&'static str>,
+    },
+    DeleteGroup(&'static str),
+}
+
+/// Generates arbitrary registry operation sequences over a small, reusable
+/// name pool. Operations deliberately need not be valid in the state where
+/// they land: properties apply the real API, discard expected refusals, and
+/// check that both accepted and rejected mutations preserve the invariants.
+#[allow(dead_code)] // consumed by the server target; the library test target shares this module
+pub(crate) fn group_op_strategy() -> impl Strategy<Value = GeneratedGroupOp> {
+    let context_set = || prop::collection::vec(prop::sample::select(CONTEXT_NAMES), 0..8);
+    let group_set = || prop::collection::vec(prop::sample::select(GROUP_NAMES), 0..8);
+
+    prop_oneof![
+        prop::sample::select(CONTEXT_NAMES).prop_map(GeneratedGroupOp::CreateContext),
+        prop::sample::select(CONTEXT_NAMES).prop_map(GeneratedGroupOp::DeleteContext),
+        (
+            prop::sample::select(GROUP_NAMES),
+            context_set(),
+            group_set(),
+        )
+            .prop_map(|(name, contexts, groups)| GeneratedGroupOp::CreateGroup {
+                name,
+                contexts,
+                groups,
+            }),
+        (
+            prop::sample::select(GROUP_NAMES),
+            context_set(),
+            context_set(),
+            group_set(),
+            group_set(),
+        )
+            .prop_map(
+                |(name, add_contexts, remove_contexts, add_groups, remove_groups)| {
+                    GeneratedGroupOp::UpdateGroup {
+                        name,
+                        add_contexts,
+                        remove_contexts,
+                        add_groups,
+                        remove_groups,
+                    }
+                },
+            ),
+        prop::sample::select(GROUP_NAMES).prop_map(GeneratedGroupOp::DeleteGroup),
     ]
 }
 

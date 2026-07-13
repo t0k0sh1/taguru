@@ -5822,8 +5822,8 @@ pub(crate) fn name_from_stem(stem: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::context_proptest::{
-        AliasInput, AssocInput, RetractionInput, config as proptest_config,
-        json_roundtrip_f64_strategy, scenario_strategy, wal_op_strategy,
+        AliasInput, AssocInput, GeneratedGroupOp, RetractionInput, config as proptest_config,
+        group_op_strategy, json_roundtrip_f64_strategy, scenario_strategy, wal_op_strategy,
     };
     use proptest::prelude::*;
 
@@ -11212,6 +11212,76 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    fn assert_live_group_invariants(state: &AppState) {
+        let contexts: BTreeSet<String> = state
+            .directory()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        let groups = state.0.groups.read();
+        assert_eq!(groups::validate_nesting(&groups), Ok(()));
+        for record in groups.values() {
+            assert!(record.contexts.len() <= groups::MAX_GROUP_MEMBERS);
+            assert!(record.groups.len() <= groups::MAX_GROUP_MEMBERS);
+            assert!(record.contexts.iter().all(|name| contexts.contains(name)));
+            assert!(record.groups.iter().all(|name| groups.contains_key(name)));
+        }
+    }
+
+    proptest! {
+        #![proptest_config(proptest_config())]
+
+        #[test]
+        fn arbitrary_group_operations_continuously_preserve_store_invariants(
+            operations in prop::collection::vec(group_op_strategy(), 1..48),
+        ) {
+            let dir = scratch_dir("group-properties");
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+
+            for operation in operations {
+                match operation {
+                    GeneratedGroupOp::CreateContext(name) => {
+                        let _ = state.create(name, ContextMeta::default());
+                    }
+                    GeneratedGroupOp::DeleteContext(name) => {
+                        let _ = state.delete(name);
+                    }
+                    GeneratedGroupOp::CreateGroup { name, contexts, groups } => {
+                        let _ = state.create_group(
+                            name,
+                            String::new(),
+                            contexts.into_iter().map(str::to_string).collect(),
+                            groups.into_iter().map(str::to_string).collect(),
+                        );
+                    }
+                    GeneratedGroupOp::UpdateGroup {
+                        name,
+                        add_contexts,
+                        remove_contexts,
+                        add_groups,
+                        remove_groups,
+                    } => {
+                        let _ = state.update_group(
+                            name,
+                            None,
+                            add_contexts.into_iter().map(str::to_string).collect(),
+                            remove_contexts.into_iter().map(str::to_string).collect(),
+                            add_groups.into_iter().map(str::to_string).collect(),
+                            remove_groups.into_iter().map(str::to_string).collect(),
+                        );
+                    }
+                    GeneratedGroupOp::DeleteGroup(name) => {
+                        let _ = state.delete_group(name);
+                    }
+                }
+                assert_live_group_invariants(&state);
+            }
+
+            drop(state);
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 
     #[cfg(unix)]
