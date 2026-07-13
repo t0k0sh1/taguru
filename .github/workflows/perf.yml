@@ -1,0 +1,77 @@
+name: Perf
+
+# Base/head comparison needs a PR; push-to-main has nothing to compare
+# against.
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  callgrind-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Single checkout, fetch-depth: 0 so both the base and head SHAs
+      # are reachable; the two runs below then `git checkout <sha>` in
+      # place. A second `actions/checkout` would `git clean -ffdx` by
+      # default and wipe the untracked target/gungraun/ baseline the
+      # first run just saved — plain `git checkout` never touches
+      # untracked files, so this stays safe.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      # A PR that adds (or temporarily removes) the `context` bench
+      # target itself has nothing on the base side to compare against —
+      # `cargo bench --bench context` fails outright rather than
+      # producing an empty baseline. Detect that case via `cargo
+      # metadata` (safe to run without a matching target; unlike
+      # `cargo bench`, it never tries to resolve one) and skip straight
+      # to an unguarded head run instead of failing the job.
+      #
+      # gungraun-runner is (re)installed here rather than once up front:
+      # the runner's benchmark protocol must match the gungraun version
+      # actually linked into *this* checkout's bench binary, and
+      # base/head can pin different versions (e.g. a PR that bumps
+      # gungraun itself). `cargo install` no-ops when the requested
+      # version is already the one installed, so this is free when they
+      # agree.
+      - name: Benchmark base branch
+        run: |
+          git checkout ${{ github.event.pull_request.base.sha }}
+          if cargo metadata --format-version=1 --no-deps \
+              | jq -e '.packages[].targets[] | select(.name == "context" and (.kind | index("bench")))' \
+              > /dev/null; then
+            version=$(cargo metadata --format-version=1 | jq -r '.packages[] | select(.name == "gungraun").version')
+            cargo install gungraun-runner --version "$version"
+            cargo bench --bench context -- --save-baseline=pr-base
+            echo "HAS_BASELINE=true" >> "$GITHUB_ENV"
+          else
+            echo "base branch has no 'context' bench target yet — skipping the baseline capture (likely the PR that adds it); head will run unguarded this once"
+            echo "HAS_BASELINE=false" >> "$GITHUB_ENV"
+          fi
+      # soft_limits in benches/context.rs fails this step (exit code 3)
+      # when Ir moves outside the configured regression margin.
+      - name: Benchmark PR head
+        run: |
+          git checkout ${{ github.event.pull_request.head.sha }}
+          version=$(cargo metadata --format-version=1 | jq -r '.packages[] | select(.name == "gungraun").version')
+          cargo install gungraun-runner --version "$version"
+          if [ "$HAS_BASELINE" = "true" ]; then
+            cargo bench --bench context -- --baseline=pr-base
+          else
+            cargo bench --bench context
+          fi

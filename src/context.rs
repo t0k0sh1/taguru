@@ -5392,4 +5392,211 @@ mod tests {
         // explore is the structural sweep and must stay unbounded.
         assert_eq!(context.explore(&["c0"], Context::UNBOUNDED).len(), 30);
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn proptest_config() -> ProptestConfig {
+            let cases = std::env::var("PROPTEST_CASES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32);
+            ProptestConfig {
+                cases,
+                ..ProptestConfig::default()
+            }
+        }
+
+        const CONCEPT_WORDS: &[&str] = &[
+            "青嶺酒造",
+            "杜氏",
+            "南部杜氏",
+            "山田錦",
+            "高瀬",
+            "state",
+            "index",
+            "boot",
+        ];
+        const LABEL_WORDS: &[&str] = &["好き", "由来", "所在地", "labelled", "linked"];
+        const SOURCE_WORDS: &[&str] = &["a.md", "b.md", "文書1", "note.txt"];
+        const CONCEPT_ALIAS_WORDS: &[&str] = &["蔵元エイリアス", "Aomine", "aliasConceptC"];
+        const LABEL_ALIAS_WORDS: &[&str] = &["設立年エイリアス", "aliasLabelC"];
+
+        #[derive(Clone, Debug)]
+        struct AssocInput {
+            subject: &'static str,
+            label: &'static str,
+            object: &'static str,
+            weight: f64,
+            source: Option<&'static str>,
+            paragraph: Option<u32>,
+        }
+
+        fn assoc_input_strategy() -> impl Strategy<Value = AssocInput> {
+            (
+                prop::sample::select(CONCEPT_WORDS),
+                prop::sample::select(LABEL_WORDS),
+                prop::sample::select(CONCEPT_WORDS),
+                -1.0e6f64..1.0e6f64,
+                prop::option::of(prop::sample::select(SOURCE_WORDS)),
+                prop::option::of(0u32..8),
+            )
+                .prop_map(|(subject, label, object, weight, source, paragraph)| {
+                    AssocInput {
+                        subject,
+                        label,
+                        object,
+                        weight,
+                        source,
+                        paragraph,
+                    }
+                })
+        }
+
+        #[derive(Clone, Debug)]
+        enum AliasInput {
+            Concept {
+                alias: &'static str,
+                canonical: &'static str,
+            },
+            Label {
+                alias: &'static str,
+                canonical: &'static str,
+            },
+        }
+
+        /// Generates a batch of association ops, then alias ops whose
+        /// `canonical` is always drawn from a name that batch actually
+        /// interns — so `add_concept_alias`/`add_label_alias` only ever
+        /// fail with `Conflict` (an alias spelling reused across two ops
+        /// in the same batch), never `UnknownCanonical`.
+        fn scenario_strategy() -> impl Strategy<Value = (Vec<AssocInput>, Vec<AliasInput>)> {
+            prop::collection::vec(assoc_input_strategy(), 1..12).prop_flat_map(|assoc_ops| {
+                let mut concept_names: Vec<&'static str> = assoc_ops
+                    .iter()
+                    .flat_map(|op| [op.subject, op.object])
+                    .collect();
+                concept_names.sort_unstable();
+                concept_names.dedup();
+                let mut label_names: Vec<&'static str> =
+                    assoc_ops.iter().map(|op| op.label).collect();
+                label_names.sort_unstable();
+                label_names.dedup();
+
+                let alias_op_strategy = prop_oneof![
+                    (
+                        prop::sample::select(CONCEPT_ALIAS_WORDS),
+                        prop::sample::select(concept_names),
+                    )
+                        .prop_map(|(alias, canonical)| AliasInput::Concept { alias, canonical }),
+                    (
+                        prop::sample::select(LABEL_ALIAS_WORDS),
+                        prop::sample::select(label_names),
+                    )
+                        .prop_map(|(alias, canonical)| AliasInput::Label { alias, canonical }),
+                ];
+
+                (
+                    Just(assoc_ops),
+                    prop::collection::vec(alias_op_strategy, 0..6),
+                )
+            })
+        }
+
+        /// Applies a scenario the way a caller would: sourced/unsourced
+        /// associations through the real API, then alias registrations
+        /// with their `Result` discarded — a `Conflict` from a repeated
+        /// alias spelling must leave the context unchanged, and that is
+        /// exactly what the round trip below is checking for, not just
+        /// the happy path.
+        fn build_context(assoc_ops: &[AssocInput], alias_ops: &[AliasInput]) -> Context {
+            let mut context = Context::default();
+            for op in assoc_ops {
+                match op.source {
+                    Some(source) => context
+                        .associate_from(
+                            op.subject,
+                            op.label,
+                            op.object,
+                            op.weight,
+                            source,
+                            op.paragraph,
+                        )
+                        .unwrap(),
+                    None => context
+                        .associate(op.subject, op.label, op.object, op.weight)
+                        .unwrap(),
+                }
+            }
+            for alias_op in alias_ops {
+                match alias_op {
+                    AliasInput::Concept { alias, canonical } => {
+                        let _ = context.add_concept_alias(*alias, canonical);
+                    }
+                    AliasInput::Label { alias, canonical } => {
+                        let _ = context.add_label_alias(*alias, canonical);
+                    }
+                }
+            }
+            context
+        }
+
+        proptest! {
+            #![proptest_config(proptest_config())]
+
+            #[test]
+            fn context_round_trips_through_bytes(
+                (assoc_ops, alias_ops) in scenario_strategy(),
+                applied_seq in any::<u64>(),
+            ) {
+                let mut context = build_context(&assoc_ops, &alias_ops);
+                context.set_applied_seq(applied_seq);
+
+                let restored = Context::from_bytes(&context.to_bytes()).unwrap();
+                prop_assert_eq!(
+                    restored.query(None, None, None),
+                    context.query(None, None, None)
+                );
+                prop_assert_eq!(restored.concept_aliases(), context.concept_aliases());
+                prop_assert_eq!(restored.label_aliases(), context.label_aliases());
+                prop_assert_eq!(restored.applied_seq(), context.applied_seq());
+            }
+
+            #[test]
+            fn from_bytes_never_panics_on_arbitrary_bytes(
+                bytes in prop::collection::vec(any::<u8>(), 0..512),
+            ) {
+                let _ = Context::from_bytes(&bytes);
+            }
+
+            #[test]
+            fn from_bytes_never_panics_on_mutated_v6_bytes(
+                (assoc_ops, alias_ops) in scenario_strategy(),
+                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..24),
+            ) {
+                let context = build_context(&assoc_ops, &alias_ops);
+                let mut bytes = context.to_bytes();
+                for (pick, value) in mutations {
+                    *pick.get_mut(&mut bytes) = value;
+                }
+                let mutated = resealed(bytes);
+                let _ = Context::from_bytes(&mutated);
+            }
+
+            #[test]
+            fn from_bytes_never_panics_on_mutated_legacy_bytes(
+                (assoc_ops, alias_ops) in scenario_strategy(),
+                version in 1u32..=5,
+                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..24),
+            ) {
+                let context = build_context(&assoc_ops, &alias_ops);
+                let mut bytes = context.to_bytes_as_version(version);
+                for (pick, value) in mutations {
+                    *pick.get_mut(&mut bytes) = value;
+                }
+                let _ = Context::from_bytes(&bytes);
+            }
+        }
+    }
 }

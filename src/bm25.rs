@@ -1030,4 +1030,113 @@ mod tests {
         assert_eq!(hits[1].0, "b-doc");
         assert_eq!(hits[0].3, hits[1].3);
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn proptest_config() -> ProptestConfig {
+            let cases = std::env::var("PROPTEST_CASES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32);
+            ProptestConfig {
+                cases,
+                ..ProptestConfig::default()
+            }
+        }
+
+        fn source_name_strategy() -> impl Strategy<Value = String> {
+            "[a-z]{1,8}\\.md"
+        }
+
+        /// A small vocabulary mixing Japanese and ASCII tokens, so
+        /// generated text exercises the same tokenizer paths as the
+        /// hand-written corpus without depending on proptest's unicode
+        /// string-regex support.
+        fn word_strategy() -> impl Strategy<Value = &'static str> {
+            prop_oneof![
+                Just("蔵元"),
+                Just("山田錦"),
+                Just("精米歩合"),
+                Just("杜氏"),
+                Just("南部"),
+                Just("state"),
+                Just("impl"),
+                Just("boot"),
+                Just("query"),
+                Just("index"),
+            ]
+        }
+
+        fn text_strategy() -> impl Strategy<Value = String> {
+            prop::collection::vec(
+                prop::collection::vec(word_strategy(), 0..8).prop_map(|words| words.join("")),
+                0..5,
+            )
+            .prop_map(|paragraphs| paragraphs.join("\n\n"))
+        }
+
+        fn corpus_strategy() -> impl Strategy<Value = Vec<(String, Arc<PassageRecord>)>> {
+            prop::collection::vec((source_name_strategy(), text_strategy()), 0..6).prop_map(
+                |entries| {
+                    entries
+                        .into_iter()
+                        .map(|(source, text)| (source, record(&text)))
+                        .collect()
+                },
+            )
+        }
+
+        proptest! {
+            #![proptest_config(proptest_config())]
+
+            /// `to_bytes` is documented as canonical, so a fresh decode must
+            /// re-encode identically — for arbitrary corpora, including ones
+            /// with tombstones left behind by removals.
+            #[test]
+            fn index_round_trips_through_bytes_for_arbitrary_corpora(
+                records in corpus_strategy(),
+                removals in prop::collection::vec(any::<prop::sample::Index>(), 0..4),
+            ) {
+                let mut index = Bm25Index::build(&records);
+                if !records.is_empty() {
+                    for pick in removals {
+                        let i = pick.index(records.len());
+                        index.remove_source(&records[i].0);
+                    }
+                }
+
+                let bytes = index.to_bytes();
+                let reborn = Bm25Index::from_bytes(&bytes)
+                    .expect("a freshly serialized index must always decode");
+                prop_assert_eq!(bytes, reborn.to_bytes());
+                prop_assert_eq!(reborn.dead_count, 0, "saving IS a compaction");
+            }
+
+            /// However malformed, `from_bytes` must reject rather than panic.
+            #[test]
+            fn from_bytes_never_panics_on_arbitrary_bytes(
+                bytes in prop::collection::vec(any::<u8>(), 0..512),
+            ) {
+                let _ = Bm25Index::from_bytes(&bytes);
+            }
+
+            /// Single-byte mutations of an otherwise-valid image are the
+            /// realistic corruption case (bit flips, truncated writes) —
+            /// still must never panic.
+            #[test]
+            fn from_bytes_never_panics_on_mutated_valid_bytes(
+                records in corpus_strategy(),
+                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..16),
+            ) {
+                let index = Bm25Index::build(&records);
+                let mut bytes = index.to_bytes();
+                for (pick, value) in mutations {
+                    *pick.get_mut(&mut bytes) = value;
+                }
+                let _ = Bm25Index::from_bytes(&bytes);
+            }
+        }
+    }
 }

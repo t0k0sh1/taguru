@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 /// One graph mutation, in the same vocabulary the `Context` write API
 /// speaks — replay is just calling the same function again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum WalOp {
     Associate(crate::registry::AssocOp),
@@ -77,25 +78,54 @@ struct WalRecord<Op> {
     /// CRC-32C of this record's own serialization WITHOUT this field —
     /// the bit-rot check structural parsing cannot give (a flipped byte
     /// that stays valid JSON replays as truth). Always the record's
-    /// LAST field, spliced in by [`append_batch`]; replay re-serializes
-    /// the parsed record crc-less and compares. The record shape stays
-    /// readable by a pre-checksum binary — its parser routes the
-    /// unknown field into the flattened op, where serde ignores it —
-    /// and records WITHOUT the field (written by one) replay unchecked,
-    /// so the format change is additive in both directions.
+    /// LAST field, spliced in by [`append_batch`]; replay strips this
+    /// suffix back off the raw line and compares (see
+    /// [`canonical_bytes_of_line`] — re-deriving the bytes by
+    /// re-encoding the parsed op is NOT safe, see its doc comment). The
+    /// record shape stays readable by a pre-checksum binary — its
+    /// parser routes the unknown field into the flattened op, where
+    /// serde ignores it — and records WITHOUT the field (written by
+    /// one) replay unchecked, so the format change is additive in both
+    /// directions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     crc: Option<u32>,
 }
 
-/// One record's canonical crc-less bytes — the exact serialization the
-/// checksum covers, shared by the writer (which splices the field onto
-/// it) and replay (which recomputes it from the parsed record). The op
-/// vocabularies keep this reconstruction byte-exact: strings, integers,
-/// ryu-printed floats, and Vecs all round-trip through serde_json to
-/// the same bytes; none of them may grow a map field (iteration order
-/// would differ between write and verify and fail every record).
+/// One record's canonical crc-less bytes, as [`append_batch`] first
+/// produces them and checksums; the writer then splices `,"crc":N}` onto
+/// exactly this. Not used to reconstruct those bytes on the read side —
+/// see [`canonical_bytes_of_line`] for why re-encoding the parsed op
+/// cannot stand in for the original serialization.
 fn canonical_record_bytes<Op: Serialize>(seq: u64, op: Op) -> serde_json::Result<Vec<u8>> {
     serde_json::to_vec(&WalRecord { seq, op, crc: None })
+}
+
+/// Recovers a checksummed record's canonical crc-less bytes straight
+/// from the line that was actually read off disk, by stripping the
+/// `,"crc":N}` suffix [`append_batch`] spliced on and restoring the
+/// closing brace — byte-for-byte identical to what the writer
+/// checksummed, no matter what.
+///
+/// This does NOT re-derive the bytes by parsing the record and
+/// re-encoding it through [`canonical_record_bytes`] — that would be
+/// unsound: serde_json's float formatter does not always round-trip
+/// bit-exact (a handful of `f64` values re-serialize one ULP off from
+/// how they were first written), which would fail the checksum of a
+/// perfectly intact record. Working from the original bytes sidesteps
+/// the question entirely.
+///
+/// `None` only if `crc` was somehow absent from the line despite the
+/// record parsing with `crc: Some(_)` moments earlier — a format
+/// invariant violation (the field is always spliced in last), not
+/// something a checksum could have caught anyway.
+fn canonical_bytes_of_line(line: &[u8]) -> Option<Vec<u8>> {
+    const CRC_FIELD: &[u8] = b",\"crc\":";
+    let pos = line
+        .windows(CRC_FIELD.len())
+        .rposition(|window| window == CRC_FIELD)?;
+    let mut canonical = line[..pos].to_vec();
+    canonical.push(b'}');
+    Some(canonical)
 }
 
 /// Test-only fault injection: arms the calling thread so that, after
@@ -378,8 +408,17 @@ fn parse_log<Op: DeserializeOwned + Serialize>(
             // eating this file — the one thing structural parsing
             // cannot notice and the whole reason the field exists.
             Some(stored) => {
-                let canonical =
-                    canonical_record_bytes(record.seq, &record.op).map_err(io::Error::from)?;
+                let canonical = canonical_bytes_of_line(line).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "corrupt WAL record at {} line {}: parsed a crc field but \
+                             could not find it in the raw line",
+                            path.display(),
+                            index + 1
+                        ),
+                    )
+                })?;
                 let computed = crate::crc32c::crc32c(&canonical);
                 if computed != stored {
                     return Err(io::Error::new(
@@ -508,8 +547,7 @@ mod tests {
             let canonical = canonical_record_bytes(record.seq, &record.op).unwrap();
             assert_eq!(stored, crate::crc32c::crc32c(&canonical));
             // ...and the splice is byte-identical to letting serde
-            // serialize `crc: Some(..)` itself — the property replay's
-            // re-serialization check rests on.
+            // serialize `crc: Some(..)` itself.
             let full = serde_json::to_vec(&WalRecord {
                 seq: record.seq,
                 op: &record.op,
@@ -542,6 +580,52 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("checksum mismatch"), "{error}");
         assert!(error.to_string().contains("line 1"), "{error}");
+    }
+
+    #[test]
+    fn a_weight_serde_json_cannot_parse_bit_exact_still_replays_clean() {
+        // serde_json (1.0.150, pinned) mis-rounds this exact literal by
+        // 1 ULP on the PARSE side (`f64::from_str` gets it right —
+        // confirmed as a serde_json bug, not this crate's). Before
+        // `canonical_bytes_of_line` existed, replay re-derived its
+        // checksum input by re-encoding the freshly reparsed op, so
+        // that drift changed the bytes being hashed and a record that
+        // landed on disk untouched failed its own checksum — a false
+        // "corrupt" on data nothing had corrupted. Pinning the exact
+        // value here catches a regression in either direction: this
+        // crate reintroducing a re-encode, or (harmlessly) serde_json
+        // fixing the parse bug and no longer reproducing it.
+        const ULP_DRIFT_WEIGHT: f64 = -434820.72978759644;
+        assert_ne!(
+            serde_json::from_str::<f64>(&serde_json::to_string(&ULP_DRIFT_WEIGHT).unwrap())
+                .unwrap(),
+            ULP_DRIFT_WEIGHT,
+            "this test's premise is a value serde_json does not parse back bit-exact; \
+             if this now holds, serde_json fixed the bug this test guards against"
+        );
+
+        let path = scratch_wal("crc-serde-json-ulp");
+        append_batch(
+            &path,
+            1,
+            &[WalOp::Associate(AssocOp {
+                subject: "りんご".to_string(),
+                label: "りんご".to_string(),
+                object: "りんご".to_string(),
+                weight: ULP_DRIFT_WEIGHT,
+                source: None,
+                paragraph: None,
+            })],
+        )
+        .unwrap();
+
+        let (ops, top) = replay::<WalOp>(&path, 0).unwrap();
+        assert_eq!(top, 1);
+        assert_eq!(
+            ops.len(),
+            1,
+            "an intact record must not fail its own checksum"
+        );
     }
 
     #[test]
@@ -737,5 +821,153 @@ mod tests {
             "the rewound tail must not survive"
         );
         assert_eq!(top, 1);
+    }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn proptest_config() -> ProptestConfig {
+            let cases = std::env::var("PROPTEST_CASES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32);
+            ProptestConfig {
+                cases,
+                ..ProptestConfig::default()
+            }
+        }
+
+        fn text_strategy() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just("りんご"),
+                Just("バナナ"),
+                Just("好き"),
+                Just("嫌い"),
+                Just("alice"),
+                Just("bob"),
+                Just("docs/a.md"),
+                Just("docs/b.md"),
+            ]
+            .prop_map(|s| s.to_string())
+        }
+
+        /// JSON has no NaN/Infinity literal, so a real record can never
+        /// carry one — restricting to finite values keeps the generator
+        /// inside the format's actual domain.
+        ///
+        /// Also filtered to values `serde_json` itself parses back
+        /// bit-exact: the pinned `serde_json` (1.0.150) mis-rounds a
+        /// minority of 17-significant-digit decimals by 1 ULP on the
+        /// PARSE side (confirmed against `f64::from_str`, which gets
+        /// them right). That no longer affects `parse_log`'s CHECKSUM
+        /// (which now verifies the raw line straight off disk — see
+        /// `canonical_bytes_of_line` — rather than re-encoding the
+        /// parsed op), but the OP VALUE this test asserts equality on
+        /// is still whatever `serde_json::from_slice` handed back, so a
+        /// third-party parse rounding difference would still fail this
+        /// property. Filtering it out keeps this property about
+        /// `parse_log`'s own plumbing rather than `serde_json`'s float
+        /// parser.
+        fn finite_weight_strategy() -> impl Strategy<Value = f64> {
+            (-1.0e6f64..1.0e6f64).prop_filter("value must survive a JSON round trip", |&w| {
+                serde_json::from_str::<f64>(&serde_json::to_string(&w).unwrap()).unwrap() == w
+            })
+        }
+
+        fn assoc_op_strategy() -> impl Strategy<Value = AssocOp> {
+            (
+                text_strategy(),
+                text_strategy(),
+                text_strategy(),
+                finite_weight_strategy(),
+                prop::option::of(text_strategy()),
+                prop::option::of(any::<u32>()),
+            )
+                .prop_map(|(subject, label, object, weight, source, paragraph)| {
+                    AssocOp {
+                        subject,
+                        label,
+                        object,
+                        weight,
+                        source,
+                        paragraph,
+                    }
+                })
+        }
+
+        fn wal_op_strategy() -> impl Strategy<Value = WalOp> {
+            prop_oneof![
+                assoc_op_strategy().prop_map(WalOp::Associate),
+                (text_strategy(), text_strategy())
+                    .prop_map(|(alias, canonical)| WalOp::AliasConcept { alias, canonical }),
+                (text_strategy(), text_strategy())
+                    .prop_map(|(alias, canonical)| WalOp::AliasLabel { alias, canonical }),
+                text_strategy().prop_map(|alias| WalOp::UnaliasConcept { alias }),
+                text_strategy().prop_map(|alias| WalOp::UnaliasLabel { alias }),
+                text_strategy().prop_map(|source| WalOp::RetractSource { source }),
+                (text_strategy(), text_strategy(), text_strategy()).prop_map(
+                    |(subject, label, object)| WalOp::RetractAssociation {
+                        subject,
+                        label,
+                        object,
+                    }
+                ),
+            ]
+        }
+
+        /// The disk-free encode side of what `append_batch` writes: same
+        /// canonical-bytes-then-splice-crc shape, built in memory so the
+        /// property stays disk-free too.
+        fn encode_batch(first_seq: u64, ops: &[WalOp]) -> Vec<u8> {
+            let mut buffer = Vec::new();
+            for (offset, op) in ops.iter().enumerate() {
+                let record = canonical_record_bytes(first_seq + offset as u64, op).unwrap();
+                let crc = crate::crc32c::crc32c(&record);
+                buffer.extend_from_slice(&record[..record.len() - 1]);
+                buffer.extend_from_slice(format!(",\"crc\":{crc}}}\n").as_bytes());
+            }
+            buffer
+        }
+
+        proptest! {
+            #![proptest_config(proptest_config())]
+
+            #[test]
+            fn parse_log_round_trips_a_clean_batch(
+                ops in prop::collection::vec(wal_op_strategy(), 0..8),
+                first_seq in 1u64..1000,
+            ) {
+                let bytes = encode_batch(first_seq, &ops);
+                let (parsed, top, torn, unchecked) =
+                    parse_log::<WalOp>(Path::new("scratch.wal.jsonl"), &bytes, 0).unwrap();
+                prop_assert_eq!(parsed, ops.clone());
+                prop_assert_eq!(unchecked, 0);
+                prop_assert!(torn.is_none());
+                let expected_top = ops.len() as u64 + first_seq - 1;
+                prop_assert_eq!(top, if ops.is_empty() { 0 } else { expected_top });
+            }
+
+            #[test]
+            fn parse_log_never_panics_on_arbitrary_bytes(
+                bytes in prop::collection::vec(any::<u8>(), 0..512),
+                watermark in any::<u64>(),
+            ) {
+                let _ = parse_log::<WalOp>(Path::new("scratch.wal.jsonl"), &bytes, watermark);
+            }
+
+            #[test]
+            fn parse_log_never_panics_on_mutated_valid_bytes(
+                ops in prop::collection::vec(wal_op_strategy(), 1..8),
+                first_seq in 1u64..1000,
+                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..16),
+            ) {
+                let mut bytes = encode_batch(first_seq, &ops);
+                for (pick, value) in mutations {
+                    *pick.get_mut(&mut bytes) = value;
+                }
+                let _ = parse_log::<WalOp>(Path::new("scratch.wal.jsonl"), &bytes, 0);
+            }
+        }
     }
 }

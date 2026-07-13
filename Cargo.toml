@@ -44,3 +44,25 @@ url = "2.5"
 # std::sync locks poison on panic, bricking the whole registry for the
 # rest of the process; parking_lot's don't.
 parking_lot = "0.12"
+
+[dev-dependencies]
+# Property-based tests for the hand-rolled binary formats (context
+# images, WAL records, the BM25/embedding sidecars, passage
+# snapshots): round-trip + fuzzed-corruption coverage the hand-picked
+# byte-offset tests can't give on their own. Dev-only — never ships in
+# either binary.
+proptest = "1.11.0"
+# Instruction-count regression benchmarks for Context's public API.
+# iai-callgrind was renamed gungraun at 0.17.0; the old name is frozen
+# at 0.16.1 with no further security fixes, so this targets the
+# maintained successor under its new name.
+gungraun = "0.19.4"
+
+[[bench]]
+name = "context"
+harness = false
+
+# Callgrind needs debug symbols to attribute instructions to source
+# locations.
+[profile.bench]
+debug = true

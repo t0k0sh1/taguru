@@ -206,6 +206,14 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   gracefully (flush + usage sweep), and health-checks itself
   (`taguru health` — there is no curl on scratch).
   `docker build -t taguru .` builds the same image locally.
+- **Linux is what's tested.** CI runs on `ubuntu-latest` and
+  `ubuntu-24.04-arm` only, matching what's released — crates.io source
+  and the Linux container image above, no Windows binaries. A few call
+  sites are unix-specific (owner-only file creation, a durability
+  fsync, SIGTERM-triggered graceful shutdown) and fall back to
+  weaker-but-working behavior elsewhere (`#[cfg(not(unix))]`); macOS
+  takes the unix code path but isn't covered by CI. Details:
+  [CONTRIBUTING.md](CONTRIBUTING.md#platform-support).
 - **One writer per data directory.** The directory admits one taguru
   process at a time (serve or import) via an advisory lock — dependable
   on local disks, *not* on NFS/EFS. Deploys are stop-then-start;

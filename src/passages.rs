@@ -1385,4 +1385,145 @@ mod tests {
             "past the end is None, not a panic"
         );
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn proptest_config() -> ProptestConfig {
+            let cases = std::env::var("PROPTEST_CASES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32);
+            ProptestConfig {
+                cases,
+                ..ProptestConfig::default()
+            }
+        }
+
+        fn word_strategy() -> impl Strategy<Value = &'static str> {
+            prop_oneof![
+                Just("蔵元"),
+                Just("山田錦"),
+                Just("精米歩合"),
+                Just("杜氏"),
+                Just("南部"),
+                Just("state"),
+                Just("impl"),
+                Just("boot"),
+                Just("query"),
+                Just("index"),
+            ]
+        }
+
+        fn text_strategy() -> impl Strategy<Value = String> {
+            prop::collection::vec(
+                prop::collection::vec(word_strategy(), 1..8).prop_map(|words| words.join("")),
+                1..5,
+            )
+            .prop_map(|paragraphs| paragraphs.join("\n\n"))
+        }
+
+        fn source_name_strategy() -> impl Strategy<Value = String> {
+            "[a-z]{1,8}\\.md"
+        }
+
+        /// (paragraph, text) markers for `questions`/`sections`. The
+        /// paragraph half is deliberately wider than any generated
+        /// text's actual paragraph count, so `PassageRecord::new`
+        /// exercises both the keep and the silent-drop path for
+        /// out-of-range markers — the same filtering the live store
+        /// and WAL replay both depend on.
+        fn marker_strategy() -> impl Strategy<Value = (u32, String)> {
+            (0u32..10, word_strategy().prop_map(str::to_string))
+        }
+
+        fn record_strategy() -> impl Strategy<Value = Arc<PassageRecord>> {
+            (
+                text_strategy(),
+                prop::collection::vec(marker_strategy(), 0..4),
+                prop::collection::vec(marker_strategy(), 0..4),
+            )
+                .prop_map(|(text, questions, sections)| {
+                    PassageRecord::new(Arc::from(text), questions, sections).0
+                })
+        }
+
+        fn corpus_strategy() -> impl Strategy<Value = BTreeMap<String, Arc<PassageRecord>>> {
+            prop::collection::vec((source_name_strategy(), record_strategy()), 0..6)
+                .prop_map(|entries| entries.into_iter().collect())
+        }
+
+        /// Recomputes the CRC-32C footer after a mutation tampers with
+        /// an S4 snapshot's body — same discipline as `Context`'s
+        /// `resealed` test helper (context.rs), and for the same
+        /// reason: without resealing, every mutation stops at the
+        /// checksum and the structural parser underneath goes
+        /// unexercised.
+        fn resealed(mut bytes: Vec<u8>) -> Vec<u8> {
+            let body = bytes.len() - 4;
+            let crc = crate::crc32c::crc32c(&bytes[..body]);
+            bytes[body..].copy_from_slice(&crc.to_le_bytes());
+            bytes
+        }
+
+        proptest! {
+            #![proptest_config(proptest_config())]
+
+            #[test]
+            fn snapshot_round_trips_through_bytes(
+                sources in corpus_strategy(),
+                watermark in any::<u64>(),
+            ) {
+                let bytes = snapshot_to_bytes(&sources, watermark);
+                let (restored, restored_watermark) = snapshot_from_bytes(&bytes)
+                    .expect("a freshly serialized snapshot must always decode");
+                prop_assert_eq!(restored_watermark, watermark);
+                prop_assert_eq!(restored.len(), sources.len());
+                for (source, original) in &sources {
+                    let record = restored.get(source).expect("every source must survive");
+                    prop_assert_eq!(record.text.as_ref(), original.text.as_ref());
+                    prop_assert_eq!(&record.paragraphs, &original.paragraphs);
+                    prop_assert_eq!(&record.questions, &original.questions);
+                    prop_assert_eq!(&record.sections, &original.sections);
+                }
+            }
+
+            #[test]
+            fn snapshot_from_bytes_never_panics_on_arbitrary_bytes(
+                bytes in prop::collection::vec(any::<u8>(), 0..512),
+            ) {
+                let _ = snapshot_from_bytes(&bytes);
+            }
+
+            #[test]
+            fn snapshot_from_bytes_never_panics_on_mutated_s4_bytes(
+                sources in corpus_strategy(),
+                watermark in any::<u64>(),
+                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..24),
+            ) {
+                let mut bytes = snapshot_to_bytes(&sources, watermark);
+                for (pick, value) in mutations {
+                    *pick.get_mut(&mut bytes) = value;
+                }
+                let mutated = resealed(bytes);
+                let _ = snapshot_from_bytes(&mutated);
+            }
+
+            #[test]
+            fn snapshot_from_bytes_never_panics_on_mutated_s3_bytes(
+                sources in corpus_strategy(),
+                watermark in any::<u64>(),
+                mutations in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..24),
+            ) {
+                let sealed = snapshot_to_bytes(&sources, watermark);
+                let mut bytes = sealed[..sealed.len() - 4].to_vec();
+                bytes[..8].copy_from_slice(S3_SNAPSHOT_MAGIC);
+                for (pick, value) in mutations {
+                    *pick.get_mut(&mut bytes) = value;
+                }
+                let _ = snapshot_from_bytes(&bytes);
+            }
+        }
+    }
 }
