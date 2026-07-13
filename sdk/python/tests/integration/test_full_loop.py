@@ -87,9 +87,18 @@ def test_context_lifecycle(client: Taguru, fresh_name: str) -> None:
     names = [e.name for e in client.contexts.iter(limit=2)]
     assert fresh_name in names
 
-    assert client.contexts.delete(fresh_name)
-    with pytest.raises(NotFoundError) as missing:
+    renamed = f"{fresh_name}-renamed"
+    assert client.contexts.rename(fresh_name, renamed)
+    with pytest.raises(NotFoundError) as renamed_away:
         client.contexts.get(fresh_name)
+    assert renamed_away.value.code == "no_context"
+    entry = client.contexts.get(renamed)
+    assert entry.description == "d2"
+    assert entry.dice_floor == 0.25
+
+    assert client.contexts.delete(renamed)
+    with pytest.raises(NotFoundError) as missing:
+        client.contexts.get(renamed)
     assert missing.value.code == "no_context"
 
 

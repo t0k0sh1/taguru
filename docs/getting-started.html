@@ -114,6 +114,8 @@ taguru version</code></pre>
           <tr><td>TAGURU_PUBLIC_URL</td><td>—</td><td>Public base URL. Setting it enables OAuth on remote MCP (<code>/mcp</code>), which lets claude.ai custom connectors attach</td></tr>
           <tr><td>TAGURU_RATE_LIMIT_PER_MIN</td><td>0 (off)</td><td>Per-key request budget per minute. Enable it before leaving localhost</td></tr>
           <tr><td>TAGURU_REQUEST_TIMEOUT_SECS</td><td>30</td><td>Time budget per request. Raise to 60+ once an embedding provider is configured</td></tr>
+          <tr><td>TAGURU_MAX_CONCURRENT_REQUESTS</td><td>256</td><td>Global in-flight ceiling. Excess requests are shed immediately with 503 + <code>Retry-After</code>; <code>0</code> disables</td></tr>
+          <tr><td>TAGURU_MAX_CONCURRENT_HEAVY_OPS</td><td>2</td><td>Shared ceiling for vocabulary audits and context compactions. Excess calls are shed immediately with 503 + <code>Retry-After</code>; <code>0</code> disables</td></tr>
         </tbody>
       </table>
     </div>
@@ -140,6 +142,16 @@ curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application
       carrying <code>strength</code> (ranking within this call), <code>path</code> (how it was
       reached), and the <code>attributions</code> of its sources. The full endpoint list and the
       playbook are distributed as-is by the running server at <code>GET /protocol</code>.
+    </p>
+    <p class="note warn">
+      The one-fact request above is only the smallest example. In an ingest loop, collect one
+      document's facts and send them in one <code>/associations</code> request (up to 10,000
+      associations): every request pays for a durable write and stalls that context's readers
+      while its fsync lands, making single-fact calls roughly two orders of magnitude more
+      expensive per association than batches. More concurrency does not help one context — its
+      writes serialize by design — though different contexts write in parallel. For a corpus or
+      migration, use <code>POST /import</code> on a running server or <code>taguru import</code>
+      offline instead.
     </p>
   </section>
 

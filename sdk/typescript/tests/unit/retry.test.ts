@@ -88,6 +88,20 @@ describe("retry policy", () => {
     expect(calls()).toBe(1);
   });
 
+  it("never retries rename after an ambiguous failure", async () => {
+    const { handler, calls } = flaky(1, midFlight);
+    const client = stubClient(handler);
+    await expect(client.contexts.rename("sake", "shochu")).rejects.toBeInstanceOf(TransportError);
+    expect(calls()).toBe(1);
+
+    const group = flaky(1, midFlight);
+    const groupClient = stubClient(group.handler);
+    await expect(groupClient.groups.rename("kura", "gura")).rejects.toBeInstanceOf(
+      TransportError,
+    );
+    expect(group.calls()).toBe(1);
+  });
+
   it("retries: 0 disables retrying entirely", async () => {
     const { handler, calls } = flaky(1, () => errBody(429, "budget", { "retry-after": "0" }));
     const client = stubClient(handler, { retries: 0 });

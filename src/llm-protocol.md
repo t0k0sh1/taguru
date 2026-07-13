@@ -120,7 +120,14 @@ answers back into prose are your job.
    - Make implicit membership explicit (whose 杜氏 is 高瀬? — add the
      edge).
 2. `POST /contexts/{name}/associations` in batches — one document per
-   request, a `source` on every element.
+   request, up to 10,000 associations, with a `source` on every element.
+   Split a larger document across requests; for corpus-scale ingestion,
+   use `POST /import` or `taguru import` instead.
+   A single-association request still pays for a full durable write —
+   roughly two orders of magnitude more per association than a batched
+   request — and stalls that context's readers while its fsync lands.
+   Batching, not concurrency, is the lever: writes to one context
+   serialize by design; writes to different contexts run in parallel.
 3. Register originals: `POST /contexts/{name}/sources` (source id →
    passage). Store the document's full text as-is: the server splits it
    into paragraphs internally (blank-line boundaries) and searches at
@@ -334,7 +341,9 @@ resend) / `unauthorized` / `forbidden` / `no_context` / `no_source` /
 `no_paragraph` / `no_group` / `unknown_path` / `method_not_allowed` / `timeout` /
 `already_exists` / `conflict` / `payload_too_large` / `rate_limited` /
 `internal` / `embeddings_unconfigured` / `embeddings_failed` /
-`overloaded` (shed at the in-flight ceiling; wait `Retry-After`) /
+`overloaded` (shed at the global in-flight ceiling or the shared
+heavy-operation ceiling for vocabulary audits/context compactions;
+wait `Retry-After`) /
 `unhealthy` (the write path is degraded) / `maintenance` (a
 `POST /maintenance/compact` sweep is running — wait `Retry-After` and
 retry) / `storage_full`.

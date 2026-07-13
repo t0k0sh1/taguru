@@ -36,8 +36,8 @@ classes:
     close: {}
 
   Contexts:
-    list: { route: "GET /contexts", options: [limit, after] }
-    iter: { route: "GET /contexts", options: [limit] }
+    list: { route: "GET /contexts", options: [limit, after, pinned] }
+    iter: { route: "GET /contexts", options: [limit, pinned] }
     get: { route: "GET /contexts/{name}", args: [name] }
     exists: { route: "GET /contexts/{name}", args: [name] }
     create:
@@ -49,6 +49,7 @@ classes:
       args: [name]
       options: [description, pinned, dice_floor, semantic_floor]
     delete: { route: "DELETE /contexts/{name}", args: [name] }
+    rename: { route: "POST /contexts/{name}/rename", args: [name, to] }
 
   Groups:
     list: { route: "GET /groups", options: [limit, after] }
@@ -64,6 +65,7 @@ classes:
       args: [name]
       options: [description, add_contexts, remove_contexts, add_groups, remove_groups]
     delete: { route: "DELETE /groups/{name}", args: [name] }
+    rename: { route: "POST /groups/{name}/rename", args: [name, to] }
     export: { route: "GET /groups/{name}/export", args: [name] }
 
   Context:
@@ -95,8 +97,8 @@ classes:
       route: "POST /contexts/{name}/unreachable_from"
       args: [origins]
       options: [limit, after]
-    list_labels: { route: "GET /contexts/{name}/labels", options: [limit, after] }
-    iter_labels: { route: "GET /contexts/{name}/labels", options: [limit] }
+    list_labels: { route: "GET /contexts/{name}/labels", options: [limit, after, prefix] }
+    iter_labels: { route: "GET /contexts/{name}/labels", options: [limit, prefix] }
     add_associations:
       route: "POST /contexts/{name}/associations"
       args: [associations]
@@ -117,11 +119,11 @@ classes:
       args: [query]
       options: [limit]
     retract_source: { route: "POST /contexts/{name}/sources/retract", args: [source] }
-    list_sources: { route: "GET /contexts/{name}/sources", options: [limit, after] }
-    iter_sources: { route: "GET /contexts/{name}/sources", options: [limit] }
+    list_sources: { route: "GET /contexts/{name}/sources", options: [limit, after, prefix] }
+    iter_sources: { route: "GET /contexts/{name}/sources", options: [limit, prefix] }
     cite_passage: { route: "POST /contexts/{name}/citations", args: [source, paragraph] }
-    get_aliases: { route: "GET /contexts/{name}/aliases", options: [limit, after] }
-    iter_aliases: { route: "GET /contexts/{name}/aliases", options: [limit] }
+    get_aliases: { route: "GET /contexts/{name}/aliases", options: [limit, after, prefix] }
+    iter_aliases: { route: "GET /contexts/{name}/aliases", options: [limit, prefix] }
     add_aliases: { route: "POST /contexts/{name}/aliases", options: [concepts, labels] }
     remove_aliases: { route: "DELETE /contexts/{name}/aliases", options: [concepts, labels] }
     audit_vocabulary:

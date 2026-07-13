@@ -601,6 +601,29 @@ pub enum UpdateGroupError {
     Io(io::Error),
 }
 
+#[derive(Debug)]
+pub enum RenameContextError {
+    NotFound,
+    /// Same trap as [`CreateError::InvalidName`]: an empty destination
+    /// would persist as a bare `.ctx` the boot scan never rediscovers.
+    InvalidName,
+    AlreadyExists,
+    /// `from` or `to` is reserved by a create, delete, or another
+    /// rename already in flight — retry once it settles.
+    Busy,
+    Io(io::Error),
+}
+
+#[derive(Debug)]
+pub enum RenameGroupError {
+    NotFound,
+    /// Same trap as [`CreateGroupError::InvalidName`], for the
+    /// destination name.
+    InvalidName,
+    AlreadyExists,
+    Io(io::Error),
+}
+
 /// Why [`AppState::restore_groups`] refused. Every arm but `Io` is a
 /// validation refusal with NOTHING applied — the set is judged whole
 /// before the first write. `Io` names how many records persisted
@@ -1214,6 +1237,13 @@ struct StateInner {
     /// context behind one create's fsyncs. Entered under the registry
     /// guard, left in the critical section that registers the entry.
     pending_creates: Mutex<std::collections::HashSet<String>>,
+    /// Both the `from` and `to` names of an in-flight rename — reserved
+    /// before the marker is written, released only once the rename's
+    /// last step (the group membership rewrite) lands. `create` and
+    /// `delete` both refuse a name reserved here: a create under `to`
+    /// would collide with the files about to land there, and a delete
+    /// of either name would race the move or strand the marker.
+    pending_renames: Mutex<std::collections::HashSet<String>>,
     /// Running estimate of unpinned resident graph bytes — the cheap
     /// gate in front of the budget sweep. Adjusted by absolute
     /// per-entry recounts (see `EntryInner::counted_bytes`); the
@@ -1301,17 +1331,41 @@ impl AppState {
         // server) would each cache and flush independently — last
         // writer wins, silently.
         let dir_lock = lock_data_dir(&data_dir)?;
-        let registry = scan_data_dir(&data_dir)?;
+        let (registry, resumed_context_renames) = scan_data_dir(&data_dir)?;
         // Groups scan after contexts (the context scan also sweeps
-        // staging leftovers), then reconcile unconditionally: whatever
-        // put a dangling member, a dangling child, or an illegal
-        // nesting into a group file — a crash between a deletion and
-        // the sweep's rewrite, a sweep that could not persist, a
-        // hand-edited directory — boot drops it and writes the fix
-        // back, so "a group names only live contexts and live groups,
-        // acyclically, within the depth cap" holds from the first
-        // request on, without exception.
-        let mut groups = groups::scan_groups(&data_dir)?;
+        // staging leftovers). Both scans finish moving any in-flight
+        // rename's files, and hand back the (from, to) pairs whose
+        // marker survived; rewrite group membership for those FIRST —
+        // before reconcile, which has no notion of a rename in flight
+        // and would see `from` as a plain dangling reference (nothing
+        // registered under that name any more) and drop it instead of
+        // carrying it to `to`. Each rewrite persists immediately (it
+        // cannot rely on reconcile's own before/after diff, which
+        // would see no further change to make and skip the write), so
+        // the marker is safe to remove right after.
+        let (mut groups, resumed_group_renames) = groups::scan_groups(&data_dir)?;
+        for (from, to) in &resumed_context_renames {
+            rename_in_membership(&data_dir, &mut groups, from, to, |record| {
+                &mut record.contexts
+            });
+            let _ = fs::remove_file(renaming_marker_path(&data_dir, &file_stem(from)));
+        }
+        for (from, to) in &resumed_group_renames {
+            rename_in_membership(&data_dir, &mut groups, from, to, |record| {
+                &mut record.groups
+            });
+            let _ = fs::remove_file(groups::group_renaming_marker_path(
+                &data_dir,
+                &file_stem(from),
+            ));
+        }
+        // Reconcile unconditionally: whatever put a dangling member, a
+        // dangling child, or an illegal nesting into a group file — a
+        // crash between a deletion and the sweep's rewrite, a sweep
+        // that could not persist, a hand-edited directory — boot drops
+        // it and writes the fix back, so "a group names only live
+        // contexts and live groups, acyclically, within the depth cap"
+        // holds from the first request on, without exception.
         reconcile_groups(&data_dir, &registry, &mut groups);
 
         let state = Self(Arc::new(StateInner {
@@ -1335,6 +1389,7 @@ impl AppState {
             passage_vector_limit: options.passage_vector_limit,
             pending_deletes: Mutex::new(std::collections::HashSet::new()),
             pending_creates: Mutex::new(std::collections::HashSet::new()),
+            pending_renames: Mutex::new(std::collections::HashSet::new()),
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
         }));
@@ -1581,10 +1636,17 @@ impl AppState {
             // A name mid-delete is still taken: its delete has left the
             // registry but is still unlinking files, and a create landing
             // now would have its fresh generation destroyed by the tail of
-            // that loop. A name mid-create is equally taken. The client
-            // sees the same refusal as for a live name and simply retries
-            // after the other call's response.
-            if registry.contains_key(name) || self.0.pending_deletes.lock().contains(name) {
+            // that loop. A name mid-create is equally taken. A name that
+            // is either end of an in-flight rename is taken too — `to`
+            // because a create now would collide with the files the
+            // rename is about to land there, `from` because the rename
+            // has not yet torn its files down. The client sees the same
+            // refusal as for a live name and simply retries after the
+            // other call's response.
+            if registry.contains_key(name)
+                || self.0.pending_deletes.lock().contains(name)
+                || self.0.pending_renames.lock().contains(name)
+            {
                 return Err(CreateError::AlreadyExists);
             }
             // Reserving while still under the registry guard closes the
@@ -1657,7 +1719,7 @@ impl AppState {
             // marker and deletes the context we are creating right now.
             deleted_marker_path(&self.0.data_dir, &stem),
         ] {
-            if let Err(error) = fs::remove_file(&stale)
+            if let Err(error) = remove_persisted_file(&stale)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 return Err(CreateError::Io(error));
@@ -1667,7 +1729,7 @@ impl AppState {
         // left beside the new files, boot would report the fresh
         // context as carrying a torn import it never ran.
         for stale in import_marker_paths(&self.0.data_dir, &stem) {
-            if let Err(error) = fs::remove_file(&stale)
+            if let Err(error) = remove_persisted_file(&stale)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 return Err(CreateError::Io(error));
@@ -1698,20 +1760,30 @@ impl AppState {
     pub fn delete(&self, name: &str) -> Option<io::Result<()>> {
         let entry = {
             let mut registry = self.0.registry.write();
+            if !registry.contains_key(name) {
+                return None;
+            }
+            // A name mid-rename is refused rather than torn down: its
+            // marker durably promises a move-then-membership-rewrite,
+            // and a delete winning the race here would either destroy
+            // the files the rename is about to move (as `from`) or the
+            // files it just landed (as `to`), leaving the marker to
+            // resume a rename with nothing left to finish at boot.
+            // Reported through the same `Option<io::Result<()>>` a
+            // live name already uses — the caller sees a name that
+            // exists but cannot be deleted right now, not "no such
+            // context".
+            if self.0.pending_renames.lock().contains(name) {
+                return Some(Err(io::Error::other(format!(
+                    "context '{name}' is mid-rename; retry after it completes"
+                ))));
+            }
             let entry = registry.remove(name)?;
             self.0.pending_deletes.lock().insert(name.to_string());
             entry
         };
         let mut in_flight = entry.inner.write();
-        in_flight.slot = Slot::Deleted;
-        self.recount_entry(&mut in_flight);
-        entry.dirty.store(false, Ordering::Relaxed);
-        // Lock order: `inner` before `passages` before `vectors`, as
-        // documented on Entry.
-        *entry.passages.lock() = None;
-        *entry.bm25.write() = None;
-        *entry.passage_vectors.lock() = None;
-        *entry.vectors.lock() = None;
+        self.tombstone_locked(&mut in_flight, &entry);
         // The rest of this function is disk I/O (marker, group sweep,
         // unlinks) guarded by `pending_deletes`, not by `inner` — hold
         // it no longer than the in-memory teardown above needs.
@@ -1735,7 +1807,7 @@ impl AppState {
         self.sweep_context_from_groups(name);
         let mut outcome = Ok(());
         for file in context_files(&stem) {
-            if let Err(error) = fs::remove_file(self.0.data_dir.join(file))
+            if let Err(error) = remove_persisted_file(self.0.data_dir.join(file))
                 && error.kind() != io::ErrorKind::NotFound
             {
                 outcome = Err(error);
@@ -1747,17 +1819,201 @@ impl AppState {
         // failure handling as the fixed files — a miss keeps the
         // `.deleted` marker, and boot finishes the job.
         for path in import_marker_paths(&self.0.data_dir, &stem) {
-            if let Err(error) = fs::remove_file(&path)
+            if let Err(error) = remove_persisted_file(&path)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 outcome = Err(error);
             }
         }
         if outcome.is_ok() {
-            let _ = fs::remove_file(&marker);
+            let _ = remove_persisted_file(&marker);
         }
         self.0.pending_deletes.lock().remove(name);
         Some(outcome)
+    }
+
+    /// Renames a context: its whole file family moves under the new
+    /// name and group membership follows, while the OLD name becomes a
+    /// tombstone exactly as `delete` leaves one — so a flusher's or
+    /// evictor's handle cloned before the rename backs off instead of
+    /// recreating files a name no longer owns.
+    ///
+    /// Unlike `delete`, a rename must not discard unflushed writes: the
+    /// entry's whole current state is drained to disk under the OLD
+    /// name, under one lock, before the tombstone lands (see
+    /// `drain_entry_for_rename`) — so no racing write can land in the
+    /// gap between "durably saved" and "this entry stops accepting
+    /// writes" and be silently lost the way `delete` allows.
+    ///
+    /// The marker (`renaming_marker_path`) is written and durable
+    /// BEFORE anything else moves, and only removed after the group
+    /// membership rewrite lands — stricter than `delete`'s best-effort
+    /// marker, because a rename whose files moved but whose group
+    /// membership rewrite did not would otherwise have boot's
+    /// `reconcile_groups` see the old name as a dangling reference and
+    /// silently drop it, rather than resuming the rewrite.
+    pub fn rename_context(&self, from: &str, to: &str) -> Result<(), RenameContextError> {
+        if to.is_empty() {
+            return Err(RenameContextError::InvalidName);
+        }
+        if from == to {
+            return Ok(());
+        }
+        let entry = {
+            let registry = self.0.registry.read();
+            let Some(entry) = registry.get(from) else {
+                return Err(RenameContextError::NotFound);
+            };
+            if registry.contains_key(to) {
+                return Err(RenameContextError::AlreadyExists);
+            }
+            let pending_deletes = self.0.pending_deletes.lock();
+            let pending_creates = self.0.pending_creates.lock();
+            let mut pending_renames = self.0.pending_renames.lock();
+            if pending_deletes.contains(from)
+                || pending_deletes.contains(to)
+                || pending_creates.contains(to)
+                || pending_renames.contains(from)
+                || pending_renames.contains(to)
+            {
+                return Err(RenameContextError::Busy);
+            }
+            pending_renames.insert(from.to_string());
+            pending_renames.insert(to.to_string());
+            Arc::clone(entry)
+        };
+        let outcome = self.rename_context_locked(from, to, &entry);
+        self.0.pending_renames.lock().remove(from);
+        self.0.pending_renames.lock().remove(to);
+        outcome
+    }
+
+    /// The disk-and-registry half of [`AppState::rename_context`], run
+    /// with `from` and `to` both reserved in `pending_renames` — see
+    /// that function's doc for why the marker is strict rather than
+    /// best-effort.
+    fn rename_context_locked(
+        &self,
+        from: &str,
+        to: &str,
+        entry: &Arc<Entry>,
+    ) -> Result<(), RenameContextError> {
+        let from_stem = file_stem(from);
+        let to_stem = file_stem(to);
+        let marker = renaming_marker_path(&self.0.data_dir, &from_stem);
+        write_rename_marker(&marker, from, to).map_err(RenameContextError::Io)?;
+        if let Err(error) = self.drain_entry_for_rename(from, entry) {
+            let _ = fs::remove_file(&marker);
+            return Err(RenameContextError::Io(error));
+        }
+        self.0.registry.write().remove(from);
+        // The marker survives a failure from here on — memory already
+        // reflects the rename (the tombstone under `from`), so the
+        // only way back is finishing the move and the membership
+        // rewrite, at boot if not now.
+        move_context_files(&self.0.data_dir, &from_stem, &to_stem)
+            .map_err(RenameContextError::Io)?;
+        let MetaFile { meta, stats, usage } = read_meta_file(&self.0.data_dir, &to_stem);
+        let pinned = meta.pinned;
+        let wal_bytes = fs::metadata(wal_path(&self.0.data_dir, &to_stem))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let passages_wal_bytes = fs::metadata(passages_wal_path(&self.0.data_dir, &to_stem))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let new_entry = Arc::new(Entry::new(
+            meta,
+            stats,
+            Slot::Cold,
+            wal_bytes,
+            passages_wal_bytes,
+            usage,
+        ));
+        self.0
+            .registry
+            .write()
+            .insert(to.to_string(), Arc::clone(&new_entry));
+        if pinned {
+            let mut inner = new_entry.inner.write();
+            match ensure_hot(&self.0.data_dir, to, &mut inner, &self.0.metrics) {
+                Ok(()) => self.recount_entry(&mut inner),
+                Err(error) => {
+                    tracing::warn!(context = %to, %error, "renamed context not preloaded; it stays cold until first use");
+                }
+            }
+        }
+        {
+            let mut groups = self.0.groups.write();
+            rename_in_membership(&self.0.data_dir, &mut groups, from, to, |record| {
+                &mut record.contexts
+            });
+        }
+        let _ = fs::remove_file(&marker);
+        Ok(())
+    }
+
+    /// Writes an entry's whole current state to disk under `name` —
+    /// its image (if Hot), sidecar, and stats — then tombstones the
+    /// slot, all under one lock: no write racing the rename can land
+    /// in the gap between "durably saved" and "this entry stops
+    /// accepting writes" and be silently discarded. `delete`'s
+    /// in-memory teardown discards unflushed writes on purpose; a
+    /// rename must carry them to the new name instead — that is the
+    /// one difference from `delete`'s teardown below.
+    ///
+    /// Derived indexes (passages, BM25, paragraph vectors) are cleared
+    /// resident-only, exactly as `delete` clears them: their sidecars
+    /// already hold their own last-saved state on disk and move with
+    /// the rest of the file family, so at most a not-yet-persisted
+    /// refresh is lost — a rename does not owe them the graph's
+    /// durability guarantee.
+    fn drain_entry_for_rename(&self, name: &str, entry: &Entry) -> io::Result<()> {
+        let mut inner = entry.inner.write();
+        // Read everything `save_files` and the watermark need before
+        // borrowing `inner.slot` mutably below — `EntryInner` sits
+        // behind a lock guard, so the borrow checker cannot see the
+        // two borrows as disjoint fields the way it would on a bare
+        // struct.
+        let watermark = inner.wal_seq.saturating_sub(1);
+        let meta = inner.meta.clone();
+        let usage = entry.usage.snapshot();
+        if let Slot::Hot(context) = &mut inner.slot {
+            // `ensure_hot`'s replay only applies WAL entries past
+            // `applied_seq`, so baking in this watermark before saving
+            // the image means the log — which rides along unmodified
+            // under the new name — replays as a no-op once the file
+            // family moves.
+            context.set_applied_seq(watermark);
+            let stats = ContextStats::of(context);
+            save_files(&self.0.data_dir, name, &meta, &stats, &usage, context)?;
+            inner.stats = stats;
+        }
+        self.tombstone_locked(&mut inner, entry);
+        entry.usage_dirty.store(false, Ordering::Relaxed);
+        drop(inner);
+        Ok(())
+    }
+
+    /// Tombstones a write-locked entry: marks the slot `Deleted`,
+    /// recounts its (now zero) footprint, clears the dirty flag, and
+    /// drops every derived index (passages, BM25, paragraph vectors,
+    /// term vectors) resident-only — their sidecars keep the
+    /// last-saved state on disk, so at most a not-yet-persisted
+    /// refresh is lost. The in-memory teardown `delete` and
+    /// `drain_entry_for_rename` both need before their disk halves
+    /// diverge (discard the state vs. carry it to a new name).
+    ///
+    /// Lock order: `inner` before `passages` before `vectors`, as
+    /// documented on Entry — the caller holds `inner` across this
+    /// call.
+    fn tombstone_locked(&self, inner: &mut EntryInner, entry: &Entry) {
+        inner.slot = Slot::Deleted;
+        self.recount_entry(inner);
+        entry.dirty.store(false, Ordering::Relaxed);
+        *entry.passages.lock() = None;
+        *entry.bm25.write() = None;
+        *entry.passage_vectors.lock() = None;
+        *entry.vectors.lock() = None;
     }
 
     /// Registers a group and persists it immediately — the create twin
@@ -2055,6 +2311,52 @@ impl AppState {
             &self.0.data_dir,
             &file_stem(name),
         ))
+    }
+
+    /// Renames a group: its file moves to the new name and every OTHER
+    /// group's `groups` field naming it is rewritten to match.
+    /// `groups.write()` covers the whole operation, so — unlike a
+    /// context rename — no separate reservation is needed: no
+    /// concurrent create, update, delete, or rename can observe a
+    /// half-renamed state, only wait behind this lock.
+    ///
+    /// The marker is written and durable BEFORE the file moves, for
+    /// the same reason as [`AppState::rename_context`]'s: a crash
+    /// between the file move and the membership rewrite must not have
+    /// boot's `reconcile_groups` see the old name as a dangling
+    /// reference and drop it, rather than resuming the rewrite.
+    pub fn rename_group(&self, from: &str, to: &str) -> Result<(), RenameGroupError> {
+        if to.is_empty() {
+            return Err(RenameGroupError::InvalidName);
+        }
+        if from == to {
+            return Ok(());
+        }
+        let mut groups = self.0.groups.write();
+        if !groups.contains_key(from) {
+            return Err(RenameGroupError::NotFound);
+        }
+        if groups.contains_key(to) {
+            return Err(RenameGroupError::AlreadyExists);
+        }
+        let from_stem = file_stem(from);
+        let to_stem = file_stem(to);
+        let marker = groups::group_renaming_marker_path(&self.0.data_dir, &from_stem);
+        write_rename_marker(&marker, from, to).map_err(RenameGroupError::Io)?;
+        if let Err(error) = commit_staged(
+            &groups::group_path(&self.0.data_dir, &from_stem),
+            &groups::group_path(&self.0.data_dir, &to_stem),
+        ) {
+            let _ = fs::remove_file(&marker);
+            return Err(RenameGroupError::Io(error));
+        }
+        let record = groups.remove(from).expect("checked contains_key above");
+        groups.insert(to.to_string(), record);
+        rename_in_membership(&self.0.data_dir, &mut groups, from, to, |record| {
+            &mut record.groups
+        });
+        let _ = fs::remove_file(&marker);
+        Ok(())
     }
 
     /// One group's record by name, or `None` for an unknown group.
@@ -2469,6 +2771,13 @@ impl AppState {
         )
     }
 
+    /// The read-only twin of [`Self::retract_source`]'s edge count —
+    /// `POST /import?dry_run=true`'s preview of what a retraction would
+    /// report, without unlinking anything.
+    pub fn count_source_edges(&self, name: &str, source: &str) -> Result<usize, AccessError> {
+        self.read_context(name, |context| context.count_source_edges(source))
+    }
+
     /// Withdraws one source from a context — its graph contributions and
     /// its registered passage — the per-document differential-sync move:
     /// retract the old version of a changed document, then re-ingest the
@@ -2551,7 +2860,7 @@ impl AppState {
     /// or a hand unlink clears it.
     pub fn clear_import_marker(&self, context: &str, source: &str) {
         let path = import_marker_path(&self.0.data_dir, &file_stem(context), source);
-        if let Err(error) = fs::remove_file(&path)
+        if let Err(error) = remove_persisted_file(&path)
             && error.kind() != io::ErrorKind::NotFound
         {
             tracing::warn!(
@@ -4225,7 +4534,7 @@ impl AppState {
         // tombstone invariant — so a delete that won the race while we
         // were staging must find us backing off, not recreating.
         let Some(mut guard) = entry.lock_unless_deleted() else {
-            let _ = fs::remove_file(&staged);
+            let _ = remove_persisted_file(&staged);
             entry.flushing.store(false, Ordering::Relaxed);
             return false;
         };
@@ -4244,7 +4553,7 @@ impl AppState {
         // already left `dirty` set, so backing off here costs nothing —
         // the next tick flushes the current image instead.
         if !matches!(inner.slot, Slot::Hot(_)) || inner.image_generation != generation {
-            let _ = fs::remove_file(&staged);
+            let _ = remove_persisted_file(&staged);
             entry.flushing.store(false, Ordering::Relaxed);
             return false;
         }
@@ -4277,7 +4586,7 @@ impl AppState {
             }
             Err(error) => {
                 tracing::warn!("flush of context '{name}' failed (will retry): {error}");
-                let _ = fs::remove_file(&staged);
+                let _ = remove_persisted_file(&staged);
                 entry.dirty.store(true, Ordering::Relaxed);
                 entry.usage_dirty.store(true, Ordering::Relaxed);
                 self.0.metrics.record_flush(name, false);
@@ -4900,7 +5209,7 @@ where
 /// staged writes are deleted (never published, and nothing may linger
 /// as unbounded disk litter), and every context image found is
 /// registered cold, described by its sidecar snapshot.
-fn scan_data_dir(data_dir: &Path) -> io::Result<BTreeMap<String, Arc<Entry>>> {
+fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, ResumedRenames)> {
     // Unfinished deletions first: a `.deleted` marker means delete()
     // acknowledged the removal but could not unlink the whole family —
     // without this sweep, a surviving `.ctx` would RESURRECT a context
@@ -4917,25 +5226,38 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<BTreeMap<String, Arc<Entry>>> {
             let stem = stem.to_string();
             for file in context_files(&stem) {
                 let target = data_dir.join(file);
-                if let Err(error) = fs::remove_file(&target)
+                if let Err(error) = remove_persisted_file(&target)
                     && error.kind() != io::ErrorKind::NotFound
                 {
                     tracing::warn!(path = %target.display(), %error, "unfinished deletion: file still held");
                 }
             }
             // The marker goes last: it only leaves once the family did.
-            if fs::remove_file(&path).is_err() {
+            if remove_persisted_file(&path).is_err() {
                 tracing::warn!(path = %path.display(), "unfinished deletion: marker still held");
             }
         }
     }
+    // Unfinished renames next, before the `.ctx` scan below: a
+    // `.renaming` marker means `rename_context` moved (or was about to
+    // move) the whole file family but crashed before the group
+    // membership rewrite landed. Finishing the move here — repeatable,
+    // since a missing source file just means it already moved — lets
+    // the `.ctx` scan discover the context under its NEW name. The
+    // marker itself survives this pass; `boot_with` removes it only
+    // after also rewriting group membership, so a second crash still
+    // has everything it needs to resume.
+    let resumed_renames =
+        resume_rename_markers(data_dir, "renaming", "context", |from_stem, to_stem| {
+            move_context_files(data_dir, from_stem, to_stem)
+        })?;
     let mut candidates: Vec<(String, String)> = Vec::new();
     let mut import_markers: Vec<PathBuf> = Vec::new();
     for dir_entry in fs::read_dir(data_dir)? {
         let path = dir_entry?.path();
         let extension = path.extension().and_then(|e| e.to_str());
         if extension.is_some_and(|e| e.starts_with("tmp")) {
-            let _ = fs::remove_file(&path);
+            let _ = remove_persisted_file(&path);
             continue;
         }
         // Import markers are judged after the scan, once it is known
@@ -5018,10 +5340,10 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<BTreeMap<String, Arc<Entry>>> {
                  aliases); re-import the batch file or retract the source",
             );
         } else {
-            let _ = fs::remove_file(&path);
+            let _ = remove_persisted_file(&path);
         }
     }
-    Ok(registry)
+    Ok((registry, resumed_renames))
 }
 
 /// The scan-side decode shared by the context and group sweeps: a
@@ -5090,6 +5412,40 @@ fn sweep_membership(
                 removed = %stale,
                 %error,
                 "group membership sweep not persisted; the next boot's reconciliation drops it"
+            );
+        }
+    }
+}
+
+/// `sweep_membership`'s replace-not-remove twin: renames `from` to
+/// `to` wherever it appears in the chosen set field, persisting each
+/// touched record. Used both live (a context or group rename's last
+/// step) and at boot (resuming a rename whose marker survived a
+/// crash) — in both cases the caller already holds the groups write
+/// lock and must call this BEFORE `reconcile_groups`, which would
+/// otherwise see `from` as a dangling reference (nothing registered
+/// under that name any more) and drop it instead of carrying it
+/// forward.
+fn rename_in_membership(
+    data_dir: &Path,
+    groups: &mut BTreeMap<String, GroupRecord>,
+    from: &str,
+    to: &str,
+    field: impl Fn(&mut GroupRecord) -> &mut BTreeSet<String>,
+) {
+    for (group_name, record) in groups.iter_mut() {
+        let set = field(record);
+        if !set.remove(from) {
+            continue;
+        }
+        set.insert(to.to_string());
+        if let Err(error) = groups::write_group(data_dir, &file_stem(group_name), record) {
+            tracing::warn!(
+                group = %group_name,
+                from = %from,
+                to = %to,
+                %error,
+                "group membership rename not persisted; the next boot's resume retries it"
             );
         }
     }
@@ -5411,6 +5767,17 @@ pub(crate) fn deleted_marker_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.deleted"))
 }
 
+/// The durable-rename marker: while it exists, boot resumes the file
+/// move AND re-applies the group membership rewrite (`contexts`
+/// entries naming `from`) before `reconcile_groups` runs — without
+/// that ordering, a crash between the move and the rewrite would have
+/// reconcile see `from` as dangling and drop it, losing the
+/// membership for good rather than carrying it to `to`. Removed only
+/// once both the move and the rewrite are durable.
+pub(crate) fn renaming_marker_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.renaming"))
+}
+
 /// The batch-open marker's file extension — `.deleted`'s sibling for
 /// imports. Shared by the path builder, the boot sweep, and inspect,
 /// so the three can never disagree about what counts as a marker.
@@ -5468,6 +5835,73 @@ pub(crate) fn import_marker_paths(dir: &Path, stem: &str) -> Vec<PathBuf> {
 pub(crate) struct ImportMarker {
     pub(crate) context: String,
     pub(crate) source: String,
+}
+
+/// What a rename marker file says: the source and destination names,
+/// self-describing so boot can resume the move and the group rewrite
+/// without any other input. Shared shape for contexts (`.renaming`)
+/// and groups (`.grouprenaming`) — the two use different extensions
+/// (a context and a group may share a name) but the same fields.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct RenameMarker {
+    pub(crate) from: String,
+    pub(crate) to: String,
+}
+
+/// Every `(from, to)` pair whose rename was resumed at boot, handed
+/// back by `scan_data_dir`/`groups::scan_groups` so `boot_with` can
+/// rewrite group membership for them before `reconcile_groups` runs.
+pub(crate) type ResumedRenames = Vec<(String, String)>;
+
+/// Serializes and durably writes a rename marker at `path` — the
+/// first step of both `rename_context_locked` and `rename_group`,
+/// which must land before anything else moves (see their docs for
+/// why the marker comes first and is not best-effort).
+fn write_rename_marker(path: &Path, from: &str, to: &str) -> io::Result<()> {
+    let body = serde_json::to_vec(&RenameMarker {
+        from: from.to_string(),
+        to: to.to_string(),
+    })
+    .expect("RenameMarker has no non-serializable field");
+    write_atomic(path, &body)
+}
+
+/// Resumes every `extension` rename marker found in `dir`: reads it,
+/// parses the `(from, to)` pair, moves that pair's files via
+/// `move_files`, and returns every pair resumed so the caller can
+/// rewrite group membership for them before `reconcile_groups` runs.
+/// `scan_data_dir` (`.renaming`, a nine-file context family) and
+/// `groups::scan_groups` (`.grouprenaming`, one file) share this exact
+/// shape and differ only in what "moving the files" means for their
+/// entity — `entity` names it for the log lines (`"context"` /
+/// `"group"`).
+pub(crate) fn resume_rename_markers(
+    dir: &Path,
+    extension: &str,
+    entity: &str,
+    mut move_files: impl FnMut(&str, &str) -> io::Result<()>,
+) -> io::Result<ResumedRenames> {
+    let mut resumed = Vec::new();
+    for dir_entry in fs::read_dir(dir)? {
+        let path = dir_entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(extension) {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            tracing::warn!(path = %path.display(), entity, "unreadable rename marker; a rename may be stuck half-done");
+            continue;
+        };
+        let Ok(marker) = serde_json::from_slice::<RenameMarker>(&bytes) else {
+            tracing::warn!(path = %path.display(), entity, "rename marker does not parse; a rename may be stuck half-done");
+            continue;
+        };
+        tracing::warn!(from = %marker.from, to = %marker.to, entity, "resuming an unfinished rename");
+        if let Err(error) = move_files(&file_stem(&marker.from), &file_stem(&marker.to)) {
+            tracing::warn!(from = %marker.from, to = %marker.to, entity, %error, "unfinished rename: file still held");
+        }
+        resumed.push((marker.from, marker.to));
+    }
+    Ok(resumed)
 }
 
 /// FNV-1a over raw bytes — the same primitive the search terms build
@@ -5876,6 +6310,75 @@ pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> 
     write_atomic_with(path, bytes, true)
 }
 
+/// Test-only deterministic fault injection for registry persistence.
+///
+/// The calling thread fails exactly one persistence operation after
+/// `successes` stage, commit, unlink, WAL append, or WAL truncate
+/// operations have run normally.
+/// Keeping the counter thread-local makes parallel tests independent,
+/// and routing every operation through shared choke points avoids a
+/// flag for each call site.
+#[cfg(test)]
+pub(crate) fn fail_persistence_ops_after(successes: u32) {
+    PERSISTENCE_FAULT.with(|cell| cell.set(Some(successes)));
+}
+
+#[cfg(test)]
+thread_local! {
+    static PERSISTENCE_FAULT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Clears an armed fault and reports whether it was still pending. A
+/// sweep uses this after each attempt: `false` means the selected op
+/// was reached and failed, while `true` means the operation had fewer
+/// persistence steps and the sweep is complete.
+#[cfg(test)]
+pub(crate) fn clear_persistence_fault() -> bool {
+    PERSISTENCE_FAULT.with(|cell| cell.take().is_some())
+}
+
+#[cfg(test)]
+pub(crate) fn injected_persistence_failure(operation: &str) -> Option<io::Error> {
+    PERSISTENCE_FAULT.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            Some(io::Error::other(format!(
+                "injected registry persistence failure during {operation}"
+            )))
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            None
+        }
+        None => None,
+    })
+}
+
+#[cfg(not(test))]
+pub(crate) fn injected_persistence_failure(_operation: &str) -> Option<io::Error> {
+    None
+}
+
+/// The unlink choke point shared by registry and group persistence.
+pub(crate) fn remove_persisted_file(path: impl AsRef<Path>) -> io::Result<()> {
+    if let Some(error) = injected_persistence_failure("unlink") {
+        return Err(error);
+    }
+    fs::remove_file(path)
+}
+
+/// The rename choke point shared by atomic publication and recovery
+/// paths that move corrupt bytes aside.
+pub(crate) fn rename_persisted_file(
+    from: impl AsRef<Path>,
+    to: impl AsRef<Path>,
+) -> io::Result<()> {
+    if let Some(error) = injected_persistence_failure("commit") {
+        return Err(error);
+    }
+    fs::rename(from, to)
+}
+
 fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
     let staged = stage_bytes(path, bytes, private)?;
     let result = commit_staged(&staged, path);
@@ -5886,7 +6389,7 @@ fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> io::Result<()>
         // after a successful rename finds nothing here: the file is
         // already `path`, and removing the stale `staged` name is a
         // harmless no-op.)
-        let _ = fs::remove_file(&staged);
+        let _ = remove_persisted_file(&staged);
     }
     result
 }
@@ -5911,6 +6414,9 @@ fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Result<PathBuf> 
     #[cfg(not(unix))]
     let _ = private;
     let staged = staging_path(path);
+    if let Some(error) = injected_persistence_failure("stage") {
+        return Err(error);
+    }
     // A private file must be BORN owner-only: create-then-chmod leaves a
     // window (the default-umask create, ~0644, before the chmod) in
     // which another local account can open() the staging file and keep
@@ -5943,16 +6449,21 @@ fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Result<PathBuf> 
             // content and was never handed to a caller — remove it
             // rather than leave a partial write behind under its
             // temporary name.
-            let _ = fs::remove_file(&staged);
+            let _ = remove_persisted_file(&staged);
             Err(error)
         }
     }
 }
 
 /// The cheap half of [`write_atomic`]: atomically publishes a staged
-/// file at its final path — rename plus parent-directory fsync.
-fn commit_staged(staged: &Path, path: &Path) -> io::Result<()> {
-    fs::rename(staged, path)?;
+/// file at its final path — rename plus parent-directory fsync. Also
+/// the whole of a same-directory file move (`staged` need not be a
+/// `.tmp*` name): `rename_group` and `groups::scan_groups`'s
+/// rename-marker resume both use it that way. [`move_context_files`]
+/// moves nine files under one parent and fsyncs once itself instead of
+/// calling this per file — see there.
+pub(crate) fn commit_staged(staged: &Path, path: &Path) -> io::Result<()> {
+    rename_persisted_file(staged, path)?;
     fsync_parent_dir(path)
 }
 
@@ -5978,17 +6489,24 @@ fn lock_data_dir(dir: &Path) -> io::Result<fs::File> {
 }
 
 /// Persists a rename or file creation by syncing the directory that
-/// holds the entry. Unix-only; elsewhere the rename stays atomic
-/// against a crash mid-write, just not durable against power loss —
-/// unix is what this server targets.
-pub(crate) fn fsync_parent_dir(path: &Path) -> io::Result<()> {
+/// holds it. Unix-only; elsewhere the rename stays atomic against a
+/// crash mid-write, just not durable against power loss — unix is
+/// what this server targets.
+pub(crate) fn fsync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        fs::File::open(parent)?.sync_all()?;
-    }
+    fs::File::open(dir)?.sync_all()?;
     #[cfg(not(unix))]
-    let _ = path;
+    let _ = dir;
     Ok(())
+}
+
+/// [`fsync_dir`] on `path`'s parent — the common case, a single file
+/// rename or creation.
+pub(crate) fn fsync_parent_dir(path: &Path) -> io::Result<()> {
+    match path.parent() {
+        Some(parent) => fsync_dir(parent),
+        None => Ok(()),
+    }
 }
 
 /// Runs blocking work — a cold load's disk read plus full-image
@@ -6025,6 +6543,33 @@ fn context_files(stem: &str) -> [String; 9] {
         format!("{stem}.vectors.bin"),
         format!("{stem}.wal.jsonl"),
     ]
+}
+
+/// Moves one context's whole file family from `from_stem` to
+/// `to_stem`, file by file, in the fixed order [`context_files`]
+/// defines — a missing source is skipped (an earlier, interrupted
+/// attempt already moved it; safe to retry at boot or from a fresh
+/// call). Every present file lands under the new stem or the move
+/// fails outright; it never leaves some files under each stem. All
+/// nine share `data_dir` as their parent, so one fsync after every
+/// rename covers the whole family durably instead of paying for it
+/// (via `commit_staged`) up to nine times.
+fn move_context_files(data_dir: &Path, from_stem: &str, to_stem: &str) -> io::Result<()> {
+    let mut moved_any = false;
+    for (from_file, to_file) in context_files(from_stem)
+        .into_iter()
+        .zip(context_files(to_stem))
+    {
+        match fs::rename(data_dir.join(from_file), data_dir.join(to_file)) {
+            Ok(()) => moved_any = true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if moved_any {
+        fsync_dir(data_dir)?;
+    }
+    Ok(())
 }
 
 /// Encodes a context name as a file stem: bytes outside [A-Za-z0-9_-]
@@ -6301,6 +6846,65 @@ mod tests {
             "the marker leaves once the family did"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Every stage/commit/unlink position in context deletion either
+    /// finishes immediately or leaves enough durable state for boot to
+    /// finish it. The first index beyond the operation proves the sweep
+    /// did not merely sample a few hand-picked failures.
+    #[test]
+    fn every_context_delete_persistence_failure_recovers_at_boot() {
+        let mut exhausted = false;
+        for failure in 0..64 {
+            let dir = scratch_dir(&format!("delete-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+            state
+                .create_group(
+                    "breweries",
+                    String::new(),
+                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let outcome = state.delete("sake").unwrap();
+            let past_end = clear_persistence_fault();
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            assert!(
+                state.directory_entry("sake").is_none(),
+                "failure at persistence step {failure} resurrected the context: {outcome:?}"
+            );
+            assert!(
+                state.group("breweries").unwrap().contexts.is_empty(),
+                "boot did not reconcile group membership at step {failure}"
+            );
+            assert!(
+                !deleted_marker_path(&dir, "sake").exists(),
+                "boot did not finish the marker at step {failure}"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+
+            if past_end {
+                assert!(outcome.is_ok());
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "context deletion exceeded the sweep bound");
     }
 
     /// The dangerous interleaving: a delete leaves a marker behind
@@ -8674,6 +9278,56 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A flush has image stage/commit, sidecar stage/commit, and a WAL
+    /// truncate. Fail each in turn: publish failures stay dirty and
+    /// retry, while a truncate failure is harmless because the image
+    /// watermark makes the retained log replay-inert.
+    #[test]
+    fn every_flush_persistence_failure_retries_or_replays_cleanly() {
+        let mut exhausted = false;
+        for failure in 0..16 {
+            let dir = scratch_dir(&format!("flush-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let first = state.flush_dirty();
+            let past_end = clear_persistence_fault();
+            if !first.iter().any(|name| name == "sake") {
+                assert!(
+                    state.flush_dirty().iter().any(|name| name == "sake"),
+                    "dirty retry did not flush after failure at step {failure}"
+                );
+            }
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            assert_eq!(
+                state
+                    .read_context("sake", |context| context.association_count())
+                    .unwrap(),
+                1,
+                "flush failure at step {failure} lost or duplicated the write"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "flush exceeded the sweep bound");
     }
 
     #[test]
@@ -11218,6 +11872,99 @@ mod tests {
     }
 
     #[test]
+    fn every_group_write_persistence_failure_rolls_back_and_retries() {
+        let mut exhausted = false;
+        for failure in 0..8 {
+            let dir = scratch_dir(&format!("group-write-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            state
+                .create_group(
+                    "drinks",
+                    "old".to_string(),
+                    BTreeSet::new(),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let first = state.update_group(
+                "drinks",
+                Some("new".to_string()),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+            );
+            let past_end = clear_persistence_fault();
+            if past_end {
+                assert!(first.is_ok());
+            } else {
+                assert!(matches!(first, Err(UpdateGroupError::Io(_))));
+                assert_eq!(state.group("drinks").unwrap().description, "old");
+                state
+                    .update_group(
+                        "drinks",
+                        Some("new".to_string()),
+                        BTreeSet::new(),
+                        BTreeSet::new(),
+                        BTreeSet::new(),
+                        BTreeSet::new(),
+                    )
+                    .unwrap();
+            }
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            assert_eq!(state.group("drinks").unwrap().description, "new");
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "group write exceeded the sweep bound");
+    }
+
+    #[test]
+    fn every_group_delete_persistence_failure_reconciles_at_boot() {
+        let mut exhausted = false;
+        for failure in 0..8 {
+            let dir = scratch_dir(&format!("group-delete-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            state
+                .create_group("leaf", String::new(), BTreeSet::new(), BTreeSet::new())
+                .unwrap();
+            state
+                .create_group(
+                    "parent",
+                    String::new(),
+                    BTreeSet::new(),
+                    BTreeSet::from(["leaf".to_string()]),
+                )
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let _ = state.delete_group("leaf").unwrap();
+            let past_end = clear_persistence_fault();
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            assert!(
+                !state.group("parent").unwrap().groups.contains("leaf"),
+                "failure at step {failure} left a dangling child after boot"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "group deletion exceeded the sweep bound");
+    }
+
+    #[test]
     fn deleting_a_context_sweeps_it_out_of_every_group() {
         let dir = scratch_dir("groups-sweep");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
@@ -11858,6 +12605,365 @@ mod tests {
             state.directory().len(),
             2,
             "the registry's own listing survives the panic too"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rename_context_moves_the_family_and_rewrites_group_membership() {
+        let dir = scratch_dir("rename-context-happy");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create(
+                "sake",
+                ContextMeta {
+                    pinned: true,
+                    ..ContextMeta::default()
+                },
+            )
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state
+            .create_group(
+                "drinks",
+                String::new(),
+                BTreeSet::from(["sake".to_string()]),
+                BTreeSet::new(),
+            )
+            .unwrap();
+
+        state.rename_context("sake", "shochu").unwrap();
+
+        assert!(
+            state.directory_entry("sake").is_none(),
+            "the old name must be gone"
+        );
+        let entry = state
+            .directory_entry("shochu")
+            .expect("the new name must answer");
+        assert!(entry.pinned, "pinned carries over");
+        assert!(
+            entry.loaded,
+            "a pinned context reloads hot under its new name"
+        );
+        assert!(!dir.join("sake.ctx").exists());
+        assert!(dir.join("shochu.ctx").exists());
+        assert_eq!(
+            state.group("drinks").unwrap().contexts,
+            BTreeSet::from(["shochu".to_string()]),
+            "group membership follows the rename, not a stale name"
+        );
+        assert!(!renaming_marker_path(&dir, &file_stem("sake")).exists());
+        let count = state
+            .read_context("shochu", |context| context.association_count())
+            .unwrap();
+        assert_eq!(count, 1, "data must survive the move");
+
+        // Persisted, not just in memory.
+        drop(state);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.directory_entry("sake").is_none());
+        assert!(state.directory_entry("shochu").is_some());
+        assert_eq!(
+            state.group("drinks").unwrap().contexts,
+            BTreeSet::from(["shochu".to_string()])
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rename_group_moves_the_file_and_rewrites_parent_membership() {
+        let dir = scratch_dir("rename-group-happy");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .create_group(
+                "liquor",
+                "d".into(),
+                BTreeSet::from(["sake".to_string()]),
+                BTreeSet::new(),
+            )
+            .unwrap();
+        state
+            .create_group(
+                "drinks",
+                String::new(),
+                BTreeSet::new(),
+                BTreeSet::from(["liquor".to_string()]),
+            )
+            .unwrap();
+
+        state.rename_group("liquor", "spirits").unwrap();
+
+        assert!(state.group("liquor").is_none());
+        let spirits = state.group("spirits").unwrap();
+        assert_eq!(spirits.description, "d");
+        assert_eq!(spirits.contexts, BTreeSet::from(["sake".to_string()]));
+        assert_eq!(
+            state.group("drinks").unwrap().groups,
+            BTreeSet::from(["spirits".to_string()]),
+            "the parent's child reference follows the rename"
+        );
+        assert!(!groups::group_path(&dir, &file_stem("liquor")).exists());
+        assert!(groups::group_path(&dir, &file_stem("spirits")).exists());
+        assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
+
+        // Persisted, not just in memory.
+        drop(state);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.group("liquor").is_none());
+        assert_eq!(
+            state.group("drinks").unwrap().groups,
+            BTreeSet::from(["spirits".to_string()])
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The crash-shaped state: `rename_context` wrote its marker but
+    /// died before the file move and the group rewrite landed. Boot
+    /// must finish both, and in the right order — rewrite group
+    /// membership before `reconcile_groups` runs — or reconcile sees
+    /// "sake" as a plain dangling reference (nothing registered under
+    /// that name any more) and drops it instead of carrying it to
+    /// "shochu". This is the regression `boot_with`'s ordering exists
+    /// to prevent.
+    #[test]
+    fn an_unfinished_context_rename_is_resumed_at_boot_before_group_reconciliation() {
+        let dir = scratch_dir("rename-context-crash");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .create_group(
+                    "drinks",
+                    String::new(),
+                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+        }
+        // No manual file move: `scan_data_dir` performs it itself once
+        // it sees the marker, exactly as it would resuming a real crash.
+        fs::write(
+            renaming_marker_path(&dir, &file_stem("sake")),
+            serde_json::to_vec(&RenameMarker {
+                from: "sake".to_string(),
+                to: "shochu".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.directory_entry("sake").is_none());
+        assert!(state.directory_entry("shochu").is_some());
+        assert!(!dir.join("sake.ctx").exists());
+        assert!(dir.join("shochu.ctx").exists());
+        assert_eq!(
+            state.group("drinks").unwrap().contexts,
+            BTreeSet::from(["shochu".to_string()]),
+            "the membership must be REWRITTEN to the new name, not pruned as dangling"
+        );
+        assert!(!renaming_marker_path(&dir, &file_stem("sake")).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The group-rename twin of
+    /// `an_unfinished_context_rename_is_resumed_at_boot_before_group_reconciliation`:
+    /// a surviving `.grouprenaming` marker must resume the file move
+    /// AND rewrite the PARENT's `groups` set to the new child name
+    /// before `reconcile_groups` runs, or the parent loses the child
+    /// as a dangling reference instead of following it to its new name.
+    #[test]
+    fn an_unfinished_group_rename_is_resumed_at_boot_before_group_reconciliation() {
+        let dir = scratch_dir("rename-group-crash");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .create_group(
+                    "liquor",
+                    String::new(),
+                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+            state
+                .create_group(
+                    "drinks",
+                    String::new(),
+                    BTreeSet::new(),
+                    BTreeSet::from(["liquor".to_string()]),
+                )
+                .unwrap();
+        }
+        fs::write(
+            groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
+            serde_json::to_vec(&RenameMarker {
+                from: "liquor".to_string(),
+                to: "spirits".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.group("liquor").is_none());
+        let spirits = state
+            .group("spirits")
+            .expect("the renamed group must exist");
+        assert_eq!(spirits.contexts, BTreeSet::from(["sake".to_string()]));
+        assert_eq!(
+            state.group("drinks").unwrap().groups,
+            BTreeSet::from(["spirits".to_string()]),
+            "the parent must be REWRITTEN to the new child name, not pruned as dangling"
+        );
+        assert!(!groups::group_path(&dir, &file_stem("liquor")).exists());
+        assert!(groups::group_path(&dir, &file_stem("spirits")).exists());
+        assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rename_context_error_cases() {
+        let dir = scratch_dir("rename-context-errors");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.create("beer", ContextMeta::default()).unwrap();
+
+        assert!(matches!(
+            state.rename_context("missing", "whatever"),
+            Err(RenameContextError::NotFound)
+        ));
+        assert!(matches!(
+            state.rename_context("sake", "beer"),
+            Err(RenameContextError::AlreadyExists)
+        ));
+        assert!(matches!(
+            state.rename_context("sake", ""),
+            Err(RenameContextError::InvalidName)
+        ));
+        assert!(
+            state.rename_context("sake", "sake").is_ok(),
+            "renaming a name to itself is a no-op, not an error"
+        );
+        assert!(state.directory_entry("sake").is_some());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rename_group_error_cases() {
+        let dir = scratch_dir("rename-group-errors");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create_group("drinks", String::new(), BTreeSet::new(), BTreeSet::new())
+            .unwrap();
+        state
+            .create_group("food", String::new(), BTreeSet::new(), BTreeSet::new())
+            .unwrap();
+
+        assert!(matches!(
+            state.rename_group("missing", "whatever"),
+            Err(RenameGroupError::NotFound)
+        ));
+        assert!(matches!(
+            state.rename_group("drinks", "food"),
+            Err(RenameGroupError::AlreadyExists)
+        ));
+        assert!(matches!(
+            state.rename_group("drinks", ""),
+            Err(RenameGroupError::InvalidName)
+        ));
+        assert!(state.rename_group("drinks", "drinks").is_ok());
+        assert!(state.group("drinks").is_some());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Same fence a create races against a slow delete in
+    /// `a_create_racing_a_slow_delete_is_refused_not_interleaved`: a
+    /// rename reserves both its names in `pending_renames` before it
+    /// may touch any file, so a create for either name must be refused
+    /// until the rename settles, never interleaved with it.
+    #[test]
+    fn a_create_racing_a_pending_context_rename_is_refused_for_both_names() {
+        let dir = scratch_dir("rename-create-race");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        let stall = entry.inner.read();
+        let renamer = {
+            let state = state.clone();
+            std::thread::spawn(move || state.rename_context("sake", "shochu").unwrap())
+        };
+        while !state.0.pending_renames.lock().contains("sake") {
+            std::thread::yield_now();
+        }
+        assert!(
+            matches!(
+                state.create("sake", ContextMeta::default()),
+                Err(CreateError::AlreadyExists)
+            ),
+            "the source name is reserved until the rename settles"
+        );
+        assert!(
+            matches!(
+                state.create("shochu", ContextMeta::default()),
+                Err(CreateError::AlreadyExists)
+            ),
+            "the destination name is reserved too, before any file lands there"
+        );
+
+        drop(stall);
+        renamer.join().unwrap();
+        assert!(state.directory_entry("shochu").is_some());
+        assert!(!state.0.pending_renames.lock().contains("sake"));
+        assert!(!state.0.pending_renames.lock().contains("shochu"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The rename twin of
+    /// `a_passage_write_racing_a_delete_backs_off_at_the_tombstone`: a
+    /// handle taken before the rename must see the tombstone after,
+    /// not the old generation's live state, and no write may recreate
+    /// the old name from under it.
+    #[test]
+    fn a_write_racing_a_rename_backs_off_at_the_tombstone() {
+        let dir = scratch_dir("rename-write-race");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        state.rename_context("sake", "shochu").unwrap();
+        assert!(
+            entry.read_unless_deleted().is_none(),
+            "a handle from before the rename must see the tombstone"
+        );
+        assert!(
+            matches!(
+                state.add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                    Deadline::unbounded(),
+                ),
+                Err(AccessError::NotFound)
+            ),
+            "the old name is gone; nothing may recreate it via a write"
         );
 
         let _ = fs::remove_dir_all(dir);

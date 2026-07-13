@@ -492,7 +492,10 @@ pub async fn enforce_authorization(
     // never leaks open (a prefix test would silently swallow future
     // `/groups/...` sub-routes instead of forcing that decision).
     if scope.contexts.is_some()
-        && !matches!(route.as_str(), "/groups/{name}" | "/groups/{name}/export")
+        && !matches!(
+            route.as_str(),
+            "/groups/{name}" | "/groups/{name}/export" | "/groups/{name}/rename"
+        )
     {
         use axum::extract::FromRequestParts as _;
         let context = axum::extract::RawPathParams::from_request_parts(&mut parts, &())

@@ -84,8 +84,17 @@ describe("context lifecycle", () => {
     }
     expect(names).toContain(name);
 
-    expect(await client.contexts.delete(name)).toBe(true);
-    const missing = await client.contexts.get(name).catch((caught: unknown) => caught);
+    const renamed = `${name}-renamed`;
+    expect(await client.contexts.rename(name, renamed)).toBe(true);
+    const renamedAway = await client.contexts.get(name).catch((caught: unknown) => caught);
+    expect(renamedAway).toBeInstanceOf(NotFoundError);
+    expect((renamedAway as NotFoundError).code).toBe("no_context");
+    const movedEntry = await client.contexts.get(renamed);
+    expect(movedEntry.description).toBe("d2");
+    expect(movedEntry.dice_floor).toBe(0.25);
+
+    expect(await client.contexts.delete(renamed)).toBe(true);
+    const missing = await client.contexts.get(renamed).catch((caught: unknown) => caught);
     expect(missing).toBeInstanceOf(NotFoundError);
     expect((missing as NotFoundError).code).toBe("no_context");
   });
@@ -500,9 +509,17 @@ describe("groups and cross-context search", () => {
     expect(names).toContain(group);
     expect(names).toContain(child);
 
-    // Deleting the bundling leaves members (and the child group) alone.
-    expect(await client.groups.delete(group)).toBe(true);
+    // Rename: the old name is gone, the new one keeps the membership.
+    const renamedGroup = `${base}-g-renamed`;
+    expect(await client.groups.rename(group, renamedGroup)).toBe(true);
     await expect(client.groups.get(group)).rejects.toMatchObject({ code: "no_group" });
+    entry = await client.groups.get(renamedGroup);
+    expect(entry.contexts).toEqual([sake, tea].sort());
+    expect(entry.groups).toEqual([child]);
+
+    // Deleting the bundling leaves members (and the child group) alone.
+    expect(await client.groups.delete(renamedGroup)).toBe(true);
+    await expect(client.groups.get(renamedGroup)).rejects.toMatchObject({ code: "no_group" });
     expect(await client.groups.exists(child)).toBe(true);
     expect(await client.contexts.exists(sake)).toBe(true);
 

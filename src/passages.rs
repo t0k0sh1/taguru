@@ -70,6 +70,24 @@ pub(crate) struct StoreOutcome {
     pub(crate) sections_dropped: usize,
 }
 
+/// How many of `questions`/`sections` name a paragraph outside
+/// `paragraph_count` — the same range check [`PassageRecord::new`]
+/// applies when it filters, exposed standalone so a caller can get the
+/// count without building the record: `preview_batch`'s read-only
+/// twin of `apply_batch` calls this to report what a real store would
+/// drop.
+pub(crate) fn preview_drops(
+    paragraph_count: usize,
+    questions: &[(u32, String)],
+    sections: &[(u32, String)],
+) -> (usize, usize) {
+    let out_of_range = |&&(paragraph, _): &&(u32, String)| paragraph as usize >= paragraph_count;
+    (
+        questions.iter().filter(out_of_range).count(),
+        sections.iter().filter(out_of_range).count(),
+    )
+}
+
 /// One source's resident passage: the byte-exact text, its paragraph
 /// spans (computed once per residency, never persisted — the split
 /// function is deterministic, so the spans are as durable as the text
@@ -571,7 +589,7 @@ impl PassageStore {
         // the whole point: removing it BEFORE a durable snapshot exists
         // would strand the passages of a crash in between. A failed
         // unlink lingers harmlessly and retries next compaction.
-        if let Err(error) = fs::remove_file(&self.legacy_path)
+        if let Err(error) = crate::registry::remove_persisted_file(&self.legacy_path)
             && error.kind() != io::ErrorKind::NotFound
         {
             tracing::warn!(

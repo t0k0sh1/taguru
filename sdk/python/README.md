@@ -26,6 +26,11 @@ result = ctx.retrieve("青嶺酒造")           # resolve → describe → activ
 hits = ctx.search_passages("1907年に創業した")  # text lane (phrase as an answer)
 ```
 
+Prefer one `add_associations` call per document. Above the 10,000-association
+request limit, `add_associations_batched` auto-chunks it; for corpus-scale
+ingestion, use `POST /import` or `taguru import`. Each call pays for a full
+durable write.
+
 `AsyncTaguru` is the same surface with `async`/`await`. The behavioral
 contract is the server's own protocol document — read it from the deployment
 you target: `client.protocol()` (`GET /protocol`).

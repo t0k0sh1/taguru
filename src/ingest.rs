@@ -1033,6 +1033,37 @@ impl ApplyRefusal {
     }
 }
 
+/// Association paragraph locators corrected against this batch's own
+/// passage split: a locator naming a spot the split does not have is
+/// meaningless, so it is cleared (the association's fact still lands)
+/// and counted as dropped. A batch with no passage has nothing to
+/// check a locator against, so every op passes through unchanged.
+/// Shared between the write path ([`apply_batch`]) and its read-only
+/// preview ([`preview_batch`]) so the two can never disagree.
+/// `paragraph_count`, when already known (`preview_batch` needs it for
+/// its own question/section drop counts), is reused instead of
+/// re-splitting the same passage text.
+fn corrected_associations(batch: &Batch, paragraph_count: Option<usize>) -> (Vec<AssocOp>, usize) {
+    let Some(text) = &batch.passage else {
+        return (batch.associations.clone(), 0);
+    };
+    let paragraph_count = paragraph_count.unwrap_or_else(|| crate::paragraph::split(text).len());
+    let mut dropped = 0;
+    let corrected = batch
+        .associations
+        .iter()
+        .cloned()
+        .map(|mut op| {
+            if op.paragraph.is_some_and(|p| p as usize >= paragraph_count) {
+                op.paragraph = None;
+                dropped += 1;
+            }
+            op
+        })
+        .collect();
+    (corrected, dropped)
+}
+
 /// Applies one validated batch: ensure the context, retract the
 /// source, then land passage → associations → aliases. Aliases go
 /// last on purpose — an alias needs its canonical interned, and the
@@ -1124,27 +1155,8 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
     // Only checked against a passage this same batch carries; an
     // associations-only batch has nothing to check against, exactly
     // like questions/sections above.
-    let mut association_paragraphs_dropped = 0;
-    let corrected_associations: Vec<AssocOp>;
-    let associations_to_apply: &[AssocOp] = match &batch.passage {
-        Some(text) => {
-            let paragraph_count = crate::paragraph::split(text).len();
-            corrected_associations = batch
-                .associations
-                .iter()
-                .cloned()
-                .map(|mut op| {
-                    if op.paragraph.is_some_and(|p| p as usize >= paragraph_count) {
-                        op.paragraph = None;
-                        association_paragraphs_dropped += 1;
-                    }
-                    op
-                })
-                .collect();
-            &corrected_associations
-        }
-        None => &batch.associations,
-    };
+    let (corrected, association_paragraphs_dropped) = corrected_associations(batch, None);
+    let associations_to_apply: &[AssocOp] = &corrected;
 
     let mut associations = 0;
     for chunk in associations_to_apply.chunks(MAX_ASSOCIATIONS_PER_REQUEST) {
@@ -1202,6 +1214,70 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         questions_stored,
         questions_dropped,
         sections_stored,
+        sections_dropped,
+        association_paragraphs_dropped,
+    })
+}
+
+/// The read-only twin of [`apply_batch`], for `POST
+/// /import?dry_run=true`: reports what a batch WOULD do without
+/// writing anything — no context created, no marker opened, no source
+/// retracted. Every write step in `apply_batch` has a cheap read-only
+/// counterpart here, except two: `associations` and `aliases` are
+/// OPTIMISTIC counts (every op this batch carries, corrected the same
+/// way `apply_batch` corrects them). A capacity cap (507) or a
+/// conflicting concurrent write (409) can only surface by actually
+/// applying the op, so on those two counts a dry run is advisory —
+/// the real import can still apply fewer than previewed. Every other
+/// field (`retracted`, the drop counts) reads through to the same
+/// state a real batch would query, so it matches exactly.
+pub(crate) fn preview_batch(state: &AppState, batch: &Batch) -> Result<Applied, ApplyRefusal> {
+    let created = state.directory_entry(&batch.context).is_none();
+    if created && batch.create.is_none() {
+        return Err(ApplyRefusal::NoContext(batch.context.clone()));
+    }
+
+    // A context about to be created has nothing to retract from yet.
+    let retracted = if created {
+        0
+    } else {
+        state
+            .count_source_edges(&batch.context, &batch.source)
+            .map_err(ApplyRefusal::Access)?
+    };
+    // Mirrors apply_batch's tolerance for a passage-store read that
+    // fails: retract_source warns and reports no removal rather than
+    // failing the whole batch, so the preview falls back the same way.
+    let had_passage = state
+        .passage_sources(&batch.context)
+        .and_then(Result::ok)
+        .is_some_and(|sources| sources.contains(&batch.source));
+    let passage_dropped = had_passage && batch.passage.is_none();
+
+    let paragraph_count = batch
+        .passage
+        .as_deref()
+        .map(|text| crate::paragraph::split(text).len());
+    let (questions_dropped, sections_dropped) = match paragraph_count {
+        Some(paragraph_count) => {
+            crate::passages::preview_drops(paragraph_count, &batch.questions, &batch.sections)
+        }
+        None => (0, 0),
+    };
+
+    let (corrected, association_paragraphs_dropped) =
+        corrected_associations(batch, paragraph_count);
+
+    Ok(Applied {
+        created,
+        retracted,
+        associations: corrected.len(),
+        aliases: batch.concepts.len() + batch.labels.len(),
+        passage_stored: batch.passage.is_some(),
+        passage_dropped,
+        questions_stored: batch.questions.len() - questions_dropped,
+        questions_dropped,
+        sections_stored: batch.sections.len() - sections_dropped,
         sections_dropped,
         association_paragraphs_dropped,
     })
@@ -1857,6 +1933,92 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Move one deterministic filesystem failure through the complete
+    /// import: marker, source retraction, passage store, associations,
+    /// aliases, and marker unlink. A stopped batch keeps its marker;
+    /// a failure before the marker applies nothing; and any swallowed
+    /// best-effort failure must still leave a complete, retryable truth.
+    #[test]
+    fn every_import_persistence_failure_is_detected_or_fully_repaired() {
+        let mut exhausted = false;
+        for failure in 0..24 {
+            let dir = std::env::temp_dir().join(format!(
+                "taguru-ingest-fault-{failure}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            let batch = parse(
+                "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
+                 {\"passage\": \"青嶺酒造の杜氏は高瀬。\"}\n\
+                 {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+                 {\"alias\": \"青嶺\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n",
+            )
+            .unwrap();
+
+            crate::registry::fail_persistence_ops_after(failure);
+            let first = apply_batch(&state, &batch);
+            let past_end = crate::registry::clear_persistence_fault();
+            let marker = crate::registry::import_marker_path(&dir, "sake", "doc-1");
+
+            if past_end {
+                assert!(
+                    first.is_ok(),
+                    "the past-end attempt must complete: {first:?}"
+                );
+                assert!(!marker.exists());
+            } else {
+                if let Err(refusal) = &first {
+                    let before_marker = refusal.text().contains("marker not persisted");
+                    assert_eq!(
+                        marker.exists(),
+                        !before_marker,
+                        "a stopped batch at step {failure} lost its tear witness: {refusal:?}"
+                    );
+                }
+                // Re-import is the documented repair and is exact even
+                // when the injected error was swallowed after a fully
+                // superseding write or only prevented marker cleanup.
+                apply_batch(&state, &batch).unwrap();
+                assert!(
+                    !marker.exists(),
+                    "repair did not clear failure step {failure}"
+                );
+            }
+
+            assert_eq!(
+                state
+                    .read_context("sake", |context| context.association_count())
+                    .unwrap(),
+                1,
+                "retry at step {failure} was not idempotent"
+            );
+            assert_eq!(
+                state
+                    .read_context("sake", |context| context.resolve("青嶺")[0].name.clone())
+                    .unwrap(),
+                "青嶺酒造",
+                "alias step {failure} did not land"
+            );
+            assert_eq!(
+                state
+                    .lookup_passages("sake", &["doc-1".to_string()])
+                    .unwrap()
+                    .unwrap()
+                    .0["doc-1"],
+                "青嶺酒造の杜氏は高瀬。"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "import exceeded the persistence sweep bound");
     }
 
     #[test]
