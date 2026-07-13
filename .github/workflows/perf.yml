@@ -34,12 +34,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install valgrind
         run: sudo apt-get update && sudo apt-get install -y valgrind
-      # Version-matched: the runner's benchmark protocol must agree
-      # exactly with the gungraun version this crate builds against.
-      - name: Install gungraun-runner
-        run: |
-          version=$(cargo metadata --format-version=1 | jq -r '.packages[] | select(.name == "gungraun").version')
-          cargo install gungraun-runner --version "$version"
       # A PR that adds (or temporarily removes) the `context` bench
       # target itself has nothing on the base side to compare against —
       # `cargo bench --bench context` fails outright rather than
@@ -47,12 +41,22 @@ jobs:
       # metadata` (safe to run without a matching target; unlike
       # `cargo bench`, it never tries to resolve one) and skip straight
       # to an unguarded head run instead of failing the job.
+      #
+      # gungraun-runner is (re)installed here rather than once up front:
+      # the runner's benchmark protocol must match the gungraun version
+      # actually linked into *this* checkout's bench binary, and
+      # base/head can pin different versions (e.g. a PR that bumps
+      # gungraun itself). `cargo install` no-ops when the requested
+      # version is already the one installed, so this is free when they
+      # agree.
       - name: Benchmark base branch
         run: |
           git checkout ${{ github.event.pull_request.base.sha }}
           if cargo metadata --format-version=1 --no-deps \
               | jq -e '.packages[].targets[] | select(.name == "context" and (.kind | index("bench")))' \
               > /dev/null; then
+            version=$(cargo metadata --format-version=1 | jq -r '.packages[] | select(.name == "gungraun").version')
+            cargo install gungraun-runner --version "$version"
             cargo bench --bench context -- --save-baseline=pr-base
             echo "HAS_BASELINE=true" >> "$GITHUB_ENV"
           else
@@ -64,6 +68,8 @@ jobs:
       - name: Benchmark PR head
         run: |
           git checkout ${{ github.event.pull_request.head.sha }}
+          version=$(cargo metadata --format-version=1 | jq -r '.packages[] | select(.name == "gungraun").version')
+          cargo install gungraun-runner --version "$version"
           if [ "$HAS_BASELINE" = "true" ]; then
             cargo bench --bench context -- --baseline=pr-base
           else
