@@ -90,6 +90,9 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_MAX_CONCURRENT_REQUESTS  in-flight request ceiling — past it new
                                requests are shed with 503 + Retry-After;
                                /health and /metrics exempt (256; 0 = off)
+  TAGURU_MAX_CONCURRENT_HEAVY_OPS  shared ceiling for audit_vocabulary and
+                               compact_context; excess calls are shed with
+                               503 + Retry-After (2; 0 = off)
   TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off)
   TAGURU_EMBED_MODEL           embedding model name
   TAGURU_EMBED_API_KEY         embedding provider credential
@@ -317,7 +320,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 32] = [
+const KNOWN_KEYS: [&str; 33] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -335,6 +338,7 @@ const KNOWN_KEYS: [&str; 32] = [
     "TAGURU_RATE_LIMIT_PER_MIN",
     "TAGURU_AUTH_FAIL_LIMIT_PER_MIN",
     "TAGURU_MAX_CONCURRENT_REQUESTS",
+    "TAGURU_MAX_CONCURRENT_HEAVY_OPS",
     "TAGURU_EMBED_URL",
     "TAGURU_EMBED_MODEL",
     "TAGURU_EMBED_API_KEY",

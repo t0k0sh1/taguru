@@ -341,7 +341,9 @@ resend) / `unauthorized` / `forbidden` / `no_context` / `no_source` /
 `no_paragraph` / `no_group` / `unknown_path` / `method_not_allowed` / `timeout` /
 `already_exists` / `conflict` / `payload_too_large` / `rate_limited` /
 `internal` / `embeddings_unconfigured` / `embeddings_failed` /
-`overloaded` (shed at the in-flight ceiling; wait `Retry-After`) /
+`overloaded` (shed at the global in-flight ceiling or the shared
+heavy-operation ceiling for vocabulary audits/context compactions;
+wait `Retry-After`) /
 `unhealthy` (the write path is degraded) / `maintenance` (a
 `POST /maintenance/compact` sweep is running — wait `Retry-After` and
 retry) / `storage_full`.
