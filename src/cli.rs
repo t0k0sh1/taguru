@@ -90,7 +90,8 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_MAX_CONCURRENT_REQUESTS  in-flight request ceiling — past it new
                                requests are shed with 503 + Retry-After;
                                /health and /metrics exempt (256; 0 = off)
-  TAGURU_MAX_CONCURRENT_HEAVY_OPS  shared ceiling for audit_vocabulary and
+  TAGURU_MAX_CONCURRENT_HEAVY_OPS  shared ceiling for audit_vocabulary,
+                               audit_drift's include_twins, and
                                compact_context; excess calls are shed with
                                503 + Retry-After (2; 0 = off)
   TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off)

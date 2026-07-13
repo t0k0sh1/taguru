@@ -239,6 +239,28 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   CRC-32C checksums, so "ok" means the bytes were proven intact, not
   just parseable. Reclaim revision-heavy contexts with
   `taguru compact`; size targets with `taguru estimate`.
+- **Recovering from a bad alias.** Alias registration takes effect
+  immediately and resolves that spelling on every subsequent write — a
+  wrong alias silently pulls all matching ingestion onto the wrong
+  canonical from that moment on. `DELETE /contexts/{name}/aliases`
+  only stops new contamination; it does not revisit associations
+  already interned under the bad spelling, and there is no alias-node
+  concept to enumerate them after the fact. To recover: delete the
+  alias first so nothing more lands on it, then bound its live window
+  by cross-referencing the WAL's `AliasConcept`/`AliasLabel` …
+  `UnaliasConcept`/`UnaliasLabel` op order, the `aliases registered`/
+  `aliases removed` `taguru::audit` lines (who, when, which
+  namespace), and the general access log (every request against the
+  context, by key and timestamp) — together they say precisely when
+  the alias existed. Cross-reference that window against your own
+  ingestion record (or the `source retracted`/`import batch applied`
+  audit lines, if the affected sources were re-imported rather than
+  freshly asserted) to find which sources landed under the bad
+  spelling, then retract each (`POST /contexts/{name}/sources/
+  retract`) and re-import it under the correct one. There is no merge
+  for two canonicals that already diverged before the alias was
+  caught — unify them the way `compact` itself rebuilds a context:
+  export both sides and re-import everything under the one you keep.
 
 Worked deployments, probe wiring, and the reasoning behind them:
 [Docker Compose](https://t0k0sh1.github.io/taguru/docker-compose.html) ·

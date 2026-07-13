@@ -795,6 +795,32 @@ pub fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "audit_drift",
+            "Graph-vs-archive drift audit: three read-only checks in one call. Unsourced weight — edges carrying weight no named source explains, the residue plain associate() calls or an export/import round trip leave behind — worst-first, paginated, filterable with unsourced_floor. Dead-canonical aliases — alias spellings whose canonical concept or label has zero live edges left. Optionally (include_twins) the same lexical/semantic fork candidates audit_vocabulary finds. Run periodically to catch drift audit_coverage and audit_vocabulary don't: weight nothing ingested explains, and aliases pointing at names nothing uses anymore.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "unsourced_floor": { "type": "number", "description": "minimum unsourced weight (by magnitude) to include; default: any amount at all" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" },
+                    "after": {
+                        "type": "object",
+                        "description": "resume past the previous page's last unsourced match — copy every field verbatim from it. total stays constant across pages",
+                        "properties": {
+                            "weight": { "type": "number" },
+                            "subject": { "type": "string" },
+                            "label": { "type": "string" },
+                            "object": { "type": "string" }
+                        },
+                        "required": ["weight", "subject", "label", "object"]
+                    },
+                    "include_twins": { "type": "boolean", "description": "also run the lexical/semantic fork-candidate sweep and include it as `twins` (default false — it's the same CPU-bound pairwise scan audit_vocabulary runs)" },
+                    "dice_floor": { "type": "number", "description": "lexical floor (default 0.6); only used when include_twins is set" },
+                    "cosine_floor": { "type": "number", "description": "semantic floor (default 0.6); only used when include_twins is set" }
+                }),
+                &["context"],
+            ),
+        ),
+        (
             "flush",
             "Persist every dirty context to disk now; answers the flushed names (admin role). The backup handshake's first half: flush, then snapshot the data directory — the same discipline the operator docs describe, reachable by an agent tending its own memory.",
             object_schema(json!({}), &[]),
@@ -1145,6 +1171,21 @@ pub fn route_tool(
             "POST",
             format!("{}/unreachable_from", context_path("context")?),
             Some(pick(arguments, &["origins", "limit", "after"])),
+        ),
+        "audit_drift" => (
+            "POST",
+            format!("{}/drift/audit", context_path("context")?),
+            Some(pick(
+                arguments,
+                &[
+                    "unsourced_floor",
+                    "limit",
+                    "after",
+                    "include_twins",
+                    "dice_floor",
+                    "cosine_floor",
+                ],
+            )),
         ),
         _ => return Err(format!("unknown tool '{name}'")),
     })
@@ -1775,6 +1816,44 @@ mod tests {
         assert_eq!(body, Some(json!({"origins": ["x"], "limit": 500})));
     }
 
+    #[test]
+    fn audit_drift_schema_advertises_limit() {
+        let audit_drift = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "audit_drift")
+            .expect("audit_drift is defined");
+        let properties = &audit_drift["inputSchema"]["properties"];
+        assert_eq!(properties["limit"]["type"], "integer");
+    }
+
+    #[test]
+    fn audit_drift_routes_every_option_into_the_request_body() {
+        let (method, path, body) = route_tool(
+            "audit_drift",
+            &json!({
+                "context": "sake",
+                "unsourced_floor": 0.5,
+                "limit": 25,
+                "include_twins": true,
+                "dice_floor": 0.7,
+                "cosine_floor": 0.8
+            }),
+        )
+        .unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/contexts/sake/drift/audit");
+        assert_eq!(
+            body,
+            Some(json!({
+                "unsourced_floor": 0.5,
+                "limit": 25,
+                "include_twins": true,
+                "dice_floor": 0.7,
+                "cosine_floor": 0.8
+            }))
+        );
+    }
+
     /// #60: query/recall/explore/audit_coverage advertise `after` for
     /// resuming a page past its predecessor's last row — the MCP-layer
     /// wiring for the keyset cursors the HTTP side already accepts.
@@ -1783,11 +1862,12 @@ mod tests {
     /// the downstream Rust struct would reject anyway.
     #[test]
     fn search_and_audit_tools_advertise_after() {
-        let cases: [(&str, &[&str]); 4] = [
+        let cases: [(&str, &[&str]); 5] = [
             ("query", &["weight", "subject", "label", "object"]),
             ("recall", &["weight", "subject", "label", "object"]),
             ("explore", &["distance", "subject", "label", "object"]),
             ("audit_coverage", &["weight", "subject", "label", "object"]),
+            ("audit_drift", &["weight", "subject", "label", "object"]),
         ];
         for (name, required) in cases {
             let tool = tool_definitions()
@@ -1851,6 +1931,10 @@ mod tests {
             &json!({"context": "sake", "origins": ["a"], "after": cursor}),
         )
         .unwrap();
+        assert_eq!(body.unwrap()["after"], cursor);
+
+        let (_, _, body) =
+            route_tool("audit_drift", &json!({"context": "sake", "after": cursor})).unwrap();
         assert_eq!(body.unwrap()["after"], cursor);
     }
 

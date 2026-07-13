@@ -335,6 +335,36 @@ describe("transfer and maintenance", () => {
     ).toBe(true);
     await client.contexts.delete(name);
   });
+
+  it("audits drift: unsourced weight and dead-canonical aliases", async () => {
+    const name = fresh();
+    await client.contexts.create(name);
+    const ctx = client.context(name);
+    // No `source`: this weight lands unexplained by any named source.
+    await ctx.addAssociations([
+      { subject: "青嶺酒造", label: "kind", object: "会社", weight: 1.0 },
+    ]);
+    await ctx.addAssociations([
+      { subject: "高瀬", label: "kind", object: "杜氏", weight: 1.0, source: "docs/a.md" },
+    ]);
+    await ctx.retractAssociation("高瀬", "kind", "杜氏");
+    expect(await ctx.addAliases({ concepts: { タカセ: "高瀬" } })).toBe(1);
+
+    const audit = await ctx.auditDrift();
+    expect(audit.total).toBe(1);
+    expect(audit.unsourced[0]!.association.subject).toBe("青嶺酒造");
+    expect(audit.unsourced[0]!.unsourced_weight).toBe(1.0);
+    expect(audit.dead_concept_aliases).toEqual({ タカセ: "高瀬" });
+    expect(audit.twins).toBeNull();
+
+    const floored = await ctx.auditDrift({ unsourced_floor: 10.0 });
+    expect(floored.total).toBe(0);
+    expect(floored.unsourced).toEqual([]);
+
+    const withTwins = await ctx.auditDrift({ include_twins: true, dice_floor: 0.4 });
+    expect(withTwins.twins).not.toBeNull();
+    await client.contexts.delete(name);
+  });
 });
 
 describe("auth and limits", () => {
