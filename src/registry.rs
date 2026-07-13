@@ -5822,8 +5822,8 @@ pub(crate) fn name_from_stem(stem: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::context_proptest::{
-        AliasInput, AssocInput, RetractionInput, config as proptest_config, scenario_strategy,
-        wal_op_strategy,
+        AliasInput, AssocInput, RetractionInput, config as proptest_config,
+        json_roundtrip_f64_strategy, scenario_strategy, wal_op_strategy,
     };
     use proptest::prelude::*;
 
@@ -6431,7 +6431,7 @@ mod tests {
         #[test]
         fn registry_compaction_flushes_and_reloads_the_canonical_image(
             (assoc_ops, alias_ops, retractions) in scenario_strategy(),
-            dice_floor in prop::option::of(-1.0f64..2.0),
+            dice_floor in prop::option::of(json_roundtrip_f64_strategy(-1.0f64..2.0)),
         ) {
             let dir = scratch_dir("compact-property");
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();

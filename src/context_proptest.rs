@@ -13,6 +13,17 @@ pub(crate) fn config() -> ProptestConfig {
     }
 }
 
+/// Generates finite values whose decimal JSON representation parses back to
+/// the exact same `f64`. Properties that cross a JSON persistence boundary
+/// use this to test their own invariant rather than serde_json's rounding.
+pub(crate) fn json_roundtrip_f64_strategy(
+    range: std::ops::Range<f64>,
+) -> impl Strategy<Value = f64> {
+    range.prop_filter("value must survive JSON parsing bit-exactly", |&value| {
+        serde_json::from_str::<f64>(&serde_json::to_string(&value).unwrap()).unwrap() == value
+    })
+}
+
 const CONCEPT_WORDS: &[&str] = &[
     "青嶺酒造",
     "杜氏",
@@ -88,12 +99,7 @@ pub(crate) enum GeneratedWalOp {
 /// properties model the acknowledged subset independently of the generator.
 #[allow(dead_code)] // consumed by the server target; the library test target shares this module
 pub(crate) fn wal_op_strategy() -> impl Strategy<Value = GeneratedWalOp> {
-    let weight = (-1.0e6f64..1.0e6f64).prop_filter(
-        "weight must survive WAL JSON parsing bit-exactly",
-        |&weight| {
-            serde_json::from_str::<f64>(&serde_json::to_string(&weight).unwrap()).unwrap() == weight
-        },
-    );
+    let weight = json_roundtrip_f64_strategy(-1.0e6f64..1.0e6f64);
 
     prop_oneof![
         (
