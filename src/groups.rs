@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::registry::{
-    remove_persisted_file, rename_persisted_file, scanned_stem_and_name, write_atomic,
+    ResumedRenames, commit_staged, remove_persisted_file, rename_persisted_file,
+    resume_rename_markers, scanned_stem_and_name, write_atomic,
 };
 
 /// The nesting ceiling: a chain of nested groups may stack at most
@@ -253,6 +254,16 @@ pub(crate) fn group_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.group"))
 }
 
+/// The durable-rename marker for a group, `.grouprenaming` rather than
+/// context rename's `.renaming` so a context and a group sharing a
+/// name never collide on the same marker file. Same contract as
+/// `registry::renaming_marker_path`: while it exists, boot resumes
+/// the file move AND the group-membership rewrite (other records'
+/// `groups` entries naming `from`) before `reconcile_groups` runs.
+pub(crate) fn group_renaming_marker_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.grouprenaming"))
+}
+
 /// Persists one group via the registry's staged write (fsync + rename +
 /// parent fsync): a crash mid-write leaves the previous version intact.
 /// The staging name is `{stem}.tmp{n}`, which the boot scan's leftover
@@ -288,7 +299,31 @@ pub(crate) fn remove_group_file(dir: &Path, stem: &str) -> io::Result<()> {
 ///   scan ignores the extension) and a fresh empty record takes their
 ///   place on disk, so disk and memory agree from the first request
 ///   and no later write clobbers bytes that were never loaded.
-pub(crate) fn scan_groups(dir: &Path) -> io::Result<BTreeMap<String, GroupRecord>> {
+///
+/// Runs as two passes over the directory, not one: the first resumes
+/// every unfinished rename (moving `from.group` to `to.group`) to
+/// completion, and only the second lists `.group` files into the
+/// returned map. A single combined pass would race the two — were a
+/// `from.group` file read into the map before its rename marker had
+/// been noticed and resolved, the rename would then move the file out
+/// from under the name already registered, leaving `from` stranded in
+/// memory under a name no file on disk answers to any more.
+///
+/// The second return value is every `(from, to)` pair resumed — group
+/// membership referencing `from` in the returned map still needs the
+/// rewrite `boot_with` applies before `reconcile_groups` runs.
+pub(crate) fn scan_groups(
+    dir: &Path,
+) -> io::Result<(BTreeMap<String, GroupRecord>, ResumedRenames)> {
+    let resumed_renames =
+        resume_rename_markers(dir, "grouprenaming", "group", |from_stem, to_stem| {
+            match commit_staged(&group_path(dir, from_stem), &group_path(dir, to_stem)) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            }
+        })?;
+
     let mut groups = BTreeMap::new();
     for dir_entry in fs::read_dir(dir)? {
         let path = dir_entry?.path();
@@ -325,7 +360,7 @@ pub(crate) fn scan_groups(dir: &Path) -> io::Result<BTreeMap<String, GroupRecord
         };
         groups.insert(name, record);
     }
-    Ok(groups)
+    Ok((groups, resumed_renames))
 }
 
 #[cfg(test)]

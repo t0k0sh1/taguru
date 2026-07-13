@@ -473,12 +473,14 @@ fn routes(
                 .delete(api::delete_group),
         )
         .route("/groups/{name}/export", get(api::export_group))
+        .route("/groups/{name}/rename", post(api::rename_group))
         // The cross-context searches: the per-context operation of the
         // same name, run across several contexts named in the body.
         .route("/recall", post(api::cross_recall))
         .route("/query", post(api::cross_query))
         .route("/sources/search", post(api::cross_search_passages))
         .route("/contexts/{name}/export", get(api::export_context))
+        .route("/contexts/{name}/rename", post(api::rename_context))
         .route("/contexts/{name}/associations", post(api::add_associations))
         .route(
             "/contexts/{name}/associations/retract",
