@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::registry::{
-    ResumedRenames, commit_staged, resume_rename_markers, scanned_stem_and_name, write_atomic,
+    ResumedRenames, commit_staged, remove_persisted_file, rename_persisted_file,
+    resume_rename_markers, scanned_stem_and_name, write_atomic,
 };
 
 /// The nesting ceiling: a chain of nested groups may stack at most
@@ -274,7 +275,7 @@ pub(crate) fn write_group(dir: &Path, stem: &str, record: &GroupRecord) -> io::R
 /// Unlinks one group file. A file already gone counts as success — the
 /// caller's intent (this group does not exist on disk) is satisfied.
 pub(crate) fn remove_group_file(dir: &Path, stem: &str) -> io::Result<()> {
-    match fs::remove_file(group_path(dir, stem)) {
+    match remove_persisted_file(group_path(dir, stem)) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
     }
@@ -352,7 +353,7 @@ pub(crate) fn scan_groups(
                     %error,
                     "group file does not parse; keeping the group empty and setting the bytes aside"
                 );
-                fs::rename(&path, &set_aside)?;
+                rename_persisted_file(&path, &set_aside)?;
                 write_group(dir, &stem, &GroupRecord::default())?;
                 GroupRecord::default()
             }

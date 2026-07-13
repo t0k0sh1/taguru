@@ -115,7 +115,7 @@ impl PassageRecord {
     /// validation point both the live path and replay go through, so
     /// they can never disagree. Returns how many questions and how
     /// many sections were dropped.
-    fn new(
+    pub(crate) fn new(
         text: Arc<str>,
         questions: Vec<(u32, String)>,
         sections: Vec<(u32, String)>,
@@ -589,7 +589,7 @@ impl PassageStore {
         // the whole point: removing it BEFORE a durable snapshot exists
         // would strand the passages of a crash in between. A failed
         // unlink lingers harmlessly and retries next compaction.
-        if let Err(error) = fs::remove_file(&self.legacy_path)
+        if let Err(error) = crate::registry::remove_persisted_file(&self.legacy_path)
             && error.kind() != io::ErrorKind::NotFound
         {
             tracing::warn!(
@@ -701,7 +701,7 @@ fn read_legacy(path: &Path) -> BTreeMap<String, String> {
 /// What one resident record costs, for the running footprint: key,
 /// text, spans, questions, sections, and the per-entry overhead
 /// constant.
-fn record_bytes(source: &str, record: &PassageRecord) -> usize {
+pub(crate) fn record_bytes(source: &str, record: &PassageRecord) -> usize {
     source.len()
         + record.text.len()
         + record.paragraphs.len() * std::mem::size_of::<ParagraphSpan>()

@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
@@ -93,6 +93,9 @@ pub(crate) enum ErrorCode {
     /// 503 from the readiness probe: the write path is degraded.
     Unhealthy,
     StorageFull,
+    /// 503 while a `POST /maintenance/compact` sweep holds the server
+    /// closed to ordinary traffic — an intentional pause, not a fault.
+    Maintenance,
 }
 
 impl ErrorCode {
@@ -120,6 +123,7 @@ impl ErrorCode {
             Self::Overloaded => "overloaded",
             Self::Unhealthy => "unhealthy",
             Self::StorageFull => "storage_full",
+            Self::Maintenance => "maintenance",
         }
     }
 
@@ -150,7 +154,9 @@ impl ErrorCode {
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             Self::EmbeddingsUnconfigured => StatusCode::NOT_IMPLEMENTED,
             Self::EmbeddingsFailed => StatusCode::BAD_GATEWAY,
-            Self::Overloaded | Self::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Overloaded | Self::Unhealthy | Self::Maintenance => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::StorageFull => StatusCode::INSUFFICIENT_STORAGE,
         }
     }
@@ -563,6 +569,77 @@ pub async fn flush_all(
     }
     let flushed = tokio::task::block_in_place(|| state.flush_dirty());
     ok(flushed, started_at)
+}
+
+/// Optional tuning knob for [`maintenance_compact`]: only contexts whose
+/// live dead ratio strictly exceeds this qualify. Omitted (and `0.0`)
+/// means "any dead weight at all".
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct MaintenanceCompactQuery {
+    pub min_dead_ratio: Option<f64>,
+}
+
+/// `POST /maintenance/compact` — closes the server to ordinary traffic
+/// just long enough to rebuild every context whose dead ratio clears
+/// `min_dead_ratio` (`GET /contexts/{name}` and `/metrics` show the
+/// live ratios that inform the choice), worst ratio first, then reopens.
+/// `/health` answers 503 `maintenance` and `enforce_concurrency` sheds
+/// new work early for the duration, but the one real guarantee against
+/// two sweeps overlapping is the CAS in [`AppState::try_enter_maintenance`]
+/// taken here: a second call while one is running answers 409, not a
+/// queued wait. Server-wide like `flush`, so a context-scoped key is
+/// refused outright rather than silently filtered.
+pub async fn maintenance_compact(
+    State(state): State<AppState>,
+    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
+    AppQuery(query): AppQuery<MaintenanceCompactQuery>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
+) -> Response {
+    let started_at = Instant::now();
+    if let Some(axum::Extension(scope)) = &scope
+        && scope.contexts.is_some()
+    {
+        return error(
+            ErrorCode::Forbidden,
+            "maintenance is server-wide (it may compact any context); a \
+             context-scoped key cannot call it",
+            started_at,
+        );
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
+    let Some(_guard) = state.try_enter_maintenance() else {
+        return error(
+            ErrorCode::Conflict,
+            "a maintenance compaction sweep is already running",
+            started_at,
+        );
+    };
+    // New admissions are already being shed (best effort) now that the
+    // flag is set, so this count can only fall — except for our own
+    // request, which is why it drains to 1 rather than 0.
+    while state.metrics().inflight_count() > 1 {
+        if deadline.expired() {
+            return deadline_exceeded(started_at);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let min_dead_ratio = query.min_dead_ratio.unwrap_or(0.0).clamp(0.0, 1.0);
+    let outcome =
+        tokio::task::block_in_place(|| state.run_maintenance_compaction(min_dead_ratio, deadline));
+    // Maintenance that rewrites images is audit-worthy even though no
+    // knowledge changes (mirrors the per-context compact endpoint).
+    tracing::info!(
+        target: "taguru::audit",
+        key = %key_name(&key),
+        contexts_compacted = outcome.contexts.len(),
+        deadline_exceeded = outcome.deadline_exceeded,
+        "maintenance compaction swept the server",
+    );
+    ok(outcome, started_at)
 }
 
 /// One directory row by name — the cheap existence-and-stats check,

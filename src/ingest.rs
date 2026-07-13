@@ -1935,6 +1935,92 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Move one deterministic filesystem failure through the complete
+    /// import: marker, source retraction, passage store, associations,
+    /// aliases, and marker unlink. A stopped batch keeps its marker;
+    /// a failure before the marker applies nothing; and any swallowed
+    /// best-effort failure must still leave a complete, retryable truth.
+    #[test]
+    fn every_import_persistence_failure_is_detected_or_fully_repaired() {
+        let mut exhausted = false;
+        for failure in 0..24 {
+            let dir = std::env::temp_dir().join(format!(
+                "taguru-ingest-fault-{failure}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            let batch = parse(
+                "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
+                 {\"passage\": \"青嶺酒造の杜氏は高瀬。\"}\n\
+                 {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+                 {\"alias\": \"青嶺\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n",
+            )
+            .unwrap();
+
+            crate::registry::fail_persistence_ops_after(failure);
+            let first = apply_batch(&state, &batch);
+            let past_end = crate::registry::clear_persistence_fault();
+            let marker = crate::registry::import_marker_path(&dir, "sake", "doc-1");
+
+            if past_end {
+                assert!(
+                    first.is_ok(),
+                    "the past-end attempt must complete: {first:?}"
+                );
+                assert!(!marker.exists());
+            } else {
+                if let Err(refusal) = &first {
+                    let before_marker = refusal.text().contains("marker not persisted");
+                    assert_eq!(
+                        marker.exists(),
+                        !before_marker,
+                        "a stopped batch at step {failure} lost its tear witness: {refusal:?}"
+                    );
+                }
+                // Re-import is the documented repair and is exact even
+                // when the injected error was swallowed after a fully
+                // superseding write or only prevented marker cleanup.
+                apply_batch(&state, &batch).unwrap();
+                assert!(
+                    !marker.exists(),
+                    "repair did not clear failure step {failure}"
+                );
+            }
+
+            assert_eq!(
+                state
+                    .read_context("sake", |context| context.association_count())
+                    .unwrap(),
+                1,
+                "retry at step {failure} was not idempotent"
+            );
+            assert_eq!(
+                state
+                    .read_context("sake", |context| context.resolve("青嶺")[0].name.clone())
+                    .unwrap(),
+                "青嶺酒造",
+                "alias step {failure} did not land"
+            );
+            assert_eq!(
+                state
+                    .lookup_passages("sake", &["doc-1".to_string()])
+                    .unwrap()
+                    .unwrap()
+                    .0["doc-1"],
+                "青嶺酒造の杜氏は高瀬。"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "import exceeded the persistence sweep bound");
+    }
+
     #[test]
     fn directories_expand_to_their_sorted_jsonl_files() {
         let dir = std::env::temp_dir().join(format!("taguru-ingest-expand-{}", std::process::id()));

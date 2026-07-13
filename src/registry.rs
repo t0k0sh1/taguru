@@ -40,7 +40,7 @@
 //! behind one separate lock; the only operations that need both take
 //! `groups` BEFORE `registry` — never the other way around.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -49,7 +49,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use taguru::context::{AliasError, CompactionError, Context, LabelUsage};
+use taguru::context::{AliasError, CompactionError, Context, LabelUsage, dead_ratio_of};
 use taguru::deadline::{Deadline, DeadlineExceeded};
 
 use crate::embedding::{
@@ -96,6 +96,17 @@ pub struct ContextStats {
     pub labels: usize,
     pub sources: usize,
     pub footprint_bytes: usize,
+    /// Live count of edges with `count == 0` — dead weight `compact`
+    /// would shed right now. See [`Context::dead_edges`] for how this
+    /// differs from the one-time `CompactionStats::dead_edges`.
+    pub dead_edges: usize,
+    /// Live count of attribution records unlinked from every chain but
+    /// not yet reclaimed by compaction.
+    pub dead_attributions: usize,
+    /// Lower-bound count of arena bytes occupied by removed aliases'
+    /// spellings — see [`Context::arena_slack`] for why it is a lower
+    /// bound.
+    pub arena_slack: usize,
     /// Most connected concepts with their degree, most connected first.
     /// Same `{label, count}` shape as `describe`'s `as_subject`/`as_object`.
     #[serde(deserialize_with = "deserialize_top_concepts")]
@@ -142,6 +153,9 @@ impl ContextStats {
             labels: context.label_count(),
             sources: context.source_count(),
             footprint_bytes: context.footprint(),
+            dead_edges: context.dead_edges(),
+            dead_attributions: context.dead_attributions(),
+            arena_slack: context.arena_slack(),
             top_concepts: context
                 .top_concepts(Self::TOP_CONCEPTS)
                 .into_iter()
@@ -157,6 +171,14 @@ impl ContextStats {
                 .map(String::from)
                 .collect(),
         }
+    }
+
+    /// Fraction of associations that are currently dead weight — the
+    /// same formula [`Context::dead_ratio`] uses, so a hot context
+    /// (recomputed live) and a cold one (this cached snapshot) can
+    /// never disagree about it.
+    pub fn dead_ratio(&self) -> f64 {
+        dead_ratio_of(self.dead_edges, self.associations)
     }
 }
 
@@ -366,6 +388,7 @@ impl Entry {
         stats: ContextStats,
         slot: Slot,
         wal_bytes: u64,
+        passages_wal_bytes: u64,
         usage: ContextUsage,
     ) -> Self {
         Self {
@@ -375,6 +398,7 @@ impl Entry {
                 slot,
                 wal_seq: 1,
                 wal_bytes,
+                passages_wal_bytes,
                 counted_bytes: 0,
                 load_failure: None,
                 image_generation: 0,
@@ -473,6 +497,13 @@ struct EntryInner {
     /// truncation; a log only shrinks after a successful image save,
     /// so sustained growth here means flushes are failing.
     wal_bytes: u64,
+    /// Size of this context's passage log on disk while cold — the same
+    /// role as `wal_bytes` but for `PassageStore`, which only knows its
+    /// own pending bytes while resident. Seeded at scan, refreshed the
+    /// moment `evict_entry` drops the store back to cold; `gauge_snapshot`
+    /// reads the live store when hot and this field otherwise, so it
+    /// never has to re-stat the log on every scrape.
+    passages_wal_bytes: u64,
     /// What this entry currently contributes to the global resident
     /// estimate (graph footprint; 0 while cold, deleted, or pinned —
     /// the budget covers unpinned residents only). Kept absolute and
@@ -708,6 +739,25 @@ pub struct CompactOutcome {
     pub bytes_after: usize,
     pub dead_edges: usize,
     pub aliases_dropped: usize,
+}
+
+/// One context's [`CompactOutcome`] inside a
+/// [`AppState::run_maintenance_compaction`] sweep, named so the sweep's
+/// response can say which contexts it touched.
+#[derive(Debug, Clone, Serialize)]
+pub struct MaintenanceCompactionEntry {
+    pub name: String,
+    #[serde(flatten)]
+    pub outcome: CompactOutcome,
+}
+
+/// What a `POST /maintenance/compact` sweep accomplished: every context
+/// it compacted, worst dead ratio first, and whether the deadline cut
+/// the sweep short of the full candidate list.
+#[derive(Debug, Clone, Serialize)]
+pub struct MaintenanceCompactionOutcome {
+    pub contexts: Vec<MaintenanceCompactionEntry>,
+    pub deadline_exceeded: bool,
 }
 
 /// Why an operation on a named context could not run.
@@ -1064,6 +1114,18 @@ impl BootConfig {
 #[derive(Clone)]
 pub struct AppState(Arc<StateInner>);
 
+/// Holds the server open-for-maintenance for as long as it lives —
+/// acquired through [`AppState::try_enter_maintenance`], released by
+/// `Drop` on every exit path (normal return, an early `?`, or a panic
+/// unwind) so a wedged sweep can never leave the flag stuck.
+pub struct MaintenanceGuard(AppState);
+
+impl Drop for MaintenanceGuard {
+    fn drop(&mut self) {
+        self.0.metrics().exit_maintenance();
+    }
+}
+
 /// Floor for the semantic entry tier when neither the call, the
 /// context, nor the server (`TAGURU_SEMANTIC_FLOOR`) sets one.
 /// Calibrated against text-embedding-3-large with GLOSSED names
@@ -1185,20 +1247,26 @@ struct StateInner {
     budget_ops: AtomicU64,
 }
 
-/// A FIFO-bounded map of cue → embedding. FIFO rather than LRU keeps it
-/// trivial; at the cap it holds ~12 MB of vectors, and evicting a warm
-/// cue merely costs one re-embed.
+/// An LRU-bounded map of cue → embedding: an LLM client repeats query
+/// wording, and recency (not insertion order) is what predicts the next
+/// hit. At the cap it holds ~12 MB of vectors. Recency is tracked by a
+/// counter dedicated to this cache rather than `AppState::clock`
+/// (documented for a different purpose) to keep the two concerns apart.
 #[derive(Default)]
 struct CueCache {
-    vectors: HashMap<String, Arc<Vec<f32>>>,
-    order: VecDeque<String>,
+    vectors: HashMap<String, (Arc<Vec<f32>>, u64)>,
+    tick: u64,
 }
 
 impl CueCache {
     const CAP: usize = 1024;
 
-    fn get(&self, cue: &str) -> Option<Arc<Vec<f32>>> {
-        self.vectors.get(cue).cloned()
+    fn get(&mut self, cue: &str) -> Option<Arc<Vec<f32>>> {
+        self.tick += 1;
+        let tick = self.tick;
+        let entry = self.vectors.get_mut(cue)?;
+        entry.1 = tick;
+        Some(Arc::clone(&entry.0))
     }
 
     fn insert(&mut self, cue: String, vector: Arc<Vec<f32>>) {
@@ -1206,12 +1274,16 @@ impl CueCache {
             return;
         }
         if self.vectors.len() >= Self::CAP
-            && let Some(oldest) = self.order.pop_front()
+            && let Some(oldest) = self
+                .vectors
+                .iter()
+                .min_by_key(|(_, (_, tick))| *tick)
+                .map(|(cue, _)| cue.clone())
         {
             self.vectors.remove(&oldest);
         }
-        self.order.push_back(cue.clone());
-        self.vectors.insert(cue, vector);
+        self.tick += 1;
+        self.vectors.insert(cue, (vector, self.tick));
     }
 }
 
@@ -1371,6 +1443,16 @@ impl AppState {
         &self.0.metrics
     }
 
+    /// Attempts to become the sole maintenance sweep; `None` means one is
+    /// already running. The returned guard is what keeps the server
+    /// closed to ordinary traffic — dropping it (by any means) reopens.
+    pub fn try_enter_maintenance(&self) -> Option<MaintenanceGuard> {
+        self.0
+            .metrics
+            .try_enter_maintenance()
+            .then(|| MaintenanceGuard(self.clone()))
+    }
+
     /// Counts one successful retrieval twice over: the aggregate
     /// searches family (by operation) and the context's own usage row.
     pub fn note_search(&self, op: crate::metrics::SearchOp, name: &str, empty: bool) {
@@ -1450,33 +1532,45 @@ impl AppState {
         let mut resident_bytes = 0u64;
         let mut wal_bytes = 0u64;
         let mut passages_wal_bytes = 0u64;
-        for (name, entry) in snapshot {
+        let mut dead_edges_total = 0u64;
+        let mut dead_attributions_total = 0u64;
+        let mut arena_slack_total = 0u64;
+        for (_name, entry) in snapshot {
             let inner = entry.inner.read();
             if let Slot::Hot(context) = &inner.slot {
                 contexts_resident += 1;
                 resident_bytes += context.footprint() as u64;
+                dead_edges_total += context.dead_edges() as u64;
+                dead_attributions_total += context.dead_attributions() as u64;
+                arena_slack_total += context.arena_slack() as u64;
+            } else {
+                // Cold (or mid-delete): the graph is not in memory, so
+                // this stays whatever `inner.stats` last cached at
+                // eviction/compact/flush — the same staleness trade
+                // `resident_bytes`'s hot-only branch already accepts,
+                // just from the other side (dead weight persists on
+                // disk whether or not the context is loaded).
+                dead_edges_total += inner.stats.dead_edges as u64;
+                dead_attributions_total += inner.stats.dead_attributions as u64;
+                arena_slack_total += inner.stats.arena_slack as u64;
             }
             wal_bytes += inner.wal_bytes;
+            let cold_passages_wal_bytes = inner.passages_wal_bytes;
             drop(inner);
             resident_bytes += entry.vectors_footprint() as u64;
             resident_bytes += entry.passages_footprint() as u64;
             resident_bytes += entry.bm25_footprint() as u64;
             resident_bytes += entry.passage_vectors_footprint() as u64;
-            // A resident store knows its pending log; a cold one gets a
-            // stat — the gauge must not go blind just because a context
-            // was evicted.
-            passages_wal_bytes += {
-                let resident = entry
-                    .passages
-                    .lock()
-                    .as_ref()
-                    .map(|store| store.pending_log_bytes());
-                resident.unwrap_or_else(|| {
-                    fs::metadata(passages_wal_path(&self.0.data_dir, &file_stem(&name)))
-                        .map(|meta| meta.len())
-                        .unwrap_or(0)
-                })
-            };
+            // A resident store knows its pending log; a cold one uses
+            // the value `evict_entry` cached on the way down — the
+            // gauge must not go blind just because a context was
+            // evicted, nor re-`stat` the log on every scrape.
+            passages_wal_bytes += entry
+                .passages
+                .lock()
+                .as_ref()
+                .map(|store| store.pending_log_bytes())
+                .unwrap_or(cold_passages_wal_bytes);
         }
         GaugeSnapshot {
             contexts_registered,
@@ -1485,6 +1579,9 @@ impl AppState {
             resident_bytes,
             wal_bytes,
             passages_wal_bytes,
+            dead_edges_total,
+            dead_attributions_total,
+            arena_slack_total,
         }
     }
 
@@ -1555,6 +1652,7 @@ impl AppState {
                     stats,
                     Slot::Hot(Box::new(context)),
                     0,
+                    0,
                     usage,
                 )),
             );
@@ -1603,7 +1701,7 @@ impl AppState {
             // marker and deletes the context we are creating right now.
             deleted_marker_path(&self.0.data_dir, &stem),
         ] {
-            if let Err(error) = fs::remove_file(&stale)
+            if let Err(error) = remove_persisted_file(&stale)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 return Err(CreateError::Io(error));
@@ -1613,7 +1711,7 @@ impl AppState {
         // left beside the new files, boot would report the fresh
         // context as carrying a torn import it never ran.
         for stale in import_marker_paths(&self.0.data_dir, &stem) {
-            if let Err(error) = fs::remove_file(&stale)
+            if let Err(error) = remove_persisted_file(&stale)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 return Err(CreateError::Io(error));
@@ -1691,7 +1789,7 @@ impl AppState {
         self.sweep_context_from_groups(name);
         let mut outcome = Ok(());
         for file in context_files(&stem) {
-            if let Err(error) = fs::remove_file(self.0.data_dir.join(file))
+            if let Err(error) = remove_persisted_file(self.0.data_dir.join(file))
                 && error.kind() != io::ErrorKind::NotFound
             {
                 outcome = Err(error);
@@ -1703,14 +1801,14 @@ impl AppState {
         // failure handling as the fixed files — a miss keeps the
         // `.deleted` marker, and boot finishes the job.
         for path in import_marker_paths(&self.0.data_dir, &stem) {
-            if let Err(error) = fs::remove_file(&path)
+            if let Err(error) = remove_persisted_file(&path)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 outcome = Err(error);
             }
         }
         if outcome.is_ok() {
-            let _ = fs::remove_file(&marker);
+            let _ = remove_persisted_file(&marker);
         }
         self.0.pending_deletes.lock().remove(name);
         Some(outcome)
@@ -1802,7 +1900,17 @@ impl AppState {
         let wal_bytes = fs::metadata(wal_path(&self.0.data_dir, &to_stem))
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let new_entry = Arc::new(Entry::new(meta, stats, Slot::Cold, wal_bytes, usage));
+        let passages_wal_bytes = fs::metadata(passages_wal_path(&self.0.data_dir, &to_stem))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let new_entry = Arc::new(Entry::new(
+            meta,
+            stats,
+            Slot::Cold,
+            wal_bytes,
+            passages_wal_bytes,
+            usage,
+        ));
         self.0
             .registry
             .write()
@@ -2734,7 +2842,7 @@ impl AppState {
     /// or a hand unlink clears it.
     pub fn clear_import_marker(&self, context: &str, source: &str) {
         let path = import_marker_path(&self.0.data_dir, &file_stem(context), source);
-        if let Err(error) = fs::remove_file(&path)
+        if let Err(error) = remove_persisted_file(&path)
             && error.kind() != io::ErrorKind::NotFound
         {
             tracing::warn!(
@@ -2833,7 +2941,7 @@ impl AppState {
         let semantic: Vec<(String, u32, u64, f32)> = match &cue {
             Some(cue) => match self.passage_vector_gate(&entry, &file_stem(name)) {
                 PassageVectorGate::Ready(vectors) => semantic_lane_hits(
-                    vectors.top_matches(cue, pool),
+                    vectors.top_matches(cue, pool, deadline),
                     self.effective_semantic_floor(&fence.meta),
                 ),
                 _ => Vec::new(),
@@ -2917,7 +3025,7 @@ impl AppState {
         };
         let vector_rows: Vec<(String, u32, u64, f32)> = match (&cue, &gate) {
             (Ok(Some(cue)), Some(PassageVectorGate::Ready(vectors))) => vectors
-                .top_matches(cue, usize::MAX)
+                .top_matches(cue, usize::MAX, deadline)
                 .into_iter()
                 .map(|(key, score)| (key.source.clone(), key.index, key.hash, score))
                 .collect(),
@@ -4207,6 +4315,68 @@ impl AppState {
         Ok(outcome)
     }
 
+    /// Server-wide sweep: every context whose live dead ratio strictly
+    /// exceeds `min_dead_ratio` is rebuilt via [`Self::compact_context`],
+    /// worst ratio first, so a deadline that cuts the sweep short still
+    /// recovers the most it could. Candidates are read from each entry's
+    /// existing dead ratio ([`Context::dead_ratio`] while hot, the
+    /// cached snapshot's while cold) — nothing is loaded or rebuilt just
+    /// to be asked whether it qualifies. Sequential by design: the caller
+    /// (`POST /maintenance/compact`) has already drained ordinary
+    /// traffic before calling this, so there is no concurrency to hide
+    /// behind parallelism, and one context at a time caps the sweep's
+    /// peak memory at a single context's footprint.
+    pub fn run_maintenance_compaction(
+        &self,
+        min_dead_ratio: f64,
+        deadline: Deadline,
+    ) -> MaintenanceCompactionOutcome {
+        let mut candidates: Vec<(String, f64)> = self
+            .snapshot()
+            .into_iter()
+            .filter_map(|(name, entry)| {
+                let inner = entry.inner.read();
+                let ratio = match &inner.slot {
+                    Slot::Hot(context) => context.dead_ratio(),
+                    Slot::Cold => inner.stats.dead_ratio(),
+                    Slot::Deleted => return None,
+                };
+                // NaN (a malformed `min_dead_ratio`) makes every
+                // comparison false, so the sweep simply selects nothing
+                // rather than mis-selecting.
+                (ratio > min_dead_ratio).then_some((name, ratio))
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        let mut contexts = Vec::with_capacity(candidates.len());
+        let mut deadline_exceeded = false;
+        for (name, _) in candidates {
+            if deadline.expired() {
+                deadline_exceeded = true;
+                break;
+            }
+            match self.compact_context(&name, deadline) {
+                Ok(outcome) => contexts.push(MaintenanceCompactionEntry { name, outcome }),
+                Err(AccessError::DeadlineExceeded) => {
+                    deadline_exceeded = true;
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        context = %name,
+                        ?error,
+                        "maintenance sweep skipped a context"
+                    );
+                }
+            }
+        }
+        MaintenanceCompactionOutcome {
+            contexts,
+            deadline_exceeded,
+        }
+    }
+
     /// Test-only: rewinds any remembered load failure (graph image and
     /// passage store both) so the quarantine window can elapse without
     /// the test sleeping through it.
@@ -4346,7 +4516,7 @@ impl AppState {
         // tombstone invariant — so a delete that won the race while we
         // were staging must find us backing off, not recreating.
         let Some(mut guard) = entry.lock_unless_deleted() else {
-            let _ = fs::remove_file(&staged);
+            let _ = remove_persisted_file(&staged);
             entry.flushing.store(false, Ordering::Relaxed);
             return false;
         };
@@ -4365,7 +4535,7 @@ impl AppState {
         // already left `dirty` set, so backing off here costs nothing —
         // the next tick flushes the current image instead.
         if !matches!(inner.slot, Slot::Hot(_)) || inner.image_generation != generation {
-            let _ = fs::remove_file(&staged);
+            let _ = remove_persisted_file(&staged);
             entry.flushing.store(false, Ordering::Relaxed);
             return false;
         }
@@ -4398,7 +4568,7 @@ impl AppState {
             }
             Err(error) => {
                 tracing::warn!("flush of context '{name}' failed (will retry): {error}");
-                let _ = fs::remove_file(&staged);
+                let _ = remove_persisted_file(&staged);
                 entry.dirty.store(true, Ordering::Relaxed);
                 entry.usage_dirty.store(true, Ordering::Relaxed);
                 self.0.metrics.record_flush(name, false);
@@ -4928,6 +5098,9 @@ impl AppState {
                 {
                     tracing::warn!("passages for '{name}' evicted uncompacted: {error}");
                 }
+                // Cold from here on: `gauge_snapshot` reads this cached
+                // value instead of re-`stat`ing the log on every scrape.
+                inner.passages_wal_bytes = store.pending_log_bytes();
             }
         }
         // Same best-effort posture for a dirty index: saving it spares
@@ -4978,6 +5151,42 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
     })
 }
 
+/// Runs `f` over `items` on up to `workers` threads pulling from one
+/// shared queue — the same divide-the-queue-not-the-slice shape
+/// `preload_pinned` uses, generalized so a caller only supplies the
+/// per-item work. Each worker collects into a local `Vec` and merges
+/// into the shared result once at the end, so contention is limited to
+/// the queue itself; results come back in arrival order, not input
+/// order — callers that need input order carry an index through `T`/`R`
+/// and sort afterward.
+pub(crate) fn parallel_map<T, R>(items: Vec<T>, workers: usize, f: impl Fn(T) -> R + Sync) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let workers = workers.min(items.len()).max(1);
+    let queue = Mutex::new(items.into_iter());
+    let results: Mutex<Vec<R>> = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                let mut local = Vec::new();
+                loop {
+                    let Some(item) = queue.lock().next() else {
+                        break;
+                    };
+                    local.push(f(item));
+                }
+                results.lock().extend(local);
+            });
+        }
+    });
+    results.into_inner()
+}
+
 /// One boot-time pass over the data directory: crash leftovers of
 /// staged writes are deleted (never published, and nothing may linger
 /// as unbounded disk litter), and every context image found is
@@ -4999,14 +5208,14 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
             let stem = stem.to_string();
             for file in context_files(&stem) {
                 let target = data_dir.join(file);
-                if let Err(error) = fs::remove_file(&target)
+                if let Err(error) = remove_persisted_file(&target)
                     && error.kind() != io::ErrorKind::NotFound
                 {
                     tracing::warn!(path = %target.display(), %error, "unfinished deletion: file still held");
                 }
             }
             // The marker goes last: it only leaves once the family did.
-            if fs::remove_file(&path).is_err() {
+            if remove_persisted_file(&path).is_err() {
                 tracing::warn!(path = %path.display(), "unfinished deletion: marker still held");
             }
         }
@@ -5024,13 +5233,13 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
         resume_rename_markers(data_dir, "renaming", "context", |from_stem, to_stem| {
             move_context_files(data_dir, from_stem, to_stem)
         })?;
-    let mut registry = BTreeMap::new();
+    let mut candidates: Vec<(String, String)> = Vec::new();
     let mut import_markers: Vec<PathBuf> = Vec::new();
     for dir_entry in fs::read_dir(data_dir)? {
         let path = dir_entry?.path();
         let extension = path.extension().and_then(|e| e.to_str());
         if extension.is_some_and(|e| e.starts_with("tmp")) {
-            let _ = fs::remove_file(&path);
+            let _ = remove_persisted_file(&path);
             continue;
         }
         // Import markers are judged after the scan, once it is known
@@ -5045,18 +5254,43 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
         let Some((stem, name)) = scanned_stem_and_name(&path) else {
             continue;
         };
-        let stem = stem.as_str();
-        let MetaFile { meta, stats, usage } = read_meta_file(data_dir, stem);
-        // The gauge must see leftover logs from the first scrape, not
-        // only after each context's first touch.
-        let wal_bytes = fs::metadata(wal_path(data_dir, stem))
-            .map(|meta| meta.len())
-            .unwrap_or(0);
-        registry.insert(
-            name,
-            Arc::new(Entry::new(meta, stats, Slot::Cold, wal_bytes, usage)),
-        );
+        candidates.push((stem, name));
     }
+
+    // The expensive part of a boot scan is the disk I/O per candidate
+    // (sidecar read plus two `fs::metadata` calls), and each candidate
+    // is independent — `parallel_map` pays for it in parallel the same
+    // way `preload_pinned` does; arrival order cannot affect the result
+    // since it only feeds a `BTreeMap`.
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let registry: BTreeMap<String, Arc<Entry>> =
+        parallel_map(candidates, workers, |(stem, name)| {
+            let stem = stem.as_str();
+            let MetaFile { meta, stats, usage } = read_meta_file(data_dir, stem);
+            // The gauge must see leftover logs from the first scrape,
+            // not only after each context's first touch.
+            let wal_bytes = fs::metadata(wal_path(data_dir, stem))
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            let passages_wal_bytes = fs::metadata(passages_wal_path(data_dir, stem))
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            (
+                name,
+                Arc::new(Entry::new(
+                    meta,
+                    stats,
+                    Slot::Cold,
+                    wal_bytes,
+                    passages_wal_bytes,
+                    usage,
+                )),
+            )
+        })
+        .into_iter()
+        .collect();
 
     // Surviving import markers: each says a multi-store batch opened
     // and never finished — a crash (or an unretried refusal) between
@@ -5088,7 +5322,7 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
                  aliases); re-import the batch file or retract the source",
             );
         } else {
-            let _ = fs::remove_file(&path);
+            let _ = remove_persisted_file(&path);
         }
     }
     Ok((registry, resumed_renames))
@@ -6058,6 +6292,75 @@ pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> 
     write_atomic_with(path, bytes, true)
 }
 
+/// Test-only deterministic fault injection for registry persistence.
+///
+/// The calling thread fails exactly one persistence operation after
+/// `successes` stage, commit, unlink, WAL append, or WAL truncate
+/// operations have run normally.
+/// Keeping the counter thread-local makes parallel tests independent,
+/// and routing every operation through shared choke points avoids a
+/// flag for each call site.
+#[cfg(test)]
+pub(crate) fn fail_persistence_ops_after(successes: u32) {
+    PERSISTENCE_FAULT.with(|cell| cell.set(Some(successes)));
+}
+
+#[cfg(test)]
+thread_local! {
+    static PERSISTENCE_FAULT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Clears an armed fault and reports whether it was still pending. A
+/// sweep uses this after each attempt: `false` means the selected op
+/// was reached and failed, while `true` means the operation had fewer
+/// persistence steps and the sweep is complete.
+#[cfg(test)]
+pub(crate) fn clear_persistence_fault() -> bool {
+    PERSISTENCE_FAULT.with(|cell| cell.take().is_some())
+}
+
+#[cfg(test)]
+pub(crate) fn injected_persistence_failure(operation: &str) -> Option<io::Error> {
+    PERSISTENCE_FAULT.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            Some(io::Error::other(format!(
+                "injected registry persistence failure during {operation}"
+            )))
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            None
+        }
+        None => None,
+    })
+}
+
+#[cfg(not(test))]
+pub(crate) fn injected_persistence_failure(_operation: &str) -> Option<io::Error> {
+    None
+}
+
+/// The unlink choke point shared by registry and group persistence.
+pub(crate) fn remove_persisted_file(path: impl AsRef<Path>) -> io::Result<()> {
+    if let Some(error) = injected_persistence_failure("unlink") {
+        return Err(error);
+    }
+    fs::remove_file(path)
+}
+
+/// The rename choke point shared by atomic publication and recovery
+/// paths that move corrupt bytes aside.
+pub(crate) fn rename_persisted_file(
+    from: impl AsRef<Path>,
+    to: impl AsRef<Path>,
+) -> io::Result<()> {
+    if let Some(error) = injected_persistence_failure("commit") {
+        return Err(error);
+    }
+    fs::rename(from, to)
+}
+
 fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
     let staged = stage_bytes(path, bytes, private)?;
     let result = commit_staged(&staged, path);
@@ -6068,7 +6371,7 @@ fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> io::Result<()>
         // after a successful rename finds nothing here: the file is
         // already `path`, and removing the stale `staged` name is a
         // harmless no-op.)
-        let _ = fs::remove_file(&staged);
+        let _ = remove_persisted_file(&staged);
     }
     result
 }
@@ -6093,6 +6396,9 @@ fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Result<PathBuf> 
     #[cfg(not(unix))]
     let _ = private;
     let staged = staging_path(path);
+    if let Some(error) = injected_persistence_failure("stage") {
+        return Err(error);
+    }
     // A private file must be BORN owner-only: create-then-chmod leaves a
     // window (the default-umask create, ~0644, before the chmod) in
     // which another local account can open() the staging file and keep
@@ -6125,7 +6431,7 @@ fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Result<PathBuf> 
             // content and was never handed to a caller — remove it
             // rather than leave a partial write behind under its
             // temporary name.
-            let _ = fs::remove_file(&staged);
+            let _ = remove_persisted_file(&staged);
             Err(error)
         }
     }
@@ -6139,7 +6445,7 @@ fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Result<PathBuf> 
 /// moves nine files under one parent and fsyncs once itself instead of
 /// calling this per file — see there.
 pub(crate) fn commit_staged(staged: &Path, path: &Path) -> io::Result<()> {
-    fs::rename(staged, path)?;
+    rename_persisted_file(staged, path)?;
     fsync_parent_dir(path)
 }
 
@@ -6522,6 +6828,65 @@ mod tests {
             "the marker leaves once the family did"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Every stage/commit/unlink position in context deletion either
+    /// finishes immediately or leaves enough durable state for boot to
+    /// finish it. The first index beyond the operation proves the sweep
+    /// did not merely sample a few hand-picked failures.
+    #[test]
+    fn every_context_delete_persistence_failure_recovers_at_boot() {
+        let mut exhausted = false;
+        for failure in 0..64 {
+            let dir = scratch_dir(&format!("delete-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+            state
+                .create_group(
+                    "breweries",
+                    String::new(),
+                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let outcome = state.delete("sake").unwrap();
+            let past_end = clear_persistence_fault();
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            assert!(
+                state.directory_entry("sake").is_none(),
+                "failure at persistence step {failure} resurrected the context: {outcome:?}"
+            );
+            assert!(
+                state.group("breweries").unwrap().contexts.is_empty(),
+                "boot did not reconcile group membership at step {failure}"
+            );
+            assert!(
+                !deleted_marker_path(&dir, "sake").exists(),
+                "boot did not finish the marker at step {failure}"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+
+            if past_end {
+                assert!(outcome.is_ok());
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "context deletion exceeded the sweep bound");
     }
 
     /// The dangerous interleaving: a delete leaves a marker behind
@@ -6960,6 +7325,189 @@ mod tests {
             drop(reloaded);
             let _ = fs::remove_dir_all(dir);
         }
+    }
+
+    /// [`AppState::run_maintenance_compaction`] selects worst-ratio-first
+    /// and drops anything at or under the floor — the ordering and the
+    /// threshold `POST /maintenance/compact` promises callers.
+    #[test]
+    fn run_maintenance_compaction_orders_worst_ratio_first_and_applies_the_floor() {
+        let dir = scratch_dir("maint-order");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        state
+            .create("clean", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "clean",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "産地", "灘", 1.0, Some("keep.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        state
+            .create("mild", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "mild",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "産地", "灘", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_source("mild", "gone.md").unwrap();
+
+        state
+            .create("rotten", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "rotten",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_source("rotten", "gone.md").unwrap();
+
+        let outcome = state.run_maintenance_compaction(0.0, Deadline::unbounded());
+        assert!(!outcome.deadline_exceeded);
+        let names: Vec<&str> = outcome
+            .contexts
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["rotten", "mild"], "{names:?}");
+        assert_eq!(outcome.contexts[0].outcome.dead_edges, 1);
+        assert_eq!(outcome.contexts[1].outcome.dead_edges, 1);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A cold context's dead ratio comes from its persisted stats
+    /// snapshot, not a load — [`AppState::run_maintenance_compaction`]'s
+    /// whole point is picking candidates without paying for residency.
+    #[test]
+    fn run_maintenance_compaction_selects_a_cold_candidate_from_its_saved_stats() {
+        let dir = scratch_dir("maint-cold");
+        let state = AppState::boot(dir.clone(), 1, None).unwrap();
+
+        state
+            .create("rotten", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "rotten",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_source("rotten", "gone.md").unwrap();
+
+        state
+            .create("other", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // Touching "other" evicts "rotten" to cold under the one-byte budget.
+        state
+            .read_context("other", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(
+            !state.directory_entry("rotten").unwrap().loaded,
+            "rotten must be cold before the sweep"
+        );
+
+        let outcome = state.run_maintenance_compaction(0.0, Deadline::unbounded());
+        assert_eq!(outcome.contexts.len(), 1, "{outcome:?}");
+        assert_eq!(outcome.contexts[0].name, "rotten");
+        assert_eq!(outcome.contexts[0].outcome.dead_edges, 1);
+        assert!(!outcome.deadline_exceeded);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A `Slot::Deleted` entry observed inside the sweep (the tombstone
+    /// left for anyone holding the entry's `Arc` from before a concurrent
+    /// `delete`) is skipped, not treated as a crash or a candidate.
+    #[test]
+    fn run_maintenance_compaction_skips_a_deleted_entry_without_panicking() {
+        let dir = scratch_dir("maint-deleted");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("ghost", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "ghost",
+                vec![assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_source("ghost", "gone.md").unwrap();
+
+        // Simulates the race `delete()` can open: still a member of the
+        // registry map (so the sweep's snapshot picks it up) but its
+        // slot already flipped to the tombstone, as if a concurrent
+        // `delete()` had reached that half of its two-step teardown.
+        let entry = state.lookup("ghost").expect("just created");
+        entry.inner.write().slot = Slot::Deleted;
+
+        let outcome = state.run_maintenance_compaction(0.0, Deadline::unbounded());
+        assert!(outcome.contexts.is_empty(), "{outcome:?}");
+        assert!(!outcome.deadline_exceeded);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// [`AppState::try_enter_maintenance`] is a one-shot CAS: a second
+    /// call fails while the guard lives, and dropping it (the only way
+    /// to release — success, a deadline, or a panic unwind all reach the
+    /// same `Drop`) reopens the server for the next sweep.
+    #[test]
+    fn maintenance_guard_is_a_one_shot_cas_released_by_drop() {
+        let dir = scratch_dir("maint-guard");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        let guard = state.try_enter_maintenance().expect("first entry succeeds");
+        assert!(state.metrics().maintenance_active());
+        assert!(
+            state.try_enter_maintenance().is_none(),
+            "a second sweep must not overlap the first"
+        );
+
+        drop(guard);
+        assert!(!state.metrics().maintenance_active());
+        let _second = state
+            .try_enter_maintenance()
+            .expect("reopened once the guard drops");
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// A context whose load failed answers the remembered refusal
@@ -7852,6 +8400,70 @@ mod tests {
     }
 
     #[test]
+    fn dead_weight_gauges_track_hot_and_cold_contexts() {
+        let dir = scratch_dir("dead-weight-gauges");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        let baseline = state.gauge_snapshot();
+        assert_eq!(baseline.dead_edges_total, 0);
+        assert_eq!(baseline.dead_attributions_total, 0);
+        assert_eq!(baseline.arena_slack_total, 0);
+
+        // One sourced association, later retracted outright: one dead
+        // edge, one unlinked attribution.
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "廃", "旧", 1.0, Some("x.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.retract_association("sake", "蔵", "廃", "旧").unwrap(),
+            Some(1)
+        );
+        // One alias registered then withdrawn: its spelling's bytes
+        // become arena slack.
+        state
+            .add_aliases(
+                "sake",
+                &BTreeMap::from([("Aomine".to_string(), "蔵".to_string())]),
+                &BTreeMap::new(),
+            )
+            .unwrap()
+            .unwrap();
+        state
+            .remove_aliases("sake", &["Aomine".to_string()], &[])
+            .unwrap()
+            .unwrap();
+
+        let hot = state.gauge_snapshot();
+        assert_eq!(hot.dead_edges_total, 1);
+        assert_eq!(hot.dead_attributions_total, 1);
+        assert_eq!(hot.arena_slack_total, "Aomine".len() as u64);
+        let text = rendered(&state);
+        assert!(text.contains("taguru_dead_edges 1"));
+        assert!(text.contains("taguru_dead_attributions 1"));
+        assert!(text.contains(&format!("taguru_arena_slack_bytes {}", "Aomine".len())));
+
+        // Eviction to cold must not lose the totals — the gauge falls
+        // back to the persisted `ContextStats` snapshot.
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        let cold = state.gauge_snapshot();
+        assert_eq!(cold.dead_edges_total, hot.dead_edges_total);
+        assert_eq!(cold.dead_attributions_total, hot.dead_attributions_total);
+        assert_eq!(cold.arena_slack_total, hot.arena_slack_total);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn health_follows_the_flusher_down_and_back_up() {
         use std::os::unix::fs::PermissionsExt;
@@ -8631,6 +9243,56 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A flush has image stage/commit, sidecar stage/commit, and a WAL
+    /// truncate. Fail each in turn: publish failures stay dirty and
+    /// retry, while a truncate failure is harmless because the image
+    /// watermark makes the retained log replay-inert.
+    #[test]
+    fn every_flush_persistence_failure_retries_or_replays_cleanly() {
+        let mut exhausted = false;
+        for failure in 0..16 {
+            let dir = scratch_dir(&format!("flush-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let first = state.flush_dirty();
+            let past_end = clear_persistence_fault();
+            if !first.iter().any(|name| name == "sake") {
+                assert!(
+                    state.flush_dirty().iter().any(|name| name == "sake"),
+                    "dirty retry did not flush after failure at step {failure}"
+                );
+            }
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            assert_eq!(
+                state
+                    .read_context("sake", |context| context.association_count())
+                    .unwrap(),
+                1,
+                "flush failure at step {failure} lost or duplicated the write"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "flush exceeded the sweep bound");
     }
 
     #[test]
@@ -11175,6 +11837,99 @@ mod tests {
     }
 
     #[test]
+    fn every_group_write_persistence_failure_rolls_back_and_retries() {
+        let mut exhausted = false;
+        for failure in 0..8 {
+            let dir = scratch_dir(&format!("group-write-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            state
+                .create_group(
+                    "drinks",
+                    "old".to_string(),
+                    BTreeSet::new(),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let first = state.update_group(
+                "drinks",
+                Some("new".to_string()),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+            );
+            let past_end = clear_persistence_fault();
+            if past_end {
+                assert!(first.is_ok());
+            } else {
+                assert!(matches!(first, Err(UpdateGroupError::Io(_))));
+                assert_eq!(state.group("drinks").unwrap().description, "old");
+                state
+                    .update_group(
+                        "drinks",
+                        Some("new".to_string()),
+                        BTreeSet::new(),
+                        BTreeSet::new(),
+                        BTreeSet::new(),
+                        BTreeSet::new(),
+                    )
+                    .unwrap();
+            }
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            assert_eq!(state.group("drinks").unwrap().description, "new");
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "group write exceeded the sweep bound");
+    }
+
+    #[test]
+    fn every_group_delete_persistence_failure_reconciles_at_boot() {
+        let mut exhausted = false;
+        for failure in 0..8 {
+            let dir = scratch_dir(&format!("group-delete-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            state
+                .create_group("leaf", String::new(), BTreeSet::new(), BTreeSet::new())
+                .unwrap();
+            state
+                .create_group(
+                    "parent",
+                    String::new(),
+                    BTreeSet::new(),
+                    BTreeSet::from(["leaf".to_string()]),
+                )
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let _ = state.delete_group("leaf").unwrap();
+            let past_end = clear_persistence_fault();
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            assert!(
+                !state.group("parent").unwrap().groups.contains("leaf"),
+                "failure at step {failure} left a dangling child after boot"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "group deletion exceeded the sweep bound");
+    }
+
+    #[test]
     fn deleting_a_context_sweeps_it_out_of_every_group() {
         let dir = scratch_dir("groups-sweep");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
@@ -12174,6 +12929,103 @@ mod tests {
                 Err(AccessError::NotFound)
             ),
             "the old name is gone; nothing may recreate it via a write"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cue_cache_get_promotes_recency_so_eviction_spares_the_touched_entry() {
+        let mut cache = CueCache::default();
+        for i in 0..CueCache::CAP {
+            cache.insert(format!("cue{i}"), Arc::new(vec![i as f32]));
+        }
+        // Touching cue0 makes it the most recently used entry, even
+        // though it was the first one inserted.
+        assert!(cache.get("cue0").is_some());
+        // The cache is at capacity, so this eviction must reach for the
+        // least recently used entry — cue1, never touched again after
+        // its insert — not the oldest insertion, which is cue0.
+        cache.insert("fresh-cue".to_string(), Arc::new(vec![-1.0]));
+        assert!(
+            cache.get("cue0").is_some(),
+            "a touched entry must survive the next eviction"
+        );
+        assert!(
+            cache.get("cue1").is_none(),
+            "the least recently used entry must be the one evicted"
+        );
+        assert!(cache.get("fresh-cue").is_some());
+    }
+
+    #[test]
+    fn cue_cache_insert_does_not_overwrite_an_existing_key() {
+        let mut cache = CueCache::default();
+        cache.insert("cue".to_string(), Arc::new(vec![1.0]));
+        cache.insert("cue".to_string(), Arc::new(vec![2.0]));
+        assert_eq!(*cache.get("cue").unwrap(), vec![1.0]);
+    }
+
+    #[test]
+    fn scan_data_dir_discovers_every_context_and_sorts_them_by_name() {
+        let dir = scratch_dir("scan-parallel");
+        let names = ["delta", "alpha", "charlie", "bravo", "echo", "foxtrot"];
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            for name in names {
+                state
+                    .create(name, ContextMeta::default())
+                    .map_err(|_| "create")
+                    .unwrap();
+            }
+        }
+
+        // A fresh boot re-runs `scan_data_dir`'s worker-pool scan; the
+        // registry it returns must still hold every context, keyed and
+        // ordered by name regardless of which worker raced to finish
+        // its disk reads first.
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let found: Vec<String> = state.directory().into_iter().map(|e| e.name).collect();
+        let mut expected: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        assert_eq!(found, expected);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn passages_wal_bytes_stays_correct_after_eviction() {
+        let dir = scratch_dir("passages-wal-gauge");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1段落".to_string(),
+            "仕込み水は雲居山の伏流水。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        assert!(
+            state.gauge_snapshot().passages_wal_bytes > 0,
+            "a freshly written passage log must show up as pending"
+        );
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        // `evict_entry` compacts the store on the way down and caches
+        // the resulting (now-zero) pending-log size on `EntryInner`;
+        // the gauge must read that cached value rather than going
+        // blind — or re-`stat`ing the log — once the context is cold.
+        assert_eq!(
+            state.gauge_snapshot().passages_wal_bytes,
+            0,
+            "eviction compacts the log, and the gauge must reflect that while cold"
         );
 
         let _ = fs::remove_dir_all(dir);

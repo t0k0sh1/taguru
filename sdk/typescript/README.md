@@ -27,6 +27,11 @@ const result = await ctx.retrieve("青嶺酒造");            // resolve → des
 const hits = await ctx.searchPassages("1907年に創業した"); // text lane (phrase as an answer)
 ```
 
+Prefer one `addAssociations` call per document. Above the 10,000-association
+request limit, `addAssociationsBatched` auto-chunks it; for corpus-scale
+ingestion, use `POST /import` or `taguru import`. Each call pays for a full
+durable write.
+
 The behavioral contract is the server's own protocol document — read it from
 the deployment you target: `await client.protocol()` (`GET /protocol`).
 

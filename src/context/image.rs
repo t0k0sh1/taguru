@@ -357,6 +357,11 @@ impl Context {
             label_index: EntryIndex::default(),
             dice_floor: None,
             applied_seq,
+            // Seeded below by `rebuild_indexes` — none of these are
+            // persisted.
+            dead_edges: 0,
+            dead_attributions: 0,
+            arena_slack: 0,
         };
         context.rebuild_indexes()?;
         Ok(context)
@@ -372,7 +377,9 @@ impl Context {
         self.index_edges()?;
         self.validate_chains()?;
         self.index_attributions()?;
-        self.validate_locators()
+        self.validate_locators()?;
+        self.seed_arena_slack();
+        Ok(())
     }
 
     /// Strings: every name range must be a valid arena slice, and names
@@ -544,8 +551,18 @@ impl Context {
     /// past the `edge.count` floor and silently defeat the check below).
     fn index_attributions(&mut self) -> Result<(), CorruptImage> {
         let mut claimed = vec![false; self.attributions.len()];
+        // Piggybacks on this same walk to seed the two incremental dead-
+        // weight counters: `edge.count == 0` — the invariant checked
+        // below (`edge.count < chain_count` is corrupt) means a dead
+        // edge's chain is always empty — is the only place `dead_edges`
+        // can be counted without a second pass, and `claimed` already
+        // tells us exactly which attribution records no chain reached.
+        let mut dead_edges = 0usize;
         for edge_id in 0..self.edges.len() as u32 {
             let edge = self.edges[edge_id as usize];
+            if edge.count == 0 {
+                dead_edges += 1;
+            }
             if !edge.sum.is_finite() {
                 return Err(CorruptImage("edge weight sum is not finite"));
             }
@@ -592,6 +609,8 @@ impl Context {
                 ));
             }
         }
+        self.dead_edges = dead_edges;
+        self.dead_attributions = claimed.iter().filter(|&&c| !c).count();
         Ok(())
     }
 
@@ -613,6 +632,24 @@ impl Context {
             previous = Some(record.attribution);
         }
         Ok(())
+    }
+
+    /// Seeds `arena_slack` on load. Concept, label, and source names are
+    /// never deleted — only aliases can be — so every arena byte not
+    /// currently spanned by a live record in one of the five name
+    /// tables can only be the spelling of a since-removed alias; the
+    /// residual (arena length minus every live name's byte span) is
+    /// therefore an exact count of that dead weight, not an estimate.
+    fn seed_arena_slack(&mut self) {
+        fn sum_name_len<T>(records: &[T], name_len: impl Fn(&T) -> u32) -> usize {
+            records.iter().map(|record| name_len(record) as usize).sum()
+        }
+        let live = sum_name_len(&self.concepts, |r| r.name_len)
+            + sum_name_len(&self.labels, |r| r.name_len)
+            + sum_name_len(&self.sources, |r| r.name_len)
+            + sum_name_len(&self.concept_aliases, |r| r.name_len)
+            + sum_name_len(&self.label_aliases, |r| r.name_len);
+        self.arena_slack = self.arena.len().saturating_sub(live);
     }
 }
 

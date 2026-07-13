@@ -150,6 +150,11 @@ pub struct Metrics {
     /// Requests refused at the ceiling with a 503 — sustained growth
     /// means the server is saturated, not slow.
     requests_shed: AtomicU64,
+    /// Set for the duration of a `POST /maintenance/compact` sweep: closes
+    /// `/health` (503 `maintenance`, distinct from an actual fault),
+    /// `enforce_concurrency` (early 503 instead of admitting new work),
+    /// and `spawn_flusher` (skips its tick rather than racing the sweep).
+    maintenance: AtomicBool,
 }
 
 /// Why a request answered 500. The status code alone cannot separate
@@ -256,6 +261,20 @@ pub struct GaugeSnapshot {
     /// ratio-triggered compaction; growth far past the snapshots means
     /// compactions are failing.
     pub passages_wal_bytes: u64,
+    /// Sum, across every context, of edges with `count == 0` — dead
+    /// weight `compact` would shed right now. Deliberately NOT broken
+    /// down per context here: unlike route templates, a context name is
+    /// unbounded, user-chosen data, and this metrics surface only ever
+    /// mints fixed-cardinality series (see `http`'s route-template
+    /// comment). Per-context detail lives at `GET /contexts` and
+    /// `taguru inspect` instead.
+    pub dead_edges_total: u64,
+    /// Sum, across every context, of attribution records unlinked from
+    /// every chain but not yet reclaimed by compaction.
+    pub dead_attributions_total: u64,
+    /// Sum, across every context, of the lower-bound arena bytes behind
+    /// removed aliases.
+    pub arena_slack_total: u64,
 }
 
 impl Metrics {
@@ -282,6 +301,35 @@ impl Metrics {
 
     pub(crate) fn release_inflight(&self) {
         self.inflight.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Requests currently inside the stack, this call included if it was
+    /// admitted through `admit_inflight`. A maintenance sweep polls this
+    /// down to 1 (itself) to know every other request has drained.
+    pub(crate) fn inflight_count(&self) -> usize {
+        self.inflight.load(Ordering::Relaxed)
+    }
+
+    /// Attempts to become the sole maintenance sweep; `false` means one is
+    /// already running, so the caller should answer 409 rather than queue
+    /// behind it.
+    pub(crate) fn try_enter_maintenance(&self) -> bool {
+        self.maintenance
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    /// Whether a maintenance sweep currently holds the server closed to
+    /// ordinary traffic.
+    pub fn maintenance_active(&self) -> bool {
+        self.maintenance.load(Ordering::Relaxed)
+    }
+
+    /// Reopens the server after a maintenance sweep. Idempotent, so it is
+    /// safe to call unconditionally from a `Drop` guard on every exit path
+    /// — success, deadline, or panic unwind.
+    pub(crate) fn exit_maintenance(&self) {
+        self.maintenance.store(false, Ordering::Release);
     }
 
     pub(crate) fn record_embed_latency(&self, elapsed: Duration) {
@@ -729,6 +777,33 @@ impl Metrics {
         ));
         push_header(
             &mut out,
+            "taguru_dead_edges",
+            "gauge",
+            "Live count of edges with count == 0 across all contexts — dead weight compaction would shed right now.",
+        );
+        out.push_str(&format!("taguru_dead_edges {}\n", gauges.dead_edges_total));
+        push_header(
+            &mut out,
+            "taguru_dead_attributions",
+            "gauge",
+            "Live count of attribution records unlinked from every chain but not yet reclaimed, across all contexts.",
+        );
+        out.push_str(&format!(
+            "taguru_dead_attributions {}\n",
+            gauges.dead_attributions_total
+        ));
+        push_header(
+            &mut out,
+            "taguru_arena_slack_bytes",
+            "gauge",
+            "Lower-bound arena bytes behind removed aliases across all contexts — bytes compaction would not carry forward.",
+        );
+        out.push_str(&format!(
+            "taguru_arena_slack_bytes {}\n",
+            gauges.arena_slack_total
+        ));
+        push_header(
+            &mut out,
             "taguru_last_flush_success_timestamp_seconds",
             "gauge",
             "Unix time of the last successful image flush (0 = none since boot); alert on time() minus this.",
@@ -981,6 +1056,15 @@ pub async fn live() -> &'static str {
 /// traffic while the disk is bad, resume when it heals — liveness
 /// lives at `/live`.
 pub async fn health(State(state): State<AppState>) -> Response {
+    if state.metrics().maintenance_active() {
+        return crate::api::error(
+            crate::api::ErrorCode::Maintenance,
+            "a maintenance compaction sweep is running — this is an intentional \
+             pause, not a fault"
+                .to_string(),
+            Instant::now(),
+        );
+    }
     if state.metrics().flush_is_healthy() {
         return "ok".into_response();
     }
@@ -1020,6 +1104,9 @@ mod tests {
             resident_bytes: 0,
             wal_bytes: 0,
             passages_wal_bytes: 0,
+            dead_edges_total: 0,
+            dead_attributions_total: 0,
+            arena_slack_total: 0,
         }
     }
 
@@ -1033,7 +1120,9 @@ mod tests {
         assert!(metrics.admit_inflight(2));
         assert!(!metrics.admit_inflight(2), "the ceiling holds");
         metrics.record_shed();
+        assert_eq!(metrics.inflight_count(), 2);
         metrics.release_inflight();
+        assert_eq!(metrics.inflight_count(), 1);
         assert!(metrics.admit_inflight(2), "a release frees a slot");
         // 0 = no ceiling; the gauge still counts.
         assert!(metrics.admit_inflight(0));
@@ -1254,6 +1343,57 @@ mod tests {
         );
     }
 
+    /// One sweep at a time, and `exit_maintenance` is safe to call more
+    /// than once — the guard's `Drop` must not panic if it somehow ran
+    /// twice.
+    #[test]
+    fn maintenance_is_a_one_shot_cas_until_exit_reopens_it() {
+        let metrics = Metrics::default();
+        assert!(!metrics.maintenance_active());
+        assert!(metrics.try_enter_maintenance(), "first claim succeeds");
+        assert!(metrics.maintenance_active());
+        assert!(
+            !metrics.try_enter_maintenance(),
+            "a second claim is refused while one is running"
+        );
+
+        metrics.exit_maintenance();
+        assert!(!metrics.maintenance_active());
+        metrics.exit_maintenance(); // idempotent
+        assert!(!metrics.maintenance_active());
+
+        assert!(metrics.try_enter_maintenance(), "reopened after exit");
+    }
+
+    /// The readiness probe treats a maintenance sweep as a deliberate
+    /// pause, not a fault: its own 503 code, and back to "ok" the
+    /// instant the guard drops.
+    #[tokio::test]
+    async fn health_reports_maintenance_distinctly_from_a_flush_fault() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-metrics-health-maintenance-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = crate::registry::AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        assert_eq!(health(State(state.clone())).await.status().as_u16(), 200);
+
+        let guard = state.try_enter_maintenance().expect("first claim succeeds");
+        let response = health(State(state.clone())).await;
+        assert_eq!(response.status().as_u16(), 503);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "maintenance");
+
+        drop(guard);
+        assert_eq!(health(State(state.clone())).await.status().as_u16(), 200);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn render_carries_help_and_type_for_every_metric_name() {
         let metrics = Metrics::default();
@@ -1266,6 +1406,9 @@ mod tests {
             resident_bytes: 640,
             wal_bytes: 0,
             passages_wal_bytes: 0,
+            dead_edges_total: 0,
+            dead_attributions_total: 0,
+            arena_slack_total: 0,
         });
 
         // Every sample line's metric name must have been introduced by

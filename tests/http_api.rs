@@ -6777,6 +6777,106 @@ fn the_compact_endpoint_shrinks_live_and_is_admin_only() {
     );
 }
 
+/// `POST /maintenance/compact` sweeps every context whose dead ratio
+/// clears `min_dead_ratio`, reopening the server when done. Being
+/// server-wide, it is refused for a context-scoped key exactly like
+/// `/flush` — the CONTEXT bypass guard, not the role table, and refused
+/// even at admin role — and, like every other operator verb, refused
+/// outright for a non-admin role.
+#[test]
+fn the_maintenance_compact_endpoint_sweeps_worst_ratio_first_and_is_admin_only() {
+    let server = Server::start_with_env(
+        "http-maint-compact",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,scribe:wtok,curator:ctok"),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"scribe": "write", "curator": {"role": "admin", "contexts": ["sake"]}}"#,
+            ),
+        ],
+    );
+    let admin = Some("atok");
+    server.call_with_token(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "d"})),
+        admin,
+    );
+    server.call_with_token(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
+            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
+        ])),
+        admin,
+    );
+    server.call_with_token(
+        "POST",
+        "/contexts/sake/sources/retract",
+        Some(json!({"source": "gone.md"})),
+        admin,
+    );
+
+    // Write-scoped, unscoped: refused by the plain role table.
+    let (status, refused) =
+        server.call_with_token("POST", "/maintenance/compact", None, Some("wtok"));
+    assert_eq!(status, 403, "{refused}");
+
+    // Admin role but context-scoped: refused because this sweeps the
+    // WHOLE server, not just its granted context.
+    let (status, scoped) =
+        server.call_with_token("POST", "/maintenance/compact", None, Some("ctok"));
+    assert_eq!(status, 403, "{scoped}");
+    assert!(
+        scoped["error"].as_str().unwrap().contains("server-wide"),
+        "{scoped}"
+    );
+
+    // A floor above sake's actual ratio (0.5, one dead of two) selects
+    // nothing — the sweep still runs and reopens, just with no work.
+    let (status, none) = server.call_with_token(
+        "POST",
+        "/maintenance/compact?min_dead_ratio=0.9",
+        None,
+        admin,
+    );
+    assert_eq!(status, 200, "{none}");
+    assert_eq!(none["result"]["contexts"], json!([]), "{none}");
+    assert_eq!(none["result"]["deadline_exceeded"], json!(false));
+
+    let (status, outcome) = server.call_with_token("POST", "/maintenance/compact", None, admin);
+    assert_eq!(status, 200, "{outcome}");
+    let contexts = outcome["result"]["contexts"].as_array().unwrap();
+    assert_eq!(contexts.len(), 1, "{outcome}");
+    assert_eq!(contexts[0]["name"], json!("sake"), "{outcome}");
+    assert_eq!(contexts[0]["dead_edges"], json!(1), "{outcome}");
+    assert!(
+        contexts[0]["bytes_after"].as_u64().unwrap()
+            < contexts[0]["bytes_before"].as_u64().unwrap(),
+        "{outcome}"
+    );
+    assert_eq!(outcome["result"]["deadline_exceeded"], json!(false));
+
+    // The sweep reopens the server: an ordinary call succeeds right after.
+    assert_eq!(server.call("GET", "/health", None).0, 200);
+
+    // Live content survived the rebuild.
+    let (status, facts) = server.call_with_token(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "蔵"})),
+        admin,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(facts["result"]["total"], json!(1), "{facts}");
+    assert_eq!(
+        facts["result"]["matches"][0]["label"],
+        json!("杜氏"),
+        "{facts}"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Groups: flat bundles of contexts — the addressing unit cross-context
 // retrieval will build on. This iteration is bundling only: CRUD,

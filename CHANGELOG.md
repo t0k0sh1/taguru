@@ -275,6 +275,43 @@ Entries that change an on-disk format or a response shape say so.
   concurrent create or another rename; a group rename runs entirely
   under the group table's single write lock instead, so no extra
   reservation is needed there.
+- Compaction dead-weight visibility (#60): three counters — live dead
+  edges (count fallen to zero), attributions unlinked from every chain
+  but not yet reclaimed, and arena slack (bytes behind removed aliases)
+  — answer "how much would `compact` reclaim right now" without
+  actually running it. Tracked incrementally (retraction, alias
+  removal) and seeded once at load by piggybacking on the existing
+  attribution/name-table walks, so there is no extra full walk and a
+  freshly compacted context starts all three back at zero. Exposed via
+  `GET /contexts/{name}` and the directory (new `ContextStats` fields),
+  `/metrics` (`taguru_dead_edges`, `taguru_dead_attributions`,
+  `taguru_arena_slack_bytes` — server-wide sums; a context name is
+  unbounded user data, so no per-context label), `taguru inspect`'s
+  stats line (the same three plus the dead ratio), and `taguru
+  estimate` (a new "maintenance window" line pricing a compaction's
+  transient double footprint).
+- `POST /maintenance/compact`: the operational counterpart to the
+  visibility above — closes the server to ordinary traffic just long
+  enough to drain in-flight requests and rebuild every context whose
+  live dead ratio clears an optional `min_dead_ratio` (default: any
+  dead weight at all), worst ratio first, then reopens. `/health`
+  answers 503 `maintenance` for the duration (distinct from an actual
+  fault) and new work is shed early; only one sweep runs at a time; a
+  second call while one is running answers 409 rather than queuing.
+  Server-wide like `/flush`: a context-scoped key is refused outright.
+  Admin-only, via the existing catch-all default rather than a new
+  authorization rule.
+- `taguru compact --parallel N`: compacts up to `N` contexts at once
+  (default 1, the prior sequential behavior), reusing the worker-pool
+  pattern boot-time preload already uses. Output is reordered to the
+  original argument order before printing, so stdout is byte-for-byte
+  identical to `--parallel 1` regardless of `N` or thread scheduling.
+- `taguru estimate` now prices passage-related memory — the passage
+  store, the BM25 index, and (with `--embedding-dims`) passage vectors
+  — into its `TAGURU_CACHE_BYTES` budget; before, `--passage-bytes`
+  only ever showed up in the disk section. The paragraph count the
+  vector estimate multiplies is capped at the same
+  `DEFAULT_PASSAGE_VECTOR_LIMIT` the server enforces per context.
 
 ### Changed
 - doc2query `questions` now index into their paragraph's BM25 postings
@@ -306,6 +343,24 @@ Entries that change an on-disk format or a response shape say so.
   context no longer blocks every context listed after it. Results and
   `total` are unchanged in both cases — only the cost/wall-clock
   improves.
+- Passage vector search grows an approximate nearest-neighbor index
+  past 50,000 rows in one context (#60): a hand-rolled IVF index
+  (deterministic farthest-point clustering — no RNG, no external ANN
+  crate, matching every other binary index in this codebase), built
+  lazily on the first search past the threshold and cached for the
+  store's lifetime. Below the threshold, and for any call asking for
+  every row (`explain_passage_search`'s exact-ranking contract, and any
+  deadline too tight to build the index), the full linear sweep still
+  runs unchanged — approximation is strictly an optimization here,
+  never a behavior callers need to account for.
+- Three more scalability improvements (#60): the in-memory cue-
+  embedding cache now evicts least-recently-used instead of FIFO;
+  boot-time directory scanning parallelizes each context's disk I/O
+  (sidecar read plus WAL stats) across a worker pool instead of a
+  sequential loop, with results merged into the same sorted map
+  regardless of arrival order; and the passage log size `/metrics`
+  reports for a cold context is now cached at eviction time instead of
+  re-`stat`ed on every scrape.
 
 ### Fixed
 - `estimate`'s synthesis walked labels by round (`round % labels`), so

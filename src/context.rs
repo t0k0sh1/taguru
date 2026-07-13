@@ -66,6 +66,17 @@ fn accumulate_saturating(sum: &mut f64, weight: f64) {
     }
 }
 
+/// Shared definition of "dead ratio" so [`Context::dead_ratio`] and
+/// `ContextStats::dead_ratio` (registry.rs) can never drift apart: 0.0
+/// when there are no associations at all, rather than dividing by zero.
+pub fn dead_ratio_of(dead_edges: usize, total_edges: usize) -> f64 {
+    if total_edges == 0 {
+        0.0
+    } else {
+        dead_edges as f64 / total_edges as f64
+    }
+}
+
 /// Error returned by [`Context::associate`] and [`Context::associate_from`]
 /// when a write would need a record or name bytes beyond the context's u32
 /// id/offset space (~4.29 billion records per table, 4 GiB of interned
@@ -588,6 +599,28 @@ pub struct Context {
     /// can never observe one updated without the other. Zero means
     /// "nothing logged is reflected" (also what v1/v2 images load as).
     applied_seq: u64,
+    /// Live count of edges whose `count` has fallen to zero — dead weight
+    /// [`Context::compacted`] would shed. Tracked incrementally (unlike
+    /// [`CompactionStats::dead_edges`], which reports a one-time count
+    /// from an actual compaction run) so it reflects the current instant,
+    /// including revivals: an edge that dies and is reasserted decrements
+    /// this back down. Not persisted — seeded from the chains on load.
+    dead_edges: usize,
+    /// Live count of attribution records unlinked from every chain but
+    /// not yet reclaimed by compaction. Unlike `dead_edges` this only
+    /// grows between compactions: retraction never reuses an unlinked
+    /// attribution record. Not persisted — seeded from the chains on
+    /// load.
+    dead_attributions: usize,
+    /// Lower-bound count of arena bytes occupied by spellings of removed
+    /// aliases — bytes `compacted()` would not carry forward. A lower
+    /// bound because the names of concepts/labels/sources that lose
+    /// their last live association also become dead weight, but arena
+    /// bytes are never attributed back to a specific record once
+    /// interned, so only alias removal (which frees a whole record) can
+    /// be tracked here. Only grows between compactions: arena bytes are
+    /// never reused. Not persisted — seeded from the residual on load.
+    arena_slack: usize,
 }
 
 impl Context {
@@ -745,8 +778,16 @@ impl Context {
         let edge_id = match self.edge_ids.get(&key).copied() {
             Some(edge_id) => {
                 let edge = &mut self.edges[edge_id as usize];
+                // `edge_ids` is never pruned, so a triple that died
+                // (count fell to zero) can still be found here and
+                // revived by a fresh assertion — dead_edges must track
+                // that revival, not just deaths, to stay a live count.
+                let was_dead = edge.count == 0;
                 accumulate_saturating(&mut edge.sum, weight);
                 edge.count += 1;
+                if was_dead {
+                    self.dead_edges -= 1;
+                }
                 edge_id
             }
             None => {
@@ -1837,6 +1878,31 @@ impl Context {
         self.sources.len()
     }
 
+    /// Live count of edges with `count == 0` — dead weight `compacted()`
+    /// would shed right now. See the field doc for how this differs from
+    /// [`CompactionStats::dead_edges`].
+    pub fn dead_edges(&self) -> usize {
+        self.dead_edges
+    }
+
+    /// Live count of attribution records unlinked from every chain but
+    /// not yet reclaimed.
+    pub fn dead_attributions(&self) -> usize {
+        self.dead_attributions
+    }
+
+    /// Lower-bound count of arena bytes occupied by removed aliases'
+    /// spellings. See the field doc for why this is a lower bound.
+    pub fn arena_slack(&self) -> usize {
+        self.arena_slack
+    }
+
+    /// Fraction of associations that are currently dead weight — the
+    /// signal for deciding whether a context is due for compaction.
+    pub fn dead_ratio(&self) -> f64 {
+        dead_ratio_of(self.dead_edges, self.association_count())
+    }
+
     /// The most connected concepts — name plus total degree, most
     /// connected first, ties toward earlier interning. This is the
     /// mechanical "what is this context about" signal: unlike a
@@ -2031,6 +2097,7 @@ impl Context {
             .iter()
             .position(|record| self.arena_str(record.name_offset, record.name_len) == alias)?;
         let record = self.concept_aliases.remove(position);
+        self.arena_slack += record.name_len as usize;
         self.concept_ids.remove(alias);
         self.concept_alias_index.remove(alias);
         self.rebuild_concept_index();
@@ -2044,6 +2111,7 @@ impl Context {
             .iter()
             .position(|record| self.arena_str(record.name_offset, record.name_len) == alias)?;
         let record = self.label_aliases.remove(position);
+        self.arena_slack += record.name_len as usize;
         self.label_ids.remove(alias);
         self.label_alias_index.remove(alias);
         self.rebuild_label_index();
@@ -2138,7 +2206,11 @@ impl Context {
             // saturated attribution sum can overshoot the representable
             // range just like two additions can.
             accumulate_saturating(&mut edge.sum, -sum);
+            let was_live = edge.count > 0;
             edge.count = edge.count.saturating_sub(count);
+            if was_live && edge.count == 0 {
+                self.dead_edges += 1;
+            }
             if previous == NIL {
                 edge.first_attribution = next;
             }
@@ -2155,6 +2227,7 @@ impl Context {
             self.attribution_ids.remove(&(edge_id, source_id));
             touched += 1;
         }
+        self.dead_attributions += touched;
         Some(touched)
     }
 
@@ -2241,6 +2314,10 @@ impl Context {
         edge.last_attribution = NIL;
         edge.sum = 0.0;
         edge.count = 0;
+        // The early return above guarantees this edge was live on entry,
+        // so this is unconditionally a live→dead transition.
+        self.dead_edges += 1;
+        self.dead_attributions += unlinked;
         Some(unlinked)
     }
 
@@ -3112,6 +3189,13 @@ mod tests {
         context.associate("私", "好き", "バナナ", -1.0).unwrap();
     }
 
+    #[test]
+    fn dead_ratio_of_treats_no_edges_as_zero_not_nan() {
+        assert_eq!(dead_ratio_of(0, 0), 0.0);
+        assert_eq!(dead_ratio_of(1, 4), 0.25);
+        assert_eq!(dead_ratio_of(4, 4), 1.0);
+    }
+
     /// Compaction reproduces every live edge — count, weight, and the
     /// full per-source attribution breakdown including the paragraph
     /// locator and sourceless residual — via the O(distinct) install
@@ -3144,8 +3228,18 @@ mod tests {
         context.retract_source("x.md");
 
         let before = context.query(Some("蔵"), Some("杜氏"), Some("高瀬"));
+        // The retraction above is already live-tracked as dead weight,
+        // ahead of any compaction.
+        assert_eq!(context.dead_edges(), 1);
+        assert_eq!(context.dead_attributions(), 1);
         let (fresh, stats) = context.compacted(Deadline::unbounded()).unwrap();
         assert_eq!(stats.dead_edges, 1, "the retracted edge sheds");
+        // Compaction carries forward only what's live, so the fresh
+        // context's dead-weight counters start over at zero — nothing
+        // survives for them to count.
+        assert_eq!(fresh.dead_edges(), 0);
+        assert_eq!(fresh.dead_attributions(), 0);
+        assert_eq!(fresh.arena_slack(), 0);
         let after = fresh.query(Some("蔵"), Some("杜氏"), Some("高瀬"));
         assert_eq!(
             before, after,
@@ -4044,16 +4138,25 @@ mod tests {
         assert!(context.resolve("aomine").is_empty());
         assert!(context.concept_aliases().is_empty());
         assert_eq!(context.recall("青嶺酒造").len(), 1);
+        // The freed spelling's bytes stay behind in the arena as slack.
+        assert_eq!(context.arena_slack(), "Aomine".len());
 
         // Not-an-alias refusals: unknown spellings, and canonical
-        // names — removal must never be able to unname a record.
+        // names — removal must never be able to unname a record. Being
+        // no-ops, neither adds further slack.
         assert_eq!(context.remove_concept_alias("Aomine"), None);
         assert_eq!(context.remove_concept_alias("青嶺酒造"), None);
+        assert_eq!(context.arena_slack(), "Aomine".len());
 
         // The spelling is free again, pointing elsewhere this time —
-        // the un-wedging move a mis-registration needs.
+        // the un-wedging move a mis-registration needs. This interns a
+        // FRESH "Aomine" (append-only arena, no reuse of the freed
+        // range), so slack holds at the first registration's bytes —
+        // it does not grow just because the spelling was reused, and
+        // it does not shrink because the new record is live.
         context.add_concept_alias("Aomine", "高瀬").unwrap();
         assert_eq!(context.describe("Aomine").unwrap().concept, "高瀬");
+        assert_eq!(context.arena_slack(), "Aomine".len());
 
         // Labels mirror, and the removal survives an image roundtrip
         // (the rebuilt entry indexes included).
@@ -4061,10 +4164,12 @@ mod tests {
             context.remove_label_alias("設立年").as_deref(),
             Some("創業年")
         );
+        assert_eq!(context.arena_slack(), "Aomine".len() + "設立年".len());
         let reborn = Context::from_bytes(&context.to_bytes()).unwrap();
         assert_eq!(reborn.describe("Aomine").unwrap().concept, "高瀬");
         assert!(reborn.label_aliases().is_empty());
         assert_eq!(reborn.resolve("青嶺")[0].name, "青嶺酒造");
+        assert_eq!(reborn.arena_slack(), context.arena_slack());
     }
 
     #[test]
@@ -4368,7 +4473,14 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(weight_between(&context, "a", "r", "d"), 1.0);
+        // Of the two edges 旧版 touched, only "a"-"r"-"c" died (its only
+        // source); "a"-"r"-"b" survives on 新版 and 第三者.
+        assert_eq!(context.dead_edges(), 1);
+        assert_eq!(context.dead_attributions(), 2);
+        // Retracting an unknown source is a no-op — no phantom counting.
         assert_eq!(context.retract_source("存在しない出典"), None);
+        assert_eq!(context.dead_edges(), 1);
+        assert_eq!(context.dead_attributions(), 2);
 
         // Unlinking the tail keeps chains appendable, and the image —
         // now carrying orphaned attribution records — must round-trip.
@@ -4376,16 +4488,26 @@ mod tests {
         // weight of 2.0 that happens to match the pre-retraction figure.
         assert_eq!(context.retract_source("第三者"), Some(1));
         assert_eq!(weight_between(&context, "a", "r", "b"), 2.0);
+        // "a"-"r"-"b" still carries 新版 alone — it does not die, so
+        // dead_edges holds at 1 while dead_attributions grows to 3.
+        assert_eq!(context.dead_edges(), 1);
+        assert_eq!(context.dead_attributions(), 3);
         context
             .associate_from("a", "r", "b", 0.5, "旧版", None)
             .unwrap();
         // Back up to sum 2.5, count 2: weight 1.25, not the old 2.5.
         assert_eq!(weight_between(&context, "a", "r", "b"), 1.25);
+        // A fresh attribution record on a never-dead edge — the counters
+        // are exactly what they were before this re-assertion.
+        assert_eq!(context.dead_edges(), 1);
+        assert_eq!(context.dead_attributions(), 3);
         let restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
         assert_eq!(
             restored.query(Some("a"), None, None),
             context.query(Some("a"), None, None)
         );
+        assert_eq!(restored.dead_edges(), context.dead_edges());
+        assert_eq!(restored.dead_attributions(), context.dead_attributions());
     }
 
     #[test]
@@ -4536,13 +4658,21 @@ mod tests {
         // The same document's OTHER fact is untouched — the point of
         // edge-granular retraction.
         assert_eq!(weight_between(&context, "a", "r", "c"), 1.0);
+        // "a"-"r"-"b" is the only one of the two edges that died.
+        assert_eq!(context.dead_edges(), 1);
+        assert_eq!(context.dead_attributions(), 2);
 
-        // Idempotent: a second retraction finds nothing live.
+        // Idempotent: a second retraction finds nothing live, and must
+        // not double-count an edge that was already dead.
         assert_eq!(context.retract_association("a", "r", "b"), None);
+        assert_eq!(context.dead_edges(), 1);
+        assert_eq!(context.dead_attributions(), 2);
 
         // Re-assertion appends FRESH records — never folds into the
         // unlinked dead space (the resurrection hazard retract_source
-        // also guards).
+        // also guards) — and revives the edge: dead_edges drops back
+        // down, while dead_attributions (never reclaimed outside
+        // compaction) stays at 2.
         context
             .associate_from("a", "r", "b", 3.0, "doc1", None)
             .unwrap();
@@ -4556,14 +4686,19 @@ mod tests {
                 paragraph: None,
             }]
         );
+        assert_eq!(context.dead_edges(), 0);
+        assert_eq!(context.dead_attributions(), 2);
 
         // And the image — orphaned attribution records behind — must
-        // round-trip.
+        // round-trip, dead-weight counters included (seeded fresh from
+        // the reloaded chains rather than persisted).
         let restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
         assert_eq!(
             restored.query(Some("a"), None, None),
             context.query(Some("a"), None, None)
         );
+        assert_eq!(restored.dead_edges(), context.dead_edges());
+        assert_eq!(restored.dead_attributions(), context.dead_attributions());
     }
 
     /// Entry resolution matches every other entry point: aliases in
