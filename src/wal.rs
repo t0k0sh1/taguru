@@ -276,10 +276,12 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
         .open(path)
     {
         Ok(file) => (file, true),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            (fs::OpenOptions::new().append(true).open(path)?, false)
-        }
-        Err(error) => return Err(error),
+        Err(error) => match error.kind() {
+            io::ErrorKind::AlreadyExists => {
+                (fs::OpenOptions::new().append(true).open(path)?, false)
+            }
+            _ => return Err(error),
+        },
     };
     // A freshly created file adds an entry to the parent directory's own
     // data: without syncing the directory too, power loss can drop the
@@ -353,10 +355,10 @@ pub fn replay<Op: DeserializeOwned + Serialize>(
 ) -> io::Result<(Vec<Op>, u64)> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok((Vec::new(), watermark));
-        }
-        Err(error) => return Err(error),
+        Err(error) => match error.kind() {
+            io::ErrorKind::NotFound => return Ok((Vec::new(), watermark)),
+            _ => return Err(error),
+        },
     };
     let (ops, top, torn, _) = parse_log(path, &bytes, watermark)?;
     // A torn trailing record is the expected crash-mid-append shape. It
@@ -503,8 +505,10 @@ fn parse_log<Op: DeserializeOwned + Serialize>(
 pub fn reset(path: &Path) -> io::Result<()> {
     match truncate_to(path, 0) {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
+        Err(error) => match error.kind() {
+            io::ErrorKind::NotFound => Ok(()),
+            _ => Err(error),
+        },
     }
 }
 

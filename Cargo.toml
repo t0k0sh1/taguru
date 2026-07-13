@@ -44,6 +44,10 @@ url = "2.5"
 # std::sync locks poison on panic, bricking the whole registry for the
 # rest of the process; parking_lot's don't.
 parking_lot = "0.12"
+# No-op marker consumed by cargo-mutants. It keeps deliberately untestable
+# capacity preflights visible at their definition instead of hiding them in a
+# global name filter.
+mutants = "0.0.3"
 
 [dev-dependencies]
 # Property-based tests for the hand-rolled binary formats (context
@@ -66,3 +70,10 @@ harness = false
 # locations.
 [profile.bench]
 debug = true
+
+# Mutation runs relink the test binaries for every candidate. Backtraces from
+# expected failures are not useful there, so omit debug info to keep that
+# repeated work smaller without changing the normal test profile.
+[profile.mutants]
+inherits = "test"
+debug = "none"
