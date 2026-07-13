@@ -21,6 +21,11 @@ type EdgeId = u32;
 /// Dense id of one per-source attribution record.
 type AttributionId = u32;
 
+/// (alias → canonical) pairs for one namespace — what
+/// [`Context::dead_canonical_aliases`] returns per side, the same shape
+/// the alias export endpoint already uses.
+type AliasMap = BTreeMap<String, String>;
+
 /// Chain terminator and "no entry" sentinel shared by every id space.
 /// Ids are dense from 0 and [`claim_id`] refuses to mint this value, so it
 /// can never collide with a real record.
@@ -170,11 +175,19 @@ impl fmt::Display for AliasError {
 
 impl Error for AliasError {}
 
+/// Reserved source id for weight that reached the graph with no named
+/// source, or that an export/import round trip preserved as a bucket.
+/// Never a real ingest source name.
+pub const UNSOURCED_SOURCE: &str = "export:unsourced";
+
 /// One source's accumulated contribution to an association's weight.
 ///
 /// `source` is an opaque identifier chosen by the caller — a document id, a
 /// URL, a chunk reference — that lets whoever retrieved the association go
-/// fetch the original text behind it. The `Context` never interprets it.
+/// fetch the original text behind it. The `Context` never interprets it,
+/// except for one reserved spelling: [`UNSOURCED_SOURCE`] marks weight
+/// that arrived with no source at all, and `unsourced_summary`/
+/// `unsourced_edges` key off exactly that value.
 /// `paragraph` optionally locates the fact within `source` (e.g. the
 /// paragraph index it was read from); it is `null` rather than omitted
 /// when absent, so callers can rely on the key always being present —
@@ -219,6 +232,16 @@ pub struct Association {
     /// contributed. Total `weight * count` can exceed the attributed sum
     /// when some assertions came in unsourced.
     pub attributions: Vec<Attribution>,
+}
+
+/// One edge `Context::unsourced_edges` flagged: the association
+/// itself, plus the weight/count no named source explains. `weight`
+/// can be negative.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UnsourcedEdge {
+    pub association: Association,
+    pub weight: f64,
+    pub count: u64,
 }
 
 /// One association reached by [`Context::explore`], annotated with how many
@@ -2012,6 +2035,84 @@ impl Context {
             .collect()
     }
 
+    /// The unsourced share of one edge: weight/count no non-reserved,
+    /// live attribution explains. `None` when every unit of `count` is
+    /// covered by a real source. `unattributed` is UNSOURCED_SOURCE's
+    /// SourceId, pre-resolved once by the caller (avoids a per-attribution
+    /// string compare across a potentially large chain).
+    fn unsourced_share(
+        &self,
+        edge: &EdgeRecord,
+        unattributed: Option<SourceId>,
+    ) -> Option<(f64, u64)> {
+        if edge.count == 0 {
+            return None;
+        }
+        let mut attributed_count = 0u64;
+        let mut attributed_sum = 0.0f64;
+        for (_, record) in self.attribution_chain(edge.first_attribution) {
+            if record.count == 0 || Some(record.source) == unattributed {
+                continue;
+            }
+            attributed_count += record.count;
+            attributed_sum += record.sum;
+        }
+        (attributed_count < edge.count)
+            .then(|| (edge.sum - attributed_sum, edge.count - attributed_count))
+    }
+
+    /// Context-wide unsourced-weight summary: `(edges, total weight)`.
+    /// `total` sums `residual.abs()` across every flagged edge — summing
+    /// signed residuals across edges would let an over- and under-counted
+    /// edge cancel out and hide both. This is a new aggregation policy,
+    /// not a port of export.rs's per-edge-only residual math (export.rs
+    /// never sums across edges), so don't expect bit-exact equality with
+    /// it in tests — compare with a small epsilon tolerance instead.
+    /// `ContextStats`, `taguru inspect`, and the `/metrics` gauges all
+    /// read through this one method so the three surfaces can't drift
+    /// from each other.
+    pub fn unsourced_summary(&self) -> (usize, f64) {
+        let unattributed = self.source_ids.get(UNSOURCED_SOURCE).copied();
+        let mut edges = 0usize;
+        let mut total = 0.0f64;
+        for edge in &self.edges {
+            if let Some((residual, _)) = self.unsourced_share(edge, unattributed) {
+                edges += 1;
+                total += residual.abs();
+            }
+        }
+        (edges, total)
+    }
+
+    /// Every edge with unsourced weight at or past `floor` (compared by
+    /// magnitude), in edge-id order. CPU-bound over the whole edge table;
+    /// checks `deadline` periodically like `compacted`/`similar_concepts`.
+    pub fn unsourced_edges(
+        &self,
+        floor: f64,
+        deadline: Deadline,
+    ) -> Result<Vec<UnsourcedEdge>, DeadlineExceeded> {
+        let floor = floor.abs();
+        let unattributed = self.source_ids.get(UNSOURCED_SOURCE).copied();
+        let mut out = Vec::new();
+        for edge_id in 0..self.edges.len() as u32 {
+            if deadline.expired() {
+                return Err(DeadlineExceeded);
+            }
+            let edge = &self.edges[edge_id as usize];
+            if let Some((weight, count)) = self.unsourced_share(edge, unattributed)
+                && weight.abs() >= floor
+            {
+                out.push(UnsourcedEdge {
+                    association: self.association(edge_id),
+                    weight,
+                    count,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// Registers an alternative spelling for an existing concept. Aliases
     /// are entry-only: every lookup — `query`, `recall`, `describe`,
     /// walk origins, `resolve` candidates, and interning on the write
@@ -2422,6 +2523,44 @@ impl Context {
     /// order.
     pub fn label_aliases(&self) -> Vec<(&str, &str)> {
         self.alias_pairs(&self.label_aliases, Self::label_name)
+    }
+
+    /// Aliases whose canonical concept/label has gone dead — every live
+    /// edge that once used it is retracted, so nothing live resolves
+    /// through the alias's real name. Not itself a fault, but a candidate
+    /// for a rename that never got a fresh alias. `(alias → canonical)`,
+    /// same per-namespace BTreeMap shape `GET .../aliases` already uses.
+    pub fn dead_canonical_aliases(
+        &self,
+        deadline: Deadline,
+    ) -> Result<(AliasMap, AliasMap), DeadlineExceeded> {
+        let mut live_concepts: BTreeSet<&str> = BTreeSet::new();
+        let mut live_labels: BTreeSet<&str> = BTreeSet::new();
+        for edge in &self.edges {
+            if deadline.expired() {
+                return Err(DeadlineExceeded);
+            }
+            if edge.count > 0 {
+                live_concepts.insert(self.concept_name(edge.subject));
+                live_concepts.insert(self.concept_name(edge.object));
+                live_labels.insert(self.label_name(edge.label));
+            }
+        }
+        Ok((
+            Self::dead_aliases(self.concept_aliases(), &live_concepts),
+            Self::dead_aliases(self.label_aliases(), &live_labels),
+        ))
+    }
+
+    /// Filters (alias, canonical) pairs down to the ones whose canonical
+    /// spelling `live` does not contain, materializing both sides as
+    /// owned strings for the wire shape `dead_canonical_aliases` returns.
+    fn dead_aliases<'a>(aliases: Vec<(&'a str, &'a str)>, live: &BTreeSet<&'a str>) -> AliasMap {
+        aliases
+            .into_iter()
+            .filter(|(_, canonical)| !live.contains(canonical))
+            .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
+            .collect()
     }
 
     /// Materializes one namespace's alias table as (alias, canonical)
@@ -5066,6 +5205,130 @@ mod tests {
 
         assert_eq!(context.unreachable_from(&["存在しない概念"]).len(), 1);
         assert_eq!(context.unreachable_from(&[]).len(), 1);
+    }
+
+    #[test]
+    fn unsourced_summary_and_edges_count_only_the_unattributed_share() {
+        let mut context = Context::default();
+        // Fully sourceless: the whole edge is unsourced.
+        context.associate("a", "r", "b", 3.0).unwrap();
+        // Fully sourced: no unsourced share at all.
+        context
+            .associate_from("c", "r", "d", 2.0, "src1", None)
+            .unwrap();
+        // Mixed: one sourced assertion plus one sourceless one on the
+        // same edge — only the sourceless portion counts.
+        context
+            .associate_from("e", "r", "f", 1.0, "src1", None)
+            .unwrap();
+        context.associate("e", "r", "f", 4.0).unwrap();
+
+        let (edges, total) = context.unsourced_summary();
+        assert_eq!(edges, 2, "c-r-d is fully sourced and must not be flagged");
+        assert!((total - 7.0).abs() < 1e-9, "3.0 + 4.0, got {total}");
+
+        let mut flagged = context.unsourced_edges(0.0, Deadline::unbounded()).unwrap();
+        flagged.sort_by(|x, y| x.association.subject.cmp(&y.association.subject));
+        assert_eq!(flagged.len(), 2);
+        assert_eq!(flagged[0].association.subject, "a");
+        assert_eq!(flagged[0].weight, 3.0);
+        assert_eq!(flagged[0].count, 1);
+        assert_eq!(flagged[1].association.subject, "e");
+        assert_eq!(flagged[1].weight, 4.0);
+        assert_eq!(flagged[1].count, 1);
+    }
+
+    #[test]
+    fn unsourced_edges_preserves_sign_and_filters_by_magnitude() {
+        let mut context = Context::default();
+        context.associate("g", "r", "h", -2.0).unwrap();
+
+        assert!(
+            context
+                .unsourced_edges(2.5, Deadline::unbounded())
+                .unwrap()
+                .is_empty(),
+            "floor compares by magnitude, 2.0 < 2.5"
+        );
+        let flagged = context.unsourced_edges(2.0, Deadline::unbounded()).unwrap();
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(
+            flagged[0].weight, -2.0,
+            "sign survives the floor comparison"
+        );
+    }
+
+    #[test]
+    fn unsourced_edges_treats_the_reserved_source_as_unattributed() {
+        // A round trip (export → import) can hand a live attribution the
+        // reserved UNSOURCED_SOURCE id back; it must still count as
+        // unsourced, not as a named source that happens to explain the
+        // edge.
+        let mut context = Context::default();
+        context
+            .associate_from("i", "r", "j", 5.0, UNSOURCED_SOURCE, None)
+            .unwrap();
+
+        let (edges, total) = context.unsourced_summary();
+        assert_eq!(edges, 1);
+        assert_eq!(total, 5.0);
+        let flagged = context.unsourced_edges(0.0, Deadline::unbounded()).unwrap();
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged[0].weight, 5.0);
+    }
+
+    #[test]
+    fn dead_canonical_aliases_reports_aliases_whose_canonical_has_no_live_edges() {
+        let mut context = Context::default();
+        context.associate("蔵", "銘柄", "青嶺", 1.0).unwrap();
+        context.add_concept_alias("あおね", "青嶺").unwrap();
+        context.add_label_alias("ブランド", "銘柄").unwrap();
+
+        // Both canonicals are still live: nothing is reported.
+        let (dead_concepts, dead_labels) = context
+            .dead_canonical_aliases(Deadline::unbounded())
+            .unwrap();
+        assert!(dead_concepts.is_empty());
+        assert!(dead_labels.is_empty());
+
+        // Retracting the only edge kills both canonicals at once.
+        context.retract_association("蔵", "銘柄", "青嶺");
+        let (dead_concepts, dead_labels) = context
+            .dead_canonical_aliases(Deadline::unbounded())
+            .unwrap();
+        assert_eq!(
+            dead_concepts.get("あおね").map(String::as_str),
+            Some("青嶺")
+        );
+        assert_eq!(
+            dead_labels.get("ブランド").map(String::as_str),
+            Some("銘柄")
+        );
+    }
+
+    #[test]
+    fn dead_canonical_aliases_matches_what_compaction_would_drop() {
+        let mut context = Context::default();
+        context.associate("蔵", "銘柄", "青嶺", 1.0).unwrap();
+        context.associate("蔵", "杜氏", "高瀬", 1.0).unwrap();
+        context.add_concept_alias("あおね", "青嶺").unwrap();
+        context.add_label_alias("ブランド", "銘柄").unwrap();
+        // 杜氏/高瀬 stay live throughout, so this alias must never be
+        // reported dead — a control against a predicate that's too broad.
+        context.add_label_alias("肩書", "杜氏").unwrap();
+        context.retract_association("蔵", "銘柄", "青嶺");
+
+        let (dead_concepts, dead_labels) = context
+            .dead_canonical_aliases(Deadline::unbounded())
+            .unwrap();
+        assert!(!dead_labels.contains_key("肩書"));
+
+        let (_, stats) = context.compacted(Deadline::unbounded()).unwrap();
+        assert_eq!(
+            dead_concepts.len() + dead_labels.len(),
+            stats.aliases_dropped,
+            "dead_canonical_aliases must name exactly what compaction would silently drop"
+        );
     }
 
     #[test]

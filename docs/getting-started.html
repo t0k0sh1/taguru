@@ -114,6 +114,8 @@ taguru version</code></pre>
           <tr><td>TAGURU_PUBLIC_URL</td><td>—</td><td>Public base URL. Setting it enables OAuth on remote MCP (<code>/mcp</code>), which lets claude.ai custom connectors attach</td></tr>
           <tr><td>TAGURU_RATE_LIMIT_PER_MIN</td><td>0 (off)</td><td>Per-key request budget per minute. Enable it before leaving localhost</td></tr>
           <tr><td>TAGURU_REQUEST_TIMEOUT_SECS</td><td>30</td><td>Time budget per request. Raise to 60+ once an embedding provider is configured</td></tr>
+          <tr><td>TAGURU_MAX_CONCURRENT_REQUESTS</td><td>256</td><td>Global in-flight ceiling. Excess requests are shed immediately with 503 + <code>Retry-After</code>; <code>0</code> disables</td></tr>
+          <tr><td>TAGURU_MAX_CONCURRENT_HEAVY_OPS</td><td>2</td><td>Shared ceiling for vocabulary audits and context compactions. Excess calls are shed immediately with 503 + <code>Retry-After</code>; <code>0</code> disables</td></tr>
         </tbody>
       </table>
     </div>

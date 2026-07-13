@@ -357,6 +357,25 @@ export interface VocabularyAudit {
   semantic_note: string | null;
 }
 
+/** One edge carrying weight no named source explains. `unsourced_weight` can be negative. */
+export interface UnsourcedEdge {
+  unsourced_weight: number;
+  unsourced_count: number;
+  association: Association;
+}
+
+/**
+ * Graph-vs-archive drift: unsourced weight, dead-canonical aliases, and
+ * (opt-in) the same fork candidates `VocabularyAudit` finds.
+ */
+export interface DriftAudit {
+  total: number;
+  unsourced: UnsourcedEdge[];
+  dead_concept_aliases: Record<string, string>;
+  dead_label_aliases: Record<string, string>;
+  twins: VocabularyAudit | null;
+}
+
 export interface CompactOutcome {
   bytes_before: number;
   bytes_after: number;

@@ -14,6 +14,7 @@ use axum::http::{HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::Response;
 use taguru::deadline::Deadline;
+use tokio::sync::Semaphore;
 
 use crate::api;
 use crate::auth;
@@ -91,6 +92,52 @@ fn shed(code: api::ErrorCode, message: impl Into<String>) -> Response {
         .headers_mut()
         .insert(header::RETRY_AFTER, HeaderValue::from(1u32));
     response
+}
+
+/// A shared, non-queuing permit pool for the whole-context CPU/disk
+/// sweeps exposed by the API. Unlike the global in-flight ceiling this
+/// gate is applied only to `audit_vocabulary`, `compact_context`, and
+/// `audit_drift` (which runs the same pairwise scan as
+/// `audit_vocabulary` when `include_twins` is set); ordinary requests
+/// retain the rest of the worker pool during a burst.
+#[derive(Clone)]
+pub struct HeavyOpsLimiter {
+    limit: usize,
+    permits: Arc<Semaphore>,
+}
+
+impl HeavyOpsLimiter {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            permits: Arc::new(Semaphore::new(limit)),
+        }
+    }
+}
+
+/// Immediately admits a heavy operation or sheds it. Waiting here would
+/// merely hide saturation until the request deadline expired, so this uses
+/// `try_acquire_owned` and returns the same retryable 503 shape as the
+/// global in-flight ceiling. A limit of zero disables this targeted gate.
+pub async fn enforce_heavy_ops(
+    State(limiter): State<HeavyOpsLimiter>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if limiter.limit == 0 {
+        return next.run(request).await;
+    }
+    let Ok(_permit) = Arc::clone(&limiter.permits).try_acquire_owned() else {
+        return shed(
+            api::ErrorCode::Overloaded,
+            format!(
+                "server is at its heavy-operation ceiling ({} concurrent calls) — retry \
+                 shortly (TAGURU_MAX_CONCURRENT_HEAVY_OPS tunes this)",
+                limiter.limit
+            ),
+        );
+    };
+    next.run(request).await
 }
 
 pub async fn enforce_concurrency(
@@ -276,7 +323,7 @@ mod tests {
     use axum::Router;
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use tower::util::ServiceExt;
 
     fn app(budget: Duration) -> Router {
@@ -395,6 +442,101 @@ mod tests {
         let after = app.clone().oneshot(request("/fast")).await.unwrap();
         assert_eq!(after.status(), 200);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The targeted semaphore is shared by both expensive routes, refuses
+    /// instead of queueing, and returns its permit when the holder ends.
+    /// Routes outside the layered sub-router remain available throughout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_heavy_operation_ceiling_sheds_only_heavy_routes_and_recovers() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let heavy = {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Router::new()
+                .route(
+                    "/audit",
+                    post(move || {
+                        let entered = Arc::clone(&entered);
+                        let release = Arc::clone(&release);
+                        async move {
+                            entered.notify_one();
+                            release.notified().await;
+                            "done"
+                        }
+                    }),
+                )
+                .route("/compact", post(|| async { "done" }))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    HeavyOpsLimiter::new(1),
+                    enforce_heavy_ops,
+                ))
+        };
+        let app = Router::new()
+            .route("/ordinary", get(|| async { "done" }))
+            .merge(heavy);
+        let request = |path: &str, method: &str| {
+            HttpRequest::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let holder = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(request("/audit", "POST")).await.unwrap() }
+        });
+        entered.notified().await;
+
+        let shed = app
+            .clone()
+            .oneshot(request("/compact", "POST"))
+            .await
+            .unwrap();
+        assert_eq!(shed.status(), 503);
+        assert_eq!(shed.headers().get(header::RETRY_AFTER).unwrap(), "1");
+        let bytes = axum::body::to_bytes(shed.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "overloaded");
+        assert!(
+            body["error"].as_str().unwrap().contains("heavy-operation"),
+            "{body}"
+        );
+
+        let ordinary = app
+            .clone()
+            .oneshot(request("/ordinary", "GET"))
+            .await
+            .unwrap();
+        assert_eq!(ordinary.status(), 200);
+
+        release.notify_one();
+        assert_eq!(holder.await.unwrap().status(), 200);
+        let after = app.oneshot(request("/compact", "POST")).await.unwrap();
+        assert_eq!(after.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn a_zero_heavy_operation_limit_disables_the_gate() {
+        let app = Router::new()
+            .route("/heavy", post(|| async { "done" }))
+            .layer(axum::middleware::from_fn_with_state(
+                HeavyOpsLimiter::new(0),
+                enforce_heavy_ops,
+            ));
+        let first = app
+            .clone()
+            .oneshot(HttpRequest::post("/heavy").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let second = app
+            .oneshot(HttpRequest::post("/heavy").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first.status(), 200);
+        assert_eq!(second.status(), 200);
     }
 
     /// A maintenance sweep sheds new work with its own code (not

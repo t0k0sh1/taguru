@@ -8,6 +8,12 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `TAGURU_MAX_CONCURRENT_HEAVY_OPS` (default 2; `0` disables): one
+  shared, non-queuing semaphore around `audit_vocabulary` and
+  `compact_context`, over both raw HTTP and MCP dispatch. Once full,
+  another heavy call is shed immediately as 503 `overloaded` with
+  `Retry-After: 1`, leaving worker capacity available for ordinary
+  requests while admitted sweeps run to their individual deadlines.
 - Context groups: `/groups` bundles contexts (many-to-many) and may
   nest child groups — a shallow DAG, at most 3 groups tall, cycles
   refused — as the addressing unit cross-context retrieval will
@@ -324,6 +330,31 @@ Entries that change an on-disk format or a response shape say so.
   dispatched. Parallelism never crosses documents — each document's
   relation-label vocabulary feeds the next document's prompt, so
   documents themselves keep extracting one at a time.
+- Drift audit (#63): `unsourced weight` — an association's weight left
+  over once every named source's contribution is subtracted, the same
+  bucket export/re-import round trips already tag with the reserved
+  source id `export:unsourced` — now surfaces at three layers instead
+  of only inside exported batches. `GET /contexts/{name}` and `taguru
+  inspect`'s stats line add `unsourced_edges`/`unsourced_weight`;
+  `/metrics` adds `taguru_unsourced_edges`/`taguru_unsourced_weight`
+  gauges (server-wide sums, same reasoning as `taguru_dead_edges`).
+  `POST /contexts/{name}/drift/audit` (MCP `audit_drift`, Role::Read)
+  is the new read-only verb, answering three things at once: edges
+  whose unsourced weight clears an optional `unsourced_floor` (default:
+  any at all), worst-first and cursor-paginated like
+  `unreachable_from`; aliases whose canonical concept or label has
+  gone dead (zero live edges); and, opt-in via `include_twins`, the
+  same lexical/semantic fork candidates `vocabulary/audit` already
+  finds, at the same `dice_floor`/`cosine_floor` defaults (0.6/0.6) —
+  one shared implementation, not a second copy. `taguru estimate` is
+  unaffected: synthesized associations always carry a generated
+  source, so unsourced weight cannot arise there.
+- Registering an alias now leaves its own `"aliases registered"`
+  `taguru::audit` line (context, concept/label counts, applied count —
+  never the spellings themselves), symmetric with the existing one for
+  removal. Reconstructing a bad alias's live window — see the new
+  "Recovering from a bad alias" note under Running in production — no
+  longer depends on the removal side alone.
 
 ### Changed
 - doc2query `questions` now index into their paragraph's BM25 postings

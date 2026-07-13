@@ -50,6 +50,8 @@ __all__ = [
     "RefreshOutcome",
     "TwinPair",
     "VocabularyAudit",
+    "UnsourcedEdge",
+    "DriftAudit",
     "CompactOutcome",
     "ImportOutcome",
     "BatchApplyResult",
@@ -372,6 +374,28 @@ class VocabularyAudit:
     semantic_concepts: list[TwinPair]
     semantic_labels: list[TwinPair]
     semantic_note: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class UnsourcedEdge:
+    """One edge carrying weight no named source explains. ``unsourced_weight``
+    can be negative."""
+
+    unsourced_weight: float
+    unsourced_count: int
+    association: Association
+
+
+@dataclass(slots=True, frozen=True)
+class DriftAudit:
+    """Graph-vs-archive drift: unsourced weight, dead-canonical aliases, and
+    (opt-in) the same fork candidates :class:`VocabularyAudit` finds."""
+
+    total: int
+    unsourced: list[UnsourcedEdge]
+    dead_concept_aliases: dict[str, str]
+    dead_label_aliases: dict[str, str]
+    twins: VocabularyAudit | None = None
 
 
 @dataclass(slots=True, frozen=True)
