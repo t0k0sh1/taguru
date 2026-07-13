@@ -201,6 +201,17 @@ fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value>
         ),
         mcp::Call::Ping => mcp::response(id, serde_json::json!({})),
         mcp::Call::ToolsList => mcp::response(id, mcp::tools_result()),
+        mcp::Call::Tool { name, arguments } if name == "retrieve" => {
+            // retrieve composes a variable number of tool calls from
+            // earlier ones' results, so it has no single (method, path,
+            // body) for route_tool to hand back — run_retrieve issues
+            // them itself, each via this same synchronous bridge.call.
+            let outcome = mcp::run_retrieve(&arguments, |method, path, body| {
+                bridge.call(method, &path, body)
+            })
+            .map(|value| value.to_string());
+            mcp::response(id, mcp::tool_response(outcome))
+        }
         mcp::Call::Tool { name, arguments } => {
             let outcome = mcp::route_tool(&name, &arguments)
                 .and_then(|(method, path, body)| bridge.call(method, &path, body));
@@ -244,6 +255,14 @@ impl Bridge {
         // Both arms run to completion inside the match: a bodiless GET
         // and a JSON POST are differently typed requests in ureq 3.
         let response = match body {
+            // A string argument (the `import` tool's NDJSON stream) rides
+            // as raw text — `Value::to_string()` would JSON-quote it,
+            // escaping every newline and breaking the line-oriented parse
+            // on the other end.
+            Some(Value::String(text)) => request
+                .header("Content-Type", "application/x-ndjson; charset=utf-8")
+                .body(text)
+                .map(|request| self.agent.run(request)),
             Some(body) => request
                 .header("Content-Type", "application/json")
                 .body(body.to_string())

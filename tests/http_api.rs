@@ -1427,6 +1427,45 @@ fn the_directory_pages_by_name_and_serves_single_contexts() {
     assert_eq!(body["status"], json!("error"));
 }
 
+/// #62 item 6: `pinned` defines the population of interest, like a
+/// search query — so unlike `after`/`limit`, it counts toward `total`.
+#[test]
+fn the_directory_filters_by_pinned_and_counts_total_after_filtering() {
+    let server = Server::start("dirpinned");
+    server.ok(
+        "PUT",
+        "/contexts/apple",
+        Some(json!({"description": "a", "pinned": true})),
+    );
+    server.ok(
+        "PUT",
+        "/contexts/banana",
+        Some(json!({"description": "b", "pinned": false})),
+    );
+    server.ok(
+        "PUT",
+        "/contexts/cherry",
+        Some(json!({"description": "c", "pinned": true})),
+    );
+
+    let pinned = server.ok("GET", "/contexts?pinned=true", None);
+    assert_eq!(pinned["total"], json!(2), "{pinned}");
+    let names: Vec<&str> = pinned["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["apple", "cherry"]);
+
+    let unpinned = server.ok("GET", "/contexts?pinned=false", None);
+    assert_eq!(unpinned["total"], json!(1), "{unpinned}");
+    assert_eq!(unpinned["contexts"][0]["name"], json!("banana"));
+
+    let all = server.ok("GET", "/contexts", None);
+    assert_eq!(all["total"], json!(3), "no filter means every context");
+}
+
 /// A context-scoped key's directory listing pages its own allow-list,
 /// not the full registry — the allow-list has no relation to name
 /// order, so this exercises a different path from the unscoped case
@@ -1772,6 +1811,14 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
         "/contexts/sake/sources",
         Some(json!({"passages": passages})),
     );
+    assert_eq!(status, 400, "{body}");
+
+    // A rename's destination rides in the body, not the path — it
+    // needs its own cap, for both the context and the group route.
+    let (status, body) = server.call("POST", "/contexts/sake/rename", Some(json!({"to": long})));
+    assert_eq!(status, 400, "{body}");
+    server.ok("PUT", "/groups/kura", Some(json!({})));
+    let (status, body) = server.call("POST", "/groups/kura/rename", Some(json!({"to": long})));
     assert_eq!(status, 400, "{body}");
 
     // Nothing landed anywhere.
@@ -4999,12 +5046,25 @@ fn a_malformed_file_refuses_the_whole_import_before_any_write() {
 /// POST /import with a raw JSONL body (the batch is not a JSON
 /// document, so the JSON helpers cannot carry it) and an optional
 /// bearer token.
-fn post_import(server: &Server, body: &str, token: Option<&str>) -> (u16, Value) {
-    let mut request = test_agent().post(format!("{}/import", server.base));
+fn post_import_query(
+    server: &Server,
+    query: &str,
+    body: &str,
+    token: Option<&str>,
+) -> (u16, Value) {
+    let mut request = test_agent().post(format!("{}/import{query}", server.base));
     if let Some(token) = token {
         request = request.header("Authorization", format!("Bearer {token}"));
     }
     finish(request.send(body), "POST", "/import")
+}
+
+fn post_import(server: &Server, body: &str, token: Option<&str>) -> (u16, Value) {
+    post_import_query(server, "", body, token)
+}
+
+fn post_import_dry_run(server: &Server, body: &str, token: Option<&str>) -> (u16, Value) {
+    post_import_query(server, "?dry_run=true", body, token)
 }
 
 #[test]
@@ -5043,6 +5103,90 @@ fn the_import_endpoint_applies_batches_to_a_live_server() {
     );
     assert_eq!(status, 200);
     assert_eq!(edge["result"]["matches"][0]["weight"], json!(2.0));
+}
+
+/// `?dry_run=true` reports the same shape a real import would without
+/// writing anything — the counts it previews match exactly what the
+/// same batch applies for real right after.
+#[test]
+fn import_dry_run_previews_without_writing_anything() {
+    let server = Server::start("http-import-dry-run");
+    let batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-preview\", \
+                 \"create\": {\"description\": \"d\"}}\n\
+                 {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
+                 {\"passage\": \"蔵の杜氏は高瀬。\"}\n";
+
+    let (status, preview) = post_import_dry_run(&server, batch, None);
+    assert_eq!(status, 200, "{preview}");
+    let outcome = &preview["result"]["batches"][0];
+    assert_eq!(outcome["created"], json!(true));
+    assert_eq!(outcome["associations"], json!(1));
+    assert_eq!(outcome["passage_stored"], json!(true));
+    assert_eq!(outcome["retracted"], json!(0));
+
+    // A preview writes nothing: the context it would create doesn't
+    // exist yet.
+    let (status, _) = server.call("GET", "/contexts/sake", None);
+    assert_eq!(status, 404, "dry_run must not create the context");
+
+    // The real import right after previews identically — same counts,
+    // this time durable.
+    let (status, real) = post_import(&server, batch, None);
+    assert_eq!(status, 200, "{real}");
+    assert_eq!(real["result"]["batches"][0], *outcome, "{real}");
+    let (status, _) = server.call("GET", "/contexts/sake", None);
+    assert_eq!(status, 200, "the real import did create the context");
+
+    // Previewing a source replacement counts the retraction without
+    // performing it — the edge the first import landed is still live.
+    let (status, replace_preview) = post_import_dry_run(&server, batch, None);
+    assert_eq!(status, 200, "{replace_preview}");
+    assert_eq!(
+        replace_preview["result"]["batches"][0]["created"],
+        json!(false)
+    );
+    assert_eq!(
+        replace_preview["result"]["batches"][0]["retracted"],
+        json!(1),
+        "{replace_preview}"
+    );
+    let (status, edge) = server.call(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "蔵", "label": "杜氏"})),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        edge["result"]["matches"][0]["weight"],
+        json!(2.0),
+        "the preview did not actually retract anything"
+    );
+}
+
+/// A stream that mixes batches with a `taguru_group` record previews
+/// the batches but skips the group record entirely — the response
+/// omits `groups`, and no group is created.
+#[test]
+fn import_dry_run_skips_group_records() {
+    let server = Server::start("http-import-dry-run-groups");
+    let stream = "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n\
+                  {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+                   \"create\": {\"description\": \"d\"}}\n";
+    let (status, preview) = post_import_dry_run(&server, stream, None);
+    assert_eq!(status, 200, "{preview}");
+    assert_eq!(
+        preview["result"]["batches"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert!(
+        preview["result"].get("groups").is_none(),
+        "dry_run previews no group records: {preview}"
+    );
+
+    let (status, _) = server.call("GET", "/groups/kura", None);
+    assert_eq!(status, 404, "dry_run must not create the group");
+    let (status, _) = server.call("GET", "/contexts/sake", None);
+    assert_eq!(status, 404, "dry_run must not create the context either");
 }
 
 /// A live import that stops partway leaves its batch-open marker on
@@ -5446,6 +5590,89 @@ fn a_scoped_key_cannot_import_group_records_beyond_its_grant() {
     let shrink = "{\"taguru_group\": 1, \"name\": \"wide\", \"contexts\": [\"sake\"]}\n";
     let (status, refusal) = post_import(&server, shrink, Some("ctok"));
     assert_eq!(status, 403, "{refusal}");
+}
+
+/// The destination of `POST /contexts/{name}/rename` rides in the
+/// body, out of the authorization middleware's reach — so a
+/// context-scoped key must not be able to move its data to a name
+/// beyond its grant, whether that name is already someone else's
+/// context or brand new.
+#[test]
+fn a_scoped_key_cannot_rename_a_context_to_a_destination_beyond_its_grant() {
+    let server = Server::start_with_env(
+        "http-rename-scope",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,curator:ctok,wide:wtok"),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"curator": {"role": "admin", "contexts": ["sake"]},
+                    "wide": {"role": "admin", "contexts": ["sake", "shochu"]}}"#,
+            ),
+        ],
+    );
+    let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
+        server.call_with_token(method, path, body, Some(token))
+    };
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/sake",
+            Some(json!({"description": "d"})),
+            "atok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/bunko",
+            Some(json!({"description": "d"})),
+            "atok"
+        )
+        .0,
+        200
+    );
+
+    // Destination already exists, but beyond the grant: refused, the
+    // message naming the destination so the caller knows what to fix.
+    let (status, refusal) = call(
+        "POST",
+        "/contexts/sake/rename",
+        Some(json!({"to": "bunko"})),
+        "ctok",
+    );
+    assert_eq!(status, 403, "{refusal}");
+    assert!(
+        refusal["error"].as_str().unwrap().contains("bunko"),
+        "{refusal}"
+    );
+
+    // Destination is brand new, still beyond the grant: refused the
+    // same way — existence is not what is being checked.
+    let (status, refusal) = call(
+        "POST",
+        "/contexts/sake/rename",
+        Some(json!({"to": "shochu"})),
+        "ctok",
+    );
+    assert_eq!(status, 403, "{refusal}");
+
+    // Neither refusal moved anything.
+    assert_eq!(call("GET", "/contexts/sake", None, "atok").0, 200);
+    assert_eq!(call("GET", "/contexts/shochu", None, "atok").0, 404);
+
+    // A key scoped to BOTH names may rename between them — the grant
+    // check is about the names involved, not a blanket ban.
+    let (status, applied) = call(
+        "POST",
+        "/contexts/sake/rename",
+        Some(json!({"to": "shochu"})),
+        "wtok",
+    );
+    assert_eq!(status, 200, "{applied}");
+    assert_eq!(call("GET", "/contexts/shochu", None, "atok").0, 200);
+    assert_eq!(call("GET", "/contexts/sake", None, "atok").0, 404);
 }
 
 /// `GET /groups/{name}/export` serves one `taguru_group` record that
@@ -6410,6 +6637,68 @@ fn labels_aliases_and_sources_page_with_keyset_cursors() {
     // A malformed cursor is a 400, not an empty page.
     let (status, refusal) = server.call("GET", "/contexts/sake/aliases?after=bogus", None);
     assert_eq!(status, 400, "{refusal}");
+}
+
+/// #62 item 6: `prefix` narrows labels/sources/aliases to a population
+/// — like `pinned` on the directory, it counts toward `total` (unlike
+/// `after`/`limit`), and for aliases it applies to both namespaces
+/// before they're joined into the `concept:`/`label:` cursor.
+#[test]
+fn labels_aliases_and_sources_filter_by_prefix_and_count_total_after_filtering() {
+    let server = Server::start("http-prefix-filter");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "a.md"},
+            {"subject": "蔵", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "a.md"},
+            {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "b.md"},
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"a.md": "本文。", "b.md": "本文。", "c.txt": "本文。"}})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/aliases",
+        Some(json!({
+            "concepts": {"Aomine": "青嶺", "Kura": "蔵"},
+            "labels": {"establishment": "創業年"},
+        })),
+    );
+
+    // labels: only those starting with "杜".
+    let filtered = server.ok(
+        "GET",
+        &format!("/contexts/sake/labels?prefix={}", urlencode("杜")),
+        None,
+    );
+    assert_eq!(filtered["total"], json!(1), "{filtered}");
+    assert_eq!(filtered["labels"], json!(["杜氏"]), "{filtered}");
+
+    // sources: only the .md files.
+    let filtered = server.ok("GET", "/contexts/sake/sources?prefix=a", None);
+    assert_eq!(filtered["total"], json!(1), "{filtered}");
+    assert_eq!(filtered["sources"], json!(["a.md"]), "{filtered}");
+
+    // aliases: prefix applies within each namespace before the
+    // concept:/label: cursor joins them.
+    let filtered = server.ok("GET", "/contexts/sake/aliases?prefix=A", None);
+    assert_eq!(filtered["total"], json!(1), "{filtered}");
+    assert_eq!(
+        filtered["concepts"],
+        json!({"Aomine": "青嶺"}),
+        "{filtered}"
+    );
+    assert_eq!(filtered["labels"], json!({}), "{filtered}");
+
+    // No matches means total 0, not an error.
+    let empty = server.ok("GET", "/contexts/sake/sources?prefix=zzz", None);
+    assert_eq!(empty["total"], json!(0), "{empty}");
+    assert_eq!(empty["sources"], json!([]), "{empty}");
 }
 
 /// Percent-encodes one query value the way ureq will not do for us.
@@ -7690,6 +7979,149 @@ fn the_mcp_flush_tool_stays_admin_gated() {
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
 
+/// #62 item 3: `compact` is MCP-advertised but unlisted in
+/// `required_role` — the role table's fail-closed default makes it
+/// admin, same as `flush`.
+#[test]
+fn the_mcp_compact_tool_stays_admin_gated() {
+    let server = Server::start_with_env(
+        "mcp-compact-auth",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,scribe:wtok"),
+            ("TAGURU_KEY_SCOPES", r#"{"scribe": "write"}"#),
+        ],
+    );
+    server.call_with_token(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "d"})),
+        Some("atok"),
+    );
+    let call = |token: &str| {
+        let (status, answer) = server.call_with_token(
+            "POST",
+            "/mcp",
+            Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": "compact", "arguments": {"context": "sake"}}})),
+            Some(token),
+        );
+        assert_eq!(status, 200, "{answer}");
+        answer["result"].clone()
+    };
+
+    let refused = call("wtok");
+    assert_eq!(refused["isError"], json!(true), "{refused}");
+    let text = refused["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("HTTP 403"), "{text}");
+
+    let allowed = call("atok");
+    assert!(allowed.get("isError").is_none(), "{allowed}");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
+
+/// #62 item 3: `get_context`/`get_group` round-trip through MCP to the
+/// same directory rows the HTTP routes serve.
+#[test]
+fn the_mcp_get_context_and_get_group_tools_return_the_http_rows() {
+    let server = Server::start("mcp-get-passthrough");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "酒蔵の記憶"})),
+    );
+    server.ok(
+        "PUT",
+        "/groups/breweries",
+        Some(json!({"description": "g", "contexts": ["sake"]})),
+    );
+
+    let call = |name: &str, arguments: Value| {
+        let (status, answer) = server.call(
+            "POST",
+            "/mcp",
+            Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": name, "arguments": arguments}})),
+        );
+        assert_eq!(status, 200, "{answer}");
+        let result = answer["result"].clone();
+        assert!(result.get("isError").is_none(), "{result}");
+        let text = result["content"][0]["text"].as_str().unwrap().to_string();
+        // The tool passes the HTTP handler's response body through
+        // verbatim, envelope and all — same as every other GET-backed
+        // tool (`export_context`, `list_contexts`, ...).
+        serde_json::from_str::<Value>(&text).unwrap()["result"].clone()
+    };
+
+    let context = call("get_context", json!({"context": "sake"}));
+    assert_eq!(context["name"], json!("sake"));
+    assert_eq!(context["description"], json!("酒蔵の記憶"));
+
+    let group = call("get_group", json!({"name": "breweries"}));
+    assert_eq!(group["name"], json!("breweries"));
+    assert_eq!(group["contexts"], json!(["sake"]));
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
+
+/// #62 item 1: the `import` tool carries a multi-line NDJSON stream as
+/// raw text, not a JSON-quoted string — the regression `call_inner`
+/// (HTTP transport) and `Bridge::call` (stdio transport) both fixed:
+/// naively `Value::to_string()`-encoding a string argument escapes
+/// every newline, collapsing the stream onto one line and breaking
+/// the line-oriented parse. A batch that only applies correctly when
+/// every line lands separately is the regression test.
+#[test]
+fn the_mcp_import_tool_applies_a_multi_line_stream() {
+    let server = Server::start("mcp-import");
+    let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-mcp\", \
+                 \"create\": {\"description\": \"d\"}}\n\
+                 {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+                 {\"passage\": \"蔵の杜氏は高瀬。\"}\n";
+
+    let (status, answer) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "import", "arguments": {"stream": stream}}})),
+    );
+    assert_eq!(status, 200, "{answer}");
+    let result = answer["result"].clone();
+    assert!(result.get("isError").is_none(), "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap().to_string();
+    let envelope: Value = serde_json::from_str(&text).unwrap();
+    let outcome = &envelope["result"]["batches"][0];
+    assert_eq!(outcome["created"], json!(true));
+    assert_eq!(outcome["associations"], json!(1));
+    assert_eq!(outcome["passage_stored"], json!(true));
+
+    let row = server.ok("GET", "/contexts/sake", None);
+    assert_eq!(row["description"], json!("d"));
+
+    // dry_run previews without writing: the context this batch would
+    // create does not exist afterward.
+    let preview_stream = "{\"taguru_batch\": 1, \"context\": \"bunko\", \"source\": \"s\", \
+                          \"create\": {\"description\": \"d\"}}\n";
+    let (status, preview_answer) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "import",
+                               "arguments": {"stream": preview_stream, "dry_run": true}}})),
+    );
+    assert_eq!(status, 200, "{preview_answer}");
+    let preview_text = preview_answer["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let preview_envelope: Value = serde_json::from_str(&preview_text).unwrap();
+    assert_eq!(
+        preview_envelope["result"]["batches"][0]["created"],
+        json!(true)
+    );
+    let (status, _) = server.call("GET", "/contexts/bunko", None);
+    assert_eq!(status, 404, "dry_run through the MCP tool must not write");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
+
 /// The search-explain decision tree (#75): one call names the first
 /// verdict that applies — stored at all, sharing any term, ranked but
 /// cut off, or served — with the evidence that makes the verdict
@@ -8069,4 +8501,96 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("no_term_overlap"), "{text}");
     assert!(text.contains("酒蔵"), "{text}");
+}
+
+/// #62 item 2: the composed `retrieve` tool runs resolve → describe →
+/// activate → cite_passage (and, forced on here, the search_passages
+/// fallback) end to end over the real HTTP/MCP transport. The point
+/// this covers beyond `run_retrieve`'s own unit tests (mock closures,
+/// no real async runtime): `remote_mcp::serve` bridges `run_retrieve`'s
+/// synchronous callback onto the async `call_inner` via
+/// `block_in_place` + `Handle::block_on`, and that bridge only proves
+/// out under an actual multi-thread tokio runtime.
+#[test]
+fn the_mcp_retrieve_tool_runs_the_composed_loop_end_to_end() {
+    let server = Server::start("mcp-retrieve");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "酒蔵の記憶"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {
+            "docs/kura.md": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
+        }})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
+             "source": "docs/kura.md", "paragraph": 0},
+        ])),
+    );
+
+    let result = server.call_tool(
+        1,
+        "retrieve",
+        json!({"context": "sake", "origins": ["青嶺酒造"]}),
+    );
+    assert!(result.get("isError").is_none(), "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap();
+    let envelope: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(
+        envelope["resolved"]["青嶺酒造"][0]["name"],
+        json!("青嶺酒造")
+    );
+    assert_eq!(
+        envelope["outline"]["青嶺酒造"]["concept"],
+        json!("青嶺酒造")
+    );
+    let associations = envelope["associations"].as_array().unwrap();
+    assert_eq!(associations.len(), 1, "{envelope}");
+    assert_eq!(associations[0]["object"], json!("高瀬"));
+    let citations = envelope["citations"].as_array().unwrap();
+    assert_eq!(citations.len(), 1, "{envelope}");
+    assert_eq!(citations[0]["source"], json!("docs/kura.md"));
+    assert_eq!(citations[0]["paragraph"], json!(0));
+    assert!(
+        citations[0]["citation"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("青嶺酒造"),
+        "{envelope}"
+    );
+    assert_eq!(envelope["passage_hits"], json!([]));
+
+    // A second call exercises the text-lane fallback (step 5) over the
+    // same transport, forced on regardless of what associations came
+    // back (text_fallback_only_if_empty: false) so it does not hinge on
+    // resolve's fuzzy-match behavior.
+    let fallback = server.call_tool(
+        2,
+        "retrieve",
+        json!({
+            "context": "sake", "origins": ["青嶺酒造"],
+            "text_fallback_query": "杜氏は高瀬である",
+            "text_fallback_only_if_empty": false
+        }),
+    );
+    assert!(fallback.get("isError").is_none(), "{fallback}");
+    let fallback_text = fallback["content"][0]["text"].as_str().unwrap();
+    let fallback_envelope: Value = serde_json::from_str(fallback_text).unwrap();
+    assert!(
+        !fallback_envelope["passage_hits"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{fallback_envelope}"
+    );
+
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }

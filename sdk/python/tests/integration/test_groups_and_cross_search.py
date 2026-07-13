@@ -74,10 +74,20 @@ def test_group_lifecycle(client: Taguru, fresh_name: str) -> None:
     names = [row.name for row in client.groups.iter(limit=2)]
     assert group in names and child in names
 
-    # Deleting the bundling leaves members (and the child group) alone.
-    assert client.groups.delete(group)
-    with pytest.raises(NotFoundError) as gone:
+    # Rename: the old name is gone, the new one keeps the membership.
+    renamed_group = f"{fresh_name}-g-renamed"
+    assert client.groups.rename(group, renamed_group)
+    with pytest.raises(NotFoundError) as renamed_away:
         client.groups.get(group)
+    assert renamed_away.value.code == "no_group"
+    entry = client.groups.get(renamed_group)
+    assert entry.contexts == sorted([sake, tea])
+    assert entry.groups == [child]
+
+    # Deleting the bundling leaves members (and the child group) alone.
+    assert client.groups.delete(renamed_group)
+    with pytest.raises(NotFoundError) as gone:
+        client.groups.get(renamed_group)
     assert gone.value.code == "no_group"
     assert client.groups.exists(child)
     assert client.contexts.exists(sake)

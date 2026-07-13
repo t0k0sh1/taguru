@@ -374,19 +374,28 @@ export class Taguru {
 export class Contexts {
   constructor(private readonly client: Taguru) {}
 
-  /** One directory page (keyset cursor: `after` = last name shown). */
-  async list(options: { limit?: number; after?: string } = {}): Promise<ContextPage> {
+  /**
+   * One directory page (keyset cursor: `after` = last name shown).
+   *
+   * `pinned` narrows to that pinned state; unlike `after`, it counts
+   * toward `total`.
+   */
+  async list(
+    options: { limit?: number; after?: string; pinned?: boolean } = {},
+  ): Promise<ContextPage> {
     const result = await this.client.requestJson("GET", "/contexts", {
-      params: { limit: options.limit, after: options.after },
+      params: { limit: options.limit, after: options.after, pinned: options.pinned },
     });
     return result as ContextPage;
   }
 
   /** Walk every directory page transparently. */
-  async *iter(options: { limit?: number } = {}): AsyncGenerator<DirectoryEntry, void, undefined> {
+  async *iter(
+    options: { limit?: number; pinned?: boolean } = {},
+  ): AsyncGenerator<DirectoryEntry, void, undefined> {
     let after: string | undefined;
     for (;;) {
-      const page = await this.list({ limit: options.limit, after });
+      const page = await this.list({ limit: options.limit, after, pinned: options.pinned });
       if (page.contexts.length === 0) {
         return;
       }
@@ -461,6 +470,18 @@ export class Contexts {
   /** Delete a context, files included (admin role). */
   async delete(name: string): Promise<boolean> {
     const result = await this.client.requestJson("DELETE", `/contexts/${encodeName(name)}`);
+    return Boolean(result);
+  }
+
+  /**
+   * Rename a context (admin role): the whole file family moves to `to`,
+   * and every group naming it is rewritten to match.
+   */
+  async rename(name: string, to: string): Promise<boolean> {
+    const result = await this.client.requestJson("POST", `/contexts/${encodeName(name)}/rename`, {
+      jsonBody: { to },
+      retry: "unsafe_on_ambiguous",
+    });
     return Boolean(result);
   }
 }
@@ -565,6 +586,18 @@ export class Groups {
   /** Delete the bundling only — member contexts and child groups stay. */
   async delete(name: string): Promise<boolean> {
     const result = await this.client.requestJson("DELETE", `/groups/${encodeName(name)}`);
+    return Boolean(result);
+  }
+
+  /**
+   * Rename a group (admin role): the group's file moves to `to`, and
+   * every OTHER group naming it as a child is rewritten to match.
+   */
+  async rename(name: string, to: string): Promise<boolean> {
+    const result = await this.client.requestJson("POST", `/groups/${encodeName(name)}/rename`, {
+      jsonBody: { to },
+      retry: "unsafe_on_ambiguous",
+    });
     return Boolean(result);
   }
 
@@ -741,18 +774,27 @@ export class Context {
     return result as MatchPage;
   }
 
-  /** One page of the relation vocabulary (canonical labels only). */
-  async listLabels(options: { limit?: number; after?: string } = {}): Promise<LabelPage> {
+  /**
+   * One page of the relation vocabulary (canonical labels only).
+   *
+   * `prefix` narrows to labels starting with that text; unlike
+   * `after`, it counts toward `total`.
+   */
+  async listLabels(
+    options: { limit?: number; after?: string; prefix?: string } = {},
+  ): Promise<LabelPage> {
     const result = await this.client.requestJson("GET", `${this.path}/labels`, {
-      params: { limit: options.limit, after: options.after },
+      params: { limit: options.limit, after: options.after, prefix: options.prefix },
     });
     return result as LabelPage;
   }
 
-  async *iterLabels(options: { limit?: number } = {}): AsyncGenerator<string, void, undefined> {
+  async *iterLabels(
+    options: { limit?: number; prefix?: string } = {},
+  ): AsyncGenerator<string, void, undefined> {
     let after: string | undefined;
     for (;;) {
-      const page = await this.listLabels({ limit: options.limit, after });
+      const page = await this.listLabels({ limit: options.limit, after, prefix: options.prefix });
       if (page.labels.length === 0) {
         return;
       }
@@ -867,17 +909,21 @@ export class Context {
     return result as RetractOutcome;
   }
 
-  async listSources(options: { limit?: number; after?: string } = {}): Promise<SourcePage> {
+  async listSources(
+    options: { limit?: number; after?: string; prefix?: string } = {},
+  ): Promise<SourcePage> {
     const result = await this.client.requestJson("GET", `${this.path}/sources`, {
-      params: { limit: options.limit, after: options.after },
+      params: { limit: options.limit, after: options.after, prefix: options.prefix },
     });
     return result as SourcePage;
   }
 
-  async *iterSources(options: { limit?: number } = {}): AsyncGenerator<string, void, undefined> {
+  async *iterSources(
+    options: { limit?: number; prefix?: string } = {},
+  ): AsyncGenerator<string, void, undefined> {
     let after: string | undefined;
     for (;;) {
-      const page = await this.listSources({ limit: options.limit, after });
+      const page = await this.listSources({ limit: options.limit, after, prefix: options.prefix });
       if (page.sources.length === 0) {
         return;
       }
@@ -900,19 +946,26 @@ export class Context {
   /**
    * One alias page; the cursor spans both namespaces (concepts first), so
    * `after` takes "concept:<alias>" or "label:<alias>".
+   *
+   * `prefix` narrows to aliases (either namespace) starting with that
+   * text; unlike `after`, it counts toward `total`.
    */
-  async getAliases(options: { limit?: number; after?: string } = {}): Promise<AliasPage> {
+  async getAliases(
+    options: { limit?: number; after?: string; prefix?: string } = {},
+  ): Promise<AliasPage> {
     const result = await this.client.requestJson("GET", `${this.path}/aliases`, {
-      params: { limit: options.limit, after: options.after },
+      params: { limit: options.limit, after: options.after, prefix: options.prefix },
     });
     return result as AliasPage;
   }
 
   /** Walk both alias namespaces as a flat stream of entries. */
-  async *iterAliases(options: { limit?: number } = {}): AsyncGenerator<AliasEntry, void, undefined> {
+  async *iterAliases(
+    options: { limit?: number; prefix?: string } = {},
+  ): AsyncGenerator<AliasEntry, void, undefined> {
     let after: string | undefined;
     for (;;) {
-      const page = await this.getAliases({ limit: options.limit, after });
+      const page = await this.getAliases({ limit: options.limit, after, prefix: options.prefix });
       const count = Object.keys(page.concepts).length + Object.keys(page.labels).length;
       if (count === 0) {
         return;
