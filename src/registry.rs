@@ -5823,6 +5823,7 @@ mod tests {
     use super::*;
     use crate::context_proptest::{
         AliasInput, AssocInput, RetractionInput, config as proptest_config, scenario_strategy,
+        wal_op_strategy,
     };
     use proptest::prelude::*;
 
@@ -6360,6 +6361,69 @@ mod tests {
 
     proptest! {
         #![proptest_config(proptest_config())]
+
+        /// Any image watermark splits the acknowledged operation history into
+        /// an already-baked prefix and a replayed suffix. A further partial
+        /// record is unacknowledged crash debris: replay must heal it without
+        /// changing the state assembled from the acknowledged operations.
+        #[test]
+        fn wal_replay_from_any_acknowledged_prefix_rebuilds_the_acknowledged_state(
+            candidates in prop::collection::vec(wal_op_strategy(), 1..16),
+            watermark_pick in any::<prop::sample::Index>(),
+            torn_op in wal_op_strategy(),
+            torn_at in any::<prop::sample::Index>(),
+        ) {
+            let mut expected = Context::default();
+            let candidates: Vec<_> = candidates.into_iter().map(WalOp::from).collect();
+            let acknowledged: Vec<_> = candidates
+                .into_iter()
+                .filter(|op| apply_op(&mut expected, op).is_ok())
+                .collect();
+            let watermark = watermark_pick.index(acknowledged.len() + 1);
+
+            let dir = scratch_dir("wal-prefix-property");
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("generated.wal.jsonl");
+            wal::append_batch(&path, 1, &acknowledged).unwrap();
+            let healthy_len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+
+            let mut restored = Context::default();
+            for op in &acknowledged[..watermark] {
+                replay_op(&mut restored, op);
+            }
+            let (pending, top) = wal::replay::<WalOp>(&path, watermark as u64).unwrap();
+            for op in &pending {
+                replay_op(&mut restored, op);
+            }
+            prop_assert_eq!(restored.to_bytes(), expected.to_bytes());
+            prop_assert_eq!(top, acknowledged.len() as u64);
+
+            // Build one real checksummed record, then retain an arbitrary
+            // non-empty strict prefix: every possible cut is a torn tail.
+            let fragment_path = dir.join("fragment.wal.jsonl");
+            let torn_op = WalOp::from(torn_op);
+            wal::append_batch(&fragment_path, acknowledged.len() as u64 + 1, &[torn_op])
+                .unwrap();
+            let record = fs::read(&fragment_path).unwrap();
+            let cut = torn_at.index(record.len() - 1) + 1;
+            let mut bytes = fs::read(&path).unwrap_or_default();
+            bytes.extend_from_slice(&record[..cut]);
+            fs::write(&path, bytes).unwrap();
+
+            let (pending, top) = wal::replay::<WalOp>(&path, watermark as u64).unwrap();
+            let mut healed = Context::default();
+            for op in &acknowledged[..watermark] {
+                replay_op(&mut healed, op);
+            }
+            for op in &pending {
+                replay_op(&mut healed, op);
+            }
+            prop_assert_eq!(healed.to_bytes(), expected.to_bytes());
+            prop_assert_eq!(top, acknowledged.len() as u64);
+            prop_assert_eq!(fs::metadata(&path).unwrap().len(), healthy_len);
+
+            let _ = fs::remove_dir_all(dir);
+        }
 
         /// The operator path installs the same canonical context as the
         /// library rebuild, flushes it immediately, and re-applies state

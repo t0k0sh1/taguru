@@ -60,6 +60,89 @@ fn assoc_input_strategy() -> impl Strategy<Value = AssocInput> {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // consumed by the server target; the library test target shares this module
+pub(crate) enum GeneratedWalOp {
+    Associate(AssocInput),
+    AliasConcept {
+        alias: &'static str,
+        canonical: &'static str,
+    },
+    AliasLabel {
+        alias: &'static str,
+        canonical: &'static str,
+    },
+    UnaliasConcept(&'static str),
+    UnaliasLabel(&'static str),
+    RetractSource(&'static str),
+    RetractAssociation {
+        subject: &'static str,
+        label: &'static str,
+        object: &'static str,
+    },
+}
+
+/// Generates the same operation vocabulary the server stages in its WAL,
+/// while keeping this shared library-side module independent of server types.
+/// Candidates may be rejected at the point where a property applies them (for
+/// example, an alias can precede its canonical name); that lets durability
+/// properties model the acknowledged subset independently of the generator.
+#[allow(dead_code)] // consumed by the server target; the library test target shares this module
+pub(crate) fn wal_op_strategy() -> impl Strategy<Value = GeneratedWalOp> {
+    let weight = (-1.0e6f64..1.0e6f64).prop_filter(
+        "weight must survive WAL JSON parsing bit-exactly",
+        |&weight| {
+            serde_json::from_str::<f64>(&serde_json::to_string(&weight).unwrap()).unwrap() == weight
+        },
+    );
+
+    prop_oneof![
+        (
+            prop::sample::select(CONCEPT_WORDS),
+            prop::sample::select(LABEL_WORDS),
+            prop::sample::select(CONCEPT_WORDS),
+            weight,
+            prop::option::of(prop::sample::select(SOURCE_WORDS)),
+            prop::option::of(0u32..8),
+        )
+            .prop_map(|(subject, label, object, weight, source, paragraph)| {
+                GeneratedWalOp::Associate(AssocInput {
+                    subject,
+                    label,
+                    object,
+                    weight,
+                    source,
+                    paragraph,
+                })
+            }),
+        (
+            prop::sample::select(CONCEPT_ALIAS_WORDS),
+            prop::sample::select(CONCEPT_WORDS),
+        )
+            .prop_map(|(alias, canonical)| GeneratedWalOp::AliasConcept { alias, canonical }),
+        (
+            prop::sample::select(LABEL_ALIAS_WORDS),
+            prop::sample::select(LABEL_WORDS),
+        )
+            .prop_map(|(alias, canonical)| GeneratedWalOp::AliasLabel { alias, canonical }),
+        prop::sample::select(CONCEPT_ALIAS_WORDS).prop_map(GeneratedWalOp::UnaliasConcept),
+        prop::sample::select(LABEL_ALIAS_WORDS).prop_map(GeneratedWalOp::UnaliasLabel),
+        prop::sample::select(SOURCE_WORDS).prop_map(GeneratedWalOp::RetractSource),
+        (
+            prop::sample::select(CONCEPT_WORDS),
+            prop::sample::select(LABEL_WORDS),
+            prop::sample::select(CONCEPT_WORDS),
+        )
+            .prop_map(
+                |(subject, label, object)| GeneratedWalOp::RetractAssociation {
+                    subject,
+                    label,
+                    object,
+                }
+            ),
+    ]
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum AliasInput {
     Concept {
         alias: &'static str,
