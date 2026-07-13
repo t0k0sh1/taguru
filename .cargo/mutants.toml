@@ -1,0 +1,6 @@
+# Keep local baselines and the changed-code CI job reproducible against the
+# committed dependency graph. A three-times-baseline timeout still catches
+# loop-inducing mutants without treating ordinary CI variance as a hang.
+additional_cargo_args = ["--locked"]
+profile = "mutants"
+timeout_multiplier = 3.0

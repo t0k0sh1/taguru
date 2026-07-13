@@ -67,20 +67,54 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Run instrumented tests
-        run: cargo llvm-cov --locked --no-report
+        run: cargo llvm-cov --workspace --locked --no-report
       - name: Per-file summary
         run: |
+          cargo llvm-cov report > coverage-summary.txt
           {
             echo "### Coverage (line/region/function, per source file)"
             echo
             echo '```'
-            cargo llvm-cov report
+            cat coverage-summary.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: LCOV report
+        run: |
+          mkdir -p target/llvm-cov
+          cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info
       - name: HTML report
         run: cargo llvm-cov report --html
       - uses: actions/upload-artifact@v7
         with:
-          name: coverage-html
-          path: target/llvm-cov/html
+          name: coverage-report
+          path: |
+            coverage-summary.txt
+            target/llvm-cov/lcov.info
+            target/llvm-cov/html
+          retention-days: 14
+
+  # Full mutation runs are intentionally local and module-scoped. On a
+  # pull request, mutate only production lines touched since the merge
+  # base so the feedback stays bounded by the size of the change.
+  mutants:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-mutants
+      - name: Build pull-request diff
+        run: git diff "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" > pr.diff
+      - name: Test mutants in changed code
+        run: cargo mutants --workspace --in-diff pr.diff
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutants-in-diff
+          path: mutants.out
           retention-days: 14

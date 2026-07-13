@@ -423,6 +423,23 @@ struct EdgeRecord {
     sum: f64,
 }
 
+type EdgeFollow = fn(&EdgeRecord) -> EdgeId;
+
+// All anchors produce the same associations after filtering; this helper
+// chooses only which adjacency chains cost least to scan. Comparator mutants
+// are therefore behaviorally equivalent, not missing correctness assertions.
+#[mutants::skip]
+fn keep_narrowest_anchor(
+    narrowest: &mut Option<(u64, Vec<EdgeId>, EdgeFollow)>,
+    total: u64,
+    firsts: Vec<EdgeId>,
+    follow: EdgeFollow,
+) {
+    if narrowest.as_ref().is_none_or(|&(best, ..)| total < best) {
+        *narrowest = Some((total, firsts, follow));
+    }
+}
+
 /// One source's weight contribution to one edge, in fixed-width form; a
 /// link in that edge's attribution chain, in insertion order, one record
 /// per distinct source.
@@ -847,6 +864,10 @@ impl Context {
     /// below the u32 id/offset ceilings. Checking everything up front is
     /// what makes a capacity failure all-or-nothing — an `Err` leaves the
     /// context exactly as it was.
+    // Exercising these branches through a Context would require allocating
+    // u32::MAX records or 4 GiB of interned text. The pure ceiling helpers
+    // and claim_id backstop are tested directly at their exact boundaries.
+    #[mutants::skip]
     fn ensure_room(
         &self,
         subject: &str,
@@ -1176,15 +1197,10 @@ impl Context {
         // fewest chained edges in total (each record carries its chain's
         // length), then filter the remaining constraints in memory; this
         // walks a few small chains instead of every edge.
-        type Follow = fn(&EdgeRecord) -> EdgeId;
-        let mut narrowest: Option<(u64, Vec<EdgeId>, Follow)> = None;
-        let mut consider = |total: u64, firsts: Vec<EdgeId>, follow: Follow| {
-            if narrowest.as_ref().is_none_or(|&(best, ..)| total < best) {
-                narrowest = Some((total, firsts, follow));
-            }
-        };
+        let mut narrowest: Option<(u64, Vec<EdgeId>, EdgeFollow)> = None;
         if let Some(ids) = &subject_ids {
-            consider(
+            keep_narrowest_anchor(
+                &mut narrowest,
                 ids.iter()
                     .map(|&id| u64::from(self.concepts[id as usize].outgoing_count))
                     .sum(),
@@ -1195,7 +1211,8 @@ impl Context {
             );
         }
         if let Some(ids) = &label_ids {
-            consider(
+            keep_narrowest_anchor(
+                &mut narrowest,
                 ids.iter()
                     .map(|&id| u64::from(self.labels[id as usize].edge_count))
                     .sum(),
@@ -1206,7 +1223,8 @@ impl Context {
             );
         }
         if let Some(ids) = &object_ids {
-            consider(
+            keep_narrowest_anchor(
+                &mut narrowest,
                 ids.iter()
                     .map(|&id| u64::from(self.concepts[id as usize].incoming_count))
                     .sum(),
@@ -2206,9 +2224,10 @@ impl Context {
             // saturated attribution sum can overshoot the representable
             // range just like two additions can.
             accumulate_saturating(&mut edge.sum, -sum);
-            let was_live = edge.count > 0;
             edge.count = edge.count.saturating_sub(count);
-            if was_live && edge.count == 0 {
+            // A linked attribution always has a positive count, and a
+            // live edge cannot reach zero more than once.
+            if edge.count == 0 {
                 self.dead_edges += 1;
             }
             if previous == NIL {
@@ -2368,7 +2387,6 @@ impl Context {
             let attributions: Vec<(String, f64, u64, Option<u32>)> = association
                 .attributions
                 .iter()
-                .filter(|attribution| attribution.count > 0)
                 .map(|attribution| {
                     (
                         attribution.source.clone(),
@@ -2936,38 +2954,36 @@ impl EntryIndex {
             .iter()
             .filter(|&&bigram| !is_stop(bigram))
             .count();
-        if informative_needle > 0 {
-            let mut shared: HashMap<u32, u32> = HashMap::new();
-            for bigram in &needle_bigrams {
-                if let Some(postings) = self.bigrams.get(bigram)
-                    && postings.len() <= stop_gram
-                {
-                    for &span_index in postings {
-                        if !contained.contains(&span_index) {
-                            *shared.entry(span_index).or_insert(0) += 1;
-                        }
+        let mut shared: HashMap<u32, u32> = HashMap::new();
+        for bigram in &needle_bigrams {
+            if let Some(postings) = self.bigrams.get(bigram)
+                && postings.len() <= stop_gram
+            {
+                for &span_index in postings {
+                    if !contained.contains(&span_index) {
+                        *shared.entry(span_index).or_insert(0) += 1;
                     }
                 }
             }
-            for (span_index, count) in shared {
-                let span = self.spans[span_index as usize];
-                // The candidate set is small (≥ 1 shared informative
-                // bigram), so recounting its informative bigrams here is
-                // cheap — and unlike a stored count, it cannot go stale
-                // as bigrams cross the stop threshold while the
-                // namespace grows.
-                let text = &self.arena[span.start..span.end];
-                let informative_span: HashSet<u64> = bigrams_of(text)
-                    .filter(|&bigram| !is_stop(bigram))
-                    .collect();
-                if informative_span.is_empty() {
-                    continue;
-                }
-                let dice =
-                    2.0 * f64::from(count) / (informative_needle + informative_span.len()) as f64;
-                if dice >= dice_floor {
-                    record(span.target, dice, MatchKind::Fuzzy, &mut best);
-                }
+        }
+        for (span_index, count) in shared {
+            let span = self.spans[span_index as usize];
+            // The candidate set is small (≥ 1 shared informative
+            // bigram), so recounting its informative bigrams here is
+            // cheap — and unlike a stored count, it cannot go stale
+            // as bigrams cross the stop threshold while the
+            // namespace grows.
+            let text = &self.arena[span.start..span.end];
+            let informative_span: HashSet<u64> = bigrams_of(text)
+                .filter(|&bigram| !is_stop(bigram))
+                .collect();
+            if informative_span.is_empty() {
+                continue;
+            }
+            let dice =
+                2.0 * f64::from(count) / (informative_needle + informative_span.len()) as f64;
+            if dice >= dice_floor {
+                record(span.target, dice, MatchKind::Fuzzy, &mut best);
             }
         }
         best
@@ -3015,10 +3031,12 @@ impl EntryIndex {
                 continue;
             }
             // Postings are appended in span order, so a < b holds.
-            for (index, &a) in postings.iter().enumerate() {
-                for &b in &postings[index + 1..] {
+            let mut tail = postings.as_slice();
+            while let Some((&a, rest)) = tail.split_first() {
+                for &b in rest {
                     *shared.entry((a, b)).or_insert(0) += 1;
                 }
+                tail = rest;
             }
         }
 
@@ -3039,9 +3057,7 @@ impl EntryIndex {
             }
             let key = (target_a.min(target_b), target_a.max(target_b));
             let slot = best.entry(key).or_insert(0.0);
-            if dice > *slot {
-                *slot = dice;
-            }
+            *slot = slot.max(dice);
         }
         let mut twins: Vec<(u32, u32, f64)> = best
             .into_iter()
@@ -3097,7 +3113,7 @@ fn fold_kana(ch: char) -> char {
 fn bigrams_of(text: &str) -> impl Iterator<Item = u64> {
     text.chars()
         .zip(text.chars().skip(1))
-        .map(|(a, b)| ((a as u64) << 32) | b as u64)
+        .map(|(a, b)| ((a as u64) << 32).wrapping_add(b as u64))
 }
 
 /// Shared ordering of [`Context::resolve`] / [`Context::resolve_label`]
@@ -3774,6 +3790,72 @@ mod tests {
     }
 
     #[test]
+    fn activate_keeps_the_first_deterministic_path_when_strengths_tie() {
+        let mut context = Context::default();
+        context.associate("first", "r", "second", 1.0).unwrap();
+
+        // Heap ties settle the lower concept id first, independently of
+        // caller order. Reaching the same edge later at equal strength must
+        // not replace that stable path.
+        let (_, ranked) = context.activate(&["second", "first"], 0.5, 10);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].strength, 0.5);
+        assert_eq!(ranked[0].path, vec!["first"]);
+    }
+
+    #[test]
+    fn activation_candidates_obey_their_ordering_equality() {
+        let a = Candidate {
+            activation: 0.5,
+            concept: 7,
+        };
+        let same = Candidate {
+            activation: 0.5,
+            concept: 7,
+        };
+        let other = Candidate {
+            activation: 0.5,
+            concept: 8,
+        };
+        assert!(a == same);
+        assert!(a != other);
+    }
+
+    #[test]
+    fn activate_propagates_a_signal_exactly_at_the_floor() {
+        let mut context = Context::default();
+        context.associate("origin", "r", "relay", 1.0).unwrap();
+        context
+            .associate("origin", "r", "distractor", 999_999.0)
+            .unwrap();
+        context.associate("relay", "r", "far", 1.0).unwrap();
+
+        let (_, ranked) = context.activate(&["origin"], 1.0, 10);
+        let far = ranked
+            .iter()
+            .find(|hit| hit.association.object == "far")
+            .expect("a signal equal to the floor still reaches the relay");
+        assert_eq!(far.strength, Context::ACTIVATION_FLOOR);
+    }
+
+    #[test]
+    fn activate_keeps_the_first_parent_when_equal_flows_meet() {
+        let mut context = Context::default();
+        context.associate("origin", "r", "a", 1.0).unwrap();
+        context.associate("origin", "r", "b", 1.0).unwrap();
+        context.associate("a", "r", "join", 1.0).unwrap();
+        context.associate("b", "r", "join", 1.0).unwrap();
+        context.associate("join", "r", "far", 1.0).unwrap();
+
+        let (_, ranked) = context.activate(&["origin"], 1.0, 20);
+        let far = ranked
+            .iter()
+            .find(|hit| hit.association.object == "far")
+            .expect("the joined signal reaches the far edge");
+        assert_eq!(far.path, vec!["origin", "a", "join"]);
+    }
+
+    #[test]
     fn activate_decays_with_distance() {
         let mut context = Context::default();
         // A chain of equal weights: nearer must outrank farther.
@@ -4170,6 +4252,17 @@ mod tests {
         assert!(reborn.label_aliases().is_empty());
         assert_eq!(reborn.resolve("青嶺")[0].name, "青嶺酒造");
         assert_eq!(reborn.arena_slack(), context.arena_slack());
+    }
+
+    #[test]
+    fn removing_a_label_alias_rebuilds_the_entry_index() {
+        let mut context = Context::default();
+        context.associate("A", "関係", "B", 1.0).unwrap();
+        context.add_label_alias("xyzzy", "関係").unwrap();
+        assert_eq!(context.resolve_label("xyzzy")[0].name, "関係");
+
+        assert_eq!(context.remove_label_alias("xyzzy").as_deref(), Some("関係"));
+        assert!(context.resolve_label("xyzzy").is_empty());
     }
 
     #[test]
@@ -5465,6 +5558,45 @@ mod tests {
     }
 
     #[test]
+    fn claim_id_never_mints_the_reserved_nil_sentinel() {
+        assert_eq!(claim_id(NIL as usize - 1, "concept"), NIL - 1);
+        assert!(
+            std::panic::catch_unwind(|| claim_id(NIL as usize, "concept")).is_err(),
+            "NIL is reserved for the linked-list terminator"
+        );
+    }
+
+    #[test]
+    fn public_errors_keep_their_diagnostic_messages() {
+        let full = ContextFull("concept ids");
+        assert_eq!(full.to_string(), "context is full: concept ids");
+        assert_eq!(
+            CompactionError::Full(full.clone()).to_string(),
+            "context is full: concept ids"
+        );
+        assert_eq!(
+            CompactionError::DeadlineExceeded.to_string(),
+            "compaction exceeded its deadline"
+        );
+        assert_eq!(
+            AliasError::UnknownCanonical.to_string(),
+            "the canonical spelling is not interned"
+        );
+        assert_eq!(
+            AliasError::Conflict.to_string(),
+            "the alias already resolves to a different record"
+        );
+        assert_eq!(
+            AliasError::Full(full).to_string(),
+            "context is full: concept ids"
+        );
+        assert_eq!(
+            CorruptImage("bad header").to_string(),
+            "corrupt context image: bad header"
+        );
+    }
+
+    #[test]
     fn arena_fits_stops_exactly_at_the_offset_ceiling() {
         assert!(arena_fits(u32::MAX as usize - 5, 5));
         assert!(!arena_fits(u32::MAX as usize - 5, 6));
@@ -5538,6 +5670,30 @@ mod tests {
             (labels[0].0.as_str(), labels[0].1.as_str()),
             ("住み込む場所", "住み込む期間")
         );
+    }
+
+    #[test]
+    fn adjacency_requires_a_real_edge_in_either_direction() {
+        let mut context = Context::default();
+        context.associate("a", "r", "b", 1.0).unwrap();
+        context.associate("c", "r", "d", 1.0).unwrap();
+
+        assert!(context.adjacent("a", "b"));
+        assert!(context.adjacent("b", "a"));
+        assert!(!context.adjacent("a", "c"));
+        assert!(!context.adjacent("a", "unknown"));
+    }
+
+    #[test]
+    fn labels_share_a_subject_only_when_their_edges_do() {
+        let mut context = Context::default();
+        context.associate("shared", "r1", "a", 1.0).unwrap();
+        context.associate("shared", "r2", "b", 1.0).unwrap();
+        context.associate("other", "r3", "c", 1.0).unwrap();
+
+        assert!(context.labels_share_subject("r1", "r2"));
+        assert!(!context.labels_share_subject("r1", "r3"));
+        assert!(!context.labels_share_subject("r1", "unknown"));
     }
 
     #[test]
@@ -5623,6 +5779,14 @@ mod tests {
     }
 
     #[test]
+    fn gloss_does_not_phrase_zero_weight_as_negative() {
+        let mut context = Context::default();
+        context.associate("A", "関係", "B", 0.0).unwrap();
+
+        assert_eq!(context.concept_gloss("A", 1).unwrap(), "A。関係はB。");
+    }
+
+    #[test]
     fn gloss_tracks_the_subject_across_incoming_and_outgoing_facts() {
         let mut context = Context::default();
         context.associate("青嶺酒造", "杜氏", "高瀬", 4.0).unwrap();
@@ -5657,8 +5821,135 @@ mod tests {
     fn footprint_grows_with_content() {
         let mut context = Context::default();
         let empty = context.footprint();
-        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書", Some(2))
+            .unwrap();
+        context.add_concept_alias("自分", "私").unwrap();
+        context.add_label_alias("好む", "好き").unwrap();
         assert!(context.footprint() > empty);
+
+        // Pin the budgeting formula, not merely monotonic growth: a wrong
+        // arithmetic operator can still produce a larger positive estimate.
+        const MAP_ENTRY_OVERHEAD: usize = 48;
+        let tables = context.arena.len()
+            + context.concepts.len() * size_of::<ConceptRecord>()
+            + context.labels.len() * size_of::<LabelRecord>()
+            + context.sources.len() * size_of::<SourceRecord>()
+            + context.edges.len() * size_of::<EdgeRecord>()
+            + context.attributions.len() * size_of::<AttributionRecord>()
+            + (context.concept_aliases.len() + context.label_aliases.len())
+                * size_of::<AliasRecord>()
+            + context.attribution_locators.len() * size_of::<AttributionLocatorRecord>();
+        let name_entries = context.concepts.len() + context.labels.len() + context.sources.len();
+        let triple_entry = size_of::<(ConceptId, LabelId, ConceptId)>() + size_of::<EdgeId>();
+        let attribution_entry = size_of::<(EdgeId, SourceId)>() + size_of::<AttributionId>();
+        let keyset_index_entries =
+            context.concept_aliases.len() + context.label_aliases.len() + context.labels.len();
+        let derived = context.arena.len()
+            + name_entries * MAP_ENTRY_OVERHEAD
+            + context.edges.len() * (triple_entry + MAP_ENTRY_OVERHEAD)
+            + context.attribution_ids.len() * (attribution_entry + MAP_ENTRY_OVERHEAD)
+            + context.source_edges.len()
+                * (size_of::<SourceId>() + size_of::<Vec<EdgeId>>() + MAP_ENTRY_OVERHEAD)
+            + context.attribution_ids.len() * size_of::<EdgeId>()
+            + keyset_index_entries * MAP_ENTRY_OVERHEAD
+            + context.concept_index.footprint()
+            + context.label_index.footprint();
+        assert_eq!(context.footprint(), tables + derived);
+    }
+
+    #[test]
+    fn entry_index_counts_unique_postings_per_spelling() {
+        let mut index = EntryIndex::default();
+        index.push("abcd", 0); // ab, bc, cd
+        assert_eq!(index.posting_entries, 3);
+        index.push("aaaa", 1); // aa repeats, but one spelling posts once
+        assert_eq!(index.posting_entries, 4);
+        assert_eq!(
+            index.footprint(),
+            index.arena.len()
+                + index.spans.len() * size_of::<EntrySpan>()
+                + index.bigrams.len() * (size_of::<u64>() + 48)
+                + index.posting_entries * size_of::<u32>()
+        );
+    }
+
+    #[test]
+    fn entry_index_normalization_preserves_distinct_spellings() {
+        assert_eq!(normalize_entry("ＡＬＰＨＡ"), "alpha");
+        assert_ne!(normalize_entry("alpha"), normalize_entry("beta"));
+
+        let mut index = EntryIndex::default();
+        index.push("alpha", 0);
+        index.push("beta", 1);
+
+        let resolved = index.resolve("ALPHA", 0.1);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved.get(&0), Some(&(1.0, MatchKind::Exact)));
+    }
+
+    #[test]
+    fn entry_index_keeps_the_first_match_kind_when_scores_tie() {
+        let mut index = EntryIndex::default();
+        index.push("ab", 0); // containment against "abcd": 2 / 4
+        index.push("abXcdY", 0); // fuzzy: 2 * 2 shared / (3 + 5)
+
+        let resolved = index.resolve("abcd", 0.3);
+        assert_eq!(resolved.get(&0), Some(&(0.5, MatchKind::Containment)));
+    }
+
+    #[test]
+    fn entry_index_keeps_a_posting_at_the_stop_gram_threshold() {
+        let mut index = EntryIndex::default();
+        for target in 0..64 {
+            index.push(&format!("ab{target:04}"), target);
+        }
+
+        // 64 spans floors the threshold at 64; a posting becomes a stop
+        // gram only after it exceeds that threshold, not when equal.
+        let resolved = index.resolve("abzz", 0.1);
+        assert_eq!(resolved.get(&0), Some(&(1.0 / 3.0, MatchKind::Fuzzy)));
+    }
+
+    #[test]
+    fn entry_index_scales_the_stop_gram_threshold_with_the_vocabulary() {
+        let mut index = EntryIndex::default();
+        for target in 0..2_000 {
+            let spelling = if target < 80 {
+                format!("abzz{target:04}")
+            } else {
+                format!("qqzz{target:04}")
+            };
+            index.push(&spelling, target);
+        }
+
+        // At 2,000 spans the threshold is 100: the 80-entry "ab"/"bz"
+        // postings remain informative while the ubiquitous "zz" is
+        // removed from both Dice denominators.
+        let resolved = index.resolve("abzz!", 0.1);
+        assert_eq!(resolved.get(&0), Some(&(0.8, MatchKind::Fuzzy)));
+    }
+
+    #[test]
+    fn entry_index_twins_use_the_scaled_stop_gram_threshold() {
+        let mut index = EntryIndex::default();
+        for target in 0..1_300 {
+            let spelling = if target < 65 {
+                format!("abzz{target:04}")
+            } else {
+                format!("qqzz{target:04}")
+            };
+            index.push(&spelling, target);
+        }
+
+        // The scaled threshold is exactly 65. "ab"/"bz" remain useful
+        // at that boundary and ubiquitous "zz" is excluded.
+        let twins = index.twins(0.1, Deadline::unbounded()).unwrap();
+        let pair = twins
+            .iter()
+            .find(|&&(a, b, _)| (a, b) == (0, 1))
+            .expect("the two distinctive-prefix spellings are compared");
+        assert_eq!(pair.2, 1.0);
     }
 
     /// Builds a small profile: 山田太郎 with two addresses' worth of
