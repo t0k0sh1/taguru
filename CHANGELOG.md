@@ -8,6 +8,12 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `TAGURU_MAX_CONCURRENT_HEAVY_OPS` (default 2; `0` disables): one
+  shared, non-queuing semaphore around `audit_vocabulary` and
+  `compact_context`, over both raw HTTP and MCP dispatch. Once full,
+  another heavy call is shed immediately as 503 `overloaded` with
+  `Retry-After: 1`, leaving worker capacity available for ordinary
+  requests while admitted sweeps run to their individual deadlines.
 - Context groups: `/groups` bundles contexts (many-to-many) and may
   nest child groups — a shallow DAG, at most 3 groups tall, cycles
   refused — as the addressing unit cross-context retrieval will
