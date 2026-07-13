@@ -19,14 +19,17 @@ import type {
   ConceptDescription,
   ContextMeta,
   ContextPage,
+  CrossMatchCursor,
   CrossMatchPage,
   CrossPassageHit,
   DirectoryEntry,
+  ExploreCursor,
   ExplorePage,
   GroupEntry,
   GroupPage,
   ImportOutcome,
   LabelPage,
+  MatchCursor,
   MatchPage,
   OneOrMany,
   PassageHit,
@@ -283,11 +286,18 @@ export class Taguru {
    * takes full names; each `groups` entry searches every context the group
    * reaches (nested children included), overlaps deduped. At least one of
    * the two must name something. Weights share one scale, so past the limit
-   * the strongest |weight| survives exactly as within one context.
+   * the strongest |weight| survives exactly as within one context. `after`
+   * resumes past the previous page's last match; `total` stays constant
+   * across pages.
    */
   async recall(
     cue: string,
-    options: { contexts?: string[]; groups?: string[]; limit?: number } = {},
+    options: {
+      contexts?: string[];
+      groups?: string[];
+      limit?: number;
+      after?: CrossMatchCursor;
+    } = {},
   ): Promise<CrossMatchPage> {
     const result = await this.requestJson("POST", "/recall", {
       jsonBody: dropUndefined({
@@ -295,6 +305,7 @@ export class Taguru {
         groups: options.groups,
         cue,
         limit: options.limit,
+        after: options.after,
       }),
     });
     return result as CrossMatchPage;
@@ -312,6 +323,7 @@ export class Taguru {
       label?: OneOrMany;
       object?: OneOrMany;
       limit?: number;
+      after?: CrossMatchCursor;
     } = {},
   ): Promise<CrossMatchPage> {
     const result = await this.requestJson("POST", "/query", {
@@ -322,6 +334,7 @@ export class Taguru {
         label: options.label,
         object: options.object,
         limit: options.limit,
+        after: options.after,
       }),
     });
     return result as CrossMatchPage;
@@ -626,15 +639,31 @@ export class Context {
 
   // -- graph reads ---------------------------------------------------------
 
-  /** Associations whose subject/object entry-matches the cue. */
-  async recall(cue: string, options: { limit?: number } = {}): Promise<MatchPage> {
-    const result = await this.post("/recall", dropUndefined({ cue, limit: options.limit }));
+  /**
+   * Associations whose subject/object entry-matches the cue. `after`
+   * resumes past the previous page's last match; `total` stays constant
+   * across pages.
+   */
+  async recall(
+    cue: string,
+    options: { limit?: number; after?: MatchCursor } = {},
+  ): Promise<MatchPage> {
+    const result = await this.post(
+      "/recall",
+      dropUndefined({ cue, limit: options.limit, after: options.after }),
+    );
     return result as MatchPage;
   }
 
   /** Exact-position query; each position takes one name or an OR-set. */
   async query(
-    options: { subject?: OneOrMany; label?: OneOrMany; object?: OneOrMany; limit?: number } = {},
+    options: {
+      subject?: OneOrMany;
+      label?: OneOrMany;
+      object?: OneOrMany;
+      limit?: number;
+      after?: MatchCursor;
+    } = {},
   ): Promise<MatchPage> {
     const result = await this.post(
       "/query",
@@ -643,6 +672,7 @@ export class Context {
         label: options.label,
         object: options.object,
         limit: options.limit,
+        after: options.after,
       }),
     );
     return result as MatchPage;
@@ -654,10 +684,14 @@ export class Context {
     return (result ?? null) as ConceptDescription | null;
   }
 
-  /** Exhaustive hop-annotated walk (truncation keeps the nearest). */
+  /**
+   * Exhaustive hop-annotated walk (truncation keeps the nearest). `after`
+   * resumes past the previous page's last recollection; `total` stays
+   * constant across pages.
+   */
   async explore(
     origins: string | string[],
-    options: { max_depth?: number; limit?: number } = {},
+    options: { max_depth?: number; limit?: number; after?: ExploreCursor } = {},
   ): Promise<ExplorePage> {
     const result = await this.post(
       "/explore",
@@ -665,6 +699,7 @@ export class Context {
         origins: typeof origins === "string" ? [origins] : origins,
         max_depth: options.max_depth,
         limit: options.limit,
+        after: options.after,
       }),
     );
     return result as ExplorePage;
@@ -686,16 +721,21 @@ export class Context {
     return result as ActivationPage;
   }
 
-  /** Coverage audit: associations not reachable from the origins. */
+  /**
+   * Coverage audit: associations not reachable from the origins. `after`
+   * resumes past the previous page's last match; `total` stays constant
+   * across pages.
+   */
   async unreachableFrom(
     origins: string | string[],
-    options: { limit?: number } = {},
+    options: { limit?: number; after?: MatchCursor } = {},
   ): Promise<MatchPage> {
     const result = await this.post(
       "/unreachable_from",
       dropUndefined({
         origins: typeof origins === "string" ? [origins] : origins,
         limit: options.limit,
+        after: options.after,
       }),
     );
     return result as MatchPage;
