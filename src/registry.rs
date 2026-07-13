@@ -4010,9 +4010,9 @@ impl AppState {
     /// exceeds `min_dead_ratio` is rebuilt via [`Self::compact_context`],
     /// worst ratio first, so a deadline that cuts the sweep short still
     /// recovers the most it could. Candidates are read from each entry's
-    /// existing stats snapshot ([`ContextStats::of`] while hot, the
-    /// cached snapshot while cold) — nothing is loaded just to be asked
-    /// whether it qualifies. Sequential by design: the caller
+    /// existing dead ratio ([`Context::dead_ratio`] while hot, the
+    /// cached snapshot's while cold) — nothing is loaded or rebuilt just
+    /// to be asked whether it qualifies. Sequential by design: the caller
     /// (`POST /maintenance/compact`) has already drained ordinary
     /// traffic before calling this, so there is no concurrency to hide
     /// behind parallelism, and one context at a time caps the sweep's
@@ -4027,12 +4027,11 @@ impl AppState {
             .into_iter()
             .filter_map(|(name, entry)| {
                 let inner = entry.inner.read();
-                let stats = match &inner.slot {
-                    Slot::Hot(context) => ContextStats::of(context),
-                    Slot::Cold => inner.stats.clone(),
+                let ratio = match &inner.slot {
+                    Slot::Hot(context) => context.dead_ratio(),
+                    Slot::Cold => inner.stats.dead_ratio(),
                     Slot::Deleted => return None,
                 };
-                let ratio = stats.dead_ratio();
                 // NaN (a malformed `min_dead_ratio`) makes every
                 // comparison false, so the sweep simply selects nothing
                 // rather than mis-selecting.
@@ -4843,6 +4842,42 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
     })
 }
 
+/// Runs `f` over `items` on up to `workers` threads pulling from one
+/// shared queue — the same divide-the-queue-not-the-slice shape
+/// `preload_pinned` uses, generalized so a caller only supplies the
+/// per-item work. Each worker collects into a local `Vec` and merges
+/// into the shared result once at the end, so contention is limited to
+/// the queue itself; results come back in arrival order, not input
+/// order — callers that need input order carry an index through `T`/`R`
+/// and sort afterward.
+pub(crate) fn parallel_map<T, R>(items: Vec<T>, workers: usize, f: impl Fn(T) -> R + Sync) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let workers = workers.min(items.len()).max(1);
+    let queue = Mutex::new(items.into_iter());
+    let results: Mutex<Vec<R>> = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                let mut local = Vec::new();
+                loop {
+                    let Some(item) = queue.lock().next() else {
+                        break;
+                    };
+                    local.push(f(item));
+                }
+                results.lock().extend(local);
+            });
+        }
+    });
+    results.into_inner()
+}
+
 /// One boot-time pass over the data directory: crash leftovers of
 /// staged writes are deleted (never published, and nothing may linger
 /// as unbounded disk litter), and every context image found is
@@ -4902,55 +4937,38 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<BTreeMap<String, Arc<Entry>>> {
 
     // The expensive part of a boot scan is the disk I/O per candidate
     // (sidecar read plus two `fs::metadata` calls), and each candidate
-    // is independent — a worker pool pays for it in parallel the same
-    // way `preload_pinned` does. Each worker fills a local `Vec` and
-    // only the final merge into the `BTreeMap` is shared, so arrival
-    // order cannot affect the result.
-    let registry: BTreeMap<String, Arc<Entry>> = if candidates.is_empty() {
-        BTreeMap::new()
-    } else {
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .min(candidates.len());
-        let queue = Mutex::new(candidates.into_iter());
-        let results: Mutex<Vec<(String, Arc<Entry>)>> = Mutex::new(Vec::new());
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| {
-                    let mut local = Vec::new();
-                    loop {
-                        let Some((stem, name)) = queue.lock().next() else {
-                            break;
-                        };
-                        let stem = stem.as_str();
-                        let MetaFile { meta, stats, usage } = read_meta_file(data_dir, stem);
-                        // The gauge must see leftover logs from the first
-                        // scrape, not only after each context's first touch.
-                        let wal_bytes = fs::metadata(wal_path(data_dir, stem))
-                            .map(|meta| meta.len())
-                            .unwrap_or(0);
-                        let passages_wal_bytes = fs::metadata(passages_wal_path(data_dir, stem))
-                            .map(|meta| meta.len())
-                            .unwrap_or(0);
-                        local.push((
-                            name,
-                            Arc::new(Entry::new(
-                                meta,
-                                stats,
-                                Slot::Cold,
-                                wal_bytes,
-                                passages_wal_bytes,
-                                usage,
-                            )),
-                        ));
-                    }
-                    results.lock().extend(local);
-                });
-            }
-        });
-        results.into_inner().into_iter().collect()
-    };
+    // is independent — `parallel_map` pays for it in parallel the same
+    // way `preload_pinned` does; arrival order cannot affect the result
+    // since it only feeds a `BTreeMap`.
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let registry: BTreeMap<String, Arc<Entry>> =
+        parallel_map(candidates, workers, |(stem, name)| {
+            let stem = stem.as_str();
+            let MetaFile { meta, stats, usage } = read_meta_file(data_dir, stem);
+            // The gauge must see leftover logs from the first scrape,
+            // not only after each context's first touch.
+            let wal_bytes = fs::metadata(wal_path(data_dir, stem))
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            let passages_wal_bytes = fs::metadata(passages_wal_path(data_dir, stem))
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            (
+                name,
+                Arc::new(Entry::new(
+                    meta,
+                    stats,
+                    Slot::Cold,
+                    wal_bytes,
+                    passages_wal_bytes,
+                    usage,
+                )),
+            )
+        })
+        .into_iter()
+        .collect();
 
     // Surviving import markers: each says a multi-store batch opened
     // and never finished — a crash (or an unretried refusal) between

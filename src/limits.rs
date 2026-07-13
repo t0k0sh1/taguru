@@ -83,6 +83,16 @@ pub async fn enforce_timeout(
 /// auth and the rate gate — probes and scrapes must see the overload,
 /// not join it. The counter doubles as the `taguru_inflight_requests`
 /// gauge, ticking whether or not a ceiling is set.
+/// Shapes an immediate shed response: the `ApiError` body plus the
+/// `Retry-After: 1` header every shed reason below shares.
+fn shed(code: api::ErrorCode, message: impl Into<String>) -> Response {
+    let mut response = api::error(code, message, Instant::now());
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(1u32));
+    response
+}
+
 pub async fn enforce_concurrency(
     State((limit, state)): State<(usize, crate::registry::AppState)>,
     request: Request,
@@ -97,32 +107,20 @@ pub async fn enforce_concurrency(
     // Not `record_shed()` — an intentional pause is not the same signal
     // as saturation.
     if state.metrics().maintenance_active() {
-        let started_at = Instant::now();
-        let mut response = api::error(
+        return shed(
             api::ErrorCode::Maintenance,
             "a maintenance compaction sweep is running — retry shortly",
-            started_at,
         );
-        response
-            .headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from(1u32));
-        return response;
     }
     if !state.metrics().admit_inflight(limit) {
         state.metrics().record_shed();
-        let started_at = Instant::now();
-        let mut response = api::error(
+        return shed(
             api::ErrorCode::Overloaded,
             format!(
                 "server is at its in-flight ceiling ({limit} requests) — retry \
                  shortly (TAGURU_MAX_CONCURRENT_REQUESTS tunes this)"
             ),
-            started_at,
         );
-        response
-            .headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from(1u32));
-        return response;
     }
     // Drop-guard, not a manual decrement: the count must come back
     // down even when a handler panics mid-request.

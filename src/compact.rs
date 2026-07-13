@@ -10,7 +10,6 @@
 
 use std::path::PathBuf;
 
-use parking_lot::Mutex;
 use taguru::deadline::Deadline;
 
 use crate::registry::{AccessError, CompactOutcome};
@@ -101,25 +100,10 @@ pub(crate) fn run(args: &[String]) -> i32 {
         // Same shared work-queue pattern `preload_pinned` uses to load
         // pinned contexts at boot: independent per-entry locks mean the
         // workers never contend with each other.
-        let workers = parallel.min(names.len());
-        let queue = Mutex::new(names.iter().enumerate());
-        let results: Mutex<Vec<(usize, Result<CompactOutcome, AccessError>)>> =
-            Mutex::new(Vec::with_capacity(names.len()));
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| {
-                    let mut local = Vec::new();
-                    loop {
-                        let Some((index, name)) = queue.lock().next() else {
-                            break;
-                        };
-                        local.push((index, state.compact_context(name, Deadline::unbounded())));
-                    }
-                    results.lock().extend(local);
-                });
-            }
+        let indexed: Vec<(usize, &String)> = names.iter().enumerate().collect();
+        let mut collected = crate::registry::parallel_map(indexed, parallel, |(index, name)| {
+            (index, state.compact_context(name, Deadline::unbounded()))
         });
-        let mut collected = results.into_inner();
         // Reordered to the original argument order so `--parallel N`'s
         // stdout is byte-for-byte identical to the sequential run,
         // whatever N is or however the workers happened to race.

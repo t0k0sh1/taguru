@@ -379,7 +379,7 @@ fn synthetic_passage_text(bytes: u64) -> String {
 fn estimate_passages(plan: &Plan) -> PassageEstimate {
     let sample_bytes = plan.passage_bytes.min(PASSAGE_SAMPLE_CAP);
     let factor = plan.passage_bytes as f64 / sample_bytes as f64;
-    let sample_sources = ((plan.sources as f64 / factor).round() as u64).clamp(1, plan.sources);
+    let sample_sources = ((plan.sources as f64 / factor).round() as u64).max(1);
     let per_source_bytes = (sample_bytes / sample_sources).max(1);
 
     let mut records: Vec<(String, Arc<PassageRecord>)> =
