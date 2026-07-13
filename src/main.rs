@@ -3,6 +3,8 @@ mod auth;
 mod bm25;
 mod cli;
 mod compact;
+#[cfg(test)]
+mod context_proptest;
 // The same file lib.rs includes — see src/crc32c.rs for why the
 // checksum primitive is dual-included instead of exported.
 mod crc32c;
