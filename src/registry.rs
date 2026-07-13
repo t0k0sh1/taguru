@@ -107,6 +107,12 @@ pub struct ContextStats {
     /// spellings — see [`Context::arena_slack`] for why it is a lower
     /// bound.
     pub arena_slack: usize,
+    /// Live count of edges carrying weight no named source explains —
+    /// see [`Context::unsourced_summary`].
+    pub unsourced_edges: usize,
+    /// Total unsourced weight (absolute value, summed across
+    /// `unsourced_edges`) — see [`Context::unsourced_summary`].
+    pub unsourced_weight: f64,
     /// Most connected concepts with their degree, most connected first.
     /// Same `{label, count}` shape as `describe`'s `as_subject`/`as_object`.
     #[serde(deserialize_with = "deserialize_top_concepts")]
@@ -147,6 +153,7 @@ impl ContextStats {
     const LABEL_SAMPLE: usize = 50;
 
     fn of(context: &Context) -> Self {
+        let (unsourced_edges, unsourced_weight) = context.unsourced_summary();
         Self {
             associations: context.association_count(),
             concepts: context.concept_count(),
@@ -156,6 +163,8 @@ impl ContextStats {
             dead_edges: context.dead_edges(),
             dead_attributions: context.dead_attributions(),
             arena_slack: context.arena_slack(),
+            unsourced_edges,
+            unsourced_weight,
             top_concepts: context
                 .top_concepts(Self::TOP_CONCEPTS)
                 .into_iter()
@@ -1535,6 +1544,8 @@ impl AppState {
         let mut dead_edges_total = 0u64;
         let mut dead_attributions_total = 0u64;
         let mut arena_slack_total = 0u64;
+        let mut unsourced_edges_total = 0u64;
+        let mut unsourced_weight_total = 0.0f64;
         for (_name, entry) in snapshot {
             let inner = entry.inner.read();
             if let Slot::Hot(context) = &inner.slot {
@@ -1543,6 +1554,9 @@ impl AppState {
                 dead_edges_total += context.dead_edges() as u64;
                 dead_attributions_total += context.dead_attributions() as u64;
                 arena_slack_total += context.arena_slack() as u64;
+                let (unsourced_edges, unsourced_weight) = context.unsourced_summary();
+                unsourced_edges_total += unsourced_edges as u64;
+                unsourced_weight_total += unsourced_weight;
             } else {
                 // Cold (or mid-delete): the graph is not in memory, so
                 // this stays whatever `inner.stats` last cached at
@@ -1553,6 +1567,8 @@ impl AppState {
                 dead_edges_total += inner.stats.dead_edges as u64;
                 dead_attributions_total += inner.stats.dead_attributions as u64;
                 arena_slack_total += inner.stats.arena_slack as u64;
+                unsourced_edges_total += inner.stats.unsourced_edges as u64;
+                unsourced_weight_total += inner.stats.unsourced_weight;
             }
             wal_bytes += inner.wal_bytes;
             let cold_passages_wal_bytes = inner.passages_wal_bytes;
@@ -1582,6 +1598,8 @@ impl AppState {
             dead_edges_total,
             dead_attributions_total,
             arena_slack_total,
+            unsourced_edges_total,
+            unsourced_weight_total,
         }
     }
 
@@ -8412,6 +8430,8 @@ mod tests {
         assert_eq!(baseline.dead_edges_total, 0);
         assert_eq!(baseline.dead_attributions_total, 0);
         assert_eq!(baseline.arena_slack_total, 0);
+        assert_eq!(baseline.unsourced_edges_total, 0);
+        assert_eq!(baseline.unsourced_weight_total, 0.0);
 
         // One sourced association, later retracted outright: one dead
         // edge, one unlinked attribution.
@@ -8427,6 +8447,15 @@ mod tests {
             state.retract_association("sake", "蔵", "廃", "旧").unwrap(),
             Some(1)
         );
+        // One sourceless association: pure unsourced weight, nothing else.
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "銘柄", "青嶺", 2.5, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
         // One alias registered then withdrawn: its spelling's bytes
         // become arena slack.
         state
@@ -8446,10 +8475,14 @@ mod tests {
         assert_eq!(hot.dead_edges_total, 1);
         assert_eq!(hot.dead_attributions_total, 1);
         assert_eq!(hot.arena_slack_total, "Aomine".len() as u64);
+        assert_eq!(hot.unsourced_edges_total, 1);
+        assert_eq!(hot.unsourced_weight_total, 2.5);
         let text = rendered(&state);
         assert!(text.contains("taguru_dead_edges 1"));
         assert!(text.contains("taguru_dead_attributions 1"));
         assert!(text.contains(&format!("taguru_arena_slack_bytes {}", "Aomine".len())));
+        assert!(text.contains("taguru_unsourced_edges 1"));
+        assert!(text.contains("taguru_unsourced_weight 2.5"));
 
         // Eviction to cold must not lose the totals — the gauge falls
         // back to the persisted `ContextStats` snapshot.
@@ -8459,6 +8492,8 @@ mod tests {
         assert_eq!(cold.dead_edges_total, hot.dead_edges_total);
         assert_eq!(cold.dead_attributions_total, hot.dead_attributions_total);
         assert_eq!(cold.arena_slack_total, hot.arena_slack_total);
+        assert_eq!(cold.unsourced_edges_total, hot.unsourced_edges_total);
+        assert_eq!(cold.unsourced_weight_total, hot.unsourced_weight_total);
 
         let _ = fs::remove_dir_all(dir);
     }

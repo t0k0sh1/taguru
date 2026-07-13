@@ -65,8 +65,9 @@ use tracing::{info, warn};
 ///   the log pipeline. Off by default: cues are memory content, and
 ///   the standard log stream carries no content.
 /// - `TAGURU_MAX_CONCURRENT_HEAVY_OPS`: shared ceiling for concurrent
-///   vocabulary audits and per-context compactions (default 2; 0 disables).
-///   Excess calls are shed immediately with 503 + `Retry-After`.
+///   vocabulary audits (including a drift audit's `include_twins`) and
+///   per-context compactions (default 2; 0 disables). Excess calls are
+///   shed immediately with 503 + `Retry-After`.
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT` (or the `_TRACES_` variant): turns
 ///   on OTLP/HTTP span export — one span per request, parented from an
 ///   inbound `traceparent` or `X-Amzn-Trace-Id`, `trace_id` stamped
@@ -440,6 +441,10 @@ fn routes(
             "/contexts/{name}/vocabulary/audit",
             post(api::audit_vocabulary),
         )
+        // `include_twins` runs the same CPU-bound pairwise scan
+        // audit_vocabulary does, so this shares its gate rather than
+        // the ordinary route table.
+        .route("/contexts/{name}/drift/audit", post(api::audit_drift))
         .route_layer(axum::middleware::from_fn_with_state(
             heavy_ops_limiter,
             limits::enforce_heavy_ops,

@@ -488,10 +488,12 @@ fn load_image(path: &Path) -> Result<(Context, u64, String), String> {
 }
 
 fn stats_line(context: &Context, image_bytes: u64, generation: &str) -> String {
+    let (unsourced_edges, unsourced_weight) = context.unsourced_summary();
     format!(
         "image {} ({generation}) · {} associations · {} concepts · {} labels · {} sources · \
          footprint {} · applied_seq {} · {} dead edge(s) ({:.1}% dead) · \
-         {} unlinked attribution(s) · {} arena slack",
+         {} unlinked attribution(s) · {} arena slack · \
+         {unsourced_edges} unsourced edge(s) (weight {unsourced_weight:.1})",
         fmt_bytes(image_bytes),
         context.association_count(),
         context.concept_count(),

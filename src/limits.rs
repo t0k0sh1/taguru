@@ -94,10 +94,12 @@ fn shed(code: api::ErrorCode, message: impl Into<String>) -> Response {
     response
 }
 
-/// A shared, non-queuing permit pool for the two whole-context CPU/disk
+/// A shared, non-queuing permit pool for the whole-context CPU/disk
 /// sweeps exposed by the API. Unlike the global in-flight ceiling this
-/// gate is applied only to `audit_vocabulary` and `compact_context`;
-/// ordinary requests retain the rest of the worker pool during a burst.
+/// gate is applied only to `audit_vocabulary`, `compact_context`, and
+/// `audit_drift` (which runs the same pairwise scan as
+/// `audit_vocabulary` when `include_twins` is set); ordinary requests
+/// retain the rest of the worker pool during a burst.
 #[derive(Clone)]
 pub struct HeavyOpsLimiter {
     limit: usize,
