@@ -38,6 +38,43 @@ export interface SectionSpec {
   section: string;
 }
 
+/**
+ * Resumes a `recall`/`query`/`unreachableFrom` page past its last match:
+ * copy `weight`/`subject`/`label`/`object` verbatim from the last match of
+ * the previous page.
+ */
+export interface MatchCursor {
+  weight: number;
+  subject: string;
+  label: string;
+  object: string;
+}
+
+/**
+ * `MatchCursor` plus `context`, for cross-context `recall`/`query`
+ * (`contexts`/`groups`). `context` is the tiebreak two different target
+ * contexts can't share on their own: each can independently hold an edge at
+ * the identical `(subject, label, object)`.
+ */
+export interface CrossMatchCursor {
+  weight: number;
+  context: string;
+  subject: string;
+  label: string;
+  object: string;
+}
+
+/**
+ * Resumes an `explore` page past its last recollection: copy
+ * `distance`/`subject`/`label`/`object` verbatim from it.
+ */
+export interface ExploreCursor {
+  distance: number;
+  subject: string;
+  label: string;
+  object: string;
+}
+
 /** One name or an OR-set of names, for query() positions. */
 export type OneOrMany = string | string[];
 

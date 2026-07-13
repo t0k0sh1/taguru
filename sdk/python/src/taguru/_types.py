@@ -9,7 +9,14 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-__all__ = ["AssocOp", "QuestionSpec", "SectionSpec"]
+__all__ = [
+    "AssocOp",
+    "QuestionSpec",
+    "SectionSpec",
+    "MatchCursor",
+    "CrossMatchCursor",
+    "ExploreCursor",
+]
 
 
 class _AssocOpRequired(TypedDict):
@@ -42,3 +49,38 @@ class SectionSpec(TypedDict):
 
     paragraph: int
     section: str
+
+
+class MatchCursor(TypedDict):
+    """Resumes a ``recall``/``query``/``unreachable_from`` page past its
+    last match: copy ``weight``/``subject``/``label``/``object`` verbatim
+    from the last match of the previous page."""
+
+    weight: float
+    subject: str
+    label: str
+    object: str
+
+
+class CrossMatchCursor(TypedDict):
+    """:class:`MatchCursor` plus ``context``, for cross-context
+    ``recall``/``query`` (``contexts``/``groups``). ``context`` is the
+    tiebreak two different target contexts can't share on their own: each
+    can independently hold an edge at the identical ``(subject, label,
+    object)``."""
+
+    weight: float
+    context: str
+    subject: str
+    label: str
+    object: str
+
+
+class ExploreCursor(TypedDict):
+    """Resumes an ``explore`` page past its last recollection: copy
+    ``distance``/``subject``/``label``/``object`` verbatim from it."""
+
+    distance: int
+    subject: str
+    label: str
+    object: str

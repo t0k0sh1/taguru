@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{Path, State};
@@ -10,8 +11,9 @@ use crate::metrics::{ErrorKind, SearchOp};
 use crate::registry::{AppState, CitationLookup, PassageExplainLookup};
 
 use super::{
-    AppJson, AppQuery, CrossMatch, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, access_error, clamp,
-    cross_targets, deadline_exceeded, error, not_found, ok, overlong, search_log_enabled,
+    AppJson, AppQuery, CrossMatch, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, access_error,
+    bounded_parallel_map, clamp, cross_search_concurrency, cross_targets, deadline_exceeded, error,
+    not_found, ok, overlong, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -775,7 +777,14 @@ pub struct CrossSearchPassagesRequest {
 /// so the merged order is rank interleaving — every context's best
 /// hit, then every second hit, ties broken by target-list order: the
 /// same rank-fusion posture the endpoint already takes across its two
-/// lanes. `score` stays what it was, per-context evidence.
+/// lanes. `score` stays what it was, per-context evidence. Every
+/// target's search runs concurrently, bounded by
+/// [`cross_search_concurrency`] — on a stone-cold cache, up to that
+/// many targets may each pay for the query embedding before the first
+/// resolution lands in the cue cache, instead of exactly one target
+/// paying and the rest reusing it; the cache is still the single
+/// source of truth (a `Mutex`), so this is wasted provider calls, not
+/// a correctness risk, and every request after the first is unaffected.
 pub async fn cross_search_passages(
     State(state): State<AppState>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
@@ -808,56 +817,61 @@ pub async fn cross_search_passages(
         pool.sort_by_key(|(index, rank, _)| (*rank, *index));
         pool.truncate(limit);
     };
-    // Off the async worker, like the single-context handler: each
-    // residency's first search tokenizes its whole corpus. One
-    // context's failure aborts the whole response (a read has nothing
-    // to half-apply); the query embedding, when the semantic lane is
-    // on, is paid once — the cue cache serves the repeat contexts.
-    let outcome = tokio::task::block_in_place(|| {
-        let mut pool = Vec::new();
-        for (index, name) in targets.iter().enumerate() {
-            // One context's failure already aborts the whole response
-            // (see the doc comment above); a spent budget is the same
-            // kind of failure, checked before paying for another
-            // context's search.
-            if deadline.expired() {
-                return Err(Box::new(error(
-                    ErrorCode::Timeout,
-                    "request exceeded its budget partway through a cross-context search \
-                     (TAGURU_REQUEST_TIMEOUT_SECS tunes this)"
-                        .to_string(),
-                    started_at,
-                )));
-            }
-            match state.search_passages(name, &request.query, limit, deadline) {
-                None => return Err(Box::new(not_found(name, started_at))),
-                Some(Err(io_error)) => {
-                    return Err(Box::new(passages_unreadable(&state, io_error, started_at)));
+    // A budget already spent when the request arrived shouldn't pay to
+    // tokenize even one context — checked once before the fan-out
+    // starts, mirroring the single-context handler's pre-flight cost
+    // discipline.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
+    // Each residency's first search tokenizes its whole corpus, so the
+    // fetch belongs on the blocking pool — bounded and concurrent, the
+    // same `bounded_parallel_map` shape as `cross_matches`'s gather.
+    // `deadline` is `Copy`, so every job carries its own value and can
+    // bail out mid-tokenize the same way the single-context handler
+    // does.
+    let permits = cross_search_concurrency().min(targets.len().max(1));
+    let owned_targets = Arc::clone(&targets);
+    let query = request.query.clone();
+    let job_state = state.clone();
+    let fetched = bounded_parallel_map(targets.len(), permits, move |index| {
+        job_state.search_passages(&owned_targets[index], &query, limit, deadline)
+    })
+    .await;
+
+    // Sequential merge: every fetch has already landed, so nothing
+    // here blocks. The first per-context failure aborts the whole
+    // response (a read has nothing to half-apply) — in target-list
+    // order now that every fetch runs concurrently, not the first one
+    // hit in real time, though the response is identical either way.
+    // Mirrors the single-context handler: an error surfacing once the
+    // budget is gone is reported as a timeout, not as whatever shape
+    // the abandoned work happened to fail with.
+    let mut pool = Vec::new();
+    for (index, outcome) in fetched.into_iter().enumerate() {
+        let name = &targets[index];
+        match outcome {
+            None => return not_found(name, started_at),
+            Some(Err(_)) if deadline.expired() => return deadline_exceeded(started_at),
+            Some(Err(io_error)) => return passages_unreadable(&state, io_error, started_at),
+            Some(Ok(hits)) => {
+                state.note_search(SearchOp::SearchPassages, name, hits.is_empty());
+                for hit in &hits {
+                    state
+                        .metrics()
+                        .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
                 }
-                Some(Ok(hits)) => {
-                    state.note_search(SearchOp::SearchPassages, name, hits.is_empty());
-                    for hit in &hits {
-                        state
-                            .metrics()
-                            .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
-                    }
-                    pool.extend(
-                        hits.into_iter()
-                            .enumerate()
-                            .map(|(rank, hit)| (index, rank, hit)),
-                    );
-                    if pool.len() >= limit * 2 {
-                        cut(&mut pool);
-                    }
+                pool.extend(
+                    hits.into_iter()
+                        .enumerate()
+                        .map(|(rank, hit)| (index, rank, hit)),
+                );
+                if pool.len() >= limit * 2 {
+                    cut(&mut pool);
                 }
             }
         }
-        Ok(pool)
-    });
-    let mut pool = match outcome {
-        Ok(pool) => pool,
-        Err(refusal) => return *refusal,
-    };
+    }
     cut(&mut pool);
     if search_log_enabled() {
         tracing::info!(

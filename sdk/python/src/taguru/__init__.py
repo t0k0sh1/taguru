@@ -76,7 +76,7 @@ from ._models import (
 )
 from ._shared import citation_key
 from ._sync.client import Context, Contexts, Groups, Taguru
-from ._types import AssocOp, QuestionSpec, SectionSpec
+from ._types import AssocOp, CrossMatchCursor, ExploreCursor, MatchCursor, QuestionSpec, SectionSpec
 
 __version__ = "0.2.0"
 
@@ -96,6 +96,9 @@ __all__ = [
     "AssocOp",
     "QuestionSpec",
     "SectionSpec",
+    "MatchCursor",
+    "CrossMatchCursor",
+    "ExploreCursor",
     # errors
     "TaguruError",
     "AuthenticationError",
