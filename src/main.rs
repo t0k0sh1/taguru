@@ -302,6 +302,9 @@ async fn serve() {
         Some(oauth) => app.merge(oauth_http::router(oauth_http::OauthState {
             oauth: Arc::clone(oauth),
             keyring: Arc::clone(&keyring),
+            // The consent form shares the bearer gate's failed-auth
+            // throttle: a wrong key there is a wrong credential too.
+            fail_limiter: Arc::clone(&fail_limiter),
         })),
         None => app,
     };
