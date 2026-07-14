@@ -105,6 +105,10 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_PASSAGE_VECTOR_LIMIT  max embedded paragraphs per context (20000);
                                past it the lexical lane still serves them
   TAGURU_EMBED_AUTO            1 = refresh embeddings with each flush (off)
+  TAGURU_EMBED_PARALLEL        concurrent 128-item chunk dispatch for gloss
+                               and passage embedding refresh (1 = old
+                               sequential behavior); raise to match the
+                               provider's rate limit, not the core count
   TAGURU_SEMANTIC_FLOOR        semantic entry floor when neither the call nor
                                the context sets one (0.35, calibrated for
                                text-embedding-3-large; model-dependent)
@@ -322,7 +326,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 34] = [
+const KNOWN_KEYS: [&str; 35] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -346,6 +350,7 @@ const KNOWN_KEYS: [&str; 34] = [
     "TAGURU_EMBED_API_KEY",
     "TAGURU_EMBED_TIMEOUT_SECS",
     "TAGURU_EMBED_AUTO",
+    "TAGURU_EMBED_PARALLEL",
     "TAGURU_EMBED_PASSAGES",
     "TAGURU_PASSAGE_VECTOR_LIMIT",
     "TAGURU_SEMANTIC_FLOOR",

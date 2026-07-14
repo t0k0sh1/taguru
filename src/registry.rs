@@ -44,8 +44,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -843,6 +843,7 @@ pub struct BootConfig {
     pub passages_wal_max_bytes: usize,
     pub embed_passages: bool,
     pub passage_vector_limit: usize,
+    pub embed_parallel: usize,
     pub semantic_floor: Option<f32>,
 }
 
@@ -1043,6 +1044,7 @@ pub struct BootOptions {
     /// glosses, so the spend is opt-in even where gloss embedding is on.
     pub embed_passages: bool,
     pub passage_vector_limit: usize,
+    pub embed_parallel: usize,
     pub default_semantic_floor: Option<f32>,
 }
 
@@ -1054,6 +1056,7 @@ impl Default for BootOptions {
             passages_wal_max_bytes: DEFAULT_PASSAGES_WAL_MAX_BYTES,
             embed_passages: false,
             passage_vector_limit: DEFAULT_PASSAGE_VECTOR_LIMIT,
+            embed_parallel: 1,
             default_semantic_floor: None,
         }
     }
@@ -1092,6 +1095,11 @@ impl BootConfig {
                 "TAGURU_PASSAGE_VECTOR_LIMIT",
                 DEFAULT_PASSAGE_VECTOR_LIMIT,
             ),
+            // Worker threads dispatching each 128-item embedding chunk to
+            // the provider concurrently; 1 keeps the old strictly-
+            // sequential behavior. Raise to match the provider's rate
+            // limit, not the machine's core count.
+            embed_parallel: crate::env_number("TAGURU_EMBED_PARALLEL", 1),
             // The right semantic floor is a property of the embedding
             // model (cosine bands differ per model), so its
             // recalibration lives beside TAGURU_EMBED_MODEL rather
@@ -1112,6 +1120,7 @@ impl BootConfig {
                 passages_wal_max_bytes: self.passages_wal_max_bytes,
                 embed_passages: self.embed_passages,
                 passage_vector_limit: self.passage_vector_limit,
+                embed_parallel: self.embed_parallel,
                 default_semantic_floor: self.semantic_floor,
             },
         )
@@ -1222,6 +1231,13 @@ struct StateInner {
     /// how many per context at most (`TAGURU_PASSAGE_VECTOR_LIMIT`).
     embed_passages: bool,
     passage_vector_limit: usize,
+    /// Worker threads dispatching each 128-item embedding chunk to the
+    /// provider concurrently (`TAGURU_EMBED_PARALLEL`, default 1 = the
+    /// old strictly-sequential behavior). Raise to match the provider's
+    /// rate limit, not the machine's core count — ureq's calls are
+    /// synchronous, so this is the only lever for provider-side
+    /// concurrency.
+    embed_parallel: usize,
     /// Names whose delete is still removing files. A delete takes the
     /// name out of the registry FIRST and only then (unlocked) unlinks
     /// the file family — without this set, a create() in that window
@@ -1387,6 +1403,7 @@ impl AppState {
             passages_wal_max_bytes: options.passages_wal_max_bytes,
             embed_passages: options.embed_passages,
             passage_vector_limit: options.passage_vector_limit,
+            embed_parallel: options.embed_parallel,
             pending_deletes: Mutex::new(std::collections::HashSet::new()),
             pending_creates: Mutex::new(std::collections::HashSet::new()),
             pending_renames: Mutex::new(std::collections::HashSet::new()),
@@ -3363,6 +3380,29 @@ impl AppState {
         outcome
     }
 
+    /// `timed_embed` for an [`EmbedPurpose::Index`] refresh call, plus
+    /// the ok/failed refresh counters every refresh site needs recorded
+    /// around it — the width probe below and each chunk dispatched by
+    /// `embed_stale`/`refresh_passage_embeddings` all wrap this same
+    /// pair.
+    fn timed_embed_for_refresh(
+        &self,
+        embedder: &dyn EmbeddingProvider,
+        texts: &[&str],
+        deadline: Deadline,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        match self.timed_embed(embedder, texts, EmbedPurpose::Index, deadline) {
+            Ok(vectors) => {
+                self.0.metrics.record_embed_refresh(true);
+                Ok(vectors)
+            }
+            Err(error) => {
+                self.0.metrics.record_embed_refresh(false);
+                Err(error)
+            }
+        }
+    }
+
     /// The query side of every embedding lookup: process cache first,
     /// provider (as [`EmbedPurpose::Query`]) on a miss. No lock is held
     /// across the provider call.
@@ -3565,18 +3605,11 @@ impl AppState {
             && fresh_width.is_none()
             && let Some((_, gloss)) = concepts.first().or_else(|| labels.first())
         {
-            match self.timed_embed(
-                embedder.as_ref(),
-                &[gloss.as_str()],
-                EmbedPurpose::Index,
-                deadline,
-            ) {
+            match self.timed_embed_for_refresh(embedder.as_ref(), &[gloss.as_str()], deadline) {
                 Ok(vectors) => {
-                    self.0.metrics.record_embed_refresh(true);
                     fresh_width = vectors.first().map(Vec::len);
                 }
                 Err(error) => {
-                    self.0.metrics.record_embed_refresh(false);
                     return Some(Err(error));
                 }
             }
@@ -3655,26 +3688,26 @@ impl AppState {
                 outdated.then(|| (name.clone(), gloss.clone(), hash))
             })
             .collect();
+        let stale_chunks: Vec<&[(String, String, u64)]> = stale.chunks(128).collect();
+        let outcomes =
+            dispatch_chunks_concurrently(&stale_chunks, self.0.embed_parallel, |chunk| {
+                if deadline.expired() {
+                    return Err(DeadlineExceeded.to_string());
+                }
+                let texts: Vec<&str> = chunk.iter().map(|(_, gloss, _)| gloss.as_str()).collect();
+                self.timed_embed_for_refresh(embedder, &texts, deadline)
+            });
         let mut embedded = VectorTable::new();
-        for chunk in stale.chunks(128) {
-            if deadline.expired() {
-                return Err(DeadlineExceeded.to_string());
-            }
-            let texts: Vec<&str> = chunk.iter().map(|(_, gloss, _)| gloss.as_str()).collect();
-            match self.timed_embed(embedder, &texts, EmbedPurpose::Index, deadline) {
-                Ok(vectors) => {
-                    self.0.metrics.record_embed_refresh(true);
-                    embedded.extend(
-                        chunk
-                            .iter()
-                            .zip(vectors)
-                            .map(|((name, _, hash), vector)| (name.clone(), (*hash, vector))),
-                    );
-                }
-                Err(error) => {
-                    self.0.metrics.record_embed_refresh(false);
-                    return Err(error);
-                }
+        for (chunk, outcome) in stale_chunks.iter().zip(outcomes) {
+            match outcome {
+                Some(Ok(vectors)) => embedded.extend(
+                    chunk
+                        .iter()
+                        .zip(vectors)
+                        .map(|((name, _, hash), vector)| (name.clone(), (*hash, vector))),
+                ),
+                Some(Err(error)) => return Err(error),
+                None => {}
             }
         }
         Ok(embedded)
@@ -3810,27 +3843,27 @@ impl AppState {
             }
         }
 
+        let to_embed_chunks: Vec<&[(PassageKey, String)]> = to_embed.chunks(128).collect();
+        let outcomes =
+            dispatch_chunks_concurrently(&to_embed_chunks, self.0.embed_parallel, |chunk| {
+                if deadline.expired() {
+                    return Err(DeadlineExceeded.to_string());
+                }
+                let texts: Vec<&str> = chunk.iter().map(|(_, text)| text.as_str()).collect();
+                self.timed_embed_for_refresh(embedder.as_ref(), &texts, deadline)
+            });
         let mut embedded = 0usize;
         let mut failure: Option<String> = None;
-        for chunk in to_embed.chunks(128) {
-            if deadline.expired() {
-                failure = Some(DeadlineExceeded.to_string());
-                break;
-            }
-            let texts: Vec<&str> = chunk.iter().map(|(_, text)| text.as_str()).collect();
-            match self.timed_embed(embedder.as_ref(), &texts, EmbedPurpose::Index, deadline) {
-                Ok(vectors) => {
-                    self.0.metrics.record_embed_refresh(true);
+        for (chunk, outcome) in to_embed_chunks.iter().zip(outcomes) {
+            match outcome {
+                Some(Ok(vectors)) => {
                     for ((key, _), vector) in chunk.iter().zip(vectors) {
                         fresh.push(key.clone(), vector);
                         embedded += 1;
                     }
                 }
-                Err(error) => {
-                    self.0.metrics.record_embed_refresh(false);
-                    failure = Some(error);
-                    break;
-                }
+                Some(Err(error)) => failure = failure.or(Some(error)),
+                None => {}
             }
         }
 
@@ -5203,6 +5236,60 @@ where
         }
     });
     results.into_inner()
+}
+
+/// Runs `f` over each of `chunks` on up to `workers` threads, claiming
+/// indices in order. Unlike `parallel_map` above — arrival-order
+/// results, no notion of failure — this preserves input order and
+/// stops claiming new work once any chunk has failed. Every caller
+/// (`extract_chunks_concurrently` in src/extract.rs, and `embed_stale` /
+/// `refresh_passage_embeddings` below) needs both: an
+/// input-order-preserving result to fold correctly, and a bound on
+/// wasted work past a failure. Fold-on-failure semantics differ per
+/// caller (fail the whole batch vs. keep whatever succeeded), so the
+/// fold itself is left to them — this returns the raw, unfolded
+/// per-index outcome.
+///
+/// `next` and `first_failure` are independent atomics; SeqCst on both
+/// is required so a worker claiming an index past a just-recorded
+/// failure actually observes it (Relaxed would silently reintroduce
+/// unbounded over-dispatch past a failure). Every index at or below the
+/// true minimum failing index is guaranteed a `Some` slot; slots past it
+/// may be `None` (never claimed) or `Some` (already in flight when the
+/// failure landed, at most `workers` of them) — callers fold
+/// accordingly.
+pub(crate) fn dispatch_chunks_concurrently<C: Sync, R: Send + Sync>(
+    chunks: &[C],
+    workers: usize,
+    f: impl Fn(&C) -> Result<R, String> + Sync,
+) -> Vec<Option<Result<R, String>>> {
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+    let workers = workers.min(chunks.len()).max(1);
+    let next = AtomicUsize::new(0);
+    let first_failure = AtomicUsize::new(usize::MAX);
+    let results: Vec<OnceLock<Result<R, String>>> =
+        (0..chunks.len()).map(|_| OnceLock::new()).collect();
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    if index >= chunks.len() || index > first_failure.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let outcome = f(&chunks[index]);
+                    if outcome.is_err() {
+                        first_failure.fetch_min(index, Ordering::SeqCst);
+                    }
+                    let _ = results[index].set(outcome);
+                }
+            });
+        }
+    });
+    results.into_iter().map(OnceLock::into_inner).collect()
 }
 
 /// One boot-time pass over the data directory: crash leftovers of
@@ -11197,6 +11284,33 @@ mod tests {
         }
     }
 
+    /// A provider whose `embed` call blocks for 150ms while tracking how
+    /// many calls are in flight at once (and the peak concurrency
+    /// observed) — long enough that concurrent calls MUST overlap unless
+    /// something serializes or gates them. Shared by the refresh
+    /// concurrency tests below.
+    struct SlowEmbeddings {
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+    impl EmbeddingProvider for SlowEmbeddings {
+        fn model(&self) -> &str {
+            "slow"
+        }
+        fn embed(
+            &self,
+            texts: &[&str],
+            _purpose: EmbedPurpose,
+            _deadline: Deadline,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+
     /// The two provider call sites declare opposite purposes: gloss
     /// refresh embeds as `Index`, live cue resolution as `Query` — the
     /// distinction an asymmetric-model proxy keys `input_type` on.
@@ -11346,33 +11460,7 @@ mod tests {
     /// provider must never see two calls in flight at once.
     #[test]
     fn concurrent_gloss_refreshes_serialize_their_provider_calls() {
-        use std::sync::atomic::AtomicUsize;
         use std::thread;
-        use std::time::Duration;
-
-        struct SlowEmbeddings {
-            in_flight: Arc<AtomicUsize>,
-            peak: Arc<AtomicUsize>,
-        }
-        impl EmbeddingProvider for SlowEmbeddings {
-            fn model(&self) -> &str {
-                "slow"
-            }
-            fn embed(
-                &self,
-                texts: &[&str],
-                _purpose: EmbedPurpose,
-                _deadline: Deadline,
-            ) -> Result<Vec<Vec<f32>>, String> {
-                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                self.peak.fetch_max(now, Ordering::SeqCst);
-                // Long enough that two unserialized refreshes' provider
-                // calls MUST overlap unless `vectors_refresh` excludes them.
-                thread::sleep(Duration::from_millis(150));
-                self.in_flight.fetch_sub(1, Ordering::SeqCst);
-                Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
-            }
-        }
 
         let dir = scratch_dir("refresh-serialize");
         let in_flight = Arc::new(AtomicUsize::new(0));
@@ -11414,6 +11502,261 @@ mod tests {
              vectors_refresh serializing the whole refresh, their provider calls \
              overlap and whichever merges last can clobber a fresher gloss with a \
              staler one"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn gloss_refresh_dispatches_chunks_concurrently_when_embed_parallel_is_raised() {
+        let dir = scratch_dir("gloss-parallel");
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let embedder = Some(Arc::new(SlowEmbeddings {
+            in_flight: Arc::clone(&in_flight),
+            peak: Arc::clone(&peak),
+        }) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            embedder,
+            BootOptions {
+                embed_parallel: 2,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("fruit", |context| {
+                // 129 stale concepts split into a 128-item chunk and a
+                // 1-item chunk; with embed_parallel=2 both dispatch at
+                // once.
+                for i in 0..129 {
+                    context
+                        .associate(format!("c{i}"), "属性", "値", 1.0)
+                        .unwrap();
+                }
+            })
+            .map_err(|_| "write")
+            .unwrap();
+
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            peak.load(Ordering::SeqCst) > 1,
+            "129 stale concepts split into two chunks; with embed_parallel=2 both \
+             should reach the provider at once"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn passage_refresh_dispatches_chunks_concurrently_when_embed_parallel_is_raised() {
+        let dir = scratch_dir("passage-parallel");
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let embedder = Arc::new(SlowEmbeddings {
+            in_flight: Arc::clone(&in_flight),
+            peak: Arc::clone(&peak),
+        }) as Arc<dyn EmbeddingProvider>;
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            Some(embedder),
+            BootOptions {
+                embed_passages: true,
+                passage_vector_limit: 20_000,
+                embed_parallel: 2,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // 129 paragraphs = one full batch of 128 plus one more; with
+        // embed_parallel=2 both chunks dispatch at once.
+        let text = (0..129)
+            .map(|i| format!("段落その{i}。"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-big".to_string(), text);
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            peak.load(Ordering::SeqCst) > 1,
+            "129 paragraphs split into two chunks; with embed_parallel=2 both \
+             should reach the provider at once"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Pins the gate's correctness argument down directly (see
+    /// `dispatch_chunks_concurrently`'s doc comment): once the lowest
+    /// failing index is recorded, no worker claims a NEW index past it,
+    /// so at most `workers` chunks — the ones already claimed and in
+    /// flight at that moment — can ever land past the failure.
+    #[test]
+    fn dispatch_chunks_concurrently_claims_at_most_worker_count_indices_past_the_first_failure() {
+        use std::time::Duration;
+
+        const FAILING_INDEX: usize = 20;
+        const WORKERS: usize = 4;
+        let chunks: Vec<usize> = (0..50).collect();
+        let calls: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let outcomes = dispatch_chunks_concurrently(&chunks, WORKERS, |&index| {
+            calls.lock().push(index);
+            if index == FAILING_INDEX {
+                return Err("boom".to_string());
+            }
+            // Slow enough that a chunk claimed after the failure lands
+            // would have ample time to observe it before finishing and
+            // going to claim another — if the gate were broken, this
+            // sleep is what would let the assertions below catch it.
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(index)
+        });
+
+        let called = calls.lock().clone();
+        assert!(
+            called.len() < chunks.len(),
+            "the gate must stop dispatch well short of all {} chunks; saw {called:?}",
+            chunks.len()
+        );
+        let past_failure = called
+            .iter()
+            .filter(|&&index| index > FAILING_INDEX)
+            .count();
+        assert!(
+            past_failure <= WORKERS,
+            "at most `workers` chunks can already be in flight when the failure \
+             lands; saw {past_failure} claimed past index {FAILING_INDEX}: {called:?}"
+        );
+        for (index, outcome) in outcomes.iter().enumerate().take(FAILING_INDEX) {
+            assert!(
+                matches!(outcome, Some(Ok(value)) if *value == index),
+                "every index below the true minimum failing index must succeed"
+            );
+        }
+        assert!(matches!(&outcomes[FAILING_INDEX], Some(Err(message)) if message == "boom"));
+    }
+
+    #[test]
+    fn refresh_passage_embeddings_persists_a_non_prefix_subset_when_parallel_dispatch_fails_early()
+    {
+        /// Fails every call belonging to chunk 0 (paragraphs 0..128);
+        /// later chunks succeed. Which chunk a call belongs to is
+        /// recovered from its first text's paragraph index, since the
+        /// provider only ever sees texts, not chunk indices.
+        struct FailFirstChunk {
+            calls: Arc<Mutex<Vec<usize>>>,
+        }
+        impl EmbeddingProvider for FailFirstChunk {
+            fn model(&self) -> &str {
+                "fail-first"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let first_index: usize = texts[0]
+                    .trim_start_matches("段落その")
+                    .trim_end_matches("。")
+                    .parse()
+                    .expect("well-formed test fixture text");
+                let chunk_index = first_index / 128;
+                self.calls.lock().push(chunk_index);
+                if chunk_index == 0 {
+                    // Delayed so the other two workers have time to
+                    // claim and start their own chunks first — an
+                    // immediate failure here can otherwise record
+                    // `first_failure` before chunk 2's worker even
+                    // calls `fetch_add`, gating a chunk that never got
+                    // a chance to be "in flight."
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    return Err("boom".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            }
+        }
+
+        let dir = scratch_dir("pvec-non-prefix");
+        let calls: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+        let embedder = Arc::new(FailFirstChunk {
+            calls: Arc::clone(&calls),
+        }) as Arc<dyn EmbeddingProvider>;
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            Some(embedder),
+            BootOptions {
+                embed_passages: true,
+                passage_vector_limit: 20_000,
+                embed_parallel: 3,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // 300 paragraphs = chunk 0 (index 0..128, fails), chunk 1
+        // (128..256, succeeds), chunk 2 (256..300, succeeds) — with
+        // embed_parallel=3 all three dispatch at once, so chunks 1 and 2
+        // can complete and land before chunk 0's failure is even
+        // recorded.
+        let text = (0..300)
+            .map(|i| format!("段落その{i}。"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-big".to_string(), text);
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let error = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("boom"), "{error}");
+
+        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        assert_eq!(
+            sidecar.len(),
+            172,
+            "chunks 1 and 2 (128 + 44 paragraphs) persist even though the \
+             earlier chunk 0 failed — the surviving subset is not a prefix \
+             of the original order"
+        );
+        assert!(
+            sidecar.iter().all(|(key, _)| key.index >= 128),
+            "no paragraph from the failed first chunk (index < 128) should be present"
         );
 
         let _ = fs::remove_dir_all(dir);

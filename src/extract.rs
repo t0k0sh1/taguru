@@ -27,8 +27,6 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -491,30 +489,16 @@ impl Run {
         Ok(outputs)
     }
 
-    /// [`Run::extract_chunks`]'s `--parallel > 1` path: a fixed pool of
-    /// workers claims chunk indexes off a shared counter (`next`) and
-    /// dispatches them through the same [`extract_chunk`] the
-    /// sequential path uses. `first_failure` tracks the lowest index
-    /// that has failed so far; a worker refuses to *claim* any index
-    /// beyond it, which is enough to reproduce the sequential contract
-    /// (the lowest-indexed failure fails the document, nothing after it
-    /// is intentionally dispatched) without cancelling calls already
-    /// in flight when the failure lands — those simply finish and are
-    /// discarded.
-    ///
-    /// Every index below the true minimum failing index `k` is
-    /// guaranteed to be claimed and to succeed: `next.fetch_add`
-    /// hands out 0, 1, 2, … in that fixed order, so every `j < k` is
-    /// claimed before `k` is claimed, and — because `k` is the
-    /// *global* minimum failure — no `j < k` ever fails, so
-    /// `first_failure` can only hold `usize::MAX` or a value `>= k`
-    /// at the moment any `j < k` performs its claim check, regardless
-    /// of thread scheduling. `next` and `first_failure` are two
-    /// independent atomics, so this claim needs `SeqCst`: it is the
-    /// single total order across *both* variables that lets a worker
-    /// claiming index `j > k` after the failure is recorded actually
-    /// observe it, instead of racing an arbitrarily stale `usize::MAX`
-    /// under a weaker ordering.
+    /// [`Run::extract_chunks`]'s `--parallel > 1` path: dispatches
+    /// through the same claim-indices-with-a-first-failure-gate engine
+    /// [`crate::registry::dispatch_chunks_concurrently`] uses for
+    /// embedding refresh, so the `SeqCst`-ordering correctness argument
+    /// (a worker claiming an index past a just-recorded failure must
+    /// actually observe it) lives in exactly one place. This is the
+    /// all-or-nothing fold: the lowest-indexed failure fails the whole
+    /// document, formatted with its position, and nothing after it is
+    /// intentionally dispatched — calls already in flight when the
+    /// failure lands simply finish and are discarded.
     fn extract_chunks_concurrently(
         &self,
         source: &str,
@@ -525,41 +509,19 @@ impl Run {
             .as_ref()
             .expect("a non-dry run built the client");
         let system = system_prompt(&self.vocabulary, self.questions);
-        let workers = self.parallel.min(chunks.len()).max(1);
-        let next = AtomicUsize::new(0);
-        let first_failure = AtomicUsize::new(usize::MAX);
-        let results: Vec<OnceLock<Result<ModelOutput, String>>> =
-            (0..chunks.len()).map(|_| OnceLock::new()).collect();
+        let indexed: Vec<(usize, &String)> = chunks.iter().enumerate().collect();
+        let outcomes = crate::registry::dispatch_chunks_concurrently(
+            &indexed,
+            self.parallel,
+            |&(index, piece)| {
+                let user = user_message(source, index, chunks.len(), piece);
+                extract_chunk(client, &system, &user)
+            },
+        );
 
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| {
-                    loop {
-                        let index = next.fetch_add(1, Ordering::SeqCst);
-                        if index >= chunks.len() || index > first_failure.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        let user = user_message(source, index, chunks.len(), &chunks[index]);
-                        let outcome = extract_chunk(client, &system, &user);
-                        if outcome.is_err() {
-                            first_failure.fetch_min(index, Ordering::SeqCst);
-                        }
-                        let _ = results[index].set(outcome);
-                    }
-                });
-            }
-        });
-
-        // Every index through the true first-failure index is dispatched
-        // (see the correctness note above), and the loop below returns as
-        // soon as it reaches that index's `Err` — so it never inspects a
-        // slot past the failure, whether or not that slot was ever
-        // claimed. Nothing past the failure needs to be truncated by hand.
         let mut outputs = Vec::new();
-        for (index, slot) in results.into_iter().enumerate() {
-            let outcome = slot
-                .into_inner()
-                .expect("every index up to the first failure was dispatched");
+        for (index, outcome) in outcomes.into_iter().enumerate() {
+            let outcome = outcome.expect("every index up to the first failure was dispatched");
             match outcome {
                 Ok(output) => outputs.push(output),
                 Err(message) => {
