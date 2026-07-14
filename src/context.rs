@@ -6152,6 +6152,14 @@ mod tests {
     }
 
     #[test]
+    fn match_kind_as_str_matches_each_variant() {
+        assert_eq!(MatchKind::Exact.as_str(), "exact");
+        assert_eq!(MatchKind::Alias.as_str(), "alias");
+        assert_eq!(MatchKind::Containment.as_str(), "containment");
+        assert_eq!(MatchKind::Fuzzy.as_str(), "fuzzy");
+    }
+
+    #[test]
     fn entry_index_keeps_the_first_match_kind_when_scores_tie() {
         let mut index = EntryIndex::default();
         index.push("ab", 0); // containment against "abcd": 2 / 4

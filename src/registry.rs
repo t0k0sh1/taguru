@@ -12222,6 +12222,94 @@ mod tests {
     }
 
     #[test]
+    fn restore_groups_reports_how_many_landed_before_an_io_failure() {
+        use crate::groups::group_path;
+
+        let dir = scratch_dir("groups-restore-io-failure");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let record = |contexts: &[&str], children: &[&str]| GroupRecord {
+            description: String::new(),
+            contexts: contexts.iter().map(|c| c.to_string()).collect(),
+            groups: children.iter().map(|g| g.to_string()).collect(),
+        };
+
+        // "a" and "b" are independent (no nesting), so equal depth keeps
+        // them in list order — "a" lands first. Occupying "b"'s target
+        // path with a non-empty directory fails its rename on every
+        // platform this project targets (see
+        // `write_atomic_cleans_up_its_staging_file_when_the_commit_fails`),
+        // isolating an Io failure strictly after "a" already landed.
+        let blocked = group_path(&dir, &file_stem("b"));
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("occupied"), b"x").unwrap();
+
+        let error = state
+            .restore_groups(&[
+                ("a".to_string(), record(&[], &[])),
+                ("b".to_string(), record(&[], &[])),
+            ])
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            RestoreGroupsError::Io { group, .. } if group == "b"
+        ));
+        assert_eq!(error.applied(), 1, "\"a\" already landed when \"b\" failed");
+        assert!(
+            state.group("a").is_some(),
+            "\"a\"'s successful write must not be rolled back"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restore_groups_counts_an_unchanged_record_as_already_landed() {
+        use crate::groups::group_path;
+
+        let dir = scratch_dir("groups-restore-unchanged-then-io-failure");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let record = |contexts: &[&str], children: &[&str]| GroupRecord {
+            description: String::new(),
+            contexts: contexts.iter().map(|c| c.to_string()).collect(),
+            groups: children.iter().map(|g| g.to_string()).collect(),
+        };
+
+        // Land "a" first so the call below finds it standing exactly as
+        // given and takes the `Unchanged` branch, which counts toward
+        // `applied` without writing anything.
+        state
+            .restore_groups(&[("a".to_string(), record(&[], &[]))])
+            .unwrap();
+
+        // "b" is new, so it takes the `write_group` branch. Occupying its
+        // target path with a non-empty directory fails its rename on
+        // every platform this project targets (see
+        // `write_atomic_cleans_up_its_staging_file_when_the_commit_fails`),
+        // isolating an Io failure strictly after "a" is judged unchanged.
+        let blocked = group_path(&dir, &file_stem("b"));
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("occupied"), b"x").unwrap();
+
+        let error = state
+            .restore_groups(&[
+                ("a".to_string(), record(&[], &[])),
+                ("b".to_string(), record(&[], &[])),
+            ])
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            RestoreGroupsError::Io { group, .. } if group == "b"
+        ));
+        assert_eq!(
+            error.applied(),
+            1,
+            "\"a\" must count as landed via the unchanged branch"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn restore_groups_judges_the_whole_set_before_writing_anything() {
         use crate::groups::NestingViolation;
 

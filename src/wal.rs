@@ -401,10 +401,10 @@ pub fn replay_readonly<Op: DeserializeOwned + Serialize>(
 ) -> io::Result<(Vec<Op>, u64, Option<u64>, usize)> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok((Vec::new(), watermark, None, 0));
-        }
-        Err(error) => return Err(error),
+        Err(error) => match error.kind() {
+            io::ErrorKind::NotFound => return Ok((Vec::new(), watermark, None, 0)),
+            _ => return Err(error),
+        },
     };
     parse_log(path, &bytes, watermark)
 }
@@ -828,6 +828,16 @@ mod tests {
         let (ops, top) = replay::<WalOp>(&path, 5).unwrap();
         assert!(ops.is_empty());
         assert_eq!(top, 5);
+    }
+
+    #[test]
+    fn a_missing_file_replays_readonly_to_nothing() {
+        let path = scratch_wal("missing-readonly");
+        let (ops, top, torn, unchecked) = replay_readonly::<WalOp>(&path, 5).unwrap();
+        assert!(ops.is_empty());
+        assert_eq!(top, 5);
+        assert_eq!(torn, None);
+        assert_eq!(unchecked, 0);
     }
 
     #[test]
