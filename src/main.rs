@@ -668,7 +668,31 @@ fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
     provider
 }
 
+/// Resolves on the first SIGINT (Ctrl+C) or SIGTERM — the signal that
+/// starts axum's graceful drain — and, before returning, arms a one-shot
+/// task that force-exits on the SECOND such signal. The drain waits on
+/// in-flight requests; if one hangs, an impatient operator's second
+/// Ctrl+C would otherwise be swallowed (tokio's installed handler
+/// overrides the default terminate disposition, and nothing awaits it),
+/// leaving SIGKILL as the only way out. The re-armed listener restores
+/// the familiar escape hatch: press again to quit now. A forced exit
+/// skips the final image flush, but every write is already in the WAL and
+/// replays on the next boot — only unwritten usage counters are lost,
+/// the price the operator chose by not waiting for the clean stop.
 async fn shutdown_signal() {
+    wait_for_terminate().await;
+    tokio::spawn(async {
+        wait_for_terminate().await;
+        warn!("second shutdown signal received — forcing an immediate exit");
+        // 128 + SIGINT(2), the shell convention for signal-terminated.
+        std::process::exit(130);
+    });
+}
+
+/// Completes on the next SIGINT (Ctrl+C) or, on Unix, SIGTERM. Each call
+/// registers fresh, so it can be awaited again after the first signal to
+/// catch a second one.
+async fn wait_for_terminate() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };

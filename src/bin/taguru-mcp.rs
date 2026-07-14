@@ -89,51 +89,40 @@ fn main() {
     // One JSON-RPC message per line. A client that never sends a newline
     // must not make the bridge buffer without bound, so cap each read; a
     // line past the cap is drained to its newline and skipped, exactly as
-    // an undecodable one is. 16 MiB clears any real message — the server
-    // caps request bodies well below it — while bounding memory.
-    const MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
-    let mut raw = Vec::new();
+    // an undecodable one is. The default must clear the largest LEGAL
+    // message, which is an `import` call: its `stream` argument runs to
+    // MAX_IMPORT_STREAM_BYTES (32 MiB), and JSON-quoting it into a string
+    // argument roughly doubles that (every newline in the NDJSON escapes
+    // to `\n`), so 64 MiB is the smallest cap that never rejects a legal
+    // import. TAGURU_MCP_MAX_LINE_BYTES raises it for streams whose
+    // escaping runs heavier, or lowers it to tighten the memory bound;
+    // 0 or unparseable falls back to the default rather than degenerating.
+    let max_line_bytes: u64 = std::env::var("TAGURU_MCP_MAX_LINE_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&bytes| bytes > 0)
+        .unwrap_or(64 * 1024 * 1024);
     loop {
-        raw.clear();
-        match (&mut reader)
-            .take(MAX_LINE_BYTES)
-            .read_until(b'\n', &mut raw)
-        {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
-            Err(_) => break,
-        }
-        // A full cap's worth of bytes with no terminating newline is an
-        // over-long line: drain its remainder so the next read lands on a
-        // message boundary, then skip it. (A shorter unterminated tail is
-        // just the final line before EOF — parse it.)
-        if raw.last() != Some(&b'\n') && raw.len() as u64 == MAX_LINE_BYTES {
-            loop {
-                let mut sink = Vec::new();
-                match (&mut reader)
-                    .take(MAX_LINE_BYTES)
-                    .read_until(b'\n', &mut sink)
-                {
-                    Ok(0) => break,
-                    Ok(_) if sink.last() == Some(&b'\n') => break,
-                    Ok(_) => continue,
-                    Err(_) => break,
-                }
+        let raw = match read_frame(&mut reader, max_line_bytes) {
+            Frame::Eof => break,
+            // The line may have carried an id a client now waits on; its
+            // bytes are gone (drained by read_frame), so a null-id parse
+            // error is all this transport can say — but silence would
+            // hang that client.
+            Frame::TooLong => {
+                eprintln!("taguru-mcp: refusing over-long line");
+                emit(
+                    &stdout,
+                    &mcp::error_response(
+                        Value::Null,
+                        -32700,
+                        format!("line exceeds the {max_line_bytes}-byte frame cap"),
+                    ),
+                );
+                continue;
             }
-            // The line may have carried an id a client now waits on;
-            // its bytes are gone, so a null-id parse error is all this
-            // transport can say — but silence would hang that client.
-            eprintln!("taguru-mcp: refusing over-long line");
-            emit(
-                &stdout,
-                &mcp::error_response(
-                    Value::Null,
-                    -32700,
-                    format!("line exceeds the {MAX_LINE_BYTES}-byte frame cap"),
-                ),
-            );
-            continue;
-        }
+            Frame::Line(raw) => raw,
+        };
         let Ok(text) = std::str::from_utf8(&raw) else {
             eprintln!("taguru-mcp: refusing undecodable line");
             emit(
@@ -166,6 +155,59 @@ fn emit(stdout: &std::io::Stdout, response: &Value) {
     let mut out = stdout.lock();
     let _ = writeln!(out, "{response}");
     let _ = out.flush();
+}
+
+/// One newline-delimited frame read from the stdio transport.
+#[derive(Debug, PartialEq, Eq)]
+enum Frame {
+    /// Input is exhausted — EOF, or a read error the transport treats as
+    /// end-of-stream (a broken pipe leaves nothing to answer).
+    Eof,
+    /// A complete line, or the final unterminated tail, whose content is
+    /// at or under the cap. Any trailing newline is included; the caller
+    /// trims it.
+    Line(Vec<u8>),
+    /// A line longer than the cap. Its remaining bytes have already been
+    /// drained here to the next boundary, so the next [`read_frame`] call
+    /// resumes on a whole message — but this line's own id (if any) is
+    /// gone, so only a null-id error can answer it.
+    TooLong,
+}
+
+/// Reads one frame, holding at most `max_line_bytes` + 1 bytes in memory.
+///
+/// The one probe byte past the cap is what lets a line whose content is
+/// EXACTLY the cap be returned whole — with its newline, or at EOF —
+/// rather than mistaken for an over-long one. Only a read that fills that
+/// extra byte with no terminating newline is [`Frame::TooLong`], and its
+/// remainder is drained here so the next call resumes on a message
+/// boundary. An unterminated tail at or under the cap is just the last
+/// line before EOF, and comes back as [`Frame::Line`].
+fn read_frame(reader: &mut impl BufRead, max_line_bytes: u64) -> Frame {
+    // saturating_add keeps a cap of u64::MAX from wrapping the probe to 0
+    // (which read_until would treat as "take nothing" and loop forever).
+    let probe = max_line_bytes.saturating_add(1);
+    let mut raw = Vec::new();
+    match reader.take(probe).read_until(b'\n', &mut raw) {
+        Ok(0) => return Frame::Eof,
+        Ok(_) => {}
+        Err(_) => return Frame::Eof,
+    }
+    if raw.last() != Some(&b'\n') && raw.len() as u64 > max_line_bytes {
+        // Over the cap with no newline in the probe window: drain the rest
+        // of this line so the next read lands on a message boundary.
+        loop {
+            let mut sink = Vec::new();
+            match reader.take(probe).read_until(b'\n', &mut sink) {
+                Ok(0) => break,
+                Ok(_) if sink.last() == Some(&b'\n') => break,
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        return Frame::TooLong;
+    }
+    Frame::Line(raw)
 }
 
 /// Dispatches one JSON-RPC message. Notifications get no reply (correct
@@ -206,6 +248,16 @@ fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value>
             // earlier ones' results, so it has no single (method, path,
             // body) for route_tool to hand back — run_retrieve issues
             // them itself, each via this same synchronous bridge.call.
+            //
+            // The network-facing transport (remote_mcp) caps this composed
+            // whole against `max_result_bytes`, since an untrusted caller
+            // could aim it at a server it does not run. Here the composition
+            // is left uncapped on purpose: the bridge is a LOCAL proxy
+            // between the operator's own MCP client and their own server,
+            // each dispatched call is already bounded server-side by
+            // TAGURU_MCP_MAX_RESULT_BYTES, and the result crosses stdio to
+            // the operator's own process — a size they asked for, not a
+            // budget an adversary can spend against a third party.
             let outcome = mcp::run_retrieve(&arguments, |method, path, body| {
                 bridge.call(method, &path, body)
             })
@@ -331,5 +383,56 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_line_exactly_at_the_cap_is_framed_whole() {
+        // The one probe byte past the cap is what separates "content is
+        // exactly the cap" from "content is over it": an 8-byte line under
+        // an 8-byte cap must come back whole, newline included, not be
+        // mistaken for an over-long frame — and the reader must be left on
+        // the next message, not consumed past it.
+        let mut input = std::io::Cursor::new(b"AAAAAAAA\nnext\n".to_vec());
+        assert_eq!(
+            read_frame(&mut input, 8),
+            Frame::Line(b"AAAAAAAA\n".to_vec())
+        );
+        assert_eq!(read_frame(&mut input, 8), Frame::Line(b"next\n".to_vec()));
+        assert_eq!(read_frame(&mut input, 8), Frame::Eof);
+    }
+
+    #[test]
+    fn an_unterminated_tail_at_the_cap_is_still_a_line() {
+        // The last line before EOF carries no newline; at or under the cap
+        // it is a line, not an over-long frame.
+        let mut input = std::io::Cursor::new(b"AAAAAAAA".to_vec());
+        assert_eq!(read_frame(&mut input, 8), Frame::Line(b"AAAAAAAA".to_vec()));
+        assert_eq!(read_frame(&mut input, 8), Frame::Eof);
+    }
+
+    #[test]
+    fn a_line_past_the_cap_is_refused_and_the_next_survives() {
+        // One byte over the cap with no newline is over-long; its bytes are
+        // drained so the message after it still frames cleanly.
+        let mut input = std::io::Cursor::new(b"AAAAAAAAA\nhi\n".to_vec());
+        assert_eq!(read_frame(&mut input, 8), Frame::TooLong);
+        assert_eq!(read_frame(&mut input, 8), Frame::Line(b"hi\n".to_vec()));
+        assert_eq!(read_frame(&mut input, 8), Frame::Eof);
+    }
+
+    #[test]
+    fn draining_an_over_long_line_spans_multiple_probe_windows() {
+        // The overflow is longer than one probe window, so the drain loop
+        // must iterate; the following message must still be recovered.
+        let mut input = std::io::Cursor::new(b"AAAAAAAAAAAA\nhi\n".to_vec());
+        assert_eq!(read_frame(&mut input, 4), Frame::TooLong);
+        assert_eq!(read_frame(&mut input, 4), Frame::Line(b"hi\n".to_vec()));
+        assert_eq!(read_frame(&mut input, 4), Frame::Eof);
+    }
+
+    #[test]
+    fn empty_input_is_eof() {
+        let mut input = std::io::Cursor::new(Vec::new());
+        assert_eq!(read_frame(&mut input, 8), Frame::Eof);
     }
 }

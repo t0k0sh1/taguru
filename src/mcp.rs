@@ -23,7 +23,10 @@ pub const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
 /// transport's own body cap (`TAGURU_MAX_BODY_BYTES`, 8 MiB default)
 /// is not a substitute: it wraps the *outer* `/mcp` JSON-RPC envelope,
 /// and a stream JSON-quoted into a string argument (every newline
-/// escaped to `\n`) runs close to double its raw size.
+/// escaped to `\n`) runs close to double its raw size. That same
+/// doubling is why `taguru-mcp`'s per-line frame cap
+/// (`TAGURU_MCP_MAX_LINE_BYTES`) defaults to ~2× this value: a line
+/// under the frame cap must still be able to carry a full-size stream.
 const MAX_IMPORT_STREAM_BYTES: usize = 32 * 1024 * 1024;
 
 /// One decoded JSON-RPC message, sorted by what it obliges us to do.
