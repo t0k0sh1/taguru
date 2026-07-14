@@ -1735,7 +1735,26 @@ impl AppState {
             // lands — otherwise the next boot's resume-sweep sees the
             // marker and deletes the context we are creating right now.
             deleted_marker_path(&self.0.data_dir, &stem),
+            // The same hazard for a rename that half-finished with THIS
+            // name as its SOURCE: its `.renaming` marker sits at this
+            // stem, and boot's resume-sweep would otherwise move the
+            // generation we are about to write onto the rename's
+            // destination stem, losing it silently.
+            renaming_marker_path(&self.0.data_dir, &stem),
         ] {
+            if let Err(error) = remove_persisted_file(&stale)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(CreateError::Io(error));
+            }
+        }
+        // A rename that half-finished with THIS name as its DESTINATION
+        // left its marker under the SOURCE's stem — a stem we cannot
+        // derive from `name`. Boot's resume-sweep would move that source
+        // family onto the generation we are about to write, erasing it.
+        // Scan for any marker that names us as `to` and drop it; a fresh
+        // create abandons a stuck rename either way.
+        for stale in rename_markers_targeting(&self.0.data_dir, name, "renaming") {
             if let Err(error) = remove_persisted_file(&stale)
                 && error.kind() != io::ErrorKind::NotFound
             {
@@ -2074,6 +2093,27 @@ impl AppState {
         }
         if let Some(missing) = first_missing(&children, |child| groups.contains_key(child)) {
             return Err(CreateGroupError::NoSuchGroup(missing.clone()));
+        }
+        // A group rename that half-finished under THIS name — as the
+        // source (its `.grouprenaming` marker sits at this stem) or the
+        // destination (some other stem's marker names it) — would
+        // otherwise have boot's resume-sweep move a stale group file over
+        // the one we are about to write. A create is a clean start:
+        // abandon any such marker. Groups clear their marker on a
+        // graceful move failure, so this only bites after a crash or a
+        // best-effort boot cleanup that could not remove it — cheap
+        // insurance keeping the group path symmetric with create_files.
+        let mut stale_markers = rename_markers_targeting(&self.0.data_dir, name, "grouprenaming");
+        stale_markers.push(groups::group_renaming_marker_path(
+            &self.0.data_dir,
+            &file_stem(name),
+        ));
+        for marker in stale_markers {
+            if let Err(error) = remove_persisted_file(&marker)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(CreateGroupError::Io(error));
+            }
         }
         let record = GroupRecord {
             description,
@@ -6020,6 +6060,31 @@ pub(crate) fn resume_rename_markers(
         resumed.push((marker.from, marker.to));
     }
     Ok(resumed)
+}
+
+/// Every rename marker of `extension` in `dir` that names `context` as
+/// its DESTINATION. A marker sits at its SOURCE's stem, so a create of
+/// the destination name cannot find it positionally the way it clears
+/// the marker at its own stem; this scan lets the create sweep abandon a
+/// half-done rename that would otherwise have boot's resume move the
+/// source family over the fresh generation. Unreadable or unparseable
+/// markers are skipped — boot's own sweep reports them. Shared by the
+/// context (`renaming`) and group (`grouprenaming`) create paths.
+fn rename_markers_targeting(dir: &Path, context: &str, extension: &str) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some(extension))
+        .filter(|path| {
+            fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<RenameMarker>(&bytes).ok())
+                .is_some_and(|marker| marker.to == context)
+        })
+        .collect()
 }
 
 /// FNV-1a over raw bytes — the same primitive the search terms build
@@ -13425,6 +13490,165 @@ mod tests {
         assert!(!groups::group_path(&dir, &file_stem("liquor")).exists());
         assert!(groups::group_path(&dir, &file_stem("spirits")).exists());
         assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A rename that half-finished with `sake` as its SOURCE leaves a
+    /// `.renaming` marker at sake's stem and frees the name to be created
+    /// again on the same live server. The create must strip that marker,
+    /// or the next boot's resume-sweep moves the fresh generation onto
+    /// the rename's destination and `sake` silently becomes `shochu`.
+    #[test]
+    fn creating_a_context_abandons_a_rename_marker_at_its_own_stem() {
+        let dir = scratch_dir("create-ctx-clears-source-marker");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            fs::write(
+                renaming_marker_path(&dir, &file_stem("sake")),
+                serde_json::to_vec(&RenameMarker {
+                    from: "sake".to_string(),
+                    to: "shochu".to_string(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            assert!(
+                !renaming_marker_path(&dir, &file_stem("sake")).exists(),
+                "create must clear a rename marker sitting at its own stem"
+            );
+        }
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            state.directory_entry("sake").is_some(),
+            "the freshly created context must survive, not be swept to the rename's destination"
+        );
+        assert!(state.directory_entry("shochu").is_none());
+        assert!(dir.join("sake.ctx").exists());
+        assert!(!dir.join("shochu.ctx").exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A rename that half-finished with `sake` as its DESTINATION leaves
+    /// its marker under the SOURCE's stem (`beer`) — a stem the create of
+    /// `sake` cannot derive from its own name. Creating `sake` must scan
+    /// for markers naming it as `to` and drop them, or the next boot's
+    /// resume-sweep renames the stale `beer` family onto the fresh `sake`
+    /// (fs::rename overwrites), clobbering it and erasing `beer`.
+    #[test]
+    fn creating_a_context_abandons_a_rename_marker_naming_it_as_destination() {
+        let dir = scratch_dir("create-ctx-clears-destination-marker");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("beer", ContextMeta::default()).unwrap();
+            fs::write(
+                renaming_marker_path(&dir, &file_stem("beer")),
+                serde_json::to_vec(&RenameMarker {
+                    from: "beer".to_string(),
+                    to: "sake".to_string(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            assert!(
+                !renaming_marker_path(&dir, &file_stem("beer")).exists(),
+                "create must clear a rename marker that names it as the destination"
+            );
+        }
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            state.directory_entry("beer").is_some(),
+            "the abandoned rename must leave the untouched source context intact"
+        );
+        assert!(
+            state.directory_entry("sake").is_some(),
+            "the freshly created destination context must survive, not be overwritten by the source"
+        );
+        assert!(dir.join("beer.ctx").exists());
+        assert!(dir.join("sake.ctx").exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The group twin of
+    /// `creating_a_context_abandons_a_rename_marker_at_its_own_stem`: a
+    /// `.grouprenaming` marker at the created group's own stem must be
+    /// abandoned so boot does not resume-move the fresh group onto the
+    /// rename's destination.
+    #[test]
+    fn creating_a_group_abandons_a_rename_marker_at_its_own_stem() {
+        let dir = scratch_dir("create-group-clears-source-marker");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            fs::write(
+                groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
+                serde_json::to_vec(&RenameMarker {
+                    from: "liquor".to_string(),
+                    to: "spirits".to_string(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            state
+                .create_group("liquor", String::new(), BTreeSet::new(), BTreeSet::new())
+                .unwrap();
+            assert!(
+                !groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists(),
+                "create_group must clear a rename marker sitting at its own stem"
+            );
+        }
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.group("liquor").is_some());
+        assert!(state.group("spirits").is_none());
+        assert!(groups::group_path(&dir, &file_stem("liquor")).exists());
+        assert!(!groups::group_path(&dir, &file_stem("spirits")).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The group twin of
+    /// `creating_a_context_abandons_a_rename_marker_naming_it_as_destination`:
+    /// creating `spirits` must drop a `.grouprenaming` marker that names
+    /// it as `to` (parked at `liquor`'s stem), or boot resume-moves the
+    /// stale `liquor` group file over the fresh `spirits` and drops
+    /// `liquor`.
+    #[test]
+    fn creating_a_group_abandons_a_rename_marker_naming_it_as_destination() {
+        let dir = scratch_dir("create-group-clears-destination-marker");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create_group("liquor", String::new(), BTreeSet::new(), BTreeSet::new())
+                .unwrap();
+            fs::write(
+                groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
+                serde_json::to_vec(&RenameMarker {
+                    from: "liquor".to_string(),
+                    to: "spirits".to_string(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            state
+                .create_group("spirits", String::new(), BTreeSet::new(), BTreeSet::new())
+                .unwrap();
+            assert!(
+                !groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists(),
+                "create_group must clear a rename marker that names it as the destination"
+            );
+        }
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            state.group("liquor").is_some(),
+            "the abandoned rename must leave the untouched source group intact"
+        );
+        assert!(
+            state.group("spirits").is_some(),
+            "the freshly created destination group must survive, not be overwritten by the source"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
