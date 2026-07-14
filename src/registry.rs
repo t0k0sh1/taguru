@@ -661,14 +661,20 @@ pub enum RestoreGroupsError {
         applied: usize,
         error: io::Error,
     },
+    /// The request budget ran out mid-write; the `applied` records
+    /// before it landed durably (children-first order, so what landed
+    /// never dangles). Re-importing the stream is exact — a restore is
+    /// a replace and a replay converges.
+    Timeout { applied: usize },
 }
 
 impl RestoreGroupsError {
     /// How many records durably landed despite the refusal — zero for
-    /// every validation arm, the write count for [`Self::Io`].
+    /// every validation arm, the write count for [`Self::Io`] and
+    /// [`Self::Timeout`].
     pub fn applied(&self) -> usize {
         match self {
-            Self::Io { applied, .. } => *applied,
+            Self::Io { applied, .. } | Self::Timeout { applied } => *applied,
             _ => 0,
         }
     }
@@ -712,6 +718,10 @@ impl RestoreGroupsError {
             } => format!(
                 "group '{group}' could not be persisted after {applied} group record(s) \
                  landed: {error} — re-importing the stream is exact"
+            ),
+            Self::Timeout { applied } => format!(
+                "the request budget ran out after {applied} group record(s) landed; \
+                 re-importing the stream is exact"
             ),
         }
     }
@@ -2242,6 +2252,7 @@ impl AppState {
     pub fn restore_groups(
         &self,
         records: &[(String, GroupRecord)],
+        deadline: Deadline,
     ) -> Result<Vec<(String, GroupRestoreOutcome)>, RestoreGroupsError> {
         let mut groups = self.0.groups.write();
         // The prospective map — what memory becomes if every write
@@ -2305,10 +2316,19 @@ impl AppState {
         order.sort_by_key(|&index| depths[records[index].0.as_str()]);
         let mut applied = 0usize;
         for &index in &order {
+            // Bound the fsync-per-record storm to the request budget. A
+            // stream of many tiny group records would otherwise pin
+            // `groups.write()` through one fsync each, freezing every
+            // group op long past the deadline the batch loop honors.
+            // What landed stands (children-first order, so it never
+            // dangles); re-POSTing the whole stream is exact.
+            if deadline.expired() {
+                return Err(RestoreGroupsError::Timeout { applied });
+            }
             let (name, record) = &records[index];
             if outcomes[index].1 == GroupRestoreOutcome::Unchanged {
                 // Already standing in the desired state — it counts as
-                // landed for the Io report below.
+                // landed for the Io/Timeout report below.
                 applied += 1;
                 continue;
             }
@@ -12925,7 +12945,9 @@ mod tests {
             ("kura".to_string(), record(&["sake"], &["kid"])),
             ("kid".to_string(), record(&["bunko"], &[])),
         ];
-        let outcomes = state.restore_groups(&records).unwrap();
+        let outcomes = state
+            .restore_groups(&records, Deadline::unbounded())
+            .unwrap();
         assert_eq!(outcomes[0].1.as_str(), "replaced");
         assert_eq!(outcomes[1].1.as_str(), "created");
         // The replace is the WHOLE record — bunko dropped, description
@@ -12942,7 +12964,9 @@ mod tests {
         assert_eq!(on_disk, records[1].1);
 
         // Restoring the same set again converges to no-ops.
-        let again = state.restore_groups(&records).unwrap();
+        let again = state
+            .restore_groups(&records, Deadline::unbounded())
+            .unwrap();
         assert!(
             again
                 .iter()
@@ -12976,10 +13000,13 @@ mod tests {
         fs::write(blocked.join("occupied"), b"x").unwrap();
 
         let error = state
-            .restore_groups(&[
-                ("a".to_string(), record(&[], &[])),
-                ("b".to_string(), record(&[], &[])),
-            ])
+            .restore_groups(
+                &[
+                    ("a".to_string(), record(&[], &[])),
+                    ("b".to_string(), record(&[], &[])),
+                ],
+                Deadline::unbounded(),
+            )
             .unwrap_err();
         assert!(matches!(
             &error,
@@ -13010,7 +13037,10 @@ mod tests {
         // given and takes the `Unchanged` branch, which counts toward
         // `applied` without writing anything.
         state
-            .restore_groups(&[("a".to_string(), record(&[], &[]))])
+            .restore_groups(
+                &[("a".to_string(), record(&[], &[]))],
+                Deadline::unbounded(),
+            )
             .unwrap();
 
         // "b" is new, so it takes the `write_group` branch. Occupying its
@@ -13023,10 +13053,13 @@ mod tests {
         fs::write(blocked.join("occupied"), b"x").unwrap();
 
         let error = state
-            .restore_groups(&[
-                ("a".to_string(), record(&[], &[])),
-                ("b".to_string(), record(&[], &[])),
-            ])
+            .restore_groups(
+                &[
+                    ("a".to_string(), record(&[], &[])),
+                    ("b".to_string(), record(&[], &[])),
+                ],
+                Deadline::unbounded(),
+            )
             .unwrap_err();
         assert!(matches!(
             &error,
@@ -13036,6 +13069,43 @@ mod tests {
             error.applied(),
             1,
             "\"a\" must count as landed via the unchanged branch"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restore_groups_stops_at_an_expired_deadline_without_writing() {
+        use std::time::Duration;
+
+        let dir = scratch_dir("groups-restore-timeout");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let record = GroupRecord {
+            description: String::new(),
+            contexts: BTreeSet::new(),
+            groups: BTreeSet::new(),
+        };
+
+        // A budget already spent must bound the fsync-per-record loop
+        // before its first write, the way the batch loop bounds itself —
+        // a stream of many tiny group records must not pin the write
+        // lock past the deadline every other group op honors.
+        let deadline = Deadline::after(Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(1));
+        let error = state
+            .restore_groups(&[("a".to_string(), record)], deadline)
+            .unwrap_err();
+        assert!(matches!(&error, RestoreGroupsError::Timeout { applied: 0 }));
+        assert_eq!(error.applied(), 0);
+
+        // Nothing landed — not in memory, not on disk.
+        assert!(
+            state.group("a").is_none(),
+            "no record may land past the budget"
+        );
+        assert!(
+            !groups::group_path(&dir, &file_stem("a")).exists(),
+            "no group file may be written past the budget"
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -13057,10 +13127,13 @@ mod tests {
         // A dangling member refuses the set — the valid record beside
         // it included.
         let refusal = state
-            .restore_groups(&[
-                ("fine".to_string(), record(&["sake"], &[])),
-                ("broken".to_string(), record(&["ghost"], &[])),
-            ])
+            .restore_groups(
+                &[
+                    ("fine".to_string(), record(&["sake"], &[])),
+                    ("broken".to_string(), record(&["ghost"], &[])),
+                ],
+                Deadline::unbounded(),
+            )
             .unwrap_err();
         assert!(matches!(
             &refusal,
@@ -13076,7 +13149,7 @@ mod tests {
         // A child neither standing nor in the set.
         assert!(matches!(
             state
-                .restore_groups(&[("a".to_string(), record(&[], &["nope"]))])
+                .restore_groups(&[("a".to_string(), record(&[], &["nope"]))], Deadline::unbounded())
                 .unwrap_err(),
             RestoreGroupsError::NoSuchChild { group, child } if group == "a" && child == "nope"
         ));
@@ -13084,10 +13157,13 @@ mod tests {
         // A cycle the set closes with itself.
         assert!(matches!(
             state
-                .restore_groups(&[
-                    ("a".to_string(), record(&[], &["b"])),
-                    ("b".to_string(), record(&[], &["a"])),
-                ])
+                .restore_groups(
+                    &[
+                        ("a".to_string(), record(&[], &["b"])),
+                        ("b".to_string(), record(&[], &["a"])),
+                    ],
+                    Deadline::unbounded(),
+                )
                 .unwrap_err(),
             RestoreGroupsError::Nesting(NestingViolation::Cycle(_))
         ));
@@ -13107,11 +13183,14 @@ mod tests {
             .unwrap();
         assert!(matches!(
             state
-                .restore_groups(&[
-                    ("mid".to_string(), record(&[], &["deep"])),
-                    ("deep".to_string(), record(&[], &["deeper"])),
-                    ("deeper".to_string(), record(&[], &[])),
-                ])
+                .restore_groups(
+                    &[
+                        ("mid".to_string(), record(&[], &["deep"])),
+                        ("deep".to_string(), record(&[], &["deeper"])),
+                        ("deeper".to_string(), record(&[], &[])),
+                    ],
+                    Deadline::unbounded(),
+                )
                 .unwrap_err(),
             RestoreGroupsError::Nesting(NestingViolation::TooDeep(_))
         ));
@@ -13120,10 +13199,13 @@ mod tests {
         // One name twice is two truths for one group.
         assert!(matches!(
             state
-                .restore_groups(&[
-                    ("dup".to_string(), record(&[], &[])),
-                    ("dup".to_string(), record(&["sake"], &[])),
-                ])
+                .restore_groups(
+                    &[
+                        ("dup".to_string(), record(&[], &[])),
+                        ("dup".to_string(), record(&["sake"], &[])),
+                    ],
+                    Deadline::unbounded(),
+                )
                 .unwrap_err(),
             RestoreGroupsError::Duplicate(name) if name == "dup"
         ));
@@ -13134,14 +13216,17 @@ mod tests {
             .collect();
         assert!(matches!(
             state
-                .restore_groups(&[(
-                    "wide".to_string(),
-                    GroupRecord {
-                        description: String::new(),
-                        contexts: over,
-                        groups: BTreeSet::new(),
-                    }
-                )])
+                .restore_groups(
+                    &[(
+                        "wide".to_string(),
+                        GroupRecord {
+                            description: String::new(),
+                            contexts: over,
+                            groups: BTreeSet::new(),
+                        },
+                    )],
+                    Deadline::unbounded(),
+                )
                 .unwrap_err(),
             RestoreGroupsError::OverCap {
                 field: "member contexts",

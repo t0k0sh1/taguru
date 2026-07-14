@@ -3260,16 +3260,27 @@ fn restore_refusal(
             state.metrics().record_error(ErrorKind::Io);
             ErrorCode::Internal
         }
+        // A spent budget is not a server fault — the batch-loop timeout
+        // records no error either, and the client resumes by re-POSTing.
+        RestoreGroupsError::Timeout { .. } => ErrorCode::Timeout,
     };
-    error(
-        code,
-        format!(
+    // A budget that ran out mid-restore is a resumable prefix, not a
+    // rejected set: some records may have landed, and the batches
+    // before them did. The validation arms, by contrast, wrote nothing
+    // in the group phase.
+    let message = match &refusal {
+        RestoreGroupsError::Timeout { .. } => format!(
+            "group restore exceeded its budget with {batches_landed} batch(es) durable \
+             (TAGURU_REQUEST_TIMEOUT_SECS tunes this); {}",
+            refusal.text()
+        ),
+        _ => format!(
             "group records refused with every batch landed ({batches_landed} durable); \
              fixing the stream and re-POSTing it whole is exact: {}",
             refusal.text()
         ),
-        started_at,
-    )
+    };
+    error(code, message, started_at)
 }
 
 /// `POST /import` — the batch-file contract (docs/import.html) over
@@ -3466,7 +3477,7 @@ pub async fn import_batch(
         // report a guess.
         let mut group_outcomes: Vec<GroupImportOutcome> = Vec::new();
         if !stream.groups.is_empty() && !query.dry_run {
-            match state.restore_groups(&stream.groups) {
+            match state.restore_groups(&stream.groups, deadline) {
                 Ok(restored) => {
                     for ((name, record), (_, applied)) in stream.groups.iter().zip(&restored) {
                         // A restore replaces the whole record —
