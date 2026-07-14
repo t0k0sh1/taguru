@@ -113,7 +113,20 @@ pub async fn serve(
                     ))
                 })
             })
-            .map(|value| value.to_string());
+            .map(|value| value.to_string())
+            // Each dispatched call was bounded by `max_result_bytes`, but
+            // retrieve composes many into one response — resolved cues,
+            // outlines, associations, activations, citations, and passage
+            // hits sum well past any single part's cap. Bound the composed
+            // whole the same way `call_inner` bounds each part, with the
+            // same too-big guidance, so the client's cap holds end to end.
+            .and_then(|text| {
+                if text.len() > max_result_bytes {
+                    Err(RESULT_TOO_BIG.to_string())
+                } else {
+                    Ok(text)
+                }
+            });
             mcp::response(id, mcp::tool_response(outcome))
         }
         mcp::Call::Tool { name, arguments } => {
@@ -320,6 +333,89 @@ mod tests {
         let text = reply["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("GET /contexts/{name}/export"), "{text}");
         assert!(text.contains("taguru export"), "{text}");
+    }
+
+    /// retrieve composes many dispatched calls into one response; each is
+    /// individually bounded by `max_result_bytes`, but their sum is not
+    /// until this transport bounds the composed whole. A retrieve whose
+    /// pieces each fit yet together overflow the cap must come back as the
+    /// same `isError` too-big result a single oversized call would.
+    ///
+    /// Multi-threaded flavor: the retrieve branch parks on
+    /// `block_in_place`, which panics on the default current-thread test
+    /// runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_composed_retrieve_over_the_cap_is_refused_like_a_single_oversized_call() {
+        // Each resolve answer fits under any sane per-call cap; ten of
+        // them summed into `resolved` do not.
+        let router = Router::new()
+            .route(
+                "/contexts/ctx/resolve",
+                axum::routing::post(|| async {
+                    axum::Json(json!({ "result": [{ "name": "anchor", "note": "x".repeat(400) }] }))
+                }),
+            )
+            .route(
+                "/contexts/ctx/activate",
+                axum::routing::post(|| async {
+                    axum::Json(json!({ "result": { "matches": [] } }))
+                }),
+            );
+        let origins: Vec<String> = (0..10).map(|i| format!("c{i}")).collect();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "retrieve",
+                "arguments": {
+                    "context": "ctx",
+                    "origins": origins,
+                    // Trim the composition to resolve + activate: this is
+                    // the aggregate-cap path, not describe/cite/search.
+                    "auto_pick": false,
+                    "describe_first": false,
+                    "fetch_citations": false,
+                },
+            },
+        });
+
+        // A cap the summed result overruns: refused, escape hatch named.
+        let response = serve(
+            router.clone(),
+            Arc::new(String::new()),
+            None,
+            Bytes::from(body.to_string()),
+            1024,
+            Deadline::unbounded(),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("taguru export"), "{text}");
+
+        // The identical call under a generous cap composes and returns —
+        // proving the cap, not the composition, is what refused it above.
+        let response = serve(
+            router,
+            Arc::new(String::new()),
+            None,
+            Bytes::from(body.to_string()),
+            usize::MAX,
+            Deadline::unbounded(),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(reply["result"]["isError"], json!(true), "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("resolved"), "{text}");
     }
 
     /// The outer request's deadline never passes back through

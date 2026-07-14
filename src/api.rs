@@ -1750,6 +1750,16 @@ pub(crate) const MAX_QUESTIONS_PER_PARAGRAPH: usize = 8;
 /// there is no per-paragraph cap to match `MAX_QUESTIONS_PER_PARAGRAPH`.
 pub(crate) const MAX_SECTION_BYTES: usize = 512;
 
+/// Per-request cap on the number of passage sources one store may
+/// carry. Each source is a whole document tokenized and folded into the
+/// resident index under the context's lock — heavier per item than an
+/// association, so a tenth of [`MAX_ASSOCIATIONS_PER_REQUEST`]. The body
+/// cap bounds the request's total bytes; this bounds how many documents
+/// do that per-item work in a single lock-hold, the same reason an
+/// association batch is refused up front. (The offline import calls the
+/// registry's `store_passages` directly and is not bound by this.)
+pub(crate) const MAX_PASSAGES_PER_REQUEST: usize = 1_000;
+
 /// The optional-body contract of create and audit: an ABSENT body
 /// means defaults, but a PRESENT body must parse as JSON — whatever
 /// the Content-Type header says. `Option<Json<T>>` answered a
@@ -2462,11 +2472,13 @@ pub async fn remove_aliases(
             started_at,
         );
     }
-    // Same WAL-op-per-item cost shape as add_aliases; same cap.
+    // Same WAL-op-per-item cost shape as add_aliases; same cap, and the
+    // same `OverLimit` code add_aliases uses for the over-cap batch — an
+    // oversized request is not a malformed one.
     let names = request.concepts.len() + request.labels.len();
     if names > MAX_ASSOCIATIONS_PER_REQUEST {
         return error(
-            ErrorCode::InvalidArgument,
+            ErrorCode::OverLimit,
             format!(
                 "batch of {names} alias removals exceeds the per-request limit of \
                  {MAX_ASSOCIATIONS_PER_REQUEST}; split the request"
@@ -2682,6 +2694,19 @@ pub async fn store_passages(
     AppJson(request): AppJson<StorePassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    // Refused before any tokenization or lock is taken: nothing of an
+    // oversized batch is stored.
+    if request.passages.len() > MAX_PASSAGES_PER_REQUEST {
+        return error(
+            ErrorCode::OverLimit,
+            format!(
+                "batch of {} passages exceeds the per-request limit of \
+                 {MAX_PASSAGES_PER_REQUEST}; split the store",
+                request.passages.len()
+            ),
+            started_at,
+        );
+    }
     // Source ids are names (the passage text itself is a document and
     // rides under the body cap instead) — and like every name, an
     // empty one is refused: it would list as a blank entry in GET

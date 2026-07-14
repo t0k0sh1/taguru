@@ -2731,6 +2731,7 @@ fn oversized_input_lists_are_refused_before_any_work() {
         Some(json!({"concepts": aliases})),
     );
     assert_eq!(status, 400, "{parsed}");
+    assert_eq!(parsed["code"], json!("over_limit"), "{parsed}");
     assert!(
         parsed["error"]
             .as_str()
@@ -2739,6 +2740,8 @@ fn oversized_input_lists_are_refused_before_any_work() {
         "{parsed}"
     );
 
+    // Removal is over-limit, not malformed — the same `over_limit` code
+    // its add twin returns, not the `invalid_argument` it once gave.
     let removals: Vec<String> = (0..10_001).map(|i| format!("a{i}")).collect();
     let (status, parsed) = server.call(
         "DELETE",
@@ -2746,6 +2749,27 @@ fn oversized_input_lists_are_refused_before_any_work() {
         Some(json!({"concepts": removals})),
     );
     assert_eq!(status, 400, "{parsed}");
+    assert_eq!(parsed["code"], json!("over_limit"), "{parsed}");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("per-request limit"),
+        "{parsed}"
+    );
+
+    // A passage store tokenizes each source under the context lock, so
+    // an oversized batch is refused before any of it lands — like an
+    // association batch, one document's worth of sources per request.
+    let passages: serde_json::Map<String, Value> =
+        (0..1001).map(|i| (format!("s{i}"), json!("t"))).collect();
+    let (status, parsed) = server.call(
+        "POST",
+        "/contexts/caps/sources",
+        Some(json!({"passages": passages})),
+    );
+    assert_eq!(status, 400, "{parsed}");
+    assert_eq!(parsed["code"], json!("over_limit"), "{parsed}");
     assert!(
         parsed["error"]
             .as_str()
