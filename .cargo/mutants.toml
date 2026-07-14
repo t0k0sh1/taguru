@@ -4,3 +4,12 @@
 additional_cargo_args = ["--locked"]
 profile = "mutants"
 timeout_multiplier = 3.0
+
+# dispatch_chunks_concurrently's `index` always comes from a fresh
+# next.fetch_add claim, and first_failure only ever holds a value some
+# earlier claim already consumed — index can never equal first_failure, so
+# `>` and `>=` are equivalent there, not a missing test (the sibling `==`
+# and `<` mutants on the same comparison are caught).
+exclude_re = [
+    "replace > with >= in dispatch_chunks_concurrently",
+]
