@@ -108,7 +108,10 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_EMBED_PARALLEL        concurrent 128-item chunk dispatch for gloss
                                and passage embedding refresh (1 = old
                                sequential behavior); raise to match the
-                               provider's rate limit, not the core count
+                               provider's rate limit, not the core count —
+                               bounds a single context's refresh only;
+                               concurrent refreshes across contexts aren't
+                               serialized and multiply this
   TAGURU_SEMANTIC_FLOOR        semantic entry floor when neither the call nor
                                the context sets one (0.35, calibrated for
                                text-embedding-3-large; model-dependent)
