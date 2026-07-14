@@ -1206,6 +1206,16 @@ fn triple_of(association: &Value) -> Option<(String, String, String)> {
     ))
 }
 
+/// Ceiling on the `origins` cue list [`run_retrieve`] accepts. Each cue
+/// drives its own `resolve` round trip (and, with describe_first, a
+/// `describe`), so an unbounded list would amplify one composed call
+/// into arbitrarily many requests — slipping past the per-request cap
+/// the direct read endpoints put on list inputs, which it reaches one
+/// cue at a time. Mirrors `api::MAX_INPUT_ITEMS`; restated here because
+/// this module compiles into the stdio bridge too, which carries no
+/// `api` module to borrow the constant from.
+const MAX_ORIGIN_CUES: usize = 1000;
+
 /// The composed retrieval loop (`Context.retrieve()` in both SDKs),
 /// reimplemented here so an MCP-only agent gets it in one call instead
 /// of orchestrating five tool calls by hand. `route_tool` stays a pure
@@ -1245,6 +1255,20 @@ pub fn run_retrieve(
             return Err("argument 'origins' must be a string or an array of strings".to_string());
         }
     };
+    // Each origin cue fans out to its own `resolve` round trip (and, with
+    // describe_first, a `describe`), so an unbounded list amplifies one
+    // call into arbitrarily many — slipping past the per-request list cap
+    // the direct read endpoints enforce, since it reaches them one cue at
+    // a time. Refuse it up front, at the same ceiling `overlong` applies
+    // to `origins` on those endpoints.
+    if origins.len() > MAX_ORIGIN_CUES {
+        return Err(format!(
+            "argument 'origins' carries {} cues, past the per-request limit of {}; \
+             split the retrieval",
+            origins.len(),
+            MAX_ORIGIN_CUES
+        ));
+    }
     let auto_pick = arguments
         .get("auto_pick")
         .and_then(Value::as_bool)
@@ -2453,6 +2477,22 @@ mod tests {
         assert_eq!(
             run_retrieve(&json!({"context": "sake"}), |_, _, _| unreachable!()),
             Err("missing required argument 'origins'".to_string())
+        );
+    }
+
+    #[test]
+    fn run_retrieve_refuses_an_origins_list_past_the_input_cap() {
+        // One resolve round trip per cue makes an oversized list a fanout
+        // amplifier, so it is refused before the first call fires — the
+        // way the direct endpoints refuse an overlong `origins` batch.
+        let origins: Vec<String> = (0..=MAX_ORIGIN_CUES).map(|i| format!("cue{i}")).collect();
+        let result = run_retrieve(
+            &json!({ "context": "sake", "origins": origins }),
+            |_, _, _| unreachable!("no request may fire once the list is refused"),
+        );
+        assert!(
+            matches!(&result, Err(message) if message.contains("past the per-request limit")),
+            "{result:?}"
         );
     }
 
