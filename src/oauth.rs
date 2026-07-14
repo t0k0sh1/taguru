@@ -270,6 +270,23 @@ impl Oauth {
                     uri.len()
                 ));
             }
+            // A redirect uri is both what the operator approves on the
+            // consent page and the exact string later matched during
+            // authorize, so — unlike client_name — it cannot be silently
+            // stripped without changing what it matches. An invisible or
+            // bidi character survives URL parsing (it rides in the path or
+            // query, where the parser leaves it be) and HTML escaping, so
+            // it could reorder or hide part of the target the operator
+            // sees. Reject the registration rather than store a uri that
+            // renders as a lie. The offending code point and offset are
+            // named without echoing the raw character back into the error.
+            if let Some((index, c)) = uri.char_indices().find(|(_, c)| is_invisible(*c)) {
+                return Err(format!(
+                    "a redirect uri contains a disallowed invisible character \
+                     (U+{:04X}) at byte {index}",
+                    c as u32
+                ));
+            }
             if !is_https_redirect(uri) && !is_loopback_redirect(uri) {
                 return Err(format!("redirect uri '{uri}' must be https or loopback"));
             }
@@ -1020,6 +1037,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(client.client_name, "Claude Code");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn registration_rejects_invisible_characters_in_redirect_uris() {
+        let (oauth, dir) = scratch_oauth("invisible-redirect");
+        // A redirect uri is a security-critical exact-match target, not a
+        // display label, so an invisible character is rejected rather than
+        // stripped: stripping would change the string the authorize step
+        // later matches, and a U+202E override or zero-width space would
+        // otherwise reorder or hide part of the target the operator
+        // approves on the consent page. The parse-level https check passes
+        // (the character rides in the path), so this guard is what stops
+        // it. Note U+202E sits AFTER the scheme so parsing still succeeds.
+        for uri in [
+            "https://example.com/c\u{202E}b",
+            "https://example.com/\u{200B}cb",
+            "https://example.com/cb\u{FEFF}",
+        ] {
+            assert!(
+                oauth.register_client("app", vec![uri.to_string()]).is_err(),
+                "an invisible character in {uri:?} must be rejected"
+            );
+        }
+        // One invisible uri poisons the whole registration even when the
+        // others are clean — no client is stored on any error path.
+        assert!(
+            oauth
+                .register_client(
+                    "app",
+                    vec![
+                        "https://ok.example/cb".to_string(),
+                        "https://ok.example/c\u{200D}b".to_string(),
+                    ],
+                )
+                .is_err()
+        );
+        // The clean twin of the rejected uris still registers.
+        assert!(
+            oauth
+                .register_client("app", vec!["https://example.com/cb".to_string()])
+                .is_ok()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
