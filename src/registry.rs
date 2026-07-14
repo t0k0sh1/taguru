@@ -40,7 +40,7 @@
 //! behind one separate lock; the only operations that need both take
 //! `groups` BEFORE `registry` — never the other way around.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -3572,21 +3572,22 @@ impl AppState {
         // whatever the previous refresh (if any) already published.
         let existing = VectorStore::load(&path);
         let mut fresh_model = existing.model != embedder.model();
-        let mut embedded_concepts = match self.embed_stale(
+        let (mut embedded_concepts, concept_failure) = self.embed_stale(
             &*embedder,
             &existing.concepts,
             &concepts,
             fresh_model,
             deadline,
-        ) {
-            Ok(embedded) => embedded,
-            Err(error) => return Some(Err(error)),
-        };
-        let mut embedded_labels =
-            match self.embed_stale(&*embedder, &existing.labels, &labels, fresh_model, deadline) {
-                Ok(embedded) => embedded,
-                Err(error) => return Some(Err(error)),
-            };
+        );
+        let (mut embedded_labels, label_failure) =
+            self.embed_stale(&*embedder, &existing.labels, &labels, fresh_model, deadline);
+        // Persist whatever either table bought even when the other fails:
+        // losing already-billed vectors to a sibling's provider error is
+        // the bug this mirrors from the passage refresh. A partial failure
+        // also skips the width probe and re-embed below — that pass returns
+        // Err and is retried, so spending more provider budget on top of a
+        // failure buys nothing.
+        let mut failure = concept_failure.or(label_failure);
         // The model NAME is the staleness discriminator, but a provider
         // can change output width behind a stable name (a backend swap
         // behind the same proxy or gateway). Old-width rows carried next
@@ -3600,7 +3601,8 @@ impl AppState {
         // change of exactly this scenario — backend swap, no gloss
         // edits — undetectable forever. One probe embedding per no-op
         // refresh keeps that from hiding.
-        if !fresh_model
+        if failure.is_none()
+            && !fresh_model
             && carried_width.is_some()
             && fresh_width.is_none()
             && let Some((_, gloss)) = concepts.first().or_else(|| labels.first())
@@ -3610,11 +3612,12 @@ impl AppState {
                     fresh_width = vectors.first().map(Vec::len);
                 }
                 Err(error) => {
-                    return Some(Err(error));
+                    failure = Some(error);
                 }
             }
         }
-        if !fresh_model
+        if failure.is_none()
+            && !fresh_model
             && let (Some(carried), Some(fresh)) = (carried_width, fresh_width)
             && carried != fresh
         {
@@ -3626,16 +3629,13 @@ impl AppState {
                 "embedding width changed under an unchanged model name; re-embedding every gloss"
             );
             fresh_model = true;
-            embedded_concepts =
-                match self.embed_stale(&*embedder, &existing.concepts, &concepts, true, deadline) {
-                    Ok(embedded) => embedded,
-                    Err(error) => return Some(Err(error)),
-                };
-            embedded_labels =
-                match self.embed_stale(&*embedder, &existing.labels, &labels, true, deadline) {
-                    Ok(embedded) => embedded,
-                    Err(error) => return Some(Err(error)),
-                };
+            let (concepts_reembedded, concept_failure) =
+                self.embed_stale(&*embedder, &existing.concepts, &concepts, true, deadline);
+            embedded_concepts = concepts_reembedded;
+            let (labels_reembedded, label_failure) =
+                self.embed_stale(&*embedder, &existing.labels, &labels, true, deadline);
+            embedded_labels = labels_reembedded;
+            failure = concept_failure.or(label_failure);
         }
         let newly_embedded = embedded_concepts.len() + embedded_labels.len();
 
@@ -3656,21 +3656,48 @@ impl AppState {
         }
         store.concepts.extend(embedded_concepts);
         store.labels.extend(embedded_labels);
+        // Prune ghost rows: a name dropped by compaction leaves the live
+        // gloss lists, so nothing above re-embeds or carries it, yet its
+        // stored vector would linger here forever and
+        // semantic_resolve/semantic_twins would keep surfacing a name the
+        // graph no longer holds. A model/width wipe above already dropped
+        // such rows wholesale; this covers ordinary retraction, the way
+        // the passage refresh gets for free by rebuilding.
+        let live_concepts: HashSet<&str> = concepts.iter().map(|(name, _)| name.as_str()).collect();
+        let live_labels: HashSet<&str> = labels.iter().map(|(name, _)| name.as_str()).collect();
+        let before_prune = store.concepts.len() + store.labels.len();
+        store
+            .concepts
+            .retain(|name, _| live_concepts.contains(name.as_str()));
+        store
+            .labels
+            .retain(|name, _| live_labels.contains(name.as_str()));
         let total = store.concepts.len() + store.labels.len();
-        if newly_embedded > 0
+        let pruned = before_prune - total;
+        if (newly_embedded > 0 || pruned > 0)
             && let Err(error) = store.save(&path)
         {
             return Some(Err(format!("vector store not persisted: {error}")));
         }
         // Publish the fresh store so queries never re-read the sidecar.
         *entry.vectors.lock() = Some(Arc::new(store));
-        Some(Ok((newly_embedded, total)))
+        // What landed is durable; a provider failure still returns Err so
+        // the caller sees the pass was partial, and the stale rows it
+        // skipped stay stale for the next refresh to retry.
+        match failure {
+            Some(error) => Some(Err(error)),
+            None => Some(Ok((newly_embedded, total))),
+        }
     }
 
     /// Diffs one gloss table against its stored vectors and embeds what
     /// is new or changed, 128 glosses per provider call. Each vector
     /// remembers the hash of the gloss it came from; `fresh_model`
-    /// marks everything stale.
+    /// marks everything stale. Returns the vectors that landed alongside
+    /// the first provider error, if any — the caller persists the former
+    /// so a sibling table's failure never discards billed work, and the
+    /// stale rows the error skipped stay stale for the next refresh to
+    /// retry.
     fn embed_stale(
         &self,
         embedder: &dyn EmbeddingProvider,
@@ -3678,7 +3705,7 @@ impl AppState {
         entries: &[(String, String)],
         fresh_model: bool,
         deadline: Deadline,
-    ) -> Result<VectorTable, String> {
+    ) -> (VectorTable, Option<String>) {
         let stale: Vec<(String, String, u64)> = entries
             .iter()
             .filter_map(|(name, gloss)| {
@@ -3698,6 +3725,7 @@ impl AppState {
                 self.timed_embed_for_refresh(embedder, &texts, deadline)
             });
         let mut embedded = VectorTable::new();
+        let mut failure: Option<String> = None;
         for (chunk, outcome) in stale_chunks.iter().zip(outcomes) {
             match outcome {
                 Some(Ok(vectors)) => embedded.extend(
@@ -3706,11 +3734,14 @@ impl AppState {
                         .zip(vectors)
                         .map(|((name, _, hash), vector)| (name.clone(), (*hash, vector))),
                 ),
-                Some(Err(error)) => return Err(error),
+                // Keep the vectors that did land so the caller can persist
+                // them; report the first error. Stale rows this failure
+                // skipped stay stale in the diff for the next refresh.
+                Some(Err(error)) => failure = failure.or(Some(error)),
                 None => {}
             }
         }
-        Ok(embedded)
+        (embedded, failure)
     }
 
     /// Whether the vector lane over paragraphs is on at all: a provider
@@ -11444,6 +11475,137 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((embedded, total), (0, 3));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn gloss_refresh_prunes_vectors_for_a_concept_dropped_by_compaction() {
+        let dir = scratch_dir("gloss-prune");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let (_, total) = state
+            .refresh_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            total, 5,
+            "concepts 蔵/高瀬/旧銘 plus labels 杜氏/廃止銘柄 all embed"
+        );
+
+        // Retract the only source behind 旧銘/廃止銘柄, then compact so
+        // those names actually leave the graph.
+        state.retract_source("sake", "gone.md").unwrap();
+        state
+            .compact_context("sake", Deadline::unbounded())
+            .unwrap();
+
+        let (_, total) = state
+            .refresh_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            total, 3,
+            "the vanished concept 旧銘 and label 廃止銘柄 must not linger as ghost rows"
+        );
+        let sidecar = VectorStore::load(&vectors_path(&dir, &file_stem("sake")));
+        assert!(
+            !sidecar.concepts.contains_key("旧銘"),
+            "the dropped concept's row reached neither memory nor disk"
+        );
+        assert!(
+            !sidecar.labels.contains_key("廃止銘柄"),
+            "the dropped label's row reached neither memory nor disk"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn gloss_refresh_keeps_concept_vectors_when_the_label_table_fails() {
+        /// Succeeds except on exactly its `fail_on`-th call (0-based).
+        struct FlakyEmbeddings {
+            calls: std::sync::atomic::AtomicUsize,
+            fail_on: usize,
+        }
+        impl EmbeddingProvider for FlakyEmbeddings {
+            fn model(&self) -> &str {
+                "flaky"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let call = self.calls.fetch_add(1, Ordering::Relaxed);
+                if call == self.fail_on {
+                    return Err("provider hiccup".to_string());
+                }
+                Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            }
+        }
+
+        let dir = scratch_dir("gloss-partial");
+        // Concepts embed on call 0 (success); the labels table is call 1,
+        // the one that fails.
+        let embedder = Some(Arc::new(FlakyEmbeddings {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_on: 1,
+        }) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let error = state
+            .refresh_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("hiccup"), "{error}");
+        let sidecar = VectorStore::load(&vectors_path(&dir, &file_stem("sake")));
+        assert_eq!(
+            sidecar.concepts.len(),
+            2,
+            "the concepts the provider already billed for stay durable despite the label failure"
+        );
+        assert!(
+            sidecar.labels.is_empty(),
+            "the failed label table wrote nothing"
+        );
+
+        // The next refresh buys only the labels the first pass missed.
+        let (embedded, total) = state
+            .refresh_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!((embedded, total), (1, 3));
 
         let _ = fs::remove_dir_all(dir);
     }
