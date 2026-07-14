@@ -2073,10 +2073,16 @@ impl Context {
                 continue;
             }
             attributed_count += record.count;
-            attributed_sum += record.sum;
+            accumulate_saturating(&mut attributed_sum, record.sum);
         }
-        (attributed_count < edge.count)
-            .then(|| (edge.sum - attributed_sum, edge.count - attributed_count))
+        (attributed_count < edge.count).then(|| {
+            // edge.sum and attributed_sum are each finite, but their
+            // difference can still overflow (f64::MAX − (−f64::MAX)):
+            // saturate it like every other cross-record sum.
+            let mut residual = edge.sum;
+            accumulate_saturating(&mut residual, -attributed_sum);
+            (residual, edge.count - attributed_count)
+        })
     }
 
     /// Context-wide unsourced-weight summary: `(edges, total weight)`.
@@ -2096,7 +2102,7 @@ impl Context {
         for edge in &self.edges {
             if let Some((residual, _)) = self.unsourced_share(edge, unattributed) {
                 edges += 1;
-                total += residual.abs();
+                accumulate_saturating(&mut total, residual.abs());
             }
         }
         (edges, total)
@@ -2497,12 +2503,23 @@ impl Context {
                     )
                 })
                 .collect();
+            // The edge total is its average times its count by
+            // construction, but `sum / count` rounds up for some values,
+            // so the product can tip just past f64::MAX to ±inf even
+            // though the original (saturated) sum was finite. install_edge
+            // needs a finite sum — the image invariant its debug_assert
+            // stands in for — so clamp the reconstruction the same way the
+            // per-source sums are re-accumulated.
+            let mut edge_sum = association.weight * association.count as f64;
+            if !edge_sum.is_finite() {
+                edge_sum = f64::MAX.copysign(edge_sum);
+            }
             fresh.install_edge(
                 &association.subject,
                 &association.label,
                 &association.object,
                 association.count,
-                association.weight * association.count as f64,
+                edge_sum,
                 &attributions,
             )?;
         }
@@ -3494,6 +3511,77 @@ mod tests {
         assert!(weight_between(&context, "a", "r", "b").is_finite());
         Context::from_bytes(&context.to_bytes())
             .expect("a context whose retraction saturated must still round-trip");
+    }
+
+    #[test]
+    fn compacting_a_saturated_edge_reconstructs_a_finite_sum() {
+        // compaction rebuilds each edge from its average weight and count,
+        // then hands the product `weight * count` to install_edge. An edge
+        // whose sum saturated at f64::MAX carries a count that need not
+        // divide it evenly, so the average rounds up just enough that the
+        // product tips back past f64::MAX to +inf — and install_edge's
+        // debug_assert demands the finite sum the image invariant promises.
+        // The reconstruction must re-clamp, exactly as the live folds do.
+        let mut context = Context::default();
+        // Three folds of f64::MAX leave the edge sum saturated at f64::MAX
+        // with count 3; (f64::MAX / 3) * 3 rounds to +inf.
+        context.associate("a", "r", "b", f64::MAX).unwrap();
+        context.associate("a", "r", "b", f64::MAX).unwrap();
+        context.associate("a", "r", "b", f64::MAX).unwrap();
+
+        let (fresh, _) = context
+            .compacted(Deadline::unbounded())
+            .expect("compacting a saturated edge must not reconstruct a non-finite sum");
+        assert!(
+            weight_between(&fresh, "a", "r", "b").is_finite(),
+            "the reconstructed edge weight must stay finite"
+        );
+        // The clamped image must still round-trip, the same guarantee the
+        // live saturation path gives.
+        Context::from_bytes(&fresh.to_bytes())
+            .expect("a compacted context with a clamped edge sum must round-trip");
+    }
+
+    #[test]
+    fn unsourced_residuals_saturate_across_opposite_extremes() {
+        // The unsourced residual is `edge.sum - attributed_sum`. With a
+        // positive-saturated edge sum and a negative-saturated attributed
+        // sum, that difference (f64::MAX − (−f64::MAX)) rounds to +inf
+        // unless it saturates like every other cross-record sum — and the
+        // context-wide total then sums those residuals, so two saturated
+        // edges would overflow it too. An infinite residual would poison
+        // the /metrics gauges and `taguru inspect` that read the summary.
+        let mut context = Context::default();
+        for subject in ["a", "c"] {
+            // A real source drives the attributed sum to −f64::MAX...
+            context
+                .associate_from(subject, "r", "b", -f64::MAX, "src", None)
+                .unwrap();
+            context
+                .associate_from(subject, "r", "b", -f64::MAX, "src", None)
+                .unwrap();
+            // ...while sourceless folds pull the edge sum back to +f64::MAX,
+            // leaving unsourced count for the residual to describe.
+            context.associate(subject, "r", "b", f64::MAX).unwrap();
+            context.associate(subject, "r", "b", f64::MAX).unwrap();
+        }
+
+        // Per-edge: each residual stays finite instead of reaching +inf.
+        let flagged = context.unsourced_edges(0.0, Deadline::unbounded()).unwrap();
+        assert_eq!(flagged.len(), 2);
+        assert!(
+            flagged.iter().all(|edge| edge.weight.is_finite()),
+            "each residual must saturate rather than reach infinity"
+        );
+
+        // Context-wide: summing two saturated residuals must saturate too,
+        // not overflow the total to +inf.
+        let (edges, total) = context.unsourced_summary();
+        assert_eq!(edges, 2);
+        assert!(
+            total.is_finite() && total > 0.0,
+            "the summary total must stay finite across saturated residuals, got {total}"
+        );
     }
 
     #[test]
