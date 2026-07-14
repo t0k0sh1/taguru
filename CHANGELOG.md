@@ -8,6 +8,16 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `TAGURU_EMBED_PARALLEL` (default 1, the prior sequential behavior):
+  gloss refresh and passage refresh now dispatch each 128-item
+  embedding chunk to the provider on up to `N` worker threads instead
+  of one chunk at a time (#65). Gloss refresh stays all-or-nothing —
+  the first chunk to fail, by index, still fails the whole refresh and
+  persists nothing. Passage refresh stays partial-persist, but under
+  parallelism the persisted subset is no longer necessarily a prefix
+  of the original order — it's whatever subset completed before the
+  first failure was recorded. Raise to match the provider's rate
+  limit, not the machine's core count.
 - `TAGURU_MAX_CONCURRENT_HEAVY_OPS` (default 2; `0` disables): one
   shared, non-queuing semaphore around `audit_vocabulary` and
   `compact_context`, over both raw HTTP and MCP dispatch. Once full,
