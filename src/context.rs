@@ -1300,9 +1300,15 @@ impl Context {
         let tally = |edges: &mut dyn Iterator<Item = EdgeId>| -> Vec<LabelUsage> {
             let mut counts: HashMap<LabelId, usize> = HashMap::new();
             for edge_id in edges {
-                *counts
-                    .entry(self.edges[edge_id as usize].label)
-                    .or_insert(0) += 1;
+                let edge = &self.edges[edge_id as usize];
+                // Skip retracted edges (count == 0): describe reports how
+                // often a label is used by LIVE facts, so a withdrawn one
+                // must not inflate the tally. Same dead-edge test as
+                // heaviest/compacted/the export.
+                if edge.count == 0 {
+                    continue;
+                }
+                *counts.entry(edge.label).or_insert(0) += 1;
             }
             let mut usages: Vec<(LabelId, usize)> = counts.into_iter().collect();
             usages.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -1858,7 +1864,16 @@ impl Context {
     /// cumulative |sum| descending (not the averaged public weight),
     /// ties toward insertion order.
     fn heaviest(&self, edges: impl Iterator<Item = EdgeId>, keep: usize) -> Vec<EdgeId> {
-        let mut edges: Vec<EdgeId> = edges.collect();
+        // Retracted edges linger in the chain walk with count == 0 and a
+        // zeroed sum (retract_association unlinks only the attribution
+        // records, not the edge itself). Their |sum| of 0 sorts last, so
+        // they surface only when a concept has fewer than `keep` live
+        // facts — but then gloss_text renders a withdrawn fact as current.
+        // count == 0 is the dead-edge test everywhere else (compacted, the
+        // export); apply it here too.
+        let mut edges: Vec<EdgeId> = edges
+            .filter(|&id| self.edges[id as usize].count > 0)
+            .collect();
         edges.sort_by(|&a, &b| {
             self.edges[b as usize]
                 .sum
@@ -6135,6 +6150,33 @@ mod tests {
         context.associate("A", "関係", "B", 0.0).unwrap();
 
         assert_eq!(context.concept_gloss("A", 1).unwrap(), "A。関係はB。");
+    }
+
+    #[test]
+    fn a_retracted_fact_is_excluded_from_gloss_and_describe() {
+        let mut context = Context::default();
+        context.associate("A", "関係", "B", 1.0).unwrap();
+        context.associate("A", "別関係", "C", 1.0).unwrap();
+        // Fully retract the first fact: its count falls to 0 but the edge
+        // stays linked in A's outgoing chain (retract unlinks only the
+        // attribution records, not the edge itself).
+        context.retract_association("A", "関係", "B");
+
+        // Even asking for more facts than remain live, the withdrawn one
+        // (|sum| 0, so it would otherwise sort in at the tail) must not
+        // surface as current knowledge.
+        assert_eq!(context.concept_gloss("A", 5).unwrap(), "A。別関係はC。");
+
+        // describe tallies live facts only — the dead label is gone.
+        let description = context.describe("A").unwrap();
+        assert_eq!(
+            description.as_subject,
+            vec![LabelUsage {
+                label: "別関係".to_string(),
+                count: 1,
+            }]
+        );
+        assert!(description.as_object.is_empty());
     }
 
     #[test]
