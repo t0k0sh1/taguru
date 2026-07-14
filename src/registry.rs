@@ -3853,90 +3853,141 @@ impl AppState {
         let records = store.snapshot();
         let path = pvectors_path(&self.0.data_dir, &file_stem(name));
         let existing = PassageVectorStore::load(&path);
-        let fresh_model = existing.model != embedder.model();
-        let carried: HashMap<(&str, u32, u64, Option<u64>), &[f32]> = if fresh_model {
-            HashMap::new()
-        } else {
-            existing
-                .iter()
-                .map(|(key, row)| {
-                    (
-                        (key.source.as_str(), key.index, key.hash, key.question_hash),
-                        row,
-                    )
-                })
-                .collect()
-        };
-
-        // Deterministic walk — snapshot() is sorted by source, spans by
-        // position, questions by paragraph — so the same rows win the
-        // limit run after run. Each paragraph offers its own text row
-        // and then one row per stored question, every one keyed to the
-        // PARAGRAPH (hash included) with the question's own hash as the
-        // discriminator.
-        let mut fresh = PassageVectorStore::new(embedder.model());
-        let mut to_embed: Vec<(PassageKey, String)> = Vec::new();
-        let mut skipped_over_limit = 0usize;
-        for (source, record) in &records {
-            for (span, text) in record.paragraph_texts() {
-                let question_rows = record
-                    .questions
+        let mut fresh_model = existing.model != embedder.model();
+        // A provider can change output width behind a stable model name
+        // (a backend swap behind the same proxy). Old-width rows carried
+        // next to new-width ones would let PassageVectorStore::push drop
+        // every new row this pass embeds — a stale store that also
+        // over-reports what it stored — so a width disagreement stales
+        // the whole table, exactly as a model rename does. Detected the
+        // way the concept refresh detects it; the redo re-walks `records`
+        // (still in scope) so it carries no extra memory. `dim` is
+        // private, so the carried width is the first stored row's length.
+        let carried_width = existing.iter().next().map(|(_, row)| row.len());
+        let (fresh, embedded, skipped_over_limit, failure) = loop {
+            let carried: HashMap<(&str, u32, u64, Option<u64>), &[f32]> = if fresh_model {
+                HashMap::new()
+            } else {
+                existing
                     .iter()
-                    .filter(|&&(paragraph, _)| paragraph == span.index)
-                    .map(|(_, question)| (Some(fnv1a(question)), question.as_str()));
-                for (question_hash, row_text) in std::iter::once((None, text)).chain(question_rows)
-                {
-                    // Stored before the write surfaces refused empty
-                    // question text, an empty row would be sent to the
-                    // provider verbatim — and providers refuse
-                    // zero-length input, failing that row's whole
-                    // chunk and abandoning the pass at the same spot
-                    // on every retry. Empty text retrieves nothing
-                    // anyway: skip it.
-                    if row_text.is_empty() {
-                        continue;
-                    }
-                    if fresh.len() + to_embed.len() >= self.0.passage_vector_limit {
-                        skipped_over_limit += 1;
-                        continue;
-                    }
-                    let key = PassageKey {
-                        source: source.clone(),
-                        index: span.index,
-                        hash: span.hash,
-                        question_hash,
-                    };
-                    match carried.get(&(source.as_str(), span.index, span.hash, question_hash)) {
-                        Some(row) => fresh.push(key, row.to_vec()),
-                        None => to_embed.push((key, row_text.to_string())),
-                    }
-                }
-            }
-        }
+                    .map(|(key, row)| {
+                        (
+                            (key.source.as_str(), key.index, key.hash, key.question_hash),
+                            row,
+                        )
+                    })
+                    .collect()
+            };
 
-        let to_embed_chunks: Vec<&[(PassageKey, String)]> = to_embed.chunks(128).collect();
-        let outcomes =
-            dispatch_chunks_concurrently(&to_embed_chunks, self.0.embed_parallel, |chunk| {
-                if deadline.expired() {
-                    return Err(DeadlineExceeded.to_string());
-                }
-                let texts: Vec<&str> = chunk.iter().map(|(_, text)| text.as_str()).collect();
-                self.timed_embed_for_refresh(embedder.as_ref(), &texts, deadline)
-            });
-        let mut embedded = 0usize;
-        let mut failure: Option<String> = None;
-        for (chunk, outcome) in to_embed_chunks.iter().zip(outcomes) {
-            match outcome {
-                Some(Ok(vectors)) => {
-                    for ((key, _), vector) in chunk.iter().zip(vectors) {
-                        fresh.push(key.clone(), vector);
-                        embedded += 1;
+            // Deterministic walk — snapshot() is sorted by source, spans by
+            // position, questions by paragraph — so the same rows win the
+            // limit run after run. Each paragraph offers its own text row
+            // and then one row per stored question, every one keyed to the
+            // PARAGRAPH (hash included) with the question's own hash as the
+            // discriminator.
+            let mut fresh = PassageVectorStore::new(embedder.model());
+            let mut to_embed: Vec<(PassageKey, String)> = Vec::new();
+            let mut skipped_over_limit = 0usize;
+            for (source, record) in &records {
+                for (span, text) in record.paragraph_texts() {
+                    let question_rows = record
+                        .questions
+                        .iter()
+                        .filter(|&&(paragraph, _)| paragraph == span.index)
+                        .map(|(_, question)| (Some(fnv1a(question)), question.as_str()));
+                    for (question_hash, row_text) in
+                        std::iter::once((None, text)).chain(question_rows)
+                    {
+                        // Stored before the write surfaces refused empty
+                        // question text, an empty row would be sent to the
+                        // provider verbatim — and providers refuse
+                        // zero-length input, failing that row's whole
+                        // chunk and abandoning the pass at the same spot
+                        // on every retry. Empty text retrieves nothing
+                        // anyway: skip it.
+                        if row_text.is_empty() {
+                            continue;
+                        }
+                        if fresh.len() + to_embed.len() >= self.0.passage_vector_limit {
+                            skipped_over_limit += 1;
+                            continue;
+                        }
+                        let key = PassageKey {
+                            source: source.clone(),
+                            index: span.index,
+                            hash: span.hash,
+                            question_hash,
+                        };
+                        match carried.get(&(source.as_str(), span.index, span.hash, question_hash))
+                        {
+                            Some(row) => fresh.push(key, row.to_vec()),
+                            None => to_embed.push((key, row_text.to_string())),
+                        }
                     }
                 }
-                Some(Err(error)) => failure = failure.or(Some(error)),
-                None => {}
             }
-        }
+
+            let to_embed_chunks: Vec<&[(PassageKey, String)]> = to_embed.chunks(128).collect();
+            let outcomes =
+                dispatch_chunks_concurrently(&to_embed_chunks, self.0.embed_parallel, |chunk| {
+                    if deadline.expired() {
+                        return Err(DeadlineExceeded.to_string());
+                    }
+                    let texts: Vec<&str> = chunk.iter().map(|(_, text)| text.as_str()).collect();
+                    self.timed_embed_for_refresh(embedder.as_ref(), &texts, deadline)
+                });
+            let mut embedded = 0usize;
+            let mut failure: Option<String> = None;
+            let mut fresh_width: Option<usize> = None;
+            for (chunk, outcome) in to_embed_chunks.iter().zip(outcomes) {
+                match outcome {
+                    Some(Ok(vectors)) => {
+                        for ((key, _), vector) in chunk.iter().zip(vectors) {
+                            fresh_width.get_or_insert(vector.len());
+                            fresh.push(key.clone(), vector);
+                            embedded += 1;
+                        }
+                    }
+                    Some(Err(error)) => failure = failure.or(Some(error)),
+                    None => {}
+                }
+            }
+            // Unchanged hashes embed nothing, which would leave the width
+            // change of exactly this scenario — backend swap, no passage
+            // edits — undetectable. One probe embedding per no-op refresh
+            // keeps it from hiding, matching the concept refresh.
+            if failure.is_none()
+                && !fresh_model
+                && carried_width.is_some()
+                && fresh_width.is_none()
+                && let Some(probe) = records
+                    .iter()
+                    .flat_map(|(_, record)| record.paragraph_texts())
+                    .map(|(_, text)| text)
+                    .find(|text| !text.is_empty())
+            {
+                match self.timed_embed_for_refresh(embedder.as_ref(), &[probe], deadline) {
+                    Ok(vectors) => fresh_width = vectors.first().map(Vec::len),
+                    Err(error) => failure = Some(error),
+                }
+            }
+            if failure.is_none()
+                && !fresh_model
+                && let (Some(carried_w), Some(fresh_w)) = (carried_width, fresh_width)
+                && carried_w != fresh_w
+            {
+                tracing::warn!(
+                    context = name,
+                    model = embedder.model(),
+                    carried = carried_w,
+                    fresh = fresh_w,
+                    "passage embedding width changed under an unchanged model name; re-embedding every passage"
+                );
+                fresh_model = true;
+                continue;
+            }
+            break (fresh, embedded, skipped_over_limit, failure);
+        };
 
         // Publish under the entry lock (a delete that won it must not
         // see its files recreated), and only when something changed —
@@ -10656,13 +10707,16 @@ mod tests {
             "the refresh claims the dirty flag"
         );
 
-        // Unchanged corpus: nothing embeds, nobody talks to the provider.
+        // Unchanged corpus: nothing re-embeds. The one provider call is
+        // the width probe that guards against a silent backend swap (a
+        // changed vector width behind an unchanged model name), the same
+        // one-embedding-per-no-op cost the gloss refresh pays.
         let again = state
             .refresh_passage_embeddings("sake", Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!((again.embedded, again.total), (0, 3));
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -10747,6 +10801,114 @@ mod tests {
         );
         let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
         assert_eq!(sidecar.len(), 1, "the prune reached the disk too");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A provider that changes output width behind a stable model name (a
+    /// backend swap behind the same proxy) must stale the whole carried
+    /// passage table, exactly as the gloss refresh does: paragraph hashes
+    /// are unchanged, so without a width check old-width rows would pin
+    /// the store's dimension and `PassageVectorStore::push` would drop
+    /// every new-width row this pass embeds — silently, at a warn.
+    #[test]
+    fn a_passage_width_change_under_the_same_model_name_re_embeds_everything() {
+        struct WidthEmbeddings(Arc<std::sync::atomic::AtomicUsize>);
+        impl EmbeddingProvider for WidthEmbeddings {
+            fn model(&self) -> &str {
+                "stable-name"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let width = self.0.load(Ordering::Relaxed);
+                Ok(texts
+                    .iter()
+                    .map(|_| {
+                        let mut vector = vec![0.0; width];
+                        vector[0] = 1.0;
+                        vector
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("pvec-width");
+        let width = Arc::new(std::sync::atomic::AtomicUsize::new(2));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(WidthEmbeddings(Arc::clone(&width))), 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "最初の段落。".to_string());
+        passages.insert("doc-b".to_string(), "二番目の段落。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        let first = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!((first.embedded, first.total), (2, 2));
+        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        assert!(
+            sidecar.iter().all(|(_, row)| row.len() == 2),
+            "the first pass stored 2-dim rows"
+        );
+
+        // Probe path: same passages (every hash carried, nothing else
+        // reveals the width) but wider vectors. One probe embedding must
+        // catch the change and re-embed every row, or the store keeps its
+        // stale 2-dim rows against a provider now speaking 3.
+        width.store(3, Ordering::Relaxed);
+        let widened = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (widened.embedded, widened.total),
+            (2, 2),
+            "an unchanged corpus still re-embeds every row on a width change"
+        );
+        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        assert_eq!(sidecar.len(), 2);
+        assert!(
+            sidecar.iter().all(|(_, row)| row.len() == 3),
+            "every stored row is the new width — none dropped, none left at the old one"
+        );
+
+        // Embedded-rows path: a width change that rides alongside an edit
+        // is caught from the freshly embedded rows directly, no probe. The
+        // one unchanged paragraph must not survive at the old width.
+        width.store(4, Ordering::Relaxed);
+        let mut edited = BTreeMap::new();
+        edited.insert("doc-a".to_string(), "改訂された段落。".to_string());
+        edited.insert("doc-b".to_string(), "二番目の段落。".to_string());
+        state
+            .store_passages("sake", plain(edited))
+            .unwrap()
+            .unwrap();
+        let mixed = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (mixed.embedded, mixed.total),
+            (2, 2),
+            "the edit's new width stales the carried row too"
+        );
+        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        assert_eq!(sidecar.len(), 2);
+        assert!(
+            sidecar.iter().all(|(_, row)| row.len() == 4),
+            "the carried old-width row was re-embedded, not dropped"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
