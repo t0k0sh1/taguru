@@ -33,6 +33,13 @@ __all__ = [
     "Activation",
     "ActivationPage",
     "TieredResolution",
+    "NearestResolution",
+    "NearestGloss",
+    "NearestSpellings",
+    "LexicalExplain",
+    "SemanticExplain",
+    "ResolveRanking",
+    "ResolveExplanation",
     "ConceptDescription",
     "LabelPage",
     "AliasPage",
@@ -43,6 +50,11 @@ __all__ = [
     "LaneEvidence",
     "PassageLanes",
     "PassageHit",
+    "TermContribution",
+    "Bm25Explain",
+    "VectorExplain",
+    "RankingExplain",
+    "SearchExplanation",
     "Citation",
     "RetractOutcome",
     "RetractAssociationOutcome",
@@ -232,6 +244,97 @@ class TieredResolution:
 
 
 @dataclass(slots=True, frozen=True)
+class NearestResolution:
+    """One stored spelling near a cue. ``kind`` names the lexical relation
+    (``"exact"``/``"alias"``/``"containment"``/``"fuzzy"``)."""
+
+    name: str
+    score: float
+    kind: str
+
+
+@dataclass(slots=True, frozen=True)
+class NearestGloss:
+    """A concept whose gloss embedding sits nearest the cue's."""
+
+    name: str
+    cosine: float
+
+
+@dataclass(slots=True, frozen=True)
+class NearestSpellings:
+    """Nearest stored spellings for a ``not_in_vocabulary`` verdict — the
+    fix (register an alias) is one step away. ``semantic_note`` explains a
+    missing semantic list (no provider, no gloss)."""
+
+    lexical: list[NearestResolution]
+    semantic: list[NearestGloss]
+    semantic_note: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class LexicalExplain:
+    """The lexical tier's account: the Dice/coverage ``score`` the resolver
+    gave (cue → canonical) next to the ``floor`` in effect. ``confident`` is
+    whether the tier's best candidate cleared 0.5 — the predicate deciding
+    if the semantic tier joins at all."""
+
+    floor: float
+    confident: bool
+    score: float | None = None
+    kind: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SemanticExplain:
+    """The semantic tier's account: whether it ``entered`` this call, the
+    ``reason`` when it could not, and the expected name's gloss ``cosine``
+    against the ``floor`` when the sweep ran. ``cap`` is the fixed count the
+    tier serves (not a request knob)."""
+
+    entered: bool
+    reason: str | None = None
+    floor: float | None = None
+    cosine: float | None = None
+    rank: int | None = None
+    cap: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ResolveRanking:
+    """Where the canonical stands against the served list: its ``rank`` and
+    ``tier`` when present, and a ``limit_to_reach`` verified by rerunning the
+    real serve computation."""
+
+    limit: int
+    served: bool
+    rank: int | None = None
+    tier: str | None = None
+    score: float | None = None
+    limit_to_reach: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ResolveExplanation:
+    """Why a name did (or didn't) resolve for a cue. ``verdict`` is machine-
+    readable, ``summary`` human-readable, the rest is evidence: which tiers
+    ran, what they scored, and how the expected name ranked. A diagnosed
+    miss is a success — every explain call is a 200."""
+
+    verdict: str
+    summary: str
+    cue: str
+    expected: str
+    in_vocabulary: bool
+    canonical: str | None = None
+    expected_kind: str | None = None
+    lexical: LexicalExplain | None = None
+    semantic: SemanticExplain | None = None
+    ranking: ResolveRanking | None = None
+    nearest: NearestSpellings | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class ConceptDescription:
     concept: str
     as_subject: list[LabelUsage]
@@ -316,6 +419,79 @@ class CrossPassageHit(PassageHit):
     within one context only — the cross-context order is rank interleaving."""
 
     context: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class TermContribution:
+    """One query term against the target paragraph: ``df`` paragraphs carry
+    it corpus-wide (its ``idf`` follows), the target carries it ``tf`` times,
+    adding ``contribution`` to the BM25 score. ``tf`` 0 with a high ``df`` is
+    the "matched only ubiquitous bigrams" signature."""
+
+    term: str
+    tf: float
+    df: int
+    idf: float
+    contribution: float
+
+
+@dataclass(slots=True, frozen=True)
+class Bm25Explain:
+    """The lexical lane's evidence: the target's ``rank`` in that lane, its
+    BM25 ``score``, and the score's per-term addends."""
+
+    score: float
+    terms: list[TermContribution]
+    rank: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class VectorExplain:
+    """The vector lane's evidence — or the ``reason`` there is none.
+    ``cosine`` is the target's best across its rows, floor or no floor."""
+
+    ran: bool
+    reason: str | None = None
+    floor: float | None = None
+    cosine: float | None = None
+    rank: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class RankingExplain:
+    """Where the target stands in the fused ranking ``search_passages``
+    truncates: its ``rank`` against ``ranked`` scored candidates, the
+    ``cutoff_score`` the ``limit`` served down to, and a ``limit_to_reach``
+    verified by rerunning the real serve computation."""
+
+    fused: bool
+    ranked: int
+    limit: int
+    served: bool
+    rank: int | None = None
+    score: float | None = None
+    cutoff_score: float | None = None
+    limit_to_reach: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SearchExplanation:
+    """Why a source did (or didn't) appear for a query. ``verdict`` is
+    machine-readable, ``summary`` human-readable, the rest is evidence: the
+    query's ``query_terms``, the lexical/vector lanes, and the ranking. A
+    diagnosed miss is a success — every explain call is a 200."""
+
+    verdict: str
+    summary: str
+    source: str
+    paragraph: int | None = None
+    paragraphs: int | None = None
+    paragraph_named: bool | None = None
+    query_terms: list[str] | None = None
+    paragraph_terms: list[str] | None = None
+    bm25: Bm25Explain | None = None
+    vector: VectorExplain | None = None
+    ranking: RankingExplain | None = None
 
 
 @dataclass(slots=True, frozen=True)

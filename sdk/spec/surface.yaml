@@ -77,6 +77,14 @@ classes:
       route: "POST /contexts/{name}/resolve_label"
       args: [cue]
       options: [dice_floor, semantic_floor, limit]
+    explain_resolve:
+      route: "POST /contexts/{name}/resolve/explain"
+      args: [cue, expected]
+      options: [dice_floor, semantic_floor, limit]
+    explain_resolve_label:
+      route: "POST /contexts/{name}/resolve_label/explain"
+      args: [cue, expected]
+      options: [dice_floor, semantic_floor, limit]
     describe: { route: "POST /contexts/{name}/describe", args: [concept] }
     query:
       route: "POST /contexts/{name}/query"
@@ -118,6 +126,10 @@ classes:
       route: "POST /contexts/{name}/sources/search"
       args: [query]
       options: [limit]
+    explain_search_passages:
+      route: "POST /contexts/{name}/sources/search/explain"
+      args: [query, source]
+      options: [paragraph, limit]
     retract_source: { route: "POST /contexts/{name}/sources/retract", args: [source] }
     list_sources: { route: "GET /contexts/{name}/sources", options: [limit, after, prefix] }
     iter_sources: { route: "GET /contexts/{name}/sources", options: [limit, prefix] }

@@ -38,6 +38,12 @@ export interface TaguruRetrieverFields extends BaseRetrieverInput {
   base_url?: string;
   api_key?: string;
   timeout?: number;
+  /**
+   * How many Documents to return (default 8). Fixed at construction: unlike
+   * the Python package — where LangChain forwards a per-call `k` kwarg
+   * (`invoke(query, k=3)`) into `_get_relevant_documents` — LangChain JS gives
+   * `_getRelevantDocuments` no per-call channel, so `k` can only be set here.
+   */
   k?: number;
   include_graph?: boolean;
   include_text?: boolean;
@@ -195,6 +201,9 @@ export class TaguruRetriever extends BaseRetriever {
     return graphDocuments(page.matches, citations, this.include_graph_only_facts, target);
   }
 
+  // No per-call `k` parameter: LangChain JS does not forward extra kwargs to
+  // `_getRelevantDocuments` the way the Python framework does, so `this.k`
+  // (set at construction) is authoritative. See the `k` field's note.
   async _getRelevantDocuments(
     query: string,
     _runManager?: CallbackManagerForRetrieverRun,

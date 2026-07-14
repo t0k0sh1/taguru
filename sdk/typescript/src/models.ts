@@ -229,6 +229,104 @@ export interface TieredResolution {
   gloss?: string;
 }
 
+// -- resolve explain -----------------------------------------------------------
+
+/**
+ * One stored spelling near a cue. `kind` names the lexical relation — never
+ * adopt a containment/fuzzy neighbor as the fix without reading the gloss.
+ */
+export interface NearestResolution {
+  name: string;
+  score: number;
+  kind: "exact" | "alias" | "containment" | "fuzzy";
+}
+
+/** A concept whose gloss embedding sits nearest the cue's. */
+export interface NearestGloss {
+  name: string;
+  cosine: number;
+}
+
+/**
+ * Nearest stored spellings for a `not_in_vocabulary` verdict — the fix
+ * (register an alias) is one step away. `semantic_note` explains a missing
+ * semantic list (no provider, no gloss).
+ */
+export interface NearestSpellings {
+  lexical: NearestResolution[];
+  semantic: NearestGloss[];
+  semantic_note?: string;
+}
+
+/**
+ * The lexical tier's account: the Dice/coverage `score` the resolver gave
+ * (cue → canonical) next to the `floor` in effect. `confident` is whether the
+ * tier's best candidate cleared 0.5 — the predicate deciding if the semantic
+ * tier joins at all.
+ */
+export interface LexicalExplain {
+  score?: number;
+  kind?: "exact" | "alias" | "containment" | "fuzzy";
+  floor: number;
+  confident: boolean;
+}
+
+/**
+ * The semantic tier's account: whether it `entered` this call, the `reason`
+ * when it could not, and the expected name's gloss `cosine` against the
+ * `floor` when the sweep ran. `cap` is the fixed count the tier serves (not a
+ * request knob).
+ */
+export interface SemanticExplain {
+  entered: boolean;
+  reason?: string;
+  floor?: number;
+  cosine?: number;
+  rank?: number;
+  cap?: number;
+}
+
+/**
+ * Where the canonical stands against the served list: its `rank` and `tier`
+ * when present, and a `limit_to_reach` verified by rerunning the real serve
+ * computation.
+ */
+export interface ResolveRanking {
+  rank?: number;
+  tier?: "lexical" | "semantic";
+  score?: number;
+  limit: number;
+  served: boolean;
+  limit_to_reach?: number;
+}
+
+/**
+ * Why a name did (or didn't) resolve for a cue. `verdict` is machine-readable,
+ * `summary` human-readable, the rest is evidence: which tiers ran, what they
+ * scored, and how the expected name ranked. A diagnosed miss is a success —
+ * every explain call is a 200.
+ */
+export interface ResolveExplanation {
+  verdict:
+    | "not_in_vocabulary"
+    | "served"
+    | "cue_resolved_exactly"
+    | "below_floor"
+    | "below_cutoff"
+    | "semantic_not_run"
+    | "semantic_below_floor";
+  summary: string;
+  cue: string;
+  expected: string;
+  in_vocabulary: boolean;
+  canonical?: string;
+  expected_kind?: "exact" | "alias";
+  lexical?: LexicalExplain;
+  semantic?: SemanticExplain;
+  ranking?: ResolveRanking;
+  nearest?: NearestSpellings;
+}
+
 export interface ConceptDescription {
   concept: string;
   as_subject: LabelUsage[];
@@ -303,6 +401,84 @@ export interface PassageHit {
  */
 export interface CrossPassageHit extends PassageHit {
   context: string;
+}
+
+// -- search explain ------------------------------------------------------------
+
+/**
+ * One query term against the target paragraph: `df` paragraphs carry it
+ * corpus-wide (its `idf` follows), the target carries it `tf` times,
+ * contributing `contribution` to the BM25 score. `tf` 0 with a high `df` is
+ * the "matched only ubiquitous bigrams" signature.
+ */
+export interface TermContribution {
+  term: string;
+  tf: number;
+  df: number;
+  idf: number;
+  contribution: number;
+}
+
+/**
+ * The lexical lane's evidence for the target: its `rank` in that lane, its
+ * BM25 `score`, and the score's per-term addends.
+ */
+export interface Bm25Explain {
+  rank?: number;
+  score: number;
+  terms: TermContribution[];
+}
+
+/** The vector lane's evidence — or the `reason` there is none. */
+export interface VectorExplain {
+  ran: boolean;
+  reason?: string;
+  floor?: number;
+  cosine?: number;
+  rank?: number;
+}
+
+/**
+ * Where the target stands in the fused ranking `searchPassages` truncates: its
+ * `rank` against `ranked` scored candidates, the `cutoff_score` the request's
+ * `limit` served down to, and a `limit_to_reach` verified by rerunning the
+ * real serve computation (pool caps included).
+ */
+export interface RankingExplain {
+  fused: boolean;
+  ranked: number;
+  rank?: number;
+  score?: number;
+  limit: number;
+  served: boolean;
+  cutoff_score?: number;
+  limit_to_reach?: number;
+}
+
+/**
+ * Why a source did (or didn't) appear for a query. `verdict` is machine-
+ * readable, `summary` human-readable, the rest is evidence: the terms each
+ * lane matched against and where the target ranked. A diagnosed miss is a
+ * success — every explain call is a 200.
+ */
+export interface SearchExplanation {
+  verdict:
+    | "not_stored"
+    | "paragraph_out_of_range"
+    | "no_query_terms"
+    | "no_term_overlap"
+    | "below_cutoff"
+    | "served";
+  summary: string;
+  source: string;
+  paragraph?: number;
+  paragraphs?: number;
+  paragraph_named?: boolean;
+  query_terms?: string[];
+  paragraph_terms?: string[];
+  bm25?: Bm25Explain;
+  vector?: VectorExplain;
+  ranking?: RankingExplain;
 }
 
 /** One verbatim paragraph. `section` is null outside every stored section. */

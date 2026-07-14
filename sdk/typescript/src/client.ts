@@ -37,9 +37,11 @@ import type {
   PassageLookup,
   QuestionSpec,
   RefreshOutcome,
+  ResolveExplanation,
   RetractAssociationOutcome,
   RetractOutcome,
   RetrievalResult,
+  SearchExplanation,
   SectionSpec,
   SourcePage,
   StoredPassages,
@@ -123,7 +125,10 @@ export class Taguru {
 
   constructor(options: TaguruOptions = {}) {
     const env = typeof process !== "undefined" ? process.env : undefined;
-    this.baseUrl = (options.base_url ?? env?.[ENV_URL] ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+    // `||`, not `??`: an empty string (explicit "" or a blank env var) falls
+    // through to the next source, matching the Python SDK's `base_url or env
+    // or DEFAULT` — an unusable URL should never win over the default.
+    this.baseUrl = (options.base_url || env?.[ENV_URL] || DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.apiKey = options.api_key ?? env?.[ENV_TOKEN];
     this.retries = options.retries ?? DEFAULT_RETRIES;
     this.timeoutSecs = options.timeout ?? DEFAULT_TIMEOUT_SECS;
@@ -258,7 +263,10 @@ export class Taguru {
   async waitUntilReady(options: { timeout?: number; interval?: number } = {}): Promise<void> {
     const timeout = options.timeout ?? 30.0;
     const interval = options.interval ?? 0.5;
-    const deadline = Date.now() + timeout * 1000;
+    // Monotonic clock: a wall-clock jump (NTP step, sleep/resume) must not
+    // fire the deadline early or defer it. Mirrors the Python SDK's
+    // time.monotonic().
+    const deadline = performance.now() + timeout * 1000;
     let lastError: TaguruError | null = null;
     for (;;) {
       try {
@@ -268,7 +276,7 @@ export class Taguru {
       } catch (error) {
         lastError = error instanceof TaguruError ? error : new TaguruError(describeError(error));
       }
-      if (Date.now() >= deadline) {
+      if (performance.now() >= deadline) {
         throw lastError ?? new TaguruError(`server not ready after ${timeout} seconds`);
       }
       await sleep(interval);
@@ -671,6 +679,48 @@ export class Context {
     return result as TieredResolution[];
   }
 
+  /**
+   * Why `expected` did (or didn't) resolve for `cue`, under the exact
+   * overrides the questioned call used. A diagnosed miss is a 200 — read the
+   * `verdict`, then the tier evidence beneath it.
+   */
+  async explainResolve(
+    cue: string,
+    expected: string,
+    options: { dice_floor?: number; semantic_floor?: number; limit?: number } = {},
+  ): Promise<ResolveExplanation> {
+    const result = await this.post(
+      "/resolve/explain",
+      dropUndefined({
+        cue,
+        expected,
+        dice_floor: options.dice_floor,
+        semantic_floor: options.semantic_floor,
+        limit: options.limit,
+      }),
+    );
+    return result as ResolveExplanation;
+  }
+
+  /** {@link explainResolve} for relation labels. */
+  async explainResolveLabel(
+    cue: string,
+    expected: string,
+    options: { dice_floor?: number; semantic_floor?: number; limit?: number } = {},
+  ): Promise<ResolveExplanation> {
+    const result = await this.post(
+      "/resolve_label/explain",
+      dropUndefined({
+        cue,
+        expected,
+        dice_floor: options.dice_floor,
+        semantic_floor: options.semantic_floor,
+        limit: options.limit,
+      }),
+    );
+    return result as ResolveExplanation;
+  }
+
   // -- graph reads ---------------------------------------------------------
 
   /**
@@ -902,6 +952,23 @@ export class Context {
       dropUndefined({ query, limit: options.limit }),
     );
     return result as PassageHit[];
+  }
+
+  /**
+   * Why `source` did (or didn't) surface for `query`. Omit `paragraph` to
+   * explain the source's best showing; name one (0-based) to interrogate it.
+   * A diagnosed miss is a 200 — read the `verdict`, then the lane evidence.
+   */
+  async explainSearchPassages(
+    query: string,
+    source: string,
+    options: { paragraph?: number; limit?: number } = {},
+  ): Promise<SearchExplanation> {
+    const result = await this.post(
+      "/sources/search/explain",
+      dropUndefined({ query, source, paragraph: options.paragraph, limit: options.limit }),
+    );
+    return result as SearchExplanation;
   }
 
   /** Withdraw one source's contributions (diff sync before re-ingest). */

@@ -47,9 +47,11 @@ from .._models import (
     PassageHit,
     PassageLookup,
     RefreshOutcome,
+    ResolveExplanation,
     RetractAssociationOutcome,
     RetractOutcome,
     RetrievalResult,
+    SearchExplanation,
     SourcePage,
     StoredPassages,
     TieredResolution,
@@ -648,6 +650,52 @@ class AsyncContext:
         result = await self._post("/resolve_label", body)
         return decode(list[TieredResolution], result)  # type: ignore[no-any-return]
 
+    async def explain_resolve(
+        self,
+        cue: str,
+        expected: str,
+        *,
+        dice_floor: float | None = None,
+        semantic_floor: float | None = None,
+        limit: int | None = None,
+    ) -> ResolveExplanation:
+        """Why ``expected`` did (or didn't) resolve for ``cue`` — the same
+        one-call overrides ``resolve`` takes, answered for that exact call.
+        A diagnosed miss is a 200, not an error."""
+        body = drop_none(
+            {
+                "cue": cue,
+                "expected": expected,
+                "dice_floor": dice_floor,
+                "semantic_floor": semantic_floor,
+                "limit": limit,
+            }
+        )
+        result = await self._post("/resolve/explain", body)
+        return decode(ResolveExplanation, result)  # type: ignore[no-any-return]
+
+    async def explain_resolve_label(
+        self,
+        cue: str,
+        expected: str,
+        *,
+        dice_floor: float | None = None,
+        semantic_floor: float | None = None,
+        limit: int | None = None,
+    ) -> ResolveExplanation:
+        """:meth:`explain_resolve` for relation labels."""
+        body = drop_none(
+            {
+                "cue": cue,
+                "expected": expected,
+                "dice_floor": dice_floor,
+                "semantic_floor": semantic_floor,
+                "limit": limit,
+            }
+        )
+        result = await self._post("/resolve_label/explain", body)
+        return decode(ResolveExplanation, result)  # type: ignore[no-any-return]
+
     # -- graph reads ---------------------------------------------------------
 
     async def recall(
@@ -872,6 +920,29 @@ class AsyncContext:
         """
         result = await self._post("/sources/search", drop_none({"query": query, "limit": limit}))
         return decode(list[PassageHit], result)  # type: ignore[no-any-return]
+
+    async def explain_search_passages(
+        self,
+        query: str,
+        source: str,
+        *,
+        paragraph: int | None = None,
+        limit: int | None = None,
+    ) -> SearchExplanation:
+        """Why ``source`` did (or didn't) appear for ``query``. ``paragraph``
+        (0-based) picks which of the source's paragraphs to account for;
+        omitted means its best showing. A diagnosed miss is a 200, not an
+        error."""
+        body = drop_none(
+            {
+                "query": query,
+                "source": source,
+                "paragraph": paragraph,
+                "limit": limit,
+            }
+        )
+        result = await self._post("/sources/search/explain", body)
+        return decode(SearchExplanation, result)  # type: ignore[no-any-return]
 
     async def retract_source(self, source: str) -> RetractOutcome:
         """Withdraw one source's contributions (diff sync before re-ingest)."""
