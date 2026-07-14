@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Path, Request, State};
+use axum::extract::{FromRequest, Request, State};
 use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
@@ -374,6 +374,36 @@ where
     }
 }
 
+/// axum's Path extractor with rejections reshaped into the
+/// [`ApiError`] body, exactly as [`AppQuery`] does. A percent-encoded
+/// path segment that decodes to invalid UTF-8 is the one client-driven
+/// Path rejection; without this wrapper it would answer axum's
+/// plain-text 400 — the lone axis still off the shared error shape.
+pub struct AppPath<T>(pub T);
+
+impl<S, T> axum::extract::FromRequestParts<S> for AppPath<T>
+where
+    T: serde::de::DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::extract::Path::<T>::from_request_parts(parts, state).await {
+            Ok(axum::extract::Path(value)) => Ok(Self(value)),
+            Err(rejection) => Err(coded(
+                rejection.status(),
+                ErrorCode::for_rejection(rejection.status()),
+                rejection.body_text(),
+                Instant::now(),
+            )),
+        }
+    }
+}
+
 /// The router-wide 404: paths outside the API answer in the error
 /// shape too, with a pointer at the self-describing endpoint.
 pub async fn unknown_path(method: Method, uri: Uri) -> Response {
@@ -644,7 +674,10 @@ pub async fn maintenance_compact(
 
 /// One directory row by name — the cheap existence-and-stats check,
 /// without listing anything else.
-pub async fn get_context(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+pub async fn get_context(
+    State(state): State<AppState>,
+    AppPath(name): AppPath<String>,
+) -> Response {
     let started_at = Instant::now();
     match state.directory_entry(&name) {
         Some(entry) => ok(entry, started_at),
@@ -718,7 +751,7 @@ pub struct CreateContextRequest {
 
 pub async fn create_context(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
 ) -> Response {
@@ -787,7 +820,7 @@ pub struct UpdateContextRequest {
 
 pub async fn update_context(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<UpdateContextRequest>,
 ) -> Response {
@@ -832,7 +865,7 @@ pub async fn update_context(
 
 pub async fn delete_context(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
@@ -892,7 +925,7 @@ pub struct RenameRequest {
 /// could move its data to an unscoped name.
 pub async fn rename_context(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -1106,7 +1139,7 @@ pub async fn list_groups(
 
 pub async fn get_group(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
 ) -> Response {
     let started_at = Instant::now();
@@ -1130,7 +1163,7 @@ pub struct CreateGroupRequest {
 
 pub async fn create_group(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -1238,7 +1271,7 @@ pub struct UpdateGroupRequest {
 
 pub async fn update_group(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -1326,7 +1359,7 @@ pub async fn update_group(
 
 pub async fn delete_group(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -1388,7 +1421,7 @@ pub async fn delete_group(
 /// exactly as `delete_group`'s does.
 pub async fn rename_group(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -1462,7 +1495,7 @@ pub async fn rename_group(
 /// one request, one lock acquisition, one WAL fsync.
 pub async fn add_associations(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(associations): AppJson<Vec<AssocOp>>,
 ) -> Response {
@@ -1604,7 +1637,7 @@ pub struct RetractAssociationOutcome {
 /// negative-weight assertion instead, which preserves the dispute.
 pub async fn retract_association(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RetractAssociationRequest>,
@@ -2347,7 +2380,7 @@ pub struct KeysetQuery {
 
 pub async fn add_aliases(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<AliasRequest>,
@@ -2458,7 +2491,7 @@ pub struct RemoveAliasesRequest {
 
 pub async fn remove_aliases(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RemoveAliasesRequest>,
@@ -2535,7 +2568,7 @@ pub async fn remove_aliases(
 
 pub async fn list_aliases(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
@@ -2689,7 +2722,7 @@ pub struct StoredPassages {
 
 pub async fn store_passages(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<StorePassagesRequest>,
 ) -> Response {
@@ -2955,7 +2988,7 @@ fn vocabulary_audit(
 
 pub async fn audit_vocabulary(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
 ) -> Response {
@@ -3028,7 +3061,7 @@ pub struct DriftAudit {
 
 pub async fn audit_drift(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
 ) -> Response {
@@ -3531,7 +3564,7 @@ pub async fn import_batch(
 /// what was shed and what the footprint became.
 pub async fn compact_context(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
@@ -3568,7 +3601,7 @@ pub async fn compact_context(
 /// runtime, the way vocabulary/audit steps aside.
 pub async fn export_context(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
@@ -3614,7 +3647,7 @@ pub async fn export_context(
 /// and restoring it elsewhere carries only what the key could see.
 pub async fn export_group(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
 ) -> Response {
     let started_at = Instant::now();
@@ -3649,7 +3682,7 @@ pub struct RecallRequest {
 
 pub async fn recall(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     AppJson(request): AppJson<RecallRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -4002,7 +4035,7 @@ pub struct QueryRequest {
 
 pub async fn query(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     AppJson(request): AppJson<QueryRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -4159,7 +4192,7 @@ pub struct DescribeRequest {
 /// matter. An unknown concept comes back as a null result.
 pub async fn describe(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     AppJson(request): AppJson<DescribeRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -4198,7 +4231,7 @@ pub struct ExplorePage {
 
 pub async fn explore(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     AppJson(request): AppJson<ExploreRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -4258,7 +4291,7 @@ pub struct ActivateRequest {
 
 pub async fn activate(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     AppJson(request): AppJson<ActivateRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -4597,7 +4630,7 @@ fn resolve_tier_of(served: &[TieredResolution]) -> ResolveTier {
 
 pub async fn resolve(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ResolveRequest>,
 ) -> Response {
@@ -4607,7 +4640,7 @@ pub async fn resolve(
 
 pub async fn resolve_label(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ResolveRequest>,
 ) -> Response {
@@ -5138,7 +5171,7 @@ fn explain_resolve_verdict(
 /// (or placed against) each of them. Read-only.
 pub async fn explain_resolve(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ExplainResolveRequest>,
 ) -> Response {
@@ -5150,7 +5183,7 @@ pub async fn explain_resolve(
 /// for relation labels.
 pub async fn explain_resolve_label(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ExplainResolveRequest>,
 ) -> Response {
@@ -5182,7 +5215,7 @@ pub struct RefreshBreakdown {
 
 pub async fn refresh_embeddings(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
@@ -5274,7 +5307,7 @@ pub struct LabelPage {
 
 pub async fn labels(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
@@ -5325,7 +5358,7 @@ pub struct UnreachableFromRequest {
 
 pub async fn unreachable_from(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     AppJson(request): AppJson<UnreachableFromRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -5408,6 +5441,84 @@ mod tests {
 
         let auto = protocol_trailer(Some("test-model"), true).unwrap();
         assert!(auto.contains("auto-refreshes"));
+    }
+
+    /// A percent-encoded path segment that decodes to invalid UTF-8 is
+    /// the one client-reachable `Path` rejection (`%ff` → the lone byte
+    /// 0xFF). `AppPath` must answer it in the shared [`ApiError`] JSON
+    /// shape — a 400 carrying `status: "error"` — not axum's bare
+    /// `text/plain` "Invalid URL", which was the last off-shape axis.
+    #[tokio::test]
+    async fn apppath_reshapes_an_invalid_utf8_segment_into_the_api_error_body() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::routing::get;
+        use tower::util::ServiceExt;
+
+        async fn echo(AppPath(name): AppPath<String>) -> String {
+            name
+        }
+        let app = Router::new().route("/x/{name}", get(echo));
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/x/%ff")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "error");
+        assert_eq!(body["code"], ErrorCode::MalformedRequest.as_str());
+        assert!(
+            body["error"].is_string() && body["time"].is_number(),
+            "{body}"
+        );
+    }
+
+    /// The happy path is untouched: a well-formed segment still reaches
+    /// the handler decoded, so wrapping every route in `AppPath` only
+    /// changes the error axis, never a valid request.
+    #[tokio::test]
+    async fn apppath_passes_a_valid_segment_through_decoded() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::routing::get;
+        use tower::util::ServiceExt;
+
+        async fn echo(AppPath(name): AppPath<String>) -> String {
+            name
+        }
+        let app = Router::new().route("/x/{name}", get(echo));
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/x/hello%20world")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(std::str::from_utf8(&bytes).unwrap(), "hello world");
     }
 
     fn assoc(object: &str, weight: f64) -> Association {
