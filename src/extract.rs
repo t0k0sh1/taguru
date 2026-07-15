@@ -414,7 +414,7 @@ impl Run {
         // association and question can cite an index the server
         // itself validates against.
         let canonical_paragraphs = crate::paragraph::split(&text).len();
-        let chunks = chunk(&labeled_document(&text), CHUNK_BYTES);
+        let chunks = chunk(&labeled_document(&text, CHUNK_BYTES), CHUNK_BYTES);
         if self.dry_run {
             println!(
                 "{source}: would extract ({} bytes, {} chunk(s)) → {}",
@@ -570,20 +570,32 @@ impl Run {
 /// The document re-rendered for question prompts: every canonical
 /// paragraph (the server's own split) prefixed with its bracketed
 /// number, so the model's `paragraph` references land on exactly the
-/// indexes the server validates against. Prompt input only — the
-/// passage stays the verbatim document.
-fn labeled_document(text: &str) -> String {
-    crate::paragraph::split(text)
-        .iter()
-        .map(|span| {
-            format!(
-                "[{}] {}",
-                span.index,
-                &text[span.start as usize..span.end as usize]
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+/// indexes the server validates against. A paragraph too large to fit a
+/// single `cap`-byte chunk is pre-split into pieces that EACH repeat the
+/// number — otherwise the byte split in [`chunk`] would carry a
+/// paragraph's continuation to the model as unlabeled text, and any
+/// `paragraph` reference the model drew from it would be a guess. Prompt
+/// input only — the passage stays the verbatim document.
+fn labeled_document(text: &str, cap: usize) -> String {
+    let mut blocks = Vec::new();
+    for span in crate::paragraph::split(text) {
+        let label = format!("[{}] ", span.index);
+        let content = &text[span.start as usize..span.end as usize];
+        // Reserve the label's room on every piece so a re-labeled
+        // continuation still fits the chunk that will carry it, leaving
+        // chunk()'s own oversize split with nothing left to cut (and so
+        // no piece to strip the label from).
+        let piece_cap = cap.saturating_sub(label.len()).max(1);
+        for piece in split_oversized(content, piece_cap) {
+            // split_oversized cuts just after a newline, so an interior
+            // piece ends in one; trim it, or joining blocks with "\n\n"
+            // would blur the paragraph boundary into a triple break. A
+            // whole (non-oversized) paragraph's span carries no trailing
+            // newline, so the common path is untouched.
+            blocks.push(format!("{label}{}", piece.trim_end_matches('\n')));
+        }
+    }
+    blocks.join("\n\n")
 }
 
 /// The document's text, refused early when it could never ride as a
@@ -1763,9 +1775,41 @@ mod tests {
     #[test]
     fn labeled_documents_number_the_canonical_paragraphs() {
         let text = "一段落目。\n\n二段落目。\n複数行。";
+        // A cap that dwarfs the paragraphs leaves the numbering untouched.
         assert_eq!(
-            labeled_document(text),
+            labeled_document(text, 10_000),
             "[0] 一段落目。\n\n[1] 二段落目。\n複数行。"
+        );
+    }
+
+    #[test]
+    fn an_oversized_paragraph_repeats_its_number_on_every_continuation() {
+        // One paragraph far larger than the cap: split at its interior
+        // line breaks, every piece must still name paragraph 0 so the
+        // model can attribute a question drawn from any of them. The old
+        // label-then-byte-split left every piece past the first unlabeled.
+        let body = "あ\n".repeat(40);
+        let cap = ("[0] ".len() + body.len()) / 3;
+        let labeled = labeled_document(&body, cap);
+        let blocks: Vec<&str> = labeled.split("\n\n").collect();
+        assert!(
+            blocks.len() > 1,
+            "the paragraph should have split: {labeled}"
+        );
+        assert!(
+            blocks.iter().all(|block| block.starts_with("[0] ")),
+            "every continuation must repeat its paragraph number: {labeled}"
+        );
+        // chunk() packs the pre-sized blocks without re-splitting, so the
+        // label survives to what the model sees: every \n\n-delimited
+        // block in every chunk still opens with the paragraph number.
+        let chunks = chunk(&labeled, cap);
+        assert!(
+            chunks
+                .iter()
+                .flat_map(|chunk| chunk.split("\n\n"))
+                .all(|block| block.starts_with("[0] ")),
+            "no chunk may carry an unlabeled continuation block: {chunks:?}"
         );
     }
 
