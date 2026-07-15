@@ -682,39 +682,93 @@ fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
 /// skips the final image flush, but every write is already in the WAL and
 /// replays on the next boot — only unwritten usage counters are lost,
 /// the price the operator chose by not waiting for the clean stop.
+///
+/// The signal streams are registered ONCE and the second wait reuses
+/// them. Re-registering per wait (the old shape) dropped the SIGTERM
+/// stream when the first signal fired and installed a new one only after
+/// the spawn — a window in which a second signal would land on no handler
+/// and be lost, defeating the very escape hatch this arms.
 async fn shutdown_signal() {
-    wait_for_terminate().await;
-    tokio::spawn(async {
-        wait_for_terminate().await;
+    let mut signals = TerminateSignals::install();
+    signals.recv().await;
+    tokio::spawn(async move {
+        signals.recv().await;
         warn!("second shutdown signal received — forcing an immediate exit");
         // 128 + SIGINT(2), the shell convention for signal-terminated.
         std::process::exit(130);
     });
 }
 
-/// Completes on the next SIGINT (Ctrl+C) or, on Unix, SIGTERM. Each call
-/// registers fresh, so it can be awaited again after the first signal to
-/// catch a second one.
-async fn wait_for_terminate() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
+/// The SIGINT/SIGTERM streams axum's graceful drain listens on, held for
+/// the whole shutdown sequence so [`recv`](Self::recv) can be awaited
+/// again for a second signal without a re-registration gap.
+struct TerminateSignals {
     #[cfg(unix)]
-    let terminate = async {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut stream) => {
-                stream.recv().await;
-            }
-            Err(_) => std::future::pending().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+    interrupt: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    terminate: Option<tokio::signal::unix::Signal>,
+}
 
-    tokio::select! {
-        () = ctrl_c => {}
-        () = terminate => {}
+impl TerminateSignals {
+    /// Registers the terminate signals once. A stream that fails to
+    /// register degrades to one that never fires — the other signal (and
+    /// a second Ctrl+C) still works — rather than crashing the server as
+    /// it starts serving.
+    fn install() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let register = |kind: SignalKind| match signal(kind) {
+                Ok(stream) => Some(stream),
+                Err(error) => {
+                    warn!(%error, "could not register a shutdown signal handler");
+                    None
+                }
+            };
+            Self {
+                interrupt: register(SignalKind::interrupt()),
+                terminate: register(SignalKind::terminate()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {}
+        }
+    }
+
+    /// Completes on the next SIGINT or SIGTERM (Ctrl+C on non-Unix).
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        {
+            let Self {
+                interrupt,
+                terminate,
+            } = self;
+            let interrupt = wait_signal(interrupt.as_mut());
+            let terminate = wait_signal(terminate.as_mut());
+            tokio::select! {
+                () = interrupt => {}
+                () = terminate => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // No persistent Unix stream to drop here; ctrl_c()'s handler
+            // is a global that stays installed, so re-awaiting is safe.
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// Awaits an optional signal stream, or pends forever when its
+/// registration failed so the surrounding select falls to the other arm.
+#[cfg(unix)]
+async fn wait_signal(stream: Option<&mut tokio::signal::unix::Signal>) {
+    match stream {
+        Some(stream) => {
+            stream.recv().await;
+        }
+        None => std::future::pending().await,
     }
 }
 
