@@ -5397,23 +5397,27 @@ where
 /// Runs `f` over each of `chunks` on up to `workers` threads, claiming
 /// indices in order. Unlike `parallel_map` above — arrival-order
 /// results, no notion of failure — this preserves input order and
-/// stops claiming new work once any chunk has failed. Every caller
-/// (`extract_chunks_concurrently` in src/extract.rs, and `embed_stale` /
-/// `refresh_passage_embeddings` below) needs both: an
-/// input-order-preserving result to fold correctly, and a bound on
-/// wasted work past a failure. Fold-on-failure semantics differ per
-/// caller (fail the whole batch vs. keep whatever succeeded), so the
-/// fold itself is left to them — this returns the raw, unfolded
+/// stops claiming new work once a chunk's failure has been recorded.
+/// Every caller (`extract_chunks_concurrently` in src/extract.rs, and
+/// `embed_stale` / `refresh_passage_embeddings` below) needs both: an
+/// input-order-preserving result to fold correctly, and best-effort
+/// early termination once a failure surfaces, so a batch that is going
+/// to fail stops enlisting new work. Fold-on-failure semantics differ
+/// per caller (fail the whole batch vs. keep whatever succeeded), so
+/// the fold itself is left to them — this returns the raw, unfolded
 /// per-index outcome.
 ///
 /// `next` and `first_failure` are independent atomics; SeqCst on both
 /// is required so a worker claiming an index past a just-recorded
 /// failure actually observes it (Relaxed would silently reintroduce
 /// unbounded over-dispatch past a failure). Every index at or below the
-/// true minimum failing index is guaranteed a `Some` slot; slots past it
-/// may be `None` (never claimed) or `Some` (already in flight when the
-/// failure landed, at most `workers` of them) — callers fold
-/// accordingly.
+/// true minimum failing index is guaranteed a `Some` slot — a foldable
+/// prefix callers can trust. Slots past it are best-effort: `None` if
+/// never claimed, `Some` if a worker finished before the failure was
+/// recorded. Their count is NOT bounded by `workers` — a failure slow
+/// to surface lets the other workers complete arbitrarily many later
+/// indices first — so callers fold on the prefix, never on a count of
+/// what landed past the failure.
 pub(crate) fn dispatch_chunks_concurrently<C: Sync, R: Send + Sync>(
     chunks: &[C],
     workers: usize,
@@ -12094,13 +12098,17 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// Pins the gate's correctness argument down directly (see
-    /// `dispatch_chunks_concurrently`'s doc comment): once the lowest
-    /// failing index is recorded, no worker claims a NEW index past it,
-    /// so at most `workers` chunks — the ones already claimed and in
-    /// flight at that moment — can ever land past the failure.
+    /// Pins down the early-stop half of `dispatch_chunks_concurrently`'s
+    /// contract on the schedule where it bites: when the failure is
+    /// recorded PROMPTLY (here the failing chunk returns instantly while
+    /// every success sleeps), no worker claims a new index past it once
+    /// the record lands, so only the `workers` chunks already in flight
+    /// at that moment can spill past the failure. A failure slow to
+    /// surface would let the other workers run far ahead first — which is
+    /// why callers fold on the guaranteed prefix (asserted below), never
+    /// on a count of what landed past the failure.
     #[test]
-    fn dispatch_chunks_concurrently_claims_at_most_worker_count_indices_past_the_first_failure() {
+    fn dispatch_chunks_concurrently_bounds_spillover_past_a_promptly_recorded_failure() {
         use std::time::Duration;
 
         const FAILING_INDEX: usize = 20;
