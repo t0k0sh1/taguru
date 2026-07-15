@@ -34,7 +34,10 @@ pub const ACCESS_TTL_SECS: u64 = 3600;
 pub const REFRESH_TTL_SECS: u64 = 30 * 24 * 3600;
 pub const CODE_TTL_SECS: u64 = 60;
 /// Registration is unauthenticated by design (RFC 7591 as MCP clients
-/// practice it), so the store must be bounded by us, not by callers.
+/// practice it), so the store must be bounded by us, not by callers. At
+/// the cap the OLDEST registration is evicted, never the new one
+/// refused: an unauthenticated flood must not be able to wedge the store
+/// so no fresh client can register until oauth.json is hand-pruned.
 pub const CLIENT_CAP: usize = 100;
 /// Every caller-controlled field of a registration is bounded too, not
 /// just the client count: without these, one unauthenticated call could
@@ -306,10 +309,18 @@ impl Oauth {
             ));
         }
         let mut clients = self.clients.lock().unwrap();
-        if clients.len() >= CLIENT_CAP {
-            return Err(format!(
-                "registration is full ({CLIENT_CAP} clients); prune data_dir/oauth.json"
-            ));
+        // Registration is unauthenticated, so the cap must self-heal.
+        // Refusing at the limit would let a flood of junk registrations
+        // wedge the store permanently — no new client could register
+        // until an operator hand-pruned oauth.json. Evict the oldest
+        // instead: the Vec is insertion-ordered, so index 0 is oldest.
+        // Outstanding tokens survive an eviction — exchange_code and
+        // exchange_refresh validate against their own grant records, not
+        // this list — so an evicted client need only re-register on its
+        // next authorize. (A while, not an if: it also drains a store
+        // that a lowered CLIENT_CAP left over the line.)
+        while clients.len() >= CLIENT_CAP {
+            clients.remove(0);
         }
         let client = Client {
             client_id: random_token(),
@@ -972,13 +983,33 @@ mod tests {
                 )
                 .is_err()
         );
+        // The store is bounded, but hitting the cap must not lock out
+        // new clients: registration is unauthenticated, so a permanent
+        // refusal would be a trivial denial of service. The oldest is
+        // evicted to make room instead.
+        let oldest = oauth
+            .register_client("oldest", vec!["https://ok.example".to_string()])
+            .unwrap();
         for i in 0..CLIENT_CAP {
-            let _ = oauth.register_client(&format!("c{i}"), vec!["https://ok.example".to_string()]);
-        }
-        assert!(
             oauth
-                .register_client("one-too-many", vec!["https://ok.example".to_string()])
-                .is_err()
+                .register_client(&format!("c{i}"), vec!["https://ok.example".to_string()])
+                .unwrap();
+        }
+        // Filling the cap aged the very first registration out, and a
+        // fresh registration still succeeds rather than being refused.
+        assert!(
+            oauth.client(&oldest.client_id).is_none(),
+            "the oldest registration is evicted at the cap"
+        );
+        let newcomer = oauth
+            .register_client("one-more", vec!["https://ok.example".to_string()])
+            .unwrap();
+        assert!(oauth.client(&newcomer.client_id).is_some());
+        // Never one over the cap: eviction keeps it exactly bounded.
+        assert_eq!(
+            oauth.clients.lock().unwrap().len(),
+            CLIENT_CAP,
+            "the store stays bounded at the cap"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
