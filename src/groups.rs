@@ -315,14 +315,21 @@ pub(crate) fn remove_group_file(dir: &Path, stem: &str) -> io::Result<()> {
 pub(crate) fn scan_groups(
     dir: &Path,
 ) -> io::Result<(BTreeMap<String, GroupRecord>, ResumedRenames)> {
-    let resumed_renames =
-        resume_rename_markers(dir, "grouprenaming", "group", |from_stem, to_stem| {
-            match commit_staged(&group_path(dir, from_stem), &group_path(dir, to_stem)) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error),
-            }
-        })?;
+    let resumed_renames = resume_rename_markers(
+        dir,
+        "grouprenaming",
+        "group",
+        |from_stem, to_stem| match commit_staged(
+            &group_path(dir, from_stem),
+            &group_path(dir, to_stem),
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        },
+        // A group is a single file; its arrival IS the whole move.
+        |to_stem| group_path(dir, to_stem).exists(),
+    )?;
 
     let mut groups = BTreeMap::new();
     for dir_entry in fs::read_dir(dir)? {

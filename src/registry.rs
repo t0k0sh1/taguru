@@ -1370,20 +1370,34 @@ impl AppState {
         // would see no further change to make and skip the write), so
         // the marker is safe to remove right after.
         let (mut groups, resumed_group_renames) = groups::scan_groups(&data_dir)?;
-        for (from, to) in &resumed_context_renames {
-            rename_in_membership(&data_dir, &mut groups, from, to, |record| {
-                &mut record.contexts
-            });
-            let _ = fs::remove_file(renaming_marker_path(&data_dir, &file_stem(from)));
+        // Rewrite membership only once the destination's pivot has
+        // landed (else there is no `to` to point at, and `from` still
+        // holds the files); remove the marker only once the move is
+        // complete (else a straggler still needs the next boot to
+        // retry). See `ResumedRename` for why these must not be one
+        // condition.
+        for rename in &resumed_context_renames {
+            if rename.landed {
+                rename_in_membership(&data_dir, &mut groups, &rename.from, &rename.to, |record| {
+                    &mut record.contexts
+                });
+            }
+            if rename.complete {
+                let _ = fs::remove_file(renaming_marker_path(&data_dir, &file_stem(&rename.from)));
+            }
         }
-        for (from, to) in &resumed_group_renames {
-            rename_in_membership(&data_dir, &mut groups, from, to, |record| {
-                &mut record.groups
-            });
-            let _ = fs::remove_file(groups::group_renaming_marker_path(
-                &data_dir,
-                &file_stem(from),
-            ));
+        for rename in &resumed_group_renames {
+            if rename.landed {
+                rename_in_membership(&data_dir, &mut groups, &rename.from, &rename.to, |record| {
+                    &mut record.groups
+                });
+            }
+            if rename.complete {
+                let _ = fs::remove_file(groups::group_renaming_marker_path(
+                    &data_dir,
+                    &file_stem(&rename.from),
+                ));
+            }
         }
         // Reconcile unconditionally: whatever put a dangling member, a
         // dangling child, or an illegal nesting into a group file — a
@@ -5476,10 +5490,15 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
     // marker itself survives this pass; `boot_with` removes it only
     // after also rewriting group membership, so a second crash still
     // has everything it needs to resume.
-    let resumed_renames =
-        resume_rename_markers(data_dir, "renaming", "context", |from_stem, to_stem| {
-            move_context_files(data_dir, from_stem, to_stem)
-        })?;
+    let resumed_renames = resume_rename_markers(
+        data_dir,
+        "renaming",
+        "context",
+        |from_stem, to_stem| move_context_files(data_dir, from_stem, to_stem),
+        // The pivot is `.ctx` — its arrival is what lets the `.ctx` scan
+        // below register the context under `to`.
+        |to_stem| data_dir.join(format!("{to_stem}.ctx")).exists(),
+    )?;
     let mut candidates: Vec<(String, String)> = Vec::new();
     let mut import_markers: Vec<PathBuf> = Vec::new();
     for dir_entry in fs::read_dir(data_dir)? {
@@ -6077,10 +6096,32 @@ pub(crate) struct RenameMarker {
     pub(crate) to: String,
 }
 
-/// Every `(from, to)` pair whose rename was resumed at boot, handed
-/// back by `scan_data_dir`/`groups::scan_groups` so `boot_with` can
-/// rewrite group membership for them before `reconcile_groups` runs.
-pub(crate) type ResumedRenames = Vec<(String, String)>;
+/// One rename whose marker `scan_data_dir`/`groups::scan_groups` found
+/// at boot and tried to finish, handed back so `boot_with` can act
+/// before `reconcile_groups` runs.
+///
+/// The two booleans decouple the two things a resume owes, because a
+/// half-done move must not do the second without the first:
+/// - `landed` — the destination's pivot file (a context's `.ctx`, a
+///   group's `.group`) is now in place, so the scan registered the
+///   entity under `to`. Group membership naming `from` must be
+///   rewritten to `to`, or `reconcile_groups` — which has no notion of
+///   a rename in flight — reads `from` as dangling and drops it.
+/// - `complete` — every present file moved, so the marker has done its
+///   job and may be removed. If a straggler sidecar was still held,
+///   this stays false and the marker survives for the next boot to
+///   retry, even though `landed` (and the membership rewrite) already
+///   went through. Deleting the marker on a `landed`-but-not-`complete`
+///   resume was the bug: the retry vanished, orphaning the straggler.
+pub(crate) struct ResumedRename {
+    pub(crate) from: String,
+    pub(crate) to: String,
+    pub(crate) landed: bool,
+    pub(crate) complete: bool,
+}
+
+/// Every rename resumed in one boot scan (see [`ResumedRename`]).
+pub(crate) type ResumedRenames = Vec<ResumedRename>;
 
 /// Serializes and durably writes a rename marker at `path` — the
 /// first step of both `rename_context_locked` and `rename_group`,
@@ -6097,18 +6138,24 @@ fn write_rename_marker(path: &Path, from: &str, to: &str) -> io::Result<()> {
 
 /// Resumes every `extension` rename marker found in `dir`: reads it,
 /// parses the `(from, to)` pair, moves that pair's files via
-/// `move_files`, and returns every pair resumed so the caller can
-/// rewrite group membership for them before `reconcile_groups` runs.
-/// `scan_data_dir` (`.renaming`, a nine-file context family) and
+/// `move_files`, and returns every pair resumed (see [`ResumedRename`]
+/// for what the two per-rename booleans mean and why the caller needs
+/// both). `scan_data_dir` (`.renaming`, a nine-file context family) and
 /// `groups::scan_groups` (`.grouprenaming`, one file) share this exact
 /// shape and differ only in what "moving the files" means for their
 /// entity — `entity` names it for the log lines (`"context"` /
 /// `"group"`).
+///
+/// `destination_landed(to_stem)` answers "is the destination's pivot
+/// file now in place?" — checked whether or not `move_files` returned
+/// Ok, because a move can fail on a straggler AFTER the pivot arrived.
+/// That is `landed`; `move_files` returning Ok is `complete`.
 pub(crate) fn resume_rename_markers(
     dir: &Path,
     extension: &str,
     entity: &str,
     mut move_files: impl FnMut(&str, &str) -> io::Result<()>,
+    destination_landed: impl Fn(&str) -> bool,
 ) -> io::Result<ResumedRenames> {
     let mut resumed = Vec::new();
     for dir_entry in fs::read_dir(dir)? {
@@ -6125,10 +6172,24 @@ pub(crate) fn resume_rename_markers(
             continue;
         };
         tracing::warn!(from = %marker.from, to = %marker.to, entity, "resuming an unfinished rename");
-        if let Err(error) = move_files(&file_stem(&marker.from), &file_stem(&marker.to)) {
-            tracing::warn!(from = %marker.from, to = %marker.to, entity, %error, "unfinished rename: file still held");
-        }
-        resumed.push((marker.from, marker.to));
+        let to_stem = file_stem(&marker.to);
+        let complete = match move_files(&file_stem(&marker.from), &to_stem) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(from = %marker.from, to = %marker.to, entity, %error, "unfinished rename: file still held");
+                false
+            }
+        };
+        // Ask the disk, not the move's return value: a straggler sidecar
+        // can stick (complete = false) long after the pivot moved, and
+        // the membership rewrite keys on the pivot, not on completeness.
+        let landed = destination_landed(&to_stem);
+        resumed.push(ResumedRename {
+            from: marker.from,
+            to: marker.to,
+            landed,
+            complete,
+        });
     }
     Ok(resumed)
 }
@@ -6803,27 +6864,41 @@ fn context_files(stem: &str) -> [String; 9] {
 /// `to_stem`, file by file, in the fixed order [`context_files`]
 /// defines — a missing source is skipped (an earlier, interrupted
 /// attempt already moved it; safe to retry at boot or from a fresh
-/// call). Every present file lands under the new stem or the move
-/// fails outright; it never leaves some files under each stem. All
-/// nine share `data_dir` as their parent, so one fsync after every
-/// rename covers the whole family durably instead of paying for it
-/// (via `commit_staged`) up to nine times.
+/// call). `.ctx` is index 0 and the pivot the boot scan registers a
+/// context by: if IT will not move, nothing else does either (the
+/// family stays wholly under `from_stem`, cleanly retried), and the
+/// call fails before touching a sidecar. Once the pivot has moved, a
+/// sidecar that still sticks is best-effort — the rest are moved anyway
+/// so the retry has fewer orphans to chase — but the first such error
+/// is returned so the caller knows the move is incomplete and keeps the
+/// rename marker. All nine share `data_dir` as their parent, so one
+/// fsync after every rename covers the whole family durably instead of
+/// paying for it (via `commit_staged`) up to nine times.
 fn move_context_files(data_dir: &Path, from_stem: &str, to_stem: &str) -> io::Result<()> {
     let mut moved_any = false;
-    for (from_file, to_file) in context_files(from_stem)
+    let mut first_error: Option<io::Error> = None;
+    for (position, (from_file, to_file)) in context_files(from_stem)
         .into_iter()
         .zip(context_files(to_stem))
+        .enumerate()
     {
         match fs::rename(data_dir.join(from_file), data_dir.join(to_file)) {
             Ok(()) => moved_any = true,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+            // The pivot: fail outright so nothing else moves.
+            Err(error) if position == 0 => return Err(error),
+            // A post-pivot straggler: keep going, remember the first.
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
         }
     }
     if moved_any {
         fsync_dir(data_dir)?;
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Encodes a context name as a file stem: bytes outside [A-Za-z0-9_-]
@@ -13630,6 +13705,69 @@ mod tests {
             state.group("drinks").unwrap().groups,
             BTreeSet::from(["spirits".to_string()])
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The half-done-move contract `boot_with` leans on. `landed` and
+    /// `complete` must move independently: a failed move is never
+    /// complete (so the marker stays for the next boot to retry), and
+    /// membership may only be rewritten once the destination pivot has
+    /// landed. Deleting the marker on a failed move was the bug — the
+    /// retry vanished and the group association was lost with no way
+    /// back.
+    #[test]
+    fn a_failed_resume_keeps_the_marker_and_defers_membership() {
+        let dir = scratch_dir("resume-failure");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            renaming_marker_path(&dir, &file_stem("sake")),
+            serde_json::to_vec(&RenameMarker {
+                from: "sake".to_string(),
+                to: "shochu".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Move fails and no pivot appears at the destination: neither
+        // bit set — boot_with rewrites no membership and keeps the
+        // marker. resume_rename_markers itself never removes a marker.
+        let resumed = resume_rename_markers(
+            &dir,
+            "renaming",
+            "context",
+            |_, _| Err(io::Error::other("file still held")),
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].from, "sake");
+        assert_eq!(resumed[0].to, "shochu");
+        assert!(!resumed[0].complete, "a failed move is not complete");
+        assert!(!resumed[0].landed, "no pivot at the destination");
+        assert!(
+            renaming_marker_path(&dir, &file_stem("sake")).exists(),
+            "the marker must survive a failed resume so the next boot retries"
+        );
+
+        // Pivot landed but a straggler stuck: landed (rewrite
+        // membership) yet not complete (keep the marker to finish).
+        let resumed = resume_rename_markers(
+            &dir,
+            "renaming",
+            "context",
+            |_, _| Err(io::Error::other("sidecar still held")),
+            |_| true,
+        )
+        .unwrap();
+        assert!(resumed[0].landed, "the pivot is at the destination");
+        assert!(!resumed[0].complete, "a stuck straggler is not complete");
+
+        // Everything moved: both bits set — rewrite membership, drop marker.
+        let resumed =
+            resume_rename_markers(&dir, "renaming", "context", |_, _| Ok(()), |_| true).unwrap();
+        assert!(resumed[0].landed && resumed[0].complete);
 
         let _ = fs::remove_dir_all(dir);
     }
