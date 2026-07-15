@@ -3569,6 +3569,9 @@ pub async fn compact_context(
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     match tokio::task::block_in_place(|| state.compact_context(&name, deadline)) {
         Ok(outcome) => {
             // Maintenance that rewrites the image is audit-worthy even
@@ -4582,6 +4585,13 @@ fn resolve_with_fallback(
     deadline: Deadline,
     started_at: Instant,
 ) -> Response {
+    // Both resolve handlers land here first, and the lexical read alone
+    // takes the registry lock and sweeps the vocabulary before the
+    // semantic tier's own deadline checks ever run — fail a spent
+    // request fast, the way every other handler pre-flights.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     let limit = clamp(request.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     let tiers = match resolve_tiers(state, name, request, labels, deadline, started_at) {
         Ok(tiers) => tiers,
