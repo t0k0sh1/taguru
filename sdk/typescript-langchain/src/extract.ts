@@ -227,14 +227,63 @@ function coerceString(value: unknown, where: string): string | null {
   return value;
 }
 
-function coerceNumber(value: unknown, where: string): number | null {
+/**
+ * Lenient float coercion mirroring pydantic v2's lax mode (weight is
+ * `float | None`): a JSON number rides through, a bool reads as 1/0, and a
+ * decimal or exponent string ("1.5", "1e3", "-1", ".5") parses after
+ * trimming. A blank or non-numeric string — or any other type — is a hard
+ * error, exactly the Python twin's ValidationError. The regex admits only a
+ * plain decimal form, so JS's Number() cannot slip a hex/octal literal
+ * ("0x10") or a thousands separator past the parity pydantic enforces.
+ */
+function coerceFloat(value: unknown, where: string): number | null {
   if (value === undefined || value === null) {
     return null;
   }
-  if (typeof value !== "number") {
-    throw new Error(`${where} is not a number`);
+  if (typeof value === "boolean") {
+    return value ? 1 : 0;
   }
-  return value;
+  if (typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(trimmed)) {
+      throw new Error(`${where} is not a number`);
+    }
+    return Number(trimmed);
+  }
+  throw new Error(`${where} is not a number`);
+}
+
+/**
+ * Lenient integer coercion mirroring pydantic v2's lax mode (paragraph is
+ * `int | None`): a bool reads as 1/0, and an integer-valued number or string
+ * ("3", "+3", even "3.0") parses. A fractional value (`3.5`, "3.5"), an
+ * exponent form ("1e2"), or a non-numeric string is a hard error — the
+ * Python twin's ValidationError. pydantic accepts a trailing all-zero
+ * fraction on a string but rejects exponents, so mirror that shape exactly.
+ */
+function coerceInt(value: unknown, where: string): number | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value === "boolean") {
+    return value ? 1 : 0;
+  }
+  if (typeof value === "number") {
+    if (!Number.isInteger(value)) {
+      throw new Error(`${where} is not an integer`);
+    }
+    return value;
+  }
+  if (typeof value === "string") {
+    if (!/^[+-]?\d+(\.0*)?$/.test(value.trim())) {
+      throw new Error(`${where} is not an integer`);
+    }
+    return Number.parseInt(value.trim(), 10);
+  }
+  throw new Error(`${where} is not an integer`);
 }
 
 function coerceOutput(parsed: unknown): ModelOutput {
@@ -261,8 +310,8 @@ function coerceOutput(parsed: unknown): ModelOutput {
       subject: coerceString(item["subject"], `associations[${index}].subject`),
       label: coerceString(item["label"], `associations[${index}].label`),
       object: coerceString(item["object"], `associations[${index}].object`),
-      weight: coerceNumber(item["weight"], `associations[${index}].weight`),
-      paragraph: coerceNumber(item["paragraph"], `associations[${index}].paragraph`),
+      weight: coerceFloat(item["weight"], `associations[${index}].weight`),
+      paragraph: coerceInt(item["paragraph"], `associations[${index}].paragraph`),
     })),
     aliases: listOf(shaped["aliases"], "aliases").map((item, index) => ({
       alias: coerceString(item["alias"], `aliases[${index}].alias`),
@@ -270,7 +319,7 @@ function coerceOutput(parsed: unknown): ModelOutput {
       kind: coerceString(item["kind"], `aliases[${index}].kind`),
     })),
     questions: listOf(shaped["questions"], "questions").map((item, index) => ({
-      paragraph: coerceNumber(item["paragraph"], `questions[${index}].paragraph`),
+      paragraph: coerceInt(item["paragraph"], `questions[${index}].paragraph`),
       question: coerceString(item["question"], `questions[${index}].question`),
     })),
   };

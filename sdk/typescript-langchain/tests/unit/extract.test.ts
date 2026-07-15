@@ -170,6 +170,45 @@ describe("model-answer parsing", () => {
     expect(() => parseModelOutput("")).toThrow(/empty/);
     expect(() => parseModelOutput("no json here")).toThrow(/not a JSON object/);
   });
+
+  it("coerces model numbers as leniently as the pydantic twin", () => {
+    // Numeric strings and bools ride through, matching pydantic's lax mode
+    // (verified against ModelAssociation in the Python twin).
+    const strings = parseModelOutput(
+      '{"associations": [{"subject": "a", "label": "b", "object": "c",' +
+        ' "weight": "1.5", "paragraph": "2"}]}',
+    );
+    expect(strings.associations[0]!.weight).toBe(1.5);
+    expect(strings.associations[0]!.paragraph).toBe(2);
+
+    const bools = parseModelOutput(
+      '{"associations": [{"subject": "a", "label": "b", "object": "c",' +
+        ' "weight": true, "paragraph": false}]}',
+    );
+    expect(bools.associations[0]!.weight).toBe(1);
+    expect(bools.associations[0]!.paragraph).toBe(0);
+  });
+
+  it("rejects the numbers pydantic's lax mode rejects", () => {
+    const parse = (assoc: string) => (): unknown =>
+      parseModelOutput(`{"associations": [${assoc}]}`);
+    // A non-numeric weight string.
+    expect(parse('{"subject":"a","label":"b","object":"c","weight":"abc"}')).toThrow(
+      /weight is not a number/,
+    );
+    // A fractional or exponent paragraph, whether a number or a string.
+    expect(parse('{"subject":"a","label":"b","object":"c","paragraph":3.5}')).toThrow(
+      /paragraph is not an integer/,
+    );
+    expect(parse('{"subject":"a","label":"b","object":"c","paragraph":"3.5"}')).toThrow(
+      /paragraph is not an integer/,
+    );
+    expect(parse('{"subject":"a","label":"b","object":"c","paragraph":"1e2"}')).toThrow(
+      /paragraph is not an integer/,
+    );
+    // A number where a name is expected stays strict, exactly like pydantic.
+    expect(parse('{"subject":42,"label":"b","object":"c"}')).toThrow(/subject is not a string/);
+  });
 });
 
 describe("batch rendering", () => {
