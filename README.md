@@ -92,6 +92,10 @@ describe/query/activate → passage lookup → cited answer. A real
 round trip, request by request, is traced in the
 [walkthrough](https://t0k0sh1.github.io/taguru/mcp-rag-walkthrough.html).
 
+`taguru-mcp` also honors `TAGURU_MCP_TIMEOUT_SECS` (per-request budget
+against the server, default 75 — raise it for a slow local model) and
+`TAGURU_MCP_MAX_LINE_BYTES` (stdio frame cap).
+
 The same tools are also served remotely: `POST /mcp` speaks the MCP
 Streamable HTTP transport (stateless profile — plain JSON responses,
 no session to manage), behind the same bearer token as the rest of the

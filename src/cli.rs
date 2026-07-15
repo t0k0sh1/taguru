@@ -94,6 +94,8 @@ ENVIRONMENT (every knob; unset = the shown default):
                                audit_drift's include_twins, and
                                compact_context; excess calls are shed with
                                503 + Retry-After (2; 0 = off)
+  TAGURU_CROSS_SEARCH_CONCURRENCY  member contexts searched in parallel by
+                               a single cross-context (group) query (4)
   TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off)
   TAGURU_EMBED_MODEL           embedding model name
   TAGURU_EMBED_API_KEY         embedding provider credential
@@ -329,7 +331,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-const KNOWN_KEYS: [&str; 35] = [
+const KNOWN_KEYS: [&str; 36] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -348,6 +350,7 @@ const KNOWN_KEYS: [&str; 35] = [
     "TAGURU_AUTH_FAIL_LIMIT_PER_MIN",
     "TAGURU_MAX_CONCURRENT_REQUESTS",
     "TAGURU_MAX_CONCURRENT_HEAVY_OPS",
+    "TAGURU_CROSS_SEARCH_CONCURRENCY",
     "TAGURU_EMBED_URL",
     "TAGURU_EMBED_MODEL",
     "TAGURU_EMBED_API_KEY",
