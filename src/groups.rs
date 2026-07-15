@@ -63,18 +63,20 @@ pub struct GroupRecord {
     pub groups: BTreeSet<String>,
 }
 
-/// Why a proposed nesting cannot stand. Carries the group name the
-/// walk was at when the violation surfaced — deterministic, because
-/// the map and each child set iterate in name order.
+/// Why a proposed nesting cannot stand. Carries a group name pinpointing
+/// the violation — deterministic, because the map and each child set
+/// iterate in name order. Which group, per variant, is documented below.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum NestingViolation {
-    /// The named group reaches itself through its children.
+    /// The named group reaches itself through its children — a group on
+    /// the cycle, the one the walk was at when it closed the loop.
     Cycle(String),
-    /// The named group sits on a chain of more than
-    /// [`MAX_GROUP_DEPTH`] groups. A cycle longer than the cap also
-    /// lands here — its chains are over the cap either way, and the
-    /// walk refuses before following a path far enough to see the
-    /// loop close.
+    /// A chain of more than [`MAX_GROUP_DEPTH`] groups; the name is the
+    /// TOP of that chain (the walk's outermost group), reported the
+    /// same whether the cap is hit descending or on the way back up. A
+    /// cycle longer than the cap also lands here — its chains are over
+    /// the cap either way, and the walk refuses before following a path
+    /// far enough to see the loop close.
     TooDeep(String),
 }
 
@@ -141,7 +143,15 @@ fn chain_depth<'a>(
     visiting.pop();
     let depth = below + 1;
     if depth > MAX_GROUP_DEPTH {
-        return Err(NestingViolation::TooDeep(name.to_string()));
+        // Name the TOP of the offending chain, like the descent guard
+        // above (`visiting[0]`). When the over-tall subtree is reached
+        // through a memoized child, `name` is a MIDDLE group, not the
+        // chain's root — so the two paths would otherwise blame
+        // different groups for the same violation. `visiting` holds
+        // `name`'s ancestors here (it was just popped); its first frame
+        // is the chain's root, or `name` itself when `name` is a root.
+        let blame = visiting.first().copied().unwrap_or(name);
+        return Err(NestingViolation::TooDeep(blame.to_string()));
     }
     settled.insert(name, depth);
     Ok(depth)
@@ -419,6 +429,29 @@ mod tests {
             Err(NestingViolation::Cycle("a".to_string()))
         );
         assert_eq!(validate_nesting(&map(&[("a", &[], &["ghost"])])), Ok(()));
+    }
+
+    #[test]
+    fn too_deep_blames_the_chain_top_even_through_a_memoized_child() {
+        // aaa->bbb->ccc settles at depth 3 (legal) while walked first in
+        // name order. Then p_top->q_mid->aaa is discovered later, its
+        // over-tall subtree reached through the memoized `aaa`, so the
+        // descent guard never fires — the cap trips on the way back up
+        // at q_mid. The blame must still be the TOP of the chain
+        // (p_top), not the middle group q_mid the walk was at: the two
+        // detection paths agree on which group they name.
+        let groups = map(&[
+            ("aaa", &[], &["bbb"]),
+            ("bbb", &[], &["ccc"]),
+            ("ccc", &[], &[]),
+            ("p_top", &[], &["q_mid"]),
+            ("q_mid", &[], &["aaa"]),
+        ]);
+        assert_eq!(
+            validate_nesting(&groups),
+            Err(NestingViolation::TooDeep("p_top".to_string())),
+            "names the chain's top, not the memoized middle group"
+        );
     }
 
     #[test]
