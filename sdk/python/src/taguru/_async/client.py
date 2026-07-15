@@ -391,8 +391,8 @@ class AsyncContexts:
                 return
             for entry in page.contexts:
                 yield entry
-            if limit is not None and len(page.contexts) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.contexts[-1].name
 
     async def get(self, name: str) -> DirectoryEntry:
@@ -496,8 +496,8 @@ class AsyncGroups:
                 return
             for entry in page.groups:
                 yield entry
-            if limit is not None and len(page.groups) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.groups[-1].name
 
     async def get(self, name: str) -> GroupEntry:
@@ -835,8 +835,8 @@ class AsyncContext:
                 return
             for label in page.labels:
                 yield label
-            if limit is not None and len(page.labels) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.labels[-1]
 
     # -- graph writes ---------------------------------------------------------
@@ -977,8 +977,8 @@ class AsyncContext:
                 return
             for source in page.sources:
                 yield source
-            if limit is not None and len(page.sources) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.sources[-1]
 
     async def cite_passage(self, source: str, paragraph: int) -> Citation:
@@ -1025,8 +1025,8 @@ class AsyncContext:
             for alias, canonical in page.labels.items():
                 yield AliasEntry(namespace="label", alias=alias, canonical=canonical)
                 last = f"label:{alias}"
-            if limit is not None and count < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = last
 
     async def add_aliases(

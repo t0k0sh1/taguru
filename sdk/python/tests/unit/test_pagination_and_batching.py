@@ -48,22 +48,36 @@ def test_contexts_iter_walks_pages_with_keyset_cursor() -> None:
             return ok_response({"total": 3, "contexts": rows[:2]})
         if after == "b":
             return ok_response({"total": 3, "contexts": rows[2:]})
+        if after == "c":
+            return ok_response({"total": 3, "contexts": []})
         raise AssertionError(after)
 
     client = sync_client(handler)
     names = [entry.name for entry in client.contexts.iter(limit=2)]
     assert names == ["a", "b", "c"]
-    # Page of 1 < limit of 2 stops without an extra empty-page request.
-    assert cursors == [None, "b"]
+    # A short page is not the last one — a concurrent delete could shorten it
+    # while later rows remain — so iteration pages on past the short final page
+    # and stops only on the empty page after it.
+    assert cursors == [None, "b", "c"]
 
 
-def test_iter_labels_stops_on_short_page() -> None:
+def test_iter_labels_pages_until_an_empty_page() -> None:
+    cursors: list[str | None] = []
+
     def handler(req: httpx.Request) -> httpx.Response:
-        assert req.url.params.get("after") is None
-        return ok_response({"total": 1, "labels": ["代表銘柄"]})
+        after = req.url.params.get("after")
+        cursors.append(after)
+        if after is None:
+            return ok_response({"total": 1, "labels": ["代表銘柄"]})
+        if after == "代表銘柄":
+            return ok_response({"total": 1, "labels": []})
+        raise AssertionError(after)
 
     client = sync_client(handler)
     assert list(client.context("sake").iter_labels(limit=10)) == ["代表銘柄"]
+    # A short page (1 < limit 10) is not the end: iteration continues to the
+    # empty page after it rather than stopping early.
+    assert cursors == [None, "代表銘柄"]
 
 
 def test_iter_aliases_flattens_both_namespaces_and_advances_cursor() -> None:
@@ -78,6 +92,8 @@ def test_iter_aliases_flattens_both_namespaces_and_advances_cursor() -> None:
             )
         if after == "concept:青嶺":
             return ok_response({"total": 3, "concepts": {}, "labels": {"brand": "代表銘柄"}})
+        if after == "label:brand":
+            return ok_response({"total": 3, "concepts": {}, "labels": {}})
         raise AssertionError(after)
 
     client = sync_client(handler)
@@ -87,9 +103,9 @@ def test_iter_aliases_flattens_both_namespaces_and_advances_cursor() -> None:
         AliasEntry(namespace="concept", alias="青嶺", canonical="青嶺酒造"),
         AliasEntry(namespace="label", alias="brand", canonical="代表銘柄"),
     ]
-    # The second page came back short (1 < limit 2), so iteration stopped
-    # without an extra empty-page request.
-    assert cursors == [None, "concept:青嶺"]
+    # The short second page (1 < limit 2) is not the end: iteration pages on
+    # to the empty page after it, advancing the cursor to the last alias.
+    assert cursors == [None, "concept:青嶺", "label:brand"]
 
 
 def _op(i: int) -> AssocOp:

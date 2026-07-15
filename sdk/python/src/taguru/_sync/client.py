@@ -385,8 +385,8 @@ class Contexts:
                 return
             for entry in page.contexts:
                 yield entry
-            if limit is not None and len(page.contexts) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.contexts[-1].name
 
     def get(self, name: str) -> DirectoryEntry:
@@ -490,8 +490,8 @@ class Groups:
                 return
             for entry in page.groups:
                 yield entry
-            if limit is not None and len(page.groups) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.groups[-1].name
 
     def get(self, name: str) -> GroupEntry:
@@ -821,8 +821,8 @@ class Context:
                 return
             for label in page.labels:
                 yield label
-            if limit is not None and len(page.labels) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.labels[-1]
 
     # -- graph writes ---------------------------------------------------------
@@ -961,8 +961,8 @@ class Context:
                 return
             for source in page.sources:
                 yield source
-            if limit is not None and len(page.sources) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.sources[-1]
 
     def cite_passage(self, source: str, paragraph: int) -> Citation:
@@ -1009,8 +1009,8 @@ class Context:
             for alias, canonical in page.labels.items():
                 yield AliasEntry(namespace="label", alias=alias, canonical=canonical)
                 last = f"label:{alias}"
-            if limit is not None and count < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = last
 
     def add_aliases(
