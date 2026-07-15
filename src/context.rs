@@ -1749,7 +1749,11 @@ impl Context {
             .chain(self.incoming(id_a))
             .any(|edge_id| {
                 let edge = &self.edges[edge_id as usize];
-                edge.subject == id_b || edge.object == id_b
+                // Retracted edges (count == 0) linger in the chain walk
+                // until compaction; a withdrawn association must not read
+                // as a live adjacency. Same dead-edge test as `heaviest`,
+                // `describe`, and the export.
+                edge.count > 0 && (edge.subject == id_b || edge.object == id_b)
             })
     }
 
@@ -1762,11 +1766,17 @@ impl Context {
         let (Some(&id_a), Some(&id_b)) = (self.label_ids.get(a), self.label_ids.get(b)) else {
             return false;
         };
+        // Skip retracted edges (count == 0) on both sides: they linger on
+        // the label chains until compaction, and a withdrawn fact must
+        // not make two labels look co-occurrent. Same dead-edge test as
+        // `heaviest`, `describe`, and the export.
         let subjects: HashSet<ConceptId> = self
             .labeled(id_a)
+            .filter(|&edge_id| self.edges[edge_id as usize].count > 0)
             .map(|edge_id| self.edges[edge_id as usize].subject)
             .collect();
         self.labeled(id_b)
+            .filter(|&edge_id| self.edges[edge_id as usize].count > 0)
             .any(|edge_id| subjects.contains(&self.edges[edge_id as usize].subject))
     }
 
@@ -6085,6 +6095,35 @@ mod tests {
         assert!(context.labels_share_subject("r1", "r2"));
         assert!(!context.labels_share_subject("r1", "r3"));
         assert!(!context.labels_share_subject("r1", "unknown"));
+    }
+
+    #[test]
+    fn a_retracted_edge_is_no_longer_adjacent() {
+        let mut context = Context::default();
+        context.associate("a", "r", "b", 1.0).unwrap();
+        assert!(context.adjacent("a", "b"));
+        // Retracting the only edge tombstones it (count == 0) but leaves
+        // it on the adjacency chain until compaction. A withdrawn fact
+        // must stop counting as a live adjacency, or the vocabulary audit
+        // reads it as RELATED evidence that no longer exists. (The Some
+        // payload is the attribution count unlinked — 0 here, since this
+        // edge carries sourceless weight — but the edge still goes dead.)
+        assert!(context.retract_association("a", "r", "b").is_some());
+        assert!(!context.adjacent("a", "b"));
+        assert!(!context.adjacent("b", "a"));
+    }
+
+    #[test]
+    fn a_retracted_edge_no_longer_shares_a_subject() {
+        let mut context = Context::default();
+        context.associate("shared", "r1", "a", 1.0).unwrap();
+        context.associate("shared", "r2", "b", 1.0).unwrap();
+        assert!(context.labels_share_subject("r1", "r2"));
+        // Withdraw r1's only edge: the tombstone lingers on the subject's
+        // label chain, but a dead edge must not make the labels look
+        // co-occurrent (the audit would mis-read the fork as related).
+        assert!(context.retract_association("shared", "r1", "a").is_some());
+        assert!(!context.labels_share_subject("r1", "r2"));
     }
 
     #[test]
