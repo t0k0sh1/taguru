@@ -160,16 +160,20 @@ describe("pagination iterators", () => {
     const client = stubClient((req) => {
       const after = new URL(req.url).searchParams.get("after");
       cursors.push(after);
-      if (after === null) return okBody({ total: 3, contexts: [rowFor("a"), rowFor("b")] });
-      if (after === "b") return okBody({ total: 3, contexts: [rowFor("c")] });
+      if (after === null) return okBody({ total: 4, contexts: [rowFor("a"), rowFor("b")] });
+      // A short page (fewer rows than the limit) is not the last one — the
+      // walk keeps paging, or a server-clamped limit would drop later rows.
+      if (after === "b") return okBody({ total: 4, contexts: [rowFor("c")] });
+      if (after === "c") return okBody({ total: 4, contexts: [rowFor("d")] });
+      if (after === "d") return okBody({ total: 4, contexts: [] });
       throw new Error(String(after));
     });
     const names: string[] = [];
     for await (const entry of client.contexts.iter({ limit: 2 })) {
       names.push(entry.name);
     }
-    expect(names).toEqual(["a", "b", "c"]);
-    expect(cursors).toEqual([null, "b"]);
+    expect(names).toEqual(["a", "b", "c", "d"]);
+    expect(cursors).toEqual([null, "b", "c", "d"]);
   });
 
   it("flattens both alias namespaces and advances the two-namespace cursor", async () => {
@@ -183,6 +187,11 @@ describe("pagination iterators", () => {
       if (after === "concept:青嶺") {
         return okBody({ total: 3, concepts: {}, labels: { brand: "代表銘柄" } });
       }
+      // The short second page is not terminal; the walk probes once more and
+      // stops only on the empty page.
+      if (after === "label:brand") {
+        return okBody({ total: 3, concepts: {}, labels: {} });
+      }
       throw new Error(String(after));
     });
     const entries = [];
@@ -194,7 +203,7 @@ describe("pagination iterators", () => {
       { namespace: "concept", alias: "青嶺", canonical: "青嶺酒造" },
       { namespace: "label", alias: "brand", canonical: "代表銘柄" },
     ]);
-    expect(cursors).toEqual([null, "concept:青嶺"]);
+    expect(cursors).toEqual([null, "concept:青嶺", "label:brand"]);
   });
 });
 

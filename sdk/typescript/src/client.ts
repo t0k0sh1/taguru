@@ -409,9 +409,8 @@ export class Contexts {
         return;
       }
       yield* page.contexts;
-      if (options.limit !== undefined && page.contexts.length < options.limit) {
-        return;
-      }
+      // A short page is not the last one: a concurrent delete can shorten
+      // it while later rows remain, so page until an empty page.
       after = page.contexts[page.contexts.length - 1]!.name;
     }
   }
@@ -520,9 +519,8 @@ export class Groups {
         return;
       }
       yield* page.groups;
-      if (options.limit !== undefined && page.groups.length < options.limit) {
-        return;
-      }
+      // A short page is not the last one: a concurrent delete can shorten
+      // it while later rows remain, so page until an empty page.
       after = page.groups[page.groups.length - 1]!.name;
     }
   }
@@ -850,9 +848,8 @@ export class Context {
         return;
       }
       yield* page.labels;
-      if (options.limit !== undefined && page.labels.length < options.limit) {
-        return;
-      }
+      // A short page is not the last one: a concurrent delete can shorten
+      // it while later rows remain, so page until an empty page.
       after = page.labels[page.labels.length - 1]!;
     }
   }
@@ -996,9 +993,8 @@ export class Context {
         return;
       }
       yield* page.sources;
-      if (options.limit !== undefined && page.sources.length < options.limit) {
-        return;
-      }
+      // A short page is not the last one: a concurrent delete can shorten
+      // it while later rows remain, so page until an empty page.
       after = page.sources[page.sources.length - 1]!;
     }
   }
@@ -1047,9 +1043,8 @@ export class Context {
         yield { namespace: "label", alias, canonical };
         last = `label:${alias}`;
       }
-      if (options.limit !== undefined && count < options.limit) {
-        return;
-      }
+      // A short page is not the last one: a concurrent delete can shorten
+      // it while later rows remain, so page until an empty page.
       after = last;
     }
   }
