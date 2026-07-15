@@ -44,10 +44,7 @@ fn main() {
     // raw transport error instead of the server's 408 in the error
     // shape. 75s clears both defaults; TAGURU_MCP_TIMEOUT_SECS adjusts
     // it alongside a raised TAGURU_REQUEST_TIMEOUT_SECS.
-    let timeout_secs = std::env::var("TAGURU_MCP_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(75);
+    let timeout_secs = resolve_timeout_secs(std::env::var("TAGURU_MCP_TIMEOUT_SECS").ok());
     let bridge = Bridge {
         base: base.trim_end_matches('/').to_string(),
         token,
@@ -275,6 +272,17 @@ fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value>
     })
 }
 
+/// The bridge's global request timeout in seconds, from a raw
+/// `TAGURU_MCP_TIMEOUT_SECS` reading. A literal 0 parses fine but would
+/// arm a zero-second timeout that aborts every request before it can
+/// answer; that — and anything unparseable or unset — falls back to the
+/// 75-second default rather than bricking the bridge.
+fn resolve_timeout_secs(raw: Option<String>) -> u64 {
+    raw.and_then(|value| value.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .unwrap_or(75)
+}
+
 /// The bridge's HTTP client: 4xx/5xx come back as responses, not
 /// errors, so their JSON error bodies stay readable for `call`.
 fn bridge_agent(timeout: Duration) -> ureq::Agent {
@@ -383,6 +391,21 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_zero_or_unparseable_timeout_falls_back_to_the_default() {
+        // A positive override is honored verbatim.
+        assert_eq!(resolve_timeout_secs(Some("120".to_string())), 120);
+        // Unset keeps the default.
+        assert_eq!(resolve_timeout_secs(None), 75);
+        // A literal 0 would arm a zero-second timeout that aborts every
+        // request — it must not pass through as the budget.
+        assert_eq!(resolve_timeout_secs(Some("0".to_string())), 75);
+        // Garbage and negatives (u64 parse fails) also fall back.
+        assert_eq!(resolve_timeout_secs(Some("-5".to_string())), 75);
+        assert_eq!(resolve_timeout_secs(Some("soon".to_string())), 75);
+        assert_eq!(resolve_timeout_secs(Some(String::new())), 75);
     }
 
     #[test]
