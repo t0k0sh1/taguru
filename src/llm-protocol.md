@@ -386,6 +386,16 @@ retry) / `storage_full`.
   last recollection, verbatim from the previous page's last row.
   `total` stays constant across pages; stop once `matches` comes back
   empty.
+- The keyset-paged listings — `/contexts` and `/groups` (`after` = the
+  last `name`), `/contexts/{name}/labels` (`after` = the last `label`),
+  `/contexts/{name}/sources` (`after` = the last `id`), and
+  `/contexts/{name}/aliases` (`after` = the last `concept:x|label:x`) —
+  page by the last row's key, not by rank, and their `total` is a live
+  count independent of your cursor. As with the match endpoints above,
+  a page can come back shorter than `limit` — a row deleted or
+  retracted in the instant it is read drops from that page while the
+  rows after it still follow — so a short page is not the last one.
+  Stop only once a page comes back empty.
 - A write that returned 200 is durable via the WAL (it survives a
   crash and replays on restart). Only when the server runs
   `TAGURU_WAL=0` can writes inside the flush interval (default 5 s)
