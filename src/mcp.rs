@@ -2526,6 +2526,130 @@ mod tests {
         assert_eq!(result, Err("stop past the guard".to_string()));
     }
 
+    /// `resolve_limit` rides every resolve round trip's body: a caller's
+    /// candidate cap must reach the resolve endpoint, not be dropped
+    /// between the composed call and the per-cue request. The non-null
+    /// gate that admits it is what makes a supplied cap take effect;
+    /// resolve returns nothing, so no anchor forms and it is the only call.
+    #[test]
+    fn run_retrieve_forwards_resolve_limit_to_each_resolve_call() {
+        let arguments = json!({ "context": "sake", "origins": ["tokyo"], "resolve_limit": 7 });
+        let mut saw_resolve = false;
+        run_retrieve(&arguments, |_method, path, body| {
+            assert!(
+                path.ends_with("/resolve"),
+                "resolve is the only call: {path}"
+            );
+            let body = body.expect("resolve carries a body");
+            assert_eq!(
+                body["limit"], 7,
+                "resolve_limit must ride the resolve body: {body}"
+            );
+            saw_resolve = true;
+            Ok(envelope(json!([])))
+        })
+        .expect("run_retrieve succeeds");
+        assert!(saw_resolve, "resolve must have fired");
+    }
+
+    /// `labels` both gates and rides the query round trip: naming facets
+    /// must fire a `query` whose body carries them. Were the non-null gate
+    /// to invert, a named facet set would silently skip query altogether.
+    #[test]
+    fn run_retrieve_forwards_labels_to_the_query_round_trip() {
+        let arguments = json!({
+            "context": "sake", "origins": ["tokyo"], "labels": ["capital_of"],
+            "describe_first": false, "fetch_citations": false
+        });
+        let mut saw_query = false;
+        run_retrieve(&arguments, |_method, path, body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{ "name": "Tokyo" }])))
+            } else if path.ends_with("/query") {
+                let body = body.expect("query carries a body");
+                assert_eq!(
+                    body["label"],
+                    json!(["capital_of"]),
+                    "labels must ride the query body: {body}"
+                );
+                saw_query = true;
+                Ok(envelope(json!({ "matches": [] })))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({ "matches": [] })))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+        assert!(saw_query, "labels must trigger a query round trip");
+    }
+
+    /// `activate_decay` and `activate_limit` both ride the activate body:
+    /// the spreading-activation knobs must reach the activate endpoint
+    /// rather than being dropped between the composed call and the request.
+    #[test]
+    fn run_retrieve_forwards_activate_decay_and_limit_to_the_activate_call() {
+        let arguments = json!({
+            "context": "sake", "origins": ["tokyo"],
+            "activate_decay": 0.5, "activate_limit": 9,
+            "describe_first": false, "fetch_citations": false
+        });
+        let mut saw_activate = false;
+        run_retrieve(&arguments, |_method, path, body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{ "name": "Tokyo" }])))
+            } else if path.ends_with("/activate") {
+                let body = body.expect("activate carries a body");
+                assert_eq!(
+                    body["decay"], 0.5,
+                    "activate_decay must ride the activate body: {body}"
+                );
+                assert_eq!(
+                    body["limit"], 9,
+                    "activate_limit must ride the activate body: {body}"
+                );
+                saw_activate = true;
+                Ok(envelope(json!({ "matches": [] })))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+        assert!(saw_activate, "activate must have fired");
+    }
+
+    /// `search_limit` rides the text-fallback search body, capping the
+    /// fallback page as the caller asked. resolve anchors but activate
+    /// returns nothing, so associations stay empty and the fallback fires.
+    #[test]
+    fn run_retrieve_forwards_search_limit_to_the_text_fallback() {
+        let arguments = json!({
+            "context": "sake", "origins": ["tokyo"], "describe_first": false,
+            "fetch_citations": false, "text_fallback_query": "some declarative fact",
+            "search_limit": 4
+        });
+        let mut saw_search = false;
+        run_retrieve(&arguments, |_method, path, body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{ "name": "Tokyo" }])))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({ "matches": [] })))
+            } else if path.ends_with("/sources/search") {
+                let body = body.expect("search carries a body");
+                assert_eq!(
+                    body["limit"], 4,
+                    "search_limit must ride the search body: {body}"
+                );
+                saw_search = true;
+                Ok(envelope(json!([])))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+        assert!(saw_search, "the text fallback must have fired a search");
+    }
+
     #[test]
     fn retrieve_is_advertised_with_context_and_origins_required() {
         let tool = tool_definitions()
