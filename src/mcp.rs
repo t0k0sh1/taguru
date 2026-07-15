@@ -1242,33 +1242,36 @@ pub fn run_retrieve(
     let context = need(arguments, "context")?.to_string();
     let origins: Vec<String> = match arguments.get("origins") {
         Some(Value::String(text)) => vec![text.clone()],
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|item| {
-                item.as_str().map(str::to_string).ok_or_else(|| {
-                    "argument 'origins' must be a string or an array of strings".to_string()
+        Some(Value::Array(items)) => {
+            // Each origin cue fans out to its own `resolve` round trip (and,
+            // with describe_first, a `describe`), so an unbounded list
+            // amplifies one call into arbitrarily many — slipping past the
+            // per-request list cap the direct read endpoints enforce, since it
+            // reaches them one cue at a time. Refuse an oversized list up
+            // front — before cloning every cue into a `String` — at the same
+            // ceiling `overlong` applies to `origins` on those endpoints.
+            if items.len() > MAX_ORIGIN_CUES {
+                return Err(format!(
+                    "argument 'origins' carries {} cues, past the per-request limit of {}; \
+                     split the retrieval",
+                    items.len(),
+                    MAX_ORIGIN_CUES
+                ));
+            }
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str().map(str::to_string).ok_or_else(|| {
+                        "argument 'origins' must be a string or an array of strings".to_string()
+                    })
                 })
-            })
-            .collect::<Result<_, _>>()?,
+                .collect::<Result<_, _>>()?
+        }
         Some(Value::Null) | None => return Err("missing required argument 'origins'".to_string()),
         Some(_) => {
             return Err("argument 'origins' must be a string or an array of strings".to_string());
         }
     };
-    // Each origin cue fans out to its own `resolve` round trip (and, with
-    // describe_first, a `describe`), so an unbounded list amplifies one
-    // call into arbitrarily many — slipping past the per-request list cap
-    // the direct read endpoints enforce, since it reaches them one cue at
-    // a time. Refuse it up front, at the same ceiling `overlong` applies
-    // to `origins` on those endpoints.
-    if origins.len() > MAX_ORIGIN_CUES {
-        return Err(format!(
-            "argument 'origins' carries {} cues, past the per-request limit of {}; \
-             split the retrieval",
-            origins.len(),
-            MAX_ORIGIN_CUES
-        ));
-    }
     let auto_pick = arguments
         .get("auto_pick")
         .and_then(Value::as_bool)
