@@ -594,6 +594,16 @@ impl Context {
                     .entry(record.source)
                     .or_default()
                     .push(edge_id);
+                // A live chained record always carries a positive count:
+                // the writer unlinks a record the instant retraction drains
+                // it to zero, so a zero-count record never lingers in the
+                // chain. Verify it rather than assume it — this is what makes
+                // `edge.count == 0` above imply an empty chain (any non-empty
+                // chain now sums to >= 1, tripping the count check below), so
+                // the dead-edge tally cannot over-count a crafted image.
+                if record.count == 0 {
+                    return Err(CorruptImage("attribution record carries a zero count"));
+                }
                 chain_count = chain_count
                     .checked_add(record.count)
                     .ok_or(CorruptImage("attribution chain count overflows u64"))?;

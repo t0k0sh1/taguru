@@ -5806,6 +5806,31 @@ mod tests {
     }
 
     #[test]
+    fn from_bytes_rejects_a_zero_count_attribution_record() {
+        // Same single-edge, single-attribution layout as the tests above:
+        // record 0 sits at 88..112, its `count` u64 at 96..104 (after the
+        // source and next u32s). The write path unlinks a record the
+        // instant retraction drains it to zero, so a live chained record
+        // always carries a positive count. A zero here is a crafted or
+        // corrupted image: it must be refused, or the `edge.count == 0`
+        // dead-edge shortcut — which assumes a dead edge's chain is empty —
+        // would over-count a chain that still threads a zero-count record.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        let mut corrupt = context.to_bytes();
+        corrupt[96..104].copy_from_slice(&0u64.to_le_bytes());
+        let error = Context::from_bytes(&resealed(corrupt)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("attribution record carries a zero count"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn empty_context_roundtrips() {
         let restored =
             Context::from_bytes(&Context::default().to_bytes()).expect("image must load");
