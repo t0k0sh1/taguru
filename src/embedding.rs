@@ -281,9 +281,20 @@ impl HttpEmbeddings {
             let mut vector: Vec<f32> = embedding
                 .iter()
                 .map(|component| {
-                    component.as_f64().map(|value| value as f32).ok_or_else(|| {
+                    let value = component.as_f64().ok_or_else(|| {
                         format!("embedding entry {index} contains a non-numeric component")
-                    })
+                    })? as f32;
+                    // A finite f64 past f32::MAX casts to ±inf; carried
+                    // into `normalize` it poisons the stored vector (inf
+                    // becomes NaN, or a norm that overflows and zeroes
+                    // every component). Name it at the boundary like any
+                    // other malformed component instead of persisting it.
+                    if !value.is_finite() {
+                        return Err(format!(
+                            "embedding entry {index} contains an out-of-range component"
+                        ));
+                    }
+                    Ok(value)
                 })
                 .collect::<Result<_, _>>()?;
             // One response, one model, one width. A mixed-width response
@@ -344,8 +355,17 @@ pub fn fnv1a(text: &str) -> u64 {
 
 /// Scales a vector to unit length, so similarity is a plain dot product.
 pub fn normalize(vector: &mut [f32]) {
-    let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
-    if norm > 0.0 {
+    // Accumulate the norm in f64: a large but finite f32 component
+    // squares past f32::MAX, overflowing an f32 sum of squares to +inf
+    // and zeroing the whole vector on divide. f64 holds the sum for any
+    // realistic width, and the finiteness guard keeps a pathological
+    // input from dividing by inf.
+    let norm = vector
+        .iter()
+        .map(|v| f64::from(*v) * f64::from(*v))
+        .sum::<f64>()
+        .sqrt() as f32;
+    if norm > 0.0 && norm.is_finite() {
         for value in vector.iter_mut() {
             *value /= norm;
         }

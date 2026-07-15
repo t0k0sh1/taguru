@@ -526,6 +526,16 @@ impl Bm25Index {
             let paragraph = read_u32(bytes, &mut pos)?;
             let length = f32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
             pos += 4;
+            // A non-finite or negative length is corruption: added into
+            // `live_total_length` it poisons the average that every
+            // document's BM25 length normalization divides by, turning
+            // every score NaN. Refuse the whole index so the caller
+            // rebuilds it, exactly as the magic and bounds checks do —
+            // the sidecars carry no CRC, so this content check is the
+            // only line between a torn write and a silently wrong corpus.
+            if !length.is_finite() || length < 0.0 {
+                return None;
+            }
             let hash = u64::from_le_bytes(bytes.get(pos..pos + 8)?.try_into().ok()?);
             pos += 8;
             let question_hash = u64::from_le_bytes(bytes.get(pos..pos + 8)?.try_into().ok()?);
@@ -556,6 +566,14 @@ impl Bm25Index {
                 }
                 let tf = f32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
                 pos += 4;
+                // Same reasoning as `length` above: a non-finite or
+                // negative term frequency flows straight into the BM25
+                // numerator and makes the score NaN/negative. Reject the
+                // index and rebuild rather than trust an unchecksummed
+                // sidecar's word.
+                if !tf.is_finite() || tf < 0.0 {
+                    return None;
+                }
                 list.push(Posting { slot, tf });
             }
             index.postings.insert(term, list);
@@ -932,6 +950,51 @@ mod tests {
             Bm25Index::from_bytes(&padded).is_none(),
             "trailing bytes are corruption, not slack"
         );
+    }
+
+    #[test]
+    fn from_bytes_rejects_non_finite_or_negative_length_and_tf() {
+        // One source, one paragraph → one slot, at least one posting.
+        let records = vec![("s".to_string(), record("あい"))];
+        let index = Bm25Index::build(&records);
+        let good = index.to_bytes();
+        assert!(
+            Bm25Index::from_bytes(&good).is_some(),
+            "the pristine bytes must decode — the corruption tests below mean nothing otherwise"
+        );
+
+        // Slot layout: magic(8) + source_count(4) + name_len(4) + "s"(1)
+        // + slot_count(4) + source_id(4) + paragraph(4) = 29, then length.
+        const LENGTH_OFF: usize = 29;
+        let stored = f32::from_le_bytes(good[LENGTH_OFF..LENGTH_OFF + 4].try_into().unwrap());
+        assert_eq!(
+            stored, index.slots[0].length,
+            "offset check: bytes[29..33] must really be the slot length"
+        );
+        // The final field written is the last posting's tf, so the tail
+        // four bytes are always a tf — no offset math needed.
+        let tf_off = good.len() - 4;
+        let stored_tf = f32::from_le_bytes(good[tf_off..].try_into().unwrap());
+        assert!(
+            stored_tf.is_finite() && stored_tf > 0.0,
+            "the tail is a live tf"
+        );
+
+        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0] {
+            let mut length_torn = good.clone();
+            length_torn[LENGTH_OFF..LENGTH_OFF + 4].copy_from_slice(&poison.to_le_bytes());
+            assert!(
+                Bm25Index::from_bytes(&length_torn).is_none(),
+                "a {poison} paragraph length poisons the average — reject and rebuild"
+            );
+
+            let mut tf_torn = good.clone();
+            tf_torn[tf_off..].copy_from_slice(&poison.to_le_bytes());
+            assert!(
+                Bm25Index::from_bytes(&tf_torn).is_none(),
+                "a {poison} term frequency makes the score NaN — reject and rebuild"
+            );
+        }
     }
 
     #[test]
