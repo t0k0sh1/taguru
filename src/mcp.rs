@@ -2500,6 +2500,33 @@ mod tests {
     }
 
     #[test]
+    fn run_retrieve_admits_an_origins_list_at_exactly_the_input_cap() {
+        // The cap refuses lists *past* the ceiling, not at it: a list of
+        // exactly MAX_ORIGIN_CUES cues clears the guard and reaches the first
+        // resolve round trip. Pins the `>` boundary so a `>=` slip — which
+        // would refuse the largest admissible list — cannot pass unnoticed.
+        let origins: Vec<String> = (0..MAX_ORIGIN_CUES).map(|i| format!("cue{i}")).collect();
+        assert_eq!(origins.len(), MAX_ORIGIN_CUES);
+        let mut calls = 0usize;
+        let result = run_retrieve(
+            &json!({ "context": "sake", "origins": origins }),
+            |_, path, _| {
+                calls += 1;
+                assert!(
+                    path.ends_with("/resolve"),
+                    "first round trip is a resolve: {path}"
+                );
+                Err("stop past the guard".to_string())
+            },
+        );
+        assert_eq!(
+            calls, 1,
+            "the admitted list fired exactly one resolve before we bailed"
+        );
+        assert_eq!(result, Err("stop past the guard".to_string()));
+    }
+
+    #[test]
     fn retrieve_is_advertised_with_context_and_origins_required() {
         let tool = tool_definitions()
             .into_iter()

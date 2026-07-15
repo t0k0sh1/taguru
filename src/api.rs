@@ -5799,4 +5799,39 @@ mod tests {
             ]
         );
     }
+
+    #[tokio::test]
+    async fn restore_refusal_frames_a_spent_budget_as_a_resumable_timeout() {
+        use crate::registry::RestoreGroupsError;
+
+        // A group restore that runs out of budget is a resumable prefix, not
+        // a rejected set: it answers with the Timeout code and a message
+        // naming the durable batch count and the timeout knob — distinct from
+        // the generic "every batch landed" refusal the validation arms emit.
+        // Guards the Timeout arm of the message match against deletion, which
+        // would fall the Timeout case through to that generic wording.
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-restore-refusal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+
+        let response = restore_refusal(
+            &state,
+            RestoreGroupsError::Timeout { applied: 2 },
+            2,
+            Instant::now(),
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str());
+        let message = body["error"].as_str().expect("error is a string");
+        assert!(
+            message.contains("group restore exceeded its budget with 2 batch(es) durable"),
+            "{message}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
