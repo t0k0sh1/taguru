@@ -284,7 +284,7 @@ pub fn run(args: &[String]) -> i32 {
             .iter()
             .map(|(_, name, record)| (name.clone(), record.clone()))
             .collect();
-        match state.restore_groups(&records) {
+        match state.restore_groups(&records, Deadline::unbounded()) {
             Ok(outcomes) => {
                 restored = outcomes.len();
                 for ((path, name, record), (_, outcome)) in groups.iter().zip(&outcomes) {

@@ -100,13 +100,17 @@ class AsyncTaguru:
             ``http://127.0.0.1:8248``.
         api_key: Bearer token; defaults to ``$TAGURU_API_TOKEN`` (unset means
             the server runs unauthenticated — dev mode).
-        timeout: Per-request budget in seconds. Matches the server's own
+        timeout: Per-request budget in seconds, applied to the default
+            client this constructor builds. Matches the server's own
             default; raise both together when the server calls an embedding
-            provider.
+            provider. Ignored when ``http_client`` is supplied — a
+            bring-your-own client carries its own timeout configuration.
         retries: Additional attempts after the first, for retry-safe failures.
         headers: Extra headers sent on every request.
         http_client: Bring your own configured ``httpx`` client (proxies,
-            mTLS, ...); its lifecycle stays yours.
+            mTLS, ...); its lifecycle — and its own timeout configuration —
+            stays yours, so the ``timeout`` argument above does not apply to
+            it.
     """
 
     def __init__(
@@ -387,8 +391,8 @@ class AsyncContexts:
                 return
             for entry in page.contexts:
                 yield entry
-            if limit is not None and len(page.contexts) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.contexts[-1].name
 
     async def get(self, name: str) -> DirectoryEntry:
@@ -492,8 +496,8 @@ class AsyncGroups:
                 return
             for entry in page.groups:
                 yield entry
-            if limit is not None and len(page.groups) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.groups[-1].name
 
     async def get(self, name: str) -> GroupEntry:
@@ -831,8 +835,8 @@ class AsyncContext:
                 return
             for label in page.labels:
                 yield label
-            if limit is not None and len(page.labels) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.labels[-1]
 
     # -- graph writes ---------------------------------------------------------
@@ -973,8 +977,8 @@ class AsyncContext:
                 return
             for source in page.sources:
                 yield source
-            if limit is not None and len(page.sources) < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = page.sources[-1]
 
     async def cite_passage(self, source: str, paragraph: int) -> Citation:
@@ -1021,8 +1025,8 @@ class AsyncContext:
             for alias, canonical in page.labels.items():
                 yield AliasEntry(namespace="label", alias=alias, canonical=canonical)
                 last = f"label:{alias}"
-            if limit is not None and count < limit:
-                return
+            # A short page is not the last one: a concurrent delete can
+            # shorten it while later rows remain, so page until an empty page.
             after = last
 
     async def add_aliases(

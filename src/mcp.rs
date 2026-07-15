@@ -1206,6 +1206,16 @@ fn triple_of(association: &Value) -> Option<(String, String, String)> {
     ))
 }
 
+/// Ceiling on the `origins` cue list [`run_retrieve`] accepts. Each cue
+/// drives its own `resolve` round trip (and, with describe_first, a
+/// `describe`), so an unbounded list would amplify one composed call
+/// into arbitrarily many requests — slipping past the per-request cap
+/// the direct read endpoints put on list inputs, which it reaches one
+/// cue at a time. Mirrors `api::MAX_INPUT_ITEMS`; restated here because
+/// this module compiles into the stdio bridge too, which carries no
+/// `api` module to borrow the constant from.
+const MAX_ORIGIN_CUES: usize = 1000;
+
 /// The composed retrieval loop (`Context.retrieve()` in both SDKs),
 /// reimplemented here so an MCP-only agent gets it in one call instead
 /// of orchestrating five tool calls by hand. `route_tool` stays a pure
@@ -1232,14 +1242,31 @@ pub fn run_retrieve(
     let context = need(arguments, "context")?.to_string();
     let origins: Vec<String> = match arguments.get("origins") {
         Some(Value::String(text)) => vec![text.clone()],
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|item| {
-                item.as_str().map(str::to_string).ok_or_else(|| {
-                    "argument 'origins' must be a string or an array of strings".to_string()
+        Some(Value::Array(items)) => {
+            // Each origin cue fans out to its own `resolve` round trip (and,
+            // with describe_first, a `describe`), so an unbounded list
+            // amplifies one call into arbitrarily many — slipping past the
+            // per-request list cap the direct read endpoints enforce, since it
+            // reaches them one cue at a time. Refuse an oversized list up
+            // front — before cloning every cue into a `String` — at the same
+            // ceiling `overlong` applies to `origins` on those endpoints.
+            if items.len() > MAX_ORIGIN_CUES {
+                return Err(format!(
+                    "argument 'origins' carries {} cues, past the per-request limit of {}; \
+                     split the retrieval",
+                    items.len(),
+                    MAX_ORIGIN_CUES
+                ));
+            }
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str().map(str::to_string).ok_or_else(|| {
+                        "argument 'origins' must be a string or an array of strings".to_string()
+                    })
                 })
-            })
-            .collect::<Result<_, _>>()?,
+                .collect::<Result<_, _>>()?
+        }
         Some(Value::Null) | None => return Err("missing required argument 'origins'".to_string()),
         Some(_) => {
             return Err("argument 'origins' must be a string or an array of strings".to_string());
@@ -2454,6 +2481,173 @@ mod tests {
             run_retrieve(&json!({"context": "sake"}), |_, _, _| unreachable!()),
             Err("missing required argument 'origins'".to_string())
         );
+    }
+
+    #[test]
+    fn run_retrieve_refuses_an_origins_list_past_the_input_cap() {
+        // One resolve round trip per cue makes an oversized list a fanout
+        // amplifier, so it is refused before the first call fires — the
+        // way the direct endpoints refuse an overlong `origins` batch.
+        let origins: Vec<String> = (0..=MAX_ORIGIN_CUES).map(|i| format!("cue{i}")).collect();
+        let result = run_retrieve(
+            &json!({ "context": "sake", "origins": origins }),
+            |_, _, _| unreachable!("no request may fire once the list is refused"),
+        );
+        assert!(
+            matches!(&result, Err(message) if message.contains("past the per-request limit")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn run_retrieve_admits_an_origins_list_at_exactly_the_input_cap() {
+        // The cap refuses lists *past* the ceiling, not at it: a list of
+        // exactly MAX_ORIGIN_CUES cues clears the guard and reaches the first
+        // resolve round trip. Pins the `>` boundary so a `>=` slip — which
+        // would refuse the largest admissible list — cannot pass unnoticed.
+        let origins: Vec<String> = (0..MAX_ORIGIN_CUES).map(|i| format!("cue{i}")).collect();
+        assert_eq!(origins.len(), MAX_ORIGIN_CUES);
+        let mut calls = 0usize;
+        let result = run_retrieve(
+            &json!({ "context": "sake", "origins": origins }),
+            |_, path, _| {
+                calls += 1;
+                assert!(
+                    path.ends_with("/resolve"),
+                    "first round trip is a resolve: {path}"
+                );
+                Err("stop past the guard".to_string())
+            },
+        );
+        assert_eq!(
+            calls, 1,
+            "the admitted list fired exactly one resolve before we bailed"
+        );
+        assert_eq!(result, Err("stop past the guard".to_string()));
+    }
+
+    /// `resolve_limit` rides every resolve round trip's body: a caller's
+    /// candidate cap must reach the resolve endpoint, not be dropped
+    /// between the composed call and the per-cue request. The non-null
+    /// gate that admits it is what makes a supplied cap take effect;
+    /// resolve returns nothing, so no anchor forms and it is the only call.
+    #[test]
+    fn run_retrieve_forwards_resolve_limit_to_each_resolve_call() {
+        let arguments = json!({ "context": "sake", "origins": ["tokyo"], "resolve_limit": 7 });
+        let mut saw_resolve = false;
+        run_retrieve(&arguments, |_method, path, body| {
+            assert!(
+                path.ends_with("/resolve"),
+                "resolve is the only call: {path}"
+            );
+            let body = body.expect("resolve carries a body");
+            assert_eq!(
+                body["limit"], 7,
+                "resolve_limit must ride the resolve body: {body}"
+            );
+            saw_resolve = true;
+            Ok(envelope(json!([])))
+        })
+        .expect("run_retrieve succeeds");
+        assert!(saw_resolve, "resolve must have fired");
+    }
+
+    /// `labels` both gates and rides the query round trip: naming facets
+    /// must fire a `query` whose body carries them. Were the non-null gate
+    /// to invert, a named facet set would silently skip query altogether.
+    #[test]
+    fn run_retrieve_forwards_labels_to_the_query_round_trip() {
+        let arguments = json!({
+            "context": "sake", "origins": ["tokyo"], "labels": ["capital_of"],
+            "describe_first": false, "fetch_citations": false
+        });
+        let mut saw_query = false;
+        run_retrieve(&arguments, |_method, path, body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{ "name": "Tokyo" }])))
+            } else if path.ends_with("/query") {
+                let body = body.expect("query carries a body");
+                assert_eq!(
+                    body["label"],
+                    json!(["capital_of"]),
+                    "labels must ride the query body: {body}"
+                );
+                saw_query = true;
+                Ok(envelope(json!({ "matches": [] })))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({ "matches": [] })))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+        assert!(saw_query, "labels must trigger a query round trip");
+    }
+
+    /// `activate_decay` and `activate_limit` both ride the activate body:
+    /// the spreading-activation knobs must reach the activate endpoint
+    /// rather than being dropped between the composed call and the request.
+    #[test]
+    fn run_retrieve_forwards_activate_decay_and_limit_to_the_activate_call() {
+        let arguments = json!({
+            "context": "sake", "origins": ["tokyo"],
+            "activate_decay": 0.5, "activate_limit": 9,
+            "describe_first": false, "fetch_citations": false
+        });
+        let mut saw_activate = false;
+        run_retrieve(&arguments, |_method, path, body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{ "name": "Tokyo" }])))
+            } else if path.ends_with("/activate") {
+                let body = body.expect("activate carries a body");
+                assert_eq!(
+                    body["decay"], 0.5,
+                    "activate_decay must ride the activate body: {body}"
+                );
+                assert_eq!(
+                    body["limit"], 9,
+                    "activate_limit must ride the activate body: {body}"
+                );
+                saw_activate = true;
+                Ok(envelope(json!({ "matches": [] })))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+        assert!(saw_activate, "activate must have fired");
+    }
+
+    /// `search_limit` rides the text-fallback search body, capping the
+    /// fallback page as the caller asked. resolve anchors but activate
+    /// returns nothing, so associations stay empty and the fallback fires.
+    #[test]
+    fn run_retrieve_forwards_search_limit_to_the_text_fallback() {
+        let arguments = json!({
+            "context": "sake", "origins": ["tokyo"], "describe_first": false,
+            "fetch_citations": false, "text_fallback_query": "some declarative fact",
+            "search_limit": 4
+        });
+        let mut saw_search = false;
+        run_retrieve(&arguments, |_method, path, body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{ "name": "Tokyo" }])))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({ "matches": [] })))
+            } else if path.ends_with("/sources/search") {
+                let body = body.expect("search carries a body");
+                assert_eq!(
+                    body["limit"], 4,
+                    "search_limit must ride the search body: {body}"
+                );
+                saw_search = true;
+                Ok(envelope(json!([])))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+        assert!(saw_search, "the text fallback must have fired a search");
     }
 
     #[test]

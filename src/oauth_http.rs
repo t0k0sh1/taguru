@@ -4,9 +4,11 @@
 //! exist to CREATE credentials) and rate-limited under the anonymous
 //! bucket like any unauthenticated caller.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
-use axum::extract::{Form, Query, State};
+use axum::extract::{ConnectInfo, Form, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -21,6 +23,13 @@ use crate::oauth::{Oauth, escape_html, now_secs};
 pub struct OauthState {
     pub oauth: Arc<Oauth>,
     pub keyring: Arc<Keyring>,
+    /// Shared with the bearer gate. The consent POST runs the same
+    /// constant-time keyring scan (`authenticate`) as the gate but
+    /// unauthenticated, so a wrong key here has to spend the same
+    /// per-source-IP failure budget — otherwise the page is a free
+    /// brute-force (and CPU-burn) oracle against the keyring whenever the
+    /// optional per-key rate limit is off, which is its default.
+    pub fail_limiter: Arc<crate::limits::RateLimiter>,
 }
 
 pub fn router(state: OauthState) -> Router {
@@ -116,6 +125,30 @@ struct AuthorizeParams {
     /// Present only on the consent POST: the operator's API key.
     #[serde(default)]
     key: String,
+}
+
+/// The caller's source address, when the listener attached one.
+/// `into_make_service_with_connect_info` (how this server serves) always
+/// does; a bare test `oneshot` may not. Infallible on purpose — a
+/// missing address degrades the consent throttle to one shared bucket
+/// instead of turning the POST into a 500, exactly as `peer_ip` does for
+/// the bearer gate.
+struct PeerAddr(Option<SocketAddr>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for PeerAddr {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(PeerAddr(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|connect| connect.0),
+        ))
+    }
 }
 
 /// Validates the (client, redirect) pair — the two fields that decide
@@ -216,7 +249,11 @@ async fn consent_page(
 /// The consent decision: a valid key issues the code and sends the
 /// browser back; an invalid one re-asks without leaking which part
 /// was wrong.
-async fn approve(State(state): State<OauthState>, Form(params): Form<AuthorizeParams>) -> Response {
+async fn approve(
+    State(state): State<OauthState>,
+    PeerAddr(peer_addr): PeerAddr,
+    Form(params): Form<AuthorizeParams>,
+) -> Response {
     let client = match checked_redirect(&state, &params) {
         Ok(client) => client,
         Err(refusal) => return *refusal,
@@ -225,6 +262,20 @@ async fn approve(State(state): State<OauthState>, Form(params): Form<AuthorizePa
         return error_redirect(&params, error);
     }
     let Some(key) = state.keyring.authenticate(&params.key) else {
+        // Same throttle the bearer gate applies to a wrong token: this
+        // path runs the identical constant-time keyring scan, so a wrong
+        // key spends the per-source-IP failure budget and, once over it,
+        // gets a 429 instead of another guess. A correct key returns
+        // below without ever touching the limiter, so a delegating
+        // operator is never throttled — only a brute-forcer is.
+        if !state.fail_limiter.is_disabled() {
+            let peer = peer_addr
+                .map(|addr| Arc::<str>::from(addr.ip().to_string().as_str()))
+                .unwrap_or_else(|| Arc::from("peer:unknown"));
+            if let Err(retry_after) = state.fail_limiter.admit(&peer, Instant::now()) {
+                return too_many_attempts(retry_after);
+            }
+        }
         return consent_form(
             &client.client_name,
             &params,
@@ -272,6 +323,24 @@ fn hardened_html(status: StatusCode, body: String) -> Response {
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
+    response
+}
+
+/// The consent POST's answer once the per-source-IP failure budget is
+/// spent: a hardened 429 carrying the same `Retry-After` the bearer gate
+/// sends on the identical throttle. Deliberately says nothing about which
+/// key or how many tries remain — it is the same page for every caller.
+fn too_many_attempts(retry_after: u64) -> Response {
+    let mut response = hardened_html(
+        StatusCode::TOO_MANY_REQUESTS,
+        "<!doctype html><meta charset=\"utf-8\">\
+         <title>Taguru — too many attempts</title>\
+         <p>Too many failed attempts from your address. Try again shortly.</p>"
+            .to_string(),
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(retry_after));
     response
 }
 
@@ -479,5 +548,84 @@ mod tests {
             page.contains("<code>https://claude.ai/cb?x=1&amp;y=2</code>"),
             "{page}"
         );
+    }
+
+    /// The consent POST runs the keyring's constant-time scan
+    /// unauthenticated, so a wrong key spends the same per-source-IP
+    /// failure budget the bearer gate uses: the first miss re-asks (200),
+    /// but once the budget is gone the page answers 429 + Retry-After
+    /// instead of grading another guess. A correct key never touches the
+    /// limiter, so a delegating operator is not locked out even after the
+    /// budget is spent. Without this the form is a free brute-force /
+    /// CPU-burn oracle against the keyring whenever the optional per-key
+    /// rate limit is off (its default).
+    #[tokio::test]
+    async fn a_wrong_consent_key_spends_the_failed_auth_budget() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-oauth-consent-throttle-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let oauth = crate::oauth::Oauth::open("https://memory.example", &dir);
+        let client = oauth
+            .register_client("claude", vec!["https://claude.ai/cb".to_string()])
+            .unwrap();
+        let state = OauthState {
+            oauth: Arc::new(oauth),
+            keyring: Arc::new(
+                crate::auth::Keyring::parse(Some("tg_correct".to_string()), None).unwrap(),
+            ),
+            // One failed attempt per minute: the second wrong key in the
+            // same minute is already over budget.
+            fail_limiter: Arc::new(crate::limits::RateLimiter::new(1)),
+        };
+        let authorize = |key: &str| -> AuthorizeParams {
+            serde_json::from_value(json!({
+                "response_type": "code",
+                "client_id": client.client_id.clone(),
+                "redirect_uri": "https://claude.ai/cb",
+                // Any 43-char string clears the S256-shape check; the key
+                // is what this test turns away.
+                "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+                "code_challenge_method": "S256",
+                "key": key,
+            }))
+            .unwrap()
+        };
+
+        // First wrong key: rejected but under budget, so the form comes
+        // back (200) for an honest retry.
+        let first = approve(
+            State(state.clone()),
+            PeerAddr(None),
+            Form(authorize("nope-1")),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // Second wrong key in the same minute: over the 1/min budget →
+        // 429 with Retry-After, exactly like the bearer gate.
+        let second = approve(
+            State(state.clone()),
+            PeerAddr(None),
+            Form(authorize("nope-2")),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(second.headers().contains_key(header::RETRY_AFTER));
+
+        // The correct key is never throttled: it returns before the
+        // limiter is consulted, so even now — failure budget spent — it
+        // still issues the code and redirects (303), never a 429.
+        let ok = approve(
+            State(state.clone()),
+            PeerAddr(None),
+            Form(authorize("tg_correct")),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::SEE_OTHER);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

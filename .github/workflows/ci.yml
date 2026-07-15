@@ -98,11 +98,16 @@ jobs:
 
   # Full mutation runs are intentionally local and module-scoped. On a
   # pull request, mutate only production lines touched since the merge
-  # base so the feedback stays bounded by the size of the change.
+  # base so the feedback stays bounded by the size of the change. A wide
+  # audit diff can still spawn dozens of mutants, each its own build+test,
+  # so run two at a time (safe on the runner's cores and disk) and give
+  # the job a ceiling that clears a large change rather than one tuned to
+  # a small one — the job still ends the moment the mutants finish, so the
+  # higher ceiling costs nothing on an ordinary PR.
   mutants:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -119,7 +124,7 @@ jobs:
       - name: Build pull-request diff
         run: git diff "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" > pr.diff
       - name: Test mutants in changed code
-        run: cargo mutants --workspace --in-diff pr.diff
+        run: cargo mutants --workspace --in-diff pr.diff --jobs 2
       - uses: actions/upload-artifact@v7
         if: always()
         with:
