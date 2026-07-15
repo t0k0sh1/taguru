@@ -94,13 +94,17 @@ class Taguru:
             ``http://127.0.0.1:8248``.
         api_key: Bearer token; defaults to ``$TAGURU_API_TOKEN`` (unset means
             the server runs unauthenticated — dev mode).
-        timeout: Per-request budget in seconds. Matches the server's own
+        timeout: Per-request budget in seconds, applied to the default
+            client this constructor builds. Matches the server's own
             default; raise both together when the server calls an embedding
-            provider.
+            provider. Ignored when ``http_client`` is supplied — a
+            bring-your-own client carries its own timeout configuration.
         retries: Additional attempts after the first, for retry-safe failures.
         headers: Extra headers sent on every request.
         http_client: Bring your own configured ``httpx`` client (proxies,
-            mTLS, ...); its lifecycle stays yours.
+            mTLS, ...); its lifecycle — and its own timeout configuration —
+            stays yours, so the ``timeout`` argument above does not apply to
+            it.
     """
 
     def __init__(
