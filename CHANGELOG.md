@@ -11,13 +11,13 @@ Entries that change an on-disk format or a response shape say so.
 - `TAGURU_EMBED_PARALLEL` (default 1, the prior sequential behavior):
   gloss refresh and passage refresh now dispatch each 128-item
   embedding chunk to the provider on up to `N` worker threads instead
-  of one chunk at a time (#65). Gloss refresh stays all-or-nothing —
-  the first chunk to fail, by index, still fails the whole refresh and
-  persists nothing. Passage refresh stays partial-persist, but under
-  parallelism the persisted subset is no longer necessarily a prefix
-  of the original order — it's whatever subset completed before the
-  first failure was recorded. Raise to match the provider's rate
-  limit, not the machine's core count.
+  of one chunk at a time (#65). Both lanes persist whatever subset
+  landed even when a later chunk fails, and under parallelism that
+  subset is no longer necessarily a prefix of the original order — it's
+  whatever completed before the first failure was recorded; the refresh
+  still returns the error, so the rows it skipped stay stale for the
+  next refresh to retry. Raise to match the provider's rate limit, not
+  the machine's core count.
 - `TAGURU_MAX_CONCURRENT_HEAVY_OPS` (default 2; `0` disables): one
   shared, non-queuing semaphore around `audit_vocabulary` and
   `compact_context`, over both raw HTTP and MCP dispatch. Once full,
@@ -442,6 +442,13 @@ Entries that change an on-disk format or a response shape say so.
   shape, including the default); a new warning also fires on the
   residual case where `labels > concepts` and rounds are too few to
   cover them all.
+- Gloss embedding refresh now prunes the vectors of concepts and labels
+  the graph no longer holds. `refresh_embeddings` extended the loaded
+  vector store in place, so a name dropped by compaction kept its row
+  in the `.vectors.bin` sidecar forever, and `resolve`, the vocabulary
+  audit's twin suggestions, and `explain` kept surfacing it. The
+  sidecar is now rebuilt against the live concept and label names each
+  refresh, the way the passage refresh already was.
 
 ## [0.2.0] - 2026-07-12
 
