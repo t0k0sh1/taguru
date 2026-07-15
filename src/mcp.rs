@@ -16,15 +16,20 @@ use serde_json::{Value, json};
 /// Spoken when the client does not name a protocol version itself.
 pub const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
 
-/// Ceiling on the `import` tool's `stream` argument. `taguru-mcp` does
-/// not link `ingest.rs` (its only path to the server is HTTP), so
-/// `ingest::MAX_LINE_BYTES` is unreachable here — this is its own
-/// bound, checked before the stream ever leaves the process. The
-/// transport's own body cap (`TAGURU_MAX_BODY_BYTES`, 8 MiB default)
-/// is not a substitute: it wraps the *outer* `/mcp` JSON-RPC envelope,
-/// and a stream JSON-quoted into a string argument (every newline
-/// escaped to `\n`) runs close to double its raw size. That same
-/// doubling is why `taguru-mcp`'s per-line frame cap
+/// Hard ceiling on the `import` tool's `stream` argument, checked
+/// before the stream ever leaves the process — `taguru-mcp` does not
+/// link `ingest.rs` (its only path to the server is HTTP), so
+/// `ingest::MAX_LINE_BYTES` is unreachable here and this stands in for
+/// it. It is an upper bound, NOT the effective cap: the server's own
+/// request body cap (`TAGURU_MAX_BODY_BYTES`, 8 MiB default) binds
+/// first at that default. The bridge POSTs the raw stream to `/import`
+/// under that cap, and over the `/mcp` HTTP transport the stream is
+/// JSON-quoted into the *outer* envelope (every newline escaped to
+/// `\n`, close to double its raw size) which must itself fit the body
+/// cap — so a stream between the body cap and this ceiling passes here
+/// only to be 413'd by the server. This 32 MiB becomes the binding
+/// limit solely once an operator raises `TAGURU_MAX_BODY_BYTES` above
+/// it. That same doubling is why `taguru-mcp`'s per-line frame cap
 /// (`TAGURU_MCP_MAX_LINE_BYTES`) defaults to ~2× this value: a line
 /// under the frame cap must still be able to carry a full-size stream.
 const MAX_IMPORT_STREAM_BYTES: usize = 32 * 1024 * 1024;
@@ -861,7 +866,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         (
             "import",
-            "Apply (or, with dry_run: true, preview) an NDJSON import stream — the same format `taguru import`/POST /import accept: a create block, associations, aliases, and passage per source, retract-then-apply and idempotent (admin role). A dry run writes nothing; its `associations`/`aliases` counts are optimistic previews, every other field exact. `taguru_group` records in the stream are not applied through this tool (their outcome is likewise not previewed) — use POST /import directly for a stream that carries any. Capped at 32 MiB; a larger stream needs POST /import or `taguru import` directly.",
+            "Apply (or, with dry_run: true, preview) an NDJSON import stream — the same format `taguru import`/POST /import accept: a create block, associations, aliases, and passage per source, retract-then-apply and idempotent (admin role). A dry run writes nothing; its `associations`/`aliases` counts are optimistic previews, every other field exact. `taguru_group` records in the stream are not applied through this tool (their outcome is likewise not previewed) — use POST /import directly for a stream that carries any. Bounded by the server's request body cap (TAGURU_MAX_BODY_BYTES, 8 MiB by default) — and smaller over the /mcp HTTP transport, where the stream is escaped into the JSON-RPC envelope that must itself fit that cap — with a hard 32 MiB tool ceiling above it; a larger stream needs POST /import or `taguru import` directly.",
             object_schema(
                 json!({
                     "stream": { "type": "string", "description": "NDJSON import stream (one taguru_batch/taguru_group/fact/alias/passage line per row)" },
