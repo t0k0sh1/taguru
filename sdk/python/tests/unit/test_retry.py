@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from taguru import RateLimitError, ServerError, TransportError
+from taguru._retry import parse_retry_after
 
 from .conftest import err_response, ok_response, sync_client
 
@@ -127,3 +128,20 @@ def test_retry_budget_exhausts_and_raises_last_error() -> None:
     with pytest.raises(RateLimitError):
         client.context("sake").recall("cue")
     assert handler.calls == 3  # initial + 2 retries
+
+
+def test_parse_retry_after_takes_a_bare_delay_and_refuses_the_rest() -> None:
+    assert parse_retry_after("5") == 5.0
+    assert parse_retry_after("  0.5  ") == 0.5
+    assert parse_retry_after("1e3") == 1000.0
+    assert parse_retry_after("0") == 0.0
+    # A trailing tail, a non-finite spelling, an overflow, or a negative value
+    # is malformed — return None so the caller falls back to computed backoff
+    # instead of sleeping on garbage (or forever).
+    assert parse_retry_after("5 seconds") is None
+    assert parse_retry_after("0x10") is None
+    assert parse_retry_after("Infinity") is None
+    assert parse_retry_after("1e400") is None
+    assert parse_retry_after("-1") is None
+    assert parse_retry_after("") is None
+    assert parse_retry_after(None) is None

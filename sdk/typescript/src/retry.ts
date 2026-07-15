@@ -48,13 +48,27 @@ export function backoffDelay(attempt: number): number {
   return Math.random() * Math.min(BACKOFF_CAP_SECS, BACKOFF_BASE_SECS * 2 ** attempt);
 }
 
-/** Parse a Retry-After header. The server sends delay-seconds only. */
+/**
+ * Parse a Retry-After header. The server sends delay-seconds only — a bare
+ * non-negative number — so parse the whole trimmed value strictly. A leading
+ * number with a trailing tail ("5 seconds"), a hex literal, an overflow, or a
+ * non-finite spelling ("Infinity") is malformed and yields null, so the caller
+ * falls back to the computed backoff rather than sleeping on garbage (or
+ * forever). `Number.parseFloat` would take the leading number and drop the
+ * rest; the regex rejects anything but a plain decimal or exponent form,
+ * matching the Python twin's `float()` parse, which also rejects a trailing
+ * tail.
+ */
 export function parseRetryAfter(value: string | null): number | null {
   if (value === null) {
     return null;
   }
-  const seconds = Number.parseFloat(value.trim());
-  if (Number.isNaN(seconds) || seconds < 0) {
+  const trimmed = value.trim();
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(trimmed)) {
+    return null;
+  }
+  const seconds = Number(trimmed);
+  if (!Number.isFinite(seconds) || seconds < 0) {
     return null;
   }
   return seconds;

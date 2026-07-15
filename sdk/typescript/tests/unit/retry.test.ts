@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { RateLimitError, ServerError, TransportError } from "../../src/errors.js";
+import { parseRetryAfter } from "../../src/retry.js";
 import { errBody, okBody, stubClient, type StubResult } from "./stub.js";
 
 vi.mock("../../src/retry.js", async (importOriginal) => {
@@ -114,5 +115,27 @@ describe("retry policy", () => {
     const client = stubClient(handler, { retries: 2 });
     await expect(client.context("sake").recall("cue")).rejects.toBeInstanceOf(RateLimitError);
     expect(calls()).toBe(3); // initial + 2 retries
+  });
+});
+
+describe("parseRetryAfter", () => {
+  it("takes a bare non-negative delay", () => {
+    expect(parseRetryAfter("5")).toBe(5);
+    expect(parseRetryAfter("  0.5  ")).toBe(0.5);
+    expect(parseRetryAfter("1e3")).toBe(1000);
+    expect(parseRetryAfter("0")).toBe(0);
+  });
+
+  it("refuses a trailing tail, non-finite, or negative value (falls back to backoff)", () => {
+    // `Number.parseFloat` would have taken the leading number; the strict
+    // parse refuses anything that is not a whole bare delay.
+    expect(parseRetryAfter("5 seconds")).toBeNull();
+    expect(parseRetryAfter("5xyz")).toBeNull();
+    expect(parseRetryAfter("0x10")).toBeNull();
+    expect(parseRetryAfter("Infinity")).toBeNull();
+    expect(parseRetryAfter("1e400")).toBeNull(); // overflows to Infinity
+    expect(parseRetryAfter("-1")).toBeNull();
+    expect(parseRetryAfter("")).toBeNull();
+    expect(parseRetryAfter(null)).toBeNull();
   });
 });

@@ -12,6 +12,7 @@ retry regardless of class.
 from __future__ import annotations
 
 import enum
+import math
 import random
 
 DEFAULT_RETRIES = 2
@@ -54,11 +55,16 @@ def backoff_delay(attempt: int) -> float:
 
 
 def parse_retry_after(value: str | None) -> float | None:
-    """Parse a Retry-After header. The server sends delay-seconds only."""
+    """Parse a Retry-After header. The server sends delay-seconds only.
+
+    ``float`` already rejects a trailing tail ("5 seconds"), but it accepts
+    "inf"/"nan"; require a finite, non-negative result so a malformed header
+    falls back to the computed backoff instead of sleeping forever.
+    """
     if value is None:
         return None
     try:
         seconds = float(value.strip())
     except ValueError:
         return None
-    return seconds if seconds >= 0 else None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
