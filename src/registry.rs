@@ -4822,9 +4822,12 @@ impl AppState {
         // variant unchanged — Hot in, Hot out — so `image_generation` is
         // what catches it: publishing our snapshot now would overwrite
         // the compacted image with the pre-compaction one it just
-        // replaced, and stamp the entry's stats back to match. Compaction
-        // already left `dirty` set, so backing off here costs nothing —
-        // the next tick flushes the current image instead.
+        // replaced, and stamp the entry's stats back to match. An
+        // eviction that reloaded Hot again is the same story once more:
+        // it bumps `image_generation` on its way to Cold specifically so
+        // this catches that case too, the same as compaction's. Either
+        // way, backing off here costs nothing — the next tick flushes
+        // the current image instead.
         if !matches!(inner.slot, Slot::Hot(_)) || inner.image_generation != generation {
             let _ = remove_persisted_file(&staged);
             entry.flushing.store(false, Ordering::Relaxed);
@@ -5406,6 +5409,12 @@ impl AppState {
                 inner.stats = ContextStats::of(context);
             }
             inner.slot = Slot::Cold;
+            // Bump so a flush that staged its image before this eviction
+            // can tell, once it re-locks, that the slot it captured is
+            // gone — a later reload plus that flush's re-publish would
+            // otherwise resurrect a stale image over whatever was written
+            // after the reload.
+            inner.image_generation += 1;
             // Local zero only: the caller's absolute store settles the
             // global, so a recount's delta would double-count.
             inner.counted_bytes = 0;
@@ -9802,6 +9811,138 @@ mod tests {
                 .unwrap();
             assert_eq!(count, WRITES, "context '{name}' lost writes to the race");
         }
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// With the WAL on, a flush that staged its image before an eviction
+    /// cooled the entry — then a later write reloaded it Hot again before
+    /// the flush re-locked — used to pass both re-validation checks (slot
+    /// is Hot again; eviction never bumped `image_generation`) and
+    /// publish its stale snapshot, regressing the on-disk image past
+    /// whatever the eviction had already persisted and truncated the WAL
+    /// for. Driven directly (`flush_entry` and `evict_entry`, the same
+    /// trick as the delete-race test above) instead of hoping a thrash
+    /// loop stumbles into the exact interleaving: spinning on `flushing`
+    /// forces the claim (and thus the snapshot the flush later
+    /// republishes) to land before the write below — `thread::spawn`
+    /// scheduling latency otherwise routinely loses that race to this
+    /// thread's very next line, and a big seed keeps the flush busy
+    /// serializing and staging afterward, which is what gives the write,
+    /// the eviction, and the reload below the room to land before it
+    /// re-locks to publish.
+    #[test]
+    fn an_eviction_racing_a_reload_and_a_stale_flush_never_regresses_the_image() {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let dir = scratch_dir("evict-reload-flush-race");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        // Big enough that `flush_entry`'s serialize-under-lock and
+        // stage-unlocked steps together take long enough for the write,
+        // the direct eviction, and the reload below to all land before
+        // it re-locks — with a tiny graph the flush publishes before any
+        // of them get a look in, and the race never opens.
+        let seed: Vec<_> = (0..50_000)
+            .map(|index| {
+                assoc_op(
+                    &format!("seed-subject-{index}-xxxxxxxxxxxxxxxxxxxx"),
+                    "seed-label-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                    &format!("seed-object-{index}-xxxxxxxxxxxxxxxxxxxx"),
+                    1.0,
+                    None,
+                )
+            })
+            .collect();
+        state
+            .add_associations("sake", seed, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        let flusher = {
+            let state = state.clone();
+            let entry = Arc::clone(&entry);
+            thread::spawn(move || state.flush_entry("sake", &entry))
+        };
+        // `flushing` only flips true once `flush_entry` has locked the
+        // entry and entered its claim section, and only flips back at
+        // the very end of the call — spinning on it here proves the
+        // claim landed before we go on to write "b" below. Without this,
+        // `thread::spawn` scheduling latency routinely lets that write
+        // land first instead, folding "b" into the flush's own snapshot
+        // and closing off the interleaving this test drives at.
+        let spun_since = Instant::now();
+        while !entry.flushing.load(Ordering::Relaxed) {
+            assert!(
+                spun_since.elapsed() < Duration::from_secs(5),
+                "flusher never reached its claim section"
+            );
+            thread::yield_now();
+        }
+        // `flush_entry` claims (clears `dirty`) and serializes the seeded
+        // image UNDER the entry lock before it stages unlocked, so this
+        // call blocks until that claim is made — it cannot land before
+        // the flush captured its (soon to be stale) snapshot.
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("b", "l", "o", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        // Queue the reload-triggering write on the entry lock now, right
+        // as the eviction below begins — behind the eviction (which,
+        // called directly here, reliably wins the very next acquisition
+        // over a freshly spawned thread, the same head start `flushing`'s
+        // spin-wait above relies on) but ahead of the flusher's own
+        // re-lock attempt, which only comes later once its slower
+        // `stage_bytes` finishes. Without this, the flusher — parked on
+        // the lock since partway through the eviction below — is
+        // `parking_lot`'s fairness-guaranteed next owner the instant the
+        // eviction releases it, and it sees Cold (this write not yet
+        // applied) instead of the reloaded Hot the bug needs.
+        let reloader = {
+            let state = state.clone();
+            thread::spawn(move || {
+                state.add_associations(
+                    "sake",
+                    vec![assoc_op("c", "l", "o", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+            })
+        };
+        assert!(
+            state.evict_entry("sake", &entry),
+            "the write above must leave `sake` dirty and evictable"
+        );
+        reloader.join().unwrap().unwrap().unwrap();
+        let published = flusher.join().unwrap();
+
+        const EXPECTED: usize = 50_000 + 2; // the seed, plus "b" and "c"
+        let live = state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(live, EXPECTED, "the race lost a write in memory");
+        drop(state);
+
+        let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let recovered = reborn
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(
+            recovered, EXPECTED,
+            "a stale flush (published: {published}) regressed the image past \
+             what the eviction had already made durable"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
