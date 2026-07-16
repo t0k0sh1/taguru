@@ -10,7 +10,7 @@ import httpx
 
 from ._decode import decode
 from ._errors import TaguruError, error_for_status
-from ._models import ImportOutcome
+from ._models import GroupImportOutcome, ImportOutcome, ImportResult
 from ._retry import parse_retry_after
 from ._types import AssocOp
 
@@ -125,14 +125,16 @@ def unwrap_envelope(response: httpx.Response) -> Any:
     )
 
 
-def normalize_import_outcomes(result: Any) -> list[ImportOutcome]:
-    """Flatten /import's response to the outcome list.
+def normalize_import_outcomes(result: Any) -> ImportResult:
+    """Normalize /import's response to ``ImportResult(batches, groups)``.
 
-    Current servers always answer ``{batches: [...]}``; servers predating
-    that change answered a bare outcome for a single batch — both parse here,
-    so callers never branch on response shape.
+    Current servers always answer ``{batches: [...], groups: [...]}``
+    (``groups`` omitted entirely when the stream carried none); servers
+    predating that change answered a bare outcome for a single batch — both
+    parse here, so callers never branch on response shape.
     """
     if isinstance(result, dict) and isinstance(result.get("batches"), list):
-        outcomes = result["batches"]
-        return [decode(ImportOutcome, outcome) for outcome in outcomes]
-    return [decode(ImportOutcome, result)]
+        batches = [decode(ImportOutcome, outcome) for outcome in result["batches"]]
+        groups = [decode(GroupImportOutcome, group) for group in result.get("groups", [])]
+        return ImportResult(batches=batches, groups=groups)
+    return ImportResult(batches=[decode(ImportOutcome, result)], groups=[])

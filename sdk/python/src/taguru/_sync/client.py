@@ -36,7 +36,7 @@ from .._models import (
     ExplorePage,
     GroupEntry,
     GroupPage,
-    ImportOutcome,
+    ImportResult,
     LabelPage,
     MatchPage,
     PassageHit,
@@ -217,12 +217,13 @@ class Taguru:
         result = self._request_json("POST", "/flush")
         return [str(name) for name in result]
 
-    def import_batches(self, data: str | bytes) -> list[ImportOutcome]:
+    def import_batches(self, data: str | bytes) -> ImportResult:
         """Apply an NDJSON batch stream (the format ``export`` produces).
 
         Each batch is one source's retract-then-apply, so re-importing is
-        idempotent. The response is normalized to a list even for a single
-        batch.
+        idempotent. ``batches`` is normalized to a list even for a single
+        batch; ``groups`` carries one entry per ``taguru_group`` record the
+        stream restored.
         """
         content = data.encode("utf-8") if isinstance(data, str) else data
         response = self._send(
@@ -230,7 +231,7 @@ class Taguru:
         )
         return normalize_import_outcomes(unwrap_envelope(response))
 
-    def import_file(self, path: str | Path) -> list[ImportOutcome]:
+    def import_file(self, path: str | Path) -> ImportResult:
         """Apply an NDJSON batch file (see ``import_batches``)."""
         return self.import_batches(Path(path).read_bytes())
 

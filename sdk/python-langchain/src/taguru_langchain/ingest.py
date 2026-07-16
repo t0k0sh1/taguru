@@ -253,7 +253,7 @@ class TaguruIngester:
             return outcome
 
         applied = self.client.import_batches(ndjson)
-        self._record(outcome, applied[0])
+        self._record(outcome, applied.batches[0])
         outcome.ok = True
 
         if self.refresh_embeddings:
@@ -343,7 +343,7 @@ class TaguruIngester:
             return outcome
 
         applied = await self.async_client.import_batches(ndjson)
-        self._record(outcome, applied[0])
+        self._record(outcome, applied.batches[0])
         outcome.ok = True
 
         if self.refresh_embeddings:

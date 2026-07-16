@@ -87,9 +87,9 @@ def test_export_import_round_trip(client: Taguru, fresh_name: str) -> None:
     assert stream.count('"taguru_batch"') >= 1
 
     restored_name = f"{fresh_name}-restored"
-    outcomes = client.import_batches(stream.replace(f'"{fresh_name}"', f'"{restored_name}"'))
-    assert all(outcome.context == restored_name for outcome in outcomes)
-    assert any(outcome.created for outcome in outcomes)
+    result = client.import_batches(stream.replace(f'"{fresh_name}"', f'"{restored_name}"'))
+    assert all(outcome.context == restored_name for outcome in result.batches)
+    assert any(outcome.created for outcome in result.batches)
 
     restored = client.context(restored_name)
     assert restored.query(subject="青嶺酒造", label="杜氏").matches[0].object == "高瀬"
@@ -129,8 +129,8 @@ def test_import_file(client: Taguru, fresh_name: str, tmp_path) -> None:
     )
     path = tmp_path / "batch.jsonl"
     path.write_text(batch, encoding="utf-8")
-    outcomes = client.import_file(path)
-    assert outcomes[0].created
-    assert outcomes[0].associations == 1
-    assert outcomes[0].passage_stored
+    result = client.import_file(path)
+    assert result.batches[0].created
+    assert result.batches[0].associations == 1
+    assert result.batches[0].passage_stored
     client.contexts.delete(fresh_name)

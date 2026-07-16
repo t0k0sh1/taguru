@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from taguru import DirectoryEntry, TaguruError
+from taguru import DirectoryEntry, GroupImportOutcome, TaguruError
 
 from .conftest import async_client, err_response, ok_response, sync_client
 
@@ -139,7 +139,7 @@ async def test_async_export_to_file_cleans_up_and_closes_the_stream_on_failure(t
     assert list(tmp_path.iterdir()) == []
 
 
-def test_import_normalizes_single_outcome_to_list() -> None:
+def test_import_normalizes_to_batches_defaulting_groups_to_empty() -> None:
     outcome = {
         "context": "sake",
         "source": "a",
@@ -156,13 +156,45 @@ def test_import_normalizes_single_outcome_to_list() -> None:
         "association_paragraphs_dropped": 0,
     }
     client = sync_client(lambda _req: ok_response(outcome))
-    outcomes = client.import_batches('{"taguru_batch":1}')
-    assert len(outcomes) == 1
-    assert outcomes[0].context == "sake"
+    result = client.import_batches('{"taguru_batch":1}')
+    assert len(result.batches) == 1
+    assert result.batches[0].context == "sake"
+    assert result.groups == []
 
     client = sync_client(lambda _req: ok_response({"batches": [outcome, outcome]}))
-    outcomes = client.import_batches('{"taguru_batch":1}')
-    assert [o.source for o in outcomes] == ["a", "a"]
+    result = client.import_batches('{"taguru_batch":1}')
+    assert [o.source for o in result.batches] == ["a", "a"]
+
+
+def test_import_carries_group_restore_outcomes() -> None:
+    outcome = {
+        "context": "sake",
+        "source": "a",
+        "created": True,
+        "retracted": 0,
+        "associations": 2,
+        "aliases": 0,
+        "passage_stored": True,
+        "passage_dropped": False,
+        "questions_stored": 0,
+        "questions_dropped": 0,
+        "sections_stored": 0,
+        "sections_dropped": 0,
+        "association_paragraphs_dropped": 0,
+    }
+    client = sync_client(
+        lambda _req: ok_response(
+            {
+                "batches": [outcome],
+                "groups": [{"name": "brewers", "outcome": "created", "contexts": 2, "groups": 0}],
+            }
+        )
+    )
+    result = client.import_batches('{"taguru_batch":1}')
+    assert len(result.batches) == 1
+    assert result.groups == [
+        GroupImportOutcome(name="brewers", outcome="created", contexts=2, groups=0)
+    ]
 
 
 def test_bearer_header_present_only_with_api_key() -> None:

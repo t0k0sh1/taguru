@@ -6,7 +6,14 @@ import json
 
 import pytest
 
-from taguru import ConflictError, NotFoundError, PermissionDeniedError, Taguru, ValidationError
+from taguru import (
+    ConflictError,
+    GroupImportOutcome,
+    NotFoundError,
+    PermissionDeniedError,
+    Taguru,
+    ValidationError,
+)
 
 
 def seeded_pair(client: Taguru, base: str) -> tuple[str, str]:
@@ -154,7 +161,10 @@ def test_group_export_import_round_trip(client: Taguru, fresh_name: str) -> None
     # The record is the group's complete truth: import restores it whole.
     client.groups.delete(group)
     assert not client.groups.exists(group)
-    client.import_batches(line)
+    result = client.import_batches(line)
+    assert result.groups == [
+        GroupImportOutcome(name=group, outcome="created", contexts=2, groups=0)
+    ]
     assert client.groups.get(group).contexts == sorted([sake, tea])
 
     client.groups.delete(group)

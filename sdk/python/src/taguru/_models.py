@@ -607,6 +607,29 @@ class ImportOutcome:
 
 
 @dataclass(slots=True, frozen=True)
+class GroupImportOutcome:
+    """Outcome of restoring one ``taguru_group`` record via import.
+
+    A restore is a replace of the whole record; ``outcome`` is one of
+    ``"created"``, ``"replaced"``, or ``"unchanged"``. ``contexts``/``groups``
+    are the member counts of the record as restored.
+    """
+
+    name: str
+    outcome: str
+    contexts: int
+    groups: int
+
+
+@dataclass(slots=True, frozen=True)
+class ImportResult:
+    """What ``POST /import`` accomplished: per-batch outcomes plus any group restores."""
+
+    batches: list[ImportOutcome]
+    groups: list[GroupImportOutcome]
+
+
+@dataclass(slots=True, frozen=True)
 class BatchApplyResult:
     """Outcome of ``add_associations_batched``: chunks are independent writes."""
 
