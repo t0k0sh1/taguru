@@ -297,6 +297,23 @@ impl Keyring {
         }
         matched
     }
+
+    /// Whether `key_name` is still a live credential — named directly,
+    /// or (for an OAuth delegation, `"key@client"`) via its base key,
+    /// the same fallback `scope_of` walks. OAuth mints an access token
+    /// once and then persists it independently of the keyring
+    /// (`data_dir/oauth.json`), so a key later dropped from
+    /// `TAGURU_API_TOKENS` must retire every token delegated from it
+    /// too — otherwise the stale delegation keeps authenticating and
+    /// `scope_of` falls through to the unscoped default (admin,
+    /// unrestricted) for a caller nobody configured anymore.
+    pub(crate) fn recognizes(&self, key_name: &str) -> bool {
+        let is_configured = |name: &str| self.keys.iter().any(|(key, _)| key.as_ref() == name);
+        is_configured(key_name)
+            || key_name
+                .rsplit_once('@')
+                .is_some_and(|(base, _)| is_configured(base))
+    }
 }
 
 /// Everything the bearer gate consults: the static keyring, the OAuth
@@ -343,7 +360,9 @@ pub async fn require_bearer(
         gate.keyring
             .authenticate(token)
             .or_else(|| match (&gate.oauth, request.uri().path()) {
-                (Some(oauth), "/mcp") => oauth.authenticate(token, crate::oauth::now_secs()),
+                (Some(oauth), "/mcp") => oauth
+                    .authenticate(token, crate::oauth::now_secs())
+                    .filter(|key| gate.keyring.recognizes(key)),
                 _ => None,
             })
     });
@@ -736,7 +755,9 @@ mod tests {
             )
             .unwrap();
 
-        let keyring = ring(Some("s3cret"), None);
+        // "laptop" must be a live credential of its own — the delegated
+        // token inherits its recognition, not a free pass.
+        let keyring = ring(Some("s3cret"), Some("laptop:tok-laptop"));
         let bearer = format!("Bearer {}", grant.access_token);
         let app = || gate_app(Arc::clone(&keyring), Some(Arc::clone(&oauth)));
         assert_eq!(status_of(app(), "/mcp", Some(&bearer)).await, 200);
@@ -756,6 +777,64 @@ mod tests {
                 "resource_metadata=\"https://memory.example/.well-known/oauth-protected-resource\""
             ),
             "{challenge}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A key retired from `TAGURU_API_TOKENS` must retire every OAuth
+    /// token delegated from it too. `oauth.json` outlives the keyring
+    /// that issued a grant, so replaying a still-unexpired access
+    /// token after the base key is gone must fail closed instead of
+    /// falling through `scope_of` to the unscoped admin default.
+    #[tokio::test]
+    async fn revoking_a_key_revokes_its_oauth_delegations_too() {
+        let dir = std::env::temp_dir().join(format!("taguru-authrevoke-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let oauth = Arc::new(crate::oauth::Oauth::open("https://memory.example", &dir));
+        let client = oauth
+            .register_client("claude", vec!["https://claude.ai/cb".to_string()])
+            .unwrap();
+        let now = crate::oauth::now_secs();
+        let verifier = "0123456789012345678901234567890123456789012345";
+        let code = oauth.issue_code(
+            &client,
+            "https://claude.ai/cb",
+            &crate::oauth::s256_challenge(verifier),
+            "laptop",
+            now,
+        );
+        let grant = oauth
+            .exchange_code(
+                &client.client_id,
+                &code,
+                verifier,
+                "https://claude.ai/cb",
+                now,
+            )
+            .unwrap();
+        let bearer = format!("Bearer {}", grant.access_token);
+
+        // While "laptop" is still configured, the delegation opens /mcp.
+        let live_keyring = ring(Some("s3cret"), Some("laptop:tok-laptop"));
+        assert_eq!(
+            status_of(
+                gate_app(live_keyring, Some(Arc::clone(&oauth))),
+                "/mcp",
+                Some(&bearer)
+            )
+            .await,
+            200
+        );
+
+        // The operator drops "laptop" from TAGURU_API_TOKENS and
+        // restarts; the still-unexpired access token must no longer
+        // authenticate anywhere, /mcp included.
+        let pruned_keyring = ring(Some("s3cret"), None);
+        assert_eq!(
+            status_of(gate_app(pruned_keyring, Some(oauth)), "/mcp", Some(&bearer)).await,
+            401
         );
 
         let _ = std::fs::remove_dir_all(dir);
