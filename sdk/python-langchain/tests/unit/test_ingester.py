@@ -217,6 +217,17 @@ def test_close_closes_a_self_built_client() -> None:
     assert client._http.is_closed
 
 
+def test_close_also_closes_the_self_built_async_client() -> None:
+    """close() has no event loop to await aclose() with, but must not leak
+    the async client's connections when aingest_* was ever used before it."""
+    llm = FakeListChatModel(responses=["{}"])
+    ingester = TaguruIngester(context="sake", llm=llm, base_url="http://test")
+    async_client_ = ingester.async_client
+    assert async_client_ is not None
+    ingester.close()
+    assert async_client_._http.is_closed
+
+
 async def test_aclose_closes_both_self_built_clients() -> None:
     llm = FakeListChatModel(responses=["{}"])
     ingester = TaguruIngester(context="sake", llm=llm, base_url="http://test")
@@ -231,10 +242,12 @@ async def test_aclose_closes_both_self_built_clients() -> None:
 def test_sync_context_manager_closes_the_self_built_client_on_exit() -> None:
     llm = FakeListChatModel(responses=["{}"])
     with TaguruIngester(context="sake", llm=llm, base_url="http://test") as ingester:
-        client = ingester.client
+        client, async_client_ = ingester.client, ingester.async_client
         assert client is not None
+        assert async_client_ is not None
         assert not client._http.is_closed
     assert client._http.is_closed
+    assert async_client_._http.is_closed
 
 
 async def test_async_context_manager_closes_self_built_clients_on_exit() -> None:

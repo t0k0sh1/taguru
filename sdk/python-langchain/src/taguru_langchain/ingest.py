@@ -13,6 +13,7 @@ over synonym-coining), and embeddings refresh best-effort after each run.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -390,15 +391,24 @@ class TaguruIngester:
     # -- lifecycle -------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the sync HTTP client, if this ingester built it itself.
+        """Close the HTTP client(s) this ingester built itself, best-effort.
 
         A client passed in via ``client``/``async_client`` stays the
-        caller's to close. The async client needs a running event loop to
-        close cleanly; use :meth:`aclose` (or ``async with``) once the
-        async lane (``aingest_text``/``aingest_documents``) has been used.
+        caller's to close. The sync client always closes cleanly here;
+        closing the async client needs a running event loop, so one is
+        spun up just for that when none is already running. Called from
+        inside a running loop, the async client is left for :meth:`aclose`
+        instead.
         """
-        if self._owns_clients and self.client is not None:
+        if not self._owns_clients:
+            return
+        if self.client is not None:
             self.client.close()
+        if self.async_client is not None:
+            try:
+                asyncio.run(self.async_client.close())
+            except RuntimeError:
+                pass
 
     async def aclose(self) -> None:
         """Close both the sync and async HTTP clients this ingester owns."""

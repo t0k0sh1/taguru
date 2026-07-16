@@ -175,6 +175,16 @@ def test_close_closes_a_self_built_client() -> None:
     assert client._http.is_closed
 
 
+def test_close_also_closes_the_self_built_async_client() -> None:
+    """close() has no event loop to await aclose() with, but must not leak
+    the async client's connections when ainvoke was ever used before it."""
+    retriever = TaguruRetriever(context="sake", base_url="http://test")
+    async_client_ = retriever.async_client
+    assert async_client_ is not None
+    retriever.close()
+    assert async_client_._http.is_closed
+
+
 async def test_aclose_closes_both_self_built_clients() -> None:
     retriever = TaguruRetriever(context="sake", base_url="http://test")
     client, async_client_ = retriever.client, retriever.async_client
@@ -187,10 +197,12 @@ async def test_aclose_closes_both_self_built_clients() -> None:
 
 def test_sync_context_manager_closes_the_self_built_client_on_exit() -> None:
     with TaguruRetriever(context="sake", base_url="http://test") as retriever:
-        client = retriever.client
+        client, async_client_ = retriever.client, retriever.async_client
         assert client is not None
+        assert async_client_ is not None
         assert not client._http.is_closed
     assert client._http.is_closed
+    assert async_client_._http.is_closed
 
 
 async def test_async_context_manager_closes_self_built_clients_on_exit() -> None:
