@@ -217,24 +217,41 @@ fn inspect_directory(dir: &Path) -> i32 {
             _ => "",
         };
 
-        // A torn tail is a crash mid-append, not corruption: the record
-        // was never acknowledged, and the server heals it on its next
-        // load. Report it (inspect left the file untouched) rather than
-        // failing — but never let it pass silently.
-        let mut torn_parts = Vec::new();
-        if let Some(bytes) = wal_torn {
-            torn_parts.push(format!("WAL torn tail ({bytes} bytes)"));
+        // A non-empty tail is a crash mid-append, not corruption, but the
+        // two TornTail shapes are healed — and mean — different things:
+        // a Discarded fragment never happened as far as the log is
+        // concerned (never acknowledged, healed by truncation), while a
+        // Recovered record is complete and already counted in `pending`
+        // above (healed by appending its missing newline). Report
+        // whichever it is (inspect left the file untouched) rather than
+        // failing — but never let it pass silently, and never blur the
+        // two together.
+        fn torn_tail_note(label: &str, torn: wal::TornTail) -> String {
+            match torn {
+                wal::TornTail::Discarded { bytes } => format!(
+                    "{label} torn tail ({bytes} bytes) — crash mid-append, healed by \
+                     truncation on the server's next load"
+                ),
+                wal::TornTail::Recovered { bytes } => format!(
+                    "{label} tail missing its trailing newline ({bytes} bytes) — the \
+                     record itself is complete and already counted above, healed by \
+                     appending the newline on the server's next load"
+                ),
+            }
         }
-        if let Some(bytes) = passages_torn {
-            torn_parts.push(format!("passages WAL torn tail ({bytes} bytes)"));
+        let mut torn_parts = Vec::new();
+        if let Some(torn) = wal_torn {
+            torn_parts.push(torn_tail_note("WAL", torn));
+        }
+        if let Some(torn) = passages_torn {
+            torn_parts.push(torn_tail_note("passages WAL", torn));
         }
         let torn_note = if torn_parts.is_empty() {
             String::new()
         } else {
             format!(
-                " · NOTE: {} — crash mid-append, healed on the server's next load \
-                 (inspect left it untouched)",
-                torn_parts.join(" and ")
+                " · NOTE: {} (inspect left it untouched)",
+                torn_parts.join("; ")
             )
         };
 

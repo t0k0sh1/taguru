@@ -233,6 +233,72 @@ fn injected_truncate_failure() -> Option<io::Error> {
     })
 }
 
+/// [`fail_appends_after`]'s twin for [`append_missing_newline`]: after
+/// `successes` more newline heals succeed normally, the one after them
+/// fails with an injected error and the hook disarms.
+#[cfg(test)]
+pub(crate) fn fail_newline_heals_after(successes: u32) {
+    NEWLINE_HEAL_FAULT.with(|cell| cell.set(Some(successes)));
+}
+
+#[cfg(test)]
+thread_local! {
+    static NEWLINE_HEAL_FAULT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn injected_newline_heal_failure() -> Option<io::Error> {
+    NEWLINE_HEAL_FAULT.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            Some(io::Error::other("injected newline-heal failure"))
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            None
+        }
+        None => None,
+    })
+}
+
+/// The shape of a non-empty final WAL line missing its trailing `\n` —
+/// both are the same crash (a `write_all` that completed followed by a
+/// crash before the batch's `sync_all`), differing only in where the
+/// crash landed relative to the record itself. Reported by
+/// [`replay_readonly`] and [`parse_log`], and healed by [`replay`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TornTail {
+    /// The crash landed inside the record — an incomplete fragment that
+    /// never parses whole. It was never acknowledged (its writer never
+    /// got `Ok`), so healing by truncating it away loses nothing.
+    Discarded { bytes: u64 },
+    /// The record itself finished; only its own trailing `\n` was lost.
+    /// Already decoded and included among the returned ops — healing
+    /// appends the missing byte rather than removing the record.
+    Recovered { bytes: u64 },
+}
+
+/// Heals a [`TornTail::Recovered`] record in place by appending the
+/// single `\n` byte a crash took between the record's own `write_all`
+/// and the batch's `sync_all`. Without this, the next `append_batch`'s
+/// `O_APPEND` write would start right after this record's last byte —
+/// fusing the two into one line that decodes as neither, the same
+/// fatal fusion [`replay`]'s doc comment describes for a `Discarded`
+/// tail, guarded against here by completing the line instead of
+/// removing it.
+fn append_missing_newline(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = injected_newline_heal_failure() {
+        return Err(error);
+    }
+    if let Some(error) = crate::registry::injected_persistence_failure("WAL newline heal") {
+        return Err(error);
+    }
+    let mut file = fs::OpenOptions::new().append(true).open(path)?;
+    file.write_all(b"\n")?;
+    file.sync_all()
+}
+
 /// Appends `ops` numbered from `first_seq`, one line each, with a
 /// single fsync after all of them — the HTTP batch is the natural
 /// group-commit unit (one document, one request, one lock, one sync).
@@ -324,21 +390,32 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
 /// absent, empty, or entirely at/below it) — the caller numbers its
 /// next write from there.
 ///
-/// A trailing line without its `\n` is the half-written record of a
-/// crash mid-append — the expected torn shape — and is dropped with a
-/// warning. Any OTHER undecodable line is real corruption: unlike the
-/// sidecars, this file holds acknowledged writes that exist nowhere
-/// else, so skipping past it would be silent loss — it errors instead.
+/// A trailing line without its `\n` is a crash mid-append, classified
+/// by whether the record itself finished writing
+/// ([`TornTail`]): an incomplete fragment ([`TornTail::Discarded`])
+/// never happened as far as the log is concerned — its writer never
+/// got `Ok` — and is dropped. A complete, checksum-valid record missing
+/// only the delimiter itself ([`TornTail::Recovered`]) already counts
+/// among the returned ops. Any OTHER undecodable line, or a trailing
+/// record that decodes whole but fails its own checksum, is real
+/// corruption: unlike the sidecars, this file holds acknowledged writes
+/// that exist nowhere else, so skipping past it would be silent loss —
+/// it errors instead.
 ///
-/// Dropping a torn tail from the returned ops is not enough on its own:
-/// the bytes stay on disk, and the next `append_batch` opens with
-/// `O_APPEND` and writes straight after them. The torn fragment and the
-/// new record would then share a line with no `\n` between them, and
-/// that fused line decodes as neither — turning a recoverable torn tail
-/// into the fatal interior-corruption case above. So the tail is healed
-/// in place here too: it was never acknowledged (its writer never got
-/// `Ok`), so truncating it away loses nothing. Healing is best effort —
-/// a failure only leaves the log as it was, to be retried next replay.
+/// Leaving either shape's bytes on disk is not enough on its own: the
+/// next `append_batch` opens with `O_APPEND` and writes straight after
+/// them. Whichever shape it is, the old bytes and the new record would
+/// then share a line with no `\n` between them, and that fused line
+/// decodes as neither — turning a recoverable tail into fatal interior
+/// corruption. So both shapes are healed in place here: a `Discarded`
+/// fragment is truncated away (it was never acknowledged, so this loses
+/// nothing); a `Recovered` record gets its missing `\n` appended
+/// instead (removing it would lose an acknowledged write). Unlike the
+/// old best-effort truncate, a heal failure here is now fatal: returning
+/// `Ok` with the tail still un-healed would silently hand the caller a
+/// context one append away from bricking on fused corruption. The
+/// caller (`ensure_hot`) already quarantines a context on `Err` rather
+/// than crash the server, so refusing to heal is the safe failure mode.
 ///
 /// Records above the watermark are keyed by `seq`, and a repeated seq
 /// keeps the LATER one. Appends are seq-monotonic, so no duplicate ever
@@ -361,44 +438,67 @@ pub fn replay<Op: DeserializeOwned + Serialize>(
         },
     };
     let (ops, top, torn, _) = parse_log(path, &bytes, watermark)?;
-    // A torn trailing record is the expected crash-mid-append shape. It
-    // is already left out of `ops`; heal it off disk too, so the next
-    // append does not write straight after the fragment and fuse a new
-    // record onto it — turning a recoverable tear into the fatal
-    // interior-corruption case. It was never acknowledged, so truncating
-    // it loses nothing. Best effort: a failure only leaves the log as it
-    // was, to be retried next replay.
-    if let Some(torn_len) = torn {
-        let healthy_len = bytes.len() as u64 - torn_len;
-        tracing::warn!(
-            "dropping a torn trailing WAL record at {} ({torn_len} bytes) — crash mid-append",
-            path.display(),
-        );
-        if let Err(error) = truncate_to(path, healthy_len) {
+    // Leaving either shape's bytes on disk risks the next append fusing
+    // onto them (see the doc comment above), so both are healed here —
+    // and, unlike the old best-effort truncate, a heal failure is now
+    // propagated instead of shrugged off: a still-torn tail is exactly
+    // one append away from bricking the context on fused corruption.
+    match torn {
+        Some(TornTail::Discarded { bytes: torn_len }) => {
+            let healthy_len = bytes.len() as u64 - torn_len;
             tracing::warn!(
-                "could not heal torn WAL tail at {} (harmless, will retry next replay): {error}",
+                "dropping a torn trailing WAL record at {} ({torn_len} bytes) — crash mid-append",
                 path.display(),
             );
+            truncate_to(path, healthy_len).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "could not heal torn WAL tail at {}: {error}",
+                        path.display(),
+                    ),
+                )
+            })?;
         }
+        Some(TornTail::Recovered {
+            bytes: recovered_len,
+        }) => {
+            tracing::warn!(
+                "recovering a WAL record at {} missing only its trailing newline \
+                 ({recovered_len} bytes) — crash after the write, before the delimiter's own fsync",
+                path.display(),
+            );
+            append_missing_newline(path).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "could not heal a missing WAL newline at {}: {error}",
+                        path.display(),
+                    ),
+                )
+            })?;
+        }
+        None => {}
     }
     Ok((ops, top))
 }
 
 /// Like [`replay`] but read-only: it heals nothing. Returns the applied
 /// ops and top seq exactly as `replay` would, plus — when the log's
-/// final record was torn by a crash mid-append — the byte size of that
-/// torn fragment (`Some(bytes)`), so a diagnostic caller such as `taguru
-/// inspect` can REPORT the tear rather than silently truncate it (a
-/// clean log returns `None`) — plus how many intact records carried no
-/// checksum (written before the field existed), so the same caller can
-/// say how much of the log was actually VERIFIED rather than merely
-/// parsed. The torn fragment is already excluded from the returned ops,
-/// so what this reports is exactly what the server's next `replay`
-/// would heal away.
+/// final line was missing its trailing `\n` — which [`TornTail`] shape
+/// it was, so a diagnostic caller such as `taguru inspect` can REPORT
+/// the tear precisely rather than silently heal it (a clean log returns
+/// `None`) — plus how many intact records carried no checksum (written
+/// before the field existed), so the same caller can say how much of
+/// the log was actually VERIFIED rather than merely parsed. A
+/// `Discarded` fragment is already excluded from the returned ops; a
+/// `Recovered` one is already included in them — either way, this
+/// reports exactly what the server's next `replay` would do, without
+/// doing it.
 pub fn replay_readonly<Op: DeserializeOwned + Serialize>(
     path: &Path,
     watermark: u64,
-) -> io::Result<(Vec<Op>, u64, Option<u64>, usize)> {
+) -> io::Result<(Vec<Op>, u64, Option<TornTail>, usize)> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) => match error.kind() {
@@ -409,29 +509,96 @@ pub fn replay_readonly<Op: DeserializeOwned + Serialize>(
     parse_log(path, &bytes, watermark)
 }
 
-/// The disk-free core of replay: split the bytes, set aside a torn
-/// trailing fragment (returned as its byte length, `None` when the file
-/// ends clean), and decode every intact record above `watermark` in seq
-/// order — a repeated seq keeps the later record (see [`replay`] for the
-/// double-fault that can leak one). Every record carrying a checksum is
-/// verified against its canonical bytes — a mismatch is the same fatal
-/// corruption an undecodable line is, because this file holds
-/// acknowledged writes that exist nowhere else — and the count of
-/// records carrying NONE (pre-checksum writers) rides along last, for
-/// diagnostic callers. Writes nothing; whether to heal a torn tail is
-/// left to the caller.
+/// Whether a final line missing its `\n` is actually a complete record
+/// rather than a genuine fragment — the difference between "the crash
+/// took only the trailing delimiter" (safe to keep) and "the crash
+/// landed mid-record" (safe to discard). A record that parses whole but
+/// carries a checksum that does NOT match is neither shape: that is
+/// bytes changing after they were written, the same corruption an
+/// interior checksum mismatch reports, so it is surfaced as an error
+/// rather than silently classified either way — a genuinely torn write
+/// never reaches a matching checksum.
+fn tail_record_is_complete<Op: DeserializeOwned>(tail: &[u8]) -> io::Result<bool> {
+    let record: WalRecord<Op> = match serde_json::from_slice(tail) {
+        Ok(record) => record,
+        Err(_) => return Ok(false),
+    };
+    let Some(stored) = record.crc else {
+        return Ok(true);
+    };
+    let canonical = canonical_bytes_of_line(tail).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "parsed a crc field but could not find it in the raw line",
+        )
+    })?;
+    let computed = crate::crc32c::crc32c(&canonical);
+    if computed != stored {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "checksum mismatch (stored {stored:#010x}, computed {computed:#010x}) — \
+                 the bytes changed after they were written",
+            ),
+        ));
+    }
+    Ok(true)
+}
+
+/// The disk-free core of replay: split the bytes, classify a non-empty
+/// trailing fragment missing its `\n` as a [`TornTail`] (`None` when
+/// the file ends clean), and decode every intact record above
+/// `watermark` in seq order — a repeated seq keeps the later record
+/// (see [`replay`] for the double-fault that can leak one). A
+/// `Recovered` tail — a complete, checksum-valid record missing only
+/// its own delimiter — rejoins the very same decode loop as every other
+/// line below, rather than being handled separately, so it is verified,
+/// counted, and seq-deduplicated exactly like an interior record. Every
+/// record carrying a checksum is verified against its canonical bytes —
+/// a mismatch is the same fatal corruption an undecodable line is,
+/// because this file holds acknowledged writes that exist nowhere else
+/// — and the count of records carrying NONE (pre-checksum writers)
+/// rides along last, for diagnostic callers. Writes nothing; whether
+/// and how to heal a torn tail is left to the caller.
 fn parse_log<Op: DeserializeOwned + Serialize>(
     path: &Path,
     bytes: &[u8],
     watermark: u64,
-) -> io::Result<(Vec<Op>, u64, Option<u64>, usize)> {
+) -> io::Result<(Vec<Op>, u64, Option<TornTail>, usize)> {
     let mut segments: Vec<&[u8]> = bytes.split(|&byte| byte == b'\n').collect();
-    // A complete file ends in '\n', making the final segment empty; a
-    // torn file's final segment is the record a crash cut short. One
-    // rule covers both: the last segment is never a whole record.
-    let torn = match segments.pop() {
-        Some(tail) if !tail.is_empty() => Some(tail.len() as u64),
-        _ => None,
+    // A complete file ends in '\n', making the final segment empty. A
+    // non-empty final segment is missing its newline — decide below
+    // whether that is a genuine fragment (never happened) or a complete
+    // record that lost only its own delimiter (already happened, and
+    // already belongs in the ops this function returns).
+    let tail = segments.pop().filter(|segment| !segment.is_empty());
+    let torn = match tail {
+        Some(tail) => {
+            // 1-indexed, matching the per-line loop below: `segments`
+            // has already had this tail popped off, so its remaining
+            // length is exactly the count of lines ahead of it.
+            let line_number = segments.len() + 1;
+            let complete = tail_record_is_complete::<Op>(tail).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "corrupt WAL record at {} line {line_number}: {error}",
+                        path.display(),
+                    ),
+                )
+            })?;
+            if complete {
+                segments.push(tail);
+                Some(TornTail::Recovered {
+                    bytes: tail.len() as u64,
+                })
+            } else {
+                Some(TornTail::Discarded {
+                    bytes: tail.len() as u64,
+                })
+            }
+        }
+        None => None,
     };
 
     // Keyed by seq so a duplicate resolves to the later record, and
@@ -784,6 +951,178 @@ mod tests {
             vec!["a", "c"]
         );
         assert_eq!(top, 2);
+    }
+
+    #[test]
+    fn a_tail_missing_only_its_newline_is_recovered_not_discarded() {
+        let path = scratch_wal("recovered");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        let len_before_b = fs::metadata(&path).unwrap().len();
+        append_batch(&path, 2, &[associate("b")]).unwrap();
+        let full_len = fs::metadata(&path).unwrap().len();
+        // The tail's length once its own trailing '\n' is gone.
+        let tail_len = full_len - len_before_b - 1;
+
+        // Simulate a crash after "b"'s own write_all landed but before
+        // the batch's sync_all reached its trailing '\n': strip exactly
+        // that one byte, leaving a complete, checksum-valid record.
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        fs::write(&path, &bytes).unwrap();
+
+        let (ops, top, torn, unchecked) = replay_readonly::<WalOp>(&path, 0).unwrap();
+        assert_eq!(
+            ops.iter().map(subject_of).collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "the newline-less record must already be included, not dropped"
+        );
+        assert_eq!(top, 2);
+        assert_eq!(unchecked, 0);
+        assert_eq!(torn, Some(TornTail::Recovered { bytes: tail_len }));
+
+        // The healing replay recovers the same ops and repairs the file
+        // back to a clean, newline-terminated state instead of
+        // truncating the record away.
+        let (ops, top) = replay::<WalOp>(&path, 0).unwrap();
+        assert_eq!(
+            ops.iter().map(subject_of).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(top, 2);
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            full_len,
+            "healing must restore the missing newline, not truncate the record away"
+        );
+    }
+
+    #[test]
+    fn a_recovered_tail_does_not_fuse_with_the_next_append() {
+        // The Recovered twin of `a_torn_tail_does_not_fuse_with_the_next_append`:
+        // healing must APPEND the missing newline, not merely accept the
+        // record in memory and leave the file as found — otherwise the
+        // next O_APPEND write lands on this record's last byte and fuses
+        // into one undecodable line, same as an un-truncated Discarded
+        // fragment would.
+        let path = scratch_wal("recovered-fuse");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        fs::write(&path, &bytes).unwrap();
+
+        let (ops, top) = replay(&path, 0).unwrap();
+        assert_eq!(ops.iter().map(subject_of).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(top, 1);
+
+        append_batch(&path, top + 1, &[associate("c")]).unwrap();
+
+        let (ops, top) = replay(&path, 0).unwrap();
+        assert_eq!(
+            ops.iter().map(subject_of).collect::<Vec<_>>(),
+            vec!["a", "c"],
+            "healing must not leave the two records fused onto one line"
+        );
+        assert_eq!(top, 2);
+    }
+
+    #[test]
+    fn a_tail_with_a_bad_checksum_is_fatal_not_torn() {
+        // A final line that parses whole but fails its own checksum is
+        // neither shape: a genuinely torn write never reaches a complete
+        // record with a mismatched checksum, so this is corruption after
+        // the fact, not a crash artifact — it must be fatal like any
+        // other checksum mismatch, never silently classified as torn or
+        // recovered.
+        let path = scratch_wal("tail-bad-crc");
+        append_batch(&path, 1, &[associate("aaaa")]).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text.matches("aaaa").count(), 1);
+        fs::write(&path, text.replace("aaaa", "aaab")).unwrap();
+
+        let error = replay::<WalOp>(&path, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("checksum mismatch"), "{error}");
+    }
+
+    #[test]
+    fn a_legacy_tail_missing_its_newline_is_recovered_and_counted_unchecked() {
+        // A pre-checksum record (no crc field) missing only its
+        // trailing newline is still a complete, parseable record —
+        // recovered and counted unchecked, exactly like a legacy record
+        // found anywhere else in the log.
+        let path = scratch_wal("legacy-recovered");
+        fs::write(
+            &path,
+            "{\"seq\":1,\"op\":\"associate\",\"subject\":\"a\",\"label\":\"好き\",\
+             \"object\":\"りんご\",\"weight\":1.0}",
+        )
+        .unwrap();
+
+        let (ops, top, torn, unchecked) = replay_readonly::<WalOp>(&path, 0).unwrap();
+        assert_eq!(ops.iter().map(subject_of).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(top, 1);
+        assert_eq!(
+            unchecked, 1,
+            "the recovered legacy record has no checksum to verify"
+        );
+        assert!(matches!(torn, Some(TornTail::Recovered { .. })));
+
+        let (ops, top) = replay::<WalOp>(&path, 0).unwrap();
+        assert_eq!(ops.iter().map(subject_of).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(top, 1);
+        assert_eq!(
+            fs::read(&path).unwrap().last(),
+            Some(&b'\n'),
+            "healing must append the missing newline"
+        );
+    }
+
+    #[test]
+    fn a_truncate_heal_failure_is_fatal_not_a_shrug() {
+        // Before this fix, a failed heal only logged a second warning
+        // and returned Ok with the tail still on disk — one append away
+        // from fusing into fatal interior corruption. It must now
+        // refuse instead of shrugging.
+        let path = scratch_wal("truncate-heal-fails");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.extend_from_slice(br#"{"seq":2,"op":"associate","subject":"b"#);
+        fs::write(&path, &bytes).unwrap();
+        let torn_len = bytes.len() as u64;
+
+        fail_truncates_after(0);
+        let error = replay::<WalOp>(&path, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error.to_string().contains("injected truncate failure"),
+            "{error}"
+        );
+        // The failed heal must not leave the file in some in-between
+        // state: nothing was truncated, so the torn bytes are untouched.
+        assert_eq!(fs::metadata(&path).unwrap().len(), torn_len);
+    }
+
+    #[test]
+    fn a_newline_heal_failure_is_fatal_not_a_shrug() {
+        let path = scratch_wal("newline-heal-fails");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        let stripped_len = bytes.len() as u64;
+        fs::write(&path, &bytes).unwrap();
+
+        fail_newline_heals_after(0);
+        let error = replay::<WalOp>(&path, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error.to_string().contains("injected newline-heal failure"),
+            "{error}"
+        );
+        // The failed heal must not leave the file in some in-between
+        // state: the missing newline was never appended.
+        assert_eq!(fs::metadata(&path).unwrap().len(), stripped_len);
     }
 
     #[test]

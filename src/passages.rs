@@ -321,8 +321,8 @@ impl PassageStore {
     /// empty) — refusing to boot over a file the old code tolerated
     /// would turn an upgrade into an outage.
     /// `heal` heals a torn WAL tail in place (the server's boot) or
-    /// leaves the file untouched and returns the torn fragment's size so
-    /// a read-only caller — `taguru inspect` — can report it (`Ok`'s
+    /// leaves the file untouched and returns the tail's `TornTail` shape
+    /// so a read-only caller — `taguru inspect` — can report it (`Ok`'s
     /// second element; `None` when the log ends clean or was healed).
     /// `Ok`'s third element counts log records that carried no checksum
     /// (pre-checksum writers) — meaningful only on the heal=false path,
@@ -334,7 +334,7 @@ impl PassageStore {
         log_path: PathBuf,
         max_log_bytes: usize,
         heal: bool,
-    ) -> io::Result<(Self, Option<u64>, usize)> {
+    ) -> io::Result<(Self, Option<wal::TornTail>, usize)> {
         let (sources, watermark, snapshot_bytes) = match fs::read(&snapshot_path) {
             Ok(bytes) => {
                 let size = bytes.len() as u64;
