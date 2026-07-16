@@ -20,6 +20,7 @@ from taguru import (
     TaguruError,
     UnexpectedStatusError,
     ValidationError,
+    error_for_status,
 )
 
 from .conftest import err_response, sync_client
@@ -117,3 +118,12 @@ def test_embedding_error_reason_distinguishes_501_from_502() -> None:
     with pytest.raises(EmbeddingUnavailableError) as excinfo:
         client.context("sake").refresh_embeddings()
     assert excinfo.value.reason == "provider_error"
+
+
+def test_error_for_status_is_reexported_and_builds_by_status() -> None:
+    """``error_for_status`` builds the same table the client applies
+    internally — it must be importable from the top-level package too, not
+    just from the private ``_errors`` module the client itself uses."""
+    error = error_for_status(404, "not found", code="no_context")
+    assert isinstance(error, NotFoundError)
+    assert error.code == "no_context"

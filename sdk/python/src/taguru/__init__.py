@@ -31,6 +31,7 @@ from ._errors import (
     TransportError,
     UnexpectedStatusError,
     ValidationError,
+    error_for_status,
 )
 from ._models import (
     Activation,
@@ -52,6 +53,7 @@ from ._models import (
     CrossMatchPage,
     CrossPassageHit,
     DirectoryEntry,
+    DriftAudit,
     ExplorePage,
     GroupEntry,
     GroupImportOutcome,
@@ -85,6 +87,7 @@ from ._models import (
     TermContribution,
     TieredResolution,
     TwinPair,
+    UnsourcedEdge,
     VectorExplain,
     VocabularyAudit,
 )
@@ -129,6 +132,7 @@ __all__ = [
     "EmbeddingUnavailableError",
     "TransportError",
     "UnexpectedStatusError",
+    "error_for_status",
     # models
     "Activation",
     "ActivationPage",
@@ -149,6 +153,7 @@ __all__ = [
     "CrossMatchPage",
     "CrossPassageHit",
     "DirectoryEntry",
+    "DriftAudit",
     "ExplorePage",
     "GroupEntry",
     "GroupImportOutcome",
@@ -182,6 +187,7 @@ __all__ = [
     "TermContribution",
     "TieredResolution",
     "TwinPair",
+    "UnsourcedEdge",
     "VectorExplain",
     "VocabularyAudit",
 ]
