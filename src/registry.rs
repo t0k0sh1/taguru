@@ -13692,6 +13692,48 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_mid_repair_never_drops_the_corrupt_group_file_itself() {
+        let mut exhausted = false;
+        for failure in 0..6 {
+            let dir = scratch_dir(&format!("groups-corrupt-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            drop(state);
+            let live = groups::group_path(&dir, &file_stem("mangled"));
+            fs::write(&live, b"{not json").unwrap();
+
+            fail_persistence_ops_after(failure);
+            let result = AppState::boot(dir.clone(), 1 << 20, None);
+            let past_end = clear_persistence_fault();
+
+            if past_end {
+                let state = result.unwrap();
+                assert_eq!(state.group("mangled").unwrap(), GroupRecord::default());
+                drop(state);
+            } else {
+                // Whatever the write reached — still the mangled bytes,
+                // or already the fresh empty record — `path` must
+                // resolve to SOMETHING. The write-then-set-aside order
+                // guarantees it; the old set-aside-then-write order
+                // could lose this file entirely between the two steps.
+                assert!(
+                    live.exists(),
+                    "failure after {failure} successes must not drop the group file"
+                );
+                let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+                assert_eq!(state.group("mangled").unwrap(), GroupRecord::default());
+                drop(state);
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "group repair exceeded the sweep bound");
+    }
+
+    #[test]
     fn an_unreadable_group_file_refuses_the_boot() {
         let dir = scratch_dir("groups-unreadable");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();

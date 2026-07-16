@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::registry::{
-    ResumedRenames, commit_staged, remove_persisted_file, rename_persisted_file,
-    resume_rename_markers, scanned_stem_and_name, write_atomic,
+    ResumedRenames, commit_staged, remove_persisted_file, resume_rename_markers,
+    scanned_stem_and_name, write_atomic,
 };
 
 /// The nesting ceiling: a chain of nested groups may stack at most
@@ -370,8 +370,18 @@ pub(crate) fn scan_groups(
                     %error,
                     "group file does not parse; keeping the group empty and setting the bytes aside"
                 );
-                rename_persisted_file(&path, &set_aside)?;
+                // The empty replacement is written FIRST: `write_group`
+                // is a staged write (stage + fsync + rename), so `path`
+                // always resolves to either the mangled bytes or the
+                // fresh empty record, never to nothing in between.
+                // Setting the mangled bytes aside second means a crash
+                // between the two steps costs only the hand-recovery
+                // copy, never the group's existence — the reverse order
+                // (rename `path` away, then write the replacement) has a
+                // window where `path` doesn't exist at all, and a crash
+                // there drops the group from the very next scan.
                 write_group(dir, &stem, &GroupRecord::default())?;
+                fs::write(&set_aside, &bytes)?;
                 GroupRecord::default()
             }
         };
