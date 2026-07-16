@@ -91,6 +91,11 @@ export interface ContextStats {
   labels: number;
   sources: number;
   footprint_bytes: number;
+  dead_edges: number;
+  dead_attributions: number;
+  arena_slack: number;
+  unsourced_edges: number;
+  unsourced_weight: number;
   top_concepts: LabelUsage[];
   label_sample: string[];
 }

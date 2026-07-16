@@ -84,6 +84,11 @@ class ContextStats:
     labels: int
     sources: int
     footprint_bytes: int
+    dead_edges: int
+    dead_attributions: int
+    arena_slack: int
+    unsourced_edges: int
+    unsourced_weight: float
     top_concepts: list[LabelUsage]
     label_sample: list[str]
 
