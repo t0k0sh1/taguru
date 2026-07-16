@@ -150,7 +150,7 @@ def main() -> int:
         print("\n== 2. apply the reviewed batches — the NDJSON *is* the import payload ==")
         for outcome in reviewed:
             assert outcome.ndjson is not None
-            applied = client.import_batches(outcome.ndjson)[0]
+            applied = client.import_batches(outcome.ndjson).batches[0]
             print(
                 f"{outcome.source}: created={applied.created} "
                 f"associations={applied.associations} aliases={applied.aliases} "

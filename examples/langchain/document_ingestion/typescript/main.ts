@@ -129,7 +129,7 @@ async function main(): Promise<void> {
 
     console.log("\n== 2. apply the reviewed batches — the NDJSON *is* the import payload ==");
     for (const outcome of reviewed) {
-      const applied = (await client.importBatches(outcome.ndjson!))[0]!;
+      const applied = (await client.importBatches(outcome.ndjson!)).batches[0]!;
       console.log(
         `${outcome.source}: created=${applied.created} ` +
           `associations=${applied.associations} aliases=${applied.aliases} ` +
