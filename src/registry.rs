@@ -3291,13 +3291,22 @@ impl AppState {
         // capped pools can seat late double-lane candidates above a
         // mid-pool single-lane hit, so the unbounded rank alone is a
         // floor, not an answer.
+        //
+        // The starting pool must cover the WORSE of the two lane
+        // ranks, not the better one: a dual-lane target's rerun score
+        // only matches its full-ranking score once both lanes are
+        // in-pool, and a pool sized off the better rank routinely
+        // truncates away the worse lane's contribution, understating
+        // the target and forcing extra doublings (or exhausting the
+        // retry budget below) to reach a candidate this same target
+        // would have cleared on the first try.
         let limit_to_reach = if served {
             Some(limit)
         } else {
             rank.map(|at| at + 1).and_then(|first| {
                 let lane_need = target
                     .and_then(|hit| match (hit.bm25, hit.vector) {
-                        (Some((bm25, _)), Some((vector, _))) => Some(bm25.min(vector)),
+                        (Some((bm25, _)), Some((vector, _))) => Some(bm25.max(vector)),
                         (Some((lane, _)), None) | (None, Some((lane, _))) => Some(lane),
                         (None, None) => None,
                     })
