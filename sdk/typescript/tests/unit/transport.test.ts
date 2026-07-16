@@ -206,6 +206,41 @@ describe("pagination iterators", () => {
     ]);
     expect(cursors).toEqual([null, "concept:青嶺", "label:brand"]);
   });
+
+  it("orders integer-like alias keys lexicographically, matching the server's BTreeMap cursor", async () => {
+    const cursors: Array<string | null> = [];
+    const client = stubClient((req) => {
+      const after = new URL(req.url).searchParams.get("after");
+      cursors.push(after);
+      // The server's BTreeMap<String, String> keeps keys in byte order,
+      // not numeric order: "10" < "2" < "9". A client that lets
+      // `Object.entries` (which numerically reorders integer-like keys)
+      // decide the cursor would advance past "10" instead of "2" here,
+      // then skip straight to "9" and never revisit "2" — or, on a page
+      // boundary drawn differently, re-fetch and re-yield an alias
+      // already produced.
+      if (after === null) {
+        return okBody({ total: 3, concepts: { "10": "ten", "2": "two" }, labels: {} });
+      }
+      if (after === "concept:2") {
+        return okBody({ total: 3, concepts: { "9": "nine" }, labels: {} });
+      }
+      if (after === "concept:9") {
+        return okBody({ total: 3, concepts: {}, labels: {} });
+      }
+      throw new Error(String(after));
+    });
+    const entries = [];
+    for await (const entry of client.context("sake").iterAliases({ limit: 2 })) {
+      entries.push(entry);
+    }
+    expect(entries).toEqual([
+      { namespace: "concept", alias: "10", canonical: "ten" },
+      { namespace: "concept", alias: "2", canonical: "two" },
+      { namespace: "concept", alias: "9", canonical: "nine" },
+    ]);
+    expect(cursors).toEqual([null, "concept:2", "concept:9"]);
+  });
 });
 
 describe("batching", () => {

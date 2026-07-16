@@ -72,6 +72,7 @@ import {
   isPreConnectFailure,
   normalizeImportOutcomes,
   sleep,
+  sortedEntries,
   unwrapEnvelope,
 } from "./transport.js";
 
@@ -1045,11 +1046,15 @@ export class Context {
         return;
       }
       let last = after;
-      for (const [alias, canonical] of Object.entries(page.concepts)) {
+      // The server's cursor tracks a BTreeMap<String, String> byte order;
+      // plain `Object.entries` would instead sort integer-like keys ("2",
+      // "10") numerically ahead of string keys, desyncing `last` from what
+      // the server considers "past" and skipping or repeating aliases.
+      for (const [alias, canonical] of sortedEntries(page.concepts)) {
         yield { namespace: "concept", alias, canonical };
         last = `concept:${alias}`;
       }
-      for (const [alias, canonical] of Object.entries(page.labels)) {
+      for (const [alias, canonical] of sortedEntries(page.labels)) {
         yield { namespace: "label", alias, canonical };
         last = `label:${alias}`;
       }

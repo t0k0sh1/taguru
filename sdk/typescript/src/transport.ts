@@ -27,6 +27,17 @@ export function dropUndefined(mapping: Record<string, unknown>): Record<string, 
   return kept;
 }
 
+/**
+ * `Object.entries`, ordered by key byte order rather than `Object.entries`'
+ * own insertion/numeric-first order (which sorts integer-like keys like
+ * "2" and "10" numerically, ahead of any string key). Needed wherever a
+ * map mirrors a server-side `BTreeMap<String, String>` whose byte order a
+ * pagination cursor depends on.
+ */
+export function sortedEntries(mapping: Record<string, string>): Array<[string, string]> {
+  return Object.entries(mapping).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
 /** Split a batch by both element count and serialized body size. */
 export function* chunkAssociations(
   ops: AssocOp[],
