@@ -1,7 +1,7 @@
 /** Transport-independent pieces: envelope handling, error mapping, chunking. */
 
 import { TaguruError, errorForStatus } from "./errors.js";
-import type { AssocOp, ImportOutcome } from "./models.js";
+import type { AssocOp, GroupImportOutcome, ImportOutcome, ImportResult } from "./models.js";
 import { parseRetryAfter } from "./retry.js";
 
 export const DEFAULT_BASE_URL = "http://127.0.0.1:8248";
@@ -120,20 +120,22 @@ export function unwrapEnvelope(status: number, bodyText: string): unknown {
 }
 
 /**
- * Flatten /import's response to the outcome array. Current servers always
- * answer `{batches: [...]}`; servers predating that change answered a bare
- * outcome for a single batch — both parse here, so callers never branch on
- * response shape.
+ * Normalize /import's response to `{batches, groups}`. Current servers
+ * always answer `{batches: [...], groups: [...]}` (`groups` omitted
+ * entirely when the stream carried none); servers predating that change
+ * answered a bare outcome for a single batch — both parse here, so callers
+ * never branch on response shape.
  */
-export function normalizeImportOutcomes(result: unknown): ImportOutcome[] {
+export function normalizeImportOutcomes(result: unknown): ImportResult {
   if (
     typeof result === "object" &&
     result !== null &&
     Array.isArray((result as { batches?: unknown }).batches)
   ) {
-    return (result as { batches: ImportOutcome[] }).batches;
+    const shaped = result as { batches: ImportOutcome[]; groups?: GroupImportOutcome[] };
+    return { batches: shaped.batches, groups: shaped.groups ?? [] };
   }
-  return [result as ImportOutcome];
+  return { batches: [result as ImportOutcome], groups: [] };
 }
 
 /** Percent-encode one path segment (context names may be any UTF-8). */

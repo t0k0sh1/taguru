@@ -581,6 +581,24 @@ export interface ImportOutcome {
   association_paragraphs_dropped: number;
 }
 
+/**
+ * Outcome of restoring one `taguru_group` record via import. A restore is a
+ * replace of the whole record; `outcome` says what it replaced.
+ */
+export interface GroupImportOutcome {
+  name: string;
+  outcome: "created" | "replaced" | "unchanged";
+  /** Member counts of the record as restored. */
+  contexts: number;
+  groups: number;
+}
+
+/** What `POST /import` accomplished: per-batch outcomes plus any group restores. */
+export interface ImportResult {
+  batches: ImportOutcome[];
+  groups: GroupImportOutcome[];
+}
+
 /** Outcome of `addAssociationsBatched`: chunks are independent writes. */
 export interface BatchApplyResult {
   applied: number;

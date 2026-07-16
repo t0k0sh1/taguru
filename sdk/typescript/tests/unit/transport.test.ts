@@ -68,13 +68,28 @@ describe("envelope and raw-body handling", () => {
     await expect(client.context("sake").export()).resolves.toBe(ndjson);
   });
 
-  it("normalizes import outcomes to an array", async () => {
+  it("normalizes import outcomes to batches, defaulting groups to empty", async () => {
     const outcome = { context: "sake", source: "a", created: true };
     const single = stubClient(() => okBody(outcome));
-    expect(await single.importBatches("{}")).toHaveLength(1);
+    const result = await single.importBatches("{}");
+    expect(result.batches).toHaveLength(1);
+    expect(result.groups).toEqual([]);
 
     const multi = stubClient(() => okBody({ batches: [outcome, outcome] }));
-    expect(await multi.importBatches("{}")).toHaveLength(2);
+    expect((await multi.importBatches("{}")).batches).toHaveLength(2);
+  });
+
+  it("carries the server's group restore outcomes through import", async () => {
+    const outcome = { context: "sake", source: "a", created: true };
+    const client = stubClient(() =>
+      okBody({
+        batches: [outcome],
+        groups: [{ name: "brewers", outcome: "created", contexts: 2, groups: 0 }],
+      }),
+    );
+    const result = await client.importBatches("{}");
+    expect(result.batches).toHaveLength(1);
+    expect(result.groups).toEqual([{ name: "brewers", outcome: "created", contexts: 2, groups: 0 }]);
   });
 
   it("sends the bearer header only when a key is configured", async () => {

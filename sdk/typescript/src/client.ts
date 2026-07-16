@@ -28,7 +28,7 @@ import type {
   ExplorePage,
   GroupEntry,
   GroupPage,
-  ImportOutcome,
+  ImportResult,
   LabelPage,
   MatchCursor,
   MatchPage,
@@ -253,10 +253,11 @@ export class Taguru {
 
   /**
    * Apply an NDJSON batch stream (the format `export` produces). Each batch
-   * is one source's retract-then-apply, so re-importing is idempotent. The
-   * response is normalized to an array even for a single batch.
+   * is one source's retract-then-apply, so re-importing is idempotent.
+   * `batches` is normalized to an array even for a single batch; `groups`
+   * carries one entry per `taguru_group` record the stream restored.
    */
-  async importBatches(data: string | Uint8Array): Promise<ImportOutcome[]> {
+  async importBatches(data: string | Uint8Array): Promise<ImportResult> {
     const response = await this.send("POST", "/import", {
       content: data,
       contentType: "application/x-ndjson",
@@ -265,7 +266,7 @@ export class Taguru {
   }
 
   /** Apply an NDJSON batch file (see `importBatches`). */
-  async importFile(path: string): Promise<ImportOutcome[]> {
+  async importFile(path: string): Promise<ImportResult> {
     const { readFile } = await import("node:fs/promises");
     return this.importBatches(await readFile(path));
   }

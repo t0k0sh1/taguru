@@ -202,7 +202,7 @@ export class TaguruIngester {
     }
 
     const applied = await this.client.importBatches(ndjson);
-    record(outcome, applied[0]!);
+    record(outcome, applied.batches[0]!);
     outcome.ok = true;
 
     if (this.refresh_embeddings) {

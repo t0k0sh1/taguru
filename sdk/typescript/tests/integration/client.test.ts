@@ -286,7 +286,7 @@ describe("transfer and maintenance", () => {
     const restoredName = `${name}-restored`;
     const renamed = stream.replaceAll(`"${name}"`, `"${restoredName}"`);
     const outcomes = await client.importBatches(renamed);
-    expect(outcomes.every((o) => o.context === restoredName)).toBe(true);
+    expect(outcomes.batches.every((o) => o.context === restoredName)).toBe(true);
 
     const restored = client.context(restoredName);
     const before = (await restored.query({ subject: "青嶺酒造", label: "杜氏" })).matches[0]!;
@@ -586,7 +586,8 @@ describe("groups and cross-context search", () => {
     // The record is the group's complete truth: import restores it whole.
     await client.groups.delete(group);
     expect(await client.groups.exists(group)).toBe(false);
-    await client.importBatches(line);
+    const result = await client.importBatches(line);
+    expect(result.groups).toEqual([{ name: group, outcome: "created", contexts: 2, groups: 0 }]);
     expect((await client.groups.get(group)).contexts).toEqual([sake, tea].sort());
 
     await client.groups.delete(group);
