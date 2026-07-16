@@ -37,10 +37,22 @@ pub(crate) const PROBE_EXEMPT: [&str; 3] = ["/health", "/live", "/metrics"];
 /// What answers without a bearer token. With OAuth enabled, its
 /// discovery and grant endpoints join the probes — they exist to
 /// CREATE credentials — but unlike the probes they stay rate-limited.
+///
+/// Listed by exact path, not by a `/oauth/` prefix: this gate lives in
+/// a different file from the router it guards (`oauth_http.rs`), so a
+/// prefix match would silently exempt any future route added under
+/// that path — an admin endpoint, say — unless its author remembered
+/// to come look here first.
 fn is_auth_exempt(path: &str, oauth_enabled: bool) -> bool {
-    PROBE_EXEMPT.contains(&path)
-        || (oauth_enabled
-            && (path.starts_with("/oauth/") || path.starts_with("/.well-known/oauth-")))
+    const OAUTH_EXEMPT: [&str; 6] = [
+        "/oauth/register",
+        "/oauth/authorize",
+        "/oauth/token",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-authorization-server",
+    ];
+    PROBE_EXEMPT.contains(&path) || (oauth_enabled && OAUTH_EXEMPT.contains(&path))
 }
 
 /// Strips the `Bearer` auth-scheme, RFC 7235 §2.1's case-insensitively
@@ -898,6 +910,43 @@ mod tests {
             "/contexts/{name}/sources/search/explain",
         ] {
             assert_eq!(required_role(&Method::POST, route), Role::Read, "{route}");
+        }
+    }
+
+    /// Exemption is by exact path, not by `/oauth/` prefix: a route
+    /// merely nested under it — an admin endpoint some future author
+    /// adds to `oauth_http.rs` without revisiting this gate — must
+    /// stay behind the bearer check.
+    #[test]
+    fn oauth_exemption_is_exact_not_prefixed() {
+        for probe in PROBE_EXEMPT {
+            assert!(is_auth_exempt(probe, false), "{probe}");
+            assert!(is_auth_exempt(probe, true), "{probe}");
+        }
+
+        let oauth_routes = [
+            "/oauth/register",
+            "/oauth/authorize",
+            "/oauth/token",
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/oauth-authorization-server",
+        ];
+        for route in oauth_routes {
+            assert!(!is_auth_exempt(route, false), "{route} needs oauth on");
+            assert!(is_auth_exempt(route, true), "{route}");
+        }
+
+        for sneaky in [
+            "/oauth/admin-panel",
+            "/oauth/",
+            "/oauth",
+            "/.well-known/oauth-evil-metadata",
+        ] {
+            assert!(
+                !is_auth_exempt(sneaky, true),
+                "{sneaky} must not ride the prefix match"
+            );
         }
     }
 
