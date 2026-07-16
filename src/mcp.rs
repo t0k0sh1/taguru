@@ -1505,10 +1505,13 @@ pub fn run_retrieve_bounded(
                 .into_iter()
                 .flatten()
             {
-                if let Some(triple) = triple_of(entry)
-                    && seen_triples.insert(triple)
-                {
-                    associations.push(entry.clone());
+                match triple_of(entry) {
+                    Some(triple) => {
+                        if seen_triples.insert(triple) {
+                            associations.push(entry.clone());
+                        }
+                    }
+                    None => associations.push(entry.clone()),
                 }
             }
         }
@@ -1531,10 +1534,13 @@ pub fn run_retrieve_bounded(
                 .get("association")
                 .cloned()
                 .unwrap_or(Value::Null);
-            if let Some(triple) = triple_of(&association)
-                && seen_triples.insert(triple)
-            {
-                associations.push(association);
+            match triple_of(&association) {
+                Some(triple) => {
+                    if seen_triples.insert(triple) {
+                        associations.push(association);
+                    }
+                }
+                None => associations.push(association),
             }
         }
     }
@@ -2655,6 +2661,50 @@ mod tests {
             "{result}"
         );
         assert_eq!(result["activations"].as_array().unwrap().len(), 1);
+    }
+
+    /// `triple_of`'s doc comment says a value it can't parse into
+    /// `(subject, label, object)` means "keep it, nothing to dedupe
+    /// against" — not "drop it". A malformed `query` match and a
+    /// malformed `activate` association (both missing `label`) must
+    /// both still land in the final `associations` list.
+    #[test]
+    fn run_retrieve_keeps_an_association_triple_of_cannot_parse() {
+        let arguments = json!({
+            "context": "sake", "origins": ["tokyo"], "labels": ["capital_of"],
+            "describe_first": false, "fetch_citations": false
+        });
+        let malformed_from_query = json!({
+            "subject": "Tokyo", "object": "Japan", "weight": 1.0, "count": 1, "attributions": []
+        });
+        let malformed_from_activate = json!({
+            "subject": "Osaka", "object": "Japan", "weight": 1.0, "count": 1, "attributions": []
+        });
+        let result = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{"name": "Tokyo"}])))
+            } else if path.ends_with("/query") {
+                Ok(envelope(
+                    json!({"total": 1, "matches": [malformed_from_query]}),
+                ))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({
+                    "total": 1,
+                    "matches": [{
+                        "strength": 1.0, "path": ["Tokyo"], "association": malformed_from_activate
+                    }]
+                })))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+
+        assert_eq!(
+            result["associations"].as_array().unwrap().len(),
+            2,
+            "an association triple_of cannot parse must be kept, not dropped: {result}"
+        );
     }
 
     /// A citation attribution pointing at a passage that was never
