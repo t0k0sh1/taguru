@@ -3713,11 +3713,16 @@ impl AppState {
         }
         let newly_embedded = embedded_concepts.len() + embedded_labels.len();
 
-        // Publish under the entry lock (a delete that may have won it
-        // must not see its sidecar recreated) — `_serial` above, held
-        // since before the gloss read, is what makes this
-        // read-modify-write race-free, not this lock by itself.
-        let _guard = entry.lock_unless_deleted()?;
+        // Publish under the entry's tombstone fence (a delete that may
+        // have won it must not see its sidecar recreated) — `_serial`
+        // above, held since before the gloss read, is what makes this
+        // read-modify-write race-free, not this lock by itself. A SHARED
+        // fence is enough: nothing below touches the entry's own data,
+        // only `entry.vectors` (its own lock) and the sidecar file on
+        // disk, so there is no reason to block concurrent graph reads for
+        // the length of this save — the same trade `flush_bm25` makes
+        // for its sidecar.
+        let _fence = entry.read_unless_deleted()?;
         let mut store = VectorStore::load(&path);
         // `fresh_model` also covers the width change above: rows for
         // names that have since left the graph must not linger at the
@@ -4023,12 +4028,16 @@ impl AppState {
             break (fresh, embedded, skipped_over_limit, failure);
         };
 
-        // Publish under the entry lock (a delete that won it must not
-        // see its files recreated), and only when something changed —
-        // an all-carried refresh is a no-op, not a rewrite.
+        // Publish under the entry's tombstone fence (a delete that won
+        // it must not see its files recreated), and only when something
+        // changed — an all-carried refresh is a no-op, not a rewrite. A
+        // SHARED fence, exactly like the read phase above: nothing here
+        // touches the entry's own data, only `entry.passage_vectors`
+        // (its own lock) and the sidecar file, so graph reads need not
+        // block for the length of this save.
         let changed =
             embedded > 0 || fresh.len() != existing.len() || (fresh_model && !fresh.is_empty());
-        let _guard = entry.lock_unless_deleted()?;
+        let _fence = entry.read_unless_deleted()?;
         if changed && let Err(error) = fresh.save(&path) {
             entry.passages_embed_dirty.store(true, Ordering::Relaxed);
             return Some(Err(format!("passage vectors not persisted: {error}")));
@@ -5004,11 +5013,25 @@ impl AppState {
         // caller is being told succeeded, present in memory only — the
         // trimmed log no longer holds them and a crash before the next
         // flush would silently lose them. An immediate image flush
-        // restores the "acknowledged means replayable" contract; if it
-        // fails too, the entry stays dirty, the flusher keeps retrying,
-        // and /health reports the failing flush until one lands.
-        if wal_behind {
-            self.flush_entry(name, &entry);
+        // restores the "acknowledged means replayable" contract. It can
+        // come back false two ways: a real I/O failure (already logged
+        // and counted by `record_flush`, which is what /health reads) or
+        // a silent no-op racing a flush already in flight (claimed
+        // `flushing` first) — that path never touches `record_flush`, so
+        // /health stays green even though this write is, for the moment,
+        // relying on the periodic flusher rather than the WAL to survive
+        // a crash. `dirty` is already set (unconditionally, above)
+        // either way, so the next tick still retries it — but a crash in
+        // that window would replay a WAL that no longer matches memory,
+        // so the gap is worth its own loud signal rather than blending
+        // into an ordinary retry.
+        if wal_behind && !self.flush_entry(name, &entry) {
+            tracing::warn!(
+                context = %name,
+                "post-write recovery flush did not land immediately; the WAL for this \
+                 write is no longer trustworthy and durability now depends on the next \
+                 periodic flush landing before a crash"
+            );
         }
         self.touch(&entry);
         self.enforce_budget(name);
