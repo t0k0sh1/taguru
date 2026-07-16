@@ -3654,9 +3654,11 @@ impl AppState {
         // Persist whatever either table bought even when the other fails:
         // losing already-billed vectors to a sibling's provider error is
         // the bug this mirrors from the passage refresh. A partial failure
-        // also skips the width probe and re-embed below — that pass returns
-        // Err and is retried, so spending more provider budget on top of a
-        // failure buys nothing.
+        // does skip the width probe just below — spending more provider
+        // budget on a pass that already reports Err and gets retried buys
+        // nothing — but not the carried-vs-fresh reconciliation after it:
+        // that one decides whether what already landed this pass is fit to
+        // persist at all.
         let mut failure = concept_failure.or(label_failure);
         // The model NAME is the staleness discriminator, but a provider
         // can change output width behind a stable name (a backend swap
@@ -3686,8 +3688,12 @@ impl AppState {
                 }
             }
         }
-        if failure.is_none()
-            && !fresh_model
+        // Not gated on `failure.is_none()`: a sibling table's provider
+        // error must not excuse persisting this pass's already-landed
+        // vectors at a width that disagrees with what is carried —
+        // that mismatch is decided below, then reconciled regardless of
+        // what else failed.
+        if !fresh_model
             && let (Some(carried), Some(fresh)) = (carried_width, fresh_width)
             && carried != fresh
         {
@@ -3772,7 +3778,13 @@ impl AppState {
     /// the first provider error, if any — the caller persists the former
     /// so a sibling table's failure never discards billed work, and the
     /// stale rows the error skipped stay stale for the next refresh to
-    /// retry.
+    /// retry. Chunks dispatch concurrently, so a provider mid-migration
+    /// can answer two chunks of the very same call with different
+    /// widths; unlike `PassageVectorStore::push`, `VectorTable` has no
+    /// dimension of its own to enforce, so a vector that disagrees with
+    /// the width this batch already settled on is dropped here — loudly,
+    /// and left stale for the next refresh — rather than merged into a
+    /// table `similarity` would then silently stop matching against.
     fn embed_stale(
         &self,
         embedder: &dyn EmbeddingProvider,
@@ -3800,15 +3812,27 @@ impl AppState {
                 self.timed_embed_for_refresh(embedder, &texts, deadline)
             });
         let mut embedded = VectorTable::new();
+        let mut width: Option<usize> = None;
         let mut failure: Option<String> = None;
         for (chunk, outcome) in stale_chunks.iter().zip(outcomes) {
             match outcome {
-                Some(Ok(vectors)) => embedded.extend(
-                    chunk
-                        .iter()
-                        .zip(vectors)
-                        .map(|((name, _, hash), vector)| (name.clone(), (*hash, vector))),
-                ),
+                Some(Ok(vectors)) => {
+                    for ((name, _, hash), vector) in chunk.iter().zip(vectors) {
+                        let expected = *width.get_or_insert(vector.len());
+                        if vector.len() != expected {
+                            tracing::warn!(
+                                name = name.as_str(),
+                                expected,
+                                got = vector.len(),
+                                "dropping a gloss vector whose width disagrees with this \
+                                 refresh's other chunks — a provider mid-migration; it stays \
+                                 stale for the next refresh to retry"
+                            );
+                            continue;
+                        }
+                        embedded.insert(name.clone(), (*hash, vector));
+                    }
+                }
                 // Keep the vectors that did land so the caller can persist
                 // them; report the first error. Stale rows this failure
                 // skipped stay stale in the diff for the next refresh.
@@ -3979,8 +4003,17 @@ impl AppState {
                     Some(Ok(vectors)) => {
                         for ((key, _), vector) in chunk.iter().zip(vectors) {
                             fresh_width.get_or_insert(vector.len());
+                            // `push` silently drops a row whose width
+                            // disagrees with the dimension `fresh` already
+                            // settled on (the same provider-mid-migration
+                            // hazard `embed_stale` guards against for
+                            // glosses) — count only the rows that actually
+                            // landed, or `embedded` over-reports what
+                            // `total_rows` below can already prove didn't
+                            // all land.
+                            let before = fresh.len();
                             fresh.push(key.clone(), vector);
-                            embedded += 1;
+                            embedded += fresh.len() - before;
                         }
                     }
                     Some(Err(error)) => failure = failure.or(Some(error)),
@@ -4006,8 +4039,12 @@ impl AppState {
                     Err(error) => failure = Some(error),
                 }
             }
-            if failure.is_none()
-                && !fresh_model
+            // Not gated on `failure.is_none()`: a chunk that failed must
+            // not excuse persisting this pass's already-landed rows at a
+            // width that disagrees with what is carried — that mismatch
+            // is decided here and reconciled regardless of what else
+            // failed.
+            if !fresh_model
                 && let (Some(carried_w), Some(fresh_w)) = (carried_width, fresh_width)
                 && carried_w != fresh_w
             {
@@ -11031,6 +11068,78 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// `PassageVectorStore::push` already drops whichever chunk lands at
+    /// a width disagreeing with the dimension the store already
+    /// settled on — but the merge loop counted every attempted push as
+    /// `embedded` regardless, over-reporting work that `push` silently
+    /// threw away. `embedded` must count only rows that actually landed.
+    #[test]
+    fn passage_refresh_reports_an_accurate_embedded_count_when_a_chunk_disagrees_on_width() {
+        struct SplitWidthEmbeddings;
+        impl EmbeddingProvider for SplitWidthEmbeddings {
+            fn model(&self) -> &str {
+                "split-width"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                // The full 128-paragraph chunk answers at width 2; the
+                // trailing 44-paragraph chunk answers at width 3 — a
+                // provider mid-migration serving two backend versions to
+                // concurrent connections.
+                let width = if texts.len() >= 128 { 2 } else { 3 };
+                Ok(texts.iter().map(|_| vec![0.0; width]).collect())
+            }
+        }
+
+        let dir = scratch_dir("pvec-split-width");
+        let embedder = Arc::new(SplitWidthEmbeddings) as Arc<dyn EmbeddingProvider>;
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            Some(embedder),
+            BootOptions {
+                embed_passages: true,
+                passage_vector_limit: 20_000,
+                embed_parallel: 2,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // 172 paragraphs = a 128-item chunk plus a 44-item remainder.
+        let text = (0..172)
+            .map(|i| format!("段落その{i}。"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-big".to_string(), text);
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (outcome.embedded, outcome.total),
+            (128, 128),
+            "the disagreeing trailing chunk is dropped, not merely undercounted"
+        );
+        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        assert!(sidecar.iter().all(|(_, row)| row.len() == 2));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn refresh_passage_embeddings_skips_paragraphs_beyond_the_configured_limit() {
         let dir = scratch_dir("pvec-limit");
@@ -11824,6 +11933,118 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// Chunks within one `embed_stale` call dispatch concurrently, so a
+    /// provider mid-migration can answer two chunks of the very same
+    /// call with different widths. `VectorTable` has no dimension of its
+    /// own to enforce (unlike `PassageVectorStore`), so without a guard
+    /// in the merge loop the disagreeing chunk would land right next to
+    /// the rest, corrupting the persisted table with no error — just a
+    /// `similarity` that silently stops matching for those rows.
+    #[test]
+    fn embed_stale_drops_a_chunk_whose_width_disagrees_with_the_rest_of_the_batch() {
+        struct SplitWidthEmbeddings;
+        impl EmbeddingProvider for SplitWidthEmbeddings {
+            fn model(&self) -> &str {
+                "split-width"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                // The full 128-entry chunk answers at width 2; any
+                // smaller chunk (the trailing remainder, or the
+                // single-label call) answers at width 3 — a provider
+                // mid-migration serving two backend versions to
+                // concurrent connections.
+                let width = if texts.len() >= 128 { 2 } else { 3 };
+                Ok(texts.iter().map(|_| vec![0.0; width]).collect())
+            }
+        }
+
+        let dir = scratch_dir("gloss-split-width");
+        let embedder = Some(Arc::new(SplitWidthEmbeddings) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            embedder,
+            BootOptions {
+                embed_parallel: 2,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("fruit", |context| {
+                for i in 0..129 {
+                    context
+                        .associate(format!("c{i}"), "属性", "値", 1.0)
+                        .unwrap();
+                }
+            })
+            .map_err(|_| "write")
+            .unwrap();
+
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let store = VectorStore::load(&vectors_path(&dir, &file_stem("fruit")));
+        assert_eq!(
+            store.concepts.len(),
+            128,
+            "the 128-item chunk lands; the remainder disagreed on width and was dropped"
+        );
+        assert!(
+            store.concepts.values().all(|(_, v)| v.len() == 2),
+            "a disagreeing vector must never reach the persisted concept table"
+        );
+        // Flush before the reboot below: write_context's association is
+        // otherwise only durable on the next periodic flush, and the
+        // reboot must see it. Then release the data-directory lock so
+        // the reboot can open the same directory again.
+        state.flush_dirty();
+        drop(state);
+
+        // The dropped remainder is still stale; once the provider
+        // stops disagreeing with itself, the next refresh picks it up.
+        struct ConsistentEmbeddings;
+        impl EmbeddingProvider for ConsistentEmbeddings {
+            fn model(&self) -> &str {
+                "split-width"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                Ok(texts.iter().map(|_| vec![0.0; 2]).collect())
+            }
+        }
+        let embedder = Some(Arc::new(ConsistentEmbeddings) as Arc<dyn EmbeddingProvider>);
+        let state =
+            AppState::boot_with(dir.clone(), usize::MAX, embedder, BootOptions::default()).unwrap();
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        let store = VectorStore::load(&vectors_path(&dir, &file_stem("fruit")));
+        assert!(
+            store.concepts.len() > 128,
+            "the previously dropped remainder must still be stale and get embedded now"
+        );
+        assert!(store.concepts.values().all(|(_, v)| v.len() == 2));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn gloss_refresh_prunes_vectors_for_a_concept_dropped_by_compaction() {
         let dir = scratch_dir("gloss-prune");
@@ -11951,6 +12172,105 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((embedded, total), (1, 3));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A width change behind a stable model name must still force a
+    /// full re-embed even when the *other* table's call fails in the
+    /// same pass — that failure must not excuse persisting this pass's
+    /// concepts at the new width right next to labels still at the old
+    /// one.
+    #[test]
+    fn gloss_width_reconciliation_fires_even_when_a_sibling_table_fails() {
+        /// Succeeds except on exactly its `fail_on`-th call (0-based);
+        /// every successful call answers at `width`.
+        struct FlakyWidthEmbeddings {
+            calls: AtomicUsize,
+            fail_on: usize,
+            width: usize,
+        }
+        impl EmbeddingProvider for FlakyWidthEmbeddings {
+            fn model(&self) -> &str {
+                "flaky-width"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let call = self.calls.fetch_add(1, Ordering::Relaxed);
+                if call == self.fail_on {
+                    return Err("provider hiccup".to_string());
+                }
+                Ok(texts.iter().map(|_| vec![0.0; self.width]).collect())
+            }
+        }
+
+        let dir = scratch_dir("gloss-width-reconcile");
+        // First boot: establish a carried width of 2.
+        {
+            let embedder = Some(Arc::new(FlakyWidthEmbeddings {
+                calls: AtomicUsize::new(0),
+                fail_on: usize::MAX,
+                width: 2,
+            }) as Arc<dyn EmbeddingProvider>);
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            state
+                .create("w", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("w", |context| {
+                    context.associate("a", "l", "b", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+            state
+                .refresh_embeddings("w", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+
+        // Second boot: same model name, width now 3, plus a brand-new
+        // association so both tables carry genuinely stale content —
+        // an unchanged-content reboot would leave nothing stale and
+        // fall to the single probe call instead, never exercising two
+        // independent per-table calls in the same pass. Concepts embed
+        // on call 0 (succeeds, proving the width changed); labels are
+        // call 1, the one that fails.
+        let embedder = Some(Arc::new(FlakyWidthEmbeddings {
+            calls: AtomicUsize::new(0),
+            fail_on: 1,
+            width: 3,
+        }) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .write_context("w", |context| {
+                context.associate("c", "m", "d", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        let (embedded, total) = state
+            .refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (embedded, total),
+            (6, 6),
+            "the reconciliation retry re-embeds everything, old and new alike, and succeeds"
+        );
+        let store = VectorStore::load(&vectors_path(&dir, &file_stem("w")));
+        assert!(
+            store
+                .concepts
+                .values()
+                .chain(store.labels.values())
+                .all(|(_, v)| v.len() == 3),
+            "a sibling table's transient failure must not leave a mixed-width store live"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -12268,6 +12588,106 @@ mod tests {
         assert!(
             sidecar.iter().all(|(key, _)| key.index >= 128),
             "no paragraph from the failed first chunk (index < 128) should be present"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A width change behind a stable model name must still force a
+    /// full re-embed even when a sibling chunk's call fails in the same
+    /// pass. Left gated on that failure, the carried row's old
+    /// dimension stays pinned on `fresh` and `PassageVectorStore::push`
+    /// silently drops every new-width row the surviving chunk just
+    /// bought — reported as a mere transient error, with no sign the
+    /// work was thrown away.
+    #[test]
+    fn passage_width_reconciliation_fires_even_when_a_later_chunk_fails() {
+        /// Succeeds except on exactly its `fail_on`-th call (0-based);
+        /// every successful call answers at `width`.
+        struct FlakyWidthEmbeddings {
+            calls: AtomicUsize,
+            fail_on: usize,
+            width: usize,
+        }
+        impl EmbeddingProvider for FlakyWidthEmbeddings {
+            fn model(&self) -> &str {
+                "flaky-width"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let call = self.calls.fetch_add(1, Ordering::Relaxed);
+                if call == self.fail_on {
+                    return Err("provider hiccup".to_string());
+                }
+                Ok(texts.iter().map(|_| vec![0.0; self.width]).collect())
+            }
+        }
+
+        let dir = scratch_dir("pvec-width-reconcile");
+        // First boot: one paragraph at width 2, establishing the
+        // carried width the second boot must reconcile against.
+        {
+            let embedder = Arc::new(FlakyWidthEmbeddings {
+                calls: AtomicUsize::new(0),
+                fail_on: usize::MAX,
+                width: 2,
+            }) as Arc<dyn EmbeddingProvider>;
+            let state = boot_for_passage_embedding(&dir, embedder, 20_000);
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut seed = BTreeMap::new();
+            seed.insert("doc-seed".to_string(), "最初の段落。".to_string());
+            state.store_passages("sake", plain(seed)).unwrap().unwrap();
+            state
+                .refresh_passage_embeddings("sake", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+        }
+
+        // Second boot: same model name, width now 3. 129 new paragraphs
+        // split into a 128-item chunk (call 0, succeeds) and a 1-item
+        // remainder (call 1, fails) — doc-seed's unchanged paragraph is
+        // carried forward, not re-embedded, so it never touches the
+        // provider. The surviving chunk already proves the width
+        // changed; that must be reconciled regardless of its sibling's
+        // failure.
+        let embedder = Arc::new(FlakyWidthEmbeddings {
+            calls: AtomicUsize::new(0),
+            fail_on: 1,
+            width: 3,
+        }) as Arc<dyn EmbeddingProvider>;
+        let state = boot_for_passage_embedding(&dir, embedder, 20_000);
+        let text = (0..129)
+            .map(|i| format!("段落その{i}。"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-big".to_string(), text);
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (outcome.embedded, outcome.total),
+            (130, 130),
+            "the reconciliation retry re-embeds every row, carried and fresh alike"
+        );
+        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        assert!(
+            sidecar.iter().all(|(_, row)| row.len() == 3),
+            "a sibling chunk's transient failure must not block reconciling a width \
+             disagreement the surviving chunk already proved"
         );
 
         let _ = fs::remove_dir_all(dir);
