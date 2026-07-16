@@ -19,6 +19,7 @@ use taguru::context::{
 use taguru::deadline::Deadline;
 
 use crate::groups::{GroupRecord, MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, NestingViolation};
+use crate::limits::HeavyOpsLimiter;
 use crate::metrics::{ErrorKind, ResolveTier, SearchOp};
 use crate::registry::{
     AccessError, AppState, AssocOp, ContextMeta, CreateError, CreateGroupError, RenameContextError,
@@ -3097,6 +3098,7 @@ pub async fn audit_drift(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
+    axum::Extension(heavy_ops): axum::Extension<HeavyOpsLimiter>,
     AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
@@ -3156,6 +3158,15 @@ pub async fn audit_drift(
         .collect();
 
     let twins = if request.include_twins {
+        // Only this branch runs the CPU-bound pairwise scan
+        // `audit_vocabulary` also runs, so it alone spends a
+        // heavy-ops permit — the unsourced/alias sweeps above are a
+        // cheap O(n) pass that a full heavy-ops ceiling would
+        // otherwise gate for no reason.
+        let _permit = match heavy_ops.try_acquire() {
+            Ok(permit) => permit,
+            Err(shed_response) => return *shed_response,
+        };
         let dice_floor = request.dice_floor.unwrap_or(0.6);
         let cosine_floor = request.cosine_floor.unwrap_or(0.6);
         match tokio::task::block_in_place(|| {
@@ -5940,6 +5951,75 @@ mod tests {
             message.contains("group restore exceeded its budget with 2 batch(es) durable"),
             "{message}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `include_twins` is the only expensive branch `audit_drift` runs
+    /// — the unsourced/alias sweeps ahead of it are a cheap O(n) pass.
+    /// The heavy-ops permit must therefore only be spent on that
+    /// branch: a plain drift audit succeeds even with the limiter's
+    /// sole permit held elsewhere, and an `include_twins: true` audit
+    /// sheds once that permit is unavailable rather than running the
+    /// pairwise scan unpermitted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audit_drift_only_spends_a_heavy_ops_permit_for_include_twins() {
+        use crate::registry::ContextMeta;
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::routing::post;
+        use tower::util::ServiceExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-api-audit-drift-permit-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+
+        let limiter = HeavyOpsLimiter::new(1);
+        let held = limiter.try_acquire().unwrap();
+
+        let app = Router::new()
+            .route("/contexts/{name}/drift/audit", post(audit_drift))
+            .layer(axum::Extension(limiter))
+            .layer(axum::Extension(Deadline::unbounded()))
+            .with_state(state);
+
+        let request = |body: &'static str| {
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/contexts/sake/drift/audit")
+                .body(Body::from(body))
+                .unwrap()
+        };
+
+        let cheap = app.clone().oneshot(request("{}")).await.unwrap();
+        assert_eq!(
+            cheap.status(),
+            StatusCode::OK,
+            "the sole permit was never touched"
+        );
+
+        let heavy = app
+            .clone()
+            .oneshot(request(r#"{"include_twins": true}"#))
+            .await
+            .unwrap();
+        assert_eq!(
+            heavy.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "include_twins needs the permit the cheap audit above left untouched"
+        );
+
+        drop(held);
+        let recovered = app
+            .oneshot(request(r#"{"include_twins": true}"#))
+            .await
+            .unwrap();
+        assert_eq!(recovered.status(), StatusCode::OK);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

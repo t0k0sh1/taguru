@@ -445,14 +445,20 @@ fn routes(
             "/contexts/{name}/vocabulary/audit",
             post(api::audit_vocabulary),
         )
-        // `include_twins` runs the same CPU-bound pairwise scan
-        // audit_vocabulary does, so this shares its gate rather than
-        // the ordinary route table.
-        .route("/contexts/{name}/drift/audit", post(api::audit_drift))
         .route_layer(axum::middleware::from_fn_with_state(
-            heavy_ops_limiter,
+            heavy_ops_limiter.clone(),
             limits::enforce_heavy_ops,
         ));
+
+    // `include_twins` runs the same CPU-bound pairwise scan
+    // audit_vocabulary does, but only when the request body asks for
+    // it — the default drift audit is a cheap O(n) sweep. So this
+    // route carries the limiter as an extension instead of sharing
+    // the unconditional gate above; `audit_drift` only spends a
+    // permit while its expensive branch actually runs.
+    let drift_audit_route = Router::new()
+        .route("/contexts/{name}/drift/audit", post(api::audit_drift))
+        .route_layer(axum::Extension(heavy_ops_limiter));
 
     Router::new()
         .route("/health", get(metrics::health))
@@ -547,6 +553,7 @@ fn routes(
             post(api::unreachable_from),
         )
         .merge(heavy_routes)
+        .merge(drift_audit_route)
         .fallback(api::unknown_path)
         .method_not_allowed_fallback(api::method_not_allowed)
         // Innermost on purpose: `routes()` is cloned for the /mcp

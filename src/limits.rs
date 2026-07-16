@@ -113,31 +113,48 @@ impl HeavyOpsLimiter {
             permits: Arc::new(Semaphore::new(limit)),
         }
     }
+
+    /// Immediately admits a heavy operation or sheds it. Waiting here would
+    /// merely hide saturation until the request deadline expired, so this
+    /// uses `try_acquire_owned` and returns the same retryable 503 shape as
+    /// the global in-flight ceiling. A limit of zero disables this targeted
+    /// gate — callers get `Ok(None)` back and hold no permit at all. The
+    /// `Ok(Some(_))` permit must be held for the duration of the heavy work
+    /// and dropped afterward to free the slot.
+    pub fn try_acquire(&self) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Box<Response>> {
+        if self.limit == 0 {
+            return Ok(None);
+        }
+        Arc::clone(&self.permits)
+            .try_acquire_owned()
+            .map(Some)
+            .map_err(|_| {
+                Box::new(shed(
+                    api::ErrorCode::Overloaded,
+                    format!(
+                        "server is at its heavy-operation ceiling ({} concurrent calls) — retry \
+                         shortly (TAGURU_MAX_CONCURRENT_HEAVY_OPS tunes this)",
+                        self.limit
+                    ),
+                ))
+            })
+    }
 }
 
-/// Immediately admits a heavy operation or sheds it. Waiting here would
-/// merely hide saturation until the request deadline expired, so this uses
-/// `try_acquire_owned` and returns the same retryable 503 shape as the
-/// global in-flight ceiling. A limit of zero disables this targeted gate.
+/// Gates an entire route on the heavy-ops ceiling — for routes that are
+/// unconditionally expensive. Routes that are only expensive under a
+/// request-body condition (like `audit_drift`'s `include_twins`) call
+/// [`HeavyOpsLimiter::try_acquire`] directly instead, so the permit is
+/// only held while the expensive branch actually runs.
 pub async fn enforce_heavy_ops(
     State(limiter): State<HeavyOpsLimiter>,
     request: Request,
     next: Next,
 ) -> Response {
-    if limiter.limit == 0 {
-        return next.run(request).await;
+    match limiter.try_acquire() {
+        Ok(_permit) => next.run(request).await,
+        Err(shed_response) => *shed_response,
     }
-    let Ok(_permit) = Arc::clone(&limiter.permits).try_acquire_owned() else {
-        return shed(
-            api::ErrorCode::Overloaded,
-            format!(
-                "server is at its heavy-operation ceiling ({} concurrent calls) — retry \
-                 shortly (TAGURU_MAX_CONCURRENT_HEAVY_OPS tunes this)",
-                limiter.limit
-            ),
-        );
-    };
-    next.run(request).await
 }
 
 pub async fn enforce_concurrency(
