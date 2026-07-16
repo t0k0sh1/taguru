@@ -3027,6 +3027,13 @@ pub async fn audit_vocabulary(
     let dice_floor = request.dice_floor.unwrap_or(0.6);
     let cosine_floor = request.cosine_floor.unwrap_or(0.6);
 
+    // vocabulary_audit's lexical half builds an O(n) per-span bigram
+    // table before its own inner loop ever checks this deadline — fail
+    // a spent request before that table gets built, the way every other
+    // heavy handler pre-flights.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     match tokio::task::block_in_place(|| {
         vocabulary_audit(&state, &name, dice_floor, cosine_floor, deadline)
     }) {
@@ -3099,6 +3106,13 @@ pub async fn audit_drift(
     };
     let floor = request.unsourced_floor.unwrap_or(0.0);
 
+    // The two sweeps below each check this deadline only once they are
+    // already inside their own edge loop — fail a spent request before
+    // read_context even takes the registry lock, the way every other
+    // heavy handler pre-flights.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     let loaded = tokio::task::block_in_place(|| {
         state
             .read_context(&name, |context| {
@@ -4824,6 +4838,15 @@ fn explain_resolve_verdict(
     deadline: Deadline,
     started_at: Instant,
 ) -> Response {
+    // Both explain handlers land here first, and the view alone runs
+    // several lexical sweeps inside read_context (membership, the cue
+    // sweep, and possibly the nearest-spellings scan) before the
+    // semantic tier's own deadline checks would ever run — fail a spent
+    // request fast, the way resolve_with_fallback already does for its
+    // own lexical read.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     let view = match state.read_context(name, |context| {
         let resolve_floor = |cue: &str, floor: f64| {
             if labels {
