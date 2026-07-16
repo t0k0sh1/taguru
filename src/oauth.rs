@@ -534,11 +534,18 @@ fn is_https_redirect(uri: &str) -> bool {
 /// decoded host, never a string prefix — `http://127.0.0.1.evil.example`
 /// and `http://localhost.evil.example` both start with the loopback
 /// text but resolve to an attacker's domain, not the loopback interface.
+/// As with `is_https_redirect`, any userinfo component is refused
+/// outright: the consent page renders this URI verbatim so an operator
+/// can catch a spoofed destination, and a userinfo prefix defeats that
+/// read just as effectively here as it does on the https branch.
 fn is_loopback_redirect(uri: &str) -> bool {
     let Ok(parsed) = Url::parse(uri) else {
         return false;
     };
     if parsed.scheme() != "http" {
+        return false;
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return false;
     }
     match parsed.host() {
@@ -980,6 +987,18 @@ mod tests {
                 .register_client(
                     "x",
                     vec!["https://trusted-app.example.com@evil.attacker.com/callback".to_string()]
+                )
+                .is_err()
+        );
+        // Loopback needs the same userinfo refusal: the destination is
+        // still genuinely loopback, but a trusted-looking segment before
+        // '@' can fool the same operator-facing consent-page read the
+        // https check above already guards against.
+        assert!(
+            oauth
+                .register_client(
+                    "x",
+                    vec!["http://trusted-app.example.com@127.0.0.1:7777/cb".to_string()]
                 )
                 .is_err()
         );
