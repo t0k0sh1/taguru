@@ -3414,6 +3414,9 @@ pub async fn import_batch(
     AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     let stream = match crate::ingest::parse_stream(&body[..]) {
         Ok(stream) => stream,
         // Line-numbered, like the CLI's validation pass.
