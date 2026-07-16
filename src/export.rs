@@ -216,9 +216,14 @@ struct Bucket<'a> {
 /// Renders one context's snapshot as the import batch stream. The
 /// only refusal is a real source colliding with a reserved id, or
 /// `deadline` running out partway through — checked once per
-/// association, passage, and alias, and once per output batch, so a
-/// context large enough to make rendering itself slow cannot run past
-/// its budget. `snapshot` is already fully materialized by the time
+/// association, passage, and alias, once per output batch, and (via
+/// [`DEADLINE_CHECK_STRIDE`]) periodically inside the two loops a
+/// single association's uncapped `count` can otherwise blow past all
+/// of those: [`push_assertions`]'s line expansion and this function's
+/// per-bucket line serialization. So a context large enough to make
+/// rendering itself slow cannot run past its budget, whether that size
+/// comes from many associations or one association corroborated many
+/// times over. `snapshot` is already fully materialized by the time
 /// this runs (see `AppState::export_context`), so a deadline that is
 /// already tight when this is called cannot shorten that collection.
 pub(crate) fn render(
@@ -281,7 +286,8 @@ pub(crate) fn render(
                 attribution.weight,
                 attribution.count,
                 attribution.paragraph,
-            );
+                deadline,
+            )?;
         }
         // Whatever the edge's total says beyond the attributed share
         // came in without a source — including any UNSOURCED_SOURCE
@@ -295,7 +301,8 @@ pub(crate) fn render(
                 residual_sum,
                 residual_count,
                 None,
-            );
+                deadline,
+            )?;
         }
     }
 
@@ -407,7 +414,10 @@ pub(crate) fn render(
                 }
             }
             association_lines += bucket.lines.len();
-            for line in &bucket.lines {
+            for (line_index, line) in bucket.lines.iter().enumerate() {
+                if (line_index as u64).is_multiple_of(DEADLINE_CHECK_STRIDE) && deadline.expired() {
+                    return Err(DeadlineExceeded.to_string());
+                }
                 push_line(&mut stream, line);
             }
             if index + 1 == batch_count {
@@ -428,19 +438,32 @@ pub(crate) fn render(
     })
 }
 
+/// How often a `count`-bounded loop rechecks `deadline` instead of on
+/// every iteration — `Instant::now()` is cheap but not free, and a
+/// single edge's `count` (or a bucket's accumulated line total) is
+/// otherwise the only unit of work between the association-level
+/// checks around these loops' callers.
+const DEADLINE_CHECK_STRIDE: u64 = 4096;
+
 /// Re-renders one attribution as `count` assertion lines of its
 /// average weight; the paragraph locator rides the first line only
 /// (attribution locators are first-write-wins, so that reproduces
-/// the stored one).
+/// the stored one). `count` is a stored `u64` with no upper bound, so
+/// this checks `deadline` on its own instead of trusting the
+/// once-per-association check in its caller to bound it.
 fn push_assertions<'a>(
     bucket: &mut Bucket<'a>,
     association: &'a Association,
     sum: f64,
     count: u64,
     paragraph: Option<u32>,
-) {
+    deadline: Deadline,
+) -> Result<(), String> {
     let weight = sum / count as f64;
     for index in 0..count {
+        if index.is_multiple_of(DEADLINE_CHECK_STRIDE) && deadline.expired() {
+            return Err(DeadlineExceeded.to_string());
+        }
         bucket.lines.push(AssociationLine {
             subject: &association.subject,
             label: &association.label,
@@ -449,6 +472,7 @@ fn push_assertions<'a>(
             paragraph: (index == 0).then_some(paragraph).flatten(),
         });
     }
+    Ok(())
 }
 
 fn push_line(stream: &mut String, line: &impl Serialize) {
