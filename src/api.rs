@@ -5376,6 +5376,13 @@ pub async fn refresh_embeddings(
             started_at,
         );
     }
+    // The gloss half above can spend the whole budget by itself; recheck
+    // before the passage half's own synchronous work (snapshot clone,
+    // sidecar load, full paragraph scan) runs unconditionally ahead of
+    // its first internal deadline check.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     match tokio::task::block_in_place(|| state.refresh_passage_embeddings(&name, deadline)) {
         None => not_found(&name, started_at),
         Some(Ok(passages)) => ok(
