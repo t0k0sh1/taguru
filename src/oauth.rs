@@ -114,20 +114,40 @@ pub fn s256_challenge(verifier: &str) -> String {
     base64url(&hasher.finalize())
 }
 
-/// Evicts grants until `vec` is under `cap`. All grants in one store
-/// share a TTL, so the smallest `expires_at` IS the oldest one —
-/// unlike the insertion-ordered client list, these stores drop spent
-/// entries via `swap_remove` (see `exchange_code`/`exchange_refresh`),
-/// so index 0 is not reliably the oldest and must be looked up instead.
-fn evict_oldest<T>(vec: &mut Vec<T>, cap: usize, expires_at: impl Fn(&T) -> u64) {
+/// Evicts grants until `vec` is under `cap`, called just before a new
+/// grant for `client_id` is pushed. Prefers the oldest grant that
+/// belongs to `client_id` itself — so a client that floods its own
+/// grants only ever evicts its OWN past ones — falling back to the
+/// store's oldest grant overall only when this client has none in the
+/// store yet (its first grant ever, or all already reclaimed); without
+/// that preference a single client hammering the token or authorize
+/// endpoint would evict OTHER clients' live grants out from under
+/// them. All grants in one store share a TTL, so the smallest
+/// `expires_at` IS the oldest one — unlike the insertion-ordered
+/// client list, these stores drop spent entries via `swap_remove` (see
+/// `exchange_code`/`exchange_refresh`), so index 0 is not reliably the
+/// oldest and must be looked up instead.
+fn evict_oldest<T>(
+    vec: &mut Vec<T>,
+    cap: usize,
+    client_id: &str,
+    client_of: impl Fn(&T) -> &str,
+    expires_at: impl Fn(&T) -> u64,
+) {
     while vec.len() >= cap {
-        let oldest = vec
+        let target = vec
             .iter()
             .enumerate()
+            .filter(|(_, item)| client_of(item) == client_id)
             .min_by_key(|(_, item)| expires_at(item))
+            .or_else(|| {
+                vec.iter()
+                    .enumerate()
+                    .min_by_key(|(_, item)| expires_at(item))
+            })
             .map(|(index, _)| index)
             .expect("vec is non-empty: the while guard checked len() >= cap > 0");
-        vec.swap_remove(oldest);
+        vec.swap_remove(target);
     }
 }
 
@@ -169,6 +189,7 @@ struct CodeGrant {
 struct AccessToken {
     hash: String,
     key: Arc<str>,
+    client_id: String,
     expires_at: u64,
 }
 
@@ -390,7 +411,13 @@ impl Oauth {
         let code = random_token();
         let mut codes = self.codes.lock().unwrap();
         codes.retain(|grant| grant.expires_at > now);
-        evict_oldest(&mut codes, CODE_CAP, |grant| grant.expires_at);
+        evict_oldest(
+            &mut codes,
+            CODE_CAP,
+            &client.client_id,
+            |grant| &grant.client_id,
+            |grant| grant.expires_at,
+        );
         codes.push(CodeGrant {
             code_hash: digest_hex(&code),
             client_id: client.client_id.clone(),
@@ -499,10 +526,17 @@ impl Oauth {
         {
             let mut access = self.access.lock().unwrap();
             access.retain(|token| token.expires_at > now);
-            evict_oldest(&mut access, ACCESS_CAP, |token| token.expires_at);
+            evict_oldest(
+                &mut access,
+                ACCESS_CAP,
+                client_id,
+                |token| &token.client_id,
+                |token| token.expires_at,
+            );
             access.push(AccessToken {
                 hash: digest_hex(&access_token),
                 key: Arc::from(key.as_str()),
+                client_id: client_id.to_string(),
                 expires_at: now + ACCESS_TTL_SECS,
             });
         }
@@ -519,7 +553,13 @@ impl Oauth {
             // sit in the list (and in every oauth.json rewrite) for the
             // full 30-day TTL.
             refresh.retain(|token| token.expires_at > now);
-            evict_oldest(&mut refresh, REFRESH_CAP, |token| token.expires_at);
+            evict_oldest(
+                &mut refresh,
+                REFRESH_CAP,
+                client_id,
+                |token| &token.client_id,
+                |token| token.expires_at,
+            );
             refresh.push(RefreshToken {
                 hash: digest_hex(&refresh_token),
                 key,
@@ -1158,6 +1198,48 @@ mod tests {
                 .authenticate(&grants.last().unwrap().access_token, ACCESS_CAP as u64)
                 .is_some(),
             "the newest access token must still authenticate despite the flood"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_flooding_client_evicts_its_own_grants_not_another_clients() {
+        let (oauth, dir) = scratch_oauth("cross-client-evict");
+        let victim = oauth
+            .register_client("victim", vec!["https://victim.example/cb".to_string()])
+            .unwrap();
+        let attacker = oauth
+            .register_client("attacker", vec!["https://attacker.example/cb".to_string()])
+            .unwrap();
+
+        // One grant belonging to the victim, minted before the flood.
+        let victim_grant = oauth.mint("victim-key".to_string(), &victim.client_id, 0);
+
+        // The attacker floods `mint` under its own client_id, one grant
+        // past the cap — enough to force exactly one eviction.
+        let mut attacker_grants = Vec::new();
+        for i in 1..=ACCESS_CAP as u64 {
+            attacker_grants.push(oauth.mint(format!("attacker-key{i}"), &attacker.client_id, i));
+        }
+
+        // The victim's token — minted before the flood and never
+        // touched by it — must still authenticate: eviction must
+        // consume the flooding client's own oldest grants, never reach
+        // into another client's.
+        assert!(
+            oauth
+                .authenticate(&victim_grant.access_token, ACCESS_CAP as u64)
+                .is_some(),
+            "flooding from one client must not evict another client's access token"
+        );
+        // The attacker's own earliest grant is what actually paid for
+        // the flood.
+        assert!(
+            oauth
+                .authenticate(&attacker_grants[0].access_token, ACCESS_CAP as u64)
+                .is_none(),
+            "the flooding client's own oldest grant is evicted instead"
         );
 
         let _ = std::fs::remove_dir_all(dir);
