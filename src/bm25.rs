@@ -274,6 +274,12 @@ impl Bm25Index {
         let average_length = (self.live_total_length / f64::from(self.live_count)).max(1.0) as f32;
 
         let mut scores: Vec<f32> = vec![0.0; self.slots.len()];
+        // Separate from `scores`: a `contribution` can underflow to
+        // exactly 0.0 for a vanishingly small `idf` (a gram carried by
+        // nearly every live paragraph), and testing the score itself for
+        // "first hit" would then push the same slot onto `touched` again
+        // on its next matching gram, duplicating it in the result.
+        let mut visited: Vec<bool> = vec![false; self.slots.len()];
         let mut touched: Vec<u32> = Vec::new();
         for gram in query_grams {
             let Some(postings) = self.postings.get(gram) else {
@@ -292,7 +298,8 @@ impl Bm25Index {
                 if !slot.alive {
                     continue;
                 }
-                if scores[posting.slot as usize] == 0.0 {
+                if !visited[posting.slot as usize] {
+                    visited[posting.slot as usize] = true;
                     touched.push(posting.slot);
                 }
                 scores[posting.slot as usize] +=
@@ -779,6 +786,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn search_does_not_duplicate_a_slot_whose_first_gram_underflows_idf_to_zero() {
+        // A gram carried by every live paragraph pushes idf's `ln(1 +
+        // epsilon)` below f32's precision floor around 1.0 — at 2^23
+        // carriers it rounds to exactly 0.0, so `contribution` does
+        // too, matching `scores`' own starting value. If the first
+        // matching gram's "first hit" test reads that score instead of
+        // an explicit visited flag, a second matching gram duplicates
+        // the slot into `touched`.
+        const CARRIERS: u32 = 8_388_608; // 2^23
+        let mut index = Bm25Index::empty();
+        assert_eq!(
+            idf(CARRIERS as f32, CARRIERS as f32),
+            0.0,
+            "test setup must actually underflow idf to zero"
+        );
+
+        index.sources.push("only".to_string());
+        index.source_ids.insert("only".to_string(), 0);
+        index.slots.push(Slot {
+            source_id: 0,
+            index: 0,
+            length: 2.0,
+            hash: 42,
+            question_hash: 0,
+            alive: true,
+        });
+        index.by_source.insert(0, vec![0]);
+        index.live_count = CARRIERS;
+        index.live_total_length = f64::from(CARRIERS) * 2.0;
+
+        let underflowing_gram = 1u64;
+        let normal_gram = 2u64;
+        let common_postings = index.postings.entry(underflowing_gram).or_default();
+        common_postings.reserve(CARRIERS as usize);
+        for _ in 0..CARRIERS {
+            common_postings.push(Posting { slot: 0, tf: 1.0 });
+        }
+        index
+            .postings
+            .entry(normal_gram)
+            .or_default()
+            .push(Posting { slot: 0, tf: 1.0 });
+
+        let hits = index.search(&[underflowing_gram, normal_gram], 10);
+        assert_eq!(
+            hits.len(),
+            1,
+            "the slot must appear once even though its first matching gram's \
+             contribution underflowed to 0.0: {hits:?}"
+        );
     }
 
     #[test]
