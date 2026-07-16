@@ -649,7 +649,11 @@ fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
 
     let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let json = std::env::var("TAGURU_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+    let (json, unrecognized_log_format) = match std::env::var("TAGURU_LOG_FORMAT") {
+        Ok(value) if value.eq_ignore_ascii_case("json") => (true, None),
+        Ok(value) => (false, Some(value)),
+        Err(_) => (false, None),
+    };
 
     let (provider, exporter_error) = trace::provider();
     let otel_layer = provider.as_ref().map(|provider| {
@@ -671,6 +675,12 @@ fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
         registry.with(stderr_layer.with_filter(filter)).init();
     }
 
+    // Deferred from the TAGURU_LOG_FORMAT read above: logging works only now.
+    if let Some(value) = unrecognized_log_format {
+        warn!(
+            "ignoring TAGURU_LOG_FORMAT={value}: not a recognized format (json); using human-readable"
+        );
+    }
     // Deferred from trace::provider(): logging works only now.
     if let Some(error) = exporter_error {
         warn!(
