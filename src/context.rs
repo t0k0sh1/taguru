@@ -1754,16 +1754,26 @@ impl Context {
         let (Some(&id_a), Some(&id_b)) = (self.concept_ids.get(a), self.concept_ids.get(b)) else {
             return false;
         };
-        self.outgoing(id_a)
-            .chain(self.incoming(id_a))
-            .any(|edge_id| {
-                let edge = &self.edges[edge_id as usize];
-                // Retracted edges (count == 0) linger in the chain walk
-                // until compaction; a withdrawn association must not read
-                // as a live adjacency. Same dead-edge test as `heaviest`,
-                // `describe`, and the export.
-                edge.count > 0 && (edge.subject == id_b || edge.object == id_b)
-            })
+        // Checked separately, not `.chain(...).any(|e| subject == id_b ||
+        // object == id_b)`: every `outgoing` edge already has `subject ==
+        // id_a`, so when `a` and `b` name the same concept that combined
+        // condition is trivially true off `subject` alone for ANY edge
+        // touching `id_a` — not just a genuine self-loop. Testing only
+        // the far endpoint on each side keeps `id_a == id_b` meaning "a
+        // self-loop exists" instead of "this concept has any edge at
+        // all".
+        let live = |edge: &EdgeRecord| edge.count > 0;
+        // Retracted edges (count == 0) linger in the chain walk until
+        // compaction; a withdrawn association must not read as a live
+        // adjacency. Same dead-edge test as `heaviest`, `describe`, and
+        // the export.
+        self.outgoing(id_a).any(|edge_id| {
+            let edge = &self.edges[edge_id as usize];
+            live(edge) && edge.object == id_b
+        }) || self.incoming(id_a).any(|edge_id| {
+            let edge = &self.edges[edge_id as usize];
+            live(edge) && edge.subject == id_b
+        })
     }
 
     /// Whether the two relation labels are ever used on one common
@@ -6190,6 +6200,23 @@ mod tests {
         assert!(context.adjacent("b", "a"));
         assert!(!context.adjacent("a", "c"));
         assert!(!context.adjacent("a", "unknown"));
+    }
+
+    #[test]
+    fn adjacent_to_itself_requires_an_actual_self_loop() {
+        let mut context = Context::default();
+        context.associate("a", "r", "b", 1.0).unwrap();
+        // `a` participates in a live edge, but not one that loops back to
+        // itself — `outgoing("a")` and `incoming("a")` each hold that one
+        // edge, and checking `subject == id_b || object == id_b` against
+        // BOTH chains (rather than just the far endpoint each chain
+        // implies) used to read that as `a` being adjacent to itself,
+        // since `subject == id_a` is trivially true on its own outgoing
+        // edge once `id_b == id_a`.
+        assert!(!context.adjacent("a", "a"));
+
+        context.associate("x", "r", "x", 1.0).unwrap();
+        assert!(context.adjacent("x", "x"));
     }
 
     #[test]
