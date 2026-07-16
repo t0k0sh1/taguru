@@ -23,7 +23,7 @@
 #[path = "../mcp.rs"]
 mod mcp;
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::sync::Arc;
 use std::thread;
@@ -33,12 +33,6 @@ use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
 
 const FALLBACK_INSTRUCTIONS: &str = include_str!("../llm-protocol.md");
-
-/// Ceiling on how many ids a `notifications/cancelled` can register
-/// before a dispatch thread claims (and clears) its own entry — a
-/// cancellation naming an id that is never actually in flight (a
-/// stale id, a client bug) would otherwise sit here forever.
-const MAX_TRACKED_CANCELLATIONS: usize = 10_000;
 
 fn main() {
     let base = std::env::var("TAGURU_URL").unwrap_or_else(|_| "http://127.0.0.1:8248".to_string());
@@ -124,7 +118,14 @@ fn main() {
     let max_concurrent_tools =
         resolve_max_concurrent_tools(std::env::var("TAGURU_MCP_MAX_CONCURRENT_TOOLS").ok());
     let concurrency = Arc::new(Semaphore::new(max_concurrent_tools));
-    let cancelled: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    // Maps a `tools/call` id to whether it has been cancelled. An entry
+    // exists ONLY while that call is in flight (inserted right before
+    // its thread spawns, removed the moment the thread claims a
+    // cancellation or finishes normally) — so a `notifications/cancelled`
+    // naming an id that already answered, or never existed, has nothing
+    // to flag and is silently a no-op instead of poisoning a future
+    // call that reuses the same id.
+    let tracked_calls: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
     // Every dispatch thread spawned below is detached, so nothing but
     // this Vec stands between `main` returning and a `tools/call` still
     // mid-flight when stdin hits EOF (the client closed its write side
@@ -180,9 +181,12 @@ fn main() {
             continue;
         }
         if let Some(target_id) = mcp::cancelled_request_id(&message) {
-            let mut cancelled = cancelled.lock();
-            if cancelled.len() < MAX_TRACKED_CANCELLATIONS {
-                cancelled.insert(target_id.to_string());
+            // Only an id currently tracked as in-flight can be flagged —
+            // one that already answered (or never existed) has no entry
+            // here and this is a no-op, rather than sitting around to
+            // poison a later call that reuses the same id.
+            if let Some(flag) = tracked_calls.lock().get_mut(&target_id.to_string()) {
+                *flag = true;
             }
             continue;
         }
@@ -193,14 +197,19 @@ fn main() {
             } => {
                 let bridge = Arc::clone(&bridge);
                 let concurrency = Arc::clone(&concurrency);
-                let cancelled = Arc::clone(&cancelled);
+                let tracked_calls = Arc::clone(&tracked_calls);
                 let response_id = id.to_string();
+                // Registered before the thread spawns, not inside it, so
+                // a cancellation racing the spawn always finds this id
+                // already tracked instead of landing in the gap and
+                // being dropped.
+                tracked_calls.lock().insert(response_id.clone(), false);
                 inflight.retain(|handle| !handle.is_finished());
                 inflight.push(thread::spawn(move || {
                     // A cancel that landed while this call was still
                     // queued skips it entirely: no permit spent, no
                     // request sent for a reply nothing is waiting on.
-                    if cancelled.lock().remove(&response_id) {
+                    if take_cancelled(&tracked_calls, &response_id) {
                         return;
                     }
                     let _permit = concurrency.acquire();
@@ -209,9 +218,15 @@ fn main() {
                     // landed once the call was already running can't
                     // stop the request — but it still stops the
                     // now-unwanted reply from reaching the client.
-                    if cancelled.lock().remove(&response_id) {
+                    if take_cancelled(&tracked_calls, &response_id) {
                         return;
                     }
+                    // Finished clean: drop the tracking entry so a
+                    // LATER message that reuses this id (ids are
+                    // caller-chosen, not guaranteed unique across a
+                    // session) starts untracked instead of inheriting
+                    // stale state.
+                    tracked_calls.lock().remove(&response_id);
                     emit(
                         &std::io::stdout(),
                         &mcp::response(id, mcp::tool_response(outcome)),
@@ -231,6 +246,20 @@ fn main() {
     // cancellation) before the process actually exits.
     for handle in inflight {
         let _ = handle.join();
+    }
+}
+
+/// Clears `id`'s tracking entry and reports whether it had been
+/// cancelled — but ONLY when it had. An entry that is merely pending
+/// (`false`) is left in place so a cancellation arriving later can
+/// still find and flag it.
+fn take_cancelled(tracked_calls: &Mutex<HashMap<String, bool>>, id: &str) -> bool {
+    let mut tracked_calls = tracked_calls.lock();
+    if tracked_calls.get(id) == Some(&true) {
+        tracked_calls.remove(id);
+        true
+    } else {
+        false
     }
 }
 
@@ -627,5 +656,34 @@ mod tests {
     fn empty_input_is_eof() {
         let mut input = std::io::Cursor::new(Vec::new());
         assert_eq!(read_frame(&mut input, 8), Frame::Eof);
+    }
+
+    #[test]
+    fn take_cancelled_ignores_an_id_that_is_not_tracked() {
+        // A cancellation naming an id that already answered (or never
+        // existed) must not be able to poison anything: no entry means
+        // no-op, not an insertion that a later call could inherit.
+        let tracked_calls = Mutex::new(HashMap::new());
+        assert!(!take_cancelled(&tracked_calls, "unknown"));
+        assert!(tracked_calls.lock().is_empty());
+    }
+
+    #[test]
+    fn take_cancelled_leaves_a_merely_pending_entry_in_place() {
+        // A call that is in flight but not yet cancelled must stay
+        // tracked — a cancellation arriving later still needs to find it.
+        let tracked_calls = Mutex::new(HashMap::from([("1".to_string(), false)]));
+        assert!(!take_cancelled(&tracked_calls, "1"));
+        assert_eq!(tracked_calls.lock().get("1"), Some(&false));
+    }
+
+    #[test]
+    fn take_cancelled_claims_and_clears_a_cancelled_entry() {
+        // Once cancelled, the entry is consumed — a stale duplicate
+        // delivery of the same cancellation (or a later id reuse) finds
+        // nothing left to act on.
+        let tracked_calls = Mutex::new(HashMap::from([("1".to_string(), true)]));
+        assert!(take_cancelled(&tracked_calls, "1"));
+        assert!(tracked_calls.lock().is_empty());
     }
 }
