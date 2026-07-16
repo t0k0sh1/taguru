@@ -1876,7 +1876,18 @@ impl Context {
     /// overlap). Returns `None` for an unknown concept.
     pub fn concept_gloss(&self, concept: &str, facts: usize) -> Option<String> {
         let &id = self.concept_ids.get(concept)?;
-        let edges = self.heaviest(self.outgoing(id).chain(self.incoming(id)), facts);
+        let edges = self.heaviest(
+            self.outgoing(id)
+                .chain(self.incoming(id).filter(|&edge_id| {
+                    // A self-loop threads BOTH of this concept's chains; kept
+                    // from both it would claim two of the `facts` slots for
+                    // one fact — the same sentence twice, crowding out
+                    // another fact that deserved the second slot.
+                    let edge = &self.edges[edge_id as usize];
+                    edge.subject != edge.object
+                })),
+            facts,
+        );
         Some(self.gloss_text(self.concept_name(id), &edges, Some(id)))
     }
 
@@ -6393,6 +6404,24 @@ mod tests {
         assert_eq!(
             context.concept_gloss("高瀬", 4).unwrap(),
             "高瀬。青嶺酒造の杜氏は高瀬。顧問は高瀬。出身は南部杜氏。南部酒造の杜氏は高瀬。"
+        );
+    }
+
+    #[test]
+    fn concept_gloss_lists_a_self_loop_once_not_twice() {
+        let mut context = Context::default();
+        context.associate("蒼月堂", "自称", "蒼月堂", 4.0).unwrap();
+        context.associate("蒼月堂", "創業地", "京都", 3.0).unwrap();
+        context
+            .associate("蒼月堂", "看板商品", "朝霧", 2.0)
+            .unwrap();
+
+        // The self-loop threads both the outgoing and incoming chains;
+        // with room for exactly three facts, it must surface once, not
+        // once per chain — which would double it and crowd out 看板商品.
+        assert_eq!(
+            context.concept_gloss("蒼月堂", 3).unwrap(),
+            "蒼月堂。自称は蒼月堂。創業地は京都。看板商品は朝霧。"
         );
     }
 
