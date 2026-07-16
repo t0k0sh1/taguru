@@ -461,10 +461,7 @@ pub async fn method_not_allowed(method: Method, uri: Uri) -> Response {
 /// log system, which is why there is no in-server top-K.
 fn search_log_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("TAGURU_LOG_SEARCHES")
-            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-    })
+    *ENABLED.get_or_init(|| crate::env_bool("TAGURU_LOG_SEARCHES", false))
 }
 
 fn access_error(

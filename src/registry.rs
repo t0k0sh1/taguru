@@ -1082,9 +1082,7 @@ impl BootConfig {
             // The WAL closes the flush-interval loss window; opting out
             // (TAGURU_WAL=0) restores the old posture for benchmarks or
             // explicit risk acceptance.
-            wal_enabled: std::env::var("TAGURU_WAL")
-                .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
-                .unwrap_or(true),
+            wal_enabled: crate::env_bool("TAGURU_WAL", true),
             // Backstop for a persistently failing flush: past this,
             // writes are refused rather than growing the log without
             // bound (0 = no cap).
@@ -1098,9 +1096,7 @@ impl BootConfig {
             // Paragraph embedding is opt-in on top of the provider
             // being configured — a corpus is orders of magnitude more
             // text than its glosses.
-            embed_passages: std::env::var("TAGURU_EMBED_PASSAGES")
-                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+            embed_passages: crate::env_bool("TAGURU_EMBED_PASSAGES", false),
             passage_vector_limit: crate::env_number(
                 "TAGURU_PASSAGE_VECTOR_LIMIT",
                 DEFAULT_PASSAGE_VECTOR_LIMIT,

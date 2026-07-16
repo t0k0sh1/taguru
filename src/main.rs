@@ -222,9 +222,7 @@ async fn serve() {
             );
         }
     }
-    let auto_embed = embedder.is_some()
-        && std::env::var("TAGURU_EMBED_AUTO")
-            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let auto_embed = embedder.is_some() && env_bool("TAGURU_EMBED_AUTO", false);
     if auto_embed {
         info!("auto embedding refresh enabled (runs with each flush)");
     }
@@ -793,6 +791,29 @@ pub(crate) fn env_number(key: &str, default: usize) -> usize {
             warn!("ignoring {key}={value}: not a number; using {default}");
             default
         }),
+        Err(_) => default,
+    }
+}
+
+/// An optional boolean from the environment: "1"/"true" is true,
+/// "0"/"false" is false (both case-insensitive), unset keeps
+/// `default`, and any other value is ignored with a warning and also
+/// keeps `default` — the same "never silent" contract `env_number`
+/// applies to unparseable input, extended to values that parse fine
+/// as text but name no recognized boolean (a typo, "yes"/"no",
+/// "on"/"off" from another tool's convention). Silently falling back
+/// here would let an operator believe a flag they misspelled was
+/// applied when it was not.
+pub(crate) fn env_bool(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => true,
+        Ok(value) if value == "0" || value.eq_ignore_ascii_case("false") => false,
+        Ok(value) => {
+            warn!(
+                "ignoring {key}={value}: not a recognized boolean (1/true or 0/false); using {default}"
+            );
+            default
+        }
         Err(_) => default,
     }
 }
