@@ -1331,6 +1331,17 @@ fn triple_of(association: &Value) -> Option<(String, String, String)> {
 /// `api` module to borrow the constant from.
 const MAX_ORIGIN_CUES: usize = 1000;
 
+/// [`run_retrieve_bounded`] with no byte budget — every planned call
+/// fires unconditionally. What the stdio bridge calls; `taguru-mcp.rs`'s
+/// `dispatch_tool` documents why its composition stays uncapped.
+#[allow(dead_code)] // consumed by the stdio bridge; the HTTP transport always calls run_retrieve_bounded instead
+pub fn run_retrieve(
+    arguments: &Value,
+    call: impl FnMut(&'static str, String, Option<Value>) -> Result<String, String>,
+) -> Result<Value, String> {
+    run_retrieve_bounded(arguments, None, call)
+}
+
 /// The composed retrieval loop (`Context.retrieve()` in both SDKs),
 /// reimplemented here so an MCP-only agent gets it in one call instead
 /// of orchestrating five tool calls by hand. `route_tool` stays a pure
@@ -1343,13 +1354,36 @@ const MAX_ORIGIN_CUES: usize = 1000;
 /// supply it (a ureq round trip for the stdio bridge, an in-process
 /// dispatch for the HTTP transport, which must bridge onto its own
 /// async call itself).
-pub fn run_retrieve(
+///
+/// `budget`, when `Some`, caps the running total of every dispatched
+/// call's raw response size: once one call pushes the total past it,
+/// the next `call_tool` refuses before firing rather than composing
+/// (and paying the round-trip cost for) a result the caller's own size
+/// cap would discard anyway. The running total only ever over-counts
+/// the true composed size — a step often keeps just one field of a
+/// response, e.g. `"result"` — so this can cut off a little early but
+/// never late; the caller's own post-hoc check on the final value
+/// stays the source of truth either way.
+pub fn run_retrieve_bounded(
     arguments: &Value,
+    budget: Option<usize>,
     mut call: impl FnMut(&'static str, String, Option<Value>) -> Result<String, String>,
 ) -> Result<Value, String> {
+    let mut spent: usize = 0;
     let mut call_tool = |name: &'static str, args: Value| -> Result<Value, String> {
         let (method, path, body) = route_tool(name, &args)?;
         let text = call(method, path, body)?;
+        spent += text.len();
+        if let Some(budget) = budget
+            && spent > budget
+        {
+            return Err(format!(
+                "retrieve's composed result already exceeds {budget} bytes after the \
+                 '{name}' call; narrow it — fewer origins, a smaller resolve_limit or \
+                 activate_limit, or fetch_citations: false — rather than paying for calls \
+                 whose result would be discarded anyway"
+            ));
+        }
         serde_json::from_str::<Value>(&text)
             .map_err(|error| format!("tool '{name}' returned invalid JSON: {error}"))
     };
@@ -2514,6 +2548,76 @@ mod tests {
             }])
         );
         assert_eq!(result["passage_hits"], json!([]));
+    }
+
+    /// A budget that the first citation round trip alone pushes past
+    /// must stop the loop right there — the second and third citations
+    /// (same association, three attributions) must never dispatch, not
+    /// merely have their result discarded once the whole call finishes.
+    #[test]
+    fn run_retrieve_bounded_stops_dispatching_citations_once_the_budget_is_spent() {
+        let resolve_body = envelope(json!([{"name": "Tokyo"}]));
+        let association = json!({
+            "subject": "Tokyo", "label": "capital_of", "object": "Japan",
+            "weight": 1.0, "count": 1,
+            "attributions": [
+                {"source": "doc1", "weight": 1.0, "count": 1, "paragraph": 0},
+                {"source": "doc2", "weight": 1.0, "count": 1, "paragraph": 0},
+                {"source": "doc3", "weight": 1.0, "count": 1, "paragraph": 0},
+            ]
+        });
+        let activate_body = envelope(json!({
+            "total": 1,
+            "matches": [{"strength": 1.0, "path": ["Tokyo"], "association": association}]
+        }));
+        let citation_body = envelope(json!({"text": "x", "source": "doc", "section": null}));
+        // One byte short of resolve + activate + one citation: the first
+        // citation's response is what tips the scale, not a fourth call.
+        let budget = resolve_body.len() + activate_body.len() + citation_body.len() - 1;
+
+        let arguments = json!({ "context": "sake", "origins": ["tokyo"], "describe_first": false });
+        let mut citation_calls = 0usize;
+        let result = run_retrieve_bounded(&arguments, Some(budget), |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(resolve_body.clone())
+            } else if path.ends_with("/activate") {
+                Ok(activate_body.clone())
+            } else if path.ends_with("/citations") {
+                citation_calls += 1;
+                Ok(citation_body.clone())
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        });
+
+        assert!(
+            matches!(&result, Err(message) if message.contains(&format!("already exceeds {budget} bytes"))
+                && message.contains("cite_passage")),
+            "{result:?}"
+        );
+        assert_eq!(
+            citation_calls, 1,
+            "the budget must be spent inside the first citation call, before a second ever fires"
+        );
+    }
+
+    /// `run_retrieve` (what the uncapped stdio bridge calls) is just
+    /// `run_retrieve_bounded` with no budget — a budget so tight even
+    /// the first call would trip it must still let a `None` budget
+    /// through untouched.
+    #[test]
+    fn run_retrieve_passes_no_budget_to_run_retrieve_bounded() {
+        let arguments = json!({ "context": "sake", "origins": ["tokyo"], "describe_first": false });
+        let result = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{"name": "Tokyo"}])))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({"total": 0, "matches": []})))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        });
+        assert!(result.is_ok(), "{result:?}");
     }
 
     /// query (only run when `labels` is given) and activate can surface

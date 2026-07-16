@@ -97,19 +97,28 @@ pub async fn serve(
             // (an async fn) to completion via `Handle::block_on`.
             let outcome = tokio::task::block_in_place(|| {
                 let handle = tokio::runtime::Handle::current();
-                mcp::run_retrieve(&arguments, |method, path, body| {
-                    handle.block_on(call_inner(
-                        dispatch.clone(),
-                        method,
-                        &path,
-                        body,
-                        key.as_ref(),
-                        max_result_bytes,
-                        deadline,
-                    ))
-                })
+                mcp::run_retrieve_bounded(
+                    &arguments,
+                    Some(max_result_bytes),
+                    |method, path, body| {
+                        handle.block_on(call_inner(
+                            dispatch.clone(),
+                            method,
+                            &path,
+                            body,
+                            key.as_ref(),
+                            max_result_bytes,
+                            deadline,
+                        ))
+                    },
+                )
             })
             .map(|value| value.to_string())
+            // `run_retrieve_bounded`'s own running-total check already
+            // stops it from dispatching further calls once the composed
+            // result is doomed to be too big — this is the backstop for
+            // what that estimate cannot see: the composed JSON's own
+            // structure (keys, brackets) on top of the parts it kept.
             // Each dispatched call was bounded by `max_result_bytes`, but
             // retrieve composes many into one response — resolved cues,
             // outlines, associations, activations, citations, and passage
@@ -333,9 +342,12 @@ mod tests {
 
     /// retrieve composes many dispatched calls into one response; each is
     /// individually bounded by `max_result_bytes`, but their sum is not
-    /// until this transport bounds the composed whole. A retrieve whose
-    /// pieces each fit yet together overflow the cap must come back as the
-    /// same `isError` too-big result a single oversized call would.
+    /// until `run_retrieve_bounded` tracks the running total itself. A
+    /// retrieve whose pieces each fit yet together overflow the cap must
+    /// come back as an `isError` result — and, since the budget is
+    /// checked after every dispatched call, it must be refused partway
+    /// through the ten-origin fan-out rather than after all ten resolves
+    /// ran and only then having the composed whole discarded.
     ///
     /// Multi-threaded flavor: the retrieve branch parks on
     /// `block_in_place`, which panics on the default current-thread test
@@ -376,7 +388,8 @@ mod tests {
             },
         });
 
-        // A cap the summed result overruns: refused, escape hatch named.
+        // A cap the summed result overruns: refused mid-fan-out, the
+        // running total (not the post-hoc backstop below) catching it.
         let response = serve(
             router.clone(),
             Arc::new(String::new()),
@@ -392,7 +405,8 @@ mod tests {
         let reply: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(reply["result"]["isError"], true, "{reply}");
         let text = reply["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("taguru export"), "{text}");
+        assert!(text.contains("already exceeds 1024 bytes"), "{text}");
+        assert!(text.contains("fewer origins"), "{text}");
 
         // The identical call under a generous cap composes and returns —
         // proving the cap, not the composition, is what refused it above.
