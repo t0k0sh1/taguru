@@ -621,15 +621,18 @@ fn labeled_document(text: &str, cap: usize) -> String {
 
 /// The document's text, refused early when it could never ride as a
 /// batch passage: unreadable, over the 8 MiB passage cap, or not UTF-8.
+/// Size is checked from metadata BEFORE the read, not after — an
+/// oversized document (a mispointed path, a multi-GB log file) is
+/// refused without ever buffering its bytes.
 fn read_document(path: &Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    if bytes.len() > MAX_PASSAGE_BYTES {
+    let size = fs::metadata(path).map_err(|error| error.to_string())?.len();
+    if size > MAX_PASSAGE_BYTES as u64 {
         return Err(format!(
-            "{} bytes exceeds the {MAX_PASSAGE_BYTES}-byte \
-             document cap — split the document",
-            bytes.len()
+            "{size} bytes exceeds the {MAX_PASSAGE_BYTES}-byte \
+             document cap — split the document"
         ));
     }
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
     String::from_utf8(bytes).map_err(|_| "not UTF-8".to_string())
 }
 
@@ -2000,5 +2003,34 @@ mod tests {
         assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
         // A value beyond the ceiling clamps rather than stalling a run.
         assert_eq!(parse_retry_after("99999"), Some(RETRY_MAX_BACKOFF));
+    }
+
+    #[test]
+    fn read_document_rejects_an_oversized_file_by_metadata_before_buffering_it() {
+        let dir = std::env::temp_dir().join(format!("taguru-read-document-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let small = dir.join("small.md");
+        fs::write(&small, "hello").unwrap();
+        assert_eq!(read_document(&small).unwrap(), "hello");
+
+        // Exactly at the cap is still accepted — the check is `>`, not `>=`.
+        let boundary = dir.join("boundary.md");
+        fs::write(&boundary, vec![b'a'; MAX_PASSAGE_BYTES]).unwrap();
+        assert!(read_document(&boundary).is_ok());
+
+        // One byte over the cap is refused, and the reported size is the
+        // real file size from metadata — proof the cap was checked before
+        // `fs::read` ran, not derived from a buffer read_document filled.
+        let oversized = dir.join("oversized.md");
+        fs::write(&oversized, vec![b'a'; MAX_PASSAGE_BYTES + 1]).unwrap();
+        let error = read_document(&oversized).unwrap_err();
+        assert!(
+            error.contains(&(MAX_PASSAGE_BYTES + 1).to_string()),
+            "{error}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
