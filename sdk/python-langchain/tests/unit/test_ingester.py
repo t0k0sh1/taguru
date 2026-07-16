@@ -53,6 +53,16 @@ class RecordingFakeChatModel(FakeListChatModel):
         return super()._generate(messages, *args, **kwargs)
 
 
+class ThrowingChatModel(FakeListChatModel):
+    """Raises a genuine (non-TaguruError, non-ValueError) provider error —
+    e.g. what an ``openai.RateLimitError`` looks like from the caller's side.
+    ``_agenerate`` is inherited from ``SimpleChatModel``, which runs this
+    same ``_generate`` in an executor, so one override covers both paths."""
+
+    def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("rate limited")
+
+
 def make_ingester(
     sync_client: Taguru, async_client: AsyncTaguru, responses: list[str], **kwargs: Any
 ) -> tuple[TaguruIngester, RecordingFakeChatModel]:
@@ -161,6 +171,55 @@ def test_documents_require_a_source_id(sync_client: Taguru, async_client: AsyncT
     strict, _llm = make_ingester(sync_client, async_client, [MODEL_ANSWER], raise_on_error=True)
     with pytest.raises(ValueError, match="source"):
         strict.ingest_documents([Document(page_content=DOC_TEXT)])
+
+
+def test_ingest_documents_records_a_real_llm_error_as_a_failed_outcome(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """A genuine provider error (neither TaguruError nor ValueError) must
+    still land in the outcome — not blow past ingest_documents entirely."""
+    ingester = TaguruIngester(
+        context="sake",
+        llm=ThrowingChatModel(responses=[]),
+        client=sync_client,
+        async_client=async_client,
+        questions=2,
+    )
+    outcomes = ingester.ingest_documents(
+        [Document(page_content=DOC_TEXT, metadata={"source": "docs/aomine.md"})]
+    )
+    assert not outcomes[0].ok
+    assert outcomes[0].error is not None and "rate limited" in outcomes[0].error
+
+    strict = TaguruIngester(
+        context="sake",
+        llm=ThrowingChatModel(responses=[]),
+        client=sync_client,
+        async_client=async_client,
+        questions=2,
+        raise_on_error=True,
+    )
+    with pytest.raises(RuntimeError, match="rate limited"):
+        strict.ingest_documents(
+            [Document(page_content=DOC_TEXT, metadata={"source": "docs/aomine.md"})]
+        )
+
+
+async def test_aingest_documents_records_a_real_llm_error_as_a_failed_outcome(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    ingester = TaguruIngester(
+        context="sake",
+        llm=ThrowingChatModel(responses=[]),
+        client=sync_client,
+        async_client=async_client,
+        questions=2,
+    )
+    outcomes = await ingester.aingest_documents(
+        [Document(page_content=DOC_TEXT, metadata={"source": "docs/aomine.md"})]
+    )
+    assert not outcomes[0].ok
+    assert outcomes[0].error is not None and "rate limited" in outcomes[0].error
 
 
 def test_embeddings_501_is_silently_ignored(sync_client: Taguru, async_client: AsyncTaguru) -> None:

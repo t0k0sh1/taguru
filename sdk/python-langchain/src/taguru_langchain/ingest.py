@@ -26,7 +26,6 @@ from taguru import (
     ImportOutcome,
     NotFoundError,
     Taguru,
-    TaguruError,
 )
 
 from ._extract import (
@@ -283,7 +282,7 @@ class TaguruIngester:
                 outcomes.append(
                     self.ingest_text(document.page_content, source=source, dry_run=dry_run)
                 )
-            except (TaguruError, ValueError) as error:
+            except Exception as error:
                 if self.raise_on_error:
                     raise
                 outcomes.append(IngestOutcome(source=source, ok=False, error=str(error)))
@@ -372,7 +371,7 @@ class TaguruIngester:
                 outcomes.append(
                     await self.aingest_text(document.page_content, source=source, dry_run=dry_run)
                 )
-            except (TaguruError, ValueError) as error:
+            except Exception as error:
                 if self.raise_on_error:
                     raise
                 outcomes.append(IngestOutcome(source=source, ok=False, error=str(error)))
