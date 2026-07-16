@@ -47,6 +47,16 @@ pub const CLIENT_CAP: usize = 100;
 pub const MAX_CLIENT_NAME_BYTES: usize = 256;
 pub const MAX_REDIRECT_URIS: usize = 10;
 pub const MAX_REDIRECT_URI_BYTES: usize = 2048;
+/// Codes, access tokens, and refresh tokens are minted only behind an
+/// authenticated consent approval — but that approval loops as fast as
+/// the anonymous rate limit lets a caller drive `/oauth/authorize` and
+/// `/oauth/token`, so a single valid key can still grow any of these
+/// stores without limit between TTL sweeps. Same self-healing cap as
+/// `CLIENT_CAP`, for the same reason: the oldest grant is evicted,
+/// never the new one refused.
+pub const CODE_CAP: usize = 100;
+pub const ACCESS_CAP: usize = 100;
+pub const REFRESH_CAP: usize = 100;
 
 pub fn now_secs() -> u64 {
     SystemTime::now()
@@ -102,6 +112,23 @@ pub fn s256_challenge(verifier: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
     base64url(&hasher.finalize())
+}
+
+/// Evicts grants until `vec` is under `cap`. All grants in one store
+/// share a TTL, so the smallest `expires_at` IS the oldest one —
+/// unlike the insertion-ordered client list, these stores drop spent
+/// entries via `swap_remove` (see `exchange_code`/`exchange_refresh`),
+/// so index 0 is not reliably the oldest and must be looked up instead.
+fn evict_oldest<T>(vec: &mut Vec<T>, cap: usize, expires_at: impl Fn(&T) -> u64) {
+    while vec.len() >= cap {
+        let oldest = vec
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, item)| expires_at(item))
+            .map(|(index, _)| index)
+            .expect("vec is non-empty: the while guard checked len() >= cap > 0");
+        vec.swap_remove(oldest);
+    }
 }
 
 /// One registered client (RFC 7591). Public client — no secret; PKCE
@@ -357,6 +384,7 @@ impl Oauth {
         let code = random_token();
         let mut codes = self.codes.lock().unwrap();
         codes.retain(|grant| grant.expires_at > now);
+        evict_oldest(&mut codes, CODE_CAP, |grant| grant.expires_at);
         codes.push(CodeGrant {
             code_hash: digest_hex(&code),
             client_id: client.client_id.clone(),
@@ -465,6 +493,7 @@ impl Oauth {
         {
             let mut access = self.access.lock().unwrap();
             access.retain(|token| token.expires_at > now);
+            evict_oldest(&mut access, ACCESS_CAP, |token| token.expires_at);
             access.push(AccessToken {
                 hash: digest_hex(&access_token),
                 key: Arc::from(key.as_str()),
@@ -484,6 +513,7 @@ impl Oauth {
             // sit in the list (and in every oauth.json rewrite) for the
             // full 30-day TTL.
             refresh.retain(|token| token.expires_at > now);
+            evict_oldest(&mut refresh, REFRESH_CAP, |token| token.expires_at);
             refresh.push(RefreshToken {
                 hash: digest_hex(&refresh_token),
                 key,
@@ -1044,6 +1074,77 @@ mod tests {
             CLIENT_CAP,
             "the store stays bounded at the cap"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn token_stores_self_heal_at_the_cap_instead_of_growing_without_bound() {
+        let (oauth, dir) = scratch_oauth("token-cap");
+        let client = register(&oauth);
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge = s256_challenge(verifier);
+
+        // `codes`: minting is authenticated (a valid key drives consent),
+        // but nothing stops that same key from looping `/oauth/authorize`
+        // as fast as the anonymous rate limit allows — one call to
+        // `issue_code` per grant here stands in for that loop, all at the
+        // same instant (`now` fixed), since a 60-second CODE_TTL_SECS
+        // cannot spread `CODE_CAP` distinct non-expiring instants across
+        // whole seconds anyway. That makes every `expires_at` identical,
+        // so eviction is exercised without relying on TTL ordering to
+        // pick a specific victim — only that the store stays bounded and
+        // the just-issued code (pushed AFTER eviction runs) survives.
+        let mut codes = Vec::new();
+        for _ in 0..=CODE_CAP {
+            codes.push(oauth.issue_code(&client, "https://claude.ai/cb", &challenge, "laptop", 0));
+        }
+        assert_eq!(
+            oauth.codes.lock().unwrap().len(),
+            CODE_CAP,
+            "the code store stays bounded at the cap despite {} issuances",
+            CODE_CAP + 1
+        );
+        assert!(
+            oauth
+                .exchange_code(
+                    &client.client_id,
+                    codes.last().unwrap(),
+                    verifier,
+                    "https://claude.ai/cb",
+                    0
+                )
+                .is_ok(),
+            "the newest code must still redeem despite the flood"
+        );
+
+        // `access`/`refresh`: `mint` is what a redeemed code or a
+        // rotated refresh token ultimately calls, so drive it directly
+        // rather than needing a fresh code (and its own cap) per grant.
+        let mut grants = Vec::new();
+        for i in 0..=ACCESS_CAP as u64 {
+            grants.push(oauth.mint(format!("laptop{i}"), &client.client_id, i));
+        }
+        assert_eq!(
+            oauth.access.lock().unwrap().len(),
+            ACCESS_CAP,
+            "the access store stays bounded at the cap"
+        );
+        assert_eq!(
+            oauth.refresh.lock().unwrap().len(),
+            REFRESH_CAP,
+            "the refresh store stays bounded at the cap"
+        );
+        assert!(
+            oauth.authenticate(&grants[0].access_token, 0).is_none(),
+            "the oldest access token is evicted at the cap"
+        );
+        assert!(
+            oauth
+                .authenticate(&grants.last().unwrap().access_token, ACCESS_CAP as u64)
+                .is_some(),
+            "the newest access token must still authenticate despite the flood"
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 
