@@ -7599,8 +7599,12 @@ mod tests {
 
         /// Any image watermark splits the acknowledged operation history into
         /// an already-baked prefix and a replayed suffix. A further partial
-        /// record is unacknowledged crash debris: replay must heal it without
-        /// changing the state assembled from the acknowledged operations.
+        /// record beyond that is crash debris from an in-flight write: most
+        /// cuts leave invalid or checksum-mismatched bytes, which must
+        /// vanish without changing the acknowledged state — but the one cut
+        /// that removes only the trailing newline is indistinguishable from
+        /// an already-acknowledged record that lost just its delimiter, and
+        /// replay keeps it (see `TornTail::Recovered`).
         #[test]
         fn wal_replay_from_any_acknowledged_prefix_rebuilds_the_acknowledged_state(
             candidates in prop::collection::vec(wal_op_strategy(), 1..16),
@@ -7637,8 +7641,12 @@ mod tests {
             // non-empty strict prefix: every possible cut is a torn tail.
             let fragment_path = dir.join("fragment.wal.jsonl");
             let torn_op = WalOp::from(torn_op);
-            wal::append_batch(&fragment_path, acknowledged.len() as u64 + 1, &[torn_op])
-                .unwrap();
+            wal::append_batch(
+                &fragment_path,
+                acknowledged.len() as u64 + 1,
+                std::slice::from_ref(&torn_op),
+            )
+            .unwrap();
             let record = fs::read(&fragment_path).unwrap();
             let cut = torn_at.index(record.len() - 1) + 1;
             let mut bytes = fs::read(&path).unwrap_or_default();
@@ -7653,9 +7661,34 @@ mod tests {
             for op in &pending {
                 replay_op(&mut healed, op);
             }
-            prop_assert_eq!(healed.to_bytes(), expected.to_bytes());
-            prop_assert_eq!(top, acknowledged.len() as u64);
-            prop_assert_eq!(fs::metadata(&path).unwrap().len(), healthy_len);
+
+            if cut == record.len() - 1 {
+                // The retained prefix is the record's complete,
+                // checksum-valid bytes minus only its own trailing
+                // newline — byte-for-byte what an already-acknowledged
+                // record that lost just its delimiter looks like.
+                // `replay` cannot tell the two apart and, by design (see
+                // `TornTail::Recovered`), keeps it rather than discarding
+                // it as debris.
+                let mut fully_acknowledged = Context::default();
+                for op in &acknowledged {
+                    replay_op(&mut fully_acknowledged, op);
+                }
+                replay_op(&mut fully_acknowledged, &torn_op);
+                prop_assert_eq!(healed.to_bytes(), fully_acknowledged.to_bytes());
+                prop_assert_eq!(top, acknowledged.len() as u64 + 1);
+                prop_assert_eq!(
+                    fs::metadata(&path).unwrap().len(),
+                    healthy_len + record.len() as u64
+                );
+            } else {
+                // Every shorter prefix is genuinely incomplete — either
+                // invalid JSON or bytes whose checksum cannot match — so
+                // it is unacknowledged crash debris that must vanish.
+                prop_assert_eq!(healed.to_bytes(), expected.to_bytes());
+                prop_assert_eq!(top, acknowledged.len() as u64);
+                prop_assert_eq!(fs::metadata(&path).unwrap().len(), healthy_len);
+            }
 
             let _ = fs::remove_dir_all(dir);
         }

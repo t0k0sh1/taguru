@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 383d2a229d8f0dfced5894cc6d2af3525e18ccc4a23075d0c3485180cbc9c63b # shrinks to candidates = [Associate(AssocInput { subject: "青嶺酒造", label: "好き", object: "青嶺酒造", weight: 0.0, source: None, paragraph: None })], watermark_pick = Index(0), torn_op = Associate(AssocInput { subject: "青嶺酒造", label: "好き", object: "青嶺酒造", weight: 0.0, source: None, paragraph: None }), torn_at = Index(18295541584262504750)
