@@ -7,6 +7,10 @@ RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# benches/ is never compiled here (only --bin taguru is built), but
+# Cargo.toml's [[bench]] target still makes manifest parsing itself
+# fail without the file present.
+COPY benches ./benches
 RUN cargo build --release --locked --bin taguru \
     && mkdir /data-skeleton
 
