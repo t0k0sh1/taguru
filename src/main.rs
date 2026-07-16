@@ -36,6 +36,7 @@ use embedding::EmbeddingProvider;
 use registry::AppState;
 use taguru::deadline::Deadline;
 use tokio::net::TcpListener;
+use tower_http::catch_panic::CatchPanicLayer;
 use tracing::{info, warn};
 
 /// Configuration comes from the environment — or from a KEY=VALUE file
@@ -548,6 +549,13 @@ fn routes(
         .merge(heavy_routes)
         .fallback(api::unknown_path)
         .method_not_allowed_fallback(api::method_not_allowed)
+        // Innermost on purpose: `routes()` is cloned for the /mcp
+        // in-process dispatch too (see `mcp_dispatch` below), so a
+        // panic inside a dispatched tool call is caught right here,
+        // same as one from an ordinary HTTP handler — neither takes
+        // down the connection task out from under the metrics/
+        // access-log/trace middleware layered on further out.
+        .layer(CatchPanicLayer::custom(api::panic_response))
 }
 
 /// The periodic flusher: every `flush_secs`, persist what is dirty —

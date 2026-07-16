@@ -1545,6 +1545,7 @@ dependencies = [
  "subtle",
  "tokio",
  "tower",
+ "tower-http",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -1703,10 +1704,12 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 

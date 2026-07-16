@@ -213,6 +213,33 @@ fn coded(
     (status, Json(ApiError::new(code, message, started_at))).into_response()
 }
 
+/// `CatchPanicLayer`'s panic handler: a handler that unwinds still owes
+/// the caller the same one JSON error shape every other failure returns
+/// — and, just as importantly, an ordinary [`Response`] handed back to
+/// `next.run` is what lets the metrics/access-log/trace middleware
+/// wrapping the router see this request at all. Without it, a panic
+/// unwinds straight through them and the request vanishes from every
+/// signal at once.
+pub(crate) fn panic_response(payload: Box<dyn std::any::Any + Send>) -> Response {
+    let message = if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else {
+        "handler panicked with a non-string payload".to_string()
+    };
+    // A bug surfacing at runtime, not one of the foreseen degraded
+    // states this codebase otherwise logs with warn! — worth the same
+    // loud signal as a boot-time fatal.
+    tracing::error!(%message, "handler panicked; responding 500 instead of dropping the connection");
+    coded(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::Internal,
+        format!("internal error: {message}"),
+        Instant::now(),
+    )
+}
+
 fn not_found(name: &str, started_at: Instant) -> Response {
     error(
         ErrorCode::NoContext,
@@ -5529,6 +5556,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::str::from_utf8(&bytes).unwrap(), "hello world");
+    }
+
+    /// `CatchPanicLayer::custom(panic_response)` is the exact wiring
+    /// `routes()` uses in `main.rs` — exercised together, not
+    /// `panic_response` in isolation, since the bug this guards
+    /// against is the request vanishing from the metrics/access-log/
+    /// trace middleware wrapping the router, not the response shape
+    /// on its own.
+    #[tokio::test]
+    async fn a_panicking_handler_still_answers_with_the_shared_api_error_shape() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::routing::get;
+        use tower::util::ServiceExt;
+        use tower_http::catch_panic::CatchPanicLayer;
+
+        async fn boom() -> &'static str {
+            panic!("kaboom")
+        }
+        let app = Router::new()
+            .route("/boom", get(boom))
+            .layer(CatchPanicLayer::custom(panic_response));
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/boom")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "error");
+        assert_eq!(body["code"], ErrorCode::Internal.as_str());
+        assert!(
+            body["error"].as_str().unwrap().contains("kaboom"),
+            "{body}"
+        );
     }
 
     fn assoc(object: &str, weight: f64) -> Association {
