@@ -1190,17 +1190,31 @@ export class Context {
     }
   }
 
-  /** Stream the export straight to a file. */
+  /**
+   * Stream the export straight to a file, atomically.
+   *
+   * Written to a sibling temp file and renamed into place, so a failed or
+   * interrupted export never leaves a truncated file at `path`.
+   */
   async exportToFile(path: string): Promise<void> {
-    const { open } = await import("node:fs/promises");
-    const handle = await open(path, "w");
+    const { open, rename, unlink } = await import("node:fs/promises");
+    const { dirname, basename, join } = await import("node:path");
+    const { randomUUID } = await import("node:crypto");
+    const tmpPath = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+    const handle = await open(tmpPath, "w");
     try {
-      for await (const chunk of this.exportStream()) {
-        await handle.write(chunk);
+      try {
+        for await (const chunk of this.exportStream()) {
+          await handle.write(chunk);
+        }
+      } finally {
+        await handle.close();
       }
-    } finally {
-      await handle.close();
+    } catch (error) {
+      await unlink(tmpPath).catch(() => {});
+      throw error;
     }
+    await rename(tmpPath, path);
   }
 
   // -- high-level retrieval loop -------------------------------------------------------
