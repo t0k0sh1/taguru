@@ -1,6 +1,7 @@
 /target
 /data
 /mutants.out*
+/node_modules
 .DS_Store
 
 # SDK build/dev artifacts
