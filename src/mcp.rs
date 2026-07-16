@@ -208,6 +208,18 @@ fn need<'a>(arguments: &'a Value, key: &str) -> Result<&'a str, String> {
     }
 }
 
+/// `need`'s missing/null-counts-as-missing rule for a required
+/// argument that isn't a string — an array or object body field, like
+/// `add_associations`'s `associations`. Type checking past "present"
+/// stays server-side, same as it already does for every argument
+/// `pick` copies through untyped.
+fn need_present<'a>(arguments: &'a Value, key: &str) -> Result<&'a Value, String> {
+    match arguments.get(key) {
+        Some(value) if !value.is_null() => Ok(value),
+        _ => Err(format!("missing required argument '{key}'")),
+    }
+}
+
 /// Copies the listed keys into a request body, skipping absent ones.
 fn pick(arguments: &Value, keys: &[&str]) -> Value {
     let mut body = serde_json::Map::new();
@@ -985,11 +997,11 @@ pub fn route_tool(
             )),
         ),
         "delete_context" => ("DELETE", context_path("name")?, None),
-        "rename_context" => (
-            "POST",
-            format!("{}/rename", context_path("name")?),
-            Some(pick(arguments, &["to"])),
-        ),
+        "rename_context" => {
+            let path = format!("{}/rename", context_path("name")?);
+            need(arguments, "to")?;
+            ("POST", path, Some(pick(arguments, &["to"])))
+        }
         "list_groups" => (
             "GET",
             format!("/groups{}", query_string(arguments, &["limit", "after"])),
@@ -1015,11 +1027,11 @@ pub fn route_tool(
             )),
         ),
         "delete_group" => ("DELETE", group_path("name")?, None),
-        "rename_group" => (
-            "POST",
-            format!("{}/rename", group_path("name")?),
-            Some(pick(arguments, &["to"])),
-        ),
+        "rename_group" => {
+            let path = format!("{}/rename", group_path("name")?);
+            need(arguments, "to")?;
+            ("POST", path, Some(pick(arguments, &["to"])))
+        }
         "add_associations" => {
             // Resolve `context` first so a caller who omitted BOTH hears
             // about the primary argument, not the secondary one, in the
@@ -1035,16 +1047,20 @@ pub fn route_tool(
                 .ok_or_else(|| "missing required argument 'associations'".to_string())?;
             ("POST", path, Some(associations))
         }
-        "store_passages" => (
-            "POST",
-            format!("{}/sources", context_path("context")?),
-            Some(pick(arguments, &["passages", "questions", "sections"])),
-        ),
-        "lookup_passages" => (
-            "POST",
-            format!("{}/sources/lookup", context_path("context")?),
-            Some(pick(arguments, &["sources"])),
-        ),
+        "store_passages" => {
+            let path = format!("{}/sources", context_path("context")?);
+            need_present(arguments, "passages")?;
+            (
+                "POST",
+                path,
+                Some(pick(arguments, &["passages", "questions", "sections"])),
+            )
+        }
+        "lookup_passages" => {
+            let path = format!("{}/sources/lookup", context_path("context")?);
+            need_present(arguments, "sources")?;
+            ("POST", path, Some(pick(arguments, &["sources"])))
+        }
         "list_sources" => (
             "GET",
             format!(
@@ -1054,43 +1070,61 @@ pub fn route_tool(
             ),
             None,
         ),
-        "resolve" => (
-            "POST",
-            format!("{}/resolve", context_path("context")?),
-            Some(pick(
-                arguments,
-                &["cue", "dice_floor", "semantic_floor", "limit"],
-            )),
-        ),
-        "resolve_label" => (
-            "POST",
-            format!("{}/resolve_label", context_path("context")?),
-            Some(pick(
-                arguments,
-                &["cue", "dice_floor", "semantic_floor", "limit"],
-            )),
-        ),
-        "explain_resolve" => (
-            "POST",
-            format!("{}/resolve/explain", context_path("context")?),
-            Some(pick(
-                arguments,
-                &["cue", "expected", "dice_floor", "semantic_floor", "limit"],
-            )),
-        ),
-        "explain_resolve_label" => (
-            "POST",
-            format!("{}/resolve_label/explain", context_path("context")?),
-            Some(pick(
-                arguments,
-                &["cue", "expected", "dice_floor", "semantic_floor", "limit"],
-            )),
-        ),
-        "describe" => (
-            "POST",
-            format!("{}/describe", context_path("context")?),
-            Some(pick(arguments, &["concept"])),
-        ),
+        "resolve" => {
+            let path = format!("{}/resolve", context_path("context")?);
+            need(arguments, "cue")?;
+            (
+                "POST",
+                path,
+                Some(pick(
+                    arguments,
+                    &["cue", "dice_floor", "semantic_floor", "limit"],
+                )),
+            )
+        }
+        "resolve_label" => {
+            let path = format!("{}/resolve_label", context_path("context")?);
+            need(arguments, "cue")?;
+            (
+                "POST",
+                path,
+                Some(pick(
+                    arguments,
+                    &["cue", "dice_floor", "semantic_floor", "limit"],
+                )),
+            )
+        }
+        "explain_resolve" => {
+            let path = format!("{}/resolve/explain", context_path("context")?);
+            need(arguments, "cue")?;
+            need(arguments, "expected")?;
+            (
+                "POST",
+                path,
+                Some(pick(
+                    arguments,
+                    &["cue", "expected", "dice_floor", "semantic_floor", "limit"],
+                )),
+            )
+        }
+        "explain_resolve_label" => {
+            let path = format!("{}/resolve_label/explain", context_path("context")?);
+            need(arguments, "cue")?;
+            need(arguments, "expected")?;
+            (
+                "POST",
+                path,
+                Some(pick(
+                    arguments,
+                    &["cue", "expected", "dice_floor", "semantic_floor", "limit"],
+                )),
+            )
+        }
+        "describe" => {
+            let path = format!("{}/describe", context_path("context")?);
+            need(arguments, "concept")?;
+            ("POST", path, Some(pick(arguments, &["concept"])))
+        }
         "query" => (
             "POST",
             format!("{}/query", search_base()?),
@@ -1101,24 +1135,36 @@ pub fn route_tool(
                 ],
             )),
         ),
-        "recall" => (
-            "POST",
-            format!("{}/recall", search_base()?),
-            Some(pick(
-                arguments,
-                &["contexts", "groups", "cue", "limit", "after"],
-            )),
-        ),
-        "activate" => (
-            "POST",
-            format!("{}/activate", context_path("context")?),
-            Some(pick(arguments, &["origins", "decay", "limit"])),
-        ),
-        "explore" => (
-            "POST",
-            format!("{}/explore", context_path("context")?),
-            Some(pick(arguments, &["origins", "max_depth", "limit", "after"])),
-        ),
+        "recall" => {
+            let path = format!("{}/recall", search_base()?);
+            need(arguments, "cue")?;
+            (
+                "POST",
+                path,
+                Some(pick(
+                    arguments,
+                    &["contexts", "groups", "cue", "limit", "after"],
+                )),
+            )
+        }
+        "activate" => {
+            let path = format!("{}/activate", context_path("context")?);
+            need_present(arguments, "origins")?;
+            (
+                "POST",
+                path,
+                Some(pick(arguments, &["origins", "decay", "limit"])),
+            )
+        }
+        "explore" => {
+            let path = format!("{}/explore", context_path("context")?);
+            need_present(arguments, "origins")?;
+            (
+                "POST",
+                path,
+                Some(pick(arguments, &["origins", "max_depth", "limit", "after"])),
+            )
+        }
         "list_labels" => (
             "GET",
             format!(
@@ -1147,36 +1193,65 @@ pub fn route_tool(
             format!("{}/aliases", context_path("context")?),
             Some(pick(arguments, &["concepts", "labels"])),
         ),
-        "retract_source" => (
-            "POST",
-            format!("{}/sources/retract", context_path("context")?),
-            Some(pick(arguments, &["source"])),
-        ),
-        "retract_association" => (
-            "POST",
-            format!("{}/associations/retract", context_path("context")?),
-            Some(pick(arguments, &["subject", "label", "object"])),
-        ),
-        "search_passages" => (
-            "POST",
-            format!("{}/sources/search", search_base()?),
-            Some(pick(arguments, &["contexts", "groups", "query", "limit"])),
-        ),
-        "explain_search" => (
-            "POST",
-            format!("{}/sources/search/explain", context_path("context")?),
-            Some(pick(arguments, &["query", "source", "paragraph", "limit"])),
-        ),
-        "cite_passage" => (
-            "POST",
-            format!("{}/citations", context_path("context")?),
-            Some(pick_with_alias(
-                arguments,
-                &["source", "paragraph"],
-                "paragraph",
-                "index",
-            )),
-        ),
+        "retract_source" => {
+            let path = format!("{}/sources/retract", context_path("context")?);
+            need(arguments, "source")?;
+            ("POST", path, Some(pick(arguments, &["source"])))
+        }
+        "retract_association" => {
+            let path = format!("{}/associations/retract", context_path("context")?);
+            need(arguments, "subject")?;
+            need(arguments, "label")?;
+            need(arguments, "object")?;
+            (
+                "POST",
+                path,
+                Some(pick(arguments, &["subject", "label", "object"])),
+            )
+        }
+        "search_passages" => {
+            let path = format!("{}/sources/search", search_base()?);
+            need(arguments, "query")?;
+            (
+                "POST",
+                path,
+                Some(pick(arguments, &["contexts", "groups", "query", "limit"])),
+            )
+        }
+        "explain_search" => {
+            let path = format!("{}/sources/search/explain", context_path("context")?);
+            need(arguments, "query")?;
+            need(arguments, "source")?;
+            (
+                "POST",
+                path,
+                Some(pick(arguments, &["query", "source", "paragraph", "limit"])),
+            )
+        }
+        "cite_passage" => {
+            let path = format!("{}/citations", context_path("context")?);
+            need(arguments, "source")?;
+            let has_paragraph = arguments
+                .get("paragraph")
+                .is_some_and(|value| !value.is_null());
+            let has_index = arguments.get("index").is_some_and(|value| !value.is_null());
+            if !has_paragraph && !has_index {
+                return Err(
+                    "missing required argument 'paragraph' (or its deprecated alias 'index')"
+                        .to_string(),
+                );
+            }
+            (
+                "POST",
+                path,
+                Some(pick_with_alias(
+                    arguments,
+                    &["source", "paragraph"],
+                    "paragraph",
+                    "index",
+                )),
+            )
+        }
         "refresh_embeddings" => (
             "POST",
             format!("{}/embeddings/refresh", context_path("context")?),
@@ -1187,11 +1262,15 @@ pub fn route_tool(
             format!("{}/vocabulary/audit", context_path("context")?),
             Some(pick(arguments, &["dice_floor", "cosine_floor"])),
         ),
-        "audit_coverage" => (
-            "POST",
-            format!("{}/unreachable_from", context_path("context")?),
-            Some(pick(arguments, &["origins", "limit", "after"])),
-        ),
+        "audit_coverage" => {
+            let path = format!("{}/unreachable_from", context_path("context")?);
+            need_present(arguments, "origins")?;
+            (
+                "POST",
+                path,
+                Some(pick(arguments, &["origins", "limit", "after"])),
+            )
+        }
         "audit_drift" => (
             "POST",
             format!("{}/drift/audit", context_path("context")?),
@@ -1492,7 +1571,8 @@ mod tests {
             "name": "ctx", "context": "ctx", "cue": "x", "concept": "x",
             "origins": ["x"], "associations": [], "passages": {},
             "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
-            "stream": "{}", "to": "ctx2",
+            "stream": "{}", "to": "ctx2", "expected": "x",
+            "subject": "s", "label": "l", "object": "o",
         });
         for tool in tool_definitions() {
             let name = tool["name"].as_str().expect("definitions carry names");
@@ -1673,6 +1753,79 @@ mod tests {
         assert_eq!(
             route_tool("add_associations", &json!({})),
             Err("missing required argument 'context'".to_string())
+        );
+    }
+
+    /// Beyond `add_associations` (covered above), every other tool whose
+    /// schema marks a body argument required must refuse routing when
+    /// that argument is omitted instead of composing a request with the
+    /// key silently absent — `pick` alone would drop it without a word,
+    /// pushing the caller's mistake past this layer and into a slower,
+    /// vaguer failure downstream.
+    #[test]
+    fn schema_required_body_arguments_are_refused_when_omitted() {
+        let base = json!({
+            "name": "ctx", "context": "ctx", "cue": "x", "concept": "x",
+            "origins": ["x"], "passages": {}, "sources": ["s"], "source": "s",
+            "query": "q", "paragraph": 0, "to": "ctx2", "expected": "x",
+            "subject": "s", "label": "l", "object": "o",
+        });
+        let cases = [
+            ("rename_context", "to"),
+            ("rename_group", "to"),
+            ("store_passages", "passages"),
+            ("lookup_passages", "sources"),
+            ("resolve", "cue"),
+            ("resolve_label", "cue"),
+            ("explain_resolve", "cue"),
+            ("explain_resolve", "expected"),
+            ("explain_resolve_label", "cue"),
+            ("explain_resolve_label", "expected"),
+            ("describe", "concept"),
+            ("recall", "cue"),
+            ("activate", "origins"),
+            ("explore", "origins"),
+            ("retract_source", "source"),
+            ("retract_association", "subject"),
+            ("retract_association", "label"),
+            ("retract_association", "object"),
+            ("search_passages", "query"),
+            ("explain_search", "query"),
+            ("explain_search", "source"),
+            ("cite_passage", "source"),
+            ("audit_coverage", "origins"),
+        ];
+        for (tool, key) in cases {
+            let mut arguments = base.clone();
+            arguments[key] = Value::Null;
+            let routed = route_tool(tool, &arguments);
+            assert!(
+                routed.is_err(),
+                "tool '{tool}' should refuse a missing '{key}', got {routed:?}"
+            );
+            let err = routed.unwrap_err();
+            assert!(
+                err.contains(key),
+                "tool '{tool}' missing '{key}' error should name it, got: {err}"
+            );
+        }
+    }
+
+    /// `cite_passage` accepts either `paragraph` or its deprecated alias
+    /// `index` (positive cases covered above); omitting both must refuse
+    /// rather than route a citation request with neither name present.
+    #[test]
+    fn cite_passage_without_paragraph_or_index_is_refused() {
+        let routed = route_tool(
+            "cite_passage",
+            &json!({"context": "sake", "source": "docs/aomine.md"}),
+        );
+        assert_eq!(
+            routed,
+            Err(
+                "missing required argument 'paragraph' (or its deprecated alias 'index')"
+                    .to_string()
+            )
         );
     }
 
