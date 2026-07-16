@@ -1119,8 +1119,12 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         )));
     }
 
+    // Not `retract_source`: this batch's own marker (opened above)
+    // already brackets this call along with every step that follows —
+    // clearing it here too would reopen the batch to the exact gap it
+    // exists to close.
     let (retracted, passage_dropped) = state
-        .retract_source(&batch.context, &batch.source)
+        .retract_source_unmarked(&batch.context, &batch.source)
         .map_err(ApplyRefusal::Access)?;
 
     let mut questions_stored = 0;

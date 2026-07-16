@@ -2870,7 +2870,39 @@ impl AppState {
     /// retract the old version of a changed document, then re-ingest the
     /// new one, instead of rebuilding the whole context. Returns how
     /// many associations were touched and whether a passage was removed.
+    ///
+    /// Brackets [`Self::retract_source_unmarked`]'s two independently
+    /// durable writes (the graph's own WAL, then the passage store's)
+    /// with the same batch-open marker `apply_batch` uses: a crash
+    /// between them would otherwise leave the graph durably retracted
+    /// while the passage text survives on disk, undetected by boot or
+    /// `taguru inspect` — the same hazard the marker already closes for
+    /// a whole import batch, at the smaller two-write scale of a
+    /// standalone retraction. `apply_batch` calls
+    /// [`Self::retract_source_unmarked`] directly instead of this
+    /// method: its own marker already brackets that call along with the
+    /// store/associate/alias steps that follow it, and clearing the
+    /// marker here too would reopen the batch to the exact gap it
+    /// exists to close.
     pub fn retract_source(&self, name: &str, source: &str) -> Result<(usize, bool), AccessError> {
+        self.open_import_marker(name, source).map_err(|error| {
+            AccessError::Unpersisted(format!(
+                "import marker not persisted: {error} — nothing was retracted"
+            ))
+        })?;
+        let outcome = self.retract_source_unmarked(name, source)?;
+        self.clear_import_marker(name, source);
+        Ok(outcome)
+    }
+
+    /// The marker-less core of [`Self::retract_source`] — see there for
+    /// behavior and for why only `apply_batch` should call this
+    /// directly.
+    pub(crate) fn retract_source_unmarked(
+        &self,
+        name: &str,
+        source: &str,
+    ) -> Result<(usize, bool), AccessError> {
         let op = WalOp::RetractSource {
             source: source.to_string(),
         };
@@ -2921,12 +2953,13 @@ impl AppState {
 
     /// Opens the batch-open marker for one source's import — see
     /// [`import_marker_path`] for what it means while it exists. Called
-    /// by `apply_batch` before the batch's first mutation; an error
-    /// refuses the batch, because proceeding would silently reintroduce
-    /// the undetectable-tear gap the marker exists to close (and a disk
-    /// that cannot land a hundred-byte marker is not going to land the
-    /// batch either). `write_atomic` makes it durable, directory entry
-    /// included, before any batch write can need it.
+    /// by `apply_batch` before the batch's first mutation, and by
+    /// [`Self::retract_source`] before its own two-write sequence; an
+    /// error refuses the operation, because proceeding would silently
+    /// reintroduce the undetectable-tear gap the marker exists to close
+    /// (and a disk that cannot land a hundred-byte marker is not going
+    /// to land the writes either). `write_atomic` makes it durable,
+    /// directory entry included, before any tracked write can need it.
     pub fn open_import_marker(&self, context: &str, source: &str) -> io::Result<()> {
         let marker = ImportMarker {
             context: context.to_string(),
@@ -7294,6 +7327,106 @@ mod tests {
             }
         }
         assert!(exhausted, "context deletion exceeded the sweep bound");
+    }
+
+    /// Standalone `retract_source` — the only path the HTTP endpoint and
+    /// the MCP tool ever call — used to bracket its two independently
+    /// durable writes (the graph's WAL, then the passage store's) with
+    /// nothing: a crash between them left the graph durably retracted
+    /// while the passage text survived on disk, invisible to boot or
+    /// `taguru inspect`. Every fault point must now leave either a
+    /// completed, marker-free retraction, or a surviving marker naming
+    /// the tear — never a silent gap between the two stores.
+    #[test]
+    fn every_standalone_retract_persistence_failure_is_detected_or_completes() {
+        let mut exhausted = false;
+        for failure in 0..24 {
+            let dir = scratch_dir(&format!("retract-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert("doc".to_string(), "杜氏は高瀬。".to_string());
+            state
+                .store_passages("sake", plain(passages))
+                .unwrap()
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let first = state.retract_source("sake", "doc");
+            let past_end = clear_persistence_fault();
+            let marker = import_marker_path(&dir, "sake", "doc");
+
+            if past_end {
+                assert!(
+                    first.is_ok(),
+                    "the past-end attempt must complete: {first:?}"
+                );
+                assert!(!marker.exists());
+            } else {
+                // A witness must survive whenever the graph side may
+                // already be durably retracted while the passage side
+                // never ran: any refusal other than the marker write
+                // itself failing (which leaves nothing behind to
+                // witness, since nothing happened yet).
+                if let Err(AccessError::Unpersisted(message)) = &first {
+                    let before_marker = message.contains("import marker");
+                    assert_eq!(
+                        marker.exists(),
+                        !before_marker,
+                        "a stopped retraction at step {failure} lost its tear witness: {first:?}"
+                    );
+                }
+                // Retracting again is the documented repair, and
+                // retract_source is idempotent per-source, so it is
+                // exact even when the injected failure was swallowed
+                // internally or only prevented marker cleanup.
+                state.retract_source("sake", "doc").unwrap();
+                assert!(
+                    !marker.exists(),
+                    "repair did not clear failure step {failure}"
+                );
+            }
+
+            // A fully retracted edge stays (storage is append-only) but
+            // nets to zero attributions — the same end-state
+            // `retract_source_withdraws_its_contributions` checks.
+            let attributions_gone = state
+                .read_context("sake", |context| {
+                    context.query(Some("蔵"), None, Some("高瀬"))[0]
+                        .attributions
+                        .is_empty()
+                })
+                .unwrap();
+            assert!(
+                attributions_gone,
+                "retry at step {failure} did not retract the association"
+            );
+            let (found, missing) = state
+                .lookup_passages("sake", &["doc".to_string()])
+                .unwrap()
+                .unwrap();
+            assert!(
+                !found.contains_key("doc") && missing == vec!["doc".to_string()],
+                "retry at step {failure} did not retract the passage"
+            );
+
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "standalone retraction exceeded the sweep bound");
     }
 
     /// The dangerous interleaving: a delete leaves a marker behind
