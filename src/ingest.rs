@@ -263,6 +263,7 @@ pub fn run(args: &[String]) -> i32 {
                 if refusal.wrote_anything() {
                     touched.insert(batch.context.clone());
                 }
+                ops_since_flush += refusal.ops_written();
                 failures += 1;
             }
         }
@@ -374,7 +375,7 @@ fn expand(paths: &[String]) -> Result<Vec<PathBuf>, String> {
                 .map_err(|error| format!("cannot read {raw}: {error}"))?
                 .filter_map(|entry| entry.ok())
                 .map(|entry| entry.path())
-                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+                .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
                 .collect();
             if found.is_empty() {
                 return Err(format!("no .jsonl files under {raw}"));
@@ -1007,6 +1008,20 @@ impl ApplyRefusal {
         !matches!(self, Self::NoContext(_))
     }
 
+    /// How many ops this refusal's batch durably wrote before failing.
+    /// Only [`ApplyRefusal::Partial`] carries a count — association or
+    /// alias ops that landed in the WAL before the op that tripped the
+    /// refusal. Feeds `ops_since_flush` in the import loop: a run
+    /// dominated by partial failures (a capacity cap hit over and
+    /// over) still needs its mid-run flushes on schedule, or the very
+    /// WAL growth `FLUSH_EVERY_OPS` exists to bound goes unwatched.
+    pub(crate) fn ops_written(&self) -> usize {
+        match self {
+            Self::Partial { applied, .. } => *applied,
+            Self::NoContext(_) | Self::Io(_) | Self::Access(_) => 0,
+        }
+    }
+
     pub(crate) fn text(&self) -> String {
         match self {
             Self::NoContext(context) => {
@@ -1193,7 +1208,14 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
             Ok(applied) => aliases += applied,
             Err(partial) => {
                 return Err(ApplyRefusal::Partial {
-                    applied: partial.applied,
+                    // Same running total the association arm above
+                    // reports: `applied` is the batch's cumulative
+                    // count, not just this call's — a batch whose
+                    // associations landed but whose first alias
+                    // didn't must not report 0 (`partial.applied`
+                    // alone) when `associations` ops are already
+                    // durable.
+                    applied: associations + partial.applied,
                     message: format!(
                         "applied {} alias(es), then: {}",
                         partial.applied, partial.message
@@ -1939,6 +1961,56 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A batch whose associations land before its alias step trips a
+    /// refusal must report the running total, not just the alias
+    /// count — otherwise a batch that durably wrote several
+    /// associations and zero aliases reports `applied: 0`, which both
+    /// undercounts the CLI's `ops_since_flush` and (over HTTP) skips
+    /// `note_write` for a context that did change.
+    #[test]
+    fn a_partial_alias_refusal_reports_associations_already_applied() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-ingest-partial-alias-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        let torn = parse(
+            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \"create\": {}}\n\
+             {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+             {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
+        )
+        .unwrap();
+        let refusal = apply_batch(&state, &torn).unwrap_err();
+        let ApplyRefusal::Partial { applied, .. } = &refusal else {
+            panic!("expected a partial refusal, got {refusal:?}");
+        };
+        assert_eq!(
+            *applied, 1,
+            "the association landed before the alias step failed"
+        );
+        assert_eq!(refusal.ops_written(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ops_written_counts_only_the_partial_refusal() {
+        assert_eq!(ApplyRefusal::NoContext("sake".to_string()).ops_written(), 0);
+        assert_eq!(ApplyRefusal::Io("boom".to_string()).ops_written(), 0);
+        assert_eq!(ApplyRefusal::Access(AccessError::NotFound).ops_written(), 0);
+        assert_eq!(
+            ApplyRefusal::Partial {
+                applied: 5,
+                message: "boom".to_string(),
+                full: false,
+            }
+            .ops_written(),
+            5
+        );
+    }
+
     /// Move one deterministic filesystem failure through the complete
     /// import: marker, source retraction, passage store, associations,
     /// aliases, and marker unlink. A stopped batch keeps its marker;
@@ -2033,6 +2105,12 @@ mod tests {
         fs::write(dir.join("b.jsonl"), "x").unwrap();
         fs::write(dir.join("a.jsonl"), "x").unwrap();
         fs::write(dir.join("ignored.txt"), "x").unwrap();
+        // A subdirectory that happens to be named like a batch file
+        // must never ride along: `fs::File::open` on it would fail
+        // with a confusing "Is a directory" error far from here,
+        // instead of `expand` just not collecting it in the first
+        // place.
+        fs::create_dir_all(dir.join("c.jsonl")).unwrap();
         let files = expand(&[dir.to_string_lossy().into_owned()]).unwrap();
         let names: Vec<_> = files
             .iter()
