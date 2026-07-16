@@ -100,6 +100,15 @@ const RETRY_ATTEMPTS: usize = 4;
 const RETRY_BASE_BACKOFF: Duration = Duration::from_secs(1);
 const RETRY_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Chat completion response cap. ureq's own `read_to_string`/`read_json`
+/// already cap at 10 MiB, but that ceiling is undocumented at the call
+/// site and unconfigurable — read through an explicit one instead, same
+/// treatment as `embedding.rs`'s `HttpEmbeddings::decode`. 16 MiB clears
+/// a legitimate answer to one [`CHUNK_BYTES`] chunk (associations plus,
+/// with `--questions`, per-paragraph search questions) many times over,
+/// while still bounding a misbehaving or misaddressed endpoint's buffer.
+const MAX_CHAT_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+
 const MANIFEST_NAME: &str = ".extract-manifest.json";
 
 pub fn run(args: &[String]) -> i32 {
@@ -724,17 +733,16 @@ impl ChatClient {
             // lengthens THIS wait, never dilutes with jitter. `None`
             // means "use the computed jittered backoff instead."
             let retry_after = match request.send(&body) {
-                Ok(mut response) if response.status().as_u16() < 400 => {
-                    let parsed: serde_json::Value = response
-                        .body_mut()
-                        .read_json()
+                Ok(response) if response.status().as_u16() < 400 => {
+                    let body = read_capped_chat_body(response.into_body())?;
+                    let parsed: serde_json::Value = serde_json::from_slice(&body)
                         .map_err(|error| format!("chat response unreadable: {error}"))?;
                     return parsed["choices"][0]["message"]["content"]
                         .as_str()
                         .map(str::to_string)
                         .ok_or_else(|| "chat response carries no assistant text".to_string());
                 }
-                Ok(mut response) => {
+                Ok(response) => {
                     let code = response.status().as_u16();
                     let retry_after = (code == 429)
                         .then(|| {
@@ -745,9 +753,11 @@ impl ChatClient {
                                 .and_then(parse_retry_after)
                         })
                         .flatten();
+                    let error_body =
+                        read_capped_chat_body(response.into_body()).unwrap_or_default();
                     last = format!(
                         "chat endpoint answered {code}: {}",
-                        snippet(&response.body_mut().read_to_string().unwrap_or_default())
+                        snippet(&String::from_utf8_lossy(&error_body))
                     );
                     if code != 429 && code < 500 {
                         return Err(last);
@@ -803,6 +813,25 @@ fn random_duration_up_to(cap: Duration) -> Duration {
 fn parse_retry_after(value: &str) -> Option<Duration> {
     let seconds: u64 = value.trim().parse().ok()?;
     Some(Duration::from_secs(seconds).min(RETRY_MAX_BACKOFF))
+}
+
+/// Reads a chat endpoint's response body capped at
+/// [`MAX_CHAT_RESPONSE_BYTES`], so a misbehaving or misaddressed
+/// endpoint cannot hand `complete` an unbounded buffer on either the
+/// success or the error-diagnostic path.
+fn read_capped_chat_body(body: ureq::Body) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut buffer = Vec::new();
+    body.into_reader()
+        .take(MAX_CHAT_RESPONSE_BYTES + 1)
+        .read_to_end(&mut buffer)
+        .map_err(|error| format!("chat response unreadable: {error}"))?;
+    if buffer.len() as u64 > MAX_CHAT_RESPONSE_BYTES {
+        return Err(format!(
+            "chat response is larger than {MAX_CHAT_RESPONSE_BYTES} bytes; refusing to buffer it"
+        ));
+    }
+    Ok(buffer)
 }
 
 /// Provider error bodies can run long; a line is enough to act on.
