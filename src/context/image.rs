@@ -327,6 +327,15 @@ impl Context {
         };
         let arena_len = usize::try_from(reader.read_u64()?)
             .map_err(|_| CorruptImage("arena length overflows this platform"))?;
+        // Record name_offset/name_len fields are u32 (intern_name
+        // asserts this same bound on the write side), so an arena this
+        // large could never have been produced by this binary and
+        // could not be addressed into correctly if it were — reject it
+        // here rather than load a Context that panics on its first
+        // intern_name call.
+        if arena_len > u32::MAX as usize {
+            return Err(CorruptImage("arena length exceeds its 4 GiB offset space"));
+        }
         let arena = reader.take(arena_len)?.to_vec();
         // Against the reader's own slice, not `image`: on v6+ the
         // checksum footer was already split off above.

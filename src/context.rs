@@ -5811,6 +5811,22 @@ mod tests {
     }
 
     #[test]
+    fn from_bytes_rejects_an_arena_length_past_the_u32_offset_space() {
+        // An empty Context: header 24, eight zero-count tables (8 bytes
+        // each) → the arena-length u64 sits at 88..96, followed by zero
+        // arena bytes and the checksum footer. name_offset/name_len
+        // record fields are u32 (intern_name asserts this same bound on
+        // the write side), so a declared length past that space must be
+        // caught here rather than surfacing as a panic the first time
+        // some later write tries to intern a name.
+        let context = Context::default();
+        let mut oversized = context.to_bytes();
+        oversized[88..96].copy_from_slice(&(u32::MAX as u64 + 1).to_le_bytes());
+        let error = Context::from_bytes(&resealed(oversized)).unwrap_err();
+        assert!(error.to_string().contains("4 GiB"), "{error}");
+    }
+
+    #[test]
     fn from_bytes_rejects_an_edge_count_below_its_attribution_chain() {
         // header 24, edge-table count 8 → the lone edge record starts
         // at 32; `count` is its ninth field, after 8 × u32 (32 bytes),
