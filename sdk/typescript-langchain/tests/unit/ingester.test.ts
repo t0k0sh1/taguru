@@ -110,6 +110,35 @@ describe("TaguruIngester", () => {
     ).rejects.toThrow(/source/);
   });
 
+  it("records a real LLM-provider error as a failed outcome, not a rethrow", async () => {
+    class ThrowingChatModel extends FakeListChatModel {
+      async _generate(): Promise<never> {
+        const error = new Error("rate limited");
+        error.name = "RateLimitError";
+        throw error;
+      }
+    }
+
+    const outcomes = await new TaguruIngester({
+      context: "sake",
+      llm: new ThrowingChatModel({ responses: [] }),
+      client: new FakeServer().client(),
+      questions: 2,
+    }).ingestDocuments([{ pageContent: DOC_TEXT, metadata: { source: "docs/aomine.md" } }]);
+    expect(outcomes[0]!.ok).toBe(false);
+    expect(outcomes[0]!.error).toMatch(/rate limited/);
+
+    await expect(
+      new TaguruIngester({
+        context: "sake",
+        llm: new ThrowingChatModel({ responses: [] }),
+        client: new FakeServer().client(),
+        questions: 2,
+        raise_on_error: true,
+      }).ingestDocuments([{ pageContent: DOC_TEXT, metadata: { source: "docs/aomine.md" } }]),
+    ).rejects.toThrow(/rate limited/);
+  });
+
   it("rejects bad construction", () => {
     const llm = new FakeListChatModel({ responses: ["{}"] });
     const client = new FakeServer().client();

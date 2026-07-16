@@ -12,7 +12,6 @@ import {
   EmbeddingUnavailableError,
   NotFoundError,
   Taguru,
-  TaguruError,
   type ImportOutcome,
 } from "taguru";
 
@@ -246,11 +245,11 @@ export class TaguruIngester {
           await this.ingestText(document.pageContent, { source, dry_run: options.dry_run }),
         );
       } catch (error) {
-        if (this.raise_on_error || !(error instanceof Error && isIngestFailure(error))) {
+        if (this.raise_on_error) {
           throw error;
         }
         const failed = emptyOutcome(source);
-        failed.error = error.message;
+        failed.error = error instanceof Error ? error.message : String(error);
         outcomes.push(failed);
       }
     }
@@ -285,10 +284,6 @@ export class TaguruIngester {
       throw error;
     }
   }
-}
-
-function isIngestFailure(error: Error): boolean {
-  return error instanceof TaguruError || error.name === "Error";
 }
 
 function record(outcome: IngestOutcome, applied: ImportOutcome): void {
