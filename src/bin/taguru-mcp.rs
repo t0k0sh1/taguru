@@ -251,10 +251,12 @@ fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value>
             // could aim it at a server it does not run. Here the composition
             // is left uncapped on purpose: the bridge is a LOCAL proxy
             // between the operator's own MCP client and their own server,
-            // each dispatched call is already bounded server-side by
-            // TAGURU_MCP_MAX_RESULT_BYTES, and the result crosses stdio to
-            // the operator's own process — a size they asked for, not a
-            // budget an adversary can spend against a third party.
+            // so each dispatched call rides a plain REST request rather
+            // than the TAGURU_MCP_MAX_RESULT_BYTES-capped /mcp route —
+            // nothing server-side bounds the response but the operator's
+            // own handler, and the result crosses stdio to the operator's
+            // own process — a size they asked for, not a budget an
+            // adversary can spend against a third party.
             let outcome = mcp::run_retrieve(&arguments, |method, path, body| {
                 bridge.call(method, &path, body)
             })
