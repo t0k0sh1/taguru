@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use taguru::deadline::Deadline;
@@ -11,7 +11,7 @@ use crate::metrics::{ErrorKind, SearchOp};
 use crate::registry::{AppState, CitationLookup, PassageExplainLookup};
 
 use super::{
-    AppJson, AppQuery, CrossMatch, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, access_error,
+    AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, access_error,
     bounded_parallel_map, clamp, cross_search_concurrency, cross_targets, deadline_exceeded, error,
     not_found, ok, overlong, search_log_enabled,
 };
@@ -32,7 +32,7 @@ pub struct PassageLookup {
 
 pub async fn lookup_passages(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<LookupPassagesRequest>,
 ) -> Response {
@@ -83,7 +83,7 @@ pub struct Citation {
 
 pub async fn citation(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<CitationRequest>,
 ) -> Response {
@@ -140,7 +140,7 @@ pub struct SourcePage {
 
 pub async fn list_sources(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
@@ -210,7 +210,7 @@ pub struct RetractOutcome {
 
 pub async fn retract_source(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RetractSourceRequest>,
@@ -320,7 +320,7 @@ impl From<crate::registry::PassageSearchHit> for PassageHit {
 
 pub async fn search_passages(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<SearchPassagesRequest>,
 ) -> Response {
@@ -723,7 +723,7 @@ impl SearchExplanation {
 /// `sources/search` computes it, so the two cannot disagree.
 pub async fn explain_search_passages(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ExplainSearchRequest>,
 ) -> Response {
