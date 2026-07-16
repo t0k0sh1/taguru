@@ -104,6 +104,20 @@ pub fn classify(message: &Value) -> Message {
     Message::Request { id, call }
 }
 
+/// The target id of a `notifications/cancelled` message, or `None` for
+/// anything else — `classify` folds every notification into one bare
+/// [`Message::Notification`], discarding `params`, so a transport that
+/// wants to act on this one specific notification (the stdio bridge,
+/// to stop waiting on a reply nothing wants anymore) reads the raw
+/// message here instead.
+#[allow(dead_code)] // consumed by the stdio bridge; the HTTP transport has no per-connection state to cancel against
+pub fn cancelled_request_id(message: &Value) -> Option<Value> {
+    if message.get("method").and_then(Value::as_str) != Some("notifications/cancelled") {
+        return None;
+    }
+    message.get("params")?.get("requestId").cloned()
+}
+
 /// The `initialize` result: capabilities plus the full protocol manual
 /// as `instructions`, so the agent learns the discipline the moment it
 /// connects.
@@ -2322,6 +2336,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The one notification method a transport needs to look inside —
+    /// everything else stays opaque behind `Message::Notification`.
+    #[test]
+    fn cancelled_request_id_reads_only_its_own_notification() {
+        assert_eq!(
+            cancelled_request_id(&json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": 7 },
+            })),
+            Some(json!(7))
+        );
+        assert_eq!(
+            cancelled_request_id(&json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": "abc" },
+            })),
+            Some(json!("abc"))
+        );
+        // A different notification, a request, and a malformed
+        // cancellation (no params, no requestId) all read as None.
+        assert_eq!(
+            cancelled_request_id(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"})),
+            None
+        );
+        assert_eq!(
+            cancelled_request_id(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"})),
+            None
+        );
+        assert_eq!(
+            cancelled_request_id(&json!({"jsonrpc": "2.0", "method": "notifications/cancelled"})),
+            None
+        );
     }
 
     #[test]

@@ -23,12 +23,22 @@
 #[path = "../mcp.rs"]
 mod mcp;
 
+use std::collections::HashSet;
 use std::io::{BufRead, Read, Write};
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
+use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
 
 const FALLBACK_INSTRUCTIONS: &str = include_str!("../llm-protocol.md");
+
+/// Ceiling on how many ids a `notifications/cancelled` can register
+/// before a dispatch thread claims (and clears) its own entry — a
+/// cancellation naming an id that is never actually in flight (a
+/// stale id, a client bug) would otherwise sit here forever.
+const MAX_TRACKED_CANCELLATIONS: usize = 10_000;
 
 fn main() {
     let base = std::env::var("TAGURU_URL").unwrap_or_else(|_| "http://127.0.0.1:8248".to_string());
@@ -45,11 +55,14 @@ fn main() {
     // shape. 75s clears both defaults; TAGURU_MCP_TIMEOUT_SECS adjusts
     // it alongside a raised TAGURU_REQUEST_TIMEOUT_SECS.
     let timeout_secs = resolve_timeout_secs(std::env::var("TAGURU_MCP_TIMEOUT_SECS").ok());
-    let bridge = Bridge {
+    // Shared across the dispatch threads spawned below, one per
+    // `tools/call` — an `Arc` rather than a `Clone` derive on `Bridge`
+    // since nothing about it needs to vary per thread.
+    let bridge = Arc::new(Bridge {
         base: base.trim_end_matches('/').to_string(),
         token,
         agent: bridge_agent(Duration::from_secs(timeout_secs)),
-    };
+    });
 
     // The probe runs BEFORE the stdio loop: until it settles, the
     // bridge cannot answer even `initialize`. A dead server fails it in
@@ -99,6 +112,28 @@ fn main() {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|&bytes| bytes > 0)
         .unwrap_or(64 * 1024 * 1024);
+    // `tools/call` is the one dispatch that rides a full HTTP round
+    // trip (an import, a recall against a large context), so it runs
+    // on its own thread — otherwise a single slow call would leave
+    // this loop unable to read the next line for the whole timeout,
+    // including a `ping` a client sends just to check the bridge is
+    // still alive, or a cancellation for that same slow call. The
+    // semaphore bounds how many of those threads actually hold a live
+    // HTTP request at once, so a client that pipelines calls without
+    // limit cannot fan this bridge out into unbounded connections.
+    let max_concurrent_tools =
+        resolve_max_concurrent_tools(std::env::var("TAGURU_MCP_MAX_CONCURRENT_TOOLS").ok());
+    let concurrency = Arc::new(Semaphore::new(max_concurrent_tools));
+    let cancelled: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    // Every dispatch thread spawned below is detached, so nothing but
+    // this Vec stands between `main` returning and a `tools/call` still
+    // mid-flight when stdin hits EOF (the client closed its write side
+    // right after its last request, which is the ordinary way this loop
+    // ends) — without it, the process would tear down mid-HTTP-call and
+    // the reply the client is waiting on would simply never arrive.
+    // Pruned finished handles on every spawn so a long session's Vec
+    // tracks only what is actually still running, not its whole history.
+    let mut inflight: Vec<thread::JoinHandle<()>> = Vec::new();
     loop {
         let raw = match read_frame(&mut reader, max_line_bytes) {
             Frame::Eof => break,
@@ -140,9 +175,62 @@ fn main() {
             );
             continue;
         };
-        if let Some(response) = handle(&bridge, &instructions, &message) {
-            emit(&stdout, &response);
+        if message.is_array() {
+            emit(&stdout, &batch_rejected());
+            continue;
         }
+        if let Some(target_id) = mcp::cancelled_request_id(&message) {
+            let mut cancelled = cancelled.lock();
+            if cancelled.len() < MAX_TRACKED_CANCELLATIONS {
+                cancelled.insert(target_id.to_string());
+            }
+            continue;
+        }
+        match mcp::classify(&message) {
+            mcp::Message::Request {
+                id,
+                call: mcp::Call::Tool { name, arguments },
+            } => {
+                let bridge = Arc::clone(&bridge);
+                let concurrency = Arc::clone(&concurrency);
+                let cancelled = Arc::clone(&cancelled);
+                let response_id = id.to_string();
+                inflight.retain(|handle| !handle.is_finished());
+                inflight.push(thread::spawn(move || {
+                    // A cancel that landed while this call was still
+                    // queued skips it entirely: no permit spent, no
+                    // request sent for a reply nothing is waiting on.
+                    if cancelled.lock().remove(&response_id) {
+                        return;
+                    }
+                    let _permit = concurrency.acquire();
+                    let outcome = dispatch_tool(&bridge, &name, &arguments);
+                    // ureq has no mid-flight abort, so a cancel that
+                    // landed once the call was already running can't
+                    // stop the request — but it still stops the
+                    // now-unwanted reply from reaching the client.
+                    if cancelled.lock().remove(&response_id) {
+                        return;
+                    }
+                    emit(
+                        &std::io::stdout(),
+                        &mcp::response(id, mcp::tool_response(outcome)),
+                    );
+                }));
+            }
+            classified => {
+                if let Some(response) = dispatch(&bridge, &instructions, classified) {
+                    emit(&stdout, &response);
+                }
+            }
+        }
+    }
+    // Stdin is exhausted, but threads spawned before that point may
+    // still be running their HTTP round trip; every accepted
+    // `tools/call` gets the chance to answer (or lose a race to a late
+    // cancellation) before the process actually exits.
+    for handle in inflight {
+        let _ = handle.join();
     }
 }
 
@@ -207,22 +295,60 @@ fn read_frame(reader: &mut impl BufRead, max_line_bytes: u64) -> Frame {
     Frame::Line(raw)
 }
 
-/// Dispatches one JSON-RPC message. Notifications get no reply (correct
-/// JSON-RPC — nothing is waiting); everything else that cannot be
-/// dispatched gets a JSON-RPC error, exactly like the HTTP transport
-/// (`remote_mcp`) — a client that sent an id must never hang on
-/// silence.
-fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value> {
-    // JSON-RPC batching left the MCP spec in 2025-06; refuse it plainly
-    // rather than answering half a contract.
-    if message.is_array() {
-        return Some(mcp::error_response(
-            Value::Null,
-            -32600,
-            "batch messages are not part of MCP; send one message per line".to_string(),
-        ));
+/// The reply to a JSON-RPC batch: batching left the MCP spec in
+/// 2025-06, so it is refused plainly rather than answered half a
+/// contract. Shared by `main`'s loop (which must check this itself —
+/// it classifies ahead of `dispatch` to route `tools/call` to its own
+/// thread) and by `handle` below, for the tests.
+fn batch_rejected() -> Value {
+    mcp::error_response(
+        Value::Null,
+        -32600,
+        "batch messages are not part of MCP; send one message per line".to_string(),
+    )
+}
+
+/// Runs one `tools/call` to completion over the bridge.
+///
+/// `retrieve` composes a variable number of tool calls from earlier
+/// ones' results, so it has no single (method, path, body) for
+/// `route_tool` to hand back — `run_retrieve` issues them itself, each
+/// via this same synchronous `bridge.call`.
+///
+/// The network-facing transport (`remote_mcp`) caps this composed
+/// whole against `max_result_bytes`, since an untrusted caller could
+/// aim it at a server it does not run. Here the composition is left
+/// uncapped on purpose: the bridge is a LOCAL proxy between the
+/// operator's own MCP client and their own server, so each dispatched
+/// call rides a plain REST request rather than the
+/// `TAGURU_MCP_MAX_RESULT_BYTES`-capped `/mcp` route — nothing
+/// server-side bounds the response but the operator's own handler, and
+/// the result crosses stdio to the operator's own process — a size
+/// they asked for, not a budget an adversary can spend against a third
+/// party.
+fn dispatch_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<String, String> {
+    if name == "retrieve" {
+        mcp::run_retrieve(arguments, |method, path, body| {
+            bridge.call(method, &path, body)
+        })
+        .map(|value| value.to_string())
+    } else {
+        mcp::route_tool(name, arguments)
+            .and_then(|(method, path, body)| bridge.call(method, &path, body))
     }
-    let (id, call) = match mcp::classify(message) {
+}
+
+/// Dispatches one already-classified, non-batch message. Notifications
+/// get no reply (correct JSON-RPC — nothing is waiting); everything
+/// else that cannot be dispatched gets a JSON-RPC error, exactly like
+/// the HTTP transport (`remote_mcp`) — a client that sent an id must
+/// never hang on silence.
+///
+/// `main`'s loop never routes a `Call::Tool` here — that classifies
+/// ahead of this call and hands it to its own thread instead (see the
+/// loop's `match`) — but `handle` below still can, for the tests.
+fn dispatch(bridge: &Bridge, instructions: &str, classified: mcp::Message) -> Option<Value> {
+    let (id, call) = match classified {
         mcp::Message::Notification => return None,
         mcp::Message::Undecodable { id } => {
             return Some(mcp::error_response(
@@ -240,38 +366,80 @@ fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value>
         ),
         mcp::Call::Ping => mcp::response(id, serde_json::json!({})),
         mcp::Call::ToolsList => mcp::response(id, mcp::tools_result()),
-        mcp::Call::Tool { name, arguments } if name == "retrieve" => {
-            // retrieve composes a variable number of tool calls from
-            // earlier ones' results, so it has no single (method, path,
-            // body) for route_tool to hand back — run_retrieve issues
-            // them itself, each via this same synchronous bridge.call.
-            //
-            // The network-facing transport (remote_mcp) caps this composed
-            // whole against `max_result_bytes`, since an untrusted caller
-            // could aim it at a server it does not run. Here the composition
-            // is left uncapped on purpose: the bridge is a LOCAL proxy
-            // between the operator's own MCP client and their own server,
-            // so each dispatched call rides a plain REST request rather
-            // than the TAGURU_MCP_MAX_RESULT_BYTES-capped /mcp route —
-            // nothing server-side bounds the response but the operator's
-            // own handler, and the result crosses stdio to the operator's
-            // own process — a size they asked for, not a budget an
-            // adversary can spend against a third party.
-            let outcome = mcp::run_retrieve(&arguments, |method, path, body| {
-                bridge.call(method, &path, body)
-            })
-            .map(|value| value.to_string());
-            mcp::response(id, mcp::tool_response(outcome))
-        }
-        mcp::Call::Tool { name, arguments } => {
-            let outcome = mcp::route_tool(&name, &arguments)
-                .and_then(|(method, path, body)| bridge.call(method, &path, body));
-            mcp::response(id, mcp::tool_response(outcome))
-        }
+        mcp::Call::Tool { name, arguments } => mcp::response(
+            id,
+            mcp::tool_response(dispatch_tool(bridge, &name, &arguments)),
+        ),
         mcp::Call::Unknown { method } => {
             mcp::error_response(id, -32601, format!("unknown method '{method}'"))
         }
     })
+}
+
+/// Classifies and dispatches one JSON-RPC message fully synchronously
+/// — used directly by the tests below. `main`'s loop does not call
+/// this: it needs to see the classified message itself first, to route
+/// a `tools/call` to its own thread instead (see `dispatch`'s doc).
+#[cfg(test)]
+fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value> {
+    if message.is_array() {
+        return Some(batch_rejected());
+    }
+    dispatch(bridge, instructions, mcp::classify(message))
+}
+
+/// The bridge's ceiling on simultaneously in-flight `tools/call`
+/// dispatches, from a raw `TAGURU_MCP_MAX_CONCURRENT_TOOLS` reading. A
+/// literal 0 parses fine but would deadlock every tool call waiting on
+/// a permit that never opens; that — and anything unparseable or
+/// unset — falls back to the default rather than bricking the bridge.
+fn resolve_max_concurrent_tools(raw: Option<String>) -> usize {
+    raw.and_then(|value| value.parse::<usize>().ok())
+        .filter(|&permits| permits > 0)
+        .unwrap_or(8)
+}
+
+/// A counting semaphore bounding how many `tools/call` dispatches hold
+/// a live HTTP request at once (`std` has no built-in one) — the
+/// textbook `Mutex` + `Condvar` shape, non-poisoning `parking_lot`
+/// versions so one dispatch thread panicking cannot wedge every other
+/// thread's `.lock()` behind it.
+struct Semaphore {
+    permits: Mutex<usize>,
+    freed: Condvar,
+}
+
+impl Semaphore {
+    fn new(permits: usize) -> Self {
+        Self {
+            permits: Mutex::new(permits),
+            freed: Condvar::new(),
+        }
+    }
+
+    /// Blocks the CALLING thread (not the stdio loop, since every
+    /// caller here is already its own spawned thread) until a permit
+    /// is free, then holds it until the returned guard drops — which
+    /// happens even if the dispatch thread panics, same as an ordinary
+    /// return.
+    fn acquire(self: &Arc<Self>) -> Permit {
+        let mut permits = self.permits.lock();
+        while *permits == 0 {
+            self.freed.wait(&mut permits);
+        }
+        *permits -= 1;
+        drop(permits);
+        Permit(Arc::clone(self))
+    }
+}
+
+struct Permit(Arc<Semaphore>);
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        *self.0.permits.lock() += 1;
+        self.0.freed.notify_one();
+    }
 }
 
 /// The bridge's global request timeout in seconds, from a raw
