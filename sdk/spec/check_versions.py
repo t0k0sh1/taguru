@@ -59,14 +59,19 @@ def npm_range(version: str) -> str:
 
 def scan_line(path: Path, pattern: re.Pattern[str], where: str) -> tuple[int, str]:
     """Index and captured value of the single line matching `pattern`."""
-    hits = [
+    hits = scan_all_lines(path, pattern)
+    if len(hits) != 1:
+        sys.exit(f"{rel(path)}: expected exactly one {where}, found {len(hits)}")
+    return hits[0]
+
+
+def scan_all_lines(path: Path, pattern: re.Pattern[str]) -> list[tuple[int, str]]:
+    """Index and captured value of every line matching `pattern`."""
+    return [
         (index, match.group(1))
         for index, line in enumerate(path.read_text().splitlines())
         if (match := pattern.fullmatch(line.strip()))
     ]
-    if len(hits) != 1:
-        sys.exit(f"{rel(path)}: expected exactly one {where}, found {len(hits)}")
-    return hits[0]
 
 
 def toml_section_version(path: Path, section: str) -> tuple[int, str]:
@@ -101,23 +106,31 @@ def gather(ref: str) -> list[tuple[str, str, str]]:
         sites.append(
             (f"{rel(path)} version", json.loads(path.read_text())["version"], ref)
         )
-    ts_dep = json.loads(TS_LANGCHAIN.read_text())["dependencies"]["taguru"]
-    sites.append((f"{rel(TS_LANGCHAIN)} taguru dependency", ts_dep, npm_range(ref)))
+    ts_manifest = json.loads(TS_LANGCHAIN.read_text())
+    for section in ("peerDependencies", "devDependencies"):
+        sites.append(
+            (
+                f"{rel(TS_LANGCHAIN)} {section} taguru dependency",
+                ts_manifest[section]["taguru"],
+                npm_range(ref),
+            )
+        )
     for path in (INIT_CORE, INIT_LANGCHAIN):
         _, version = scan_line(path, INIT_VERSION, "__version__")
         sites.append((f"{rel(path)} __version__", version, ref))
     packages = json.loads(NPM_LOCK.read_text())["packages"]
     for key in ("typescript", "typescript-langchain"):
         sites.append((f"{rel(NPM_LOCK)} {key} version", packages[key]["version"], ref))
-    lock_dep = packages["typescript-langchain"].get("dependencies", {}).get("taguru")
-    if lock_dep is not None:
-        sites.append(
-            (
-                f"{rel(NPM_LOCK)} typescript-langchain taguru dependency",
-                lock_dep,
-                npm_range(ref),
+    for section in ("peerDependencies", "devDependencies"):
+        lock_dep = packages["typescript-langchain"].get(section, {}).get("taguru")
+        if lock_dep is not None:
+            sites.append(
+                (
+                    f"{rel(NPM_LOCK)} typescript-langchain {section} taguru dependency",
+                    lock_dep,
+                    npm_range(ref),
+                )
             )
-        )
     return sites
 
 
@@ -170,8 +183,8 @@ def set_all(target: str) -> None:
         index, version = scan_line(path, PACKAGE_JSON_VERSION, "version")
         patch_line(path, index, f'"{version}"', f'"{target}"')
         json.loads(path.read_text())  # the patch must leave valid JSON behind
-    index, dep = scan_line(TS_LANGCHAIN, PACKAGE_JSON_DEP, "taguru dependency")
-    patch_line(TS_LANGCHAIN, index, f'"{dep}"', f'"{npm_range(target)}"')
+    for index, dep in scan_all_lines(TS_LANGCHAIN, PACKAGE_JSON_DEP):
+        patch_line(TS_LANGCHAIN, index, f'"{dep}"', f'"{npm_range(target)}"')
     json.loads(TS_LANGCHAIN.read_text())
     for path in (INIT_CORE, INIT_LANGCHAIN):
         index, version = scan_line(path, INIT_VERSION, "__version__")
