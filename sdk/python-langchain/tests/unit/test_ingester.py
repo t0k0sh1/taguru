@@ -189,3 +189,59 @@ def test_validation_rejects_bad_construction(
         TaguruIngester(context="c", llm=llm, client=sync_client, create_context=True)
     with pytest.raises(ValueError, match="questions"):
         TaguruIngester(context="c", llm=llm, client=sync_client, questions=99)
+
+
+def test_close_leaves_a_caller_supplied_client_open(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    ingester, _llm = make_ingester(sync_client, async_client, ["{}"])
+    ingester.close()
+    assert not sync_client._http.is_closed
+
+
+async def test_aclose_leaves_caller_supplied_clients_open(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    ingester, _llm = make_ingester(sync_client, async_client, ["{}"])
+    await ingester.aclose()
+    assert not sync_client._http.is_closed
+    assert not async_client._http.is_closed
+
+
+def test_close_closes_a_self_built_client() -> None:
+    llm = FakeListChatModel(responses=["{}"])
+    ingester = TaguruIngester(context="sake", llm=llm, base_url="http://test")
+    client = ingester.client
+    assert client is not None
+    ingester.close()
+    assert client._http.is_closed
+
+
+async def test_aclose_closes_both_self_built_clients() -> None:
+    llm = FakeListChatModel(responses=["{}"])
+    ingester = TaguruIngester(context="sake", llm=llm, base_url="http://test")
+    client, async_client_ = ingester.client, ingester.async_client
+    assert client is not None
+    assert async_client_ is not None
+    await ingester.aclose()
+    assert client._http.is_closed
+    assert async_client_._http.is_closed
+
+
+def test_sync_context_manager_closes_the_self_built_client_on_exit() -> None:
+    llm = FakeListChatModel(responses=["{}"])
+    with TaguruIngester(context="sake", llm=llm, base_url="http://test") as ingester:
+        client = ingester.client
+        assert client is not None
+        assert not client._http.is_closed
+    assert client._http.is_closed
+
+
+async def test_async_context_manager_closes_self_built_clients_on_exit() -> None:
+    llm = FakeListChatModel(responses=["{}"])
+    async with TaguruIngester(context="sake", llm=llm, base_url="http://test") as ingester:
+        client, async_client_ = ingester.client, ingester.async_client
+        assert client is not None
+        assert async_client_ is not None
+    assert client._http.is_closed
+    assert async_client_._http.is_closed

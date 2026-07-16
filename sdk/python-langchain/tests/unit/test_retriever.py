@@ -148,3 +148,55 @@ async def test_async_cross_matches_sync(sync_client: Taguru, async_client: Async
     assert [d.metadata["context"] for d in async_documents] == [
         d.metadata["context"] for d in sync_documents
     ]
+
+
+def test_close_leaves_a_caller_supplied_client_open(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    retriever = make_retriever(sync_client, async_client)
+    retriever.close()
+    assert not sync_client._http.is_closed
+
+
+async def test_aclose_leaves_caller_supplied_clients_open(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    retriever = make_retriever(sync_client, async_client)
+    await retriever.aclose()
+    assert not sync_client._http.is_closed
+    assert not async_client._http.is_closed
+
+
+def test_close_closes_a_self_built_client() -> None:
+    retriever = TaguruRetriever(context="sake", base_url="http://test")
+    client = retriever.client
+    assert client is not None
+    retriever.close()
+    assert client._http.is_closed
+
+
+async def test_aclose_closes_both_self_built_clients() -> None:
+    retriever = TaguruRetriever(context="sake", base_url="http://test")
+    client, async_client_ = retriever.client, retriever.async_client
+    assert client is not None
+    assert async_client_ is not None
+    await retriever.aclose()
+    assert client._http.is_closed
+    assert async_client_._http.is_closed
+
+
+def test_sync_context_manager_closes_the_self_built_client_on_exit() -> None:
+    with TaguruRetriever(context="sake", base_url="http://test") as retriever:
+        client = retriever.client
+        assert client is not None
+        assert not client._http.is_closed
+    assert client._http.is_closed
+
+
+async def test_async_context_manager_closes_self_built_clients_on_exit() -> None:
+    async with TaguruRetriever(context="sake", base_url="http://test") as retriever:
+        client, async_client_ = retriever.client, retriever.async_client
+        assert client is not None
+        assert async_client_ is not None
+    assert client._http.is_closed
+    assert async_client_._http.is_closed

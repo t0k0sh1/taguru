@@ -29,7 +29,7 @@ from langchain_core.callbacks import (
 )
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
-from pydantic import ConfigDict, model_validator
+from pydantic import ConfigDict, PrivateAttr, model_validator
 from taguru import (
     Activation,
     AsyncTaguru,
@@ -77,6 +77,8 @@ class TaguruRetriever(BaseRetriever):
     dice_floor: float | None = None
     semantic_floor: float | None = None
 
+    _owns_clients: bool = PrivateAttr(default=False)
+
     def __init__(
         self,
         *,
@@ -85,13 +87,15 @@ class TaguruRetriever(BaseRetriever):
         timeout: float | None = None,
         **kwargs: Any,
     ) -> None:
-        if "client" not in kwargs and "async_client" not in kwargs:
+        owns_clients = "client" not in kwargs and "async_client" not in kwargs
+        if owns_clients:
             client_kwargs: dict[str, Any] = {}
             if timeout is not None:
                 client_kwargs["timeout"] = timeout
             kwargs["client"] = Taguru(base_url, api_key, **client_kwargs)
             kwargs["async_client"] = AsyncTaguru(base_url, api_key, **client_kwargs)
         super().__init__(**kwargs)
+        self._owns_clients = owns_clients
 
     @model_validator(mode="after")
     def _require_a_target(self) -> TaguruRetriever:
@@ -283,6 +287,39 @@ class TaguruRetriever(BaseRetriever):
                 )
             )
         return _merge_lanes(graph_docs, text_hits, limit)
+
+    # -- lifecycle -----------------------------------------------------------
+
+    def close(self) -> None:
+        """Close the sync HTTP client, if this retriever built it itself.
+
+        A client passed in via ``client``/``async_client`` stays the
+        caller's to close. The async client needs a running event loop to
+        close cleanly; use :meth:`aclose` (or ``async with``) once the
+        async lane (``ainvoke``) has been used.
+        """
+        if self._owns_clients and self.client is not None:
+            self.client.close()
+
+    async def aclose(self) -> None:
+        """Close both the sync and async HTTP clients this retriever owns."""
+        if self._owns_clients:
+            if self.client is not None:
+                self.client.close()
+            if self.async_client is not None:
+                await self.async_client.close()
+
+    def __enter__(self) -> TaguruRetriever:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    async def __aenter__(self) -> TaguruRetriever:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
 
 
 # -- lane assembly (pure functions shared by both entry points) -----------------
