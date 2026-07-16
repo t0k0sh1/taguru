@@ -5016,7 +5016,28 @@ impl AppState {
             let Slot::Hot(context) = &mut inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
             };
-            let result = operate(context);
+            let result =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operate(context))) {
+                    Ok(result) => result,
+                    Err(payload) => {
+                        // The WAL append above already landed, but `operate`
+                        // panicked before the in-memory apply it durably
+                        // promises could finish, and before `dirty` below
+                        // could cover it. Left Hot, this half-mutated
+                        // Context would keep serving reads and accepting
+                        // further writes forever — parking_lot doesn't
+                        // poison. Forcing the slot back to Cold makes the
+                        // next access rebuild Hot from the image plus a
+                        // full WAL replay instead, which reapplies the very
+                        // op that just panicked through the same validated
+                        // path replay always uses. recount_entry reflects
+                        // the entry's now-zero resident footprint right
+                        // away, matching the promotion it counted above.
+                        inner.slot = Slot::Cold;
+                        self.recount_entry(&mut inner);
+                        std::panic::resume_unwind(payload);
+                    }
+                };
             entry.dirty.store(true, Ordering::Relaxed);
             self.recount_entry(&mut inner);
 
@@ -5924,9 +5945,8 @@ fn ensure_hot(
             // that exist nowhere else.
             let (ops, top) = wal::replay(&wal_path(data_dir, &stem), context.applied_seq())
                 .map_err(|e| format!("context '{name}' WAL unreadable: {e}"))?;
-            for op in ops {
-                replay_op(&mut context, &op);
-            }
+            replay_ops_guarded(&mut context, &ops)
+                .map_err(|e| format!("context '{name}' WAL replay panicked: {e}"))?;
             Ok((context, top))
         });
     let (mut context, top) = match loaded {
@@ -5990,6 +6010,23 @@ fn replay_op(context: &mut Context, op: &WalOp) {
     if let Err((message, _)) = apply_op(context, op) {
         tracing::warn!("WAL replay skipped an op (same rejection as the original): {message}");
     }
+}
+
+/// Runs the whole replay loop behind `catch_unwind`, turning a panic
+/// (an actual bug tripped by some op's content, not a library
+/// rejection — `replay_op` already turns those into a log line) into
+/// the same `Err` shape a corrupt image or unreadable WAL produces.
+/// Without this, a poisoned op would panic `ensure_hot` itself on
+/// every subsequent access — this context can never come back Hot, so
+/// every caller touching it crash-loops forever instead of hitting
+/// the existing quarantine-and-retry path ([`LOAD_FAILURE_RETRY`]).
+fn replay_ops_guarded(context: &mut Context, ops: &[WalOp]) -> Result<(), String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for op in ops {
+            replay_op(context, op);
+        }
+    }))
+    .map_err(|_| "an op panicked reapplying against a fresh load".to_string())
 }
 
 /// Applies one op to the graph; `Err` carries the human message each
@@ -14208,6 +14245,70 @@ mod tests {
             2,
             "the registry's own listing survives the panic too"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Unlike `write_context` above, `logged_write` appends the whole
+    /// batch to the WAL *before* running `operate` — so a panic partway
+    /// through the batch leaves the tail durably logged but (absent
+    /// this recovery) never applied in memory and never marked `dirty`
+    /// either, since the slot stayed Hot holding whatever `operate`
+    /// half-finished. A closure that panics only *after* fully applying
+    /// every op would not catch this: the in-memory state would already
+    /// be complete and correct, panic or not. The real risk is the
+    /// batch's untried tail — durably logged, silently missing from
+    /// memory. Forcing the slot back to Cold on panic must make the
+    /// very next access — no restart needed — rebuild from the image
+    /// plus a WAL replay that reapplies that untried tail too.
+    #[test]
+    fn a_panic_inside_logged_write_forces_a_cold_reload_that_replays_the_wal() {
+        let dir = scratch_dir("logged-write-panic-recovery");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+
+        let ops = vec![
+            WalOp::Associate(assoc_op(
+                "青嶺酒造",
+                "創業年",
+                "1907年",
+                1.0,
+                Some("第1段落"),
+            )),
+            WalOp::Associate(assoc_op("青嶺酒造", "所在地", "灘", 1.0, Some("第2段落"))),
+        ];
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.logged_write(
+                "sake",
+                &ops,
+                |context| {
+                    // Only the first op of the batch applies before the
+                    // simulated bug fires; the second is durably in the
+                    // WAL (appended above, before `operate` ran) but
+                    // never reaches memory here.
+                    apply_op(context, &ops[0]).unwrap();
+                    panic!("simulated failure partway through the batch");
+                },
+                applied_count,
+            )
+        }));
+        assert!(
+            panicked.is_err(),
+            "the panic must propagate, not be swallowed"
+        );
+
+        let recalled = state
+            .read_context("sake", |context| context.recall("青嶺酒造"))
+            .expect("the context that panicked stays usable — the lock never poisoned");
+        assert_eq!(
+            recalled.len(),
+            2,
+            "both WAL-logged ops must survive the panic, in this same process, with \
+             no restart — including the one `operate` never got to apply"
+        );
+        let objects: BTreeSet<&str> = recalled.iter().map(|fact| fact.object.as_str()).collect();
+        assert_eq!(objects, BTreeSet::from(["1907年", "灘"]));
 
         let _ = fs::remove_dir_all(dir);
     }
