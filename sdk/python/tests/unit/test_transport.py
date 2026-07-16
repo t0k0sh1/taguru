@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import threading
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -139,6 +143,44 @@ async def test_async_export_to_file_cleans_up_and_closes_the_stream_on_failure(t
     assert list(tmp_path.iterdir()) == []
 
 
+async def test_async_export_to_file_writes_off_the_event_loop_thread(tmp_path, monkeypatch) -> None:
+    """Each chunk write must run in a worker thread, or a slow disk stalls the loop."""
+    client = async_client(lambda _req: httpx.Response(200, text="unused"))
+    ctx = client.context("sake")
+
+    async def two_chunks():
+        yield b"chunk-one-"
+        yield b"chunk-two"
+
+    ctx.export_stream = two_chunks  # type: ignore[method-assign]
+    target = tmp_path / "backup.jsonl"
+
+    loop_thread = threading.current_thread()
+    write_threads: list[threading.Thread] = []
+    original_fdopen = os.fdopen
+
+    class RecordingWriter:
+        def __init__(self, fd: int) -> None:
+            self._raw = original_fdopen(fd, "wb")
+
+        def write(self, data: bytes) -> int:
+            write_threads.append(threading.current_thread())
+            return self._raw.write(data)
+
+        def __enter__(self) -> RecordingWriter:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            self._raw.close()
+
+    monkeypatch.setattr(os, "fdopen", lambda fd, mode: RecordingWriter(fd))
+    await ctx.export_to_file(target)
+
+    assert len(write_threads) == 2
+    assert all(thread is not loop_thread for thread in write_threads)
+    assert target.read_bytes() == b"chunk-one-chunk-two"
+
+
 def test_import_normalizes_to_batches_defaulting_groups_to_empty() -> None:
     outcome = {
         "context": "sake",
@@ -195,6 +237,42 @@ def test_import_carries_group_restore_outcomes() -> None:
     assert result.groups == [
         GroupImportOutcome(name="brewers", outcome="created", contexts=2, groups=0)
     ]
+
+
+async def test_async_import_file_reads_off_the_event_loop_thread(tmp_path, monkeypatch) -> None:
+    """The file read must run in a worker thread, or a slow disk stalls the loop."""
+    path = tmp_path / "batch.jsonl"
+    path.write_text('{"taguru_batch":1}\n', encoding="utf-8")
+    outcome = {
+        "context": "sake",
+        "source": "a",
+        "created": True,
+        "retracted": 0,
+        "associations": 2,
+        "aliases": 0,
+        "passage_stored": True,
+        "passage_dropped": False,
+        "questions_stored": 0,
+        "questions_dropped": 0,
+        "sections_stored": 0,
+        "sections_dropped": 0,
+        "association_paragraphs_dropped": 0,
+    }
+    client = async_client(lambda _req: ok_response(outcome))
+
+    loop_thread = threading.current_thread()
+    read_threads: list[threading.Thread] = []
+    original_read_bytes = Path.read_bytes
+
+    def spying_read_bytes(self: Path) -> bytes:
+        read_threads.append(threading.current_thread())
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", spying_read_bytes)
+    await client.import_file(path)
+
+    assert len(read_threads) == 1
+    assert read_threads[0] is not loop_thread
 
 
 def test_bearer_header_present_only_with_api_key() -> None:

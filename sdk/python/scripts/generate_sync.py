@@ -31,6 +31,7 @@ REPLACEMENTS = {
     "asyncio": "time",
     "__aenter__": "__enter__",
     "__aexit__": "__exit__",
+    "run_blocking": "call_blocking",
 }
 
 SYNC_DOCSTRING = '''"""Sync client — GENERATED, do not edit.

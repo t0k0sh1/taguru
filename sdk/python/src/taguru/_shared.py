@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator, Mapping
 from typing import Any, NoReturn
@@ -138,3 +139,18 @@ def normalize_import_outcomes(result: Any) -> ImportResult:
         groups = [decode(GroupImportOutcome, group) for group in result.get("groups", [])]
         return ImportResult(batches=batches, groups=groups)
     return ImportResult(batches=[decode(ImportOutcome, result)], groups=[])
+
+
+async def run_blocking(fn: Any, *args: Any) -> Any:
+    """Run a blocking callable off the event loop (async client only).
+
+    ``generate_sync.py`` rewrites this call to ``call_blocking`` for the
+    sync client, which runs ``fn`` inline — it's already on a blocking
+    call stack, so there's no event loop to protect.
+    """
+    return await asyncio.to_thread(fn, *args)
+
+
+def call_blocking(fn: Any, *args: Any) -> Any:
+    """Run a blocking callable inline (the sync client's half of ``run_blocking``)."""
+    return fn(*args)

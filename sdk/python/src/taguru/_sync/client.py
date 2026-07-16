@@ -73,6 +73,7 @@ from .._shared import (
     encode_name,
     normalize_import_outcomes,
     raise_for_response,
+    call_blocking,
     unwrap_envelope,
 )
 from .._types import (
@@ -233,7 +234,8 @@ class Taguru:
 
     def import_file(self, path: str | Path) -> ImportResult:
         """Apply an NDJSON batch file (see ``import_batches``)."""
-        return self.import_batches(Path(path).read_bytes())
+        data = call_blocking(Path(path).read_bytes)
+        return self.import_batches(data)
 
     def wait_until_ready(self, *, timeout: float = 30.0, interval: float = 0.5) -> None:
         """Poll ``live`` then ``health`` until both pass or ``timeout`` elapses."""
@@ -1127,7 +1129,7 @@ class Context:
         try:
             with os.fdopen(fd, "wb") as handle:
                 for chunk in stream:
-                    handle.write(chunk)
+                    call_blocking(handle.write, chunk)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise

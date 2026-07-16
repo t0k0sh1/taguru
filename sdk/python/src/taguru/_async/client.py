@@ -79,6 +79,7 @@ from .._shared import (
     encode_name,
     normalize_import_outcomes,
     raise_for_response,
+    run_blocking,
     unwrap_envelope,
 )
 from .._types import (
@@ -239,7 +240,8 @@ class AsyncTaguru:
 
     async def import_file(self, path: str | Path) -> ImportResult:
         """Apply an NDJSON batch file (see ``import_batches``)."""
-        return await self.import_batches(Path(path).read_bytes())
+        data = await run_blocking(Path(path).read_bytes)
+        return await self.import_batches(data)
 
     async def wait_until_ready(self, *, timeout: float = 30.0, interval: float = 0.5) -> None:
         """Poll ``live`` then ``health`` until both pass or ``timeout`` elapses."""
@@ -1143,7 +1145,7 @@ class AsyncContext:
         try:
             with os.fdopen(fd, "wb") as handle:
                 async for chunk in stream:
-                    handle.write(chunk)
+                    await run_blocking(handle.write, chunk)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
