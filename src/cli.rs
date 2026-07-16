@@ -386,21 +386,36 @@ pub fn load_config(path: &Path) {
         Ok(pairs) => pairs,
         Err(message) => usage_error(&format!("config {}: {message}", path.display())),
     };
-    for (key, value) in pairs {
+    // Snapshotted before any file value is applied: a key repeated in
+    // the file would otherwise see its own earlier `set_var` on the
+    // second pass and be misreported as a real environment override,
+    // when it was this same file that set it moments ago.
+    let preexisting: std::collections::HashSet<&str> = pairs
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .filter(|key| std::env::var_os(key).is_some())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    for (key, value) in &pairs {
         if key.starts_with("TAGURU_") && !KNOWN_KEYS.contains(&key.as_str()) {
             eprintln!("taguru: config: {key} is not a variable taguru reads (typo?)");
         }
         // The real environment wins: a `docker run -e` or shell export
         // must override the file, exactly as it overrides an image's
         // baked-in defaults.
-        if std::env::var_os(&key).is_some() {
+        if preexisting.contains(key.as_str()) {
             eprintln!("taguru: config: {key} set in the environment; the file value is ignored");
             continue;
+        }
+        if !seen.insert(key.as_str()) {
+            eprintln!(
+                "taguru: config: {key} appears more than once in the file; the last value wins"
+            );
         }
         // SAFETY: the caller runs this before the tokio runtime (or
         // any other thread) starts, so no concurrent environment
         // access exists.
-        unsafe { std::env::set_var(&key, &value) };
+        unsafe { std::env::set_var(key, value) };
     }
 }
 
@@ -462,6 +477,67 @@ mod tests {
     fn config_keys_with_spaces_are_refused() {
         let error = parse_config("TAGURU WAL=1\n").unwrap_err();
         assert!(error.contains("line 1"), "{error}");
+    }
+
+    /// A key repeated in the file must not see its own earlier
+    /// `set_var` and mistake it for a real environment override — that
+    /// bug both applied the file's *first* occurrence instead of its
+    /// last (env-file dialects agree the last wins) and printed a
+    /// "set in the environment" message that named this same file as
+    /// the culprit.
+    #[test]
+    fn load_config_lets_the_files_last_duplicate_key_win() {
+        let path = std::env::temp_dir().join(format!(
+            "taguru-cli-test-dup-key-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::write(
+            &path,
+            "TAGURU_CLI_TEST_DUP=first\nTAGURU_CLI_TEST_DUP=second\n",
+        )
+        .unwrap();
+        // SAFETY: no other thread touches the environment during this test.
+        unsafe { std::env::remove_var("TAGURU_CLI_TEST_DUP") };
+
+        load_config(&path);
+
+        assert_eq!(
+            std::env::var("TAGURU_CLI_TEST_DUP").as_deref(),
+            Ok("second"),
+            "the file's last occurrence must win, not its first"
+        );
+
+        // SAFETY: no other thread touches the environment during this test.
+        unsafe { std::env::remove_var("TAGURU_CLI_TEST_DUP") };
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A real pre-existing environment variable must still beat the
+    /// file — the fix for the duplicate-key bug above must not widen
+    /// which keys the file is allowed to override.
+    #[test]
+    fn load_config_still_defers_to_a_real_pre_existing_environment_variable() {
+        let path = std::env::temp_dir().join(format!(
+            "taguru-cli-test-real-env-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::write(&path, "TAGURU_CLI_TEST_REAL=from_file\n").unwrap();
+        // SAFETY: no other thread touches the environment during this test.
+        unsafe { std::env::set_var("TAGURU_CLI_TEST_REAL", "from_shell") };
+
+        load_config(&path);
+
+        assert_eq!(
+            std::env::var("TAGURU_CLI_TEST_REAL").as_deref(),
+            Ok("from_shell"),
+            "a real environment variable must still win over the file"
+        );
+
+        // SAFETY: no other thread touches the environment during this test.
+        unsafe { std::env::remove_var("TAGURU_CLI_TEST_REAL") };
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
