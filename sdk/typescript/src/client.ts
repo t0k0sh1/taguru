@@ -1159,35 +1159,52 @@ export class Context {
     return (await this.client.send("GET", `${this.path}/export`)).text;
   }
 
-  /** Stream the export body without buffering it whole (no retry). */
+  /**
+   * Stream the export body without buffering it whole (no retry).
+   *
+   * The timeout is re-armed on every chunk, not held once against the whole
+   * download — a large export must not be cut off just because it runs
+   * longer than one request's timeout budget as long as bytes keep arriving.
+   */
   async *exportStream(): AsyncGenerator<Uint8Array, void, undefined> {
     const { url, headers, fetchImpl, timeoutSecs } = this.client.streamUrl(`${this.path}/export`);
-    const response = await fetchImpl(url, {
-      method: "GET",
-      headers,
-      signal: AbortSignal.timeout(timeoutSecs * 1000),
-    });
-    if (response.status >= 400) {
-      throw errorFromBody(
-        response.status,
-        response.headers.get("retry-after"),
-        await response.text(),
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = (): void => {
+      clearTimeout(timer);
+      timer = setTimeout(
+        () => controller.abort(new DOMException("This operation was aborted", "TimeoutError")),
+        timeoutSecs * 1000,
       );
-    }
-    if (response.body === null) {
-      return;
-    }
-    const reader = response.body.getReader();
+    };
     try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) {
-          return;
+      arm();
+      const response = await fetchImpl(url, { method: "GET", headers, signal: controller.signal });
+      if (response.status >= 400) {
+        throw errorFromBody(
+          response.status,
+          response.headers.get("retry-after"),
+          await response.text(),
+        );
+      }
+      if (response.body === null) {
+        return;
+      }
+      const reader = response.body.getReader();
+      try {
+        for (;;) {
+          arm();
+          const { done, value } = await reader.read();
+          if (done) {
+            return;
+          }
+          yield value;
         }
-        yield value;
+      } finally {
+        reader.releaseLock();
       }
     } finally {
-      reader.releaseLock();
+      clearTimeout(timer);
     }
   }
 

@@ -437,4 +437,66 @@ describe("exportStream", () => {
     const stream = client.context("sake").exportStream();
     await expect(stream.next()).rejects.toThrow(/aborted/i);
   });
+
+  /**
+   * A body whose `pull` waits `delay` ms per chunk before enqueuing it, but
+   * rejects immediately if `signal` fires while it's waiting — standing in
+   * for how a real fetch stream errors its reader once the request's
+   * AbortSignal aborts mid-download.
+   */
+  function delayedBody(signal: AbortSignal, delaysMs: number[]): ReadableStream<Uint8Array> {
+    let index = 0;
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (index >= delaysMs.length) {
+          controller.close();
+          return;
+        }
+        const delay = delaysMs[index]!;
+        index += 1;
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, delay);
+          signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(signal.reason);
+          });
+        });
+        controller.enqueue(new TextEncoder().encode("x"));
+      },
+    });
+  }
+
+  it("keeps streaming past the overall timeout as long as each chunk arrives in time", async () => {
+    // Three chunks 15ms apart — 45ms total, more than the 30ms timeout, but
+    // every individual gap is under it: the timeout must re-arm per chunk,
+    // not apply once to the whole download.
+    const client = new Taguru({
+      base_url: "http://test",
+      api_key: "",
+      timeout: 0.03,
+      fetch: (_url, init) =>
+        Promise.resolve(new Response(delayedBody(init!.signal!, [15, 15, 15]), { status: 200 })),
+    });
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of client.context("sake").exportStream()) {
+      chunks.push(chunk);
+    }
+    expect(chunks).toHaveLength(3);
+  });
+
+  it("still aborts on a stalled chunk, even after earlier chunks arrived fine", async () => {
+    // First chunk arrives quickly; the second never arrives within the
+    // timeout window — must abort despite the earlier progress.
+    const client = new Taguru({
+      base_url: "http://test",
+      api_key: "",
+      timeout: 0.02,
+      fetch: (_url, init) =>
+        Promise.resolve(new Response(delayedBody(init!.signal!, [5, 200]), { status: 200 })),
+    });
+    const stream = client.context("sake").exportStream();
+    const first = await stream.next();
+    expect(first.done).toBe(false);
+    await expect(stream.next()).rejects.toThrow(/aborted/i);
+  });
 });
