@@ -307,6 +307,16 @@ async fn serve() {
         })),
         None => app,
     };
+    // `routes()` applies its own CatchPanicLayer (see the comment at
+    // its end) before this function ever adds the /mcp route or merges
+    // the OAuth router above, so — for the exact same reason the auth
+    // layer below has to come after both — that inner layer never
+    // reaches either surface. Re-applying it here, still innermost
+    // relative to auth/rate-limit/timeout/concurrency/metrics below,
+    // means a panic dispatched through /mcp or raised inside an OAuth
+    // handler answers 500 through `api::panic_response` instead of
+    // dropping the connection out from under those layers.
+    let app = app.layer(CatchPanicLayer::custom(api::panic_response));
     // Authorization wraps every OUTER route — the context API, the
     // /mcp endpoint itself, and the merged OAuth routes — now that all
     // are registered. `.layer()` only covers routes already on the
