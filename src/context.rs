@@ -3906,10 +3906,16 @@ mod tests {
         context.associate("私", "好き", "りんご", 1.0).unwrap();
         context.associate("りんご", "分類", "果物", 1.0).unwrap();
         context.associate("果物", "含む", "ビタミン", 1.0).unwrap();
-        context.retract_association("りんご", "分類", "果物").unwrap();
+        context
+            .retract_association("りんご", "分類", "果物")
+            .unwrap();
 
         let reached = context.explore(&["私"], Context::UNBOUNDED);
-        assert_eq!(reached.len(), 1, "the retracted edge must not surface, nor bridge to 果物's facts");
+        assert_eq!(
+            reached.len(),
+            1,
+            "the retracted edge must not surface, nor bridge to 果物's facts"
+        );
         assert_eq!(reached[0].association, assoc("私", "好き", "りんご", 1.0));
     }
 
@@ -5488,9 +5494,7 @@ mod tests {
             .associate("青嶺酒造", "代表銘柄", "青嶺", 1.0)
             .unwrap();
         context.associate("高瀬", "役職", "杜氏", 1.0).unwrap();
-        context
-            .associate("青嶺酒造", "杜氏", "高瀬", 1.0)
-            .unwrap();
+        context.associate("青嶺酒造", "杜氏", "高瀬", 1.0).unwrap();
         assert!(context.unreachable_from(&["青嶺酒造"]).is_empty());
 
         context

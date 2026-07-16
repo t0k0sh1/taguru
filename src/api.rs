@@ -5679,10 +5679,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["status"], "error");
         assert_eq!(body["code"], ErrorCode::Internal.as_str());
-        assert!(
-            body["error"].as_str().unwrap().contains("kaboom"),
-            "{body}"
-        );
+        assert!(body["error"].as_str().unwrap().contains("kaboom"), "{body}");
     }
 
     fn assoc(object: &str, weight: f64) -> Association {
