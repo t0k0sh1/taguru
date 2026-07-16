@@ -381,9 +381,16 @@ impl Oauth {
         let grant = {
             let mut codes = self.codes.lock().unwrap();
             let hash = digest_hex(code);
-            let position = codes
-                .iter()
-                .position(|grant| bool::from(grant.code_hash.as_bytes().ct_eq(hash.as_bytes())));
+            // Constant-shape scan, same as Keyring::authenticate: every
+            // stored code is compared even after a match, so lookup
+            // timing cannot narrow down which slot (if any) the
+            // presented code landed on.
+            let mut position = None;
+            for (index, grant) in codes.iter().enumerate() {
+                if bool::from(grant.code_hash.as_bytes().ct_eq(hash.as_bytes())) {
+                    position = Some(index);
+                }
+            }
             // Single use: the code leaves the store on FIRST presentation,
             // valid or not — a replayed code must find nothing.
             match position {
@@ -431,12 +438,19 @@ impl Oauth {
             // defense) would let anyone who learned a token but not its
             // client binding grief the legitimate client by destroying it.
             // ct_eq keeps the secret-hash compare constant-time; client_id
-            // is public, so a plain equality gate behind the short-circuit
-            // leaks nothing.
-            let position = refresh.iter().position(|token| {
-                bool::from(token.hash.as_bytes().ct_eq(hash.as_bytes()))
+            // is public, so gating on it after the hash match leaks
+            // nothing. The scan itself is constant-shape, same as
+            // Keyring::authenticate: every stored token is compared even
+            // after a match, so lookup timing cannot narrow down which
+            // slot (if any) the presented token landed on.
+            let mut position = None;
+            for (index, token) in refresh.iter().enumerate() {
+                if bool::from(token.hash.as_bytes().ct_eq(hash.as_bytes()))
                     && token.client_id == client_id
-            });
+                {
+                    position = Some(index);
+                }
+            }
             match position {
                 Some(position) => refresh.swap_remove(position),
                 None => return Err(OauthError("invalid_grant")),
