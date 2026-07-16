@@ -13,8 +13,17 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-/// Spoken when the client does not name a protocol version itself.
+/// Spoken when the client does not name a protocol version itself, or
+/// names one this build does not recognize.
 pub const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// The protocol versions this build has actually been written against.
+/// `initialize` only echoes a client-named version drawn from this
+/// list; anything else falls back rather than promising semantics
+/// this server does not implement — the whole point of the version
+/// exchange is the two sides agreeing on one wire contract, which a
+/// blind echo would skip entirely.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 
 /// Hard ceiling on the `import` tool's `stream` argument, checked
 /// before the stream ever leaves the process — `taguru-mcp` does not
@@ -94,8 +103,11 @@ pub fn classify(message: &Value) -> Message {
 /// as `instructions`, so the agent learns the discipline the moment it
 /// connects.
 pub fn initialize_result(client_protocol_version: Option<&str>, instructions: &str) -> Value {
+    let protocol_version = client_protocol_version
+        .filter(|version| SUPPORTED_PROTOCOL_VERSIONS.contains(version))
+        .unwrap_or(FALLBACK_PROTOCOL_VERSION);
     json!({
-        "protocolVersion": client_protocol_version.unwrap_or(FALLBACK_PROTOCOL_VERSION),
+        "protocolVersion": protocol_version,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "taguru", "version": env!("CARGO_PKG_VERSION") },
         "instructions": instructions,
@@ -2161,6 +2173,18 @@ mod tests {
 
         let fallback = initialize_result(None, "manual");
         assert_eq!(fallback["protocolVersion"], FALLBACK_PROTOCOL_VERSION);
+    }
+
+    /// A version this build was never written against — a future spec
+    /// revision, or a client just making one up — falls back instead
+    /// of being echoed back as if the two sides had agreed to it.
+    #[test]
+    fn initialize_result_falls_back_on_an_unrecognized_client_version() {
+        let unrecognized = initialize_result(Some("2099-01-01"), "manual");
+        assert_eq!(unrecognized["protocolVersion"], FALLBACK_PROTOCOL_VERSION);
+
+        let garbage = initialize_result(Some("not-a-version"), "manual");
+        assert_eq!(garbage["protocolVersion"], FALLBACK_PROTOCOL_VERSION);
     }
 
     #[test]
