@@ -549,6 +549,7 @@ pub struct ContextPage {
 pub async fn list_contexts(
     State(state): State<AppState>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<ListContextsQuery>,
 ) -> Response {
     let started_at = Instant::now();
@@ -572,6 +573,13 @@ pub async fn list_contexts(
     let (total, contexts) = if allowed.is_none() && query.pinned.is_none() {
         state.directory_page(after, limit)
     } else {
+        // An allow-list or `pinned` forces the whole-directory scan
+        // below instead of `directory_page`'s O(log n + k) seek — gate
+        // it on the deadline like every other handler whose read cost
+        // scales with the directory rather than the page (35f5ead).
+        if deadline.expired() {
+            return deadline_exceeded(started_at);
+        }
         let mut directory: Vec<_> = match &allowed {
             Some(allowed) => allowed
                 .iter()
