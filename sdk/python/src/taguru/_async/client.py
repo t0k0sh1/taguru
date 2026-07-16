@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 import time
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -1117,7 +1118,7 @@ class AsyncContext:
         response = await self._client._send("GET", self._path + "/export")
         return response.text
 
-    async def export_stream(self) -> AsyncIterator[bytes]:
+    async def export_stream(self) -> AsyncGenerator[bytes, None]:
         """Stream the export body without buffering it whole (no retry)."""
         url = self._client._base_url + self._path + "/export"
         headers = dict(self._client._headers)
@@ -1129,11 +1130,25 @@ class AsyncContext:
                 yield chunk
 
     async def export_to_file(self, path: str | Path) -> None:
-        """Stream the export straight to a file."""
+        """Stream the export straight to a file, atomically.
+
+        Written to a sibling temp file and renamed into place, so a failed
+        or interrupted export never leaves a truncated file at ``path``.
+        """
         target = Path(path)
-        with target.open("wb") as handle:
-            async for chunk in self.export_stream():
-                handle.write(chunk)
+        fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+        tmp = Path(tmp_name)
+        stream = self.export_stream()
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                async for chunk in stream:
+                    handle.write(chunk)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        finally:
+            await stream.aclose()
+        tmp.replace(target)
 
     # -- high-level retrieval loop -------------------------------------------------------
 

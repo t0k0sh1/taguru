@@ -91,6 +91,54 @@ def test_export_returns_raw_ndjson() -> None:
     assert client.context("sake").export() == ndjson
 
 
+def test_export_to_file_cleans_up_and_closes_the_stream_on_failure(tmp_path) -> None:
+    client = sync_client(lambda _req: httpx.Response(200, text="unused"))
+    ctx = client.context("sake")
+    closed = False
+
+    def broken_stream():
+        nonlocal closed
+        try:
+            yield b"chunk-1"
+            yield "not-bytes"  # rejected by the binary file handle mid-write
+        finally:
+            closed = True
+
+    ctx.export_stream = broken_stream  # type: ignore[method-assign]
+    target = tmp_path / "backup.jsonl"
+
+    with pytest.raises(TypeError):
+        ctx.export_to_file(target)
+
+    assert closed  # the abandoned generator (and its connection) was released
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []  # no leftover temp file
+
+
+async def test_async_export_to_file_cleans_up_and_closes_the_stream_on_failure(tmp_path) -> None:
+    client = async_client(lambda _req: httpx.Response(200, text="unused"))
+    ctx = client.context("sake")
+    closed = False
+
+    async def broken_stream():
+        nonlocal closed
+        try:
+            yield b"chunk-1"
+            yield "not-bytes"  # type: ignore[misc]  # rejected mid-write
+        finally:
+            closed = True
+
+    ctx.export_stream = broken_stream  # type: ignore[method-assign]
+    target = tmp_path / "backup.jsonl"
+
+    with pytest.raises(TypeError):
+        await ctx.export_to_file(target)
+
+    assert closed
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_import_normalizes_single_outcome_to_list() -> None:
     outcome = {
         "context": "sake",
