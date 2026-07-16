@@ -413,9 +413,12 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         | (&Method::POST, "/contexts/{name}/explore")
         | (&Method::POST, "/contexts/{name}/activate")
         | (&Method::POST, "/contexts/{name}/resolve")
+        | (&Method::POST, "/contexts/{name}/resolve/explain")
         | (&Method::POST, "/contexts/{name}/resolve_label")
+        | (&Method::POST, "/contexts/{name}/resolve_label/explain")
         | (&Method::POST, "/contexts/{name}/sources/lookup")
         | (&Method::POST, "/contexts/{name}/sources/search")
+        | (&Method::POST, "/contexts/{name}/sources/search/explain")
         | (&Method::POST, "/contexts/{name}/citations")
         | (&Method::POST, "/contexts/{name}/unreachable_from")
         | (&Method::POST, "/contexts/{name}/vocabulary/audit")
@@ -881,6 +884,21 @@ mod tests {
             required_role(&Method::DELETE, "/contexts/{name}"),
             Role::Admin
         );
+    }
+
+    /// The three `/explain` endpoints are read-only diagnostics for
+    /// their base endpoint — same role, or fail-closed silently
+    /// demotes a scoped reader to Admin the moment they ask why a
+    /// call resolved the way it did.
+    #[test]
+    fn explain_routes_share_their_base_endpoints_role() {
+        for route in [
+            "/contexts/{name}/resolve/explain",
+            "/contexts/{name}/resolve_label/explain",
+            "/contexts/{name}/sources/search/explain",
+        ] {
+            assert_eq!(required_role(&Method::POST, route), Role::Read, "{route}");
+        }
     }
 
     /// The authorization layer end to end: role refusals, context
