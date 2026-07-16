@@ -178,6 +178,7 @@ pub fn run(args: &[String]) -> i32 {
     };
 
     let mut written = 0usize;
+    let mut planned = 0usize;
     let mut skipped = 0usize;
     let mut failures = 0usize;
     for path in &files {
@@ -185,7 +186,7 @@ pub fn run(args: &[String]) -> i32 {
         match run.extract_document(path, &source) {
             Ok(Outcome::Written) => written += 1,
             Ok(Outcome::Unchanged) => skipped += 1,
-            Ok(Outcome::Planned) => {}
+            Ok(Outcome::Planned) => planned += 1,
             Err(message) => {
                 eprintln!("taguru: extract: {source}: {message}");
                 failures += 1;
@@ -201,10 +202,21 @@ pub fn run(args: &[String]) -> i32 {
              the next run re-extracts"
         );
     }
-    println!(
-        "extract: {written} written, {skipped} unchanged, {failures} failed of {} document(s)",
-        files.len()
-    );
+    // `written` and `planned` are mutually exclusive across a whole run
+    // (dry_run is one flag for every document), so the line reports
+    // whichever one actually applies instead of always printing a
+    // count that is guaranteed zero.
+    if run.dry_run {
+        println!(
+            "extract: {planned} planned, {skipped} unchanged, {failures} failed of {} document(s)",
+            files.len()
+        );
+    } else {
+        println!(
+            "extract: {written} written, {skipped} unchanged, {failures} failed of {} document(s)",
+            files.len()
+        );
+    }
     if failures > 0 { 1 } else { 0 }
 }
 
