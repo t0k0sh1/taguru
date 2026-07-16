@@ -293,10 +293,11 @@ impl Oauth {
                 redirect_uris.len()
             ));
         }
-        for uri in &redirect_uris {
+        for (position, uri) in redirect_uris.iter().enumerate() {
             if uri.len() > MAX_REDIRECT_URI_BYTES {
                 return Err(format!(
-                    "a redirect uri is too long ({} bytes, max {MAX_REDIRECT_URI_BYTES})",
+                    "redirect uri #{} is too long ({} bytes, max {MAX_REDIRECT_URI_BYTES})",
+                    position + 1,
                     uri.len()
                 ));
             }
@@ -308,17 +309,22 @@ impl Oauth {
             // query, where the parser leaves it be) and HTML escaping, so
             // it could reorder or hide part of the target the operator
             // sees. Reject the registration rather than store a uri that
-            // renders as a lie. The offending code point and offset are
-            // named without echoing the raw character back into the error.
+            // renders as a lie. Every error below names the uri only by
+            // position, never by echoing its (possibly still misleading —
+            // is_invisible cannot be exhaustive) raw contents back out.
             if let Some((index, c)) = uri.char_indices().find(|(_, c)| is_invisible(*c)) {
                 return Err(format!(
-                    "a redirect uri contains a disallowed invisible character \
+                    "redirect uri #{} contains a disallowed invisible character \
                      (U+{:04X}) at byte {index}",
+                    position + 1,
                     c as u32
                 ));
             }
             if !is_https_redirect(uri) && !is_loopback_redirect(uri) {
-                return Err(format!("redirect uri '{uri}' must be https or loopback"));
+                return Err(format!(
+                    "redirect uri #{} must be https or loopback",
+                    position + 1
+                ));
             }
         }
         // The registered name is what the consent page shows the
@@ -617,13 +623,14 @@ fn slug(client_name: &str) -> String {
 
 /// Characters that render as nothing — or reorder what renders: C0/C1
 /// controls plus the Unicode format characters (BIDI embeddings,
-/// overrides and isolates, zero-width joiners and spaces, the soft
-/// hyphen, the BOM, interlinear annotation anchors, and the invisible
-/// tag block). A client_name survives HTML escaping with these intact,
-/// and a name that can rewrite its own visual order or hide a
-/// character can impersonate a trusted client on the consent page.
-/// Stripped at registration so the stored name is what the operator
-/// will actually see.
+/// overrides, isolates and the deprecated shaping controls that sit
+/// next to them, zero-width joiners and spaces, the soft hyphen, the
+/// BOM, interlinear annotation anchors, variation selectors, and the
+/// invisible tag block). A client_name survives HTML escaping with
+/// these intact, and a name that can rewrite its own visual order or
+/// hide a character can impersonate a trusted client on the consent
+/// page. Stripped at registration so the stored name is what the
+/// operator will actually see.
 fn is_invisible(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -633,10 +640,12 @@ fn is_invisible(c: char) -> bool {
                 | '\u{200B}'..='\u{200F}'
                 | '\u{202A}'..='\u{202E}'
                 | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{2069}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FE00}'..='\u{FE0F}'
                 | '\u{FEFF}'
                 | '\u{FFF9}'..='\u{FFFB}'
                 | '\u{E0000}'..='\u{E007F}'
+                | '\u{E0100}'..='\u{E01EF}'
         )
 }
 
@@ -994,10 +1003,16 @@ mod tests {
     fn registration_validates_redirects_and_caps_the_store() {
         let (oauth, dir) = scratch_oauth("register");
         assert!(oauth.register_client("x", vec![]).is_err());
+        // The rejected uri is a security-relevant string (it may still
+        // carry characters is_invisible doesn't catch), so the error
+        // must name it only by position, never echo it back whole.
+        let bad_scheme = oauth
+            .register_client("x", vec!["http://evil.example/cb".to_string()])
+            .err()
+            .unwrap();
         assert!(
-            oauth
-                .register_client("x", vec!["http://evil.example/cb".to_string()])
-                .is_err()
+            !bad_scheme.contains("evil.example"),
+            "the rejected uri must not be echoed back in the error: {bad_scheme:?}"
         );
         assert!(
             oauth
@@ -1220,6 +1235,15 @@ mod tests {
             "https://example.com/c\u{202E}b",
             "https://example.com/\u{200B}cb",
             "https://example.com/cb\u{FEFF}",
+            // A variation selector picks a glyph form for the preceding
+            // character rather than rendering on its own — the same
+            // "renders as nothing by itself" shape as the tag block this
+            // guard already covered, just in the adjacent Unicode block.
+            "https://example.com/c\u{FE0F}b",
+            "https://example.com/c\u{E0100}b",
+            // Deprecated bidi shaping controls, adjacent to the isolates
+            // this guard already covered.
+            "https://example.com/c\u{206E}b",
         ] {
             assert!(
                 oauth.register_client("app", vec![uri.to_string()]).is_err(),
