@@ -224,9 +224,9 @@ fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value>
     }
     let (id, call) = match mcp::classify(message) {
         mcp::Message::Notification => return None,
-        mcp::Message::Undecodable => {
+        mcp::Message::Undecodable { id } => {
             return Some(mcp::error_response(
-                Value::Null,
+                id,
                 -32600,
                 "not a JSON-RPC message (no method)".to_string(),
             ));

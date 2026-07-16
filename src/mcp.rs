@@ -49,8 +49,10 @@ pub enum Message {
     Request { id: Value, call: Call },
     /// A method without an id (or a null one): fire-and-forget.
     Notification,
-    /// No method at all — not a JSON-RPC call we can act on.
-    Undecodable,
+    /// No method at all — not a JSON-RPC call we can act on. Carries
+    /// whatever id was present so the sender's wait isn't answered with
+    /// a null it can't correlate to its request.
+    Undecodable { id: Value },
 }
 
 /// The requests both transports answer.
@@ -64,16 +66,19 @@ pub enum Call {
 
 /// Sorts one decoded message into [`Message`]. Never fails: garbage is
 /// [`Message::Undecodable`], which both transports answer with a
-/// JSON-RPC error — the sender may be waiting on an id this function
-/// could not even find.
+/// JSON-RPC error carrying whatever id was found — a message missing
+/// only its method is still owed a correlatable reply, not a null one.
 pub fn classify(message: &Value) -> Message {
-    let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return Message::Undecodable;
-    };
     let id = match message.get("id") {
         Some(id) if !id.is_null() => id.clone(),
-        _ => return Message::Notification,
+        _ => Value::Null,
     };
+    let Some(method) = message.get("method").and_then(Value::as_str) else {
+        return Message::Undecodable { id };
+    };
+    if id.is_null() {
+        return Message::Notification;
+    }
     let params = message.get("params").cloned().unwrap_or(Value::Null);
     let call = match method {
         "initialize" => Call::Initialize {
@@ -2304,9 +2309,11 @@ mod tests {
             classify(&json!({"jsonrpc": "2.0", "id": null, "method": "ping"})),
             Message::Notification
         ));
+        // The id survives even though the method is what's missing — the
+        // sender is still waiting on a reply it can correlate, not a null.
         assert!(matches!(
             classify(&json!({"jsonrpc": "2.0", "id": 1})),
-            Message::Undecodable
+            Message::Undecodable { id } if id == json!(1)
         ));
         assert!(matches!(
             classify(&json!({"jsonrpc": "2.0", "id": 1, "method": "resources/list"})),

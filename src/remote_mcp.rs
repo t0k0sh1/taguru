@@ -70,14 +70,10 @@ pub async fn serve(
     let (id, call) = match mcp::classify(&message) {
         // Notifications get no body — 202 says "heard, nothing to say".
         mcp::Message::Notification => return StatusCode::ACCEPTED.into_response(),
-        mcp::Message::Undecodable => {
+        mcp::Message::Undecodable { id } => {
             return rpc_over_http(
                 StatusCode::BAD_REQUEST,
-                mcp::error_response(
-                    Value::Null,
-                    -32600,
-                    "not a JSON-RPC message (no method)".to_string(),
-                ),
+                mcp::error_response(id, -32600, "not a JSON-RPC message (no method)".to_string()),
             );
         }
         mcp::Message::Request { id, call } => (id, call),
