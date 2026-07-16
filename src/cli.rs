@@ -442,6 +442,13 @@ fn parse_config(text: &str) -> Result<Vec<(String, String)>, String> {
                 index + 1
             ));
         }
+        // Only the whitespace `split_once` leaves stranded around the
+        // `=` itself — `KEY = VALUE` or `KEY= VALUE` are both common
+        // spellings. The line's own leading/trailing whitespace is
+        // already gone from the `line.trim()` above; verbatim applies
+        // to the value's content, not to accidental padding around
+        // the separator.
+        let value = value.trim();
         pairs.push((key.to_string(), value.to_string()));
     }
     Ok(pairs)
@@ -462,6 +469,19 @@ mod tests {
                 ("TAGURU_ADDR".to_string(), "127.0.0.1:0".to_string()),
                 // The first '=' splits; the value keeps the rest verbatim.
                 ("TAGURU_API_TOKEN".to_string(), "a=b=c".to_string()),
+                ("TAGURU_WAL".to_string(), "1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn whitespace_padding_the_separator_is_trimmed_from_key_and_value() {
+        let text = "TAGURU_ADDR = 127.0.0.1:0\nTAGURU_WAL= 1\n";
+        let pairs = parse_config(text).unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                ("TAGURU_ADDR".to_string(), "127.0.0.1:0".to_string()),
                 ("TAGURU_WAL".to_string(), "1".to_string()),
             ]
         );
