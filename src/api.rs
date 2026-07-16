@@ -2115,11 +2115,13 @@ async fn bounded_parallel_map<R: Send + 'static>(
 fn cross_search_concurrency() -> usize {
     static CONCURRENCY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CONCURRENCY.get_or_init(|| {
-        std::env::var("TAGURU_CROSS_SEARCH_CONCURRENCY")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .filter(|&value: &usize| value > 0)
-            .unwrap_or(4)
+        let value = crate::env_number("TAGURU_CROSS_SEARCH_CONCURRENCY", 4);
+        if value == 0 {
+            tracing::warn!("TAGURU_CROSS_SEARCH_CONCURRENCY=0 would fan out no work; using 4");
+            4
+        } else {
+            value
+        }
     })
 }
 
