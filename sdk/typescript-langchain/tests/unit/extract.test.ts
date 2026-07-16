@@ -139,6 +139,14 @@ describe("chunking and paragraph split", () => {
     expect(chunk("   \n\n  ", 100)).toEqual([]);
   });
 
+  it("never splits a surrogate pair across pieces, even under a cap smaller than one codepoint", () => {
+    const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const text = "😀".repeat(20); // U+1F600: 4 UTF-8 bytes, a UTF-16 surrogate pair
+    const pieces = chunk(text, 3);
+    expect(pieces.some((piece) => LONE_SURROGATE.test(piece))).toBe(false);
+    expect(pieces.join("")).toBe(text);
+  });
+
   it("mirrors the server's paragraph split", () => {
     const text = "\n最初の段落。\n二行目も同じ段落。\n\n \t \n次の段落。\n\n";
     expect(splitParagraphs(text)).toEqual(["最初の段落。\n二行目も同じ段落。", "次の段落。"]);

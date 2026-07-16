@@ -135,7 +135,10 @@ function splitOversized(paragraph: string, cap: number): string[] {
     const newline = window.lastIndexOf("\n");
     let cut = newline !== -1 ? newline + 1 : window.length;
     if (cut === 0) {
-      cut = 1;
+      // Not even one codepoint fit; always make progress without
+      // splitting a surrogate pair across two pieces.
+      const codePoint = rest.codePointAt(0);
+      cut = codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
     }
     pieces.push(rest.slice(0, cut));
     rest = rest.slice(cut);
