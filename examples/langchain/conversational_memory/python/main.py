@@ -166,6 +166,9 @@ def main() -> int:
         memorized = ingester.ingest_documents(
             [Document(page_content=SESSION_1, metadata={"source": "conversations/2026-07-05"})]
         )[0]
+        if not memorized.ok:
+            print(f"FAILED to ingest {memorized.source}: {memorized.error}", file=sys.stderr)
+            return 1
         print(f"memorized {memorized.source}: {memorized.associations} facts")
 
         print("\n== session 2 (2026-07-12): every turn first recalls, then answers ==")

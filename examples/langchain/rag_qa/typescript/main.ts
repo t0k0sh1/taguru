@@ -159,7 +159,14 @@ async function main(): Promise<void> {
       pageContent: text,
       metadata: { source },
     }));
-    for (const outcome of await ingester.ingestDocuments(documents)) {
+    const outcomes = await ingester.ingestDocuments(documents);
+    const failed = outcomes.filter((outcome) => !outcome.ok);
+    if (failed.length > 0) {
+      throw new Error(
+        `failed to ingest: ${failed.map((outcome) => `${outcome.source} (${outcome.error})`).join(", ")}`,
+      );
+    }
+    for (const outcome of outcomes) {
       console.log(`ingested ${outcome.source}: ${outcome.associations} facts, ${outcome.aliases} aliases`);
     }
 

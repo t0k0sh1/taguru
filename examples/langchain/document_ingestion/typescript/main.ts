@@ -119,6 +119,12 @@ async function main(): Promise<void> {
 
     console.log("== 1. dry run: review the exact batch before anything is written ==");
     const reviewed = await ingester.ingestDocuments(documents, { dry_run: true });
+    const failed = reviewed.filter((outcome) => !outcome.ok);
+    if (failed.length > 0) {
+      throw new Error(
+        `failed to ingest: ${failed.map((outcome) => `${outcome.source} (${outcome.error})`).join(", ")}`,
+      );
+    }
     for (const outcome of reviewed) {
       console.log(`--- NDJSON for ${outcome.source} ---`);
       for (const line of outcome.ndjson!.trim().split("\n")) {

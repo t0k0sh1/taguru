@@ -151,6 +151,9 @@ async function main(): Promise<void> {
     const [memorized] = await ingester.ingestDocuments([
       { pageContent: SESSION_1, metadata: { source: "conversations/2026-07-05" } },
     ]);
+    if (!memorized!.ok) {
+      throw new Error(`failed to ingest ${memorized!.source}: ${memorized!.error}`);
+    }
     console.log(`memorized ${memorized!.source}: ${memorized!.associations} facts`);
 
     console.log("\n== session 2 (2026-07-12): every turn first recalls, then answers ==");

@@ -174,7 +174,13 @@ def main() -> int:
             Document(page_content=text, metadata={"source": source})
             for source, text in DOCS.items()
         ]
-        for outcome in ingester.ingest_documents(documents):
+        outcomes = ingester.ingest_documents(documents)
+        failed = [outcome for outcome in outcomes if not outcome.ok]
+        if failed:
+            for outcome in failed:
+                print(f"FAILED to ingest {outcome.source}: {outcome.error}", file=sys.stderr)
+            return 1
+        for outcome in outcomes:
             print(f"ingested {outcome.source}: {outcome.associations} facts, {outcome.aliases} aliases")
 
         # -- read: the retriever composes like any other LCEL component --------

@@ -140,6 +140,11 @@ def main() -> int:
 
         print("== 1. dry run: review the exact batch before anything is written ==")
         reviewed = ingester.ingest_documents(documents, dry_run=True)
+        failed = [outcome for outcome in reviewed if not outcome.ok]
+        if failed:
+            for outcome in failed:
+                print(f"FAILED to ingest {outcome.source}: {outcome.error}", file=sys.stderr)
+            return 1
         for outcome in reviewed:
             print(f"--- NDJSON for {outcome.source} ---")
             assert outcome.ndjson is not None
