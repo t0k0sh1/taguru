@@ -25,7 +25,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -621,9 +621,15 @@ fn labeled_document(text: &str, cap: usize) -> String {
 
 /// The document's text, refused early when it could never ride as a
 /// batch passage: unreadable, over the 8 MiB passage cap, or not UTF-8.
-/// Size is checked from metadata BEFORE the read, not after — an
-/// oversized document (a mispointed path, a multi-GB log file) is
-/// refused without ever buffering its bytes.
+/// Size is checked from metadata BEFORE the read for the common case —
+/// an oversized document (a mispointed path, a multi-GB log file) is
+/// refused without ever buffering its bytes. That check alone would
+/// still race a file that grows past the cap between the stat and the
+/// read (TOCTOU) — or, for something like a FIFO, one whose metadata
+/// length never reflected its content at all — so the read itself is
+/// also bounded: at most one byte over the cap is ever buffered, just
+/// enough to detect an overflow the stat missed without letting an
+/// unbounded stream through.
 fn read_document(path: &Path) -> Result<String, String> {
     let size = fs::metadata(path).map_err(|error| error.to_string())?.len();
     if size > MAX_PASSAGE_BYTES as u64 {
@@ -632,7 +638,16 @@ fn read_document(path: &Path) -> Result<String, String> {
              document cap — split the document"
         ));
     }
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PASSAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_PASSAGE_BYTES as u64 {
+        return Err(format!(
+            "exceeds the {MAX_PASSAGE_BYTES}-byte document cap — split the document"
+        ));
+    }
     String::from_utf8(bytes).map_err(|_| "not UTF-8".to_string())
 }
 
@@ -2031,6 +2046,47 @@ mod tests {
             "{error}"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // A FIFO's metadata length is always 0 regardless of what actually
+    // flows through it — the same blind spot as a real file that grows
+    // between the metadata stat and the read. This makes the race
+    // deterministic instead of timing-dependent: the pre-read size
+    // check is guaranteed to see nothing to reject, so only a bound on
+    // the read itself can catch the overflow.
+    #[cfg(unix)]
+    #[test]
+    fn read_document_rejects_a_stream_whose_metadata_never_reflected_its_size() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-read-document-toctou-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let fifo = dir.join("fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo failed");
+
+        let writer_fifo = fifo.clone();
+        let writer = std::thread::spawn(move || {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .open(&writer_fifo)
+                .unwrap();
+            file.write_all(&vec![b'a'; MAX_PASSAGE_BYTES + 1]).unwrap();
+        });
+
+        let error = read_document(&fifo).unwrap_err();
+        assert!(error.contains("exceeds"), "{error}");
+
+        writer.join().unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 }
