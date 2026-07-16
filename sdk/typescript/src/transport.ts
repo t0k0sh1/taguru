@@ -132,11 +132,19 @@ export function encodeName(name: string): string {
 
 /**
  * Whether a fetch failure certainly happened before the request was sent
- * (refused connection, unresolvable host) — always safe to retry. Anything
- * else is ambiguous: the request may have executed server-side.
+ * (refused connection, unresolvable host, connect-phase timeout) — always
+ * safe to retry. Anything else is ambiguous: the request may have executed
+ * server-side.
+ *
+ * UND_ERR_CONNECT_TIMEOUT is undici's own connect-phase timeout, distinct
+ * from the AbortSignal.timeout() `send` races against the whole request: that
+ * one surfaces as an unqualified "TimeoutError" with no `code` at all and can
+ * fire after the request already reached the server, so it stays ambiguous.
+ * The undici error fires only while the TCP handshake itself is still
+ * outstanding, which is why it belongs in this set and TimeoutError does not.
  */
 export function isPreConnectFailure(error: unknown): boolean {
-  const codes = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
+  const codes = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
   const codeOf = (value: unknown): string | undefined => {
     if (typeof value === "object" && value !== null && "code" in value) {
       const code = (value as { code?: unknown }).code;

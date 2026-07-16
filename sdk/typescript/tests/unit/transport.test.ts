@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { Taguru } from "../../src/client.js";
 import { citationKey } from "../../src/models.js";
 import { TaguruError } from "../../src/errors.js";
-import { chunkAssociations } from "../../src/transport.js";
+import { chunkAssociations, isPreConnectFailure } from "../../src/transport.js";
 import { errBody, okBody, stubClient, type StubRequest } from "./stub.js";
 
 const DIRECTORY_ROW = {
@@ -331,5 +332,59 @@ describe("retrieve loop", () => {
       text_fallback_only_if_empty: false,
     });
     expect(always.passage_hits).toHaveLength(1);
+  });
+});
+
+describe("isPreConnectFailure", () => {
+  it("recognizes undici's connect-phase timeout", () => {
+    const error = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("connect timeout"), { code: "UND_ERR_CONNECT_TIMEOUT" }),
+    });
+    expect(isPreConnectFailure(error)).toBe(true);
+  });
+
+  it("recognizes refused connections and unresolvable hosts", () => {
+    const refused = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+    });
+    expect(isPreConnectFailure(refused)).toBe(true);
+
+    const notFound = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }),
+    });
+    expect(isPreConnectFailure(notFound)).toBe(true);
+  });
+
+  it("does not treat AbortSignal.timeout()'s TimeoutError as pre-connect", () => {
+    // No `code` at all, and it can fire after the request already reached
+    // the server — must stay ambiguous, unlike UND_ERR_CONNECT_TIMEOUT.
+    const timeout = new DOMException("This operation was aborted", "TimeoutError");
+    expect(isPreConnectFailure(timeout)).toBe(false);
+  });
+
+  it("stays false for an unrelated or mid-flight failure", () => {
+    const midFlight = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("socket hang up"), { code: "UND_ERR_SOCKET" }),
+    });
+    expect(isPreConnectFailure(midFlight)).toBe(false);
+    expect(isPreConnectFailure(new Error("boom"))).toBe(false);
+  });
+});
+
+describe("exportStream", () => {
+  it("aborts once the client's timeout elapses", async () => {
+    const client = new Taguru({
+      base_url: "http://test",
+      api_key: "",
+      timeout: 0.05,
+      fetch: (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("This operation was aborted", "TimeoutError"));
+          });
+        }),
+    });
+    const stream = client.context("sake").exportStream();
+    await expect(stream.next()).rejects.toThrow(/aborted/i);
   });
 });

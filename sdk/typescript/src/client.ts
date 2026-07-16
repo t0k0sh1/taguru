@@ -208,8 +208,18 @@ export class Taguru {
   }
 
   /** @internal */
-  streamUrl(path: string): { url: string; headers: Record<string, string>; fetchImpl: typeof fetch } {
-    return { url: this.baseUrl + path, headers: { ...this.headers }, fetchImpl: this.fetchImpl };
+  streamUrl(path: string): {
+    url: string;
+    headers: Record<string, string>;
+    fetchImpl: typeof fetch;
+    timeoutSecs: number;
+  } {
+    return {
+      url: this.baseUrl + path,
+      headers: { ...this.headers },
+      fetchImpl: this.fetchImpl,
+      timeoutSecs: this.timeoutSecs,
+    };
   }
 
   // -- server-level operations -------------------------------------------
@@ -1145,8 +1155,12 @@ export class Context {
 
   /** Stream the export body without buffering it whole (no retry). */
   async *exportStream(): AsyncGenerator<Uint8Array, void, undefined> {
-    const { url, headers, fetchImpl } = this.client.streamUrl(`${this.path}/export`);
-    const response = await fetchImpl(url, { method: "GET", headers });
+    const { url, headers, fetchImpl, timeoutSecs } = this.client.streamUrl(`${this.path}/export`);
+    const response = await fetchImpl(url, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(timeoutSecs * 1000),
+    });
     if (response.status >= 400) {
       throw errorFromBody(
         response.status,
