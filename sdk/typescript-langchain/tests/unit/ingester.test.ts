@@ -3,6 +3,7 @@
 import { FakeListChatModel } from "@langchain/core/utils/testing";
 import { describe, expect, it } from "vitest";
 
+import { MAX_PASSAGE_BYTES } from "../../src/extract.js";
 import { TaguruIngester } from "../../src/ingest.js";
 import { FakeServer } from "./stub.js";
 
@@ -137,6 +138,25 @@ describe("TaguruIngester", () => {
         raise_on_error: true,
       }).ingestDocuments([{ pageContent: DOC_TEXT, metadata: { source: "docs/aomine.md" } }]),
     ).rejects.toThrow(/rate limited/);
+  });
+
+  it("skips the passage-size cap when include_passage is false", async () => {
+    const bigText = `${DOC_TEXT}\n\n${"a".repeat(MAX_PASSAGE_BYTES)}`;
+
+    const outcome = await make(new FakeServer(), [MODEL_ANSWER], {
+      include_passage: false,
+      chunk_bytes: MAX_PASSAGE_BYTES + 1024,
+    }).ingestText(bigText, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+
+    // With include_passage true (the default), the same oversized text is
+    // still rejected — the cap is real, just conditional on actually
+    // needing it.
+    await expect(
+      make(new FakeServer(), [MODEL_ANSWER], {
+        chunk_bytes: MAX_PASSAGE_BYTES + 1024,
+      }).ingestText(bigText, { source: "docs/aomine.md" }),
+    ).rejects.toThrow(/passage cap/);
   });
 
   it("rejects bad construction", () => {

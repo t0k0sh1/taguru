@@ -215,7 +215,7 @@ class TaguruIngester:
         if self.client is None:
             raise ValueError("this ingester was built with only an async client")
         outcome = IngestOutcome(source=source, ok=False)
-        if len(text.encode("utf-8")) > MAX_PASSAGE_BYTES:
+        if self.include_passage and len(text.encode("utf-8")) > MAX_PASSAGE_BYTES:
             raise ValueError(f"document exceeds the {MAX_PASSAGE_BYTES}-byte passage cap")
 
         vocabulary = self._fetch_vocabulary()
@@ -305,7 +305,7 @@ class TaguruIngester:
         if self.async_client is None:
             raise ValueError("this ingester was built with only a sync client")
         outcome = IngestOutcome(source=source, ok=False)
-        if len(text.encode("utf-8")) > MAX_PASSAGE_BYTES:
+        if self.include_passage and len(text.encode("utf-8")) > MAX_PASSAGE_BYTES:
             raise ValueError(f"document exceeds the {MAX_PASSAGE_BYTES}-byte passage cap")
 
         vocabulary = await self._afetch_vocabulary()

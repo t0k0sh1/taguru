@@ -138,7 +138,7 @@ export class TaguruIngester {
     options: { source: string; dry_run?: boolean },
   ): Promise<IngestOutcome> {
     const outcome = emptyOutcome(options.source);
-    if (Buffer.byteLength(text, "utf-8") > MAX_PASSAGE_BYTES) {
+    if (this.include_passage && Buffer.byteLength(text, "utf-8") > MAX_PASSAGE_BYTES) {
       throw new Error(`document exceeds the ${MAX_PASSAGE_BYTES}-byte passage cap`);
     }
 

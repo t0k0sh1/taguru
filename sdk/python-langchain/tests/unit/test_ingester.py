@@ -11,6 +11,7 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from taguru import AsyncTaguru, Taguru
 
 from taguru_langchain import TaguruIngester
+from taguru_langchain._extract import MAX_PASSAGE_BYTES
 
 from .conftest import FakeServer
 
@@ -220,6 +221,50 @@ async def test_aingest_documents_records_a_real_llm_error_as_a_failed_outcome(
     )
     assert not outcomes[0].ok
     assert outcomes[0].error is not None and "rate limited" in outcomes[0].error
+
+
+def test_include_passage_false_skips_the_size_cap(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """The passage cap only matters when the passage is actually going to
+    be sent — include_passage=False never sends it (the server itself
+    only checks passage size when a passage key is present), so an
+    oversized text must not be rejected for a limit that no longer
+    applies."""
+    big_text = DOC_TEXT + "\n\n" + "a" * MAX_PASSAGE_BYTES
+    ingester, _llm = make_ingester(
+        sync_client,
+        async_client,
+        [MODEL_ANSWER],
+        include_passage=False,
+        chunk_bytes=MAX_PASSAGE_BYTES + 1024,
+    )
+    outcome = ingester.ingest_text(big_text, source="docs/aomine.md")
+    assert outcome.ok
+
+    # With include_passage=True (the default), the same oversized text is
+    # still rejected — the cap is real, just conditional on actually
+    # needing it.
+    strict, _llm = make_ingester(
+        sync_client, async_client, [MODEL_ANSWER], chunk_bytes=MAX_PASSAGE_BYTES + 1024
+    )
+    with pytest.raises(ValueError, match="passage cap"):
+        strict.ingest_text(big_text, source="docs/aomine.md")
+
+
+async def test_aingest_text_include_passage_false_skips_the_size_cap(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    big_text = DOC_TEXT + "\n\n" + "a" * MAX_PASSAGE_BYTES
+    ingester, _llm = make_ingester(
+        sync_client,
+        async_client,
+        [MODEL_ANSWER],
+        include_passage=False,
+        chunk_bytes=MAX_PASSAGE_BYTES + 1024,
+    )
+    outcome = await ingester.aingest_text(big_text, source="docs/aomine.md")
+    assert outcome.ok
 
 
 def test_embeddings_501_is_silently_ignored(sync_client: Taguru, async_client: AsyncTaguru) -> None:
