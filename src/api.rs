@@ -2594,6 +2594,7 @@ pub async fn remove_aliases(
 pub async fn list_aliases(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
@@ -2623,6 +2624,11 @@ pub async fn list_aliases(
         Some((false, alias)) => (Some(alias), None, false),
         Some((true, alias)) => (None, Some(alias), true),
     };
+    // A `prefix` filter forces the whole-namespace scan below; a bare
+    // cursor stays on the cheap BTreeMap-seeking path regardless.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     match state.read_context(&name, |context| {
         // A `prefix` filter defines the population rather than a
         // cursor, so — like `pinned` on `list_contexts` — it forces the
@@ -3735,9 +3741,13 @@ pub struct RecallRequest {
 pub async fn recall(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RecallRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     match state.read_context(&name, |context| context.recall(&request.cue)) {
         Ok(result) => {
             let (total, matches) = page(result, request.limit, request.after.as_ref());
@@ -4030,6 +4040,7 @@ pub async fn cross_recall(
     State(state): State<AppState>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<CrossRecallRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -4044,6 +4055,9 @@ pub async fn cross_recall(
         Ok(targets) => targets,
         Err(refusal) => return *refusal,
     };
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Computed before `search` moves `cue` out of `request`.
     let cue_log = request.cue.clone();
     let outcome = cross_matches(
@@ -4088,6 +4102,7 @@ pub struct QueryRequest {
 pub async fn query(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<QueryRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -4106,6 +4121,9 @@ pub async fn query(
         started_at,
     ) {
         return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     match state.read_context(&name, |context| {
         context.query_any(
@@ -4162,6 +4180,7 @@ pub async fn cross_query(
     State(state): State<AppState>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<CrossQueryRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -4192,6 +4211,9 @@ pub async fn cross_query(
         Ok(targets) => targets,
         Err(refusal) => return *refusal,
     };
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     // Computed before `search` moves `subject`/`label`/`object` out of
     // `request` — `OneOrMany` has no `Clone` to fall back on.
     let subject_log = as_refs(&request.subject).join(",");
@@ -4245,9 +4267,13 @@ pub struct DescribeRequest {
 pub async fn describe(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<DescribeRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     match state.read_context(&name, |context| context.describe(&request.concept)) {
         Ok(result) => {
             state.note_read(&name, result.is_none());
@@ -4284,11 +4310,15 @@ pub struct ExplorePage {
 pub async fn explore(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ExploreRequest>,
 ) -> Response {
     let started_at = Instant::now();
     if let Some(refusal) = overlong("origins", request.origins.len(), started_at) {
         return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
@@ -4344,11 +4374,15 @@ pub struct ActivateRequest {
 pub async fn activate(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ActivateRequest>,
 ) -> Response {
     let started_at = Instant::now();
     if let Some(refusal) = overlong("origins", request.origins.len(), started_at) {
         return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
@@ -5376,10 +5410,16 @@ pub struct LabelPage {
 pub async fn labels(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
     let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    // A `prefix` filter forces the whole-vocabulary scan below; a bare
+    // cursor stays on the cheap BTreeMap-seeking path regardless.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     match state.read_context(&name, |context| {
         // A `prefix` filter defines the population rather than a
         // cursor, so — like `pinned` on `list_contexts` — it forces the
@@ -5427,11 +5467,18 @@ pub struct UnreachableFromRequest {
 pub async fn unreachable_from(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<UnreachableFromRequest>,
 ) -> Response {
     let started_at = Instant::now();
     if let Some(refusal) = overlong("origins", request.origins.len(), started_at) {
         return refusal;
+    }
+    // Always walks every edge in the context (see Context::unreachable_from)
+    // — the same unconditional-full-scan cost as audit_drift's
+    // unsourced_edges, which already pre-flights this.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
     }
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
