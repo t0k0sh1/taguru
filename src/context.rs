@@ -1373,8 +1373,17 @@ impl Context {
                 continue;
             }
             for edge_id in self.outgoing(concept_id).chain(self.incoming(concept_id)) {
-                reached.entry(edge_id).or_insert((hop, concept_id));
                 let edge = &self.edges[edge_id as usize];
+                // A retracted edge (count == 0) still hangs off the
+                // adjacency chains — retract_association unlinks only the
+                // attribution records — so it must not act as a bridge to
+                // otherwise-unrelated live facts. count == 0 is the
+                // dead-edge test everywhere else (heaviest, compacted, the
+                // export); apply it here too.
+                if edge.count == 0 {
+                    continue;
+                }
+                reached.entry(edge_id).or_insert((hop, concept_id));
                 for neighbor in [edge.subject, edge.object] {
                     if let Entry::Vacant(entry) = node_distances.entry(neighbor) {
                         entry.insert(hop);
@@ -2062,6 +2071,13 @@ impl Context {
         while let Some(concept_id) = frontier.pop_front() {
             for edge_id in self.outgoing(concept_id).chain(self.incoming(concept_id)) {
                 let edge = &self.edges[edge_id as usize];
+                // A retracted edge (count == 0) lingers in the adjacency
+                // chains and must not act as a bridge between otherwise
+                // disconnected live facts — same dead-edge test as
+                // `explore` and `heaviest`.
+                if edge.count == 0 {
+                    continue;
+                }
                 for neighbor in [edge.subject, edge.object] {
                     if visited.insert(neighbor) {
                         frontier.push_back(neighbor);
@@ -2071,8 +2087,11 @@ impl Context {
         }
 
         // An edge's endpoints reach each other through it, so checking one
-        // endpoint decides the whole edge.
+        // endpoint decides the whole edge. Retracted edges (count == 0)
+        // are no longer facts at all, so they're excluded rather than
+        // reported as unreachable ones.
         (0..self.edges.len() as u32)
+            .filter(|&edge_id| self.edges[edge_id as usize].count > 0)
             .filter(|&edge_id| !visited.contains(&self.edges[edge_id as usize].subject))
             .map(|edge_id| self.association(edge_id))
             .collect()
@@ -2383,29 +2402,34 @@ impl Context {
     }
 
     /// The read-only twin of [`Self::retract_source`]'s count: how
-    /// many edges this source touches, without unlinking anything —
-    /// `POST /import?dry_run=true`'s preview of what a retraction
-    /// would report.
+    /// many distinct edges this source touches, without unlinking
+    /// anything — `POST /import?dry_run=true`'s preview of what a
+    /// retraction would report.
     ///
     /// `source_edges` is not pruned by [`Self::retract_association`],
     /// which can unlink this source's attribution on one of its edges
     /// without touching the reverse index — so a raw `Vec::len` would
-    /// overcount past that edge. Each candidate is confirmed live
-    /// against `attribution_ids`, the same check `retract_source`
-    /// itself relies on to skip a dead entry.
+    /// overcount past that edge. Worse, if the source later re-asserts
+    /// onto that same edge, `attribute` has no way to tell the stale
+    /// reverse-index entry apart from a fresh one and appends a second
+    /// one, so the same live edge can appear twice. Each candidate is
+    /// confirmed live against `attribution_ids` (the same check
+    /// `retract_source` itself relies on to skip a dead entry) and
+    /// deduplicated so a retract-then-reassert cycle is still counted
+    /// once.
     pub fn count_source_edges(&self, source: &str) -> usize {
         let Some(&source_id) = self.source_ids.get(source) else {
             return 0;
         };
-        self.source_edges
-            .get(&source_id)
-            .map(|edges| {
-                edges
-                    .iter()
-                    .filter(|&&edge_id| self.attribution_ids.contains_key(&(edge_id, source_id)))
-                    .count()
-            })
-            .unwrap_or(0)
+        let Some(edges) = self.source_edges.get(&source_id) else {
+            return 0;
+        };
+        let mut seen = HashSet::new();
+        edges
+            .iter()
+            .filter(|&&edge_id| self.attribution_ids.contains_key(&(edge_id, source_id)))
+            .filter(|&&edge_id| seen.insert(edge_id))
+            .count()
     }
 
     /// Withdraws one association outright: the `(subject, label,
@@ -3875,6 +3899,21 @@ mod tests {
     }
 
     #[test]
+    fn explore_does_not_bridge_through_a_retracted_edge() {
+        let mut context = Context::default();
+        // 私 -- りんご -- 果物: retracting the middle edge must sever the
+        // path, not leave it standing as a free bridge to 果物's facts.
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        context.associate("りんご", "分類", "果物", 1.0).unwrap();
+        context.associate("果物", "含む", "ビタミン", 1.0).unwrap();
+        context.retract_association("りんご", "分類", "果物").unwrap();
+
+        let reached = context.explore(&["私"], Context::UNBOUNDED);
+        assert_eq!(reached.len(), 1, "the retracted edge must not surface, nor bridge to 果物's facts");
+        assert_eq!(reached[0].association, assoc("私", "好き", "りんご", 1.0));
+    }
+
+    #[test]
     fn associate_from_records_which_source_contributed_what() {
         let mut context = Context::default();
         context
@@ -4898,6 +4937,30 @@ mod tests {
         assert_eq!(context.count_source_edges("旧版"), 0);
     }
 
+    #[test]
+    fn count_source_edges_does_not_double_count_a_retract_then_reassert_cycle() {
+        let mut context = Context::default();
+        context
+            .associate_from("a", "r", "b", 1.0, "旧版", None)
+            .unwrap();
+        assert_eq!(context.count_source_edges("旧版"), 1);
+
+        // retract_association unlinks the attribution but leaves the
+        // reverse-index entry for (a, r, b) under "旧版" in place.
+        assert_eq!(context.retract_association("a", "r", "b"), Some(1));
+        assert_eq!(context.count_source_edges("旧版"), 0);
+
+        // Re-asserting from the same source onto the same edge appends a
+        // second reverse-index entry — attribute() cannot tell it apart
+        // from the stale one. Both now resolve to the same, single live
+        // attribution, so the edge must still count once, not twice.
+        context
+            .associate_from("a", "r", "b", 1.0, "旧版", None)
+            .unwrap();
+        assert_eq!(context.count_source_edges("旧版"), 1);
+        assert_eq!(context.retract_source("旧版"), Some(1));
+    }
+
     /// The `(edge, source)` index the write path consults is derived, so
     /// it must be rebuilt from the chains on load — and rebuilt to match
     /// what retraction left behind: a source's unlinked record is dead
@@ -5411,6 +5474,30 @@ mod tests {
 
         assert_eq!(context.unreachable_from(&["存在しない概念"]).len(), 1);
         assert_eq!(context.unreachable_from(&[]).len(), 1);
+    }
+
+    #[test]
+    fn unreachable_from_ignores_retracted_edges_on_both_sides_of_the_audit() {
+        let mut context = Context::default();
+        // 青嶺酒造 -- 杜氏 -- 高瀬 is the only path to 高瀬's island; once
+        // retracted, 高瀬's remaining fact is a genuine orphan again — the
+        // dead edge itself must not (a) stand in as a live bridge that
+        // hides the orphan, nor (b) be reported as an "unreachable"
+        // association in its own right, since it is no longer a fact.
+        context
+            .associate("青嶺酒造", "代表銘柄", "青嶺", 1.0)
+            .unwrap();
+        context.associate("高瀬", "役職", "杜氏", 1.0).unwrap();
+        context
+            .associate("青嶺酒造", "杜氏", "高瀬", 1.0)
+            .unwrap();
+        assert!(context.unreachable_from(&["青嶺酒造"]).is_empty());
+
+        context
+            .retract_association("青嶺酒造", "杜氏", "高瀬")
+            .unwrap();
+        let orphans = context.unreachable_from(&["青嶺酒造"]);
+        assert_eq!(orphans, vec![assoc("高瀬", "役職", "杜氏", 1.0)]);
     }
 
     #[test]
