@@ -4901,6 +4901,39 @@ mod tests {
     }
 
     #[test]
+    fn migrating_a_pre_v5_image_cannot_tell_a_sourceless_zero_weight_edge_from_a_retracted_one() {
+        // The flip side of the test above, and a known limitation
+        // rather than a bug: `associate` (no source) never rejects
+        // weight 0.0 — only NaN/±inf are refused — so a live,
+        // always-sourceless edge can legitimately sit at
+        // first_attribution == NIL, weight == 0.0. On disk that is
+        // bit-for-bit the same shape a fully retracted edge settles
+        // into, and a pre-v5 attribution record carries no back-
+        // pointer to its edge, so no amount of scanning the legacy
+        // image recovers which case this was — migration cannot tell
+        // them apart from the bytes alone. Reviving every empty-chain
+        // edge would undo the fix above, so migration accepts this
+        // false negative in exchange for never reviving a retraction:
+        // retractions happen constantly in normal operation, a live
+        // edge asserted at weight 0.0 essentially never does.
+        let mut context = Context::default();
+        context.associate("a", "r", "b", 0.0).unwrap();
+        assert_eq!(context.dead_edges(), 0);
+
+        let v4 = context.to_bytes_as_version(4);
+        let loaded = Context::from_bytes(&v4).expect("v4 image must load");
+
+        assert_eq!(
+            loaded.dead_edges(),
+            1,
+            "known limitation: a sourceless zero-weight edge is indistinguishable on \
+             disk from a fully retracted one, and migration resolves the ambiguity \
+             toward the far more common case (retraction) — if this starts failing, \
+             the ambiguity became resolvable and this test's premise should be revisited"
+        );
+    }
+
+    #[test]
     fn retract_source_withdraws_its_contributions() {
         let mut context = Context::default();
         context

@@ -291,9 +291,20 @@ impl Context {
                 };
                 // An empty chain (first_attribution == NIL) is ambiguous in
                 // the legacy format: it means either an edge that was always
-                // sourceless (weight holds its nonzero value) or one that
-                // was fully retracted (weight was zeroed along with the
-                // chain). Only the latter should come back dead.
+                // sourceless or one that was fully retracted (weight zeroed
+                // along with the chain). Weight tells the common shapes of
+                // each apart — a sourceless edge is usually nonzero, a
+                // retraction always zero — but not perfectly: `associate`
+                // never rejected weight 0.0, so a live sourceless edge can
+                // also land here at weight 0.0, identical on disk to a
+                // retracted one (a pre-v5 attribution record keeps no
+                // back-pointer to its edge, so no amount of scanning
+                // recovers which this was). That case is a known, accepted
+                // false negative — see
+                // `migrating_a_pre_v5_image_cannot_tell_a_sourceless_zero_weight_edge_from_a_retracted_one`
+                // in context.rs — chosen over the alternative of reviving
+                // every empty chain, which would undo the fix below and
+                // resurrect the far more common case: an actual retraction.
                 let count = if chain_len == 0 && legacy.weight == 0.0 {
                     0
                 } else {
