@@ -4650,11 +4650,17 @@ fn resolve_tiers(
     started_at: Instant,
 ) -> Result<ResolvedTiers, Response> {
     let limit = clamp(request.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
-    let mut bounded = match state.read_context(name, |context| match (labels, request.dice_floor) {
-        (false, Some(floor)) => context.resolve_with_floor(&request.cue, floor),
-        (false, None) => context.resolve(&request.cue),
-        (true, Some(floor)) => context.resolve_label_with_floor(&request.cue, floor),
-        (true, None) => context.resolve_label(&request.cue),
+    // The lexical read sweeps the vocabulary (see resolve_with_fallback's
+    // own deadline comment above its call site) — the same unconditional
+    // whole-table cost as unreachable_from's full scan, so it runs under
+    // block_in_place rather than straight on the async task.
+    let mut bounded = match tokio::task::block_in_place(|| {
+        state.read_context(name, |context| match (labels, request.dice_floor) {
+            (false, Some(floor)) => context.resolve_with_floor(&request.cue, floor),
+            (false, None) => context.resolve(&request.cue),
+            (true, Some(floor)) => context.resolve_label_with_floor(&request.cue, floor),
+            (true, None) => context.resolve_label(&request.cue),
+        })
     }) {
         Ok(result) => result,
         Err(failure) => return Err(access_error(state, failure, name, started_at)),
@@ -4948,47 +4954,53 @@ fn explain_resolve_verdict(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    let view = match state.read_context(name, |context| {
-        let resolve_floor = |cue: &str, floor: f64| {
-            if labels {
-                context.resolve_label_with_floor(cue, floor)
-            } else {
-                context.resolve_with_floor(cue, floor)
-            }
-        };
-        // Membership means the expected string IS a stored spelling —
-        // exact or alias, nothing looser. The floor cannot express
-        // that (it gates only the fuzzy tier; containment sails past
-        // any floor), so the kind is the test.
-        let canonical = resolve_floor(&request.expected, 1.0)
-            .into_iter()
-            .find(|candidate| matches!(candidate.kind, MatchKind::Exact | MatchKind::Alias));
-        let dice_floor = request.dice_floor.map_or_else(
-            || context.dice_floor(),
-            // NaN falls to the strictest floor, exactly as the scorer
-            // treats it (`clamp_unit_or`'s nan_fallback).
-            |floor| {
-                if floor.is_nan() {
-                    1.0
+    // Several lexical sweeps in one read_context (see the comment above
+    // this function) — the same unconditional whole-table cost as
+    // unreachable_from's full scan, so it runs under block_in_place
+    // rather than straight on the async task.
+    let view = match tokio::task::block_in_place(|| {
+        state.read_context(name, |context| {
+            let resolve_floor = |cue: &str, floor: f64| {
+                if labels {
+                    context.resolve_label_with_floor(cue, floor)
                 } else {
-                    floor.clamp(0.0, 1.0)
+                    context.resolve_with_floor(cue, floor)
                 }
-            },
-        );
-        let sweep = resolve_floor(&request.cue, 0.0);
-        let nearest = if canonical.is_none() {
-            let mut nearest = resolve_floor(&request.expected, 0.0);
-            nearest.truncate(NEAREST_SPELLINGS);
-            nearest
-        } else {
-            Vec::new()
-        };
-        VocabularyView {
-            canonical,
-            dice_floor,
-            sweep,
-            nearest,
-        }
+            };
+            // Membership means the expected string IS a stored spelling —
+            // exact or alias, nothing looser. The floor cannot express
+            // that (it gates only the fuzzy tier; containment sails past
+            // any floor), so the kind is the test.
+            let canonical = resolve_floor(&request.expected, 1.0)
+                .into_iter()
+                .find(|candidate| matches!(candidate.kind, MatchKind::Exact | MatchKind::Alias));
+            let dice_floor = request.dice_floor.map_or_else(
+                || context.dice_floor(),
+                // NaN falls to the strictest floor, exactly as the scorer
+                // treats it (`clamp_unit_or`'s nan_fallback).
+                |floor| {
+                    if floor.is_nan() {
+                        1.0
+                    } else {
+                        floor.clamp(0.0, 1.0)
+                    }
+                },
+            );
+            let sweep = resolve_floor(&request.cue, 0.0);
+            let nearest = if canonical.is_none() {
+                let mut nearest = resolve_floor(&request.expected, 0.0);
+                nearest.truncate(NEAREST_SPELLINGS);
+                nearest
+            } else {
+                Vec::new()
+            };
+            VocabularyView {
+                canonical,
+                dice_floor,
+                sweep,
+                nearest,
+            }
+        })
     }) {
         Ok(view) => view,
         Err(failure) => return access_error(state, failure, name, started_at),
