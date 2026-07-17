@@ -13,17 +13,21 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-/// Spoken when the client does not name a protocol version itself, or
-/// names one this build does not recognize.
-pub const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
-
-/// The protocol versions this build has actually been written against.
-/// `initialize` only echoes a client-named version drawn from this
-/// list; anything else falls back rather than promising semantics
-/// this server does not implement — the whole point of the version
-/// exchange is the two sides agreeing on one wire contract, which a
-/// blind echo would skip entirely.
+/// The protocol versions this build has actually been written against,
+/// oldest first. `initialize` only echoes a client-named version drawn
+/// from this list; anything else falls back rather than promising
+/// semantics this server does not implement — the whole point of the
+/// version exchange is the two sides agreeing on one wire contract,
+/// which a blind echo would skip entirely.
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
+
+/// Spoken when the client does not name a protocol version itself, or
+/// names one this build does not recognize. The spec requires the
+/// LATEST version the server supports here, not just any supported
+/// one — so this is derived from the list above rather than pinned to
+/// a literal that could drift from it as versions are added.
+pub const FALLBACK_PROTOCOL_VERSION: &str =
+    SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.len() - 1];
 
 /// Hard ceiling on the `import` tool's `stream` argument, checked
 /// before the stream ever leaves the process — `taguru-mcp` does not
@@ -2479,6 +2483,18 @@ mod tests {
 
         let garbage = initialize_result(Some("not-a-version"), "manual");
         assert_eq!(garbage["protocolVersion"], FALLBACK_PROTOCOL_VERSION);
+    }
+
+    /// The spec requires the fallback to be the NEWEST version the
+    /// server supports, not merely one of them — a server that fell
+    /// back to its oldest-understood version would pass every other
+    /// assertion in this file while still violating the spec.
+    #[test]
+    fn fallback_protocol_version_is_the_newest_supported_one() {
+        assert_eq!(
+            Some(&FALLBACK_PROTOCOL_VERSION),
+            SUPPORTED_PROTOCOL_VERSIONS.last()
+        );
     }
 
     #[test]
