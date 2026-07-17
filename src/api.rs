@@ -2667,80 +2667,90 @@ pub async fn list_aliases(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    match state.read_context(&name, |context| {
-        // A `prefix` filter defines the population rather than a
-        // cursor, so — like `pinned` on `list_contexts` — it forces the
-        // whole-namespace path: the BTreeMap-seeking `*_alias_page` fast
-        // path has no way to know in advance how many prefix-matching
-        // aliases lie within any given range.
-        if let Some(prefix) = query.prefix.as_deref() {
-            let mut concepts: Vec<(String, String)> = context
-                .concept_aliases()
-                .into_iter()
-                .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
-                .collect();
-            concepts.sort();
-            concepts.retain(|(alias, _)| alias.starts_with(prefix));
-            let mut labels: Vec<(String, String)> = context
-                .label_aliases()
-                .into_iter()
-                .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
-                .collect();
-            labels.sort();
-            labels.retain(|(alias, _)| alias.starts_with(prefix));
-            let total = concepts.len() + labels.len();
-            // One ordered sequence — concepts, then labels — filtered
-            // past the cursor and cut at the limit, then split back
-            // into maps.
-            let page: Vec<(bool, (String, String))> = concepts
-                .into_iter()
-                .map(|entry| (false, entry))
-                .chain(labels.into_iter().map(|entry| (true, entry)))
-                .filter(|(is_label, (alias, _))| match after {
-                    None => true,
-                    Some((after_is_label, after_alias)) => {
-                        (*is_label, alias.as_str()) > (after_is_label, after_alias)
+    // A `prefix` filter defines the population rather than a cursor, so
+    // — like `pinned` on `list_contexts` — it forces the whole-namespace
+    // path: the BTreeMap-seeking `*_alias_page` fast path has no way to
+    // know in advance how many prefix-matching aliases lie within any
+    // given range. That path clones and sorts every concept and label
+    // alias in the context — the same unconditional whole-table cost as
+    // `unreachable_from`'s full scan — so it runs under block_in_place;
+    // the bare-cursor path below stays off it, same as
+    // `recall`/`describe`, since its BTreeMap seek is already bounded by
+    // `limit`.
+    let outcome = match query.prefix.as_deref() {
+        Some(prefix) => tokio::task::block_in_place(|| {
+            state.read_context(&name, |context| {
+                let mut concepts: Vec<(String, String)> = context
+                    .concept_aliases()
+                    .into_iter()
+                    .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
+                    .collect();
+                concepts.sort();
+                concepts.retain(|(alias, _)| alias.starts_with(prefix));
+                let mut labels: Vec<(String, String)> = context
+                    .label_aliases()
+                    .into_iter()
+                    .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
+                    .collect();
+                labels.sort();
+                labels.retain(|(alias, _)| alias.starts_with(prefix));
+                let total = concepts.len() + labels.len();
+                // One ordered sequence — concepts, then labels — filtered
+                // past the cursor and cut at the limit, then split back
+                // into maps.
+                let page: Vec<(bool, (String, String))> = concepts
+                    .into_iter()
+                    .map(|entry| (false, entry))
+                    .chain(labels.into_iter().map(|entry| (true, entry)))
+                    .filter(|(is_label, (alias, _))| match after {
+                        None => true,
+                        Some((after_is_label, after_alias)) => {
+                            (*is_label, alias.as_str()) > (after_is_label, after_alias)
+                        }
+                    })
+                    .take(limit)
+                    .collect();
+                let mut export = AliasExport {
+                    total,
+                    concepts: BTreeMap::new(),
+                    labels: BTreeMap::new(),
+                };
+                for (is_label, (alias, canonical)) in page {
+                    if is_label {
+                        export.labels.insert(alias, canonical);
+                    } else {
+                        export.concepts.insert(alias, canonical);
                     }
-                })
-                .take(limit)
-                .collect();
+                }
+                export
+            })
+        }),
+        None => state.read_context(&name, |context| {
+            let total = context.concept_alias_count() + context.label_alias_count();
             let mut export = AliasExport {
                 total,
                 concepts: BTreeMap::new(),
                 labels: BTreeMap::new(),
             };
-            for (is_label, (alias, canonical)) in page {
-                if is_label {
-                    export.labels.insert(alias, canonical);
-                } else {
-                    export.concepts.insert(alias, canonical);
-                }
+            let mut remaining = limit;
+            if !skip_concepts {
+                let (_, page) = context.concept_alias_page(concept_after, remaining);
+                remaining -= page.len();
+                export.concepts.extend(page);
             }
-            return export;
-        }
-        let total = context.concept_alias_count() + context.label_alias_count();
-        let mut export = AliasExport {
-            total,
-            concepts: BTreeMap::new(),
-            labels: BTreeMap::new(),
-        };
-        let mut remaining = limit;
-        if !skip_concepts {
-            let (_, page) = context.concept_alias_page(concept_after, remaining);
-            remaining -= page.len();
-            export.concepts.extend(page);
-        }
-        // A concept page shorter than what was asked for means that
-        // namespace ran dry, so the leftover budget spills into labels,
-        // started fresh — reached only when `label_after` is `None`,
-        // since a label-namespace cursor takes the `skip_concepts`
-        // branch above and never sets `remaining` here.
-        if remaining > 0 {
-            let (_, page) = context.label_alias_page(label_after, remaining);
-            export.labels.extend(page);
-        }
-        export
-    }) {
+            // A concept page shorter than what was asked for means that
+            // namespace ran dry, so the leftover budget spills into labels,
+            // started fresh — reached only when `label_after` is `None`,
+            // since a label-namespace cursor takes the `skip_concepts`
+            // branch above and never sets `remaining` here.
+            if remaining > 0 {
+                let (_, page) = context.label_alias_page(label_after, remaining);
+                export.labels.extend(page);
+            }
+            export
+        }),
+    };
+    match outcome {
         Ok(result) => ok(result, started_at),
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
@@ -5471,19 +5481,22 @@ pub async fn labels(
 ) -> Response {
     let started_at = Instant::now();
     let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
-    // A `prefix` filter forces the whole-vocabulary scan below; a bare
-    // cursor stays on the cheap BTreeMap-seeking path regardless.
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    match state.read_context(&name, |context| {
-        // A `prefix` filter defines the population rather than a
-        // cursor, so — like `pinned` on `list_contexts` — it forces the
-        // whole-vocabulary path instead of the BTreeMap-seeking
-        // `label_page` fast path, which has no way to know in advance
-        // how many prefix-matching labels lie within any given range.
-        let (total, labels) = match query.prefix.as_deref() {
-            Some(prefix) => {
+    // A `prefix` filter defines the population rather than a cursor, so
+    // — like `pinned` on `list_contexts` — it forces the whole-vocabulary
+    // path instead of the BTreeMap-seeking `label_page` fast path, which
+    // has no way to know in advance how many prefix-matching labels lie
+    // within any given range. That path clones and sorts every label in
+    // the context — the same unconditional whole-table cost as
+    // `unreachable_from`'s full scan — so it runs under block_in_place;
+    // the bare-cursor path below stays off it, same as
+    // `recall`/`describe`, since its BTreeMap seek is already bounded by
+    // `limit`.
+    let outcome = match query.prefix.as_deref() {
+        Some(prefix) => tokio::task::block_in_place(|| {
+            state.read_context(&name, |context| {
                 let mut labels: Vec<String> =
                     context.labels().into_iter().map(String::from).collect();
                 labels.sort();
@@ -5499,12 +5512,15 @@ pub async fn labels(
                     })
                     .take(limit)
                     .collect();
-                (total, labels)
-            }
-            None => context.label_page(query.after.as_deref(), limit),
-        };
-        LabelPage { total, labels }
-    }) {
+                LabelPage { total, labels }
+            })
+        }),
+        None => state.read_context(&name, |context| {
+            let (total, labels) = context.label_page(query.after.as_deref(), limit);
+            LabelPage { total, labels }
+        }),
+    };
+    match outcome {
         Ok(result) => ok(result, started_at),
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
