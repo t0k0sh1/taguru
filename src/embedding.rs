@@ -311,7 +311,7 @@ impl HttpEmbeddings {
                 }
                 Some(_) => {}
             }
-            normalize(&mut vector);
+            normalize(&mut vector)?;
             if slots[index].replace(vector).is_some() {
                 return Err(format!("embedding response repeated index {index}"));
             }
@@ -353,23 +353,34 @@ pub fn fnv1a(text: &str) -> u64 {
     fnv1a_fold(FNV1A_OFFSET, text.bytes())
 }
 
-/// Scales a vector to unit length, so similarity is a plain dot product.
-pub fn normalize(vector: &mut [f32]) {
-    // Accumulate the norm in f64: a large but finite f32 component
-    // squares past f32::MAX, overflowing an f32 sum of squares to +inf
-    // and zeroing the whole vector on divide. f64 holds the sum for any
-    // realistic width, and the finiteness guard keeps a pathological
-    // input from dividing by inf.
+/// Scales a vector to unit length, so similarity is a plain dot
+/// product. A zero vector is left as-is — there is nothing to scale
+/// toward, and an all-zero embedding is a legitimate (if useless)
+/// value, not an error.
+///
+/// A non-finite norm is rejected outright rather than silently left
+/// unnormalized. Accumulating in f64 (a large but finite f32
+/// component squares past f32::MAX, overflowing an f32 sum of squares
+/// to +inf) keeps this unreachable for any realistic width given the
+/// caller's own component-by-component finiteness check — but should
+/// that guard ever lapse, a NaN- or Inf-carrying vector must not
+/// reach the store silently: every similarity score computed against
+/// it downstream would be corrupted, invisibly, until then.
+pub fn normalize(vector: &mut [f32]) -> Result<(), String> {
     let norm = vector
         .iter()
         .map(|v| f64::from(*v) * f64::from(*v))
         .sum::<f64>()
         .sqrt() as f32;
-    if norm > 0.0 && norm.is_finite() {
+    if !norm.is_finite() {
+        return Err(format!("embedding vector norm is not finite: {norm}"));
+    }
+    if norm > 0.0 {
         for value in vector.iter_mut() {
             *value /= norm;
         }
     }
+    Ok(())
 }
 
 /// Cosine similarity of two unit vectors (a dot product).
@@ -1017,7 +1028,7 @@ mod tests {
     #[test]
     fn similarity_is_a_dot_product_over_unit_vectors() {
         let mut a = vec![3.0, 4.0];
-        normalize(&mut a);
+        normalize(&mut a).unwrap();
         assert!((similarity(&a, &a) - 1.0).abs() < 1e-6);
         let b = vec![-a[1], a[0]];
         assert!(similarity(&a, &b).abs() < 1e-6);
@@ -1025,6 +1036,24 @@ mod tests {
         // that would read as a plausible score.
         assert_eq!(similarity(&a, &[1.0]), 0.0);
         assert_eq!(similarity(&[], &a), 0.0);
+    }
+
+    #[test]
+    fn normalize_leaves_a_zero_vector_untouched() {
+        let mut zero = vec![0.0, 0.0, 0.0];
+        normalize(&mut zero).unwrap();
+        assert_eq!(zero, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn normalize_rejects_a_non_finite_norm_instead_of_leaving_it_unnormalized() {
+        for corrupt in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut vector = vec![corrupt, 1.0];
+            assert!(
+                normalize(&mut vector).is_err(),
+                "{corrupt} must be rejected, not silently passed through"
+            );
+        }
     }
 
     /// Reads one whole HTTP request — headers plus the Content-Length
