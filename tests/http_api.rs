@@ -6524,13 +6524,28 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
 
     // Unchanged documents skip without a single model call: the
     // endpoint here refuses every connection, so an attempt would fail
-    // loudly instead of passing.
+    // loudly instead of passing. Every input the manifest keys on must
+    // match the first run bit-for-bit — including --description, which
+    // the manifest treats as a computation input (it is baked into the
+    // batch header's create block) even though import ignores that
+    // block once the context already exists; dropping it here would
+    // legitimately change the manifest key and force a real re-extract.
     let dead = [
         ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_extract(&out, &dead, &["--context", "sake", aomine_src, takase_src]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &dead,
+        &[
+            "--context",
+            "sake",
+            "--description",
+            "酒蔵の記憶",
+            aomine_src,
+            takase_src,
+        ],
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(stdout.matches("unchanged, skipped").count(), 2, "{stdout}");
 
