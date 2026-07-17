@@ -261,6 +261,51 @@ fn injected_newline_heal_failure() -> Option<io::Error> {
     })
 }
 
+/// Arms the calling thread so that the next `count` directory-fsyncs
+/// [`append_batch`] performs right after creating a new WAL file fail
+/// with an injected error; calls beyond `count` succeed normally. Unlike
+/// the `_after` faults above (one shot, armed by a success count), this
+/// one needs to fail an exact number of times in a row so a test can
+/// drive both the first failure AND a subsequent retry's failure
+/// deterministically, without relying on real directory-permission
+/// tricks to fail an `fsync` specifically.
+#[cfg(test)]
+pub(crate) fn fail_next_create_fsyncs(count: u32) {
+    CREATE_FSYNC_FAULT.with(|cell| cell.set(count));
+}
+
+#[cfg(test)]
+thread_local! {
+    static CREATE_FSYNC_FAULT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn injected_create_fsync_failure() -> Option<io::Error> {
+    CREATE_FSYNC_FAULT.with(|cell| {
+        let remaining = cell.get();
+        if remaining == 0 {
+            None
+        } else {
+            cell.set(remaining - 1);
+            Some(io::Error::other("injected create-fsync failure"))
+        }
+    })
+}
+
+/// [`crate::registry::fsync_parent_dir`] for the directory-entry sync
+/// [`append_batch`] performs right after creating a new WAL file —
+/// test-fault-aware the same way [`injected_append_failure`] is for the
+/// append itself, so a regression test can fail this specific sync (and
+/// a retry of it) deterministically without also catching the syncs
+/// `write_atomic` performs elsewhere through the same shared function.
+fn fsync_parent_dir_after_create(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = injected_create_fsync_failure() {
+        return Err(error);
+    }
+    crate::registry::fsync_parent_dir(path)
+}
+
 /// The shape of a non-empty final WAL line missing its trailing `\n` —
 /// both are the same crash (a `write_all` that completed followed by a
 /// crash before the batch's `sync_all`), differing only in where the
@@ -360,9 +405,22 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
     // content write — tied to the same `and_then` chain — let a create
     // whose content sync then failed leave an un-synced file that every
     // later append skipped forever.)
-    if created && let Err(error) = crate::registry::fsync_parent_dir(path) {
-        let _ = crate::registry::remove_persisted_file(path);
-        return Err(error);
+    if created && let Err(error) = fsync_parent_dir_after_create(path) {
+        // The usual recovery is removing the file so the next append
+        // recreates it and syncs the directory again. But if the
+        // removal ITSELF fails, dropping the error here would leave an
+        // unsynced file behind that the `AlreadyExists` path above will
+        // then skip syncing forever — silently, since nothing surfaces
+        // that failure to a caller. Retrying the sync instead gives the
+        // directory entry a second chance to actually land: on success
+        // the batch proceeds with a file that is now durable after all,
+        // and only if that retry ALSO fails does this give up and
+        // surface an error.
+        if crate::registry::remove_persisted_file(path).is_err() {
+            fsync_parent_dir_after_create(path)?;
+        } else {
+            return Err(error);
+        }
     }
     let length_before = file.metadata()?.len();
     if let Err(error) = file.write_all(&buffer).and_then(|()| file.sync_all()) {
@@ -1192,6 +1250,68 @@ mod tests {
         let (ops, top) = replay(&path, 0).unwrap();
         assert_eq!(ops.iter().map(subject_of).collect::<Vec<_>>(), vec!["a"]);
         assert_eq!(top, 1);
+    }
+
+    #[test]
+    fn a_failed_create_fsync_retries_after_a_failed_cleanup_and_succeeds() {
+        // Before this fix, a failed directory fsync always tried to
+        // remove the just-created file and gave up on `Err`, ignoring
+        // whether the removal itself worked. If it didn't, the file
+        // stayed on disk unsynced forever: the next append finds it via
+        // the `AlreadyExists` path, which never syncs the directory
+        // again. The fix retries the sync when cleanup fails — this
+        // test proves that retry actually happens and, on success, the
+        // batch completes rather than surfacing the original error.
+        let path = scratch_wal("create-fsync-retry-succeeds");
+
+        fail_next_create_fsyncs(1);
+        // The registry-tracked op sequence this call reaches is: the
+        // "WAL append" check (succeeds — decrements the arm), then
+        // `remove_persisted_file`'s "unlink" check (fails — the arm was
+        // at 0). The directory fsync itself never touches this counter,
+        // so its failure/retry is driven entirely by `fail_next_create_fsyncs`.
+        crate::registry::fail_persistence_ops_after(1);
+        let result = append_batch(&path, 1, &[associate("a")]);
+        let past_end = crate::registry::clear_persistence_fault();
+
+        result.unwrap();
+        assert!(
+            !past_end,
+            "the unlink fault must have fired for this test to be meaningful"
+        );
+        let (ops, top) = replay(&path, 0).unwrap();
+        assert_eq!(ops.iter().map(subject_of).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(top, 1);
+    }
+
+    #[test]
+    fn a_failed_create_fsync_surfaces_an_error_when_cleanup_and_retry_both_fail() {
+        // The other half of the fix: when the retry ALSO fails, this
+        // must still return an error rather than silently proceeding —
+        // best effort stops at two attempts, it does not paper over a
+        // disk that keeps refusing to sync.
+        let path = scratch_wal("create-fsync-retry-fails");
+
+        fail_next_create_fsyncs(2);
+        crate::registry::fail_persistence_ops_after(1);
+        let result = append_batch(&path, 1, &[associate("a")]);
+        let past_end = crate::registry::clear_persistence_fault();
+
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("injected create-fsync failure"),
+            "{error}"
+        );
+        assert!(
+            !past_end,
+            "the unlink fault must have fired for this test to be meaningful"
+        );
+        // Best effort: the removal was never actually attempted (the
+        // fault intercepts before it), so the file the create left
+        // behind is still there, still unsynced. Nothing worse than
+        // that leftover happens — the caller gets the error and does
+        // not mistake this batch for applied.
+        assert!(path.exists());
     }
 
     #[test]
