@@ -11,9 +11,9 @@ use crate::metrics::{ErrorKind, SearchOp};
 use crate::registry::{AppState, CitationLookup, PassageExplainLookup};
 
 use super::{
-    AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, access_error,
-    bounded_parallel_map, clamp, cross_search_concurrency, cross_targets, deadline_exceeded, error,
-    not_found, ok, overlong, search_log_enabled,
+    AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT, MAX_NAME_BYTES,
+    access_error, bounded_parallel_map, clamp, cross_search_concurrency, cross_targets,
+    deadline_exceeded, empty, error, not_found, ok, overlong, oversized, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -216,6 +216,16 @@ pub async fn retract_source(
     AppJson(request): AppJson<RetractSourceRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    // Same gate every other name-shaped write goes through (add_associations'
+    // source, retract_association's subject/label/object): an empty or
+    // oversized source would otherwise reach the lookup below unchecked,
+    // paying for a marker fsync and a WAL fsync before failing to find it.
+    if let Some(refusal) = empty("source", &request.source, started_at) {
+        return refusal;
+    }
+    if let Some(refusal) = oversized("source", &request.source, MAX_NAME_BYTES, started_at) {
+        return refusal;
+    }
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }

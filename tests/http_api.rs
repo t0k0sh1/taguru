@@ -1813,6 +1813,16 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
     );
     assert_eq!(status, 400, "{body}");
 
+    // retract_source's source id is a name like any other — refused
+    // before the lookup, marker fsync, and WAL fsync it would otherwise
+    // pay for on every oversized call.
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources/retract",
+        Some(json!({"source": long})),
+    );
+    assert_eq!(status, 400, "{body}");
+
     // A rename's destination rides in the body, not the path — it
     // needs its own cap, for both the context and the group route.
     let (status, body) = server.call("POST", "/contexts/sake/rename", Some(json!({"to": long})));
@@ -1935,6 +1945,14 @@ fn empty_names_are_rejected_at_the_write_boundary() {
         let (status, body) = server.call("POST", "/contexts/sake/sources", Some(request));
         assert_eq!(status, 400, "{name}: {body}");
     }
+
+    // retract_source's source id is no exception either.
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources/retract",
+        Some(json!({"source": ""})),
+    );
+    assert_eq!(status, 400, "{body}");
 
     // An omitted source is the ordinary unsourced-association case,
     // not a missing name — it must NOT be swept up by the same check.
