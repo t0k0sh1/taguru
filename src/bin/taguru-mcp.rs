@@ -26,10 +26,11 @@ mod mcp;
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 use serde_json::Value;
 
 const FALLBACK_INSTRUCTIONS: &str = include_str!("../llm-protocol.md");
@@ -107,34 +108,46 @@ fn main() {
         .filter(|&bytes| bytes > 0)
         .unwrap_or(64 * 1024 * 1024);
     // `tools/call` is the one dispatch that rides a full HTTP round
-    // trip (an import, a recall against a large context), so it runs
-    // on its own thread — otherwise a single slow call would leave
-    // this loop unable to read the next line for the whole timeout,
-    // including a `ping` a client sends just to check the bridge is
-    // still alive, or a cancellation for that same slow call. The
-    // semaphore bounds how many of those threads actually hold a live
-    // HTTP request at once, so a client that pipelines calls without
-    // limit cannot fan this bridge out into unbounded connections.
+    // trip (an import, a recall against a large context), so it is
+    // handed off to a worker pool rather than run inline — otherwise a
+    // single slow call would leave this loop unable to read the next
+    // line for the whole timeout, including a `ping` a client sends
+    // just to check the bridge is still alive, or a cancellation for
+    // that same slow call. The pool holds a FIXED number of threads,
+    // never one per call: a client that pipelines calls without limit
+    // queues them instead (a small heap-allocated job apiece), rather
+    // than spawning an OS thread per call that a large enough pipeline
+    // could use to exhaust the process's thread or memory budget long
+    // before any concurrency limit actually kicked in.
     let max_concurrent_tools =
         resolve_max_concurrent_tools(std::env::var("TAGURU_MCP_MAX_CONCURRENT_TOOLS").ok());
-    let concurrency = Arc::new(Semaphore::new(max_concurrent_tools));
     // Maps a `tools/call` id to whether it has been cancelled. An entry
     // exists ONLY while that call is in flight (inserted right before
-    // its thread spawns, removed the moment the thread claims a
+    // its job is queued, removed the moment a worker claims a
     // cancellation or finishes normally) — so a `notifications/cancelled`
     // naming an id that already answered, or never existed, has nothing
     // to flag and is silently a no-op instead of poisoning a future
     // call that reuses the same id.
     let tracked_calls: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
-    // Every dispatch thread spawned below is detached, so nothing but
-    // this Vec stands between `main` returning and a `tools/call` still
-    // mid-flight when stdin hits EOF (the client closed its write side
-    // right after its last request, which is the ordinary way this loop
-    // ends) — without it, the process would tear down mid-HTTP-call and
-    // the reply the client is waiting on would simply never arrive.
-    // Pruned finished handles on every spawn so a long session's Vec
-    // tracks only what is actually still running, not its whole history.
-    let mut inflight: Vec<thread::JoinHandle<()>> = Vec::new();
+    let (job_tx, job_rx) = mpsc::channel::<ToolJob>();
+    // `mpsc::Receiver` isn't `Sync`; the mutex is what lets every
+    // worker share the one queue instead of each needing its own.
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    // Spawned once, up front — never one thread per call. Each worker
+    // loops pulling its next job off the shared queue, so the pool
+    // size doubles as the dispatch concurrency ceiling; no separate
+    // semaphore is needed. `job_tx` stays alive until EOF, so nothing
+    // stands between `main` returning and a `tools/call` still queued
+    // or mid-flight — dropping it there closes the queue and lets
+    // every worker drain the rest before this loop joins them.
+    let workers: Vec<thread::JoinHandle<()>> = (0..max_concurrent_tools)
+        .map(|_| {
+            let bridge = Arc::clone(&bridge);
+            let tracked_calls = Arc::clone(&tracked_calls);
+            let job_rx = Arc::clone(&job_rx);
+            thread::spawn(move || run_tool_worker(&bridge, &tracked_calls, &job_rx))
+        })
+        .collect();
     loop {
         let raw = match read_frame(&mut reader, max_line_bytes) {
             Frame::Eof => break,
@@ -195,43 +208,22 @@ fn main() {
                 id,
                 call: mcp::Call::Tool { name, arguments },
             } => {
-                let bridge = Arc::clone(&bridge);
-                let concurrency = Arc::clone(&concurrency);
-                let tracked_calls = Arc::clone(&tracked_calls);
                 let response_id = id.to_string();
-                // Registered before the thread spawns, not inside it, so
-                // a cancellation racing the spawn always finds this id
-                // already tracked instead of landing in the gap and
-                // being dropped.
+                // Registered before the job is queued, not inside a
+                // worker, so a cancellation racing the handoff always
+                // finds this id already tracked instead of landing in
+                // the gap and being dropped.
                 tracked_calls.lock().insert(response_id.clone(), false);
-                inflight.retain(|handle| !handle.is_finished());
-                inflight.push(thread::spawn(move || {
-                    // A cancel that landed while this call was still
-                    // queued skips it entirely: no permit spent, no
-                    // request sent for a reply nothing is waiting on.
-                    if take_cancelled(&tracked_calls, &response_id) {
-                        return;
-                    }
-                    let _permit = concurrency.acquire();
-                    let outcome = dispatch_tool(&bridge, &name, &arguments);
-                    // ureq has no mid-flight abort, so a cancel that
-                    // landed once the call was already running can't
-                    // stop the request — but it still stops the
-                    // now-unwanted reply from reaching the client.
-                    if take_cancelled(&tracked_calls, &response_id) {
-                        return;
-                    }
-                    // Finished clean: drop the tracking entry so a
-                    // LATER message that reuses this id (ids are
-                    // caller-chosen, not guaranteed unique across a
-                    // session) starts untracked instead of inheriting
-                    // stale state.
-                    tracked_calls.lock().remove(&response_id);
-                    emit(
-                        &std::io::stdout(),
-                        &mcp::response(id, mcp::tool_response(outcome)),
-                    );
-                }));
+                // No receiver ever drops before `job_tx` does (every
+                // worker holds its own clone of `job_rx` until this
+                // loop drops the sender below), so this send cannot
+                // fail during normal operation.
+                let _ = job_tx.send(ToolJob {
+                    id,
+                    response_id,
+                    name,
+                    arguments,
+                });
             }
             classified => {
                 if let Some(response) = dispatch(&bridge, &instructions, classified) {
@@ -240,12 +232,62 @@ fn main() {
             }
         }
     }
-    // Stdin is exhausted, but threads spawned before that point may
-    // still be running their HTTP round trip; every accepted
-    // `tools/call` gets the chance to answer (or lose a race to a late
-    // cancellation) before the process actually exits.
-    for handle in inflight {
-        let _ = handle.join();
+    // Stdin is exhausted, but queued or in-flight calls may still be
+    // outstanding. Dropping the sender closes the queue, so every
+    // worker drains what's left and returns instead of blocking on
+    // `recv` forever; only then does joining let each one finish
+    // answering (or lose a race to a late cancellation) before the
+    // process actually exits.
+    drop(job_tx);
+    for worker in workers {
+        let _ = worker.join();
+    }
+}
+
+/// One queued `tools/call` dispatch, handed from the stdio loop to
+/// whichever pool worker picks it up next.
+struct ToolJob {
+    id: Value,
+    response_id: String,
+    name: String,
+    arguments: Value,
+}
+
+/// Runs on one of the pool's fixed worker threads: pulls jobs off the
+/// shared queue until it closes (the stdio loop hit EOF and dropped
+/// its sender), dispatching each in turn.
+fn run_tool_worker(
+    bridge: &Bridge,
+    tracked_calls: &Mutex<HashMap<String, bool>>,
+    job_rx: &Mutex<mpsc::Receiver<ToolJob>>,
+) {
+    loop {
+        let Ok(job) = job_rx.lock().recv() else {
+            return;
+        };
+        // A cancel that landed while this call was still queued skips
+        // it entirely: no request sent for a reply nothing is waiting
+        // on.
+        if take_cancelled(tracked_calls, &job.response_id) {
+            continue;
+        }
+        let outcome = dispatch_tool(bridge, &job.name, &job.arguments);
+        // ureq has no mid-flight abort, so a cancel that landed once
+        // the call was already running can't stop the request — but
+        // it still stops the now-unwanted reply from reaching the
+        // client.
+        if take_cancelled(tracked_calls, &job.response_id) {
+            continue;
+        }
+        // Finished clean: drop the tracking entry so a LATER message
+        // that reuses this id (ids are caller-chosen, not guaranteed
+        // unique across a session) starts untracked instead of
+        // inheriting stale state.
+        tracked_calls.lock().remove(&job.response_id);
+        emit(
+            &std::io::stdout(),
+            &mcp::response(job.id, mcp::tool_response(outcome)),
+        );
     }
 }
 
@@ -374,8 +416,9 @@ fn dispatch_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<Strin
 /// never hang on silence.
 ///
 /// `main`'s loop never routes a `Call::Tool` here — that classifies
-/// ahead of this call and hands it to its own thread instead (see the
-/// loop's `match`) — but `handle` below still can, for the tests.
+/// ahead of this call and queues it for the tool worker pool instead
+/// (see the loop's `match`) — but `handle` below still can, for the
+/// tests.
 fn dispatch(bridge: &Bridge, instructions: &str, classified: mcp::Message) -> Option<Value> {
     let (id, call) = match classified {
         mcp::Message::Notification => return None,
@@ -407,8 +450,9 @@ fn dispatch(bridge: &Bridge, instructions: &str, classified: mcp::Message) -> Op
 
 /// Classifies and dispatches one JSON-RPC message fully synchronously
 /// — used directly by the tests below. `main`'s loop does not call
-/// this: it needs to see the classified message itself first, to route
-/// a `tools/call` to its own thread instead (see `dispatch`'s doc).
+/// this: it needs to see the classified message itself first, to queue
+/// a `tools/call` for the tool worker pool instead (see `dispatch`'s
+/// doc).
 #[cfg(test)]
 fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value> {
     if message.is_array() {
@@ -418,57 +462,15 @@ fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value>
 }
 
 /// The bridge's ceiling on simultaneously in-flight `tools/call`
-/// dispatches, from a raw `TAGURU_MCP_MAX_CONCURRENT_TOOLS` reading. A
-/// literal 0 parses fine but would deadlock every tool call waiting on
-/// a permit that never opens; that — and anything unparseable or
-/// unset — falls back to the default rather than bricking the bridge.
+/// dispatches — the tool worker pool's size — from a raw
+/// `TAGURU_MCP_MAX_CONCURRENT_TOOLS` reading. A literal 0 parses fine
+/// but would leave every tool call queued behind an empty pool
+/// forever; that — and anything unparseable or unset — falls back to
+/// the default rather than bricking the bridge.
 fn resolve_max_concurrent_tools(raw: Option<String>) -> usize {
     raw.and_then(|value| value.parse::<usize>().ok())
         .filter(|&permits| permits > 0)
         .unwrap_or(8)
-}
-
-/// A counting semaphore bounding how many `tools/call` dispatches hold
-/// a live HTTP request at once (`std` has no built-in one) — the
-/// textbook `Mutex` + `Condvar` shape, non-poisoning `parking_lot`
-/// versions so one dispatch thread panicking cannot wedge every other
-/// thread's `.lock()` behind it.
-struct Semaphore {
-    permits: Mutex<usize>,
-    freed: Condvar,
-}
-
-impl Semaphore {
-    fn new(permits: usize) -> Self {
-        Self {
-            permits: Mutex::new(permits),
-            freed: Condvar::new(),
-        }
-    }
-
-    /// Blocks the CALLING thread (not the stdio loop, since every
-    /// caller here is already its own spawned thread) until a permit
-    /// is free, then holds it until the returned guard drops — which
-    /// happens even if the dispatch thread panics, same as an ordinary
-    /// return.
-    fn acquire(self: &Arc<Self>) -> Permit {
-        let mut permits = self.permits.lock();
-        while *permits == 0 {
-            self.freed.wait(&mut permits);
-        }
-        *permits -= 1;
-        drop(permits);
-        Permit(Arc::clone(self))
-    }
-}
-
-struct Permit(Arc<Semaphore>);
-
-impl Drop for Permit {
-    fn drop(&mut self) {
-        *self.0.permits.lock() += 1;
-        self.0.freed.notify_one();
-    }
 }
 
 /// The bridge's global request timeout in seconds, from a raw
@@ -685,5 +687,43 @@ mod tests {
         let tracked_calls = Mutex::new(HashMap::from([("1".to_string(), true)]));
         assert!(take_cancelled(&tracked_calls, "1"));
         assert!(tracked_calls.lock().is_empty());
+    }
+
+    #[test]
+    fn one_worker_drains_a_backlog_far_larger_than_the_pool_itself() {
+        // The pool's whole point: a `tools/call` becomes a small
+        // heap-allocated job on a shared queue, not an OS thread. Proven
+        // here by running a backlog of 1,000 through a SINGLE worker
+        // invocation — on this test's own thread, no `thread::spawn` at
+        // all — which could only drain them all if jobs are cheap queue
+        // entries rather than one-thread-per-call.
+        let (job_tx, job_rx) = mpsc::channel::<ToolJob>();
+        let job_rx = Mutex::new(job_rx);
+        let tracked_calls: Mutex<HashMap<String, bool>> = Mutex::new(HashMap::new());
+
+        let jobs = 1000;
+        for i in 0..jobs {
+            let response_id = i.to_string();
+            tracked_calls.lock().insert(response_id.clone(), false);
+            // An unknown tool name is refused by `route_tool` before it
+            // would ever reach the network — this test proves the
+            // queue drains, not that a real HTTP round trip completes.
+            job_tx
+                .send(ToolJob {
+                    id: serde_json::json!(i),
+                    response_id,
+                    name: "not-a-real-tool".to_string(),
+                    arguments: serde_json::json!({}),
+                })
+                .unwrap();
+        }
+        drop(job_tx);
+
+        run_tool_worker(&bridge(), &tracked_calls, &job_rx);
+
+        assert!(
+            tracked_calls.lock().is_empty(),
+            "every queued job must be dispatched (and its tracking entry cleared) by the one worker"
+        );
     }
 }

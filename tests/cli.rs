@@ -814,6 +814,85 @@ fn the_mcp_bridge_applies_a_multi_line_import_stream_through_a_live_server() {
     );
 }
 
+/// A client that pipelines far more `tools/call` requests than
+/// `TAGURU_MCP_MAX_CONCURRENT_TOOLS` must still get every one of them
+/// answered, each matched to its own id — proving the fixed-size worker
+/// pool actually queues a backlog rather than losing or wedging requests
+/// past its own concurrency ceiling (the failure mode a one-thread-per-call
+/// design would never hit, since it never has a queue to get stuck in).
+#[test]
+fn the_mcp_bridge_drains_a_pipelined_backlog_through_a_small_worker_pool() {
+    use std::io::Write;
+
+    let (mut server, addr, dir) = spawn_server("mcp-bridge-backlog");
+
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_taguru-mcp"))
+        .env("TAGURU_URL", format!("http://{addr}"))
+        .env_remove("TAGURU_API_TOKEN")
+        .env("TAGURU_MCP_MAX_CONCURRENT_TOOLS", "2")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge must spawn");
+
+    let calls: i64 = 50;
+    let mut stdin = bridge.stdin.take().unwrap();
+    for id in 0..calls {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": "get_protocol", "arguments": {}}
+        });
+        writeln!(stdin, "{request}").unwrap();
+    }
+    drop(stdin);
+
+    let stdout = bridge.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines();
+        for _ in 0..calls {
+            match lines.next() {
+                Some(Ok(line)) => {
+                    if sender.send(line).is_err() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    });
+
+    let mut seen_ids = std::collections::HashSet::new();
+    for _ in 0..calls {
+        let reply = receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect(
+                "every pipelined call must eventually be answered, not dropped or wedged \
+                 behind a 2-worker pool",
+            );
+        let answer: serde_json::Value = serde_json::from_str(&reply).expect("reply must be JSON");
+        assert!(answer["result"].get("isError").is_none(), "{reply}");
+        seen_ids.insert(
+            answer["id"]
+                .as_i64()
+                .expect("id must echo back as a number"),
+        );
+    }
+
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        seen_ids.len(),
+        calls as usize,
+        "each of the {calls} pipelined ids must get exactly one reply"
+    );
+}
+
 #[test]
 fn estimate_prints_usage_for_help_in_any_position() {
     // The other subcommands answer --help wherever it appears; an
