@@ -4450,6 +4450,12 @@ impl AppState {
     /// A page can come back shorter than `limit` if a context in it is
     /// deleted in the instant between the seek and [`describe_entry`]
     /// reading its slot — the same race `directory` already tolerates.
+    /// If EVERY entry in the seek window loses that race, re-seek past
+    /// it instead of reporting an empty page: callers (the SDKs' `iter`
+    /// helpers among them) treat an empty page as the end of the
+    /// directory, so returning one while later entries still exist
+    /// would truncate the walk. Each retry's `after` strictly advances,
+    /// so this terminates in at most `total` iterations.
     pub fn directory_page(
         &self,
         after: Option<&str>,
@@ -4457,24 +4463,33 @@ impl AppState {
     ) -> (usize, Vec<DirectoryEntry>) {
         use std::ops::Bound;
 
-        let (total, slice) = {
-            let registry = self.0.registry.read();
-            let start = match after {
-                Some(after) => Bound::Excluded(after),
-                None => Bound::Unbounded,
+        let mut after = after.map(str::to_string);
+        loop {
+            let (total, slice) = {
+                let registry = self.0.registry.read();
+                let start = match &after {
+                    Some(after) => Bound::Excluded(after.as_str()),
+                    None => Bound::Unbounded,
+                };
+                let slice: Vec<(String, Arc<Entry>)> = registry
+                    .range::<str, _>((start, Bound::Unbounded))
+                    .take(limit)
+                    .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
+                    .collect();
+                (registry.len(), slice)
             };
-            let slice: Vec<(String, Arc<Entry>)> = registry
-                .range::<str, _>((start, Bound::Unbounded))
-                .take(limit)
-                .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
+            let Some(last_seeked) = slice.last().map(|(name, _)| name.clone()) else {
+                return (total, Vec::new());
+            };
+            let page: Vec<DirectoryEntry> = slice
+                .into_iter()
+                .filter_map(|(name, entry)| describe_entry(name, &entry))
                 .collect();
-            (registry.len(), slice)
-        };
-        let page = slice
-            .into_iter()
-            .filter_map(|(name, entry)| describe_entry(name, &entry))
-            .collect();
-        (total, page)
+            if !page.is_empty() {
+                return (total, page);
+            }
+            after = Some(last_seeked);
+        }
     }
 
     /// One directory row by name, or `None` for an unknown context.
@@ -13607,6 +13622,38 @@ mod tests {
         assert_eq!(total, 2);
         let names: Vec<&str> = page.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, vec!["banana", "cherry"]);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn directory_page_skips_past_a_seek_window_tombstoned_before_describe() {
+        let dir = scratch_dir("directory-page-tombstoned-window");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        for name in ["apple", "banana"] {
+            state.create(name, ContextMeta::default()).unwrap();
+        }
+
+        // The race directory_page's doc comment describes: a handle
+        // survives because the seek already cloned its Arc out of the
+        // registry, but the slot it points at is tombstoned before
+        // describe_entry reads it — the same effect AppState::delete
+        // has on a handle the seek already cloned, without actually
+        // removing "apple" from the BTreeMap so the seek still lands
+        // on it.
+        {
+            let registry = state.0.registry.read();
+            let entry = registry.get("apple").unwrap();
+            entry.inner.write().slot = Slot::Deleted;
+        }
+
+        // limit 1 makes the whole seek window ("apple" alone) lose the
+        // race — a false end of directory would stop right here and
+        // never see "banana".
+        let (total, page) = state.directory_page(None, 1);
+        assert_eq!(total, 2);
+        let names: Vec<&str> = page.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["banana"]);
 
         let _ = fs::remove_dir_all(dir);
     }
