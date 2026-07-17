@@ -194,7 +194,19 @@ async fn serve() {
             info!(issuer = %oauth.public_url(), "oauth enabled for remote MCP");
             Some(oauth)
         }
-        _ => None,
+        Ok(_) => {
+            // Present-but-blank is almost always a templating accident
+            // (e.g. `${PUBLIC_URL:-}` with an unset upstream var), not an
+            // intentional opt-out — unlike every other env var this file
+            // reads, silently treating it as absent would leave OAuth
+            // disabled with no boot-time signal that anything was wrong.
+            warn!(
+                "TAGURU_PUBLIC_URL is set but empty: treating OAuth as disabled — \
+                 unset the variable entirely if that's intended"
+            );
+            None
+        }
+        Err(_) => None,
     };
 
     let embedder = embedding::HttpEmbeddings::from_env();
