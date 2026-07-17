@@ -120,6 +120,35 @@ describe("merge (extract.rs golden ports)", () => {
     expect(merged.duplicates).toBe(1);
     expect(merged.dropped).toBe(3);
   });
+
+  it("does not mistake a cap-dropped question for a duplicate on repeat", () => {
+    // Every document chunk sees the same paragraph list and independently
+    // proposes questions for it, so an identical question re-proposed by a
+    // later chunk is a realistic occurrence, not an edge case. Before the
+    // fix it read as a *duplicate* on the repeat, mislabeling the
+    // paragraph's overflow as deduplication instead of the cap that
+    // actually caused it.
+    const merged = merge(
+      [
+        output({
+          questions: [
+            { paragraph: 0, question: "質問A" },
+            { paragraph: 0, question: "質問B" }, // over this run's N=1
+          ],
+        }),
+        output({
+          questions: [
+            { paragraph: 0, question: "質問B" }, // re-proposed, still over the cap
+          ],
+        }),
+      ],
+      1,
+      1,
+    );
+    expect(merged.questions).toEqual([[0, "質問A"]]);
+    expect(merged.duplicates).toBe(0); // the repeat is still a cap drop, not a duplicate
+    expect(merged.dropped).toBe(2);
+  });
 });
 
 describe("chunking and paragraph split", () => {

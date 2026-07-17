@@ -444,12 +444,18 @@ export function merge(
         extraction.duplicates += 1;
         continue;
       }
-      seenQuestions.add(key);
       const count = perParagraph.get(paragraph) ?? 0;
       if (count >= questionsCap) {
         extraction.dropped += 1;
         continue;
       }
+      // Only register with seenQuestions once the item is actually kept:
+      // adding it before the cap check would make a cap-dropped question
+      // read as a *duplicate* the next time an identical one arrives
+      // (from another chunk re-proposing it), permanently mislabeling a
+      // paragraph's overflow as deduplication instead of the cap that
+      // caused it.
+      seenQuestions.add(key);
       perParagraph.set(paragraph, count + 1);
       extraction.questions.push([paragraph, question]);
     }
