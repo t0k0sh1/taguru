@@ -104,4 +104,37 @@ describe("TaguruRetriever cross-context", () => {
     expect(crossSearches).toEqual([{ contexts: ["sake", "tea"], query: "青嶺酒造", limit: 5 }]);
     expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["sake", "tea"]));
   });
+
+  it("still resolves the groups it can when one group fails to fetch", async () => {
+    const server = new FakeServer();
+    const retriever = new TaguruRetriever({
+      groups: ["parent", "no-such-group"],
+      client: server.client(),
+    });
+    const documents = await retriever.invoke("青嶺酒造");
+
+    // parent's members (sake, tea) still come back even though the
+    // sibling group 404s.
+    expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["sake", "tea"]));
+  });
+
+  it("keeps a healthy target's graph docs when another target's graph lane errors", async () => {
+    const server = new FakeServer();
+    server.failContexts.add("tea");
+    const retriever = new TaguruRetriever({
+      contexts: ["sake", "tea"],
+      client: server.client(),
+    });
+    const documents = await retriever.invoke("青嶺酒造");
+
+    // sake's graph lane never touched the failing context, so its docs
+    // still show up.
+    const graphDocs = documents.filter((d) => String(d.metadata["lane"]).includes("graph"));
+    expect(graphDocs.length).toBeGreaterThan(0);
+    expect(graphDocs.every((d) => d.metadata["context"] === "sake")).toBe(true);
+
+    // tea's cross-context text hit isn't a per-context call, so it
+    // still shows up despite tea's graph lane failing.
+    expect(documents.some((d) => d.metadata["context"] === "tea")).toBe(true);
+  });
 });

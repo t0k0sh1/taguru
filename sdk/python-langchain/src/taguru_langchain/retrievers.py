@@ -138,7 +138,13 @@ class TaguruRetriever(BaseRetriever):
             if group in seen:
                 continue
             seen.add(group)
-            entry = client.groups.get(group)
+            # One group failing to fetch (deleted mid-walk, transient
+            # error) should not blank out every other member this walk
+            # already found or would still reach.
+            try:
+                entry = client.groups.get(group)
+            except Exception:
+                continue
             members.update(entry.contexts)
             stack.extend(entry.groups)
         return self._with_members(self._direct_targets(), members)
@@ -191,9 +197,16 @@ class TaguruRetriever(BaseRetriever):
         targets = self._resolve_targets(self.client)
         graph_docs = []
         if self.include_graph:
-            graph_docs = _interleave(
-                [self._graph_lane(self.client, target, query) for target in targets]
-            )
+            # One target erroring (a deleted context, a transient
+            # failure) should not blank out the graph docs every other
+            # target already found.
+            per_target = []
+            for target in targets:
+                try:
+                    per_target.append(self._graph_lane(self.client, target, query))
+                except Exception:
+                    per_target.append([])
+            graph_docs = _interleave(per_target)
         text_hits = []
         if self.include_text:
             text_hits = list(
@@ -208,14 +221,21 @@ class TaguruRetriever(BaseRetriever):
         seen: set[str] = set()
         # BFS by frontier: the groups of one level are independent
         # fetches, so each level resolves concurrently (nesting is at
-        # most 3 levels deep server-side).
+        # most 3 levels deep server-side). return_exceptions=True: one
+        # group failing to fetch (deleted mid-walk, transient error)
+        # should not blank out every other member this walk already
+        # found or would still reach.
         frontier = list(self.groups or [])
         while frontier:
             fetch = [name for name in dict.fromkeys(frontier) if name not in seen]
             seen.update(fetch)
-            entries = await asyncio.gather(*(client.groups.get(name) for name in fetch))
+            entries = await asyncio.gather(
+                *(client.groups.get(name) for name in fetch), return_exceptions=True
+            )
             frontier = []
             for entry in entries:
+                if isinstance(entry, BaseException):
+                    continue
                 members.update(entry.contexts)
                 frontier.extend(entry.groups)
         return self._with_members(self._direct_targets(), members)
@@ -275,10 +295,16 @@ class TaguruRetriever(BaseRetriever):
             # Each target's lane is an independent chain of round
             # trips, and completion order is irrelevant (_interleave
             # sorts by rank, then target order) — run them concurrently.
+            # return_exceptions=True: one target erroring (a deleted
+            # context, a transient failure) should not blank out the
+            # graph docs every other target already found.
             per_target = await asyncio.gather(
-                *(self._agraph_lane(self.async_client, target, query) for target in targets)
+                *(self._agraph_lane(self.async_client, target, query) for target in targets),
+                return_exceptions=True,
             )
-            graph_docs = _interleave(list(per_target))
+            graph_docs = _interleave(
+                [docs if not isinstance(docs, BaseException) else [] for docs in per_target]
+            )
         text_hits = []
         if self.include_text:
             text_hits = list(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import httpx
@@ -53,6 +54,9 @@ class FakeServer:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.imported: list[str] = []
+        # Context names whose every request should fail with a 500, to
+        # exercise cross-context partial-failure handling.
+        self.fail_contexts: set[str] = set()
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -63,6 +67,17 @@ class FakeServer:
             except json.JSONDecodeError:
                 body = request.content.decode("utf-8")
         self.calls.append((path, body))
+        context_match = re.match(r"^/contexts/([^/]+)/", path)
+        if context_match and context_match.group(1) in self.fail_contexts:
+            return httpx.Response(
+                500,
+                json={
+                    "status": "error",
+                    "code": "internal",
+                    "error": "simulated failure",
+                    "time": 0.001,
+                },
+            )
         if path.startswith("/groups/"):
             row = GROUP_ROWS.get(path.removeprefix("/groups/"))
             if row is None:

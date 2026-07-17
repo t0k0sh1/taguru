@@ -143,16 +143,22 @@ export class TaguruRetriever extends BaseRetriever {
     const seen = new Set<string>();
     // BFS by frontier: the groups of one level are independent fetches,
     // so each level resolves concurrently (nesting is at most 3 levels
-    // deep server-side).
+    // deep server-side). allSettled, not all: one group failing to
+    // fetch (deleted mid-walk, transient error) should not blank out
+    // every other member this walk already found or would still reach.
     let frontier = [...(this.groups ?? [])];
     while (frontier.length > 0) {
       const fetch = [...new Set(frontier)].filter((name) => !seen.has(name));
       for (const name of fetch) {
         seen.add(name);
       }
-      const entries = await Promise.all(fetch.map((name) => this.client.groups.get(name)));
+      const settled = await Promise.allSettled(fetch.map((name) => this.client.groups.get(name)));
       frontier = [];
-      for (const entry of entries) {
+      for (const outcome of settled) {
+        if (outcome.status === "rejected") {
+          continue;
+        }
+        const entry = outcome.value;
         for (const member of entry.contexts) {
           members.add(member);
         }
@@ -225,9 +231,14 @@ export class TaguruRetriever extends BaseRetriever {
     if (this.include_graph) {
       // Each target's lane is an independent chain of round trips, and
       // completion order is irrelevant (interleave sorts by rank, then
-      // target order) — run them concurrently.
+      // target order) — run them concurrently. allSettled, not all: one
+      // target erroring (a deleted context, a transient failure) should
+      // not blank out the graph docs every other target already found.
+      const settled = await Promise.allSettled(
+        targets.map((target) => this.graphLane(target, query)),
+      );
       graphDocs = interleave(
-        await Promise.all(targets.map((target) => this.graphLane(target, query))),
+        settled.map((outcome) => (outcome.status === "fulfilled" ? outcome.value : [])),
       );
     }
     let textHits: PassageHit[] = [];

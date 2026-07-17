@@ -34,6 +34,9 @@ const ok = (result: unknown): Response =>
 export class FakeServer {
   calls: Array<[string, unknown]> = [];
   imported: string[] = [];
+  /** Context names whose every request should fail with a 500, to
+   * exercise cross-context partial-failure handling. */
+  failContexts = new Set<string>();
 
   fetch: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -47,6 +50,13 @@ export class FakeServer {
       }
     }
     this.calls.push([path, body]);
+    const contextMatch = /^\/contexts\/([^/]+)\//.exec(path);
+    if (contextMatch && this.failContexts.has(contextMatch[1]!)) {
+      return new Response(
+        JSON.stringify({ status: "error", code: "internal", error: "simulated failure", time: 0.001 }),
+        { status: 500 },
+      );
+    }
     if (path.startsWith("/groups/")) {
       const row = GROUP_ROWS[path.slice("/groups/".length)];
       if (row === undefined) {
