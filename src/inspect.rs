@@ -15,7 +15,9 @@ use std::path::Path;
 use taguru::context::Context;
 
 use crate::cli::fmt_bytes;
-use crate::groups::{GroupRecord, MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, repair_nesting};
+use crate::groups::{
+    GroupRecord, MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, repair_nesting, trim_membership,
+};
 use crate::registry::{
     IMPORT_MARKER_EXTENSION, ImportMarker, bm25_path, meta_path, name_from_stem, passages_path,
     passages_wal_path, pvectors_path, scanned_stem_and_name, sources_path, vectors_path, wal_path,
@@ -467,15 +469,18 @@ fn inspect_groups(
         );
     }
 
-    // The shape preview runs the REAL repair on a scratch copy —
-    // dangling references dropped first, the order boot reconciles in
-    // (a dangling edge is not a shape violation, so the repair would
-    // keep it) — and names every edge boot would drop, not just the
-    // first violation a validator walk happens to hit.
+    // The shape preview runs the REAL repair on a scratch copy — dangling
+    // references dropped first, then the membership cap, then nesting
+    // shape, the exact order boot's `reconcile_groups` runs in (a dangling
+    // edge is not a shape violation, so the repair would keep it; an
+    // over-cap set can still change which edges the shape repair sees) —
+    // and names every edge boot would drop, not just the first violation a
+    // validator walk happens to hit.
     let mut swept = records.clone();
     for record in swept.values_mut() {
         record.groups.retain(|child| records.contains_key(child));
     }
+    trim_membership(&mut swept, MAX_GROUP_MEMBERS);
     let mut repaired = swept.clone();
     repair_nesting(&mut repaired);
     for (name, record) in &swept {
