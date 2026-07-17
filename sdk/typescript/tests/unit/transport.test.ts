@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { Taguru } from "../../src/client.js";
 import { citationKey } from "../../src/models.js";
 import { TaguruError } from "../../src/errors.js";
-import { chunkAssociations, isPreConnectFailure } from "../../src/transport.js";
+import { chunkAssociations, isPreConnectFailure, normalizeHeaders } from "../../src/transport.js";
 import { errBody, okBody, stubClient, type StubRequest } from "./stub.js";
 
 const DIRECTORY_ROW = {
@@ -166,6 +166,52 @@ describe("envelope and raw-body handling", () => {
       error: "context 'x' does not exist",
       time: 0.001,
     });
+  });
+});
+
+describe("header normalization", () => {
+  it("normalizeHeaders lower-cases every key", () => {
+    expect(normalizeHeaders({ Authorization: "x", "X-Custom": "y" })).toEqual({
+      authorization: "x",
+      "x-custom": "y",
+    });
+  });
+
+  // stubFetch's own toLowerCase()-and-assign can't reproduce this: only a
+  // real Headers object comma-joins same-name keys that differ in case, so
+  // these two tests build the actual Request the SDK would send.
+  it("a conventionally-cased custom Authorization header does not collide with api_key's", async () => {
+    let seenAuth: string | null = null;
+    const client = new Taguru({
+      base_url: "http://test",
+      api_key: "secret",
+      headers: { Authorization: "Bearer USER_SUPPLIED" },
+      fetch: async (url, init) => {
+        const req = new Request(url, init);
+        seenAuth = req.headers.get("authorization");
+        return new Response(JSON.stringify({ status: "ok", result: [], time: 0 }), { status: 200 });
+      },
+    });
+    await client.contexts.list();
+    expect(seenAuth).toBe("Bearer secret");
+  });
+
+  it("a conventionally-cased custom Content-Type header does not collide with the JSON body's", async () => {
+    let seenType: string | null = null;
+    const client = new Taguru({
+      base_url: "http://test",
+      headers: { "Content-Type": "text/plain" },
+      fetch: async (url, init) => {
+        const req = new Request(url, init);
+        seenType = req.headers.get("content-type");
+        return new Response(
+          JSON.stringify({ status: "ok", result: { name: "x", description: "" }, time: 0 }),
+          { status: 200 },
+        );
+      },
+    });
+    await client.contexts.create("x", { description: "" });
+    expect(seenType).toBe("application/json");
   });
 });
 

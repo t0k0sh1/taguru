@@ -70,6 +70,7 @@ import {
   encodeName,
   errorFromBody,
   isPreConnectFailure,
+  normalizeHeaders,
   normalizeImportOutcomes,
   sleep,
   sortedEntries,
@@ -133,7 +134,7 @@ export class Taguru {
     this.apiKey = options.api_key ?? env?.[ENV_TOKEN];
     this.retries = options.retries ?? DEFAULT_RETRIES;
     this.timeoutSecs = options.timeout ?? DEFAULT_TIMEOUT_SECS;
-    this.headers = { ...(options.headers ?? {}) };
+    this.headers = normalizeHeaders(options.headers ?? {});
     if (this.apiKey) {
       this.headers["authorization"] = `Bearer ${this.apiKey}`;
     }

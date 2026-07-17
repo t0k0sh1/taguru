@@ -16,6 +16,23 @@ export const DEFAULT_TIMEOUT_SECS = 30.0;
 export const MAX_OPS_PER_REQUEST = 10_000;
 export const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Lower-case every header key. HTTP header names are case-insensitive, but a
+ * plain object used as a fetch() `headers` init is not: `Authorization` and
+ * `authorization` survive as two distinct keys, and fetch's Headers-fill
+ * algorithm appends both under one case-insensitive name instead of either
+ * overwriting the other — comma-joining the two values into one broken
+ * header. Normalizing here keeps caller-supplied headers from colliding with
+ * the SDK's own lower-case keys (authorization, content-type).
+ */
+export function normalizeHeaders(headers: Record<string, string>): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    normalized[key.toLowerCase()] = value;
+  }
+  return normalized;
+}
+
 /** Omit absent optional fields instead of sending nulls. */
 export function dropUndefined(mapping: Record<string, unknown>): Record<string, unknown> {
   const kept: Record<string, unknown> = {};
