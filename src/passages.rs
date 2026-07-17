@@ -512,7 +512,7 @@ impl PassageStore {
 
     fn append_and_apply_locked(
         &self,
-        _writer: &std::sync::MutexGuard<'_, ()>,
+        writer: &std::sync::MutexGuard<'_, ()>,
         ops: &[PassageOp],
     ) -> io::Result<AppliedCounts> {
         let first_seq = self.inner.read().unwrap().next_seq;
@@ -558,7 +558,7 @@ impl PassageStore {
             // housekeeping, and a failure must not turn a persisted
             // write into a client-facing error. A stuck compaction
             // shows up as unbounded log growth instead.
-            if let Err(error) = self.compact() {
+            if let Err(error) = self.compact_locked(writer) {
                 tracing::warn!(
                     "passage log at {} not compacted (will retry on a later write): {error}",
                     self.log_path.display()
@@ -570,16 +570,48 @@ impl PassageStore {
 
     /// Rewrites the snapshot from the current map and truncates the
     /// log if — and only if — no write landed while the bytes were in
-    /// flight (the same watermark re-check `flush_entry` runs). The
-    /// serialize-and-write happens with NO lock held: the map is
-    /// `Arc<str>` handles, so the one consistent read is a cheap
-    /// clone, and megabytes of text land on disk while readers and
-    /// writers proceed.
+    /// flight (the same watermark re-check `flush_entry` runs).
+    ///
+    /// Takes `writer` itself rather than assuming a caller already
+    /// holds it: eviction calls this directly, with no
+    /// `append_and_apply_locked` in between. Without the lock here,
+    /// that direct call and a ratio-triggered compaction from a
+    /// concurrent `store`/`retract` can both read a consistent
+    /// `(sources, seen_seq)` snapshot and both reach `write_atomic` —
+    /// but whichever lands SECOND wins on disk regardless of which
+    /// one actually saw the newer state. If the first (newer) one to
+    /// finish already truncated the log on its own, then-correct
+    /// watermark check, the second (staler) one overwriting the
+    /// snapshot afterward leaves the write it missed nowhere: not in
+    /// the snapshot, not in the (already-emptied) log. An
+    /// acknowledged, fsynced write vanishes silently — and eviction
+    /// clearing `entry.passages` right after this call means the very
+    /// next access reloads from disk and confirms the loss.
     pub(crate) fn compact(&self) -> io::Result<()> {
+        let writer = self.writer.lock().unwrap();
+        self.compact_locked(&writer)
+    }
+
+    /// [`compact`]'s body, for a caller that already holds `writer` —
+    /// `append_and_apply_locked` calls this instead of `compact()` so
+    /// its own ratio-triggered compaction does not try to re-lock a
+    /// `std::sync::Mutex`, which is not reentrant.
+    ///
+    /// The serialize-and-write happens with no OTHER lock held: the
+    /// map is `Arc<str>` handles, so the one consistent read is a
+    /// cheap clone, and megabytes of text land on disk while readers
+    /// proceed (writers wait behind `writer`, same as any mutator).
+    fn compact_locked(&self, _writer: &std::sync::MutexGuard<'_, ()>) -> io::Result<()> {
         let (sources, seen_seq) = {
             let inner = self.inner.read().unwrap();
             (inner.sources.clone(), inner.next_seq)
         };
+        #[cfg(test)]
+        COMPACT_PAUSE_AFTER_READ.with(|cell| {
+            if let Some(hook) = cell.borrow_mut().take() {
+                hook();
+            }
+        });
         let bytes = snapshot_to_bytes(&sources, seen_seq - 1);
         crate::registry::write_atomic(&self.snapshot_path, &bytes)?;
 
@@ -663,6 +695,23 @@ impl PassageStore {
         let inner = self.inner.read().unwrap();
         (inner.compactions, inner.snapshot_bytes_written)
     }
+}
+
+// Test-only interleaving control for `PassageStore::compact_locked`:
+// armed on a thread via `pause_next_compact_after_read`, it fires once
+// — right after that thread's next `compact` captures its `(sources,
+// seen_seq)` snapshot — then clears itself. Lets a test force a second,
+// concurrent `compact`/`store` to run to completion in that gap,
+// deterministically, rather than hoping a race window lands.
+#[cfg(test)]
+thread_local! {
+    static COMPACT_PAUSE_AFTER_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn pause_next_compact_after_read(hook: impl FnOnce() + 'static) {
+    COMPACT_PAUSE_AFTER_READ.with(|cell| *cell.borrow_mut() = Some(Box::new(hook)));
 }
 
 /// The u32-offset bound `store()` enforces on the live path, re-checked
@@ -950,6 +999,96 @@ mod tests {
         assert_eq!(text(&reborn, "a").as_deref(), Some("本文A"));
         assert_eq!(text(&reborn, "b").as_deref(), Some("本文B"));
         assert_eq!(text(&reborn, "c").as_deref(), Some("本文C"));
+    }
+
+    /// A regression for a stale-snapshot race in `compact`. Before the
+    /// fix, `compact` took no lock of its own — it trusted every caller
+    /// to already hold `writer`, true for the ratio-triggered call
+    /// inside `append_and_apply_locked` but false for eviction's direct
+    /// `store.compact()` (`AppState::evict_entry`, taken straight off
+    /// `entry.passages` with no `writer` lock in sight). Two uncoordinated
+    /// `compact` calls could then interleave: one (the "fresh" one below)
+    /// reads a `(sources, seen_seq)` snapshot that already includes a new
+    /// write, finishes first, and correctly truncates the log now that
+    /// the write is safely captured in its snapshot; the other (the
+    /// "stale" one) had read an OLDER snapshot, missing that write, and
+    /// finishes second — overwriting the fresh, correct snapshot with its
+    /// stale one. The write "stale" never saw is now nowhere: not in the
+    /// snapshot it just wrote, not in the log ("fresh" already truncated
+    /// it, correctly from "fresh"'s own vantage).
+    ///
+    /// Rather than hope two racing threads happen to land in that
+    /// interleaving, [`pause_next_compact_after_read`] pins "stale" right
+    /// after it captures its snapshot — before the write below exists —
+    /// and holds it there until "fresh" (which does that write, then
+    /// compacts) has had every chance to run. Fixed, "fresh" cannot even
+    /// start its own `store` until "stale" — which now takes `writer`
+    /// before pausing — releases it, so the sleep just elapses with
+    /// "fresh" blocked; unfixed, "stale" holds nothing, so "fresh" races
+    /// ahead and finishes well within it.
+    #[test]
+    fn a_paused_compact_never_overwrites_a_write_a_racing_compact_already_persisted() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let dir = scratch_dir("compact-race");
+        let store = Arc::new(open(&dir));
+        store.store(batch(&[("seed", "seed text")])).unwrap();
+
+        let (paused_tx, paused_rx) = mpsc::channel::<()>();
+        let (resume_tx, resume_rx) = mpsc::channel::<()>();
+
+        // Mirrors eviction's direct, once-unlocked `compact()` call:
+        // pauses right after reading `(sources, seen_seq)` — before
+        // "late" below exists — and does not write that now-stale
+        // snapshot until told to.
+        let stale = {
+            let store = Arc::clone(&store);
+            thread::spawn(move || {
+                pause_next_compact_after_read(move || {
+                    paused_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                });
+                store.compact()
+            })
+        };
+        paused_rx.recv().unwrap();
+
+        // Mirrors a ratio-triggered compact from a concurrent `store`/
+        // `retract`: stores "late", then compacts, seeing it and — no
+        // further write having landed since — truncating the log.
+        let fresh = {
+            let store = Arc::clone(&store);
+            thread::spawn(move || {
+                store
+                    .store(batch(&[(
+                        "late",
+                        "landed and was compacted while the stale compact was paused",
+                    )]))
+                    .unwrap();
+                store.compact()
+            })
+        };
+        // Ample time for `fresh` to fully finish on the unfixed code,
+        // where it races `stale` freely; on the fixed code it simply
+        // blocks on `writer` for the same span, since `stale` holds it
+        // throughout the pause.
+        thread::sleep(Duration::from_millis(300));
+
+        resume_tx.send(()).unwrap();
+        stale.join().unwrap().unwrap();
+        fresh.join().unwrap().unwrap();
+
+        drop(store);
+        let reloaded = open(&dir);
+        assert_eq!(text(&reloaded, "seed").as_deref(), Some("seed text"));
+        assert_eq!(
+            text(&reloaded, "late").as_deref(),
+            Some("landed and was compacted while the stale compact was paused"),
+            "a write a concurrent compact already read, persisted, and \
+             truncated the log for must survive a stale compact's later overwrite"
+        );
     }
 
     #[test]
