@@ -730,7 +730,17 @@ impl PassageVectorStore {
         for _ in 0..count * dim {
             let slice = bytes.get(pos..pos + 4)?;
             pos += 4;
-            data.push(f32::from_le_bytes(slice.try_into().ok()?));
+            let value = f32::from_le_bytes(slice.try_into().ok()?);
+            // NaN/inf can only reach this file through corruption or a
+            // hand-edited sidecar — the write path (`normalize`, the
+            // HTTP boundary above) never produces one. Carried into
+            // `similarity`'s dot product it poisons every score it
+            // touches; `total_cmp` then sorts that poisoned row as the
+            // maximum instead of a candidate that would fail cleanly.
+            if !value.is_finite() {
+                return None;
+            }
+            data.push(value);
         }
         (pos == bytes.len()).then_some(Self {
             model,
@@ -932,7 +942,15 @@ fn read_table(bytes: &[u8], pos: &mut usize) -> Option<VectorTable> {
         for _ in 0..dim {
             let slice = bytes.get(*pos..*pos + 4)?;
             *pos += 4;
-            vector.push(f32::from_le_bytes(slice.try_into().ok()?));
+            let value = f32::from_le_bytes(slice.try_into().ok()?);
+            // Same guard as `PassageVectorStore::from_bytes`: a NaN or
+            // infinite component poisons every `similarity` dot product
+            // it touches, and `total_cmp` then sorts that poisoned row
+            // as the maximum instead of failing the load cleanly.
+            if !value.is_finite() {
+                return None;
+            }
+            vector.push(value);
         }
         table.insert(name, (hash, vector));
     }
@@ -966,6 +984,34 @@ mod tests {
 
         assert!(VectorStore::from_bytes(b"garbage").is_none());
         assert!(VectorStore::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+    }
+
+    /// A NaN or infinite component can only reach this file through
+    /// corruption — the write path never produces one — but if it did,
+    /// it would poison every `similarity` dot product it touches and
+    /// `total_cmp` would then sort that poisoned row as the maximum.
+    #[test]
+    fn vector_store_rejects_non_finite_components() {
+        let mut store = VectorStore {
+            model: "test-model".into(),
+            ..Default::default()
+        };
+        // A distinctive value unlikely to collide with any length
+        // prefix or hash elsewhere in the serialized bytes.
+        let marker = 12345.678_f32;
+        store.concepts.insert("a".into(), (1, vec![marker, 2.0]));
+
+        let bytes = store.to_bytes();
+        let at = bytes
+            .windows(4)
+            .position(|window| window == marker.to_le_bytes())
+            .expect("marker component must appear in the serialized bytes");
+
+        for corrupt in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut corrupted = bytes.clone();
+            corrupted[at..at + 4].copy_from_slice(&corrupt.to_le_bytes());
+            assert!(VectorStore::from_bytes(&corrupted).is_none());
+        }
     }
 
     #[test]
@@ -1375,6 +1421,35 @@ mod tests {
         let mut padded = bytes.clone();
         padded.push(0);
         assert!(PassageVectorStore::from_bytes(&padded).is_none());
+    }
+
+    /// Same guard as `vector_store_rejects_non_finite_components`, for
+    /// the flat passage-vector layout.
+    #[test]
+    fn passage_vector_store_rejects_non_finite_components() {
+        let mut store = PassageVectorStore::new("test-model");
+        let marker = 12345.678_f32;
+        store.push(
+            PassageKey {
+                source: "docs/aomine.md".into(),
+                index: 0,
+                hash: 7,
+                question_hash: None,
+            },
+            vec![marker, 2.0],
+        );
+
+        let bytes = store.to_bytes();
+        let at = bytes
+            .windows(4)
+            .position(|window| window == marker.to_le_bytes())
+            .expect("marker component must appear in the serialized bytes");
+
+        for corrupt in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut corrupted = bytes.clone();
+            corrupted[at..at + 4].copy_from_slice(&corrupt.to_le_bytes());
+            assert!(PassageVectorStore::from_bytes(&corrupted).is_none());
+        }
     }
 
     // -----------------------------------------------------------------
