@@ -423,6 +423,8 @@ impl Run {
                 &self.model_name,
                 &self.context,
                 self.questions,
+                self.no_passage,
+                self.description.as_deref().unwrap_or(""),
             )
             && out_path.is_file()
         {
@@ -474,6 +476,8 @@ impl Run {
             &self.model_name,
             &self.context,
             self.questions,
+            self.no_passage,
+            self.description.as_deref().unwrap_or(""),
             &file_name,
         );
         self.vocabulary.extend(extraction.label_vocabulary());
@@ -1464,6 +1468,17 @@ struct ManifestEntry {
     /// extraction call on purpose, see the design's trade-off note).
     #[serde(default)]
     questions_n: usize,
+    /// --no-passage of the run that wrote this batch: it decides
+    /// whether the emitted batch carries the source passage at all, so
+    /// toggling it must re-extract rather than skip with a batch shaped
+    /// for the other setting.
+    #[serde(default)]
+    no_passage: bool,
+    /// --description of the run that wrote this batch: baked into the
+    /// emitted header like `context`, so a change here must re-extract
+    /// too rather than skip and leave the old description in place.
+    #[serde(default)]
+    description: String,
     output: String,
 }
 
@@ -1484,6 +1499,7 @@ impl Manifest {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn matches(
         &self,
         source: &str,
@@ -1491,6 +1507,8 @@ impl Manifest {
         model: &str,
         context: &str,
         questions_n: usize,
+        no_passage: bool,
+        description: &str,
     ) -> bool {
         self.documents.get(source).is_some_and(|entry| {
             entry.sha256 == sha256
@@ -1498,9 +1516,12 @@ impl Manifest {
                 && entry.prompt_version == PROMPT_VERSION
                 && entry.context == context
                 && entry.questions_n == questions_n
+                && entry.no_passage == no_passage
+                && entry.description == description
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record(
         &mut self,
         source: &str,
@@ -1508,6 +1529,8 @@ impl Manifest {
         model: &str,
         context: &str,
         questions_n: usize,
+        no_passage: bool,
+        description: &str,
         output: &str,
     ) {
         self.documents.insert(
@@ -1518,6 +1541,8 @@ impl Manifest {
                 prompt_version: PROMPT_VERSION,
                 context: context.to_string(),
                 questions_n,
+                no_passage,
+                description: description.to_string(),
                 output: output.to_string(),
             },
         );
@@ -1923,14 +1948,29 @@ mod tests {
     #[test]
     fn manifests_skip_only_exact_recomputations() {
         let mut manifest = Manifest::default();
-        manifest.record("a.md", "hash-1", "model-1", "sake", 0, "a.md.jsonl");
-        assert!(manifest.matches("a.md", "hash-1", "model-1", "sake", 0));
-        assert!(!manifest.matches("a.md", "hash-2", "model-1", "sake", 0));
-        assert!(!manifest.matches("a.md", "hash-1", "model-2", "sake", 0));
-        assert!(!manifest.matches("b.md", "hash-1", "model-1", "sake", 0));
+        manifest.record(
+            "a.md",
+            "hash-1",
+            "model-1",
+            "sake",
+            0,
+            false,
+            "",
+            "a.md.jsonl",
+        );
+        assert!(manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, ""));
+        assert!(!manifest.matches("a.md", "hash-2", "model-1", "sake", 0, false, ""));
+        assert!(!manifest.matches("a.md", "hash-1", "model-2", "sake", 0, false, ""));
+        assert!(!manifest.matches("b.md", "hash-1", "model-1", "sake", 0, false, ""));
         // A re-pointed --context must re-extract, not keep files whose
         // headers still name the old target.
-        assert!(!manifest.matches("a.md", "hash-1", "model-1", "vats", 0));
+        assert!(!manifest.matches("a.md", "hash-1", "model-1", "vats", 0, false, ""));
+        // Toggling --no-passage changes whether the batch carries the
+        // source passage at all — a skip would keep the stale shape.
+        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, true, ""));
+        // A changed --description is baked into the batch header, so it
+        // must re-extract too rather than skip with the old one.
+        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, "new desc"));
 
         // A prompt bump invalidates entries recorded under the old one.
         manifest
@@ -1938,7 +1978,7 @@ mod tests {
             .get_mut("a.md")
             .expect("just recorded")
             .prompt_version = PROMPT_VERSION + 1;
-        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0));
+        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, ""));
 
         let dir = std::env::temp_dir().join(format!("taguru-manifest-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -1946,14 +1986,24 @@ mod tests {
         let path = dir.join(MANIFEST_NAME);
         assert!(Manifest::load(&path).documents.is_empty());
         let mut manifest = Manifest::default();
-        manifest.record("a.md", "hash-1", "model-1", "sake", 0, "a.md.jsonl");
+        manifest.record(
+            "a.md",
+            "hash-1",
+            "model-1",
+            "sake",
+            0,
+            false,
+            "",
+            "a.md.jsonl",
+        );
         manifest.save(&path).unwrap();
-        assert!(Manifest::load(&path).matches("a.md", "hash-1", "model-1", "sake", 0));
+        assert!(Manifest::load(&path).matches("a.md", "hash-1", "model-1", "sake", 0, false, ""));
         fs::write(&path, "not json").unwrap();
         assert!(Manifest::load(&path).documents.is_empty());
 
-        // An entry written before the context field existed still
-        // loads — and mismatches, so it re-extracts exactly once.
+        // An entry written before the context/no_passage/description
+        // fields existed still loads — and mismatches, so it
+        // re-extracts exactly once.
         fs::write(
             &path,
             r#"{"documents": {"a.md": {"sha256": "hash-1", "model": "model-1",
@@ -1962,7 +2012,7 @@ mod tests {
         .unwrap();
         let legacy = Manifest::load(&path);
         assert_eq!(legacy.documents.len(), 1);
-        assert!(!legacy.matches("a.md", "hash-1", "model-1", "sake", 0));
+        assert!(!legacy.matches("a.md", "hash-1", "model-1", "sake", 0, false, ""));
         let _ = fs::remove_dir_all(&dir);
     }
 
