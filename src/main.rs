@@ -283,6 +283,7 @@ async fn serve() {
     let app = routes(
         protocol_trailer,
         limits::HeavyOpsLimiter::new(max_concurrent_heavy),
+        state.clone(),
     )
     .with_state(state.clone());
 
@@ -343,7 +344,10 @@ async fn serve() {
     // means a panic dispatched through /mcp or raised inside an OAuth
     // handler answers 500 through `api::panic_response` instead of
     // dropping the connection out from under those layers.
-    let app = app.layer(CatchPanicLayer::custom(api::panic_response));
+    let app = app.layer({
+        let state = state.clone();
+        CatchPanicLayer::custom(move |payload| api::panic_response(payload, &state))
+    });
     // Authorization wraps every OUTER route — the context API, the
     // /mcp endpoint itself, and the merged OAuth routes — now that all
     // are registered. `.layer()` only covers routes already on the
@@ -473,6 +477,7 @@ async fn serve() {
 fn routes(
     protocol_trailer: Option<String>,
     heavy_ops_limiter: limits::HeavyOpsLimiter,
+    state: AppState,
 ) -> Router<AppState> {
     let heavy_routes = Router::new()
         .route("/contexts/{name}/compact", post(api::compact_context))
@@ -596,8 +601,15 @@ fn routes(
         // panic inside a dispatched tool call is caught right here,
         // same as one from an ordinary HTTP handler — neither takes
         // down the connection task out from under the metrics/
-        // access-log/trace middleware layered on further out.
-        .layer(CatchPanicLayer::custom(api::panic_response))
+        // access-log/trace middleware layered on further out. Also why
+        // this needs `state` passed in rather than reusing `serve()`'s
+        // own outer CatchPanicLayer below: `record_error` inside
+        // `panic_response` is the only signal a dispatched call's panic
+        // leaves behind, since the /mcp response itself stays 200 (see
+        // `panic_response`'s doc comment).
+        .layer(CatchPanicLayer::custom(move |payload| {
+            api::panic_response(payload, &state)
+        }))
 }
 
 /// The periodic flusher: every `flush_secs`, persist what is dirty —

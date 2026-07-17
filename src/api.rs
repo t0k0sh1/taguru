@@ -221,7 +221,19 @@ fn coded(
 /// wrapping the router see this request at all. Without it, a panic
 /// unwinds straight through them and the request vanishes from every
 /// signal at once.
-pub(crate) fn panic_response(payload: Box<dyn std::any::Any + Send>) -> Response {
+///
+/// Takes `state` to record `ErrorKind::Panic` here too: `record_error`
+/// is how every other 500 cause reaches `taguru_errors_total`, and a
+/// panic is as legitimate a cause as `Load` or `Io` — omitting it would
+/// leave the one 500 cause that is always a bug invisible in the metric
+/// meant to surface exactly that. This also covers panics from a tool
+/// call dispatched through `/mcp`: `routes()` layers this same handler
+/// as its innermost layer specifically so a dispatched call's panic is
+/// caught here (see that function's doc comment), even though the
+/// resulting 500 never becomes the outer HTTP response — the JSON-RPC
+/// envelope answers 200 either way, so `taguru_errors_total` is the
+/// only signal that call ever left behind.
+pub(crate) fn panic_response(payload: Box<dyn std::any::Any + Send>, state: &AppState) -> Response {
     let message = if let Some(s) = payload.downcast_ref::<String>() {
         s.clone()
     } else if let Some(s) = payload.downcast_ref::<&str>() {
@@ -233,6 +245,7 @@ pub(crate) fn panic_response(payload: Box<dyn std::any::Any + Send>) -> Response
     // states this codebase otherwise logs with warn! — worth the same
     // loud signal as a boot-time fatal.
     tracing::error!(%message, "handler panicked; responding 500 instead of dropping the connection");
+    state.metrics().record_error(ErrorKind::Panic);
     coded(
         StatusCode::INTERNAL_SERVER_ERROR,
         ErrorCode::Internal,
@@ -5697,9 +5710,18 @@ mod tests {
         async fn boom() -> &'static str {
             panic!("kaboom")
         }
-        let app = Router::new()
-            .route("/boom", get(boom))
-            .layer(CatchPanicLayer::custom(panic_response));
+
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-api-panic-response-shape-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+
+        let app = Router::new().route("/boom", get(boom)).layer({
+            let state = state.clone();
+            CatchPanicLayer::custom(move |payload| panic_response(payload, &state))
+        });
 
         let response = app
             .oneshot(
@@ -5723,6 +5745,73 @@ mod tests {
         assert_eq!(body["status"], "error");
         assert_eq!(body["code"], ErrorCode::Internal.as_str());
         assert!(body["error"].as_str().unwrap().contains("kaboom"), "{body}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real layer order (CatchPanicLayer inside metrics::track_http,
+    /// exactly as main.rs's routes()/serve() wire it) must let a
+    /// panic-induced 500 land in BOTH the RED metrics (by status code,
+    /// via `track_http`, which never needed this fix) AND
+    /// `taguru_errors_total{kind="panic"}` (via `record_error`, which
+    /// `panic_response` used to skip entirely — see its doc comment).
+    #[tokio::test]
+    async fn a_panicking_handler_is_visible_in_both_the_red_metrics_and_the_error_counter() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::routing::get;
+        use tower::util::ServiceExt;
+        use tower_http::catch_panic::CatchPanicLayer;
+
+        async fn boom() -> &'static str {
+            panic!("kaboom")
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-api-panic-metrics-visibility-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+
+        let app = Router::new()
+            .route("/boom", get(boom))
+            .layer({
+                let state = state.clone();
+                CatchPanicLayer::custom(move |payload| panic_response(payload, &state))
+            })
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::metrics::track_http,
+            ))
+            .with_state(state.clone());
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/boom")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let rendered = state.metrics().render_prometheus(&state.gauge_snapshot());
+        assert!(
+            rendered.contains(
+                "taguru_http_requests_total{method=\"GET\",route=\"/boom\",status=\"500\"} 1"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("taguru_errors_total{kind=\"panic\"} 1"),
+            "{rendered}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn assoc(object: &str, weight: f64) -> Association {

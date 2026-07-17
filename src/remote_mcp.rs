@@ -429,6 +429,77 @@ mod tests {
         );
     }
 
+    /// A panic inside a dispatched tool call must never surface as a
+    /// bare 200 with no trace of the failure: `routes()` wires this
+    /// same `CatchPanicLayer::custom(panic_response)` as `dispatch`'s
+    /// own innermost layer specifically so a panic here is caught
+    /// before it can unwind out of `call_inner`'s `dispatch.oneshot`
+    /// (see `routes()`'s doc comment in main.rs). The RPC envelope
+    /// still answers 200 — this transport never surfaces a raw HTTP
+    /// error status for a tool call — but `panic_response` must still
+    /// have recorded `ErrorKind::Panic`, since that counter is the
+    /// only signal this failure leaves behind anywhere: the tool
+    /// result names just "HTTP 500", nothing that identifies it as a
+    /// panic rather than an ordinary handler-returned error.
+    #[tokio::test]
+    async fn a_panic_inside_a_dispatched_tool_call_still_records_the_error_metric() {
+        use crate::api::panic_response;
+        use crate::registry::AppState;
+        use tower_http::catch_panic::CatchPanicLayer;
+
+        async fn boom() -> &'static str {
+            panic!("kaboom")
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-remote-mcp-dispatched-panic-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+
+        let panicking = Router::new()
+            .route("/contexts", axum::routing::get(boom))
+            .layer({
+                let state = state.clone();
+                CatchPanicLayer::custom(move |payload| panic_response(payload, &state))
+            });
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_contexts", "arguments": {} },
+        });
+        let response = serve(
+            panicking,
+            Arc::new(String::new()),
+            None,
+            Bytes::from(body.to_string()),
+            1024,
+            Deadline::unbounded(),
+        )
+        .await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, 200, "the RPC envelope itself still succeeds");
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("HTTP 500"), "{text}");
+
+        let rendered = state.metrics().render_prometheus(&state.gauge_snapshot());
+        assert!(
+            rendered.contains("taguru_errors_total{kind=\"panic\"} 1"),
+            "a panic dispatched through /mcp must still reach taguru_errors_total, \
+             the only place this failure is visible outside the log line: {rendered}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// retrieve composes many dispatched calls into one response; each is
     /// individually bounded by `max_result_bytes`, but their sum is not
     /// until `run_retrieve_bounded` tracks the running total itself. A

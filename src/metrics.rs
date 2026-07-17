@@ -113,6 +113,7 @@ pub struct Metrics {
     errors_load: AtomicU64,
     errors_wal_refused: AtomicU64,
     errors_io: AtomicU64,
+    errors_panic: AtomicU64,
     /// `[op][outcome]`, outcome 0 = hit, 1 = empty.
     searches: [[AtomicU64; 2]; SearchOp::ALL.len()],
     resolve_tiers: [AtomicU64; ResolveTier::ALL.len()],
@@ -171,12 +172,15 @@ pub struct Metrics {
 /// these — and they demand different responses from an operator: `load`
 /// is a corrupt or unreadable image (restore from backup), `wal_refused`
 /// is the durability path failing writes (check the disk NOW), `io` is
-/// a sidecar or image file operation failing outside the WAL path.
+/// a sidecar or image file operation failing outside the WAL path, and
+/// `panic` is a handler unwinding on a bug — not a disk problem, so it
+/// warrants a bug report instead of an operator remedy.
 #[derive(Clone, Copy)]
 pub enum ErrorKind {
     Load,
     WalRefused,
     Io,
+    Panic,
 }
 
 /// The retrieval operations whose hit/empty split is tracked — the
@@ -502,6 +506,7 @@ impl Metrics {
             ErrorKind::Load => &self.errors_load,
             ErrorKind::WalRefused => &self.errors_wal_refused,
             ErrorKind::Io => &self.errors_io,
+            ErrorKind::Panic => &self.errors_panic,
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -738,11 +743,13 @@ impl Metrics {
             "counter",
             "Requests answered 500, by cause: load = image/WAL unreadable on load, \
              wal_refused = the WAL could not durably record a write (nothing applied), \
-             io = a file operation failed outside the WAL path.",
+             io = a file operation failed outside the WAL path, panic = a handler \
+             unwound on a bug.",
         );
         for (kind, counter) in [
             ("io", &self.errors_io),
             ("load", &self.errors_load),
+            ("panic", &self.errors_panic),
             ("wal_refused", &self.errors_wal_refused),
         ] {
             out.push_str(&format!(
@@ -1319,10 +1326,12 @@ mod tests {
         metrics.record_error(ErrorKind::Load);
         metrics.record_error(ErrorKind::Load);
         metrics.record_error(ErrorKind::WalRefused);
+        metrics.record_error(ErrorKind::Panic);
 
         let rendered = metrics.render_prometheus(&empty_gauges());
         assert!(rendered.contains("taguru_errors_total{kind=\"load\"} 2"));
         assert!(rendered.contains("taguru_errors_total{kind=\"wal_refused\"} 1"));
+        assert!(rendered.contains("taguru_errors_total{kind=\"panic\"} 1"));
         // The untouched kind still renders, so dashboards never see an
         // absent series.
         assert!(rendered.contains("taguru_errors_total{kind=\"io\"} 0"));
