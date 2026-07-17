@@ -971,50 +971,94 @@ fn user_message(source: &str, index: usize, total: usize, text: &str) -> String 
 #[derive(Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelOutput {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     associations: Vec<ModelAssociation>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     aliases: Vec<ModelAlias>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     questions: Vec<ModelQuestion>,
 }
 
-// Every field is an Option: models emit explicit nulls as readily as
-// they omit fields, and serde's `default` covers only absence — a
-// null must cost one item in merge(), never the whole chunk.
+/// A field the model set to `null` reaches the same deserializer as
+/// one it omitted — `#[serde(default)]` alone only covers an absent
+/// key, not a present-but-null one, so a nulled-out array would
+/// otherwise fail this document's whole `ModelOutput` over one field
+/// merge() would happily have treated as empty.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
+}
+
+// Every field goes through a lenient deserializer: models emit
+// explicit nulls as readily as they omit fields, and a wrong-typed
+// scalar (a string where the schema showed a number) as readily as
+// either. `#[serde(default)]` covers only absence and a plain
+// `Option<T>` covers only null — neither covers a value of the wrong
+// type, which would otherwise fail the whole chunk's deserialization
+// over one field. Reading it as a `Value` first and keeping only a
+// match on the expected shape costs that one field, not the item and
+// not the chunk — merge() already treats an absent field as `None`.
 #[derive(Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelAssociation {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     subject: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     label: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     object: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_f64")]
     weight: Option<f64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_u32")]
     paragraph: Option<u32>,
 }
 
 #[derive(Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelAlias {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     alias: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     canonical: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     kind: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelQuestion {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_u32")]
     paragraph: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     question: Option<String>,
+}
+
+fn lenient_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_str()
+        .map(str::to_string))
+}
+
+fn lenient_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(serde_json::Value::deserialize(deserializer)?.as_f64())
+}
+
+fn lenient_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok()))
 }
 
 /// The assistant text must contain one JSON object; code fences and
@@ -1535,6 +1579,41 @@ mod tests {
         assert_eq!(merged.associations[0].chunk_index, 0);
         assert!(merged.concepts.is_empty());
         assert_eq!(merged.dropped, 3);
+    }
+
+    #[test]
+    fn wrong_typed_scalars_cost_the_field_never_the_document() {
+        // A model that emits "weight": "high" or "paragraph": [1] is
+        // handing back a wrong-typed scalar, not a null — same failure
+        // class as the null case above, and it must land the same way:
+        // that one field reads as absent, the rest of the item survives.
+        let malformed = r#"{"associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": "high"},
+            {"subject": "c", "label": "l", "object": "d", "paragraph": [1]}
+        ]}"#;
+        let output = parse_model_output(malformed).expect("wrong-typed scalars must still parse");
+        let merged = merge(vec![output], 0, 1);
+        assert_eq!(merged.associations.len(), 2);
+        // A weight that failed to parse reads as absent — a plain assertion.
+        assert_eq!(merged.associations[0].weight, 1.0);
+        // A paragraph that failed to parse reads as absent — untagged,
+        // never dropped for it.
+        assert_eq!(merged.associations[1].paragraph, None);
+    }
+
+    #[test]
+    fn a_null_array_field_reads_as_empty_not_a_parse_failure() {
+        // `#[serde(default)]` alone only covers an absent key; a model
+        // that emits "associations": null (present, explicitly empty)
+        // must not fail the whole document over it, and siblings the
+        // model got right (questions here) must still come through.
+        let nulled = r#"{"associations": null, "questions": [
+            {"paragraph": 0, "question": "何?"}
+        ]}"#;
+        let output = parse_model_output(nulled).expect("a null array field must still parse");
+        assert!(output.associations.is_empty());
+        let merged = merge(vec![output], 1, 1);
+        assert_eq!(merged.questions, vec![(0, "何?".to_string())]);
     }
 
     fn association(subject: &str, label: &str, object: &str, weight: f64) -> ModelAssociation {
