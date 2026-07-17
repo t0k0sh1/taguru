@@ -116,10 +116,15 @@ pub fn run(args: &[String]) -> i32 {
     let image = (context.to_bytes().len() as f64 * factor) as u64;
 
     // The vector sidecar is arithmetic, not synthesis: one f32 vector
-    // and one gloss hash per canonical concept and label.
-    let embedded_names = plan.concepts + plan.labels;
+    // and one gloss hash per canonical concept and label. Routed
+    // through f64 like `footprint`/`image` above: --concepts,
+    // --labels, and --embedding-dims are each unbounded from the
+    // CLI, and u64 multiplication overflows (panicking in debug,
+    // silently wrapping to a nonsense small number in release) well
+    // before a realistic capacity-planning input does.
+    let embedded_names = plan.concepts as f64 + plan.labels as f64;
     let vectors = if plan.embedding_dims > 0 {
-        embedded_names * (plan.embedding_dims * 4 + plan.name_bytes as u64 + 64)
+        (embedded_names * (plan.embedding_dims as f64 * 4.0 + plan.name_bytes as f64 + 64.0)) as u64
     } else {
         0
     };
@@ -129,9 +134,11 @@ pub fn run(args: &[String]) -> i32 {
     } else {
         None
     };
-    let passage_resident = passages
-        .as_ref()
-        .map_or(0, |p| p.store_bytes + p.bm25_bytes + p.vector_bytes);
+    let passage_resident = passages.as_ref().map_or(0, |p| {
+        p.store_bytes
+            .saturating_add(p.bm25_bytes)
+            .saturating_add(p.vector_bytes)
+    });
 
     println!(
         "target shape: {} associations · {} concepts · {} labels · {} sources · {}-byte names",
@@ -166,7 +173,7 @@ pub fn run(args: &[String]) -> i32 {
             "  vector store       {:>12}   ({} dims × 4 B × {} names, resident after semantic use)",
             fmt_bytes(vectors),
             plan.embedding_dims,
-            embedded_names
+            embedded_names as u64
         );
     }
     if let Some(p) = &passages {
@@ -189,7 +196,11 @@ pub fn run(args: &[String]) -> i32 {
     }
     println!(
         "  TAGURU_CACHE_BYTES ≥ {} to keep this context hot; footprint is modeled",
-        fmt_bytes(footprint + vectors + passage_resident)
+        fmt_bytes(
+            footprint
+                .saturating_add(vectors)
+                .saturating_add(passage_resident)
+        )
     );
     println!("  bytes, not RSS — leave ~20-30% container headroom on top.");
 
