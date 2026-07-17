@@ -3415,11 +3415,18 @@ impl AppState {
                         (None, None) => None,
                     })
                     .map_or(1, |lane| lane.div_ceil(4));
-                let mut candidate = first.max(lane_need);
+                // `lane_need` sizes the pool a RAW lane rank would need,
+                // unlike `first` it is not bounded by `full.len()` —
+                // under heavy staleness (many raw lane hits filtered
+                // out as stale before `full` was built) it can overshoot
+                // past `full.len()` on this very first candidate. Clamp
+                // rather than let that overshoot read as "unreachable":
+                // `full.len()` is always a legal, still-untried candidate
+                // (it's `first`'s own upper bound), and skipping it would
+                // report a false negative for a limit that would have
+                // served the target.
+                let mut candidate = first.max(lane_need).min(full.len());
                 for _ in 0..8 {
-                    if candidate > full.len() {
-                        return None;
-                    }
                     let rerun = fuse_passage_lanes(
                         &store,
                         lexical_lane(lane_pool(candidate)),
@@ -3428,6 +3435,9 @@ impl AppState {
                     );
                     if rerun.iter().any(is_target) {
                         return Some(candidate);
+                    }
+                    if candidate >= full.len() {
+                        return None;
                     }
                     candidate = (candidate.saturating_mul(2)).min(full.len());
                 }
@@ -11618,6 +11628,117 @@ mod tests {
         );
         let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
         assert_eq!(sidecar.len(), 1, "the prune reached the disk too");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A regression for a false-negative `limit_to_reach`: a raw semantic
+    /// lane rank counts every row the vector store holds for a source,
+    /// stale ones included, so it can run far ahead of `full.len()` (the
+    /// count that actually survives the staleness filter). `lane_need`
+    /// derives from that raw rank; before the fix it sized the starting
+    /// candidate past `full.len()` and the search bailed out with "no
+    /// limit reaches it" without ever trying `full.len()` itself — which,
+    /// being the target's own rank in `full`, always would have.
+    #[test]
+    fn limit_to_reach_is_not_a_false_negative_when_stale_rows_inflate_the_raw_lane_rank() {
+        struct MarkerEmbeddings;
+        impl EmbeddingProvider for MarkerEmbeddings {
+            fn model(&self) -> &str {
+                "marker"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                Ok(texts
+                    .iter()
+                    .map(|text| {
+                        if text.starts_with("TARGETMARKER") {
+                            vec![0.5, 0.8660254]
+                        } else {
+                            vec![1.0, 0.0]
+                        }
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("limit-to-reach-stale");
+        let state = boot_for_passage_embedding(&dir, Arc::new(MarkerEmbeddings), 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        let mut passages = BTreeMap::new();
+        passages.insert("fresh-doc".to_string(), "FRESHMARKER".to_string());
+        passages.insert("target-doc".to_string(), "TARGETMARKER".to_string());
+        for i in 0..15 {
+            passages.insert(format!("decoy-{i:02}"), "DECOYMARKER".to_string());
+        }
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        // Edit every decoy without re-embedding: their vector rows stay
+        // in the store at the old hash, tied with `fresh-doc` at the top
+        // of the raw cosine sweep, but staleness drops all 15 out of
+        // `full` — so they inflate the target's raw rank without ever
+        // occupying a `full` slot themselves.
+        let mut edited = BTreeMap::new();
+        for i in 0..15 {
+            edited.insert(format!("decoy-{i:02}"), "DECOYMARKER-EDITED".to_string());
+        }
+        state
+            .store_passages("sake", plain(edited))
+            .unwrap()
+            .unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "sake",
+                "QUERYMARKER",
+                "target-doc",
+                None,
+                1,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert!(
+            !explanation.served,
+            "fresh-doc alone fills the one requested seat"
+        );
+        assert_eq!(
+            explanation.ranked, 2,
+            "only fresh-doc and target-doc survive the staleness filter"
+        );
+        assert_eq!(
+            explanation.limit_to_reach,
+            Some(2),
+            "full.len() (2) is itself a valid, untried candidate — it must not \
+             be skipped as unreachable just because lane_need overshoots it"
+        );
+
+        let hits = state
+            .search_passages("sake", "QUERYMARKER", 2, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.source == "target-doc"),
+            "limit_to_reach must actually reach it: {hits:?}"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
