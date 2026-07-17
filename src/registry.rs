@@ -342,6 +342,14 @@ pub struct Entry {
     /// the merge, so a slower refresh of an older gloss can never
     /// finish after — and clobber — a faster refresh of a newer one.
     vectors_refresh: Mutex<()>,
+    /// Set when a gloss-embedding refresh's save to the sidecar fails
+    /// after the provider already sold it the rows — `vectors` above
+    /// caches them even though the disk does not have them yet.
+    /// Cleared on the save that finally lands. The next refresh reads
+    /// this, not just its own diff (which reads that same cache and so
+    /// can land on "nothing new to buy"), to decide whether to retry
+    /// the write even when its own pass bought nothing.
+    vectors_save_pending: AtomicBool,
     /// The passage store, resident after first use (see
     /// [`crate::passages::PassageStore`]) and counted against the cache
     /// budget like `vectors`. Lock order: `inner` (the tombstone fence,
@@ -417,6 +425,7 @@ impl Entry {
             last_touch: AtomicU64::new(0),
             vectors: Mutex::new(None),
             vectors_refresh: Mutex::new(()),
+            vectors_save_pending: AtomicBool::new(false),
             passages: Mutex::new(None),
             bm25: RwLock::new(None),
             bm25_dirty: AtomicBool::new(false),
@@ -3777,7 +3786,20 @@ impl AppState {
         // keeps two overlapping refreshes from racing: only one can be
         // here at a time, so the diff below always runs against
         // whatever the previous refresh (if any) already published.
-        let existing = VectorStore::load(&path);
+        //
+        // Read through the memory cache, not straight off disk: a prior
+        // refresh's save can fail after the provider already sold it
+        // the rows (see the tail of this function), and the cache is
+        // where those survive even though the sidecar does not. Empty
+        // and disk agree whenever nothing failed, so this changes
+        // nothing on the common path.
+        let existing = self.entry_vectors(&entry, &file_stem(name));
+        // Claim the save-pending flag up front: it only ever reflects a
+        // prior pass's save failure (this pass owns the whole write
+        // side via `_serial`, so nothing else can set it mid-flight),
+        // and tells this pass to retry the write below even if its own
+        // diff buys nothing new.
+        let was_pending = entry.vectors_save_pending.swap(false, Ordering::Relaxed);
         let mut fresh_model = existing.model != embedder.model();
         let (mut embedded_concepts, concept_failure) = self.embed_stale(
             &*embedder,
@@ -3862,16 +3884,25 @@ impl AppState {
         // the length of this save — the same trade `flush_bm25` makes
         // for its sidecar.
         let _fence = entry.read_unless_deleted()?;
-        let mut store = VectorStore::load(&path);
+        // Same basis `existing` was diffed against above, not a fresh
+        // disk read: `_serial` has excluded every other refresh of
+        // this context since before `existing` was taken, so nothing
+        // could have changed the sidecar (or the cache backing it) in
+        // between — re-reading here would only risk losing rows a
+        // still-unpersisted prior pass bought and cached but a
+        // straight disk read cannot see.
+        //
         // `fresh_model` also covers the width change above: rows for
         // names that have since left the graph must not linger at the
         // old width either.
-        if fresh_model || store.model != embedder.model() {
-            store = VectorStore {
+        let mut store = if fresh_model || existing.model != embedder.model() {
+            VectorStore {
                 model: embedder.model().to_string(),
                 ..Default::default()
-            };
-        }
+            }
+        } else {
+            (*existing).clone()
+        };
         store.concepts.extend(embedded_concepts);
         store.labels.extend(embedded_labels);
         // Prune ghost rows: a name dropped by compaction leaves the live
@@ -3892,9 +3923,22 @@ impl AppState {
             .retain(|name, _| live_labels.contains(name.as_str()));
         let total = store.concepts.len() + store.labels.len();
         let pruned = before_prune - total;
-        if (newly_embedded > 0 || pruned > 0)
+        // `was_pending` covers a prior save that failed after already
+        // buying rows: this pass's own diff can land on newly_embedded
+        // == 0 and pruned == 0 (everything it needs is already carried
+        // from `existing`, which reads the memory cache — see above)
+        // while the disk image is still whatever the failed save left
+        // it as. Without this, that state would never retry the write.
+        if (newly_embedded > 0 || pruned > 0 || was_pending)
             && let Err(error) = store.save(&path)
         {
+            entry.vectors_save_pending.store(true, Ordering::Relaxed);
+            // The provider already sold `embedded_concepts`/
+            // `embedded_labels`; cache the merged store anyway so the
+            // next refresh's `existing` (read from this same cache,
+            // not the disk — see above) does not buy them a second
+            // time. Only the sidecar write failed, not this.
+            *entry.vectors.lock() = Some(Arc::new(store));
             return Some(Err(format!("vector store not persisted: {error}")));
         }
         // Publish the fresh store so queries never re-read the sidecar.
@@ -4031,8 +4075,13 @@ impl AppState {
         let _serial = entry.passage_refresh.lock();
         // Claim the dirty flag up front: work that lands mid-refresh
         // re-marks it, so the ticker returns — never lost, never
-        // double-claimed.
-        entry.passages_embed_dirty.store(false, Ordering::Relaxed);
+        // double-claimed. The prior value still matters: besides a
+        // fresh passage store/retract, it is also how a save that
+        // failed after buying rows (see `changed` below) tells this
+        // pass to retry the write even if its own diff finds nothing
+        // new — otherwise a would-be-`changed: false` pass would never
+        // flush the cache the failed save left behind onto disk.
+        let was_dirty = entry.passages_embed_dirty.swap(false, Ordering::Relaxed);
         let store = {
             let _fence = entry.read_unless_deleted()?;
             match self.entry_passages(&entry, &file_stem(name)) {
@@ -4048,7 +4097,13 @@ impl AppState {
         };
         let records = store.snapshot();
         let path = pvectors_path(&self.0.data_dir, &file_stem(name));
-        let existing = PassageVectorStore::load(&path);
+        // Read through the memory cache, not straight off disk: a prior
+        // refresh's save can fail after the provider already sold it
+        // the rows (see the tail of this function), and the cache is
+        // where those survive even though the sidecar does not. Empty
+        // and disk agree whenever nothing failed, so this changes
+        // nothing on the common path.
+        let existing = self.entry_passage_vectors(&entry, &file_stem(name));
         let mut fresh_model = existing.model != embedder.model();
         // A provider can change output width behind a stable model name
         // (a backend swap behind the same proxy). Old-width rows carried
@@ -4205,14 +4260,28 @@ impl AppState {
         // touches the entry's own data, only `entry.passage_vectors`
         // (its own lock) and the sidecar file, so graph reads need not
         // block for the length of this save.
-        let changed =
-            embedded > 0 || fresh.len() != existing.len() || (fresh_model && !fresh.is_empty());
+        // `was_dirty` covers a prior save that failed after already
+        // buying rows: this pass's own diff can land on `changed:
+        // false` (everything it needs is already carried from
+        // `existing`, which reads the memory cache — see above) while
+        // the disk image is still whatever the failed save left it
+        // as. Without this, that state would never retry the write.
+        let changed = embedded > 0
+            || fresh.len() != existing.len()
+            || (fresh_model && !fresh.is_empty())
+            || was_dirty;
         let _fence = entry.read_unless_deleted()?;
+        let total_rows = fresh.len();
         if changed && let Err(error) = fresh.save(&path) {
             entry.passages_embed_dirty.store(true, Ordering::Relaxed);
+            // The provider already sold `embedded` of these rows; cache
+            // them anyway so the next refresh's `existing` (read from
+            // this same cache, not the disk — see above) does not buy
+            // them a second time. Only the sidecar write failed, not
+            // this.
+            *entry.passage_vectors.lock() = Some(Arc::new(fresh));
             return Some(Err(format!("passage vectors not persisted: {error}")));
         }
-        let total_rows = fresh.len();
         *entry.passage_vectors.lock() = Some(Arc::new(fresh));
         match failure {
             Some(error) => {
@@ -5463,16 +5532,34 @@ impl AppState {
             .store(total as i64, Ordering::Relaxed);
     }
 
-    /// One entry's eviction, everything under its write lock: persist
-    /// if dirty, drop the graph, clear the cached vectors. `false`
-    /// means nothing was freed — the entry got pinned since the
-    /// caller's sweep, its save failed (it stays resident rather than
-    /// losing writes), or a concurrent eviction already cleared it. That
-    /// last case matters: two budget sweeps snapshot the directory under
-    /// a shared lock and can carry the same candidate, so the loser must
-    /// report `false` or the caller subtracts its bytes from the
-    /// residency estimate a second time.
+    /// One entry's eviction: persist if dirty, drop the graph, clear
+    /// the cached vectors. `false` means nothing was freed — the entry
+    /// got pinned since the caller's sweep, its save failed (it stays
+    /// resident rather than losing writes), or a concurrent eviction
+    /// already cleared it. That last case matters: two budget sweeps
+    /// snapshot the directory under a shared lock and can carry the
+    /// same candidate, so the loser must report `false` or the caller
+    /// subtracts its bytes from the residency estimate a second time.
+    ///
+    /// The common case persists BEFORE the entry's write lock below is
+    /// taken, via [`Self::flush_bm25`] and [`Self::flush_entry`] —
+    /// both already stage their disk work (serialize + fsync) with
+    /// the lock released (see `flush_entry`'s doc comment) and re-take
+    /// it only to publish. Calling them here, instead of this function
+    /// doing its own lock-held save the way it once did unconditionally,
+    /// means an eviction no longer stalls every reader and writer of
+    /// the context for as long as the image takes to land — the same
+    /// stall `flush_entry` was written to avoid in the first place.
+    /// The lock-held save below still exists as the fallback for the
+    /// rare case a rival flush is already mid-flight when this call
+    /// starts: `flush_entry`'s own claim would just lose that race and
+    /// no-op, and skipping the drop-to-Cold below in that case would
+    /// mean the caller's eviction sweep might never make progress on a
+    /// context under sustained write pressure.
     fn evict_entry(&self, name: &str, entry: &Entry) -> bool {
+        self.flush_bm25(name, entry);
+        self.flush_entry(name, entry);
+
         let mut guard = entry.inner.write();
         let inner = &mut *guard;
         // Re-check under the write lock; the entry may have changed
@@ -5480,21 +5567,18 @@ impl AppState {
         if inner.meta.pinned {
             return false;
         }
-        // Tracks whether THIS call actually released something — a graph,
-        // a passage store, an index, or a vector cache. A call that finds
-        // everything already gone (a rival sweep won the race) returns
-        // `false` so its bytes are not double-counted.
         let mut freed = false;
         let watermark = inner.wal_seq - 1;
         if let Slot::Hot(context) = &mut inner.slot {
-            // Persist before dropping if the image is stale (`dirty`) OR a
-            // flush is mid-stage (`flushing`). A flush claims its entry by
-            // clearing `dirty` under this same lock, then stages the image
-            // with the lock dropped; in that window `dirty` reads clean
-            // though the write is NOT yet on disk. Saving on `flushing`
-            // too means we never drop a hot context whose only un-imaged
-            // write lives in a flush that has not committed — the write
-            // that, with the WAL off, exists nowhere else.
+            // Still dirty/flushing after the attempt above: either a
+            // rival flush was already mid-flight (its own claim swap
+            // made `flush_entry` above a no-op) or `flush_entry` itself
+            // lost a race and backed off. Either way the durable image
+            // is stale or absent, so fall back to saving it here, under
+            // the lock, same as this function always did — the rare
+            // cost of a lock-held serialize+fsync only on the rare
+            // path where flush and eviction land on the same entry at
+            // the same instant.
             if entry.dirty.load(Ordering::Relaxed) || entry.flushing.load(Ordering::Relaxed) {
                 context.set_applied_seq(watermark);
                 let stats = ContextStats::of(context);
@@ -5519,38 +5603,47 @@ impl AppState {
                 inner.stats = ContextStats::of(context);
             }
             inner.slot = Slot::Cold;
-            // Bump so a flush that staged its image before this eviction
-            // can tell, once it re-locks, that the slot it captured is
-            // gone — a later reload plus that flush's re-publish would
-            // otherwise resurrect a stale image over whatever was written
-            // after the reload.
+            // Bump so a flush that staged its image before this
+            // eviction can tell, once it re-locks, that the slot it
+            // captured is gone — a later reload plus that flush's
+            // re-publish would otherwise resurrect a stale image over
+            // whatever was written after the reload.
             inner.image_generation += 1;
-            // Local zero only: the caller's absolute store settles the
-            // global, so a recount's delta would double-count.
+            // Local zero only: the caller's absolute store settles
+            // the global, so a recount's delta would double-count.
             inner.counted_bytes = 0;
             self.0.metrics.record_eviction(true);
             freed = true;
         }
+        drop(guard);
+
         // Dropping the passage store loses nothing (its log is fsynced
         // per batch); a best-effort compaction first just spares the
         // next load a replay. Failure changes neither.
-        {
+        let compacted_wal_bytes = {
             let mut passages = entry.passages.lock();
-            if let Some(store) = passages.take() {
-                freed = true;
-                if store.pending_log_bytes() > 0
-                    && let Err(error) = store.compact()
-                {
-                    tracing::warn!("passages for '{name}' evicted uncompacted: {error}");
+            match passages.take() {
+                Some(store) => {
+                    if store.pending_log_bytes() > 0
+                        && let Err(error) = store.compact()
+                    {
+                        tracing::warn!("passages for '{name}' evicted uncompacted: {error}");
+                    }
+                    Some(store.pending_log_bytes())
                 }
-                // Cold from here on: `gauge_snapshot` reads this cached
-                // value instead of re-`stat`ing the log on every scrape.
-                inner.passages_wal_bytes = store.pending_log_bytes();
+                None => None,
             }
+        };
+        if let Some(bytes) = compacted_wal_bytes {
+            freed = true;
+            // Cold from here on: `gauge_snapshot` reads this cached
+            // value instead of re-`stat`ing the log on every scrape.
+            entry.inner.write().passages_wal_bytes = bytes;
         }
         // Same best-effort posture for a dirty index: saving it spares
-        // the next residency a re-tokenization, and the entry lock held
-        // above keeps a racing delete away from the file.
+        // the next residency a re-tokenization. `flush_bm25` above
+        // already persisted it if it was dirty, so `bm25_dirty` is
+        // normally already clear here and this is just a `take()`.
         {
             let mut bm25 = entry.bm25.write();
             if let Some(index) = bm25.take() {
@@ -8415,8 +8508,12 @@ mod tests {
             .map_err(|_| "write")
             .unwrap();
         state.flush_dirty();
+        // 2, not 1: evicting "a" above already flushed it (evict_entry
+        // persists via flush_entry so its own write lock is never held
+        // across the serialize+fsync — see evict_entry's doc comment),
+        // and this flush_dirty tick adds "b"'s.
         assert!(
-            rendered(&state).contains("taguru_flush_total{outcome=\"ok\"} 1"),
+            rendered(&state).contains("taguru_flush_total{outcome=\"ok\"} 2"),
             "a flushed dirty context must count"
         );
 
@@ -10070,6 +10167,83 @@ mod tests {
             recovered, EXPECTED,
             "a stale flush (published: {published}) regressed the image past \
              what the eviction had already made durable"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn evict_entry_does_not_hold_the_entry_lock_across_its_serialize_and_fsync() {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let dir = scratch_dir("evict-lock-free-io");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("big", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        // Big enough that flush_entry's stage (write + fsync) step, which
+        // evict_entry now goes through instead of saving under its own
+        // lock, takes long enough for the try_write below to land while
+        // it's still in flight — with a tiny graph the flush publishes
+        // before this thread gets a look in and the assertion proves
+        // nothing either way.
+        let seed: Vec<_> = (0..50_000)
+            .map(|index| {
+                assoc_op(
+                    &format!("seed-subject-{index}-xxxxxxxxxxxxxxxxxxxx"),
+                    "seed-label-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                    &format!("seed-object-{index}-xxxxxxxxxxxxxxxxxxxx"),
+                    1.0,
+                    None,
+                )
+            })
+            .collect();
+        state
+            .add_associations("big", seed, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("big").unwrap();
+        let evictor = {
+            let state = state.clone();
+            let entry = Arc::clone(&entry);
+            thread::spawn(move || state.evict_entry("big", &entry))
+        };
+        // flush_entry's claim section sets `flushing` AND serializes the
+        // graph (context.to_bytes()) before it releases the lock, so
+        // spinning on `flushing` alone would just as often land while
+        // the lock is still held for that serialize step. Poll instead:
+        // the lock must open up SOME time before the evictor finishes —
+        // that's the stage_bytes (write + fsync) window, exactly what
+        // the old evict_entry held its own write lock across instead,
+        // stalling every reader and writer of "big" for as long as the
+        // serialize+fsync took.
+        let poll_since = Instant::now();
+        let mut saw_free_lock = false;
+        while !evictor.is_finished() {
+            if entry.inner.try_write().is_some() {
+                saw_free_lock = true;
+                break;
+            }
+            assert!(
+                poll_since.elapsed() < Duration::from_secs(5),
+                "evict_entry seems to hold the entry lock for the whole eviction"
+            );
+            thread::yield_now();
+        }
+        assert!(
+            saw_free_lock,
+            "evict_entry must not hold the entry lock across its serialize+fsync \
+             (never observed it open up before the evictor finished — if this \
+             gets flaky, grow the seed so eviction takes longer)"
+        );
+
+        assert!(
+            evictor.join().unwrap(),
+            "the seeded write must have been evictable"
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -11732,6 +11906,73 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn refresh_passage_embeddings_does_not_rebuy_rows_a_failed_save_already_bought() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("pvec-save-fail");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごの段落。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        // The disk goes bad right before the save: the provider still
+        // gets paid (embed happens before the write), but the sidecar
+        // write fails.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let error = state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("not persisted"), "{error}");
+        let calls_after_failure = calls.load(Ordering::Relaxed);
+        assert!(
+            calls_after_failure > 0,
+            "the provider must have been paid before the save failed"
+        );
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The disk recovers: the retry must not re-embed the row the
+        // failed save already bought (a width probe still spends one
+        // call on a no-op refresh, same as any other — see
+        // a_width_change_under_the_same_model_name_re_embeds_everything),
+        // yet it must still retry the write so the row does not stay
+        // unpersisted forever.
+        let outcome = state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            outcome.embedded, 0,
+            "must not re-embed what the failed save already cached"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            calls_after_failure + 1,
+            "only the width probe's one call, not a re-embed of the cached row"
+        );
+
+        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("fruit")));
+        assert_eq!(
+            sidecar.len(),
+            outcome.total,
+            "the retried save must have actually landed on disk"
+        );
+        assert!(outcome.total > 0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_stored_question_row_answers_a_question_shaped_query_at_its_paragraph() {
         let dir = scratch_dir("doc2query-hit");
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -12410,6 +12651,73 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((embedded, total), (0, 3));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn refresh_embeddings_does_not_rebuy_rows_a_failed_save_already_bought() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("gvec-save-fail");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("fruit", |context| {
+                context.associate("りんご", "l", "アップル", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+
+        // The disk goes bad right before the save: the provider still
+        // gets paid (embed happens before the write), but the sidecar
+        // write fails.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let error = state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("not persisted"), "{error}");
+        let calls_after_failure = calls.load(Ordering::Relaxed);
+        assert!(
+            calls_after_failure > 0,
+            "the provider must have been paid before the save failed"
+        );
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The disk recovers: the retry must not re-embed the rows the
+        // failed save already bought (a width probe still spends one
+        // call on a no-op refresh, same as any other — see
+        // a_width_change_under_the_same_model_name_re_embeds_everything),
+        // yet it must still retry the write so those rows do not stay
+        // unpersisted forever.
+        let (embedded, total) = state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            embedded, 0,
+            "must not re-embed what the failed save already cached"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            calls_after_failure + 1,
+            "only the width probe's one call, not a re-embed of the cached rows"
+        );
+
+        let store = VectorStore::load(&vectors_path(&dir, &file_stem("fruit")));
+        assert_eq!(
+            store.concepts.len() + store.labels.len(),
+            total,
+            "the retried save must have actually landed on disk"
+        );
+        assert!(total > 0);
 
         let _ = fs::remove_dir_all(dir);
     }

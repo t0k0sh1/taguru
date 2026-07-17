@@ -393,7 +393,7 @@ pub type VectorTable = HashMap<String, (u64, Vec<f32>)>;
 /// One context's name vectors: a derived cache keyed by the model that
 /// produced it. Wholesale discarded on model change — vectors from two
 /// models must never be compared.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct VectorStore {
     pub model: String,
     pub concepts: VectorTable,
