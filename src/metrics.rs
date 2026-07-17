@@ -36,15 +36,39 @@ const LATENCY_BUCKETS: [(u64, &str); 8] = [
 
 /// One latency distribution. `counts[i]` is the exclusive bin ending
 /// at `LATENCY_BUCKETS[i]` — NOT cumulative; the `_bucket{le=…}`
-/// prefix sums are computed at render time so recording stays a single
-/// increment. `count` doubles as the `+Inf` bucket and the `_count`
-/// line (the exposition format defines them to be equal), so it also
-/// counts observations past the largest finite bound.
+/// prefix sums are computed at render time. `count` doubles as the
+/// `+Inf` bucket and the `_count` line (the exposition format defines
+/// them to be equal), so it also counts observations past the largest
+/// finite bound.
+///
+/// Guarded by one mutex rather than three independent atomics: three
+/// separate atomic loads (buckets, then sum, then count) can each land
+/// at a different instant, and a render that catches an in-flight
+/// `observe()` between its bucket increment and its count increment
+/// sees a finite bucket that already includes the new observation but
+/// a `+Inf`/`_count` that does not yet — an invalid histogram, since
+/// `+Inf` must never be less than a finite bucket. Locking the whole
+/// read (and the whole write) makes every render see one consistent
+/// instant instead.
 #[derive(Default)]
 struct Histogram {
-    counts: [AtomicU64; LATENCY_BUCKETS.len()],
-    sum_micros: AtomicU64,
-    count: AtomicU64,
+    state: Mutex<HistogramState>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct HistogramState {
+    counts: [u64; LATENCY_BUCKETS.len()],
+    sum_micros: u64,
+    count: u64,
+}
+
+/// A [`Histogram`] read at one consistent instant: cumulative
+/// `_bucket{le=…}` values (ascending, one per finite bound), the
+/// running sum, and the total count all agree with each other.
+struct HistogramSnapshot {
+    cumulative: [u64; LATENCY_BUCKETS.len()],
+    sum_micros: u64,
+    count: u64,
 }
 
 impl Histogram {
@@ -55,26 +79,30 @@ impl Histogram {
         // low buckets, where this server's common case lives, are
         // exactly where that skews `histogram_quantile` the most.
         let micros = elapsed.as_micros();
+        let mut state = self.state.lock().unwrap();
         if let Some(bin) = LATENCY_BUCKETS
             .iter()
             .position(|&(bound, _)| micros <= u128::from(bound) * 1000)
         {
-            self.counts[bin].fetch_add(1, Ordering::Relaxed);
+            state.counts[bin] += 1;
         }
-        self.sum_micros
-            .fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
-        self.count.fetch_add(1, Ordering::Relaxed);
+        state.sum_micros += elapsed.as_micros() as u64;
+        state.count += 1;
     }
 
-    /// Cumulative `_bucket{le=…}` values, ascending, one per finite bound.
-    fn cumulative(&self) -> [u64; LATENCY_BUCKETS.len()] {
+    fn snapshot(&self) -> HistogramSnapshot {
+        let state = self.state.lock().unwrap();
         let mut running = 0u64;
-        let mut out = [0u64; LATENCY_BUCKETS.len()];
-        for (slot, count) in out.iter_mut().zip(&self.counts) {
-            running += count.load(Ordering::Relaxed);
+        let mut cumulative = [0u64; LATENCY_BUCKETS.len()];
+        for (slot, count) in cumulative.iter_mut().zip(&state.counts) {
+            running += count;
             *slot = running;
         }
-        out
+        HistogramSnapshot {
+            cumulative,
+            sum_micros: state.sum_micros,
+            count: state.count,
+        }
     }
 }
 
@@ -571,14 +599,14 @@ impl Metrics {
             "HTTP request latency by method and route template.",
         );
         for ((method, route), stat) in &routes {
-            let cumulative = stat.latency.cumulative();
-            for ((_, le), value) in LATENCY_BUCKETS.iter().zip(cumulative) {
+            let snapshot = stat.latency.snapshot();
+            for ((_, le), value) in LATENCY_BUCKETS.iter().zip(snapshot.cumulative) {
                 out.push_str(&format!(
                     "taguru_http_request_duration_seconds_bucket{{method=\"{method}\",route=\"{route}\",le=\"{le}\"}} {value}\n"
                 ));
             }
-            let count = stat.latency.count.load(Ordering::Relaxed);
-            let sum = stat.latency.sum_micros.load(Ordering::Relaxed) as f64 / 1e6;
+            let count = snapshot.count;
+            let sum = snapshot.sum_micros as f64 / 1e6;
             out.push_str(&format!(
                 "taguru_http_request_duration_seconds_bucket{{method=\"{method}\",route=\"{route}\",le=\"+Inf\"}} {count}\n"
             ));
@@ -666,19 +694,19 @@ impl Metrics {
             "Embedding provider round-trip latency, retries included \
              (calls past the top bucket land in +Inf).",
         );
-        let cumulative = self.embed_latency.cumulative();
-        for ((_, le), value) in LATENCY_BUCKETS.iter().zip(cumulative) {
+        let snapshot = self.embed_latency.snapshot();
+        for ((_, le), value) in LATENCY_BUCKETS.iter().zip(snapshot.cumulative) {
             out.push_str(&format!(
                 "taguru_embedding_duration_seconds_bucket{{le=\"{le}\"}} {value}\n"
             ));
         }
-        let count = self.embed_latency.count.load(Ordering::Relaxed);
+        let count = snapshot.count;
         out.push_str(&format!(
             "taguru_embedding_duration_seconds_bucket{{le=\"+Inf\"}} {count}\n"
         ));
         out.push_str(&format!(
             "taguru_embedding_duration_seconds_sum {}\n",
-            self.embed_latency.sum_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0
+            snapshot.sum_micros as f64 / 1_000_000.0
         ));
         out.push_str(&format!(
             "taguru_embedding_duration_seconds_count {count}\n"
@@ -1230,13 +1258,57 @@ mod tests {
         histogram.observe(Duration::from_millis(3)); // le 5
         histogram.observe(Duration::from_millis(400)); // le 500
 
-        let cumulative = histogram.cumulative();
+        let cumulative = histogram.snapshot().cumulative;
         assert_eq!(cumulative, [1, 3, 3, 3, 3, 4, 4, 4]);
         let mut previous = 0;
         for value in cumulative {
             assert!(value >= previous, "buckets must never decrease");
             previous = value;
         }
+    }
+
+    /// A [`Histogram`] backed by three independent atomics (the shape
+    /// this used to have) can render `+Inf` as less than a finite
+    /// bucket: a reader catching `observe()` between its bucket
+    /// increment and its count increment sees the new observation in
+    /// `cumulative` but not yet in `count`. The single mutex behind
+    /// `snapshot()` rules that out — every reader sees one consistent
+    /// instant — so this holds under concurrent writers and readers,
+    /// not just the single-threaded shape the other tests exercise.
+    #[test]
+    fn concurrent_observe_and_snapshot_never_report_inf_below_a_finite_bucket() {
+        let histogram = Arc::new(Histogram::default());
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                let histogram = Arc::clone(&histogram);
+                std::thread::spawn(move || {
+                    for i in 0..2_000u64 {
+                        histogram.observe(Duration::from_micros(i % 6_000));
+                    }
+                })
+            })
+            .collect();
+
+        let reader = {
+            let histogram = Arc::clone(&histogram);
+            std::thread::spawn(move || {
+                for _ in 0..2_000 {
+                    let snapshot = histogram.snapshot();
+                    let max_finite = *snapshot.cumulative.last().unwrap();
+                    assert!(
+                        snapshot.count >= max_finite,
+                        "+Inf ({}) must never be less than a finite bucket ({})",
+                        snapshot.count,
+                        max_finite
+                    );
+                }
+            })
+        };
+
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        reader.join().unwrap();
     }
 
     #[test]
@@ -1248,7 +1320,7 @@ mod tests {
         histogram.observe(Duration::from_micros(1_000)); // le 1, exactly
         histogram.observe(Duration::from_micros(5_100)); // le 10
 
-        assert_eq!(histogram.cumulative(), [1, 2, 3, 3, 3, 3, 3, 3]);
+        assert_eq!(histogram.snapshot().cumulative, [1, 2, 3, 3, 3, 3, 3, 3]);
     }
 
     #[test]
