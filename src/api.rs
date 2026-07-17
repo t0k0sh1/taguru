@@ -5532,14 +5532,22 @@ pub async fn unreachable_from(
     }
     // Always walks every edge in the context (see Context::unreachable_from)
     // — the same unconditional-full-scan cost as audit_drift's
-    // unsourced_edges, which already pre-flights this.
+    // unsourced_edges, so it gets the same block_in_place + deadline
+    // treatment rather than running the scan straight on the async task.
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    match state.read_context(&name, |context| {
-        let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
-        context.unreachable_from(&origins)
-    }) {
+    let loaded = tokio::task::block_in_place(|| {
+        state
+            .read_context(&name, |context| {
+                let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
+                context
+                    .unreachable_from(&origins, deadline)
+                    .map_err(|_| AccessError::DeadlineExceeded)
+            })
+            .and_then(std::convert::identity)
+    });
+    match loaded {
         Ok(result) => {
             let (total, matches) = page(result, request.limit, request.after.as_ref());
             // A graph read like recall/query/explore/activate — the

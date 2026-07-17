@@ -2087,8 +2087,13 @@ impl Context {
     /// disconnected (usually an implicit membership that never became an
     /// edge) and names exactly which ones. Reachability is bidirectional
     /// and does not travel through labels, exactly as in
-    /// [`Context::explore`].
-    pub fn unreachable_from(&self, origins: &[&str]) -> Vec<Association> {
+    /// [`Context::explore`]. CPU-bound over the whole edge table; checks
+    /// `deadline` periodically like `unsourced_edges`/`similar_concepts`.
+    pub fn unreachable_from(
+        &self,
+        origins: &[&str],
+        deadline: Deadline,
+    ) -> Result<Vec<Association>, DeadlineExceeded> {
         let mut visited: HashSet<ConceptId> = HashSet::new();
         let mut frontier: VecDeque<ConceptId> = VecDeque::new();
         for &origin in origins {
@@ -2099,6 +2104,9 @@ impl Context {
             }
         }
         while let Some(concept_id) = frontier.pop_front() {
+            if deadline.expired() {
+                return Err(DeadlineExceeded);
+            }
             for edge_id in self.outgoing(concept_id).chain(self.incoming(concept_id)) {
                 let edge = &self.edges[edge_id as usize];
                 // A retracted edge (count == 0) lingers in the adjacency
@@ -2120,11 +2128,17 @@ impl Context {
         // endpoint decides the whole edge. Retracted edges (count == 0)
         // are no longer facts at all, so they're excluded rather than
         // reported as unreachable ones.
-        (0..self.edges.len() as u32)
-            .filter(|&edge_id| self.edges[edge_id as usize].count > 0)
-            .filter(|&edge_id| !visited.contains(&self.edges[edge_id as usize].subject))
-            .map(|edge_id| self.association(edge_id))
-            .collect()
+        let mut out = Vec::new();
+        for edge_id in 0..self.edges.len() as u32 {
+            if deadline.expired() {
+                return Err(DeadlineExceeded);
+            }
+            let edge = &self.edges[edge_id as usize];
+            if edge.count > 0 && !visited.contains(&edge.subject) {
+                out.push(self.association(edge_id));
+            }
+        }
+        Ok(out)
     }
 
     /// The unsourced share of one edge: weight/count no non-reserved,
@@ -5616,13 +5630,20 @@ mod tests {
             .unwrap();
         context.associate("高瀬", "役職", "杜氏", 1.0).unwrap(); // island
 
-        let orphans = context.unreachable_from(&["青嶺酒造"]);
+        let orphans = context
+            .unreachable_from(&["青嶺酒造"], Deadline::unbounded())
+            .unwrap();
         assert_eq!(orphans, vec![assoc("高瀬", "役職", "杜氏", 1.0)]);
 
         // The membership edge repairs the island; the audit comes back
         // clean.
         context.associate("青嶺酒造", "杜氏", "高瀬", 1.0).unwrap();
-        assert!(context.unreachable_from(&["青嶺酒造"]).is_empty());
+        assert!(
+            context
+                .unreachable_from(&["青嶺酒造"], Deadline::unbounded())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -5630,8 +5651,20 @@ mod tests {
         let mut context = Context::default();
         context.associate("私", "好き", "りんご", 1.0).unwrap();
 
-        assert_eq!(context.unreachable_from(&["存在しない概念"]).len(), 1);
-        assert_eq!(context.unreachable_from(&[]).len(), 1);
+        assert_eq!(
+            context
+                .unreachable_from(&["存在しない概念"], Deadline::unbounded())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            context
+                .unreachable_from(&[], Deadline::unbounded())
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -5647,12 +5680,19 @@ mod tests {
             .unwrap();
         context.associate("高瀬", "役職", "杜氏", 1.0).unwrap();
         context.associate("青嶺酒造", "杜氏", "高瀬", 1.0).unwrap();
-        assert!(context.unreachable_from(&["青嶺酒造"]).is_empty());
+        assert!(
+            context
+                .unreachable_from(&["青嶺酒造"], Deadline::unbounded())
+                .unwrap()
+                .is_empty()
+        );
 
         context
             .retract_association("青嶺酒造", "杜氏", "高瀬")
             .unwrap();
-        let orphans = context.unreachable_from(&["青嶺酒造"]);
+        let orphans = context
+            .unreachable_from(&["青嶺酒造"], Deadline::unbounded())
+            .unwrap();
         assert_eq!(orphans, vec![assoc("高瀬", "役職", "杜氏", 1.0)]);
     }
 
@@ -5858,8 +5898,12 @@ mod tests {
         assert_eq!(restored.resolve("りんご"), context.resolve("りんご"));
         assert_eq!(restored.labels(), context.labels());
         assert_eq!(
-            restored.unreachable_from(&["私"]),
-            context.unreachable_from(&["私"])
+            restored
+                .unreachable_from(&["私"], Deadline::unbounded())
+                .unwrap(),
+            context
+                .unreachable_from(&["私"], Deadline::unbounded())
+                .unwrap()
         );
     }
 
