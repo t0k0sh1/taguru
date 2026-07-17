@@ -1138,9 +1138,24 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
     // already brackets this call along with every step that follows —
     // clearing it here too would reopen the batch to the exact gap it
     // exists to close.
-    let (retracted, passage_dropped) = state
+    let (retracted, passage_dropped, passage_removal_errored) = state
         .retract_source_unmarked(&batch.context, &batch.source)
         .map_err(ApplyRefusal::Access)?;
+
+    // A genuine passage-store failure here only self-heals when this
+    // batch carries a replacement passage: `store_passages` below then
+    // overwrites whatever stale copy the failed retraction left
+    // behind. With no replacement coming, that stale passage would
+    // survive under a marker this function is about to clear as if
+    // the source's truth were fully applied — refuse instead, leaving
+    // the marker (and the documented repair) in place.
+    if passage_removal_errored && batch.passage.is_none() {
+        return Err(ApplyRefusal::Io(format!(
+            "old passage for source '{}' could not be retracted and this batch carries no \
+             replacement passage to overwrite it with — its truth may be half-applied",
+            batch.source
+        )));
+    }
 
     let mut questions_stored = 0;
     let mut questions_dropped = 0;
@@ -1959,6 +1974,83 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An associations-only re-import (no passage line in this batch)
+    /// for a source that already has one on disk: the differential
+    /// sync still retracts that old passage first, same as any other
+    /// batch. If the retraction genuinely fails to remove it — not
+    /// "there was nothing to remove" — nothing later in this batch
+    /// will ever overwrite the stale copy, so the batch must refuse
+    /// and keep its marker rather than clear it over a source whose
+    /// truth is now half-applied.
+    #[test]
+    fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
+        let mut exhausted = false;
+        let mut saw_the_refusal = false;
+        for failure in 0..24 {
+            let dir = std::env::temp_dir().join(format!(
+                "taguru-ingest-marker-passage-fault-{failure}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+            let seeded = parse(
+                "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \"create\": {}}\n\
+                 {\"passage\": \"杜氏は高瀬。\"}\n\
+                 {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+            )
+            .unwrap();
+            apply_batch(&state, &seeded).unwrap();
+
+            let reimport = parse(
+                "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
+                 {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬2\", \"weight\": 1.0}\n",
+            )
+            .unwrap();
+
+            crate::registry::fail_persistence_ops_after(failure);
+            let result = apply_batch(&state, &reimport);
+            let past_end = crate::registry::clear_persistence_fault();
+
+            if let Err(ApplyRefusal::Io(message)) = &result
+                && message.contains("could not be retracted")
+            {
+                saw_the_refusal = true;
+                assert_eq!(
+                    crate::registry::import_marker_paths(&dir, "sake").len(),
+                    1,
+                    "step {failure}: refusing to retract an unreplaced passage still \
+                     cleared the marker"
+                );
+                // The documented repair still converges: retrying the
+                // same associations-only batch re-attempts the
+                // retraction (idempotent per-source) with the fault
+                // now cleared.
+                apply_batch(&state, &reimport).unwrap();
+                assert!(
+                    crate::registry::import_marker_paths(&dir, "sake").is_empty(),
+                    "step {failure}: repair did not clear the marker"
+                );
+            }
+
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(
+            exhausted,
+            "sweep bound too small to reach past every persistence step"
+        );
+        assert!(
+            saw_the_refusal,
+            "the sweep never reached the passage-retract fault point"
+        );
     }
 
     /// A batch whose associations land before its alias step trips a

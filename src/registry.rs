@@ -2915,19 +2915,38 @@ impl AppState {
                 "import marker not persisted: {error} — nothing was retracted"
             ))
         })?;
-        let outcome = self.retract_source_unmarked(name, source)?;
-        self.clear_import_marker(name, source);
-        Ok(outcome)
+        let (touched, passage_removed, passage_removal_errored) =
+            self.retract_source_unmarked(name, source)?;
+        // A genuine passage-store failure must leave the marker in
+        // place: clearing it here would erase the only surviving
+        // witness (surfaced by boot and `taguru inspect`) that this
+        // source's truth is now half-applied — the graph side already
+        // retracted, the passage still sitting on disk. "Nothing was
+        // there to remove" (raced with a delete, or never had a
+        // passage) is not this case and still clears normally.
+        if !passage_removal_errored {
+            self.clear_import_marker(name, source);
+        }
+        Ok((touched, passage_removed))
     }
 
     /// The marker-less core of [`Self::retract_source`] — see there for
     /// behavior and for why only `apply_batch` should call this
-    /// directly.
+    /// directly. The third element of the returned tuple is `true`
+    /// only when the passage store's own removal genuinely errored
+    /// (store unavailable, or its `retract` call failed) — as opposed
+    /// to `false`/`false`, which also covers "there was nothing to
+    /// remove." `apply_batch` ignores it: its own `store_passages` call
+    /// right after overwrites whatever stale passage a failed
+    /// retraction left behind, so the failure there is self-healing.
+    /// [`Self::retract_source`] is the one caller that cannot heal it
+    /// the same way and uses it to decide whether clearing its marker
+    /// is safe.
     pub(crate) fn retract_source_unmarked(
         &self,
         name: &str,
         source: &str,
-    ) -> Result<(usize, bool), AccessError> {
+    ) -> Result<(usize, bool, bool), AccessError> {
         let op = WalOp::RetractSource {
             source: source.to_string(),
         };
@@ -2941,39 +2960,42 @@ impl AppState {
 
         let Some(entry) = self.lookup(name) else {
             // Raced with a delete; there is nothing left to clean up.
-            return Ok((touched, false));
+            return Ok((touched, false, false));
         };
         let Some(_fence) = entry.read_unless_deleted() else {
             // Same race, one step later: the delete beat us to the lock.
-            return Ok((touched, false));
+            return Ok((touched, false, false));
         };
         // The graph retraction above already succeeded; a passage-side
         // failure must not turn it into an error, only into an honest
-        // `passage_removed: false`.
-        let passage_removed = match self.entry_passages(&entry, &file_stem(name)) {
-            Ok(store) => match store.retract(source) {
-                Ok(removed) => {
-                    if removed {
-                        self.refresh_bm25(
-                            &entry,
-                            &store,
-                            std::slice::from_ref(&source.to_string()),
-                        );
-                        entry.passages_embed_dirty.store(true, Ordering::Relaxed);
+        // `passage_removed: false` — paired with a `true` third element
+        // so a marker-clearing caller can still tell "nothing to
+        // remove" and "removal genuinely failed" apart.
+        let (passage_removed, passage_removal_errored) =
+            match self.entry_passages(&entry, &file_stem(name)) {
+                Ok(store) => match store.retract(source) {
+                    Ok(removed) => {
+                        if removed {
+                            self.refresh_bm25(
+                                &entry,
+                                &store,
+                                std::slice::from_ref(&source.to_string()),
+                            );
+                            entry.passages_embed_dirty.store(true, Ordering::Relaxed);
+                        }
+                        (removed, false)
                     }
-                    removed
-                }
+                    Err(error) => {
+                        tracing::warn!("passage for '{source}' not removed from disk: {error}");
+                        (false, true)
+                    }
+                },
                 Err(error) => {
-                    tracing::warn!("passage for '{source}' not removed from disk: {error}");
-                    false
+                    tracing::warn!("passages for '{name}' unavailable during retract: {error}");
+                    (false, true)
                 }
-            },
-            Err(error) => {
-                tracing::warn!("passages for '{name}' unavailable during retract: {error}");
-                false
-            }
-        };
-        Ok((touched, passage_removed))
+            };
+        Ok((touched, passage_removed, passage_removal_errored))
     }
 
     /// Opens the batch-open marker for one source's import — see
@@ -7451,18 +7473,36 @@ mod tests {
                 );
                 assert!(!marker.exists());
             } else {
-                // A witness must survive whenever the graph side may
-                // already be durably retracted while the passage side
-                // never ran: any refusal other than the marker write
-                // itself failing (which leaves nothing behind to
-                // witness, since nothing happened yet).
-                if let Err(AccessError::Unpersisted(message)) = &first {
-                    let before_marker = message.contains("import marker");
-                    assert_eq!(
-                        marker.exists(),
-                        !before_marker,
-                        "a stopped retraction at step {failure} lost its tear witness: {first:?}"
-                    );
+                match &first {
+                    // A witness must survive whenever the graph side may
+                    // already be durably retracted while the passage side
+                    // never ran: any refusal other than the marker write
+                    // itself failing (which leaves nothing behind to
+                    // witness, since nothing happened yet).
+                    Err(AccessError::Unpersisted(message)) => {
+                        let before_marker = message.contains("import marker");
+                        assert_eq!(
+                            marker.exists(),
+                            !before_marker,
+                            "a stopped retraction at step {failure} lost its tear witness: {first:?}"
+                        );
+                    }
+                    // The graph write itself never swallows a failure —
+                    // the only way this call can succeed while a fault
+                    // fired somewhere is a passage-side failure folded
+                    // into an honest `passage_removed: false`. The
+                    // witness must survive exactly that swallow, or the
+                    // half-applied state it names (graph retracted,
+                    // passage still on disk) becomes permanently
+                    // invisible to boot and `taguru inspect`.
+                    Ok(_) => {
+                        assert!(
+                            marker.exists(),
+                            "a swallowed passage failure at step {failure} still cleared \
+                             the tear witness: {first:?}"
+                        );
+                    }
+                    Err(_) => {}
                 }
                 // Retracting again is the documented repair, and
                 // retract_source is idempotent per-source, so it is
