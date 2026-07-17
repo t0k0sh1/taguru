@@ -137,4 +137,21 @@ describe("TaguruRetriever cross-context", () => {
     // still shows up despite tea's graph lane failing.
     expect(documents.some((d) => d.metadata["context"] === "tea")).toBe(true);
   });
+
+  it("keeps both targets' graph docs when the text lane errors", async () => {
+    const server = new FakeServer();
+    server.failTextSearch = true;
+    const retriever = new TaguruRetriever({
+      contexts: ["sake", "tea"],
+      client: server.client(),
+    });
+    const documents = await retriever.invoke("青嶺酒造");
+
+    // The one cross-context /sources/search call 500s, but it is not a
+    // per-target call — both targets' already-fetched graph lanes must
+    // survive it rather than being wiped out along with the text hits.
+    expect(documents.length).toBeGreaterThan(0);
+    expect(documents.every((d) => String(d.metadata["lane"]).includes("graph"))).toBe(true);
+    expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["sake", "tea"]));
+  });
 });

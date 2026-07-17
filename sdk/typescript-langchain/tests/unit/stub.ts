@@ -37,6 +37,9 @@ export class FakeServer {
   /** Context names whose every request should fail with a 500, to
    * exercise cross-context partial-failure handling. */
   failContexts = new Set<string>();
+  /** When set, the cross-context /sources/search call (the text lane)
+   * fails with a 500, to exercise text/graph lane isolation. */
+  failTextSearch = false;
 
   fetch: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -68,6 +71,12 @@ export class FakeServer {
       return ok(row);
     }
     if (path === "/sources/search") {
+      if (this.failTextSearch) {
+        return new Response(
+          JSON.stringify({ status: "error", code: "internal", error: "simulated failure", time: 0.001 }),
+          { status: 500 },
+        );
+      }
       // The cross-context search: one tagged hit per named context,
       // already rank-interleaved the way the server merges.
       const { contexts } = body as { contexts: string[] };

@@ -57,6 +57,9 @@ class FakeServer:
         # Context names whose every request should fail with a 500, to
         # exercise cross-context partial-failure handling.
         self.fail_contexts: set[str] = set()
+        # When set, the cross-context /sources/search call (the text
+        # lane) fails with a 500, to exercise text/graph lane isolation.
+        self.fail_text_search = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -92,6 +95,16 @@ class FakeServer:
                 )
             return ok(row)
         if path == "/sources/search":
+            if self.fail_text_search:
+                return httpx.Response(
+                    500,
+                    json={
+                        "status": "error",
+                        "code": "internal",
+                        "error": "simulated failure",
+                        "time": 0.001,
+                    },
+                )
             # The cross-context search: one tagged hit per named context,
             # already rank-interleaved the way the server merges.
             return ok(

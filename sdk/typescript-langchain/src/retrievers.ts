@@ -243,10 +243,19 @@ export class TaguruRetriever extends BaseRetriever {
     }
     let textHits: PassageHit[] = [];
     if (this.include_text) {
-      textHits = await this.client.searchPassages(query, {
-        contexts: targets,
-        limit: this.text_limit,
-      });
+      // The server's cross_targets validation rejects the WHOLE request
+      // if even one named context is gone — without this isolation, a
+      // single deleted group member would silently discard the graph
+      // lane's already-fetched results too (see the allSettled
+      // isolation just above).
+      try {
+        textHits = await this.client.searchPassages(query, {
+          contexts: targets,
+          limit: this.text_limit,
+        });
+      } catch {
+        textHits = [];
+      }
     }
     return mergeLanes(graphDocs, textHits, this.k);
   }

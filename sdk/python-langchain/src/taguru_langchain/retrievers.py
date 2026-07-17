@@ -209,9 +209,17 @@ class TaguruRetriever(BaseRetriever):
             graph_docs = _interleave(per_target)
         text_hits = []
         if self.include_text:
-            text_hits = list(
-                self.client.search_passages(query, contexts=targets, limit=self.text_limit)
-            )
+            # The server's cross_targets validation rejects the WHOLE
+            # request if even one named context is gone — without this
+            # isolation, a single deleted group member would silently
+            # discard the graph lane's results too (see the per-target
+            # isolation just above).
+            try:
+                text_hits = list(
+                    self.client.search_passages(query, contexts=targets, limit=self.text_limit)
+                )
+            except Exception:
+                text_hits = []
         return _merge_lanes(graph_docs, text_hits, limit)
 
     # -- async lane ----------------------------------------------------------
@@ -307,11 +315,16 @@ class TaguruRetriever(BaseRetriever):
             )
         text_hits = []
         if self.include_text:
-            text_hits = list(
-                await self.async_client.search_passages(
-                    query, contexts=targets, limit=self.text_limit
+            # Same isolation as the sync lane above: one gone target must
+            # not blank out the graph lane's already-fetched results.
+            try:
+                text_hits = list(
+                    await self.async_client.search_passages(
+                        query, contexts=targets, limit=self.text_limit
+                    )
                 )
-            )
+            except Exception:
+                text_hits = []
         return _merge_lanes(graph_docs, text_hits, limit)
 
     # -- lifecycle -----------------------------------------------------------

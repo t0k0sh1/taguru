@@ -194,6 +194,37 @@ async def test_async_keeps_a_healthy_targets_graph_docs_when_another_targets_gra
     assert any(d.metadata["context"] == "tea" for d in documents)
 
 
+def test_keeps_the_graph_lanes_docs_when_the_text_lane_errors(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    fake_server.fail_text_search = True
+    retriever = TaguruRetriever(
+        contexts=["sake", "tea"], client=sync_client, async_client=async_client
+    )
+    documents = retriever.invoke("青嶺酒造")
+
+    # The one cross-context /sources/search call 500s, but it is not a
+    # per-target call — both targets' already-fetched graph lanes must
+    # survive it rather than being wiped out along with the text hits.
+    assert documents
+    assert all("graph" in d.metadata["lane"] for d in documents)
+    assert {d.metadata["context"] for d in documents} == {"sake", "tea"}
+
+
+async def test_async_keeps_the_graph_lanes_docs_when_the_text_lane_errors(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    fake_server.fail_text_search = True
+    retriever = TaguruRetriever(
+        contexts=["sake", "tea"], client=sync_client, async_client=async_client
+    )
+    documents = await retriever.ainvoke("青嶺酒造")
+
+    assert documents
+    assert all("graph" in d.metadata["lane"] for d in documents)
+    assert {d.metadata["context"] for d in documents} == {"sake", "tea"}
+
+
 async def test_async_cross_matches_sync(sync_client: Taguru, async_client: AsyncTaguru) -> None:
     retriever = TaguruRetriever(
         contexts=["sake"], groups=["childg"], client=sync_client, async_client=async_client
