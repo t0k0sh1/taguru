@@ -66,11 +66,22 @@ class ModelOutput(BaseModel):
 # -- paragraph split (mirrors src/paragraph.rs exactly) --------------------------
 
 
+def _is_unicode_whitespace(char: str) -> bool:
+    """Unicode's White_Space property — what src/paragraph.rs's
+    char::is_whitespace() checks per character. str.isspace() is not quite
+    this: it also treats U+001C-001F (the "information separator" controls
+    FS/GS/RS/US) as whitespace, which would blank a line here that stays
+    content on the server, drifting the paragraph indices this function
+    exists to keep in lockstep."""
+    return char.isspace() and char not in "\x1c\x1d\x1e\x1f"
+
+
 def split_paragraphs(text: str) -> list[str]:
-    """Blank (all-whitespace) lines separate paragraphs; interior line breaks
-    stay in; the terminating newline (and a final CR) stays out. Only ``\\n``
-    is a line break — the same rule the server splits stored passages with,
-    so paragraph indices computed here match the server's."""
+    """Blank (empty or all Unicode-whitespace) lines separate paragraphs;
+    interior line breaks stay in; the terminating newline (and a final CR)
+    stays out. Only ``\\n`` is a line break — the same rule the server splits
+    stored passages with, so paragraph indices computed here match the
+    server's."""
     spans: list[str] = []
     run_start: int | None = None
     run_end = 0
@@ -84,7 +95,7 @@ def split_paragraphs(text: str) -> list[str]:
         if content_end > offset and text[content_end - 1] == "\r":
             content_end -= 1
         content = text[offset:content_end]
-        if content == "" or content.isspace():
+        if all(_is_unicode_whitespace(char) for char in content):
             if run_start is not None:
                 spans.append(text[run_start:run_end])
                 run_start = None

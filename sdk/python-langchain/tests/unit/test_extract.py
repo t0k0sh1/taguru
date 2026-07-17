@@ -184,6 +184,24 @@ def test_split_paragraphs_mirrors_the_server_split() -> None:
     assert split_paragraphs("一行だけ。\n") == ["一行だけ。"]
 
 
+def test_split_paragraphs_does_not_treat_information_separators_as_blank() -> None:
+    """Port of paragraph.rs's split_paragraphs_does_not_treat_information_separators_as_blank.
+
+    str.isspace() treats U+001C-001F (the Unicode "information separator"
+    controls FS/GS/RS/US) as whitespace; Unicode's White_Space property,
+    which src/paragraph.rs's char::is_whitespace() follows, does not. Before
+    the fix, a line made of only one of these blanked here and split a
+    paragraph the server keeps whole, drifting every paragraph index after
+    it between the model's view of the document and the server's.
+    """
+    text = "最初の段落。\n\x1e\n続き。\n\n次の段落。"
+    assert split_paragraphs(text) == ["最初の段落。\n\x1e\n続き。", "次の段落。"]
+    # Every one of U+001C-U+001F, alone or amid real whitespace, is content.
+    for control in "\x1c\x1d\x1e\x1f":
+        assert split_paragraphs(f"a\n{control}\nb") == [f"a\n{control}\nb"]
+        assert split_paragraphs(f"a\n  {control}  \nb") == [f"a\n  {control}  \nb"]
+
+
 def test_labeled_document_numbers_the_canonical_paragraphs() -> None:
     text = "一段落目。\n\n二段落目。"
     # A cap that dwarfs the paragraphs leaves the numbering untouched.

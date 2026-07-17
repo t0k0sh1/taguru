@@ -112,6 +112,22 @@ mod tests {
     }
 
     #[test]
+    fn split_paragraphs_does_not_treat_information_separators_as_blank() {
+        // U+001C-U+001F (FILE/GROUP/RECORD/UNIT SEPARATOR) are whitespace
+        // under Python's str.isspace() but not under Unicode's White_Space
+        // property, which char::is_whitespace() follows — a line made of
+        // only one must stay content here, or the Python LangChain SDK's
+        // mirror of this function (sdk/python-langchain, which once used
+        // str.isspace()) would split a paragraph the server keeps whole.
+        let text = "最初の段落。\n\u{1e}\n続き。\n\n次の段落。";
+        assert_eq!(
+            texts(text),
+            vec!["最初の段落。\n\u{1e}\n続き。", "次の段落。"],
+            "a lone information-separator control does not blank its line"
+        );
+    }
+
+    #[test]
     fn split_paragraphs_of_an_empty_or_all_blank_document_is_empty() {
         assert!(split("").is_empty());
         assert!(split("\n\n\n").is_empty());
