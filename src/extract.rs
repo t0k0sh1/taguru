@@ -649,7 +649,14 @@ fn read_document(path: &Path) -> Result<String, String> {
             "exceeds the {MAX_PASSAGE_BYTES}-byte document cap — split the document"
         ));
     }
-    String::from_utf8(bytes).map_err(|_| "not UTF-8".to_string())
+    let text = String::from_utf8(bytes).map_err(|_| "not UTF-8".to_string())?;
+    // A leading BOM is invisible in an editor but would otherwise become
+    // the first character of paragraph 0 — silently breaking any exact
+    // match against the document's true opening text.
+    Ok(match text.strip_prefix('\u{FEFF}') {
+        Some(rest) => rest.to_string(),
+        None => text,
+    })
 }
 
 fn usage_error(message: &str) -> i32 {
@@ -2233,6 +2240,24 @@ mod tests {
             error.contains(&(MAX_PASSAGE_BYTES + 1).to_string()),
             "{error}"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A BOM is invisible in an editor but would otherwise become the
+    /// first character of paragraph 0 — silently breaking any exact
+    /// match against the document's true opening text. Windows editors
+    /// routinely stamp one onto every UTF-8 file they save.
+    #[test]
+    fn read_document_strips_a_leading_bom() {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-read-document-bom-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("bom.md");
+        fs::write(&path, "\u{FEFF}青嶺酒造は1907年創業。").unwrap();
+        assert_eq!(read_document(&path).unwrap(), "青嶺酒造は1907年創業。");
 
         let _ = fs::remove_dir_all(&dir);
     }

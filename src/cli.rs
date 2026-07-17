@@ -450,6 +450,12 @@ pub fn load_config(path: &Path) {
 /// comments and blank lines ignored, values taken verbatim (no quoting
 /// or expansion). Returned in file order.
 fn parse_config(text: &str) -> Result<Vec<(String, String)>, String> {
+    // A leading BOM survives `str::trim` (U+FEFF is not `White_Space`),
+    // so left in place it rides onto the first key of the file — e.g.
+    // "\u{FEFF}TAGURU_ADDR" — which fails the `TAGURU_` typo check
+    // silently (it doesn't start with "TAGURU_" either) and then just
+    // vanishes as an unrecognized env var, no warning printed at all.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let mut pairs = Vec::new();
     for (index, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -496,6 +502,25 @@ mod tests {
                 ("TAGURU_ADDR".to_string(), "127.0.0.1:0".to_string()),
                 // The first '=' splits; the value keeps the rest verbatim.
                 ("TAGURU_API_TOKEN".to_string(), "a=b=c".to_string()),
+                ("TAGURU_WAL".to_string(), "1".to_string()),
+            ]
+        );
+    }
+
+    /// A BOM survives `str::trim` (U+FEFF is not `White_Space`), so left
+    /// in place it would ride onto the first key as "\u{FEFF}TAGURU_ADDR"
+    /// — which is not `TAGURU_ADDR`, so the value never reaches the
+    /// server, and it doesn't start with "TAGURU_" either, so not even
+    /// the typo warning fires. Notepad and other Windows editors stamp a
+    /// BOM onto every UTF-8 file they save, so this is not exotic input.
+    #[test]
+    fn a_leading_bom_does_not_mangle_the_first_key() {
+        let text = "\u{FEFF}TAGURU_ADDR=127.0.0.1:0\nTAGURU_WAL=1\n";
+        let pairs = parse_config(text).unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                ("TAGURU_ADDR".to_string(), "127.0.0.1:0".to_string()),
                 ("TAGURU_WAL".to_string(), "1".to_string()),
             ]
         );

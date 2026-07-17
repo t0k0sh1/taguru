@@ -653,6 +653,15 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
         if read == 0 {
             break;
         }
+        // A UTF-8 BOM only ever means anything at byte 0 of the whole
+        // stream — many Windows editors stamp one onto every file they
+        // save. Left in place it rides invisibly onto the first key of
+        // the first JSON object, which then fails as "not JSON" (or, if
+        // it parsed at all, as an unrecognized field) with no hint that
+        // the file itself looks completely normal.
+        if number == 1 && raw.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            raw.drain(0..3);
+        }
         if raw.last() != Some(&b'\n') && raw.len() > MAX_LINE_BYTES {
             return Err(format!(
                 "line {number}: exceeds the {MAX_LINE_BYTES}-byte line cap"
@@ -1430,6 +1439,17 @@ mod tests {
         assert!(error.contains("taguru_batch 2"), "{error}");
 
         assert!(parse("\n\n").unwrap_err().contains("empty file"));
+    }
+
+    /// Notepad and other Windows editors stamp a UTF-8 BOM onto every
+    /// file they save; left in place it rides onto '{' as the first
+    /// byte of the header line and fails to parse as JSON at all, with
+    /// nothing in the error pointing at what actually went wrong.
+    #[test]
+    fn a_leading_bom_does_not_break_the_first_line() {
+        let batch = parse(&format!("\u{FEFF}{HEADER}\n")).unwrap();
+        assert_eq!(batch.context, "sake");
+        assert_eq!(batch.source, "doc-1");
     }
 
     #[test]
