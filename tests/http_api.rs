@@ -7037,6 +7037,87 @@ fn the_extract_timeout_knob_bounds_a_stalled_provider() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+#[test]
+fn extract_persists_the_manifest_after_each_document_not_only_at_the_end() {
+    let docs = batch_dir("extract-manifest-durability-docs");
+    let fast = docs.join("fast.md");
+    let slow = docs.join("slow.md");
+    std::fs::write(&fast, "青嶺酒造は1907年に創業した。").unwrap();
+    std::fs::write(&slow, "高瀬は青嶺酒造の杜氏。").unwrap();
+    let fast_src = fast.to_str().unwrap().to_string();
+
+    // fast.md's one request gets a real answer; every later connection
+    // (slow.md's) is accepted and then never answered — standing in
+    // for the interruption (Ctrl+C, a CI timeout's SIGKILL, a panic on
+    // a later document) that this test triggers itself by killing the
+    // child while it hangs there. fast.md's progress must already be
+    // on disk by that point, not deferred to a final save this kill
+    // prevents from ever running.
+    let reply = json!({
+        "associations": [
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0}
+        ]
+    })
+    .to_string();
+    let response = chat_ok(&reply);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::Write;
+        let mut held = Vec::new();
+        for (index, stream) in listener.incoming().enumerate() {
+            let Ok(mut stream) = stream else { continue };
+            if index == 0 {
+                let _ = read_http_request(&mut stream);
+                let _ = stream.write_all(response.as_bytes());
+            } else {
+                held.push(stream);
+            }
+        }
+    });
+
+    let out = batch_dir("extract-manifest-durability-out");
+    let manifest_path = out.join(".extract-manifest.json");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .arg("extract")
+        .env_remove("TAGURU_EXTRACT_URL")
+        .env_remove("TAGURU_EXTRACT_MODEL")
+        .env_remove("TAGURU_EXTRACT_API_KEY")
+        .env_remove("TAGURU_EXTRACT_TIMEOUT_SECS")
+        .env_remove("TAGURU_EXTRACT_PARALLEL")
+        .env_remove("TAGURU_CONFIG")
+        .env("TAGURU_EXTRACT_URL", &url)
+        .env("TAGURU_EXTRACT_MODEL", "stub-model")
+        .args(["--out", out.to_str().unwrap(), "--context", "c"])
+        .arg(&fast)
+        .arg(&slow)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("extract must spawn");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut saved = String::new();
+    while std::time::Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(&manifest_path)
+            && text.contains(&fast_src)
+        {
+            saved = text;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        saved.contains(&fast_src),
+        "manifest never recorded the completed document before the run was killed: {saved:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// The hybrid-search wire contract on a lexical-only server: hits are
 /// paragraph-granular, every hit carries its lane evidence, the
 /// top-level score stays the raw BM25 number (no semantic lane ran),

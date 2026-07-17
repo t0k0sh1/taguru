@@ -194,7 +194,22 @@ pub fn run(args: &[String]) -> i32 {
     for path in &files {
         let source = path.to_string_lossy().into_owned();
         match run.extract_document(path, &source) {
-            Ok(Outcome::Written) => written += 1,
+            Ok(Outcome::Written) => {
+                written += 1;
+                // Persisted per document, not just once after the loop: a
+                // run this size is LLM-bound (seconds per document), so an
+                // interruption (Ctrl+C, a CI timeout's SIGKILL, a panic on
+                // a later document) would otherwise strand the manifest
+                // behind every batch file it should already credit,
+                // making the next run re-extract documents that already
+                // succeeded.
+                if let Err(error) = run.manifest.save(&manifest_path) {
+                    eprintln!(
+                        "taguru: extract: {source}: saving the manifest: {error} — \
+                         the batch is written; the next run re-extracts it"
+                    );
+                }
+            }
             Ok(Outcome::Unchanged) => skipped += 1,
             Ok(Outcome::Planned) => planned += 1,
             Err(message) => {
