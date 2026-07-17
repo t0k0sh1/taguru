@@ -308,8 +308,13 @@ pub async fn enforce_rate_limit(
     // colliding with a configured key that happens to share its text.
     // (No peer address, only in tests without ConnectInfo, falls back
     // to the shared bucket; production always carries one.)
+    //
+    // An OAuth delegation ("key@client") buckets on its base key —
+    // `auth::base_key`, the same fallback `scope_of`/`recognizes` walk
+    // — so a caller cannot multiply its request budget by minting more
+    // delegated clients from the same key.
     let key = match request.extensions().get::<auth::AuthKey>() {
-        Some(key) => Arc::clone(&key.0),
+        Some(key) => Arc::<str>::from(auth::base_key(&key.0)),
         None => peer_ip(&request)
             .map(|ip| Arc::<str>::from(format!("peer:{ip}")))
             .unwrap_or_else(|| Arc::from("anon")),
@@ -659,6 +664,38 @@ mod tests {
         assert!(limiter.admit(&hot, now).is_ok());
         assert!(limiter.admit(&hot, now).is_err());
         assert!(limiter.admit(&calm, now).is_ok());
+    }
+
+    /// An OAuth delegation ("key@client") must not get its own budget:
+    /// two different clients delegated from the same key spend the same
+    /// bucket as each other and as the bare key, or registering more
+    /// delegated clients would multiply the key's rate limit.
+    #[tokio::test]
+    async fn oauth_delegated_keys_share_their_base_keys_budget() {
+        let limiter = Arc::new(RateLimiter::new(1));
+        let app = Router::new()
+            .route("/contexts", get(|| async { "hi" }))
+            .layer(axum::middleware::from_fn_with_state(
+                limiter,
+                enforce_rate_limit,
+            ));
+        let send = |key_name: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    HttpRequest::builder()
+                        .uri("/contexts")
+                        .extension(auth::AuthKey(Arc::from(key_name)))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(send("boss@app1").await.status(), 200);
+        assert_eq!(send("boss@app2").await.status(), 429);
+        assert_eq!(send("boss").await.status(), 429);
     }
 
     /// End to end through auth: the 429 wears the ApiError shape and a

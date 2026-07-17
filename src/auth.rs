@@ -64,6 +64,16 @@ fn strip_bearer_prefix(value: &str) -> Option<&str> {
     scheme.eq_ignore_ascii_case("Bearer ").then_some(rest)
 }
 
+/// The credential a key name is billed and scoped against: itself, or
+/// — for an OAuth delegation, `"key@client"` — the name before the
+/// last '@'. Every consumer of a key name that isn't an exact keyring
+/// lookup (scope resolution, liveness, rate limiting) must fall back
+/// through this so a caller cannot dilute a limit meant for one key by
+/// minting more delegated clients from it.
+pub(crate) fn base_key(key_name: &str) -> &str {
+    key_name.rsplit_once('@').map_or(key_name, |(base, _)| base)
+}
+
 /// The authenticated key's name, attached to the RESPONSE: the access
 /// log middleware sits outside this one, so response extensions are
 /// the channel that reaches it.
@@ -264,9 +274,7 @@ impl Keyring {
         if let Some(scope) = self.scopes.get(key_name) {
             return scope.clone();
         }
-        if let Some((base, _)) = key_name.rsplit_once('@')
-            && let Some(scope) = self.scopes.get(base)
-        {
+        if let Some(scope) = self.scopes.get(base_key(key_name)) {
             return scope.clone();
         }
         KeyScope::default()
@@ -309,10 +317,7 @@ impl Keyring {
     /// unrestricted) for a caller nobody configured anymore.
     pub(crate) fn recognizes(&self, key_name: &str) -> bool {
         let is_configured = |name: &str| self.keys.iter().any(|(key, _)| key.as_ref() == name);
-        is_configured(key_name)
-            || key_name
-                .rsplit_once('@')
-                .is_some_and(|(base, _)| is_configured(base))
+        is_configured(key_name) || is_configured(base_key(key_name))
     }
 }
 
