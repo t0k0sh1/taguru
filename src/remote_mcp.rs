@@ -208,7 +208,22 @@ async fn call_inner(
     let status = response.status();
     let bytes = match axum::body::to_bytes(response.into_body(), max_result_bytes).await {
         Ok(bytes) => bytes,
-        Err(error) if is_length_limit(&error) => return Err(RESULT_TOO_BIG.to_string()),
+        // A downstream error's own body (a verbose stack trace, an HTML
+        // error page) can outgrow max_result_bytes just as easily as a
+        // large successful result can — but RESULT_TOO_BIG's "narrow the
+        // call" advice is nonsense for a request that already failed
+        // downstream. Surface the real status instead of swapping it for
+        // an unrelated cap message.
+        Err(error) if is_length_limit(&error) && status.is_success() => {
+            return Err(RESULT_TOO_BIG.to_string());
+        }
+        Err(error) if is_length_limit(&error) => {
+            return Err(format!(
+                "HTTP {}: (error body exceeds the MCP response cap, \
+                 TAGURU_MCP_MAX_RESULT_BYTES)",
+                status.as_u16()
+            ));
+        }
         Err(error) => return Err(format!("response unreadable: {error}")),
     };
     let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -338,6 +353,51 @@ mod tests {
         let text = reply["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("GET /contexts/{name}/export"), "{text}");
         assert!(text.contains("taguru export"), "{text}");
+    }
+
+    /// A downstream *error* response (a 500 with a huge body — a stack
+    /// trace, an HTML error page) that outgrows the cap must not read
+    /// like an oversized successful result: RESULT_TOO_BIG's "narrow the
+    /// call" advice describes a request that could be retried smaller,
+    /// which is nonsense for one that already failed downstream. The
+    /// real status must survive instead of being swapped for the cap
+    /// message.
+    #[tokio::test]
+    async fn a_downstream_error_over_the_cap_reports_its_real_status_not_result_too_big() {
+        let failing = Router::new().route(
+            "/contexts",
+            axum::routing::get(|| async {
+                (StatusCode::INTERNAL_SERVER_ERROR, "x".repeat(1_000_000))
+            }),
+        );
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_contexts", "arguments": {} },
+        });
+        let response = serve(
+            failing,
+            Arc::new(String::new()),
+            None,
+            Bytes::from(body.to_string()),
+            1024,
+            Deadline::unbounded(),
+        )
+        .await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, 200, "the RPC envelope itself still succeeds");
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("HTTP 500"), "{text}");
+        assert!(
+            !text.contains("narrow the call"),
+            "a downstream failure must not be relabeled as an oversized result: {text}"
+        );
     }
 
     /// retrieve composes many dispatched calls into one response; each is
