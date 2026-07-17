@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use crate::api::{
     MAX_ASSOCIATION_WEIGHT, MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES, MAX_NAME_BYTES,
@@ -971,25 +972,41 @@ fn user_message(source: &str, index: usize, total: usize, text: &str) -> String 
 #[derive(Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelOutput {
-    #[serde(default, deserialize_with = "null_as_default")]
+    #[serde(default, deserialize_with = "lenient_vec")]
     associations: Vec<ModelAssociation>,
-    #[serde(default, deserialize_with = "null_as_default")]
+    #[serde(default, deserialize_with = "lenient_vec")]
     aliases: Vec<ModelAlias>,
-    #[serde(default, deserialize_with = "null_as_default")]
+    #[serde(default, deserialize_with = "lenient_vec")]
     questions: Vec<ModelQuestion>,
 }
 
-/// A field the model set to `null` reaches the same deserializer as
-/// one it omitted — `#[serde(default)]` alone only covers an absent
-/// key, not a present-but-null one, so a nulled-out array would
-/// otherwise fail this document's whole `ModelOutput` over one field
-/// merge() would happily have treated as empty.
-fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+/// A field the model set to `null`, to a lone object instead of an
+/// array, or to some other wrong-typed value reaches the same
+/// deserializer as one it omitted. `#[serde(default)]` alone only
+/// covers an absent key, and a plain `Option<Vec<T>>` only covers an
+/// explicit null — neither covers a present value of the wrong shape,
+/// which would otherwise fail this document's whole `ModelOutput` over
+/// one field merge() would happily have treated as empty. Reading it
+/// as a `Value` first, keeping only the shape that parses as an array,
+/// and then dropping just the elements that don't parse as `T` (the
+/// same one-field-not-the-item cost `lenient_string` and friends pay
+/// below) costs the malformed items — never the field, never the
+/// chunk.
+fn lenient_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
-    T: Deserialize<'de> + Default,
+    T: DeserializeOwned,
 {
-    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
+    let Some(items) = serde_json::Value::deserialize(deserializer)?
+        .as_array()
+        .cloned()
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| T::deserialize(item).ok())
+        .collect())
 }
 
 // Every field goes through a lenient deserializer: models emit
@@ -1614,6 +1631,49 @@ mod tests {
         assert!(output.associations.is_empty());
         let merged = merge(vec![output], 1, 1);
         assert_eq!(merged.questions, vec![(0, "何?".to_string())]);
+    }
+
+    #[test]
+    fn a_wrong_typed_array_field_reads_as_empty_not_a_parse_failure() {
+        // A model that emits "aliases": {} (an object instead of an
+        // array — a common shape mistake) is handing back a
+        // present-but-wrong-typed field, not a null. Before lenient_vec
+        // this failed Vec<ModelAlias>'s deserialization and took the
+        // whole document down with it, including the associations the
+        // model got right sitting right next to it.
+        let object_shaped = r#"{"associations": [
+            {"subject": "a", "label": "l", "object": "b"}
+        ], "aliases": {}}"#;
+        let output =
+            parse_model_output(object_shaped).expect("a wrong-typed array field must still parse");
+        assert_eq!(output.associations.len(), 1);
+        assert!(output.aliases.is_empty());
+
+        // A lone object where the model meant a one-element array is
+        // the same failure mode, just more tempting for a model to
+        // produce.
+        let unwrapped = r#"{"associations": {"subject": "a", "label": "l", "object": "b"}}"#;
+        let output = parse_model_output(unwrapped).expect("an unwrapped object must still parse");
+        assert!(output.associations.is_empty());
+
+        // A scalar instead of an array is the same failure mode again.
+        let scalar = r#"{"associations": "none"}"#;
+        let output = parse_model_output(scalar).expect("a scalar array field must still parse");
+        assert!(output.associations.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_array_item_costs_the_item_never_the_field() {
+        // One bad element in an otherwise well-formed array (a string
+        // where the schema showed an object) must not fail its
+        // siblings in the same array.
+        let mixed = r#"{"associations": [
+            {"subject": "a", "label": "l", "object": "b"},
+            "not an association",
+            {"subject": "c", "label": "l", "object": "d"}
+        ]}"#;
+        let output = parse_model_output(mixed).expect("a malformed item must still parse");
+        assert_eq!(output.associations.len(), 2);
     }
 
     fn association(subject: &str, label: &str, object: &str, weight: f64) -> ModelAssociation {
