@@ -139,17 +139,24 @@ class EmbeddingUnavailableError(ServerError):
     """501/502 — no embedding provider configured, or the provider failed.
 
     ``reason`` is ``"not_configured"`` for 501 and ``"provider_error"`` for 502.
+    Unlike the single-status sibling errors, this class covers two statuses,
+    so neither has a safe implicit default — ``status`` must be passed as
+    501 or 502 explicitly.
     """
 
     def __init__(
         self,
         message: str,
         *,
-        status: int | None = None,
+        status: int | None,
         code: str | None = None,
         time: float | None = None,
         body: object = None,
     ) -> None:
+        if status not in (501, 502):
+            raise ValueError(
+                f"EmbeddingUnavailableError requires status=501 or 502, got {status!r}"
+            )
         super().__init__(message, status=status, code=code, time=time, body=body)
         self.reason = "not_configured" if status == 501 else "provider_error"
 

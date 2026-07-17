@@ -120,6 +120,14 @@ def test_embedding_error_reason_distinguishes_501_from_502() -> None:
     assert excinfo.value.reason == "provider_error"
 
 
+@pytest.mark.parametrize("status", [None, 500, 503])
+def test_embedding_error_rejects_any_status_other_than_501_or_502(
+    status: int | None,
+) -> None:
+    with pytest.raises(ValueError):
+        EmbeddingUnavailableError("boom", status=status)
+
+
 def test_error_for_status_is_reexported_and_builds_by_status() -> None:
     """``error_for_status`` builds the same table the client applies
     internally — it must be importable from the top-level package too, not
