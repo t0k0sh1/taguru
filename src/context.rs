@@ -4869,6 +4869,38 @@ mod tests {
     }
 
     #[test]
+    fn migrating_a_pre_v5_image_does_not_revive_a_fully_retracted_edge() {
+        // A pre-v5 image predates `count`; migration synthesizes it from
+        // the attribution chain length, floored at 1 for edges that were
+        // always sourceless (first_attribution == NIL but weight != 0).
+        // An edge that instead died via retract_source ends up with the
+        // very same on-disk shape: first_attribution == NIL. Migration
+        // must tell the two apart by weight — retraction always zeroes
+        // it — so the synthesized `count` must come back 0 (dead), not
+        // 1 (revived).
+        let mut context = Context::default();
+        context
+            .associate_from("a", "r", "b", 1.0, "旧版", None)
+            .unwrap();
+        assert_eq!(context.retract_source("旧版"), Some(1));
+        assert_eq!(context.dead_edges(), 1);
+
+        let v4 = context.to_bytes_as_version(4);
+        let loaded = Context::from_bytes(&v4).expect("v4 image must load");
+
+        assert_eq!(
+            loaded.dead_edges(),
+            1,
+            "a fully retracted edge must not come back alive after migrating a pre-v5 image"
+        );
+        assert!(
+            loaded.query(Some("a"), None, Some("b"))[0]
+                .attributions
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn retract_source_withdraws_its_contributions() {
         let mut context = Context::default();
         context

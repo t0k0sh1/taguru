@@ -289,6 +289,16 @@ impl Context {
                         len
                     }
                 };
+                // An empty chain (first_attribution == NIL) is ambiguous in
+                // the legacy format: it means either an edge that was always
+                // sourceless (weight holds its nonzero value) or one that
+                // was fully retracted (weight was zeroed along with the
+                // chain). Only the latter should come back dead.
+                let count = if chain_len == 0 && legacy.weight == 0.0 {
+                    0
+                } else {
+                    chain_len.max(1)
+                };
                 edges.push(EdgeRecord {
                     subject: legacy.subject,
                     label: legacy.label,
@@ -298,7 +308,7 @@ impl Context {
                     next_labeled: legacy.next_labeled,
                     first_attribution: legacy.first_attribution,
                     last_attribution: legacy.last_attribution,
-                    count: chain_len.max(1),
+                    count,
                     sum: legacy.weight,
                 });
             }
