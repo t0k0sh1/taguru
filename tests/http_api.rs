@@ -6785,6 +6785,19 @@ fn a_failing_chunk_fails_the_document_without_dispatching_the_tail() {
         if index == failing_index {
             chat_error(400, "Bad Request", "", "no thanks")
         } else {
+            // The failure must be recorded before any other worker claims
+            // far past it: same fix as
+            // dispatch_chunks_concurrently_bounds_spillover_past_a_promptly_recorded_failure
+            // in registry.rs — an instant failure raced against
+            // slowed-down successes, so the bound asserted below holds
+            // instead of racing the stub server's own thread scheduling
+            // (without this, a CI runner busy enough to delay the failing
+            // request past several successes can let a worker claim well
+            // beyond `failing_index + workers`, which is exactly the
+            // best-effort spillover dispatch_chunks_concurrently's own
+            // doc comment says is unbounded once a failure is slow to
+            // surface).
+            std::thread::sleep(std::time::Duration::from_millis(20));
             chat_ok(&json!({"associations": []}).to_string())
         }
     });
@@ -6828,10 +6841,12 @@ fn a_failing_chunk_fails_the_document_without_dispatching_the_tail() {
     );
     // A worker can only ever have one chunk in flight at a time, so once
     // `first_failure` is recorded, at most `workers` chunks beyond it can
-    // already be claimed and running. Any index past that band was claimed
-    // strictly after the failure was recorded and visible — a deterministic
-    // bound, not a timing-dependent one, so it also catches a regression to
-    // a weaker atomic ordering that lets a worker miss the failure update.
+    // already be claimed and running. This bound only holds because the
+    // stub above stalls every success while returning the failure
+    // instantly, promptly recording it — the same precondition
+    // dispatch_chunks_concurrently_bounds_spillover_past_a_promptly_recorded_failure
+    // in registry.rs relies on. It also catches a regression to a weaker
+    // atomic ordering that lets a worker miss the failure update.
     let max_in_flight_past_failure = failing_index + workers;
     let stray_indexes: Vec<usize> = seen
         .iter()
