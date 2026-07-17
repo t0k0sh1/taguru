@@ -211,15 +211,34 @@ pub struct Oauth {
     /// the base of the canonical `{public_url}/mcp` resource.
     public_url: String,
     store_path: PathBuf,
-    // Lock order: a path that needs more than one of these takes them
-    // in field order. `register_client` and `mint` both hold `clients`
-    // and `refresh` together around `persist`, and the one agreed
-    // order is what keeps a concurrent registration and token grant
-    // from deadlocking each other.
+    // Each of these is held only long enough to mutate it, never across
+    // `persist`'s fsync-heavy write — `persist_now` is the sole place
+    // that reads more than one (always `clients` before `refresh`, to
+    // snapshot both for the store file), and it releases each right
+    // after cloning it, before writing anything. That keeps `client()`
+    // — which `/oauth/authorize` calls on every request — and any
+    // in-progress registration or mint from ever waiting on disk I/O;
+    // only a second concurrent persist waits, on `persist_lock` below.
     clients: Mutex<Vec<Client>>,
     codes: Mutex<Vec<CodeGrant>>,
     access: Mutex<Vec<AccessToken>>,
     refresh: Mutex<Vec<RefreshToken>>,
+    /// Serializes the actual disk write in `persist_now` so two
+    /// concurrent persists cannot interleave their writes — held across
+    /// the fsync-heavy `persist` call, but never together with any of
+    /// the data locks above (each is reacquired fresh, one at a time,
+    /// just to snapshot-and-clone).
+    persist_lock: Mutex<()>,
+    /// Test-only rendezvous point: `persist_now` runs this, once, right
+    /// after it has released `clients` and `refresh` but before it
+    /// calls the fsync-heavy `persist`. A test that blocks here can
+    /// then probe those locks from another thread while a persist is
+    /// genuinely in flight, instead of standing in for that window by
+    /// holding `persist_lock` directly — a stand-in that a regression
+    /// reverting to the old combined critical section would pass right
+    /// through, since it never touches `persist_lock` at all.
+    #[cfg(test)]
+    persist_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Oauth {
@@ -256,6 +275,9 @@ impl Oauth {
             codes: Mutex::new(Vec::new()),
             access: Mutex::new(Vec::new()),
             refresh: Mutex::new(persisted.refresh),
+            persist_lock: Mutex::new(()),
+            #[cfg(test)]
+            persist_hook: Mutex::new(None),
         }
     }
 
@@ -362,29 +384,35 @@ impl Oauth {
                 client_name.len()
             ));
         }
-        let mut clients = self.clients.lock().unwrap();
-        // Registration is unauthenticated, so the cap must self-heal.
-        // Refusing at the limit would let a flood of junk registrations
-        // wedge the store permanently — no new client could register
-        // until an operator hand-pruned oauth.json. Evict the oldest
-        // instead: the Vec is insertion-ordered, so index 0 is oldest.
-        // Outstanding tokens survive an eviction — exchange_code and
-        // exchange_refresh validate against their own grant records, not
-        // this list — so an evicted client need only re-register on its
-        // next authorize. (A while, not an if: it also drains a store
-        // that a lowered CLIENT_CAP left over the line.)
-        while clients.len() >= CLIENT_CAP {
-            clients.remove(0);
-        }
-        let client = Client {
-            client_id: random_token(),
-            client_name: client_name.to_string(),
-            redirect_uris,
-            created_at: now_secs(),
+        let client = {
+            let mut clients = self.clients.lock().unwrap();
+            // Registration is unauthenticated, so the cap must self-heal.
+            // Refusing at the limit would let a flood of junk registrations
+            // wedge the store permanently — no new client could register
+            // until an operator hand-pruned oauth.json. Evict the oldest
+            // instead: the Vec is insertion-ordered, so index 0 is oldest.
+            // Outstanding tokens survive an eviction — exchange_code and
+            // exchange_refresh validate against their own grant records, not
+            // this list — so an evicted client need only re-register on its
+            // next authorize. (A while, not an if: it also drains a store
+            // that a lowered CLIENT_CAP left over the line.)
+            while clients.len() >= CLIENT_CAP {
+                clients.remove(0);
+            }
+            let client = Client {
+                client_id: random_token(),
+                client_name: client_name.to_string(),
+                redirect_uris,
+                created_at: now_secs(),
+            };
+            clients.push(client.clone());
+            client
         };
-        clients.push(client.clone());
-        let refresh = self.refresh.lock().unwrap();
-        self.persist(&clients, &refresh);
+        // Dropped the `clients` lock above before persisting: the
+        // fsync-heavy write must never hold it, or `client()` — which
+        // `/oauth/authorize` calls on every request — would block on
+        // every registration's disk write.
+        self.persist_now();
         Ok(client)
     }
 
@@ -541,12 +569,6 @@ impl Oauth {
             });
         }
         {
-            // `clients` before `refresh` — the field-order rule on the
-            // struct. Taking `refresh` first here while register_client
-            // takes `clients` first is an AB-BA deadlock between the
-            // (unauthenticated) registration endpoint and every token
-            // grant.
-            let clients = self.clients.lock().unwrap();
             let mut refresh = self.refresh.lock().unwrap();
             // The same insert-time sweep as `access` above: grants whose
             // refresh token was simply never used again would otherwise
@@ -566,13 +588,35 @@ impl Oauth {
                 client_id: client_id.to_string(),
                 expires_at: now + REFRESH_TTL_SECS,
             });
-            self.persist(&clients, &refresh);
         }
+        // Dropped the `refresh` lock above before persisting, same reason
+        // as `register_client`: the fsync-heavy write must not hold a
+        // data lock, or `client()` and any in-progress registration would
+        // block on every token grant's disk write.
+        self.persist_now();
         TokenGrant {
             access_token,
             refresh_token,
             expires_in: ACCESS_TTL_SECS,
         }
+    }
+
+    /// Snapshots `clients` and `refresh` and writes them to disk,
+    /// serialized against a concurrent persist by `persist_lock` alone —
+    /// never by the data locks themselves. Each is locked just long
+    /// enough to clone it and is released before the other is taken, so
+    /// this never holds more than one at a time; the fsync-heavy part
+    /// that follows holds only `persist_lock`, which nothing else in
+    /// this type ever waits on.
+    fn persist_now(&self) {
+        let _serialize = self.persist_lock.lock().unwrap();
+        let clients = self.clients.lock().unwrap().clone();
+        let refresh = self.refresh.lock().unwrap().clone();
+        #[cfg(test)]
+        if let Some(hook) = self.persist_hook.lock().unwrap().take() {
+            hook();
+        }
+        self.persist(&clients, &refresh);
     }
 
     /// The resource-server check: an unexpired access token resolves to
@@ -1471,6 +1515,115 @@ mod tests {
             Ok(clean) => assert!(clean, "a worker thread panicked"),
             Err(_) => panic!("registration deadlocked against a token grant"),
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A `client()` lookup — what `/oauth/authorize` calls on every
+    /// request — must never wait while a persist writes to disk.
+    /// `persist_hook` catches `persist_now` in the one window that
+    /// matters: data locks already released, the fsync-heavy write
+    /// about to start. That beats holding `persist_lock` directly —
+    /// the old combined critical section (mutate-then-persist under
+    /// the same lock) never touches `persist_lock` either, so a test
+    /// that only holds it can't tell old from new and passes either
+    /// way; a regression back to that shape simply never reaches this
+    /// hook, so the `recv_timeout` below fails loudly instead.
+    #[test]
+    fn a_client_lookup_does_not_wait_while_persist_writes_to_disk() {
+        let (oauth, dir) = scratch_oauth("persist-lock-scope-lookup");
+        let client = register(&oauth);
+        let oauth = std::sync::Arc::new(oauth);
+
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+        *oauth.persist_hook.lock().unwrap() = Some(Box::new(move || {
+            let _ = arrived_tx.send(());
+            let _ = proceed_rx.recv();
+        }));
+
+        let writer = std::sync::Arc::clone(&oauth);
+        let handle = std::thread::spawn(move || {
+            writer
+                .register_client("claude", vec!["https://claude.ai/cb".to_string()])
+                .unwrap()
+        });
+
+        arrived_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect(
+                "persist_now never reached the hook — is the write still gated behind a data lock?",
+            );
+
+        let reader = std::sync::Arc::clone(&oauth);
+        let client_id = client.client_id.clone();
+        let (done, watchdog) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let found = reader.client(&client_id).is_some();
+            let _ = done.send(found);
+        });
+        match watchdog.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(found) => assert!(found, "the lookup must still find the registered client"),
+            Err(_) => panic!("client() waited while persist's disk write was in flight"),
+        }
+
+        let _ = proceed_tx.send(());
+        let _ = handle.join();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `register_client`'s data mutation must be complete and visible
+    /// to `client()` before the disk write even starts, not merely by
+    /// the time it finishes. This is the flip side of the lookup test
+    /// above: it pins that the lock split actually separates "mutate
+    /// the in-memory store" from "persist it", instead of just moving
+    /// the same combined critical section behind a differently named
+    /// lock. Rendezvousing on `persist_hook` replaces a fixed sleep
+    /// with a real synchronization point, so this can't flake under
+    /// load the way a "wait 200ms and hope" check could.
+    #[test]
+    fn a_registrations_data_mutation_lands_before_its_persist_writes_to_disk() {
+        let (oauth, dir) = scratch_oauth("persist-lock-scope-mutation");
+        let oauth = std::sync::Arc::new(oauth);
+
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+        *oauth.persist_hook.lock().unwrap() = Some(Box::new(move || {
+            let _ = arrived_tx.send(());
+            let _ = proceed_rx.recv();
+        }));
+
+        let writer = std::sync::Arc::clone(&oauth);
+        let handle = std::thread::spawn(move || {
+            writer
+                .register_client("claude", vec!["https://claude.ai/cb".to_string()])
+                .unwrap()
+        });
+
+        arrived_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect(
+                "persist_now never reached the hook — is the write still gated behind a data lock?",
+            );
+
+        let mutated = oauth.clients.lock().unwrap().len() == 1;
+        assert!(
+            mutated,
+            "the client list must be updated before the disk write starts"
+        );
+
+        let _ = proceed_tx.send(());
+        let (done, watchdog) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(handle.join().is_ok());
+        });
+        match watchdog.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(joined) => assert!(
+                joined,
+                "register_client must complete once persist finishes"
+            ),
+            Err(_) => panic!("register_client never returned after persist finished"),
+        }
+
         let _ = std::fs::remove_dir_all(dir);
     }
 }
