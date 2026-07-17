@@ -2204,7 +2204,14 @@ impl Context {
         floor: f64,
         deadline: Deadline,
     ) -> Result<Vec<UnsourcedEdge>, DeadlineExceeded> {
-        let floor = floor.abs();
+        // Not `clamp_unit_or`: this floor is a magnitude threshold on
+        // accumulated edge weight, not a [0, 1] similarity score (a
+        // caller can legitimately ask for 2.5), so only NaN needs a
+        // fallback. This is a drift-audit surface, where silently
+        // excluding every edge (weight.abs() >= NaN is always false)
+        // reads as "the corpus is clean" — the unsafe direction to
+        // fail toward. 0.0 keeps every edge in play instead.
+        let floor = if floor.is_nan() { 0.0 } else { floor.abs() };
         let unattributed = self.source_ids.get(UNSOURCED_SOURCE).copied();
         let mut out = Vec::new();
         for edge_id in 0..self.edges.len() as u32 {
@@ -5782,6 +5789,21 @@ mod tests {
         assert_eq!(
             flagged[0].weight, -2.0,
             "sign survives the floor comparison"
+        );
+    }
+
+    #[test]
+    fn unsourced_edges_treats_a_nan_floor_as_admitting_everything() {
+        let mut context = Context::default();
+        context.associate("g", "r", "h", -2.0).unwrap();
+
+        let flagged = context
+            .unsourced_edges(f64::NAN, Deadline::unbounded())
+            .unwrap();
+        assert_eq!(
+            flagged.len(),
+            1,
+            "a NaN floor must not silently read as \"nothing unsourced\""
         );
     }
 
