@@ -121,14 +121,26 @@ fn main() {
     // before any concurrency limit actually kicked in.
     let max_concurrent_tools =
         resolve_max_concurrent_tools(std::env::var("TAGURU_MCP_MAX_CONCURRENT_TOOLS").ok());
-    // Maps a `tools/call` id to whether it has been cancelled. An entry
-    // exists ONLY while that call is in flight (inserted right before
-    // its job is queued, removed the moment a worker claims a
-    // cancellation or finishes normally) — so a `notifications/cancelled`
-    // naming an id that already answered, or never existed, has nothing
-    // to flag and is silently a no-op instead of poisoning a future
-    // call that reuses the same id.
-    let tracked_calls: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Maps a job's own internal sequence number to whether it has been
+    // cancelled. Keyed by sequence rather than by the client's response
+    // id, because that id is caller-chosen and may be reused while an
+    // earlier call under the same id is still queued or dispatching —
+    // a bare `id -> bool` map would have exactly one slot for both
+    // calls to fight over, so the newer one's insert would silently
+    // erase the older one's already-recorded cancellation (or a stale
+    // flag could be consumed by the wrong job). Each entry exists ONLY
+    // while its own call is in flight (inserted right before its job is
+    // queued, removed the moment a worker claims a cancellation or
+    // finishes normally).
+    let tracked_calls: Arc<Mutex<HashMap<u64, bool>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Resolves a client response id to the sequence number of whichever
+    // job is CURRENTLY tracked under it — the most recently queued call
+    // sharing that id, since that is the only one a bare id-keyed
+    // `notifications/cancelled` can plausibly mean. Repointed on every
+    // new job for a given id, but this never touches — let alone
+    // erases — any earlier job's own entry in `tracked_calls` above.
+    let active_by_id: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    let mut next_seq: u64 = 0;
     let (job_tx, job_rx) = mpsc::channel::<ToolJob>();
     // `mpsc::Receiver` isn't `Sync`; the mutex is what lets every
     // worker share the one queue instead of each needing its own.
@@ -144,8 +156,9 @@ fn main() {
         .map(|_| {
             let bridge = Arc::clone(&bridge);
             let tracked_calls = Arc::clone(&tracked_calls);
+            let active_by_id = Arc::clone(&active_by_id);
             let job_rx = Arc::clone(&job_rx);
-            thread::spawn(move || run_tool_worker(&bridge, &tracked_calls, &job_rx))
+            thread::spawn(move || run_tool_worker(&bridge, &tracked_calls, &active_by_id, &job_rx))
         })
         .collect();
     loop {
@@ -194,13 +207,7 @@ fn main() {
             continue;
         }
         if let Some(target_id) = mcp::cancelled_request_id(&message) {
-            // Only an id currently tracked as in-flight can be flagged —
-            // one that already answered (or never existed) has no entry
-            // here and this is a no-op, rather than sitting around to
-            // poison a later call that reuses the same id.
-            if let Some(flag) = tracked_calls.lock().get_mut(&target_id.to_string()) {
-                *flag = true;
-            }
+            cancel(&tracked_calls, &active_by_id, &target_id.to_string());
             continue;
         }
         match mcp::classify(&message) {
@@ -209,11 +216,19 @@ fn main() {
                 call: mcp::Call::Tool { name, arguments },
             } => {
                 let response_id = id.to_string();
+                next_seq += 1;
+                let seq = next_seq;
                 // Registered before the job is queued, not inside a
                 // worker, so a cancellation racing the handoff always
-                // finds this id already tracked instead of landing in
+                // finds this job already tracked instead of landing in
                 // the gap and being dropped.
-                tracked_calls.lock().insert(response_id.clone(), false);
+                tracked_calls.lock().insert(seq, false);
+                // Repoints this id at the new job. An earlier call
+                // sharing the same id — still queued or dispatching —
+                // keeps its own entry in `tracked_calls` untouched, so
+                // this reuse can never erase a cancellation already
+                // recorded against it.
+                active_by_id.lock().insert(response_id.clone(), seq);
                 // No receiver ever drops before `job_tx` does (every
                 // worker holds its own clone of `job_rx` until this
                 // loop drops the sender below), so this send cannot
@@ -221,6 +236,7 @@ fn main() {
                 let _ = job_tx.send(ToolJob {
                     id,
                     response_id,
+                    seq,
                     name,
                     arguments,
                 });
@@ -249,6 +265,9 @@ fn main() {
 struct ToolJob {
     id: Value,
     response_id: String,
+    /// This job's own slot in `tracked_calls` — never shared with any
+    /// other job, even one queued for the same `response_id`.
+    seq: u64,
     name: String,
     arguments: Value,
 }
@@ -258,7 +277,8 @@ struct ToolJob {
 /// its sender), dispatching each in turn.
 fn run_tool_worker(
     bridge: &Bridge,
-    tracked_calls: &Mutex<HashMap<String, bool>>,
+    tracked_calls: &Mutex<HashMap<u64, bool>>,
+    active_by_id: &Mutex<HashMap<String, u64>>,
     job_rx: &Mutex<mpsc::Receiver<ToolJob>>,
 ) {
     loop {
@@ -268,7 +288,8 @@ fn run_tool_worker(
         // A cancel that landed while this call was still queued skips
         // it entirely: no request sent for a reply nothing is waiting
         // on.
-        if take_cancelled(tracked_calls, &job.response_id) {
+        if take_cancelled(tracked_calls, job.seq) {
+            clear_active(active_by_id, &job.response_id, job.seq);
             continue;
         }
         let outcome = dispatch_tool(bridge, &job.name, &job.arguments);
@@ -276,14 +297,16 @@ fn run_tool_worker(
         // the call was already running can't stop the request — but
         // it still stops the now-unwanted reply from reaching the
         // client.
-        if take_cancelled(tracked_calls, &job.response_id) {
+        if take_cancelled(tracked_calls, job.seq) {
+            clear_active(active_by_id, &job.response_id, job.seq);
             continue;
         }
         // Finished clean: drop the tracking entry so a LATER message
         // that reuses this id (ids are caller-chosen, not guaranteed
         // unique across a session) starts untracked instead of
         // inheriting stale state.
-        tracked_calls.lock().remove(&job.response_id);
+        tracked_calls.lock().remove(&job.seq);
+        clear_active(active_by_id, &job.response_id, job.seq);
         emit(
             &std::io::stdout(),
             &mcp::response(job.id, mcp::tool_response(outcome)),
@@ -291,14 +314,45 @@ fn run_tool_worker(
     }
 }
 
-/// Clears `id`'s tracking entry and reports whether it had been
+/// Flags whichever job is CURRENTLY tracked under `target_id` as
+/// cancelled — the most recently queued `tools/call` sharing that
+/// client id, since that is the only one a bare id-keyed cancellation
+/// can plausibly mean. An id with nothing tracked (already answered, or
+/// never existed) has nothing to flag and is silently a no-op instead
+/// of poisoning a future call that reuses the same id.
+fn cancel(
+    tracked_calls: &Mutex<HashMap<u64, bool>>,
+    active_by_id: &Mutex<HashMap<String, u64>>,
+    target_id: &str,
+) {
+    let seq = active_by_id.lock().get(target_id).copied();
+    if let Some(seq) = seq
+        && let Some(flag) = tracked_calls.lock().get_mut(&seq)
+    {
+        *flag = true;
+    }
+}
+
+/// Clears `response_id`'s pointer into `tracked_calls` — but only if it
+/// still points at `seq`. A later call that reused the same client id
+/// has since repointed it at its own, newer entry; clearing
+/// unconditionally would erase that job's bookkeeping instead of this
+/// finished one's.
+fn clear_active(active_by_id: &Mutex<HashMap<String, u64>>, response_id: &str, seq: u64) {
+    let mut active_by_id = active_by_id.lock();
+    if active_by_id.get(response_id) == Some(&seq) {
+        active_by_id.remove(response_id);
+    }
+}
+
+/// Clears `seq`'s tracking entry and reports whether it had been
 /// cancelled — but ONLY when it had. An entry that is merely pending
 /// (`false`) is left in place so a cancellation arriving later can
 /// still find and flag it.
-fn take_cancelled(tracked_calls: &Mutex<HashMap<String, bool>>, id: &str) -> bool {
+fn take_cancelled(tracked_calls: &Mutex<HashMap<u64, bool>>, seq: u64) -> bool {
     let mut tracked_calls = tracked_calls.lock();
-    if tracked_calls.get(id) == Some(&true) {
-        tracked_calls.remove(id);
+    if tracked_calls.get(&seq) == Some(&true) {
+        tracked_calls.remove(&seq);
         true
     } else {
         false
@@ -661,12 +715,12 @@ mod tests {
     }
 
     #[test]
-    fn take_cancelled_ignores_an_id_that_is_not_tracked() {
-        // A cancellation naming an id that already answered (or never
+    fn take_cancelled_ignores_a_seq_that_is_not_tracked() {
+        // A cancellation naming a job that already answered (or never
         // existed) must not be able to poison anything: no entry means
         // no-op, not an insertion that a later call could inherit.
         let tracked_calls = Mutex::new(HashMap::new());
-        assert!(!take_cancelled(&tracked_calls, "unknown"));
+        assert!(!take_cancelled(&tracked_calls, 404));
         assert!(tracked_calls.lock().is_empty());
     }
 
@@ -674,9 +728,9 @@ mod tests {
     fn take_cancelled_leaves_a_merely_pending_entry_in_place() {
         // A call that is in flight but not yet cancelled must stay
         // tracked — a cancellation arriving later still needs to find it.
-        let tracked_calls = Mutex::new(HashMap::from([("1".to_string(), false)]));
-        assert!(!take_cancelled(&tracked_calls, "1"));
-        assert_eq!(tracked_calls.lock().get("1"), Some(&false));
+        let tracked_calls = Mutex::new(HashMap::from([(1u64, false)]));
+        assert!(!take_cancelled(&tracked_calls, 1));
+        assert_eq!(tracked_calls.lock().get(&1), Some(&false));
     }
 
     #[test]
@@ -684,9 +738,82 @@ mod tests {
         // Once cancelled, the entry is consumed — a stale duplicate
         // delivery of the same cancellation (or a later id reuse) finds
         // nothing left to act on.
-        let tracked_calls = Mutex::new(HashMap::from([("1".to_string(), true)]));
-        assert!(take_cancelled(&tracked_calls, "1"));
+        let tracked_calls = Mutex::new(HashMap::from([(1u64, true)]));
+        assert!(take_cancelled(&tracked_calls, 1));
         assert!(tracked_calls.lock().is_empty());
+    }
+
+    #[test]
+    fn cancel_ignores_an_id_with_no_active_job() {
+        // A `notifications/cancelled` naming an id that already
+        // answered (or never existed) has nothing in `active_by_id` to
+        // resolve, so it must be a plain no-op.
+        let tracked_calls = Mutex::new(HashMap::new());
+        let active_by_id = Mutex::new(HashMap::new());
+        cancel(&tracked_calls, &active_by_id, "unknown");
+        assert!(tracked_calls.lock().is_empty());
+    }
+
+    #[test]
+    fn cancel_flags_whichever_job_is_currently_active_for_that_id() {
+        let tracked_calls = Mutex::new(HashMap::from([(1u64, false)]));
+        let active_by_id = Mutex::new(HashMap::from([("1".to_string(), 1u64)]));
+        cancel(&tracked_calls, &active_by_id, "1");
+        assert_eq!(tracked_calls.lock().get(&1), Some(&true));
+    }
+
+    #[test]
+    fn a_cancellation_for_an_in_flight_call_survives_the_client_reusing_its_id() {
+        // The bug this guards against: call A (seq 1) is dispatching
+        // under client id "1" when it is cancelled. Before A's worker
+        // gets a chance to observe that, the client reuses id "1" for a
+        // brand-new call B (seq 2) — legitimate under MCP's
+        // fire-and-forget cancellation, which gives the client no
+        // acknowledgment to wait for before reusing the id. A blind
+        // `id -> bool` map would have one slot for both calls, so B's
+        // insert would silently overwrite A's already-recorded
+        // cancellation with `false`. Tracking by sequence number
+        // instead must let A's cancellation survive B's insert.
+        let tracked_calls = Mutex::new(HashMap::new());
+        let active_by_id = Mutex::new(HashMap::new());
+
+        // A (seq 1) is registered and dispatching under id "1".
+        tracked_calls.lock().insert(1, false);
+        active_by_id.lock().insert("1".to_string(), 1);
+
+        // The client cancels id "1", meaning A — the only job tracked
+        // under it so far.
+        cancel(&tracked_calls, &active_by_id, "1");
+
+        // Before A's worker checks, the client reuses id "1" for B
+        // (seq 2).
+        tracked_calls.lock().insert(2, false);
+        active_by_id.lock().insert("1".to_string(), 2);
+
+        // A's worker checks its OWN sequence number: the reuse must not
+        // have erased A's cancellation.
+        assert!(
+            take_cancelled(&tracked_calls, 1),
+            "A's cancellation must survive id \"1\" being reused by B before A observed it"
+        );
+        // B was never cancelled — its own check must come back clean.
+        assert!(!take_cancelled(&tracked_calls, 2));
+    }
+
+    #[test]
+    fn clear_active_leaves_a_newer_jobs_pointer_alone() {
+        // A (seq 1) finishes after B (seq 2) has already reused id "1"
+        // — its own cleanup must not rip out B's still-live pointer.
+        let active_by_id = Mutex::new(HashMap::from([("1".to_string(), 2u64)]));
+        clear_active(&active_by_id, "1", 1);
+        assert_eq!(active_by_id.lock().get("1"), Some(&2));
+    }
+
+    #[test]
+    fn clear_active_removes_its_own_still_current_pointer() {
+        let active_by_id = Mutex::new(HashMap::from([("1".to_string(), 1u64)]));
+        clear_active(&active_by_id, "1", 1);
+        assert!(active_by_id.lock().is_empty());
     }
 
     #[test]
@@ -699,19 +826,22 @@ mod tests {
         // entries rather than one-thread-per-call.
         let (job_tx, job_rx) = mpsc::channel::<ToolJob>();
         let job_rx = Mutex::new(job_rx);
-        let tracked_calls: Mutex<HashMap<String, bool>> = Mutex::new(HashMap::new());
+        let tracked_calls: Mutex<HashMap<u64, bool>> = Mutex::new(HashMap::new());
+        let active_by_id: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
 
         let jobs = 1000;
-        for i in 0..jobs {
-            let response_id = i.to_string();
-            tracked_calls.lock().insert(response_id.clone(), false);
+        for seq in 0..jobs {
+            let response_id = seq.to_string();
+            tracked_calls.lock().insert(seq, false);
+            active_by_id.lock().insert(response_id.clone(), seq);
             // An unknown tool name is refused by `route_tool` before it
             // would ever reach the network — this test proves the
             // queue drains, not that a real HTTP round trip completes.
             job_tx
                 .send(ToolJob {
-                    id: serde_json::json!(i),
+                    id: serde_json::json!(seq),
                     response_id,
+                    seq,
                     name: "not-a-real-tool".to_string(),
                     arguments: serde_json::json!({}),
                 })
@@ -719,11 +849,15 @@ mod tests {
         }
         drop(job_tx);
 
-        run_tool_worker(&bridge(), &tracked_calls, &job_rx);
+        run_tool_worker(&bridge(), &tracked_calls, &active_by_id, &job_rx);
 
         assert!(
             tracked_calls.lock().is_empty(),
             "every queued job must be dispatched (and its tracking entry cleared) by the one worker"
+        );
+        assert!(
+            active_by_id.lock().is_empty(),
+            "every queued job must clear its own still-current active_by_id pointer"
         );
     }
 }
