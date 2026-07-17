@@ -18,6 +18,7 @@
 export { Taguru, Contexts, Groups, Context, type TaguruOptions } from "./client.js";
 export {
   TaguruError,
+  type TaguruErrorOptions,
   AuthenticationError,
   PermissionDeniedError,
   NotFoundError,
@@ -32,6 +33,7 @@ export {
   EmbeddingUnavailableError,
   TransportError,
   UnexpectedStatusError,
+  errorForStatus,
 } from "./errors.js";
 export {
   citationKey,
@@ -56,6 +58,7 @@ export {
   type CrossMatchPage,
   type CrossPassageHit,
   type DirectoryEntry,
+  type DriftAudit,
   type ExploreCursor,
   type ExplorePage,
   type GroupEntry,
@@ -94,6 +97,7 @@ export {
   type TermContribution,
   type TieredResolution,
   type TwinPair,
+  type UnsourcedEdge,
   type VectorExplain,
   type VocabularyAudit,
 } from "./models.js";
