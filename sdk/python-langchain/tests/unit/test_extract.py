@@ -126,6 +126,33 @@ def test_merge_validates_questions_against_the_canonical_paragraph_count() -> No
     assert merged.dropped == 3
 
 
+def test_cap_dropped_questions_are_not_mistaken_for_duplicates_on_repeat() -> None:
+    """Port of extract.rs cap_dropped_questions_are_not_mistaken_for_duplicates_on_repeat.
+
+    A question the per-paragraph cap drops must not register as seen —
+    every document chunk sees the same paragraph list and independently
+    proposes questions for it, so an identical question re-proposed by a
+    later chunk is a realistic occurrence. Before the fix it read as a
+    *duplicate* on the repeat, mislabeling the paragraph's overflow as
+    deduplication instead of the cap that caused it.
+    """
+    first_chunk = ModelOutput(
+        questions=[
+            ModelQuestion(paragraph=0, question="質問A"),
+            ModelQuestion(paragraph=0, question="質問B"),  # over this run's N=1
+        ]
+    )
+    second_chunk = ModelOutput(
+        questions=[
+            ModelQuestion(paragraph=0, question="質問B"),  # re-proposed, still over the cap
+        ]
+    )
+    merged = merge([first_chunk, second_chunk], 1, 1)
+    assert merged.questions == [(0, "質問A")]
+    assert merged.duplicates == 0, "the repeat is still a cap drop, not a duplicate"
+    assert merged.dropped == 2
+
+
 def test_chunks_split_at_paragraph_boundaries_and_survive_multibyte_walls() -> None:
     """Port of extract.rs chunks_split_at_paragraph_boundaries_and_survive_multibyte_walls."""
     text = "第一段落。\n\n第二段落。\n\n第三段落。"
@@ -182,9 +209,9 @@ def test_an_oversized_paragraph_repeats_its_number_on_every_continuation() -> No
     # survives to what the model sees: every \n\n-delimited block in every
     # chunk still opens with the paragraph number.
     chunks = chunk(labeled, cap)
-    assert all(
-        block.startswith("[0] ") for piece in chunks for block in piece.split("\n\n")
-    ), chunks
+    assert all(block.startswith("[0] ") for piece in chunks for block in piece.split("\n\n")), (
+        chunks
+    )
 
 
 def test_parse_model_output_tolerates_fences_and_prose() -> None:

@@ -312,10 +312,16 @@ def merge(outputs: list[ModelOutput], questions_cap: int, paragraph_count: int) 
             if (paragraph, question) in seen_questions:
                 extraction.duplicates += 1
                 continue
-            seen_questions.add((paragraph, question))
             if per_paragraph.get(paragraph, 0) >= questions_cap:
                 extraction.dropped += 1
                 continue
+            # Only register with seen_questions once the item is actually
+            # kept: adding it before the cap check would make a
+            # cap-dropped question read as a *duplicate* the next time an
+            # identical one arrives (from another chunk re-proposing it),
+            # permanently mislabeling a paragraph's overflow as
+            # deduplication instead of the cap that caused it.
+            seen_questions.add((paragraph, question))
             per_paragraph[paragraph] = per_paragraph.get(paragraph, 0) + 1
             extraction.questions.append((paragraph, question))
 
