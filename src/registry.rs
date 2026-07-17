@@ -3825,8 +3825,13 @@ impl AppState {
         // to new-width ones would feed `similarity` mismatched
         // dimensions — no error, no score — so a width disagreement
         // stales the whole table, exactly as if the model were renamed.
+        // Concepts and labels are sampled and compared independently —
+        // collapsing to "whichever table is non-empty, concepts first"
+        // would miss a width change confined to whichever table that
+        // fallback didn't happen to sample.
         let width = |table: &VectorTable| table.values().map(|(_, vector)| vector.len()).next();
-        let carried_width = width(&existing.concepts).or_else(|| width(&existing.labels));
+        let carried_concepts_width = width(&existing.concepts);
+        let carried_labels_width = width(&existing.labels);
         let mut fresh_width = width(&embedded_concepts).or_else(|| width(&embedded_labels));
         // Unchanged hashes embed nothing, which would leave the width
         // change of exactly this scenario — backend swap, no gloss
@@ -3834,7 +3839,7 @@ impl AppState {
         // refresh keeps that from hiding.
         if failure.is_none()
             && !fresh_model
-            && carried_width.is_some()
+            && (carried_concepts_width.is_some() || carried_labels_width.is_some())
             && fresh_width.is_none()
             && let Some((_, gloss)) = concepts.first().or_else(|| labels.first())
         {
@@ -3852,15 +3857,17 @@ impl AppState {
         // vectors at a width that disagrees with what is carried —
         // that mismatch is decided below, then reconciled regardless of
         // what else failed.
-        if !fresh_model
-            && let (Some(carried), Some(fresh)) = (carried_width, fresh_width)
-            && carried != fresh
-        {
+        let width_mismatch = fresh_width.is_some_and(|fresh| {
+            carried_concepts_width.is_some_and(|carried| carried != fresh)
+                || carried_labels_width.is_some_and(|carried| carried != fresh)
+        });
+        if !fresh_model && width_mismatch {
             tracing::warn!(
                 context = name,
                 model = embedder.model(),
-                carried,
-                fresh,
+                carried_concepts = ?carried_concepts_width,
+                carried_labels = ?carried_labels_width,
+                fresh = fresh_width,
                 "embedding width changed under an unchanged model name; re-embedding every gloss"
             );
             fresh_model = true;
@@ -12651,6 +12658,92 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((embedded, total), (0, 3));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_width_drift_confined_to_the_label_table_is_still_caught() {
+        struct FixedWidthEmbeddings(usize);
+        impl EmbeddingProvider for FixedWidthEmbeddings {
+            fn model(&self) -> &str {
+                "stable-name"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                Ok(texts
+                    .iter()
+                    .map(|_| {
+                        let mut vector = vec![0.0; self.0];
+                        vector[0] = 1.0;
+                        vector
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("label-only-width-drift");
+        let path = vectors_path(&dir, &file_stem("w"));
+        {
+            let embedder = Some(Arc::new(FixedWidthEmbeddings(3)) as Arc<dyn EmbeddingProvider>);
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            state
+                .create("w", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("w", |context| {
+                    context.associate("a", "l", "b", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+            state
+                .refresh_embeddings("w", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+
+        // Shrink only the label table's vectors in place, keeping their
+        // hash unchanged — the shape a width change confined to one
+        // table (a partial backend rollout, or a prior pass that only
+        // reconciled concepts) would leave on disk. `carried_width`
+        // sampling concepts first — as this used to — would see
+        // concepts already at width 3, call that "no drift", and never
+        // look at labels at all.
+        let mut store = VectorStore::load(&path);
+        for (_, vector) in store.labels.values_mut() {
+            vector.truncate(2);
+        }
+        store.save(&path).unwrap();
+
+        // Same model name, same provider width (3): a no-op content
+        // diff, so nothing re-embeds and only the probe/reconciliation
+        // path can notice the label table is still stuck at width 2.
+        let embedder = Some(Arc::new(FixedWidthEmbeddings(3)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        let (embedded, total) = state
+            .refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (embedded, total),
+            (3, 3),
+            "a width drift confined to the label table must still force a full re-embed"
+        );
+        let reloaded = VectorStore::load(&path);
+        assert!(
+            reloaded
+                .concepts
+                .values()
+                .chain(reloaded.labels.values())
+                .all(|(_, vector)| vector.len() == 3),
+            "the label table's stale width must not survive reconciliation"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
