@@ -1167,6 +1167,44 @@ impl Drop for MaintenanceGuard {
 /// `TAGURU_SEMANTIC_FLOOR≈0.2` next to its `TAGURU_EMBED_MODEL`.
 const DEFAULT_SEMANTIC_FLOOR: f32 = 0.35;
 
+/// Names with a reservation in flight for `create`, `delete`, or
+/// `rename_context` — held under ONE mutex so that checking all three
+/// sets and reserving a name in one of them happen as a single
+/// critical section. Splitting these into three independent mutexes
+/// let a `create`'s check-then-insert interleave with a concurrent
+/// `rename_context`'s own check-then-insert (each only ever took
+/// `registry.read()`, which does not exclude the other): both could
+/// observe the other's set as still empty and both proceed to reserve
+/// the same name, racing their disk writes. `delete` needs no such
+/// care against the other two — it holds `registry.write()` across
+/// its whole check-then-reserve phase, which already excludes any
+/// concurrent `create`/`rename_context` (both readers).
+#[derive(Default)]
+struct PendingNames {
+    /// Names whose delete is still removing files. A delete takes the
+    /// name out of the registry FIRST and only then (unlocked) unlinks
+    /// the file family — without this set, a create() in that window
+    /// would lay down a new generation for the tail of the delete's
+    /// unlink loop to destroy. Entered in the same critical section
+    /// that removes the name, left when the files are gone.
+    deletes: HashSet<String>,
+    /// Names whose create is still writing files — the create-side twin
+    /// of `deletes`. A create reserves the name here FIRST and only
+    /// then (unlocked) clears leftovers and fsyncs the fresh file
+    /// family; without this set the registry lock would have to stay
+    /// held across that disk work, stalling every operation on every
+    /// context behind one create's fsyncs. Entered under the registry
+    /// guard, left in the critical section that registers the entry.
+    creates: HashSet<String>,
+    /// Both the `from` and `to` names of an in-flight rename — reserved
+    /// before the marker is written, released only once the rename's
+    /// last step (the group membership rewrite) lands. `create` and
+    /// `delete` both refuse a name reserved here: a create under `to`
+    /// would collide with the files about to land there, and a delete
+    /// of either name would race the move or strand the marker.
+    renames: HashSet<String>,
+}
+
 struct StateInner {
     data_dir: PathBuf,
     /// The advisory exclusive lock that makes this process the data
@@ -1244,28 +1282,9 @@ struct StateInner {
     /// synchronous, so this is the only lever for provider-side
     /// concurrency.
     embed_parallel: usize,
-    /// Names whose delete is still removing files. A delete takes the
-    /// name out of the registry FIRST and only then (unlocked) unlinks
-    /// the file family — without this set, a create() in that window
-    /// would lay down a new generation for the tail of the delete's
-    /// unlink loop to destroy. Entered in the same critical section
-    /// that removes the name, left when the files are gone.
-    pending_deletes: Mutex<std::collections::HashSet<String>>,
-    /// Names whose create is still writing files — the create-side twin
-    /// of `pending_deletes`. A create reserves the name here FIRST and
-    /// only then (unlocked) clears leftovers and fsyncs the fresh file
-    /// family; without this set the registry lock would have to stay
-    /// held across that disk work, stalling every operation on every
-    /// context behind one create's fsyncs. Entered under the registry
-    /// guard, left in the critical section that registers the entry.
-    pending_creates: Mutex<std::collections::HashSet<String>>,
-    /// Both the `from` and `to` names of an in-flight rename — reserved
-    /// before the marker is written, released only once the rename's
-    /// last step (the group membership rewrite) lands. `create` and
-    /// `delete` both refuse a name reserved here: a create under `to`
-    /// would collide with the files about to land there, and a delete
-    /// of either name would race the move or strand the marker.
-    pending_renames: Mutex<std::collections::HashSet<String>>,
+    /// See [`PendingNames`] for why `create`, `delete`, and
+    /// `rename_context` share one mutex here instead of one each.
+    pending: Mutex<PendingNames>,
     /// Running estimate of unpinned resident graph bytes — the cheap
     /// gate in front of the budget sweep. Adjusted by absolute
     /// per-entry recounts (see `EntryInner::counted_bytes`); the
@@ -1424,9 +1443,7 @@ impl AppState {
             embed_passages: options.embed_passages,
             passage_vector_limit: options.passage_vector_limit,
             embed_parallel: options.embed_parallel,
-            pending_deletes: Mutex::new(std::collections::HashSet::new()),
-            pending_creates: Mutex::new(std::collections::HashSet::new()),
-            pending_renames: Mutex::new(std::collections::HashSet::new()),
+            pending: Mutex::new(PendingNames::default()),
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
         }));
@@ -1656,10 +1673,10 @@ impl AppState {
     /// The registry lock is NOT held across the disk work (up to seven
     /// unlinks plus save_files' fsyncs — seconds on slow storage,
     /// behind which every operation on every context would otherwise
-    /// stall). The name is reserved in `pending_creates` under the
+    /// stall). The name is reserved in `pending.creates` under the
     /// registry guard, the files are written unlocked, and the entry
     /// lands in a second critical section — the create twin of
-    /// delete's `pending_deletes` choreography.
+    /// delete's `pending.deletes` choreography.
     pub fn create(&self, name: &str, meta: ContextMeta) -> Result<(), CreateError> {
         // An empty name has no file stem — it would persist as a bare
         // `.ctx` and disappear from the registry on the next restart.
@@ -1680,18 +1697,20 @@ impl AppState {
             // has not yet torn its files down. The client sees the same
             // refusal as for a live name and simply retries after the
             // other call's response.
-            if registry.contains_key(name)
-                || self.0.pending_deletes.lock().contains(name)
-                || self.0.pending_renames.lock().contains(name)
-            {
+            if registry.contains_key(name) {
                 return Err(CreateError::AlreadyExists);
             }
-            // Reserving while still under the registry guard closes the
-            // gap against a finishing create: reservations leave only
-            // inside the registry's WRITE section below, so "not in the
-            // map, not reserved" cannot be observed between a sibling's
-            // insert and its unreserve.
-            if !self.0.pending_creates.lock().insert(name.to_string()) {
+            // Checking the other two sets and reserving this one all
+            // happen under the SAME lock, in one critical section — see
+            // `PendingNames`'s doc for why that atomicity is what closes
+            // the gap against a concurrent `rename_context` (the only
+            // sibling that, like this call, holds only `registry.read()`
+            // for its own check-then-reserve).
+            let mut pending = self.0.pending.lock();
+            if pending.deletes.contains(name)
+                || pending.renames.contains(name)
+                || !pending.creates.insert(name.to_string())
+            {
                 return Err(CreateError::AlreadyExists);
             }
         }
@@ -1712,12 +1731,12 @@ impl AppState {
                 )),
             );
         });
-        self.0.pending_creates.lock().remove(name);
+        self.0.pending.lock().creates.remove(name);
         outcome
     }
 
     /// The disk half of [`AppState::create`], run WITHOUT the registry
-    /// lock — the `pending_creates` reservation is what keeps the name
+    /// lock — the `pending.creates` reservation is what keeps the name
     /// taken meanwhile.
     ///
     /// A name can be reused after a delete, and a delete that failed
@@ -1808,7 +1827,7 @@ impl AppState {
     /// backs off instead of recreating the files. Any unflushed writes
     /// are discarded — deletion destroys the context.
     ///
-    /// The name enters `pending_deletes` in the same critical section
+    /// The name enters `pending.deletes` in the same critical section
     /// that unregisters it and leaves only after the unlink loop: to a
     /// concurrent create() the name stays taken for the delete's whole
     /// run, so no new generation of files can appear under the tail of
@@ -1829,19 +1848,19 @@ impl AppState {
             // live name already uses — the caller sees a name that
             // exists but cannot be deleted right now, not "no such
             // context".
-            if self.0.pending_renames.lock().contains(name) {
+            if self.0.pending.lock().renames.contains(name) {
                 return Some(Err(io::Error::other(format!(
                     "context '{name}' is mid-rename; retry after it completes"
                 ))));
             }
             let entry = registry.remove(name)?;
-            self.0.pending_deletes.lock().insert(name.to_string());
+            self.0.pending.lock().deletes.insert(name.to_string());
             entry
         };
         let mut in_flight = entry.inner.write();
         self.tombstone_locked(&mut in_flight, &entry);
         // The rest of this function is disk I/O (marker, group sweep,
-        // unlinks) guarded by `pending_deletes`, not by `inner` — hold
+        // unlinks) guarded by `pending.deletes`, not by `inner` — hold
         // it no longer than the in-memory teardown above needs.
         drop(in_flight);
         let stem = file_stem(name);
@@ -1884,7 +1903,7 @@ impl AppState {
         if outcome.is_ok() {
             let _ = remove_persisted_file(&marker);
         }
-        self.0.pending_deletes.lock().remove(name);
+        self.0.pending.lock().deletes.remove(name);
         Some(outcome)
     }
 
@@ -1923,29 +1942,35 @@ impl AppState {
             if registry.contains_key(to) {
                 return Err(RenameContextError::AlreadyExists);
             }
-            let pending_deletes = self.0.pending_deletes.lock();
-            let pending_creates = self.0.pending_creates.lock();
-            let mut pending_renames = self.0.pending_renames.lock();
-            if pending_deletes.contains(from)
-                || pending_deletes.contains(to)
-                || pending_creates.contains(to)
-                || pending_renames.contains(from)
-                || pending_renames.contains(to)
+            // Checking all three sets and reserving both names in
+            // `renames` all happen under the SAME lock, in one critical
+            // section — see `PendingNames`'s doc for why that atomicity
+            // is what closes the gap against a concurrent `create` (the
+            // only sibling that, like this call, holds only
+            // `registry.read()` for its own check-then-reserve).
+            let mut pending = self.0.pending.lock();
+            if pending.deletes.contains(from)
+                || pending.deletes.contains(to)
+                || pending.creates.contains(to)
+                || pending.renames.contains(from)
+                || pending.renames.contains(to)
             {
                 return Err(RenameContextError::Busy);
             }
-            pending_renames.insert(from.to_string());
-            pending_renames.insert(to.to_string());
+            pending.renames.insert(from.to_string());
+            pending.renames.insert(to.to_string());
             Arc::clone(entry)
         };
         let outcome = self.rename_context_locked(from, to, &entry);
-        self.0.pending_renames.lock().remove(from);
-        self.0.pending_renames.lock().remove(to);
+        let mut pending = self.0.pending.lock();
+        pending.renames.remove(from);
+        pending.renames.remove(to);
+        drop(pending);
         outcome
     }
 
     /// The disk-and-registry half of [`AppState::rename_context`], run
-    /// with `from` and `to` both reserved in `pending_renames` — see
+    /// with `from` and `to` both reserved in `pending.renames` — see
     /// that function's doc for why the marker is strict rather than
     /// best-effort.
     fn rename_context_locked(
@@ -2073,7 +2098,7 @@ impl AppState {
     }
 
     /// Registers a group and persists it immediately — the create twin
-    /// for groups, without the `pending_creates` choreography: the one
+    /// for groups, without the `pending.creates` choreography: the one
     /// fsync happens under the groups lock, which blocks only other
     /// group writes (see the field's doc), so nothing here needs the
     /// reservation dance.
@@ -2081,7 +2106,7 @@ impl AppState {
     /// Member validation happens under both locks (`groups` before
     /// `registry` — the documented order): `contains_key` already
     /// answers false for a name mid-delete, because delete() removes
-    /// the name and reserves it in `pending_deletes` inside one
+    /// the name and reserves it in `pending.deletes` inside one
     /// critical section. Child groups are judged against the same map
     /// the write lock already holds.
     pub fn create_group(
@@ -10452,7 +10477,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A failed create must release its `pending_creates` reservation —
+    /// A failed create must release its `pending.creates` reservation —
     /// otherwise one disk refusal would leave the name reading as taken
     /// until restart.
     #[test]
@@ -15003,7 +15028,7 @@ mod tests {
 
     /// Same fence a create races against a slow delete in
     /// `a_create_racing_a_slow_delete_is_refused_not_interleaved`: a
-    /// rename reserves both its names in `pending_renames` before it
+    /// rename reserves both its names in `pending.renames` before it
     /// may touch any file, so a create for either name must be refused
     /// until the rename settles, never interleaved with it.
     #[test]
@@ -15018,7 +15043,7 @@ mod tests {
             let state = state.clone();
             std::thread::spawn(move || state.rename_context("sake", "shochu").unwrap())
         };
-        while !state.0.pending_renames.lock().contains("sake") {
+        while !state.0.pending.lock().renames.contains("sake") {
             std::thread::yield_now();
         }
         assert!(
@@ -15039,8 +15064,8 @@ mod tests {
         drop(stall);
         renamer.join().unwrap();
         assert!(state.directory_entry("shochu").is_some());
-        assert!(!state.0.pending_renames.lock().contains("sake"));
-        assert!(!state.0.pending_renames.lock().contains("shochu"));
+        assert!(!state.0.pending.lock().renames.contains("sake"));
+        assert!(!state.0.pending.lock().renames.contains("shochu"));
 
         let _ = fs::remove_dir_all(dir);
     }
