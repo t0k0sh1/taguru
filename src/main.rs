@@ -418,11 +418,17 @@ async fn serve() {
     println!("listening on {}", listener.local_addr().unwrap());
     // Off-loopback with no per-key budget: one chatty client owns the
     // whole server. README says to turn the limit on when the server
-    // leaves localhost — say it where the operator is looking.
-    if !listener.local_addr().unwrap().ip().is_loopback() && rate_limit_disabled {
+    // leaves localhost — say it where the operator is looking. Pulled
+    // into a predicate so the condition has a unit test; the message
+    // hedges on 0.0.0.0 since the Dockerfile binds it by default just
+    // so `-p`/a Service can publish the port, which isn't proof this
+    // process is actually reachable beyond its own namespace.
+    if needs_off_loopback_warning(listener.local_addr().unwrap().ip(), rate_limit_disabled) {
         warn!(
-            "listening beyond loopback with TAGURU_RATE_LIMIT_PER_MIN off — set a \
-             per-key budget whenever the server leaves localhost"
+            "listening beyond loopback with TAGURU_RATE_LIMIT_PER_MIN off — 0.0.0.0 \
+             alone doesn't mean exposed (a container needs it just to publish the \
+             port at all); set a per-key budget once the server is actually \
+             reachable beyond this host"
         );
     }
     // "ready" only after the socket exists: everything an operator
@@ -952,6 +958,16 @@ pub(crate) fn resolve_per_minute(name: &str, requested: usize) -> u32 {
     })
 }
 
+/// Whether the boot-time "off-loopback, no rate limit" warning should
+/// fire. `0.0.0.0` — the Docker image's default bind — is included:
+/// it's still true that *something* beyond this process can reach the
+/// port if it's published or routed, the process just can't see how
+/// far. A concrete non-loopback address (an explicit LAN/public IP)
+/// warrants the same warning for the same reason.
+pub(crate) fn needs_off_loopback_warning(ip: std::net::IpAddr, rate_limit_disabled: bool) -> bool {
+    !ip.is_loopback() && rate_limit_disabled
+}
+
 /// Tokio reserves a few high bits in its semaphore permit counter and
 /// panics when constructed above `MAX_PERMITS`. An operator-provided usize
 /// must therefore be clamped before it reaches `HeavyOpsLimiter::new`.
@@ -1074,6 +1090,27 @@ mod tests {
         assert_eq!(resolve_per_minute("X", 0), 0);
         assert_eq!(resolve_per_minute("X", 600), 600);
         assert_eq!(resolve_per_minute("X", u32::MAX as usize + 1), u32::MAX);
+    }
+
+    #[test]
+    fn off_loopback_warning_fires_only_without_a_rate_limit() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let unspecified = IpAddr::V4(Ipv4Addr::UNSPECIFIED); // 0.0.0.0 — the image's default bind
+        let lan = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+        let (disabled, configured) = (true, false); // rate_limit_disabled
+
+        // Loopback never warns, rate limit configured or not.
+        assert!(!needs_off_loopback_warning(loopback, disabled));
+        assert!(!needs_off_loopback_warning(loopback, configured));
+        // 0.0.0.0 (the Docker image's default bind) and an explicit LAN
+        // address both warn with no rate limit configured...
+        assert!(needs_off_loopback_warning(unspecified, disabled));
+        assert!(needs_off_loopback_warning(lan, disabled));
+        // ...and both stay quiet once one is.
+        assert!(!needs_off_loopback_warning(unspecified, configured));
+        assert!(!needs_off_loopback_warning(lan, configured));
     }
 
     #[test]
