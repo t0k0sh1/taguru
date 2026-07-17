@@ -130,7 +130,13 @@ struct WalRecord<Op> {
     /// parser routes the unknown field into the flattened op, where
     /// serde ignores it — and records WITHOUT the field (written by
     /// one) replay unchecked, so the format change is additive in both
-    /// directions.
+    /// directions. That same leniency would also swallow a record
+    /// whose crc field survived corruption everywhere except its own
+    /// name — serde treats an unrecognized field name exactly like a
+    /// missing one — so every replay path additionally checks whether
+    /// the raw bytes hold a field the deserialized op cannot account
+    /// for before trusting a `None` here (see
+    /// [`line_has_a_field_the_op_cannot_explain`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     crc: Option<u32>,
 }
@@ -170,6 +176,40 @@ fn canonical_bytes_of_line(line: &[u8]) -> Option<Vec<u8>> {
     let mut canonical = line[..pos].to_vec();
     canonical.push(b'}');
     Some(canonical)
+}
+
+/// Whether a line, already parsed with `crc: None`, carries a top-level
+/// field the parsed `op` cannot account for. Only meaningful to call in
+/// that situation: serde's flatten treats ANY field name it doesn't
+/// recognize as simply absent (see [`WalRecord::crc`]), so a record
+/// whose crc field's own name got bit-flipped into something else — say
+/// `"crd"` — parses exactly like a genuine pre-checksum record that
+/// never had the field at all. Naively scanning the raw bytes for a
+/// `,"crc":` marker cannot tell the two apart either: the corrupted
+/// name isn't `"crc"` anymore, so the marker is gone from the bytes in
+/// exactly the case that needs catching.
+///
+/// The two situations DO differ in one place: a real pre-checksum
+/// record's bytes hold nothing but `seq` and the op's own fields, while
+/// a corrupted-name record has one extra field sitting alongside them.
+/// Re-serializing the already-deserialized `op` recovers exactly the
+/// key set it explains — without ever needing to know `Op`'s field
+/// names statically — and this only ever compares KEYS, never a value,
+/// so serde_json's occasional one-ULP float round-trip drift (see
+/// [`canonical_bytes_of_line`]'s doc comment) cannot produce a false
+/// positive here the way comparing re-encoded bytes could.
+fn line_has_a_field_the_op_cannot_explain<Op: Serialize>(line: &[u8], op: &Op) -> io::Result<bool> {
+    let raw: serde_json::Value = serde_json::from_slice(line)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let Some(raw_fields) = raw.as_object() else {
+        return Ok(false);
+    };
+    let op_value = serde_json::to_value(op)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let op_fields = op_value.as_object();
+    Ok(raw_fields.keys().any(|key| {
+        key != "seq" && key != "crc" && !op_fields.is_some_and(|fields| fields.contains_key(key))
+    }))
 }
 
 /// Test-only fault injection: arms the calling thread so that, after
@@ -588,12 +628,19 @@ pub fn replay_readonly<Op: DeserializeOwned + Serialize>(
 /// interior checksum mismatch reports, so it is surfaced as an error
 /// rather than silently classified either way — a genuinely torn write
 /// never reaches a matching checksum.
-fn tail_record_is_complete<Op: DeserializeOwned>(tail: &[u8]) -> io::Result<bool> {
+fn tail_record_is_complete<Op: DeserializeOwned + Serialize>(tail: &[u8]) -> io::Result<bool> {
     let record: WalRecord<Op> = match serde_json::from_slice(tail) {
         Ok(record) => record,
         Err(_) => return Ok(false),
     };
     let Some(stored) = record.crc else {
+        if line_has_a_field_the_op_cannot_explain(tail, &record.op)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a field the op does not account for is present in the raw bytes — \
+                 the crc field's name is likely corrupted, not genuinely absent",
+            ));
+        }
         return Ok(true);
     };
     let canonical = canonical_bytes_of_line(tail).ok_or_else(|| {
@@ -719,7 +766,21 @@ fn parse_log<Op: DeserializeOwned + Serialize>(
                     ));
                 }
             }
-            None => unchecked += 1,
+            None => {
+                if line_has_a_field_the_op_cannot_explain(line, &record.op)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "corrupt WAL record at {} line {}: a field the op does not \
+                             account for is present in the raw bytes — the crc field's \
+                             name is likely corrupted, not genuinely absent",
+                            path.display(),
+                            index + 1
+                        ),
+                    ));
+                }
+                unchecked += 1;
+            }
         }
         top = top.max(record.seq);
         if record.seq > watermark && pending.insert(record.seq, record.op).is_some() {
@@ -870,6 +931,35 @@ mod tests {
         let error = replay::<WalOp>(&path, 0).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("checksum mismatch"), "{error}");
+        assert!(error.to_string().contains("line 1"), "{error}");
+    }
+
+    #[test]
+    fn a_bitflip_in_an_interior_crc_field_name_is_not_silently_treated_as_pre_checksum() {
+        // A distinct corruption shape from the sibling test above: the
+        // flip lands on the FIELD NAME rather than the op's data. Serde's
+        // flatten treats any field name it doesn't recognize as simply
+        // absent, so `record.crc` silently becomes `None` and the record
+        // looks exactly like a genuine pre-checksum write — without the
+        // raw-byte marker scan, this corruption would be counted as
+        // unchecked instead of rejected.
+        let path = scratch_wal("crc-field-name-flip-interior");
+        append_batch(&path, 1, &[associate("aaaa")]).unwrap();
+        append_batch(&path, 2, &[associate("z")]).unwrap();
+
+        let text = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+        assert_eq!(text.matches("\"crc\":").count(), 2);
+        let flipped = text.replacen("\"crc\":", "\"crd\":", 1);
+        fs::write(&path, flipped).unwrap();
+
+        let error = replay::<WalOp>(&path, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("field's name is likely corrupted"),
+            "{error}"
+        );
         assert!(error.to_string().contains("line 1"), "{error}");
     }
 
@@ -1114,6 +1204,34 @@ mod tests {
         let error = replay::<WalOp>(&path, 0).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("checksum mismatch"), "{error}");
+    }
+
+    #[test]
+    fn a_bitflip_in_the_tail_crc_field_name_is_not_silently_treated_as_pre_checksum() {
+        // The tail-specific counterpart to
+        // `a_bitflip_in_an_interior_crc_field_name_is_not_silently_treated_as_pre_checksum`:
+        // a final line missing its newline goes through
+        // `tail_record_is_complete` instead of the interior loop, a
+        // separate code path that needs the same raw-byte guard. Without
+        // it, this corruption parses as `crc: None`, is indistinguishable
+        // from a genuine pre-checksum tail, and is recovered as if intact.
+        let path = scratch_wal("crc-field-name-flip-tail");
+        append_batch(&path, 1, &[associate("aaaa")]).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text.matches("\"crc\":").count(), 1);
+        let flipped = text.replace("\"crc\":", "\"crd\":");
+        fs::write(&path, flipped).unwrap();
+
+        let error = replay::<WalOp>(&path, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("field's name is likely corrupted"),
+            "{error}"
+        );
     }
 
     #[test]
