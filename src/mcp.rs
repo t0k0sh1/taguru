@@ -239,6 +239,21 @@ fn need_present<'a>(arguments: &'a Value, key: &str) -> Result<&'a Value, String
     }
 }
 
+/// Pulls an optional boolean argument, falling back to `default` when
+/// absent — but, like `need`, refusing to silently coerce a
+/// present-but-wrong-typed value. `.and_then(Value::as_bool).unwrap_or(default)`
+/// treats a caller's typo'd `"false"` (a JSON string, not a bool) exactly
+/// like never passing the argument at all, silently keeping `default`
+/// instead of surfacing the mistake — most dangerous for a knob whose
+/// default is `true`, where the caller's intent was plainly to turn it off.
+fn optional_bool(arguments: &Value, key: &str, default: bool) -> Result<bool, String> {
+    match arguments.get(key) {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(Value::Null) | None => Ok(default),
+        Some(_) => Err(format!("argument '{key}' must be a boolean")),
+    }
+}
+
 /// Copies the listed keys into a request body, skipping absent ones.
 fn pick(arguments: &Value, keys: &[&str]) -> Value {
     let mut body = serde_json::Map::new();
@@ -1421,22 +1436,11 @@ pub fn run_retrieve_bounded(
             return Err("argument 'origins' must be a string or an array of strings".to_string());
         }
     };
-    let auto_pick = arguments
-        .get("auto_pick")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let describe_first = arguments
-        .get("describe_first")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let fetch_citations = arguments
-        .get("fetch_citations")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let text_fallback_only_if_empty = arguments
-        .get("text_fallback_only_if_empty")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let auto_pick = optional_bool(arguments, "auto_pick", true)?;
+    let describe_first = optional_bool(arguments, "describe_first", true)?;
+    let fetch_citations = optional_bool(arguments, "fetch_citations", true)?;
+    let text_fallback_only_if_empty =
+        optional_bool(arguments, "text_fallback_only_if_empty", true)?;
 
     // Step 1: resolve each origin cue, auto-picking the top candidate
     // (or falling back to the cue itself verbatim when auto_pick is
@@ -2773,6 +2777,32 @@ mod tests {
             }
         });
         assert_eq!(result, Err("HTTP 500: internal error".to_string()));
+    }
+
+    /// A wrong-typed boolean knob — `"auto_pick": "false"` (a JSON
+    /// string, not a bool) — must be rejected outright rather than
+    /// silently falling back to its `true` default: for a knob whose
+    /// default is `true`, silently keeping it would run the whole
+    /// retrieval against the opposite of what the caller plainly
+    /// intended, and no tool call should fire before that check.
+    #[test]
+    fn run_retrieve_rejects_wrong_typed_boolean_arguments() {
+        for key in [
+            "auto_pick",
+            "describe_first",
+            "fetch_citations",
+            "text_fallback_only_if_empty",
+        ] {
+            let mut arguments = json!({ "context": "sake", "origins": ["tokyo"] });
+            arguments[key] = json!("false");
+            let result = run_retrieve(&arguments, |_method, path, _body| {
+                panic!("unexpected call: {path}");
+            });
+            assert!(
+                matches!(&result, Err(message) if message.contains(key) && message.contains("must be a boolean")),
+                "{key}: {result:?}"
+            );
+        }
     }
 
     /// `auto_pick: false` anchors on each cue verbatim instead of
