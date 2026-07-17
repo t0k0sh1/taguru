@@ -2002,7 +2002,22 @@ fn page_by<T>(
             cursor.label.as_str(),
             cursor.object.as_str(),
         );
-        matches.retain(|item| rank(key(item), seat) == std::cmp::Ordering::Greater);
+        matches.retain(|item| {
+            let k = key(item);
+            // The cursor names an edge by identity — `weight` only
+            // ranks it, and a concurrent `associate` call can re-average
+            // that weight between pages. Comparing on the current
+            // weight alone would then be able to rank this exact edge
+            // as still ahead of the cursor it itself produced, handing
+            // it back a second time. The triple alone already uniquely
+            // identifies an edge (the `edge_ids` bijection this
+            // module's docs describe), so that exact edge is always
+            // excluded regardless of what its weight now reads.
+            if (k.1, k.2, k.3) == (seat.1, seat.2, seat.3) {
+                return false;
+            }
+            rank(k, seat) == std::cmp::Ordering::Greater
+        });
     }
     matches.sort_by(|a, b| rank(key(a), key(b)));
     matches.truncate(limit);
@@ -3934,7 +3949,15 @@ fn cross_page_by(
             cursor.object.as_str(),
         );
         matches.retain(|(index, found)| {
-            cross_rank(cross_key(&targets[*index], found), seat) == std::cmp::Ordering::Greater
+            let k = cross_key(&targets[*index], found);
+            // Same reasoning as `page_by`: `(context, subject, label,
+            // object)` alone already identifies the edge the cursor
+            // names, so a weight that moved between pages can never
+            // make that same edge outrank its own cursor a second time.
+            if (k.1, k.2, k.3, k.4) == (seat.1, seat.2, seat.3, seat.4) {
+                return false;
+            }
+            cross_rank(k, seat) == std::cmp::Ordering::Greater
         });
     }
     matches.sort_by(|(ia, a), (ib, b)| {
@@ -5850,6 +5873,44 @@ mod tests {
         assert_eq!(objects, vec!["c", "d"]);
     }
 
+    #[test]
+    fn page_never_returns_the_cursors_own_edge_even_if_its_weight_moved() {
+        // The cursor names "b" at weight 2.0. Between pages, a
+        // concurrent `associate` call re-averages b's weight down to
+        // 0.5. Ranking on that new weight alone would place b's
+        // current record ahead of the cursor it itself produced (its
+        // magnitude no longer matches what the cursor recorded), and
+        // hand the same edge back a second time.
+        let matches = vec![
+            assoc("a", 3.0),
+            assoc("b", 2.0),
+            assoc("c", 1.0),
+            assoc("d", 1.0),
+        ];
+        let (_, first) = page(matches, Some(2), None);
+        let last = first.last().unwrap();
+        assert_eq!(last.object, "b");
+        let cursor = MatchCursor {
+            weight: last.weight,
+            subject: last.subject.clone(),
+            label: last.label.clone(),
+            object: last.object.clone(),
+        };
+
+        let mutated = vec![
+            assoc("a", 3.0),
+            assoc("b", 0.5),
+            assoc("c", 1.0),
+            assoc("d", 1.0),
+        ];
+        let (_, second) = page(mutated, Some(10), Some(&cursor));
+        let objects: Vec<&str> = second.iter().map(|m| m.object.as_str()).collect();
+        assert!(
+            !objects.contains(&"b"),
+            "b must never come back just because its own weight moved: got {objects:?}"
+        );
+    }
+
     fn recollection(object: &str, distance: usize) -> Recollection {
         Recollection {
             distance,
@@ -5945,6 +6006,32 @@ mod tests {
         assert_eq!(total, 2, "total is the pre-cursor, pre-truncate count");
         assert_eq!(second.len(), 1);
         assert_eq!(targets[second[0].0], "zeta");
+    }
+
+    #[test]
+    fn cross_page_by_never_returns_the_cursors_own_edge_even_if_its_weight_moved() {
+        let targets = vec!["alpha".to_string(), "zeta".to_string()];
+        let matches = vec![(0, assoc("青嶺", 1.0)), (1, assoc("青嶺", 1.0))];
+        let (_, first) = cross_page_by(matches, Some(1), None, &targets);
+        let (index, last) = &first[0];
+        assert_eq!(targets[*index], "alpha");
+        let cursor = CrossMatchCursor {
+            weight: last.weight,
+            context: targets[*index].clone(),
+            subject: last.subject.clone(),
+            label: last.label.clone(),
+            object: last.object.clone(),
+        };
+
+        // alpha's edge re-averages down between pages — same edge,
+        // moved weight, must not rank ahead of the cursor it produced.
+        let mutated = vec![(0, assoc("青嶺", 0.2)), (1, assoc("青嶺", 1.0))];
+        let (_, second) = cross_page_by(mutated, Some(10), Some(&cursor), &targets);
+        let contexts: Vec<&str> = second.iter().map(|(i, _)| targets[*i].as_str()).collect();
+        assert!(
+            !contexts.contains(&"alpha"),
+            "alpha's edge must never come back just because its own weight moved: got {contexts:?}"
+        );
     }
 
     #[test]
