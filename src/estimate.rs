@@ -363,7 +363,7 @@ struct PassageEstimate {
     vectorized_paragraphs: u64,
 }
 
-/// A synthetic passage body of roughly `bytes` bytes, `\n\n`-separated
+/// A synthetic passage body of exactly `bytes` bytes, `\n\n`-separated
 /// into paragraphs so `paragraph::split` (and so BM25 and the vector
 /// lane) sees the same shape a real document would rather than one
 /// giant paragraph.
@@ -383,6 +383,17 @@ fn synthetic_passage_text(bytes: u64) -> String {
             word += 1;
         }
     }
+    // The loop above always finishes whichever paragraph it's mid-way
+    // through before re-checking `bytes`, so it can overshoot by up to
+    // one SYNTHETIC_PARAGRAPH_BYTES — for a small `bytes`, or one that
+    // lands just past a paragraph boundary (500 overshoots to 812), that's
+    // not a rounding error, it's up to double. `estimate_passages` measures
+    // this sample for real and scales it by `factor` to reach the final
+    // estimate, so an oversized sample doesn't stay a sampling quirk — it
+    // becomes a systematic overestimate of every passage number `estimate`
+    // reports. Truncating back to the request here is what keeps the
+    // sample honest.
+    text.truncate(bytes as usize);
     text
 }
 
@@ -458,6 +469,25 @@ mod tests {
         let name = synthetic_name('c', 7, 24);
         assert_eq!(name.len(), 24);
         assert_ne!(synthetic_name('c', 1, 8), synthetic_name('c', 11, 8));
+    }
+
+    /// Regression test: the paragraph loop always finishes the paragraph
+    /// it's mid-way through before checking whether `bytes` is met, so
+    /// without the final truncate a target of 500 landed a whole
+    /// SYNTHETIC_PARAGRAPH_BYTES paragraph past "roughly 500" — 812 bytes,
+    /// a 62% overshoot that `estimate_passages` would carry straight into
+    /// its reported store/BM25 estimate via `factor`.
+    #[test]
+    fn synthetic_passage_text_lands_on_the_exact_requested_length() {
+        for bytes in [0, 1, 10, 399, 400, 401, 500, 799, 800, 801, 4096] {
+            let text = synthetic_passage_text(bytes);
+            assert_eq!(
+                text.len() as u64,
+                bytes,
+                "requested {bytes} bytes, got {}",
+                text.len()
+            );
+        }
     }
 
     #[test]
