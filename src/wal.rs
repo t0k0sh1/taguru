@@ -413,11 +413,23 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
         // then skip syncing forever — silently, since nothing surfaces
         // that failure to a caller. Retrying the sync instead gives the
         // directory entry a second chance to actually land: on success
-        // the batch proceeds with a file that is now durable after all,
-        // and only if that retry ALSO fails does this give up and
-        // surface an error.
+        // the batch proceeds with a file that is now durable after all.
         if crate::registry::remove_persisted_file(path).is_err() {
-            fsync_parent_dir_after_create(path)?;
+            if let Err(retry_error) = fsync_parent_dir_after_create(path) {
+                // The sync failed twice AND the cleanup failed once
+                // already — a disk in serious trouble. Leaving the file
+                // behind now would make the poisoning permanent: every
+                // later append reaches it through the `AlreadyExists`
+                // path above, which never syncs the directory, so this
+                // would be the last chance ever to close the hole. Best
+                // effort: if this ALSO fails there is nothing left to
+                // try, and the (still unsynced) leftover survives, but
+                // the original disk failure is exceedingly rare to
+                // begin with, and rarer still to also make the cleanup
+                // fail twice over.
+                let _ = crate::registry::remove_persisted_file(path);
+                return Err(retry_error);
+            }
         } else {
             return Err(error);
         }
@@ -1288,8 +1300,11 @@ mod tests {
     fn a_failed_create_fsync_surfaces_an_error_when_cleanup_and_retry_both_fail() {
         // The other half of the fix: when the retry ALSO fails, this
         // must still return an error rather than silently proceeding —
-        // best effort stops at two attempts, it does not paper over a
-        // disk that keeps refusing to sync.
+        // best effort does not paper over a disk that keeps refusing to
+        // sync. But it must not leave the file behind either: that
+        // leftover would be a permanent, silent durability hole, since
+        // every later append reaches it through the `AlreadyExists`
+        // path above, which never syncs the directory again.
         let path = scratch_wal("create-fsync-retry-fails");
 
         fail_next_create_fsyncs(2);
@@ -1306,12 +1321,13 @@ mod tests {
             !past_end,
             "the unlink fault must have fired for this test to be meaningful"
         );
-        // Best effort: the removal was never actually attempted (the
-        // fault intercepts before it), so the file the create left
-        // behind is still there, still unsynced. Nothing worse than
-        // that leftover happens — the caller gets the error and does
-        // not mistake this batch for applied.
-        assert!(path.exists());
+        // The first cleanup attempt was intercepted by the injected
+        // unlink fault (one-shot, already spent), so this second
+        // attempt reaches the real filesystem unobstructed and actually
+        // removes the file — the next append starts completely fresh
+        // and gets an honest chance to sync the directory again, rather
+        // than silently skipping it forever via `AlreadyExists`.
+        assert!(!path.exists());
     }
 
     #[test]
