@@ -1184,7 +1184,8 @@ fn merge(outputs: Vec<ModelOutput>, questions_cap: usize, paragraph_count: usize
                 extraction.dropped += 1;
                 continue;
             };
-            if !seen_questions.insert((paragraph, question.to_string())) {
+            let question_key = (paragraph, question.to_string());
+            if seen_questions.contains(&question_key) {
                 extraction.duplicates += 1;
                 continue;
             }
@@ -1193,8 +1194,15 @@ fn merge(outputs: Vec<ModelOutput>, questions_cap: usize, paragraph_count: usize
                 extraction.dropped += 1;
                 continue;
             }
+            // Only register with seen_questions once the item is actually
+            // kept: inserting it before the cap check would make a
+            // cap-dropped question read as a *duplicate* the next time an
+            // identical one arrives (from another chunk re-proposing it),
+            // permanently mislabeling a paragraph's overflow as
+            // deduplication instead of the cap that caused it.
             *count += 1;
-            extraction.questions.push((paragraph, question.to_string()));
+            seen_questions.insert(question_key.clone());
+            extraction.questions.push(question_key);
         }
         for item in output.associations {
             // Absent and null both read as empty; an omitted weight is
@@ -2050,6 +2058,47 @@ mod tests {
         );
         assert_eq!(merged.duplicates, 1);
         assert_eq!(merged.dropped, 4);
+    }
+
+    /// Regression test: a question the per-paragraph cap drops must not
+    /// register with `seen_questions` — every document chunk sees the
+    /// same paragraph list and independently proposes questions for it,
+    /// so the identical question re-proposed by a later chunk is a
+    /// realistic occurrence, not an edge case. Before this fix it read
+    /// as a *duplicate* on the repeat, permanently mislabeling the
+    /// paragraph's overflow as deduplication instead of the cap that
+    /// actually caused it.
+    #[test]
+    fn cap_dropped_questions_are_not_mistaken_for_duplicates_on_repeat() {
+        let first_chunk = ModelOutput {
+            associations: Vec::new(),
+            aliases: Vec::new(),
+            questions: vec![
+                ModelQuestion {
+                    paragraph: Some(0),
+                    question: Some("質問A".to_string()),
+                },
+                ModelQuestion {
+                    paragraph: Some(0),
+                    question: Some("質問B".to_string()), // over this run's N=1
+                },
+            ],
+        };
+        let second_chunk = ModelOutput {
+            associations: Vec::new(),
+            aliases: Vec::new(),
+            questions: vec![ModelQuestion {
+                paragraph: Some(0),
+                question: Some("質問B".to_string()), // re-proposed, still over the cap
+            }],
+        };
+        let merged = merge(vec![first_chunk, second_chunk], 1, 1);
+        assert_eq!(merged.questions, vec![(0, "質問A".to_string())]);
+        assert_eq!(
+            merged.duplicates, 0,
+            "the repeat is still a cap drop, not a duplicate"
+        );
+        assert_eq!(merged.dropped, 2);
     }
 
     #[test]
