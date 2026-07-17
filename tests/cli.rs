@@ -1038,6 +1038,69 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Pass 1's summary counts refused FILES, not refused batches: a
+/// stream file (`taguru export` output, or any hand-built one) can
+/// carry several batches, and each one that restates a source an
+/// earlier file already claimed logs its own conflict line — but the
+/// file itself must still add at most 1 to the tally, or "N of M
+/// file(s) refused" could report N > M from a single offending file.
+#[test]
+fn a_multi_batch_stream_restating_earlier_sources_counts_as_one_refused_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-cli-import-refused-count-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+
+    // first.jsonl claims three sources in one stream — all novel.
+    std::fs::write(
+        dir.join("first.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}\n\
+         {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s2\"}\n\
+         {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s3\"}\n\
+         {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o3\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    // second.jsonl restates the same three sources in one stream of its
+    // own — one refused FILE, but three separate ownership conflicts.
+    std::fs::write(
+        dir.join("second.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}\n\
+         {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o1b\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s2\"}\n\
+         {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o2b\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s3\"}\n\
+         {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o3b\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+
+    let output = run(&[
+        "import",
+        &dir.join("first.jsonl").display().to_string(),
+        &dir.join("second.jsonl").display().to_string(),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Each conflicting batch is still named individually…
+    assert_eq!(
+        stderr
+            .matches("is already stated by an earlier file")
+            .count(),
+        3,
+        "{stderr}"
+    );
+    // …but only one of the two files actually failed — never 3 of 2.
+    assert!(
+        stderr.contains("1 of 2 file(s) refused during validation"),
+        "{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Inspect covers the group files: parse trouble fails the check (a
 /// boot would reset the record, and membership is acknowledged data),
 /// an unreadable file fails it (a boot refuses outright), and what

@@ -160,6 +160,10 @@ pub fn run(args: &[String]) -> i32 {
         let parsed = fs::File::open(path)
             .map_err(|error| error.to_string())
             .and_then(|file| parse_stream(std::io::BufReader::new(file)));
+        // A stream file can carry several batches or groups, so it can
+        // trip several of the checks below; `broken` counts files, not
+        // events, so one file's several conflicts must still add only 1.
+        let mut file_broken = false;
         match parsed {
             Ok(stream) => {
                 for batch in stream.batches {
@@ -171,7 +175,7 @@ pub fn run(args: &[String]) -> i32 {
                             batch.source,
                             batch.context
                         );
-                        broken += 1;
+                        file_broken = true;
                         continue;
                     }
                     batches.push((path, batch));
@@ -183,7 +187,7 @@ pub fn run(args: &[String]) -> i32 {
                              earlier file — one record owns one group's truth",
                             path.display()
                         );
-                        broken += 1;
+                        file_broken = true;
                         continue;
                     }
                     groups.push((path, name, record));
@@ -191,8 +195,11 @@ pub fn run(args: &[String]) -> i32 {
             }
             Err(message) => {
                 eprintln!("taguru: import: {}: {message}", path.display());
-                broken += 1;
+                file_broken = true;
             }
+        }
+        if file_broken {
+            broken += 1;
         }
     }
     if broken > 0 {
