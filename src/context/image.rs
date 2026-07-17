@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use super::{
     AliasRecord, AttributionId, AttributionLocatorRecord, AttributionRecord, ConceptId,
     ConceptRecord, Context, CorruptImage, EdgeId, EdgeRecord, EntryIndex, LabelId, LabelRecord,
-    NIL, SourceId, SourceRecord,
+    NIL, SourceId, SourceRecord, accumulate_saturating,
 };
 
 // The persistence format depends on these exact widths. A field added to
@@ -272,21 +272,21 @@ impl Context {
             let mut edges = Vec::with_capacity(legacy_edges.len());
             // A chain is identified by its head: edges sharing a
             // `first_attribution` walk the identical `next` list and get the
-            // same length, so memoize by head. Without this a pathological
-            // image whose every edge points at one long shared chain walks
-            // that chain once per edge — O(edges × chain) — during a
-            // migration that holds the write lock and never yields.
-            let mut chain_lens: HashMap<AttributionId, u64> = HashMap::new();
+            // same length and sum, so memoize by head. Without this a
+            // pathological image whose every edge points at one long shared
+            // chain walks that chain once per edge — O(edges × chain) —
+            // during a migration that holds the write lock and never yields.
+            let mut chains: HashMap<AttributionId, (u64, f64)> = HashMap::new();
             for legacy in &legacy_edges {
-                let chain_len = match chain_lens.get(&legacy.first_attribution) {
-                    Some(&len) => len,
+                let (chain_len, attributed_sum) = match chains.get(&legacy.first_attribution) {
+                    Some(&cached) => cached,
                     None => {
-                        let len = legacy_attribution_chain_len(
+                        let computed = legacy_attribution_chain_len(
                             &legacy_attributions,
                             legacy.first_attribution,
                         )?;
-                        chain_lens.insert(legacy.first_attribution, len);
-                        len
+                        chains.insert(legacy.first_attribution, computed);
+                        computed
                     }
                 };
                 // An empty chain (first_attribution == NIL) is ambiguous in
@@ -305,8 +305,28 @@ impl Context {
                 // in context.rs — chosen over the alternative of reviving
                 // every empty chain, which would undo the fix below and
                 // resurrect the far more common case: an actual retraction.
+                //
+                // A chain that IS non-empty can still under-represent the
+                // edge: `upsert` (see `Context::associate`) folds every
+                // assertion — sourced or not — into the edge's cumulative
+                // weight, but only a sourced one ever links into the
+                // attribution chain, so a sourceless call sitting alongside
+                // sourced ones on the same edge leaves no chain record at
+                // all. `legacy.weight` still carries its contribution,
+                // though, so a gap between it and what the chain accounts
+                // for (`attributed_sum`) proves at least one sourceless call
+                // happened. Exactly how many is unrecoverable — only their
+                // combined weight survived — so credit one for the whole
+                // gap: enough that `count` still exceeds the chain's
+                // combined attribution count after every source retracts,
+                // rather than the edge being declared dead out from under a
+                // contribution `retract_source` was never told about. See
+                // `migrating_a_pre_v5_image_credits_an_undetected_sourceless_call_so_retraction_cannot_revive_it_as_dead`
+                // in context.rs.
                 let count = if chain_len == 0 && legacy.weight == 0.0 {
                     0
+                } else if legacy.weight != attributed_sum {
+                    chain_len + 1
                 } else {
                     chain_len.max(1)
                 };
@@ -706,16 +726,17 @@ fn checked_arena_str(arena: &[u8], offset: u32, len: u32) -> Result<&str, Corrup
     std::str::from_utf8(bytes).map_err(|_| CorruptImage("name is not valid UTF-8"))
 }
 
-/// Counts one legacy edge's attribution chain length for the v5 migration
-/// in [`Context::from_bytes`]. Defensive rather than trusting: this runs
-/// before `index_attributions` has ever looked at the chain, so a
-/// hostile or truncated pre-v5 image must not send it out of bounds or
-/// looping forever on a cycle.
+/// Counts one legacy edge's attribution chain length and combined weight
+/// for the v5 migration in [`Context::from_bytes`]. Defensive rather than
+/// trusting: this runs before `index_attributions` has ever looked at the
+/// chain, so a hostile or truncated pre-v5 image must not send it out of
+/// bounds or looping forever on a cycle.
 fn legacy_attribution_chain_len(
     attributions: &[LegacyAttributionRecord],
     mut cursor: AttributionId,
-) -> Result<u64, CorruptImage> {
+) -> Result<(u64, f64), CorruptImage> {
     let mut len = 0u64;
+    let mut sum = 0.0f64;
     let mut steps: usize = 0;
     while cursor != NIL {
         steps += 1;
@@ -728,9 +749,10 @@ fn legacy_attribution_chain_len(
             .get(cursor as usize)
             .ok_or(CorruptImage("legacy attribution link is out of range"))?;
         len += 1;
+        accumulate_saturating(&mut sum, record.weight);
         cursor = record.next;
     }
-    Ok(len)
+    Ok((len, sum))
 }
 
 /// Checks that one linked chain of edges is exactly `count` records long,

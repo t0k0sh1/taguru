@@ -5393,6 +5393,44 @@ mod tests {
     }
 
     #[test]
+    fn migrating_a_pre_v5_image_credits_an_undetected_sourceless_call_so_retraction_cannot_revive_it_as_dead()
+     {
+        // `upsert` folds every assertion — sourced or not — into the
+        // edge's cumulative weight, but only a sourced one ever links
+        // into the attribution chain (see `Context::associate` vs
+        // `associate_from`). A pre-v5 image that mixes both on the same
+        // edge therefore has a chain shorter than the edge's true call
+        // count: migration must notice the gap between the edge's total
+        // weight and what the chain accounts for, or the sourceless
+        // call vanishes from `count` entirely and retracting the last
+        // known source wrongly declares the edge dead.
+        let mut context = Context::default();
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 2.0, "文書1", None)
+            .unwrap();
+        let native = &context.recall("私")[0];
+        assert_eq!(native.count, 2);
+        assert_eq!(native.weight, 1.5);
+
+        let v4 = context.to_bytes_as_version(4);
+        let mut restored = Context::from_bytes(&v4).expect("v4 image must load");
+
+        assert_eq!(restored.retract_source("文書1"), Some(1));
+
+        assert_eq!(
+            restored.dead_edges(),
+            0,
+            "a sourceless contribution must keep the edge alive after its only \
+             source retracts"
+        );
+        let after = &restored.recall("私")[0];
+        assert_eq!(after.count, 1);
+        assert_eq!(after.weight, 1.0);
+        assert!(after.attributions.is_empty());
+    }
+
+    #[test]
     fn dice_floor_is_tunable_per_context_and_per_call() {
         let mut context = Context::default();
         context.associate("青嶺酒造", "分類", "酒蔵", 1.0).unwrap();
