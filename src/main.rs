@@ -37,7 +37,7 @@ use registry::AppState;
 use taguru::deadline::Deadline;
 use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// Configuration comes from the environment — or from a KEY=VALUE file
 /// (`--config FILE` / `TAGURU_CONFIG=FILE`, the `docker --env-file`
@@ -604,58 +604,89 @@ fn spawn_flusher(state: AppState, flush_secs: usize, auto_embed: bool) {
             if state.metrics().maintenance_active() {
                 continue;
             }
-            // Serialization and fsyncs are blocking work; keep the
-            // async workers free while images land on disk.
-            let flushed = tokio::task::block_in_place(|| state.flush_dirty());
-            // Opt-in: a flushed context just changed on disk, so its
-            // glosses may have changed too — re-embed the difference.
-            if auto_embed && !flushed.is_empty() {
-                tokio::task::block_in_place(|| {
-                    for name in &flushed {
-                        match state.refresh_embeddings(name, Deadline::unbounded()) {
-                            None | Some(Ok((0, _))) => {}
-                            Some(Ok((embedded, _))) => {
-                                info!(context = %name, embedded, "auto-embedded glosses");
-                            }
-                            Some(Err(error)) => {
-                                warn!(context = %name, error, "auto embedding refresh failed");
-                            }
-                        }
-                    }
-                });
-            }
-            // Passages ride their own dirty flag: storing text never
-            // marks the GRAPH dirty, so the flush list alone would
-            // miss passage-only ingest.
-            if auto_embed && state.passage_embedding_enabled() {
-                let stale = state.passage_embed_dirty_names();
-                if !stale.is_empty() {
-                    tokio::task::block_in_place(|| {
-                        for name in &stale {
-                            match state.refresh_passage_embeddings(name, Deadline::unbounded()) {
-                                None => {}
-                                Some(Ok(outcome)) if outcome.embedded == 0 => {}
-                                Some(Ok(outcome)) => {
-                                    info!(
-                                        context = %name,
-                                        embedded = outcome.embedded,
-                                        "auto-embedded paragraphs"
-                                    );
-                                }
-                                Some(Err(error)) => {
-                                    warn!(
-                                        context = %name,
-                                        error,
-                                        "auto passage embedding failed"
-                                    );
-                                }
-                            }
-                        }
-                    });
-                }
+            // Guarded: this loop's `JoinHandle` is discarded above, so
+            // an unguarded panic here (a bug, not a disk fault) would
+            // silently kill the flusher forever — no log, no crash,
+            // and `/health` stuck reporting whatever it last saw since
+            // the loop that was supposed to keep disproving it is gone.
+            // Catching it keeps the loop alive for the next tick and
+            // lets `record_flusher_tick` turn it into a 503 instead.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_flush_tick(&state, auto_embed)
+            }));
+            state.metrics().record_flusher_tick(outcome.is_ok());
+            if let Err(payload) = outcome {
+                let message = if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = payload.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else {
+                    "flusher tick panicked with a non-string payload".to_string()
+                };
+                error!(
+                    %message,
+                    "flusher tick panicked; /health will report unhealthy until the next clean tick"
+                );
             }
         }
     });
+}
+
+/// One flusher tick's actual work, split out of `spawn_flusher` so it
+/// can run behind `catch_unwind` as a plain synchronous call — the
+/// guarded closure must not straddle an `.await`, which rules out
+/// wrapping the loop body in place.
+fn run_flush_tick(state: &AppState, auto_embed: bool) {
+    // Serialization and fsyncs are blocking work; keep the
+    // async workers free while images land on disk.
+    let flushed = tokio::task::block_in_place(|| state.flush_dirty());
+    // Opt-in: a flushed context just changed on disk, so its
+    // glosses may have changed too — re-embed the difference.
+    if auto_embed && !flushed.is_empty() {
+        tokio::task::block_in_place(|| {
+            for name in &flushed {
+                match state.refresh_embeddings(name, Deadline::unbounded()) {
+                    None | Some(Ok((0, _))) => {}
+                    Some(Ok((embedded, _))) => {
+                        info!(context = %name, embedded, "auto-embedded glosses");
+                    }
+                    Some(Err(error)) => {
+                        warn!(context = %name, error, "auto embedding refresh failed");
+                    }
+                }
+            }
+        });
+    }
+    // Passages ride their own dirty flag: storing text never
+    // marks the GRAPH dirty, so the flush list alone would
+    // miss passage-only ingest.
+    if auto_embed && state.passage_embedding_enabled() {
+        let stale = state.passage_embed_dirty_names();
+        if !stale.is_empty() {
+            tokio::task::block_in_place(|| {
+                for name in &stale {
+                    match state.refresh_passage_embeddings(name, Deadline::unbounded()) {
+                        None => {}
+                        Some(Ok(outcome)) if outcome.embedded == 0 => {}
+                        Some(Ok(outcome)) => {
+                            info!(
+                                context = %name,
+                                embedded = outcome.embedded,
+                                "auto-embedded paragraphs"
+                            );
+                        }
+                        Some(Err(error)) => {
+                            warn!(
+                                context = %name,
+                                error,
+                                "auto passage embedding failed"
+                            );
+                        }
+                    }
+                }
+            });
+        }
+    }
 }
 
 /// Installs the global tracing subscriber: `RUST_LOG` filtering

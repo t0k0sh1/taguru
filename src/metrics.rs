@@ -155,6 +155,16 @@ pub struct Metrics {
     /// `enforce_concurrency` (early 503 instead of admitting new work),
     /// and `spawn_flusher` (skips its tick rather than racing the sweep).
     maintenance: AtomicBool,
+    /// Set when the periodic flusher's most recent tick panicked instead
+    /// of completing — a bug, not a disk fault. `/health`'s flush signal
+    /// is exactly that loop's own outcome (see `health` below); without
+    /// this, `spawn_flusher` catching the panic to keep the loop alive
+    /// would otherwise look identical to any other quiet tick, and the
+    /// probe would report healthy right through a flusher that stopped
+    /// making progress on every subsequent tick too. Cleared by the next
+    /// tick that completes without panicking — self-healing, same shape
+    /// as `flush_degraded`.
+    flusher_panicked: AtomicBool,
 }
 
 /// Why a request answered 500. The status code alone cannot separate
@@ -432,14 +442,32 @@ impl Metrics {
     }
 
     /// Whether every context's most recent image flush succeeded (true
-    /// when none has run yet — an idle server is a healthy server).
+    /// when none has run yet — an idle server is a healthy server), AND
+    /// the flusher loop itself is still making it to a tick's end rather
+    /// than panicking out from under `/health`'s only signal.
     pub fn flush_is_healthy(&self) -> bool {
         !self.flush_degraded.load(Ordering::Relaxed)
+            && !self.flusher_panicked.load(Ordering::Relaxed)
     }
 
     /// Unix seconds of the last successful flush; 0 when none yet.
     pub fn last_flush_success_epoch(&self) -> u64 {
         self.last_flush_success_epoch.load(Ordering::Relaxed)
+    }
+
+    /// Record whether the flusher's most recent tick completed without
+    /// panicking. Called from `spawn_flusher`'s `catch_unwind` boundary
+    /// once per tick, success or not — so a later clean tick clears the
+    /// flag the same way a later clean flush clears `flush_degraded`.
+    pub fn record_flusher_tick(&self, ok: bool) {
+        self.flusher_panicked.store(!ok, Ordering::Relaxed);
+    }
+
+    /// Whether the flusher's most recent tick panicked. Distinct from
+    /// `flush_is_healthy` (which folds this in) so `health()` can pick a
+    /// reason message that names the actual fault.
+    pub fn flusher_panicked(&self) -> bool {
+        self.flusher_panicked.load(Ordering::Relaxed)
     }
 
     pub fn record_wal_append(&self, ok: bool) {
@@ -1073,13 +1101,14 @@ pub async fn live() -> &'static str {
 }
 
 /// GET /health: 200 "ok" while the write path is healthy, 503 in the
-/// ApiError shape when the most recent image flush failed. The check
-/// is the flusher's own outcome, so an orchestrator's probe turns red
-/// within one flush interval of the disk going bad — and green again
-/// one interval after it recovers. (An idle server with nothing dirty
-/// reports its last known state.) The readiness signal: stop routing
-/// traffic while the disk is bad, resume when it heals — liveness
-/// lives at `/live`.
+/// ApiError shape when the most recent image flush failed — or the
+/// flusher tick that would have flushed it panicked instead of running.
+/// The check is the flusher's own outcome, so an orchestrator's probe
+/// turns red within one flush interval of the disk going bad — and
+/// green again one interval after it recovers. (An idle server with
+/// nothing dirty reports its last known state.) The readiness signal:
+/// stop routing traffic while the disk is bad, resume when it heals —
+/// liveness lives at `/live`.
 pub async fn health(State(state): State<AppState>) -> Response {
     if state.metrics().maintenance_active() {
         return crate::api::error(
@@ -1093,14 +1122,20 @@ pub async fn health(State(state): State<AppState>) -> Response {
     if state.metrics().flush_is_healthy() {
         return "ok".into_response();
     }
-    let reason = match state.metrics().last_flush_success_epoch() {
-        0 => "the last image flush failed, and none has succeeded since boot — \
-              check disk space and the server log"
-            .to_string(),
-        epoch => format!(
-            "the last image flush failed; the last success was at unix {epoch} — \
-             check disk space and the server log"
-        ),
+    let reason = if state.metrics().flusher_panicked() {
+        "the flusher task panicked on its last tick — this is a bug, not a disk \
+         fault; check the server log"
+            .to_string()
+    } else {
+        match state.metrics().last_flush_success_epoch() {
+            0 => "the last image flush failed, and none has succeeded since boot — \
+                  check disk space and the server log"
+                .to_string(),
+            epoch => format!(
+                "the last image flush failed; the last success was at unix {epoch} — \
+                 check disk space and the server log"
+            ),
+        }
     };
     crate::api::error(crate::api::ErrorCode::Unhealthy, reason, Instant::now())
 }
@@ -1370,6 +1405,32 @@ mod tests {
         );
     }
 
+    /// A panicking flusher tick must degrade health just like a failed
+    /// flush — `spawn_flusher` catches the panic to keep ticking, but
+    /// without this a flusher stuck panicking on every tick would look
+    /// identical to a healthy idle server forever, since no flush ever
+    /// runs to report a failure.
+    #[test]
+    fn flusher_panic_degrades_health_and_a_clean_tick_heals_it() {
+        let metrics = Metrics::default();
+        assert!(metrics.flush_is_healthy(), "an idle server is healthy");
+        assert!(!metrics.flusher_panicked());
+
+        metrics.record_flusher_tick(false);
+        assert!(
+            !metrics.flush_is_healthy(),
+            "a panicked tick degrades health"
+        );
+        assert!(metrics.flusher_panicked());
+
+        metrics.record_flusher_tick(true);
+        assert!(
+            metrics.flush_is_healthy(),
+            "the next clean tick heals it, same as a flush retry"
+        );
+        assert!(!metrics.flusher_panicked());
+    }
+
     /// One sweep at a time, and `exit_maintenance` is safe to call more
     /// than once — the guard's `Drop` must not panic if it somehow ran
     /// twice.
@@ -1416,6 +1477,43 @@ mod tests {
         assert_eq!(body["code"], "maintenance");
 
         drop(guard);
+        assert_eq!(health(State(state.clone())).await.status().as_u16(), 200);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The flusher-panic reason must read differently from an ordinary
+    /// flush failure: one is a disk problem worth checking disk space
+    /// over, the other is a bug in the server itself. An operator
+    /// paged with the disk-space message would go check the wrong
+    /// thing.
+    #[tokio::test]
+    async fn health_reports_the_flusher_panic_reason_distinctly_from_a_flush_fault() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-metrics-health-flusher-panic-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = crate::registry::AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        assert_eq!(health(State(state.clone())).await.status().as_u16(), 200);
+
+        state.metrics().record_flusher_tick(false);
+        let response = health(State(state.clone())).await;
+        assert_eq!(response.status().as_u16(), 503);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "unhealthy");
+        assert!(
+            body["error"].as_str().unwrap().contains("panicked"),
+            "{body}"
+        );
+
+        // The next clean tick heals it — self-healing, same as a flush
+        // retry, not a latch an operator has to clear by hand.
+        state.metrics().record_flusher_tick(true);
         assert_eq!(health(State(state.clone())).await.status().as_u16(), 200);
 
         let _ = std::fs::remove_dir_all(&dir);
