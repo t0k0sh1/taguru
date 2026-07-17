@@ -3244,21 +3244,24 @@ impl EntryIndex {
                 .get(&bigram)
                 .is_some_and(|postings| postings.len() > stop_gram)
         };
-        let informative: Vec<usize> = self
-            .spans
-            .iter()
-            .map(|span| {
-                let text = &self.arena[span.start..span.end];
-                let unique: HashSet<u64> = bigrams_of(text).collect();
-                unique.iter().filter(|&&bigram| !is_stop(bigram)).count()
-            })
-            .collect();
+        // Built with an explicit loop rather than spans.iter().map(..)
+        // so a deadline check can run per span: each span's own cost is
+        // bounded (it scans only its own bigrams), but a caller with a
+        // huge vocabulary and a short deadline must still be able to
+        // bail before this whole pass finishes, not just once the
+        // O(len²) pass below starts.
+        let mut informative: Vec<usize> = Vec::with_capacity(self.spans.len());
+        for span in &self.spans {
+            if deadline.expired() {
+                return Err(DeadlineExceeded);
+            }
+            let text = &self.arena[span.start..span.end];
+            let unique: HashSet<u64> = bigrams_of(text).collect();
+            informative.push(unique.iter().filter(|&&bigram| !is_stop(bigram)).count());
+        }
 
         let mut shared: HashMap<(u32, u32), u32> = HashMap::new();
         for postings in self.bigrams.values() {
-            // The inner double loop is bounded by stop_gram (postings
-            // this long are skipped outright), so checking only here —
-            // once per outer bigram, not once per pair — is enough.
             if deadline.expired() {
                 return Err(DeadlineExceeded);
             }
@@ -3268,6 +3271,16 @@ impl EntryIndex {
             // Postings are appended in span order, so a < b holds.
             let mut tail = postings.as_slice();
             while let Some((&a, rest)) = tail.split_first() {
+                // A single posting list can run up to stop_gram long,
+                // and stop_gram scales with vocabulary size (spans.len()
+                // / 20) — so this list's own O(len²) pass can outlast
+                // `deadline` entirely between outer-loop checks on a
+                // large enough vocabulary. Checking once per outer
+                // element (O(len) checks) instead of once per pair
+                // keeps the gap between checks to O(len), not O(len²).
+                if deadline.expired() {
+                    return Err(DeadlineExceeded);
+                }
                 for &b in rest {
                     *shared.entry((a, b)).or_insert(0) += 1;
                 }
@@ -3316,14 +3329,33 @@ impl EntryIndex {
 }
 
 /// The one normalization both sides of every entry comparison go
-/// through: Unicode NFKC (folding full-width romaji, half-width kana,
-/// and compatibility forms), lowercasing, and katakana → hiragana, so
-/// "Ａｐｐｌｅ" meets "apple" and "リンゴ" meets "りんご". Applying the
+/// through: lowercasing, Unicode NFKC (folding full-width romaji,
+/// half-width kana, and compatibility forms), and katakana → hiragana,
+/// so "Ａｐｐｌｅ" meets "apple" and "リンゴ" meets "りんご". Applying the
 /// same function to stored spellings and cues is what makes the folds
 /// safe — neither side is ever compared raw against a folded form.
+///
+/// Lowercasing runs both before AND after nfkc(), because either order
+/// alone has a counterexample that leaves this function not idempotent:
+/// - NFKC-then-lowercase: "J" + COMBINING CARON (U+030C) has no
+///   precomposed NFKC form, so nfkc() leaves it as two code points;
+///   lowercasing afterward yields "j" + U+030C, still two code points
+///   — not a fixed point, since folding THAT again composes straight
+///   to the single precomposed U+01F0.
+/// - Lowercase-then-NFKC only: "🄐" (U+1F110, PARENTHESIZED LATIN
+///   CAPITAL LETTER A) has no lowercase mapping of its own, so
+///   lowercasing first is a no-op; its NFKC compatibility decomposition
+///   is the literal, uppercase "(A)" — not a fixed point, since folding
+///   THAT again lowercases to "(a)".
+///
+/// A trailing lowercase after nfkc() closes both gaps: it re-folds
+/// whatever casing nfkc()'s decomposition introduced, so the result is
+/// always a fixed point of this same function.
 fn normalize(name: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
-    name.nfkc()
+    name.chars()
+        .flat_map(char::to_lowercase)
+        .nfkc()
         .flat_map(char::to_lowercase)
         .map(fold_kana)
         .collect()
@@ -6300,6 +6332,53 @@ mod tests {
         );
     }
 
+    /// Before the fix, `twins()`'s `informative` pass had no deadline
+    /// check at all, and its O(len²) pass over one large posting list
+    /// was checked only once per OUTER bigram — not once per pair — so
+    /// an already-expired deadline could still cost hundreds of
+    /// milliseconds on a large enough shared vocabulary instead of
+    /// returning almost immediately. `shared_count` sets one posting
+    /// list as long as `stop_gram` allows before `twins()` skips it
+    /// outright, so this exercises both O(len²) passes at once.
+    #[test]
+    fn similar_concepts_honors_an_expired_deadline_promptly_despite_a_large_shared_vocabulary() {
+        let n: usize = 40_000;
+        let stop_gram = (n / 20).max(64); // mirrors twins()'s formula
+        let shared_count = stop_gram; // as large as possible while still under the skip threshold
+
+        let mut context = Context::default();
+        for i in 0..shared_count {
+            context
+                .associate(
+                    format!("sharedprefixbigrams{i:06}"),
+                    "r",
+                    format!("obj{i:06}"),
+                    1.0,
+                )
+                .unwrap();
+        }
+        for i in shared_count..n {
+            context
+                .associate(format!("unique{i:06}"), "r", format!("uobj{i:06}"), 1.0)
+                .unwrap();
+        }
+
+        let deadline = Deadline::after(std::time::Duration::from_millis(1));
+        std::thread::sleep(std::time::Duration::from_millis(5)); // guarantee it's already expired
+        let start = std::time::Instant::now();
+        let result = context.similar_concepts(0.0, deadline);
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "an already-expired deadline must be honored"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "deadline check should return in tens of ms, not scale with vocabulary size; took {elapsed:?}"
+        );
+    }
+
     #[test]
     fn adjacency_requires_a_real_edge_in_either_direction() {
         let mut context = Context::default();
@@ -6980,6 +7059,16 @@ mod tests {
                 let once = normalize_entry(&name);
                 prop_assert_eq!(normalize_entry(&once), once.clone());
                 prop_assume!(!once.is_empty());
+                // The object side of the association below is the fixed
+                // literal "object". If `name` also normalizes to "object"
+                // (e.g. the full-width "ｏbject"), the two spellings become
+                // DIFFERENT concepts that collide under normalization, and
+                // resolve's exact-match tie-break (alphabetical, per
+                // `sort_resolutions`, not insertion order) can then put
+                // "object" ahead of `name` — breaking the single-winner
+                // assumption this test relies on below. Excluding that
+                // collision keeps `name` the only concept in play.
+                prop_assume!(once != "object");
 
                 let mut context = Context::default();
                 context.associate(&name, "relation", "object", 1.0).unwrap();
