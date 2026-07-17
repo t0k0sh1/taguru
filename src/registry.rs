@@ -5033,15 +5033,23 @@ impl AppState {
         // this write either lands in the snapshot or re-marks the flag —
         // never both lost. (Advisory counters; a failed write re-marks.)
         entry.usage_dirty.store(false, Ordering::Relaxed);
-        let outcome = commit_staged(&staged, &image).and_then(|()| {
-            write_meta(
-                &self.0.data_dir,
-                &stem,
-                &meta,
-                &stats,
-                &entry.usage.snapshot(),
-            )
-        });
+        // Sidecar before image, same as `save_files`: `scan_data_dir` keys
+        // existence on the image, so it must land LAST. A crash between
+        // the two leaves the sidecar ahead of the image it describes —
+        // Cold reporting briefly over-states this entry rather than
+        // under-stating it, which errs toward a maintenance sweep
+        // re-checking a context that turns out not to need it yet, never
+        // toward skipping one that does. Publishing the image first (the
+        // old order) risked exactly that skip, since the sidecar would
+        // instead lag the image until the next successful flush.
+        let outcome = write_meta(
+            &self.0.data_dir,
+            &stem,
+            &meta,
+            &stats,
+            &entry.usage.snapshot(),
+        )
+        .and_then(|()| commit_staged(&staged, &image));
         let published = match outcome {
             Ok(()) => {
                 inner.stats = stats;
