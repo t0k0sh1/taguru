@@ -162,6 +162,27 @@ describe("graph writes and reads", () => {
     await client.contexts.delete(name);
   });
 
+  it("resumes recall pagination from a match object without a 400 (MatchCursor structural trap)", async () => {
+    const name = fresh();
+    await seed(name);
+    const ctx = client.context(name);
+
+    const first = await ctx.recall("青嶺酒造", { limit: 1 });
+    expect(first.matches).toHaveLength(1);
+    expect(first.total).toBeGreaterThan(1);
+
+    // `first.matches[0]` is a full `Association` — it carries `count` and
+    // `attributions` on top of the four fields `MatchCursor` wants. Passing
+    // it straight back as `after` type-checks (Association structurally
+    // satisfies MatchCursor), but the server's `MatchCursor` rejects
+    // unrecognized fields; the SDK must narrow it before it hits the wire.
+    const second = await ctx.recall("青嶺酒造", { limit: 1, after: first.matches[0] });
+    expect(second.matches).toHaveLength(1);
+    expect(second.matches[0]!.object).not.toEqual(first.matches[0]!.object);
+
+    await client.contexts.delete(name);
+  });
+
   it("resolves cues across kinds and floors", async () => {
     const name = fresh();
     await seed(name);
@@ -363,6 +384,30 @@ describe("transfer and maintenance", () => {
 
     const withTwins = await ctx.auditDrift({ include_twins: true, dice_floor: 0.4 });
     expect(withTwins.twins).not.toBeNull();
+    await client.contexts.delete(name);
+  });
+
+  it("resumes drift-audit pagination from an unsourced entry's association (MatchCursor structural trap)", async () => {
+    const name = fresh();
+    await client.contexts.create(name);
+    const ctx = client.context(name);
+    // Two unsourced edges so a limit:1 page has somewhere to resume from.
+    await ctx.addAssociations([{ subject: "青嶺酒造", label: "kind", object: "会社", weight: 1.0 }]);
+    await ctx.addAssociations([{ subject: "高瀬", label: "kind", object: "杜氏", weight: 1.0 }]);
+
+    const first = await ctx.auditDrift({ limit: 1 });
+    expect(first.unsourced).toHaveLength(1);
+    expect(first.total).toBe(2);
+
+    // `unsourced[0].association` is a full `Association` — it carries
+    // `count`/`attributions` beyond what `MatchCursor` wants. Passing it
+    // straight back as `after` must not 400.
+    const second = await ctx.auditDrift({ limit: 1, after: first.unsourced[0]!.association });
+    expect(second.unsourced).toHaveLength(1);
+    expect(second.unsourced[0]!.association.subject).not.toEqual(
+      first.unsourced[0]!.association.subject,
+    );
+
     await client.contexts.delete(name);
   });
 });

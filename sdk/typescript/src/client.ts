@@ -48,7 +48,7 @@ import type {
   TieredResolution,
   VocabularyAudit,
 } from "./models.js";
-import { citationKey } from "./models.js";
+import { citationKey, crossMatchCursor, matchCursor } from "./models.js";
 import {
   DEFAULT_RETRIES,
   type RetryClass,
@@ -327,7 +327,7 @@ export class Taguru {
         groups: options.groups,
         cue,
         limit: options.limit,
-        after: options.after,
+        after: options.after ? crossMatchCursor(options.after) : undefined,
       }),
     });
     return result as CrossMatchPage;
@@ -356,7 +356,7 @@ export class Taguru {
         label: options.label,
         object: options.object,
         limit: options.limit,
-        after: options.after,
+        after: options.after ? crossMatchCursor(options.after) : undefined,
       }),
     });
     return result as CrossMatchPage;
@@ -745,7 +745,11 @@ export class Context {
   ): Promise<MatchPage> {
     const result = await this.post(
       "/recall",
-      dropUndefined({ cue, limit: options.limit, after: options.after }),
+      dropUndefined({
+        cue,
+        limit: options.limit,
+        after: options.after ? matchCursor(options.after) : undefined,
+      }),
     );
     return result as MatchPage;
   }
@@ -767,7 +771,7 @@ export class Context {
         label: options.label,
         object: options.object,
         limit: options.limit,
-        after: options.after,
+        after: options.after ? matchCursor(options.after) : undefined,
       }),
     );
     return result as MatchPage;
@@ -830,7 +834,7 @@ export class Context {
       dropUndefined({
         origins: typeof origins === "string" ? [origins] : origins,
         limit: options.limit,
-        after: options.after,
+        after: options.after ? matchCursor(options.after) : undefined,
       }),
     );
     return result as MatchPage;
@@ -1128,7 +1132,7 @@ export class Context {
       dropUndefined({
         unsourced_floor: options.unsourced_floor,
         limit: options.limit,
-        after: options.after,
+        after: options.after ? matchCursor(options.after) : undefined,
         include_twins: options.include_twins ?? false,
         dice_floor: options.dice_floor,
         cosine_floor: options.cosine_floor,

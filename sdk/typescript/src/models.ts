@@ -39,15 +39,30 @@ export interface SectionSpec {
 }
 
 /**
- * Resumes a `recall`/`query`/`unreachableFrom` page past its last match:
- * copy `weight`/`subject`/`label`/`object` verbatim from the last match of
- * the previous page.
+ * Resumes a `recall`/`query`/`unreachableFrom`/`auditDrift` page past its
+ * last match: copy `weight`/`subject`/`label`/`object` verbatim from the
+ * last match of the previous page (for `auditDrift`, that's the
+ * `association` nested inside the last `unsourced` entry).
  */
 export interface MatchCursor {
   weight: number;
   subject: string;
   label: string;
   object: string;
+}
+
+/**
+ * Narrows a match down to the four fields `MatchCursor` wants.
+ * `Association` structurally satisfies `MatchCursor` (it has `weight`,
+ * `subject`, `label`, and `object`, so TypeScript happily accepts passing
+ * the previous page's last match straight back as `after`), but it also
+ * carries `count` and `attributions` — and the server's `MatchCursor`
+ * rejects any field it doesn't recognize, so a match passed verbatim 400s.
+ * Route every `after` built from a match through this first; `recall`,
+ * `query`, `unreachableFrom`, and `auditDrift` do.
+ */
+export function matchCursor(match: MatchCursor): MatchCursor {
+  return { weight: match.weight, subject: match.subject, label: match.label, object: match.object };
 }
 
 /**
@@ -62,6 +77,17 @@ export interface CrossMatchCursor {
   subject: string;
   label: string;
   object: string;
+}
+
+/** `matchCursor`, for the cross-context match shape (`context` included). */
+export function crossMatchCursor(match: CrossMatchCursor): CrossMatchCursor {
+  return {
+    weight: match.weight,
+    context: match.context,
+    subject: match.subject,
+    label: match.label,
+    object: match.object,
+  };
 }
 
 /**
