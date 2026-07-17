@@ -76,6 +76,16 @@ pub async fn serve(
                 mcp::error_response(id, -32600, "not a JSON-RPC message (no method)".to_string()),
             );
         }
+        mcp::Message::InvalidId => {
+            return rpc_over_http(
+                StatusCode::BAD_REQUEST,
+                mcp::error_response(
+                    Value::Null,
+                    -32600,
+                    "id must be a string, a number, or null".to_string(),
+                ),
+            );
+        }
         mcp::Message::Request { id, call } => (id, call),
     };
 
@@ -95,43 +105,55 @@ pub async fn serve(
             // frees this worker for other tasks while it's parked, and
             // each of `run_retrieve`'s callbacks drives `call_inner`
             // (an async fn) to completion via `Handle::block_on`.
-            let outcome = tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                mcp::run_retrieve_bounded(
-                    &arguments,
-                    Some(max_result_bytes),
-                    |method, path, body| {
-                        handle.block_on(call_inner(
-                            dispatch.clone(),
-                            method,
-                            &path,
-                            body,
-                            key.as_ref(),
-                            max_result_bytes,
-                            deadline,
-                        ))
-                    },
-                )
-            })
-            .map(|value| value.to_string())
-            // `run_retrieve_bounded`'s own running-total check already
-            // stops it from dispatching further calls once the composed
-            // result is doomed to be too big — this is the backstop for
-            // what that estimate cannot see: the composed JSON's own
-            // structure (keys, brackets) on top of the parts it kept.
-            // Each dispatched call was bounded by `max_result_bytes`, but
-            // retrieve composes many into one response — resolved cues,
-            // outlines, associations, activations, citations, and passage
-            // hits sum well past any single part's cap. Bound the composed
-            // whole the same way `call_inner` bounds each part, with the
-            // same too-big guidance, so the client's cap holds end to end.
-            .and_then(|text| {
-                if text.len() > max_result_bytes {
-                    Err(RESULT_TOO_BIG.to_string())
-                } else {
-                    Ok(text)
-                }
-            });
+            //
+            // Guarded by `deadline.expired()` first, same as every other
+            // `block_in_place` site (api.rs, api/sources.rs): once
+            // `block_in_place` is entered, `enforce_timeout`'s race can
+            // no longer preempt it (see that function's doc comment), so
+            // a budget already spent must be caught before paying for
+            // the parked worker and the dispatched fan-out behind it,
+            // not after.
+            let outcome = if deadline.expired() {
+                Err(DEADLINE_EXCEEDED.to_string())
+            } else {
+                tokio::task::block_in_place(|| {
+                    let handle = tokio::runtime::Handle::current();
+                    mcp::run_retrieve_bounded(
+                        &arguments,
+                        Some(max_result_bytes),
+                        |method, path, body| {
+                            handle.block_on(call_inner(
+                                dispatch.clone(),
+                                method,
+                                &path,
+                                body,
+                                key.as_ref(),
+                                max_result_bytes,
+                                deadline,
+                            ))
+                        },
+                    )
+                })
+                .map(|value| value.to_string())
+                // `run_retrieve_bounded`'s own running-total check already
+                // stops it from dispatching further calls once the composed
+                // result is doomed to be too big — this is the backstop for
+                // what that estimate cannot see: the composed JSON's own
+                // structure (keys, brackets) on top of the parts it kept.
+                // Each dispatched call was bounded by `max_result_bytes`, but
+                // retrieve composes many into one response — resolved cues,
+                // outlines, associations, activations, citations, and passage
+                // hits sum well past any single part's cap. Bound the composed
+                // whole the same way `call_inner` bounds each part, with the
+                // same too-big guidance, so the client's cap holds end to end.
+                .and_then(|text| {
+                    if text.len() > max_result_bytes {
+                        Err(RESULT_TOO_BIG.to_string())
+                    } else {
+                        Ok(text)
+                    }
+                })
+            };
             mcp::response(id, mcp::tool_response(outcome))
         }
         mcp::Call::Tool { name, arguments } => {
@@ -243,6 +265,13 @@ const RESULT_TOO_BIG: &str = "tool result exceeds the MCP response cap \
     (TAGURU_MCP_MAX_RESULT_BYTES); narrow the call (a smaller `limit` works for most tools), or \
     for a full-context export use GET /contexts/{name}/export over the raw HTTP API, or the \
     `taguru export` CLI — both are uncapped";
+
+/// Mirrors `api::deadline_exceeded`'s message: the same "budget already
+/// spent" condition, surfaced as a tool error here (this transport
+/// never returns a raw HTTP error status for a tool call, only content
+/// with `isError`) instead of that function's `Response`.
+const DEADLINE_EXCEEDED: &str = "request exceeded its budget before this operation could start; \
+    narrow the query or raise TAGURU_REQUEST_TIMEOUT_SECS";
 
 /// `axum::body::to_bytes` wraps a cap violation as an `axum::Error`
 /// whose `source()` is always the underlying `LengthLimitError` — the
@@ -524,5 +553,74 @@ mod tests {
         let reply: Value = serde_json::from_slice(&bytes).unwrap();
         let text = reply["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("true"), "{reply}");
+    }
+
+    /// The retrieve branch must check the deadline itself before
+    /// entering `block_in_place` — same as every other `block_in_place`
+    /// site (api.rs, api/sources.rs) — since `enforce_timeout`'s race
+    /// can no longer preempt it once inside (see that function's doc
+    /// comment). Proven on the default current-thread test runtime:
+    /// `block_in_place` panics there, so if this guard were missing this
+    /// test would panic instead of returning the tool error below.
+    #[tokio::test]
+    async fn retrieve_refuses_an_already_expired_deadline_before_block_in_place() {
+        let already_expired = Deadline::after(std::time::Duration::ZERO);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "retrieve",
+                "arguments": { "context": "ctx", "origins": ["x"] },
+            },
+        });
+        let response = serve(
+            Router::new(),
+            Arc::new(String::new()),
+            None,
+            Bytes::from(body.to_string()),
+            usize::MAX,
+            already_expired,
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("exceeded its budget"), "{text}");
+    }
+
+    /// An id of a disallowed JSON-RPC type (object/array/bool) must come
+    /// back as -32600 with a null id, per the spec's own rule for a
+    /// reply whose id could not be established — never echoed back
+    /// as-is, which would just hand the client a second malformed
+    /// message.
+    #[tokio::test]
+    async fn an_id_of_the_wrong_type_is_refused_with_a_null_id() {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": { "not": "allowed" },
+            "method": "ping",
+        });
+        let response = serve(
+            Router::new(),
+            Arc::new(String::new()),
+            None,
+            Bytes::from(body.to_string()),
+            usize::MAX,
+            Deadline::unbounded(),
+        )
+        .await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, 400);
+        assert_eq!(reply["id"], Value::Null, "{reply}");
+        assert_eq!(reply["error"]["code"], -32600, "{reply}");
     }
 }

@@ -53,6 +53,11 @@ pub enum Message {
     /// whatever id was present so the sender's wait isn't answered with
     /// a null it can't correlate to its request.
     Undecodable { id: Value },
+    /// `id` was present but not a string, number, or null — the only
+    /// shapes JSON-RPC 2.0 allows (§4). Carries no id: the spec's own
+    /// rule for a reply whose id could not be established is that the
+    /// id "MUST be Null", so there is nothing valid left to echo.
+    InvalidId,
 }
 
 /// The requests both transports answer.
@@ -64,15 +69,25 @@ pub enum Call {
     Unknown { method: String },
 }
 
-/// Sorts one decoded message into [`Message`]. Never fails: garbage is
-/// [`Message::Undecodable`], which both transports answer with a
-/// JSON-RPC error carrying whatever id was found — a message missing
-/// only its method is still owed a correlatable reply, not a null one.
+/// Sorts one decoded message into [`Message`]. Never fails: an id of
+/// the wrong type is [`Message::InvalidId`], and any other garbage is
+/// [`Message::Undecodable`] — both transports answer both with a
+/// JSON-RPC error, the latter carrying whatever id was found so a
+/// message missing only its method is still owed a correlatable reply,
+/// not a null one.
 pub fn classify(message: &Value) -> Message {
     let id = match message.get("id") {
         Some(id) if !id.is_null() => id.clone(),
         _ => Value::Null,
     };
+    // JSON-RPC 2.0 allows only a string, a number, or null for id
+    // (§4) — an object/array/bool id can't be echoed back through
+    // `response`/`error_response` without the reply becoming just as
+    // malformed as the request was. Checked ahead of `method`: a bad
+    // id makes the request invalid no matter what else it carries.
+    if !matches!(id, Value::Null | Value::String(_) | Value::Number(_)) {
+        return Message::InvalidId;
+    }
     let Some(method) = message.get("method").and_then(Value::as_str) else {
         return Message::Undecodable { id };
     };
@@ -2379,6 +2394,31 @@ mod tests {
                 call: Call::Unknown { .. },
                 ..
             }
+        ));
+    }
+
+    /// JSON-RPC 2.0 allows only a string, a number, or null for id
+    /// (§4); an object/array/bool id must be refused up front rather
+    /// than echoed into a response that would itself become malformed
+    /// — regardless of whether the rest of the message (here, a valid
+    /// `method`) would otherwise decode cleanly.
+    #[test]
+    fn classify_refuses_an_id_that_is_not_a_string_number_or_null() {
+        for bad_id in [json!({"a": 1}), json!([1, 2]), json!(true)] {
+            assert!(
+                matches!(
+                    classify(&json!({"jsonrpc": "2.0", "id": bad_id, "method": "ping"})),
+                    Message::InvalidId
+                ),
+                "{bad_id}"
+            );
+        }
+        // A missing method doesn't change the diagnosis: the id's own
+        // type is still what's wrong, so this must not be reported as
+        // Undecodable (whose "no method" text would misdescribe it).
+        assert!(matches!(
+            classify(&json!({"jsonrpc": "2.0", "id": [1]})),
+            Message::InvalidId
         ));
     }
 

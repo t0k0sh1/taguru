@@ -483,6 +483,13 @@ fn dispatch(bridge: &Bridge, instructions: &str, classified: mcp::Message) -> Op
                 "not a JSON-RPC message (no method)".to_string(),
             ));
         }
+        mcp::Message::InvalidId => {
+            return Some(mcp::error_response(
+                Value::Null,
+                -32600,
+                "id must be a string, a number, or null".to_string(),
+            ));
+        }
         mcp::Message::Request { id, call } => (id, call),
     };
     Some(match call {
@@ -636,6 +643,19 @@ mod tests {
         )
         .expect("a batch must be answered");
         assert_eq!(reply["error"]["code"], -32600, "{reply}");
+
+        // An id of a disallowed JSON-RPC type (object/array/bool, not
+        // string/number/null) is refused too, with a null id per the
+        // spec's own rule for a reply whose id could not be established
+        // — never echoed back as-is.
+        let reply = handle(
+            &bridge(),
+            "",
+            &serde_json::json!({"jsonrpc": "2.0", "id": [1], "method": "ping"}),
+        )
+        .expect("an invalid-typed id must be answered");
+        assert_eq!(reply["error"]["code"], -32600, "{reply}");
+        assert_eq!(reply["id"], serde_json::Value::Null, "{reply}");
 
         // Notifications stay silent — correct JSON-RPC: nothing waits.
         assert!(
