@@ -643,6 +643,14 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
     // seen so far — a batch piling questions on one paragraph would
     // otherwise be quadratic. Reset at every batch boundary.
     let mut question_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    // (paragraph, question) pairs already accepted this batch, so an
+    // exact repeat — a doc2query generator's own duplicate, or a batch
+    // author pasting a line twice — folds into the one entry already
+    // held instead of spending another of the paragraph's capped
+    // slots on text that adds nothing. A set lookup, for the same
+    // quadratic-blowup reason `question_counts` is a map instead of a
+    // rescan. Reset at every batch boundary, same as `question_counts`.
+    let mut seen_questions: HashSet<(u32, String)> = HashSet::new();
     let mut raw: Vec<u8> = Vec::new();
     let mut number = 0usize;
     loop {
@@ -695,6 +703,7 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
             if let Some(finished) = current.take() {
                 batches.push(finish_batch(finished)?);
                 question_counts.clear();
+                seen_questions.clear();
             }
         }
         if is_header {
@@ -724,7 +733,13 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
                          one was expected"
                     ));
                 }
-                Some(batch) => parse_op(batch, &mut question_counts, value, number)?,
+                Some(batch) => parse_op(
+                    batch,
+                    &mut question_counts,
+                    &mut seen_questions,
+                    value,
+                    number,
+                )?,
             }
         }
     }
@@ -826,6 +841,7 @@ fn parse_header(value: serde_json::Value, number: usize) -> Result<Batch, String
 fn parse_op(
     batch: &mut Batch,
     question_counts: &mut BTreeMap<u32, usize>,
+    seen_questions: &mut HashSet<(u32, String)>,
     value: serde_json::Value,
     number: usize,
 ) -> Result<(), String> {
@@ -903,16 +919,22 @@ fn parse_op(
         // and providers refuse zero-length input — failing the whole
         // refresh pass, every pass, at the same spot.
         check_nonempty(number, "question", &op.question)?;
-        let siblings = question_counts.entry(op.paragraph).or_insert(0);
-        if *siblings >= crate::api::MAX_QUESTIONS_PER_PARAGRAPH {
-            return Err(format!(
-                "line {number}: paragraph {} already carries {} questions (the cap)",
-                op.paragraph,
-                crate::api::MAX_QUESTIONS_PER_PARAGRAPH
-            ));
+        // Identical (paragraph, question) pairs fold into the one entry
+        // already held silently — matching the group-list dedup elsewhere
+        // in this file — rather than spending one of the paragraph's
+        // capped slots on a duplicate doc2query line.
+        if seen_questions.insert((op.paragraph, op.question.clone())) {
+            let siblings = question_counts.entry(op.paragraph).or_insert(0);
+            if *siblings >= crate::api::MAX_QUESTIONS_PER_PARAGRAPH {
+                return Err(format!(
+                    "line {number}: paragraph {} already carries {} questions (the cap)",
+                    op.paragraph,
+                    crate::api::MAX_QUESTIONS_PER_PARAGRAPH
+                ));
+            }
+            *siblings += 1;
+            batch.questions.push((op.paragraph, op.question));
         }
-        *siblings += 1;
-        batch.questions.push((op.paragraph, op.question));
     } else if object.contains_key("section") {
         let op: SectionLine = serde_json::from_value(value)
             .map_err(|error| format!("line {number}: section: {error}"))?;
@@ -1762,6 +1784,38 @@ mod tests {
         assert!(
             error.contains("question") && error.contains("cap"),
             "{error}"
+        );
+    }
+
+    /// A doc2query generator repeating itself, or a batch author pasting
+    /// the same line twice, must not burn two of the paragraph's capped
+    /// slots on text that says nothing new — it folds into one entry,
+    /// matching the group-list dedup elsewhere in this file.
+    #[test]
+    fn a_repeated_question_on_the_same_paragraph_folds_into_one_entry() {
+        let batch = parse(&format!(
+            "{HEADER}\n\
+             {{\"passage\": \"本文。\"}}\n\
+             {{\"paragraph\": 0, \"question\": \"何?\"}}\n\
+             {{\"paragraph\": 0, \"question\": \"何?\"}}\n"
+        ))
+        .unwrap();
+        assert_eq!(batch.questions, vec![(0, "何?".to_string())]);
+
+        // The repeat must not spend one of the paragraph's capped slots
+        // either: MAX_QUESTIONS_PER_PARAGRAPH distinct questions plus one
+        // repeat of the first must still fit under the cap.
+        let distinct: String = (0..crate::api::MAX_QUESTIONS_PER_PARAGRAPH)
+            .map(|i| format!("{{\"paragraph\": 0, \"question\": \"言い換え{i}?\"}}\n"))
+            .collect();
+        let batch = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\"}}\n{distinct}\
+             {{\"paragraph\": 0, \"question\": \"言い換え0?\"}}\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            batch.questions.len(),
+            crate::api::MAX_QUESTIONS_PER_PARAGRAPH
         );
     }
 
