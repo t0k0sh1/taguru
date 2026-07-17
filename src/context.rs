@@ -1523,6 +1523,11 @@ impl Context {
                     let edge = &self.edges[edge_id as usize];
                     edge.subject != edge.object
                 }))
+                // Retracted edges (count == 0) linger in the chain walk
+                // until compaction; a fully-withdrawn association must
+                // not weigh in the total or propagate. Same dead-edge
+                // test as `heaviest`, `describe`, and the export.
+                .filter(|&edge_id| self.edges[edge_id as usize].count > 0)
                 .map(|edge_id| self.edges[edge_id as usize].sum.abs())
                 .fold(0.0, |mut acc, magnitude| {
                     // Individually-finite magnitudes can sum past f64's
@@ -1534,7 +1539,11 @@ impl Context {
             if total == 0.0 {
                 continue;
             }
-            for edge_id in self.outgoing(concept).chain(self.incoming(concept)) {
+            for edge_id in self
+                .outgoing(concept)
+                .chain(self.incoming(concept))
+                .filter(|&edge_id| self.edges[edge_id as usize].count > 0)
+            {
                 let edge = &self.edges[edge_id as usize];
                 // Ranking: fan-independent, so a busy endpoint doesn't
                 // sink its own facts. Netted-out (or zero-decay) signals
@@ -4250,6 +4259,31 @@ mod tests {
         context.associate("a", "r", "b", 1.0).unwrap();
         context.associate("a", "r", "b", -1.0).unwrap(); // fully contested → 0.0
         context.associate("a", "r", "c", 1.0).unwrap();
+
+        let (_, ranked) = context.activate(&["a"], 0.5, 10);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].association.object, "c");
+    }
+
+    /// 0.1 + 0.2, then retracting 0.1 and 0.2 in that order, leaves a
+    /// nonzero residual (~2.78e-17) in `sum` even though `count` reaches
+    /// 0 — floating-point subtraction doesn't exactly invert addition.
+    /// A fully retracted edge must read as dead, not as a residual
+    /// signal with a score just barely above zero.
+    #[test]
+    fn activate_ignores_a_fully_retracted_edges_floating_point_residue() {
+        let mut context = Context::default();
+        context
+            .associate_from("a", "r", "b", 0.1, "s1", None)
+            .unwrap();
+        context
+            .associate_from("a", "r", "b", 0.2, "s2", None)
+            .unwrap();
+        context.associate("a", "r", "c", 1.0).unwrap();
+
+        context.retract_source("s1");
+        context.retract_source("s2");
+        assert_eq!(context.dead_edges(), 1);
 
         let (_, ranked) = context.activate(&["a"], 0.5, 10);
         assert_eq!(ranked.len(), 1);
