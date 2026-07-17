@@ -593,13 +593,13 @@ pub async fn list_contexts(
         if deadline.expired() {
             return deadline_exceeded(started_at);
         }
-        let mut directory: Vec<_> = match &allowed {
+        let mut directory: Vec<_> = tokio::task::block_in_place(|| match &allowed {
             Some(allowed) => allowed
                 .iter()
                 .filter_map(|name| state.directory_entry(name))
                 .collect(),
             None => state.directory(),
-        };
+        });
         directory.retain(|entry| query.pinned.is_none_or(|pinned| entry.pinned == pinned));
         directory.sort_by(|a, b| a.name.cmp(&b.name));
         let total = directory.len();
