@@ -1,4 +1,5 @@
 use taguru::context::Context;
+use taguru::deadline::Deadline;
 
 // A realistic-scale ingestion test: one coherent 文脈 described by five
 // paragraphs of several sentences each, with vocabulary deliberately
@@ -249,7 +250,9 @@ fn main() {
     // so an ingesting pipeline should run this after every document — it
     // is what exposed the 高瀬 island in the first place.
     let total = context.query(None, None, None).len();
-    let orphans = context.unreachable_from(&["青嶺酒造"]);
+    let orphans = context
+        .unreachable_from(&["青嶺酒造"], Deadline::unbounded())
+        .unwrap();
     println!(
         "\n=== 被覆率監査: unreachable_from([\"青嶺酒造\"]) → 到達不能 {}件 / 全{}件 ===",
         orphans.len(),
