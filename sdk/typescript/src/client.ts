@@ -1193,12 +1193,19 @@ export class Context {
       const reader = response.body.getReader();
       try {
         for (;;) {
-          arm();
           const { done, value } = await reader.read();
+          // Stop the clock the instant a chunk lands, before handing
+          // control to the consumer via yield — otherwise the timer
+          // armed for this read keeps running through however long the
+          // consumer takes to come back for the next one (writing the
+          // chunk to disk, say), charging that time against a budget
+          // meant only for the network wait.
+          clearTimeout(timer);
           if (done) {
             return;
           }
           yield value;
+          arm();
         }
       } finally {
         reader.releaseLock();

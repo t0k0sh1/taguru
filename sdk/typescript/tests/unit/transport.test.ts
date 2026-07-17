@@ -448,6 +448,13 @@ describe("exportStream", () => {
     let index = 0;
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
+        // A real fetch stream fails the very next read once its signal
+        // has aborted, even if the abort landed while nothing was
+        // pulling — a timer left armed across a yield fires on its own
+        // schedule, not while this callback happens to be on the stack.
+        if (signal.aborted) {
+          throw signal.reason;
+        }
         if (index >= delaysMs.length) {
           controller.close();
           return;
@@ -498,5 +505,25 @@ describe("exportStream", () => {
     const first = await stream.next();
     expect(first.done).toBe(false);
     await expect(stream.next()).rejects.toThrow(/aborted/i);
+  });
+
+  it("does not count the consumer's own processing time against the timeout", async () => {
+    // Every chunk arrives instantly — only the consumer is slow, taking
+    // longer between chunks than the timeout allows. A timer left armed
+    // across the yield would abort on the consumer's own pace even
+    // though the network side never stalled.
+    const client = new Taguru({
+      base_url: "http://test",
+      api_key: "",
+      timeout: 0.02,
+      fetch: (_url, init) =>
+        Promise.resolve(new Response(delayedBody(init!.signal!, [0, 0, 0]), { status: 200 })),
+    });
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of client.context("sake").exportStream()) {
+      chunks.push(chunk);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    expect(chunks).toHaveLength(3);
   });
 });
