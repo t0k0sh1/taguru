@@ -26,6 +26,13 @@ dependencies = [
 Homepage = "https://github.com/t0k0sh1/taguru"
 Repository = "https://github.com/t0k0sh1/taguru"
 
+[tool.uv.sources]
+# Without this, `uv sync` resolves `taguru` from PyPI instead of this
+# repo's own sdk/python — so a local change there (or a stale .venv
+# predating one) silently goes untested here, the same class of drift
+# npm workspaces rule out for the TS twin (sdk/package.json).
+taguru = { path = "../python", editable = true }
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
