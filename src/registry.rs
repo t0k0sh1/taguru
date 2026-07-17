@@ -614,6 +614,15 @@ pub enum RenameContextError {
     Io(io::Error),
 }
 
+/// [`AppState::rename_context_locked`]'s result: whether a failure left
+/// `from` safely free again or stuck pending a boot resume. See that
+/// function's doc for the full reasoning.
+enum RenameOutcome {
+    Ok,
+    RolledBack(RenameContextError),
+    Stuck(RenameContextError),
+}
+
 #[derive(Debug)]
 pub enum RenameGroupError {
     NotFound,
@@ -1961,39 +1970,78 @@ impl AppState {
             pending.renames.insert(to.to_string());
             Arc::clone(entry)
         };
-        let outcome = self.rename_context_locked(from, to, &entry);
-        let mut pending = self.0.pending.lock();
-        pending.renames.remove(from);
-        pending.renames.remove(to);
-        drop(pending);
-        outcome
+        match self.rename_context_locked(from, to, &entry) {
+            RenameOutcome::Ok => {
+                let mut pending = self.0.pending.lock();
+                pending.renames.remove(from);
+                pending.renames.remove(to);
+                Ok(())
+            }
+            // Rolled back before the point of no return: the registry
+            // and the marker are both back to their pre-call state, so
+            // both names are genuinely free again.
+            RenameOutcome::RolledBack(error) => {
+                let mut pending = self.0.pending.lock();
+                pending.renames.remove(from);
+                pending.renames.remove(to);
+                Err(error)
+            }
+            // Failed AT or AFTER the point of no return: `from` is
+            // already gone from the registry, but its files (and the
+            // durable `.renaming` marker) may still be sitting there
+            // half-moved. `from` MUST stay reserved — releasing it
+            // would let a client's create(from) sweep away the marker
+            // and the old generation's files as ordinary "stale
+            // leftovers" (see create_files), destroying them beyond any
+            // recovery. Only a boot resume-sweep can finish or roll
+            // this back, so the reservation outlives this call; `to`
+            // was never touched and is safe to free now.
+            RenameOutcome::Stuck(error) => {
+                tracing::error!(
+                    from = %from, to = %to, ?error,
+                    "context rename failed after the point of no return; the \
+                     source name stays reserved until the next restart resumes \
+                     it from the .renaming marker"
+                );
+                self.0.pending.lock().renames.remove(to);
+                Err(error)
+            }
+        }
     }
 
     /// The disk-and-registry half of [`AppState::rename_context`], run
     /// with `from` and `to` both reserved in `pending.renames` — see
     /// that function's doc for why the marker is strict rather than
     /// best-effort.
-    fn rename_context_locked(
-        &self,
-        from: &str,
-        to: &str,
-        entry: &Arc<Entry>,
-    ) -> Result<(), RenameContextError> {
+    ///
+    /// The return type spells out what the caller may safely release on
+    /// failure: [`RenameOutcome::RolledBack`] means the attempt never
+    /// passed the point of no return (the registry still lists `from`,
+    /// and any marker written was cleaned up), so both names are free
+    /// again. [`RenameOutcome::Stuck`] means it failed after `from` was
+    /// already removed from the registry — the marker survives on disk
+    /// and only a boot resume-sweep (or a successful retry) can resolve
+    /// it, so `from` must stay reserved in the meantime.
+    fn rename_context_locked(&self, from: &str, to: &str, entry: &Arc<Entry>) -> RenameOutcome {
         let from_stem = file_stem(from);
         let to_stem = file_stem(to);
         let marker = renaming_marker_path(&self.0.data_dir, &from_stem);
-        write_rename_marker(&marker, from, to).map_err(RenameContextError::Io)?;
+        if let Err(error) = write_rename_marker(&marker, from, to) {
+            return RenameOutcome::RolledBack(RenameContextError::Io(error));
+        }
         if let Err(error) = self.drain_entry_for_rename(from, entry) {
             let _ = fs::remove_file(&marker);
-            return Err(RenameContextError::Io(error));
+            return RenameOutcome::RolledBack(RenameContextError::Io(error));
         }
         self.0.registry.write().remove(from);
-        // The marker survives a failure from here on — memory already
-        // reflects the rename (the tombstone under `from`), so the
-        // only way back is finishing the move and the membership
-        // rewrite, at boot if not now.
-        move_context_files(&self.0.data_dir, &from_stem, &to_stem)
-            .map_err(RenameContextError::Io)?;
+        // POINT OF NO RETURN: memory already reflects the rename (the
+        // tombstone under `from`). Every failure from here on is
+        // reported as `Stuck` — see this function's doc — so the only
+        // way back is finishing the move and the membership rewrite, at
+        // boot if not now.
+        if let Err(error) = move_context_files(&self.0.data_dir, &from_stem, &to_stem) {
+            return RenameOutcome::Stuck(RenameContextError::Io(error));
+        }
         let MetaFile { meta, stats, usage } = read_meta_file(&self.0.data_dir, &to_stem);
         let pinned = meta.pinned;
         let wal_bytes = fs::metadata(wal_path(&self.0.data_dir, &to_stem))
@@ -2030,7 +2078,7 @@ impl AppState {
             });
         }
         let _ = fs::remove_file(&marker);
-        Ok(())
+        RenameOutcome::Ok
     }
 
     /// Writes an entry's whole current state to disk under `name` —
@@ -14627,6 +14675,96 @@ mod tests {
             state.group("drinks").unwrap().contexts,
             BTreeSet::from(["shochu".to_string()])
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Regression for the critical data-loss bug in
+    /// `rename_context_locked`: once the registry has forgotten `from`
+    /// (the point of no return), a failed pivot move must keep `from`
+    /// reserved in `pending.renames` rather than release it. Before the
+    /// fix, `rename_context` unconditionally cleared the reservation on
+    /// any failure, so a client's natural reaction to seeing `from`
+    /// vanish — `create(from)` — sailed through `create_files`'s
+    /// stale-file sweep and deleted both the untouched old generation's
+    /// files AND the `.renaming` marker that boot needs to resume the
+    /// move, erasing the data beyond any recovery.
+    #[test]
+    fn a_rename_stuck_past_the_point_of_no_return_refuses_a_recreate_and_survives_reboot() {
+        let dir = scratch_dir("rename-stuck-recreate");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        // Block the pivot: `fs::rename` onto an existing directory
+        // fails with ENOTDIR/EISDIR, deterministically breaking
+        // `move_context_files`'s first (pivot) move without touching
+        // permissions — which would also break the marker write that
+        // must succeed first.
+        let blocker = dir.join(format!("{}.ctx", file_stem("shochu")));
+        fs::create_dir(&blocker).unwrap();
+
+        let error = state.rename_context("sake", "shochu").unwrap_err();
+        assert!(
+            matches!(error, RenameContextError::Io(_)),
+            "the pivot move must fail: {error:?}"
+        );
+
+        assert!(
+            state.directory_entry("sake").is_none(),
+            "memory already forgot the source name past the point of no return"
+        );
+        assert!(
+            state.directory_entry("shochu").is_none(),
+            "the destination never landed"
+        );
+        assert!(
+            renaming_marker_path(&dir, &file_stem("sake")).exists(),
+            "the marker must survive so boot can resume the move"
+        );
+        assert!(
+            dir.join("sake.ctx").exists(),
+            "the old generation's files must stay put, untouched"
+        );
+
+        // The dangerous part: a client that saw `sake` disappear (404)
+        // and naturally retries with create() must be refused, not
+        // handed a fresh empty context in place of the old data.
+        assert!(
+            matches!(
+                state.create("sake", ContextMeta::default()),
+                Err(CreateError::AlreadyExists)
+            ),
+            "a stuck rename must keep blocking create(), or create_files' \
+             stale-file sweep would delete the marker and the old data"
+        );
+        assert!(
+            renaming_marker_path(&dir, &file_stem("sake")).exists(),
+            "the refused create must not have touched the marker"
+        );
+        assert!(
+            dir.join("sake.ctx").exists(),
+            "the refused create must not have touched the old data"
+        );
+
+        // Clear the obstruction and let boot's resume-sweep finish what
+        // the live call could not.
+        fs::remove_dir(&blocker).unwrap();
+        drop(state);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.directory_entry("sake").is_none());
+        let count = state
+            .read_context("shochu", |context| context.association_count())
+            .unwrap();
+        assert_eq!(count, 1, "the resumed move must carry the old data over");
+        assert!(!renaming_marker_path(&dir, &file_stem("sake")).exists());
 
         let _ = fs::remove_dir_all(dir);
     }
