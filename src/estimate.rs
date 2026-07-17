@@ -42,6 +42,16 @@ const SYNTHESIS_CAP: u64 = 1_000_000;
 /// synthesis above does.
 const PASSAGE_SAMPLE_CAP: u64 = 16 * 1024 * 1024;
 
+/// The paragraph size `synthetic_passage_text` always emits at least one
+/// of, however few bytes it's asked for. `estimate_passages` caps its
+/// source-sample count against this floor: without it, a huge `--sources`
+/// derived from a huge `--associations` paired with a tiny
+/// `--passage-bytes` would synthesize one such paragraph per sampled
+/// source regardless of `PASSAGE_SAMPLE_CAP` — tens of thousands of
+/// sources each contributing ~400 bytes no matter how little text
+/// `--passage-bytes` actually called for.
+const SYNTHETIC_PARAGRAPH_BYTES: u64 = 400;
+
 struct Plan {
     associations: u64,
     concepts: u64,
@@ -358,15 +368,15 @@ struct PassageEstimate {
 /// lane) sees the same shape a real document would rather than one
 /// giant paragraph.
 fn synthetic_passage_text(bytes: u64) -> String {
-    const PARAGRAPH_BYTES: usize = 400;
-    let mut text = String::with_capacity(bytes as usize + PARAGRAPH_BYTES);
+    let paragraph_bytes = SYNTHETIC_PARAGRAPH_BYTES as usize;
+    let mut text = String::with_capacity(bytes as usize + paragraph_bytes);
     let mut word: u64 = 0;
     while (text.len() as u64) < bytes {
         if !text.is_empty() {
             text.push_str("\n\n");
         }
         let paragraph_start = text.len();
-        while text.len() - paragraph_start < PARAGRAPH_BYTES {
+        while text.len() - paragraph_start < paragraph_bytes {
             text.push_str("word");
             text.push_str(&word.to_string());
             text.push(' ');
@@ -379,7 +389,15 @@ fn synthetic_passage_text(bytes: u64) -> String {
 fn estimate_passages(plan: &Plan) -> PassageEstimate {
     let sample_bytes = plan.passage_bytes.min(PASSAGE_SAMPLE_CAP);
     let factor = plan.passage_bytes as f64 / sample_bytes as f64;
-    let sample_sources = ((plan.sources as f64 / factor).round() as u64).max(1);
+    let requested_sample_sources = ((plan.sources as f64 / factor).round() as u64).max(1);
+    // Every sampled source costs at least one SYNTHETIC_PARAGRAPH_BYTES
+    // paragraph no matter how tiny its share of sample_bytes works out to,
+    // so a --sources far larger than sample_bytes can support at that
+    // floor (e.g. a huge --associations deriving a huge default --sources
+    // alongside a small --passage-bytes) must not be sampled in full —
+    // that's exactly the runaway PASSAGE_SAMPLE_CAP exists to prevent.
+    let sample_sources =
+        requested_sample_sources.min((sample_bytes / SYNTHETIC_PARAGRAPH_BYTES).max(1));
     let per_source_bytes = (sample_bytes / sample_sources).max(1);
 
     let mut records: Vec<(String, Arc<PassageRecord>)> =
@@ -597,5 +615,29 @@ mod tests {
             "store ratio {store_ratio}"
         );
         assert!((3.2..=4.8).contains(&bm25_ratio), "bm25 ratio {bm25_ratio}");
+    }
+
+    /// Regression test: a huge `--associations` derives a huge default
+    /// `--sources` (associations / 20) even when `--passage-bytes` is
+    /// tiny. `sample_sources` used to track that derived `sources` count
+    /// uncapped, so every one of the tens of thousands of sampled sources
+    /// synthesized its own ~400-byte paragraph regardless of
+    /// `PASSAGE_SAMPLE_CAP` — tens of megabytes of synthetic text (and a
+    /// matching BM25 build) to measure a 400-byte request.
+    #[test]
+    fn estimate_passages_caps_the_source_sample_when_sources_vastly_outnumber_bytes() {
+        let plan = passage_plan(400, 1_000_000 / 20, 0);
+        let estimate = estimate_passages(&plan);
+        assert!(
+            estimate.store_bytes < 1024 * 1024,
+            "measuring 400 requested passage bytes across 50,000 sources must not \
+             synthesize megabytes: store_bytes = {}",
+            estimate.store_bytes
+        );
+        assert!(
+            estimate.bm25_bytes < 1024 * 1024,
+            "bm25_bytes = {}",
+            estimate.bm25_bytes
+        );
     }
 }
