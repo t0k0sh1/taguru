@@ -20,6 +20,7 @@
 //! so a server restart costs connected clients one silent refresh,
 //! and a stolen store file contains nothing replayable.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -35,9 +36,13 @@ pub const REFRESH_TTL_SECS: u64 = 30 * 24 * 3600;
 pub const CODE_TTL_SECS: u64 = 60;
 /// Registration is unauthenticated by design (RFC 7591 as MCP clients
 /// practice it), so the store must be bounded by us, not by callers. At
-/// the cap the OLDEST registration is evicted, never the new one
-/// refused: an unauthenticated flood must not be able to wedge the store
-/// so no fresh client can register until oauth.json is hand-pruned.
+/// the cap a registration is evicted, never the new one refused: an
+/// unauthenticated flood must not be able to wedge the store so no
+/// fresh client can register until oauth.json is hand-pruned. The one
+/// evicted is the oldest registration nobody has approved yet, falling
+/// back to the oldest overall only once every slot is approved (see
+/// `register_client`) — so a flood of registrations alone can never
+/// evict a client an operator actually uses.
 pub const CLIENT_CAP: usize = 100;
 /// Every caller-controlled field of a registration is bounded too, not
 /// just the client count: without these, one unauthenticated call could
@@ -212,10 +217,13 @@ pub struct Oauth {
     public_url: String,
     store_path: PathBuf,
     // Each of these is held only long enough to mutate it, never across
-    // `persist`'s fsync-heavy write — `persist_now` is the sole place
-    // that reads more than one (always `clients` before `refresh`, to
-    // snapshot both for the store file), and it releases each right
-    // after cloning it, before writing anything. That keeps `client()`
+    // `persist`'s fsync-heavy write, and never together with another.
+    // `persist_now` (`clients` then `refresh`, to snapshot both for the
+    // store file) and `register_client` (`refresh` then `clients`, to
+    // know which registrations are approved before choosing an eviction
+    // target) are the only places that read more than one — each
+    // releases the first before the next is touched, so the two
+    // (different) orders never actually overlap. That keeps `client()`
     // — which `/oauth/authorize` calls on every request — and any
     // in-progress registration or mint from ever waiting on disk I/O;
     // only a second concurrent persist waits, on `persist_lock` below.
@@ -385,19 +393,42 @@ impl Oauth {
             ));
         }
         let client = {
+            // A `refresh` grant exists only once a human has approved a
+            // client_id on the consent page (see `issue_code`/`mint`), so
+            // it is proof of real use an unauthenticated registration
+            // flood cannot forge. Snapshot which client_ids have one
+            // before `clients` is locked — never both at once (see the
+            // field comments above) — so eviction below can spare them.
+            let authorized: HashSet<String> = self
+                .refresh
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|token| token.client_id.clone())
+                .collect();
             let mut clients = self.clients.lock().unwrap();
             // Registration is unauthenticated, so the cap must self-heal.
             // Refusing at the limit would let a flood of junk registrations
             // wedge the store permanently — no new client could register
-            // until an operator hand-pruned oauth.json. Evict the oldest
-            // instead: the Vec is insertion-ordered, so index 0 is oldest.
+            // until an operator hand-pruned oauth.json. Evict instead, but
+            // never a client someone has actually approved while an
+            // unapproved one can give up its slot instead: the Vec is
+            // insertion-ordered, so the first unapproved entry `position`
+            // finds is also the oldest one. Only once every slot is
+            // approved does eviction fall back to index 0, the oldest
+            // overall — a flood of bare registrations, with no consent
+            // behind any of them, can never force that fallback.
             // Outstanding tokens survive an eviction — exchange_code and
             // exchange_refresh validate against their own grant records, not
             // this list — so an evicted client need only re-register on its
             // next authorize. (A while, not an if: it also drains a store
             // that a lowered CLIENT_CAP left over the line.)
             while clients.len() >= CLIENT_CAP {
-                clients.remove(0);
+                let target = clients
+                    .iter()
+                    .position(|client| !authorized.contains(&client.client_id))
+                    .unwrap_or(0);
+                clients.remove(target);
             }
             let client = Client {
                 client_id: random_token(),
@@ -1284,6 +1315,72 @@ mod tests {
                 .authenticate(&attacker_grants[0].access_token, ACCESS_CAP as u64)
                 .is_none(),
             "the flooding client's own oldest grant is evicted instead"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Unlike codes/access/refresh, a registration flood cannot be
+    /// scoped to "the flooding client's own entries" — every registration
+    /// mints a brand new client_id, so there is no prior identity to
+    /// prefer evicting. The registration cap must still resist a flood,
+    /// so it leans on the one thing a flood cannot forge: a `refresh`
+    /// grant, which only exists once a human approved that client_id.
+    #[test]
+    fn a_registration_flood_evicts_unapproved_clients_not_an_approved_one() {
+        let (oauth, dir) = scratch_oauth("register-flood-approved");
+        // A real client: registered, then actually approved — this is
+        // the one an eviction must spare.
+        let approved = register(&oauth);
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let code = oauth.issue_code(
+            &approved,
+            "https://claude.ai/cb",
+            &s256_challenge(verifier),
+            "laptop",
+            0,
+        );
+        oauth
+            .exchange_code(
+                &approved.client_id,
+                &code,
+                verifier,
+                "https://claude.ai/cb",
+                0,
+            )
+            .unwrap();
+
+        // Flood the store past the cap with registrations nobody ever
+        // approves — same shape as a bot hammering /oauth/register.
+        let mut flood = Vec::new();
+        for i in 0..CLIENT_CAP {
+            flood.push(
+                oauth
+                    .register_client(
+                        &format!("flood{i}"),
+                        vec!["https://flood.example/cb".to_string()],
+                    )
+                    .unwrap(),
+            );
+        }
+
+        // The approved client survives the flood — naive oldest-first
+        // eviction would have evicted it immediately, since it was
+        // registered before every flood entry.
+        assert!(
+            oauth.client(&approved.client_id).is_some(),
+            "an approved client must survive a registration flood that never got approved itself"
+        );
+        // The flood's own oldest entry is what actually paid for it.
+        assert!(
+            oauth.client(&flood[0].client_id).is_none(),
+            "the flood's own oldest unapproved registration is evicted instead"
+        );
+        // Never one over the cap: eviction still keeps the store bounded.
+        assert_eq!(
+            oauth.clients.lock().unwrap().len(),
+            CLIENT_CAP,
+            "the store stays bounded at the cap"
         );
 
         let _ = std::fs::remove_dir_all(dir);
