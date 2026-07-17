@@ -246,7 +246,16 @@ fn health(args: &[String]) -> i32 {
     if let Some(path) = &config {
         load_config(path);
     }
-    let base = explicit_url.unwrap_or_else(default_base_url);
+    let base = match explicit_url {
+        Some(url) => url,
+        None => match default_base_url() {
+            Ok(url) => url,
+            Err(error) => {
+                eprintln!("taguru: health: {error}");
+                return 2;
+            }
+        },
+    };
     let url = format!("{base}/health");
     // The agent timeout stays under HEALTHCHECK's own 5s deadline so
     // the verdict (and its message) comes from here, not from a kill.
@@ -280,9 +289,27 @@ fn health(args: &[String]) -> i32 {
 /// unspecified bind address read as its loopback — 0.0.0.0 is
 /// reachable at 127.0.0.1 from inside the same network namespace, and
 /// inside the namespace is exactly where a HEALTHCHECK runs.
-fn default_base_url() -> String {
+///
+/// Errs when that resolves to port 0: TAGURU_ADDR documents port 0 as
+/// "pick free" (the OS assigns an ephemeral port at bind time), but
+/// that assignment is invisible to a second, later process — probing
+/// port 0 itself always fails, reporting a healthy server unhealthy
+/// forever rather than just once.
+fn default_base_url() -> Result<String, String> {
     let addr = std::env::var("TAGURU_ADDR").unwrap_or_else(|_| "127.0.0.1:8248".to_string());
-    format!("http://{}", loopback_of(&addr))
+    base_url_for(&addr)
+}
+
+fn base_url_for(addr: &str) -> Result<String, String> {
+    let loopback = loopback_of(addr);
+    if loopback.ends_with(":0") {
+        return Err(format!(
+            "TAGURU_ADDR ({addr}) binds to port 0 (OS-assigned) — the actual port \
+             can't be discovered from here; pass the server's real URL explicitly: \
+             'taguru health http://host:PORT'"
+        ));
+    }
+    Ok(format!("http://{loopback}"))
 }
 
 fn loopback_of(addr: &str) -> String {
@@ -581,6 +608,18 @@ mod tests {
         assert_eq!(loopback_of("127.0.0.1:8248"), "127.0.0.1:8248");
         // Hostnames don't parse as socket addresses; pass them through.
         assert_eq!(loopback_of("localhost:8248"), "localhost:8248");
+    }
+
+    #[test]
+    fn a_port_0_bind_address_refuses_to_guess_the_real_port() {
+        let error =
+            base_url_for("0.0.0.0:0").expect_err("port 0 cannot resolve to a probeable URL");
+        assert!(error.contains("port 0"), "{error}");
+        // A concrete port still resolves normally.
+        assert_eq!(
+            base_url_for("0.0.0.0:8248").unwrap(),
+            "http://127.0.0.1:8248"
+        );
     }
 
     #[test]
