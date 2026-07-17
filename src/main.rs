@@ -233,6 +233,21 @@ async fn serve() {
                  already done"
             );
         }
+        // The same worst-case hold applies to shutdown: the provider call
+        // runs in block_in_place, so a SIGTERM arriving mid-embed leaves
+        // axum's graceful drain waiting on it, not the request timeout
+        // above. A container orchestrator's own stop grace period
+        // (Kubernetes terminationGracePeriodSeconds, Docker
+        // stop_grace_period) is invisible to this process, so it can't be
+        // checked the way TAGURU_REQUEST_TIMEOUT_SECS was above — only
+        // said, once, here.
+        info!(
+            embed_worst_case_secs = worst_case,
+            "an in-flight embed call can hold graceful shutdown's drain for up to this \
+             long — size the container orchestrator's stop grace period at least this \
+             large, or a SIGKILL cuts the drain short (every write is still safe in the \
+             WAL; only the final flush and unwritten usage counters are lost)"
+        );
     }
     let auto_embed = embedder.is_some() && env_bool("TAGURU_EMBED_AUTO", false);
     if auto_embed {

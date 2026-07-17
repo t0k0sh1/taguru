@@ -20,9 +20,16 @@ services:
       - taguru-data:/data
     read_only: true # /data is the only write target
     restart: unless-stopped
-    # `docker stop` is a graceful shutdown (flush + usage sweep); give
-    # a large flush a moment before the kill.
-    stop_grace_period: 30s
+    # `docker stop` is a graceful shutdown: it drains in-flight requests
+    # before the final flush + usage sweep. If the embedding tier is on,
+    # a request that lands mid-embed can hold that drain for
+    # TAGURU_EMBED_TIMEOUT_SECS × 3 retries — 180s at the defaults, since
+    # the provider call can't be preempted by the request timeout. Too
+    # short a grace period here gets the process SIGKILLed mid-drain
+    # instead (writes are still safe: the WAL replays them on the next
+    # boot, but the in-flight response and the final flush are lost).
+    # Raise this alongside TAGURU_EMBED_TIMEOUT_SECS if you widen that.
+    stop_grace_period: 200s
 
 volumes:
   taguru-data:
