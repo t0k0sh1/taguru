@@ -3416,16 +3416,25 @@ impl AppState {
                     })
                     .map_or(1, |lane| lane.div_ceil(4));
                 // `lane_need` sizes the pool a RAW lane rank would need,
-                // unlike `first` it is not bounded by `full.len()` —
-                // under heavy staleness (many raw lane hits filtered
-                // out as stale before `full` was built) it can overshoot
-                // past `full.len()` on this very first candidate. Clamp
-                // rather than let that overshoot read as "unreachable":
-                // `full.len()` is always a legal, still-untried candidate
-                // (it's `first`'s own upper bound), and skipping it would
-                // report a false negative for a limit that would have
-                // served the target.
+                // unlike `first` it is not bounded by `full.len()` — two
+                // different things can inflate a raw rank past it. Under
+                // heavy staleness, many raw lane hits get filtered out
+                // before `full` is built, so `lane_need` overshoots what
+                // is actually necessary there and `full.len()` — always
+                // a legal, still-untried candidate — is the right first
+                // try. But a paragraph can also own several LIVE rows in
+                // a lane (doc2query question rows in the vector lane),
+                // and then `lane_need` is exactly right while
+                // `full.len()`'s own pool (`lane_pool(full.len())`) is
+                // too small to ever reach it — no amount of retrying at
+                // or below `full.len()` would. So: try the cheap
+                // `full.len()`-bounded candidate first (keeps the
+                // staleness case minimal), and only once that is
+                // exhausted widen to the raw row ceiling `lane_need` was
+                // actually sized for.
+                let raw_ceiling = lexical_full.len().max(vector_rows.len()).max(full.len());
                 let mut candidate = first.max(lane_need).min(full.len());
+                let mut widened = false;
                 for _ in 0..8 {
                     let rerun = fuse_passage_lanes(
                         &store,
@@ -3436,10 +3445,15 @@ impl AppState {
                     if rerun.iter().any(is_target) {
                         return Some(candidate);
                     }
-                    if candidate >= full.len() {
+                    if candidate >= raw_ceiling {
                         return None;
                     }
-                    candidate = (candidate.saturating_mul(2)).min(full.len());
+                    candidate = if !widened && candidate >= full.len() {
+                        widened = true;
+                        lane_need.max(candidate + 1).min(raw_ceiling)
+                    } else {
+                        (candidate.saturating_mul(2)).min(raw_ceiling)
+                    };
                 }
                 None
             })
@@ -11741,6 +11755,126 @@ mod tests {
 
         let hits = state
             .search_passages("sake", "QUERYMARKER", 2, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.source == "target-doc"),
+            "limit_to_reach must actually reach it: {hits:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A false-negative twin of the regression above, this time from a
+    /// healthy cause: doc2query gives one paragraph several vector rows
+    /// (its text plus each stored question), so a raw semantic-lane rank
+    /// can run far past `full.len()` even when every row is current. The
+    /// fix above clamps the starting candidate to `full.len()`, but
+    /// `full.len()` is only a valid candidate when ITS OWN lane pool
+    /// (`full.len() * 4`, floored at 50) actually reaches the target's
+    /// raw row — here two decoys carrying 30 questions each plant 62
+    /// perfect-cosine rows ahead of the target's one, past that 50-row
+    /// floor, so clamping to `full.len()` (3) still bails out on a limit
+    /// that would have served it.
+    #[test]
+    fn limit_to_reach_is_not_a_false_negative_when_doc2query_questions_inflate_the_raw_lane_rank() {
+        struct MarkerEmbeddings;
+        impl EmbeddingProvider for MarkerEmbeddings {
+            fn model(&self) -> &str {
+                "marker"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                Ok(texts
+                    .iter()
+                    .map(|text| {
+                        if text.starts_with("TARGETMARKER") {
+                            vec![0.5, 0.8660254]
+                        } else {
+                            vec![1.0, 0.0]
+                        }
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("limit-to-reach-doc2query");
+        let state = boot_for_passage_embedding(&dir, Arc::new(MarkerEmbeddings), 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "target-doc".to_string(),
+            crate::passages::PassageSubmission {
+                text: "TARGETMARKER".to_string(),
+                questions: Vec::new(),
+                sections: Vec::new(),
+            },
+        );
+        for i in 0..2 {
+            let questions = (0..30)
+                .map(|q| (0, format!("DECOYQUESTION{i}X{q}")))
+                .collect();
+            passages.insert(
+                format!("decoy-{i:02}"),
+                crate::passages::PassageSubmission {
+                    text: "DECOYMARKER".to_string(),
+                    questions,
+                    sections: Vec::new(),
+                },
+            );
+        }
+        state.store_passages("sake", passages).unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "sake",
+                "QUERYMARKER",
+                "target-doc",
+                None,
+                3,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert!(
+            !explanation.served,
+            "the two decoys alone fill all three requested seats"
+        );
+        assert_eq!(
+            explanation.ranked, 3,
+            "target-doc and both decoys all survive — nothing here is stale"
+        );
+        assert_eq!(
+            explanation.limit_to_reach,
+            Some(16),
+            "target-doc's raw vector-lane rank is 63rd (62 decoy rows \
+             ahead of it); lane_pool(16) = 64 is the smallest pool that \
+             reaches it, and full.len() (3) must widen to it rather than \
+             give up once its own 50-row pool comes up short"
+        );
+
+        let hits = state
+            .search_passages(
+                "sake",
+                "QUERYMARKER",
+                explanation.limit_to_reach.unwrap(),
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         assert!(
