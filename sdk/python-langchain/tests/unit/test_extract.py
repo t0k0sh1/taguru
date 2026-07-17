@@ -159,7 +159,32 @@ def test_split_paragraphs_mirrors_the_server_split() -> None:
 
 def test_labeled_document_numbers_the_canonical_paragraphs() -> None:
     text = "一段落目。\n\n二段落目。"
-    assert labeled_document(text) == "[0] 一段落目。\n\n[1] 二段落目。"
+    # A cap that dwarfs the paragraphs leaves the numbering untouched.
+    assert labeled_document(text, 10_000) == "[0] 一段落目。\n\n[1] 二段落目。"
+
+
+def test_an_oversized_paragraph_repeats_its_number_on_every_continuation() -> None:
+    """Port of extract.rs an_oversized_paragraph_repeats_its_number_on_every_continuation.
+
+    One paragraph far larger than the cap: split at its interior line
+    breaks, every piece must still name paragraph 0 so the model can
+    attribute a question drawn from any of them. The old label-then-byte-
+    split left every piece past the first unlabeled.
+    """
+    body = "あ\n" * 40
+    cap = (len(b"[0] ") + len(body.encode())) // 3
+    labeled = labeled_document(body, cap)
+    blocks = labeled.split("\n\n")
+    assert len(blocks) > 1, labeled
+    assert all(block.startswith("[0] ") for block in blocks), labeled
+
+    # chunk() packs the pre-sized blocks without re-splitting, so the label
+    # survives to what the model sees: every \n\n-delimited block in every
+    # chunk still opens with the paragraph number.
+    chunks = chunk(labeled, cap)
+    assert all(
+        block.startswith("[0] ") for piece in chunks for block in piece.split("\n\n")
+    ), chunks
 
 
 def test_parse_model_output_tolerates_fences_and_prose() -> None:

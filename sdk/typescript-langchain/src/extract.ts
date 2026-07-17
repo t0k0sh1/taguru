@@ -88,11 +88,32 @@ export function splitParagraphs(text: string): string[] {
   return spans;
 }
 
-/** The prompt-input copy: each canonical paragraph prefixed `[index]`. */
-export function labeledDocument(text: string): string {
-  return splitParagraphs(text)
-    .map((paragraph, index) => `[${index}] ${paragraph}`)
-    .join("\n\n");
+/**
+ * The prompt-input copy: each canonical paragraph prefixed `[index]`, so the
+ * model's `paragraph` references land on exactly the indexes the server
+ * validates against. A paragraph too large to fit a single `cap`-byte chunk
+ * is pre-split into pieces that EACH repeat the number — otherwise the byte
+ * split in `chunk()` would carry a paragraph's continuation to the model as
+ * unlabeled text, and any `paragraph` reference the model drew from it would
+ * be a guess.
+ */
+export function labeledDocument(text: string, cap: number): string {
+  const blocks: string[] = [];
+  splitParagraphs(text).forEach((paragraph, index) => {
+    const label = `[${index}] `;
+    // Reserve the label's room on every piece so a re-labeled continuation
+    // still fits the chunk that will carry it, leaving chunk()'s own
+    // oversize split with nothing left to cut (and so no piece to strip
+    // the label from).
+    const pieceCap = Math.max(cap - byteLen(label), 1);
+    for (const piece of splitOversized(paragraph, pieceCap)) {
+      // splitOversized cuts just after a newline, so an interior piece ends
+      // in one; trim it, or joining blocks with "\n\n" would blur the
+      // paragraph boundary into a triple break.
+      blocks.push(`${label}${piece.replace(/\n+$/, "")}`);
+    }
+  });
+  return blocks.join("\n\n");
 }
 
 // -- prompt-input chunking --------------------------------------------------------

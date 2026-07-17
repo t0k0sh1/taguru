@@ -98,12 +98,29 @@ def split_paragraphs(text: str) -> list[str]:
     return spans
 
 
-def labeled_document(text: str) -> str:
-    """The prompt-input copy: each canonical paragraph prefixed ``[index]``.
-    The stored passage stays the verbatim document."""
-    return "\n\n".join(
-        f"[{index}] {paragraph}" for index, paragraph in enumerate(split_paragraphs(text))
-    )
+def labeled_document(text: str, cap: int) -> str:
+    """The prompt-input copy: each canonical paragraph prefixed ``[index]``,
+    so the model's ``paragraph`` references land on exactly the indexes the
+    server validates against. The stored passage stays the verbatim
+    document. A paragraph too large to fit a single ``cap``-byte chunk is
+    pre-split into pieces that EACH repeat the number — otherwise the byte
+    split in ``chunk()`` would carry a paragraph's continuation to the model
+    as unlabeled text, and any ``paragraph`` reference the model drew from it
+    would be a guess."""
+    blocks: list[str] = []
+    for index, paragraph in enumerate(split_paragraphs(text)):
+        label = f"[{index}] "
+        # Reserve the label's room on every piece so a re-labeled
+        # continuation still fits the chunk that will carry it, leaving
+        # chunk()'s own oversize split with nothing left to cut (and so no
+        # piece to strip the label from).
+        piece_cap = max(cap - _byte_len(label), 1)
+        for piece in _split_oversized(paragraph, piece_cap):
+            # _split_oversized cuts just after a newline, so an interior
+            # piece ends in one; trim it, or joining blocks with "\n\n"
+            # would blur the paragraph boundary into a triple break.
+            blocks.append(f"{label}{piece.rstrip(chr(10))}")
+    return "\n\n".join(blocks)
 
 
 # -- prompt-input chunking (byte-capped, paragraph boundaries preferred) ---------

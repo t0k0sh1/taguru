@@ -159,7 +159,31 @@ describe("chunking and paragraph split", () => {
   });
 
   it("numbers the canonical paragraphs in the prompt copy", () => {
-    expect(labeledDocument("一段落目。\n\n二段落目。")).toBe("[0] 一段落目。\n\n[1] 二段落目。");
+    // A cap that dwarfs the paragraphs leaves the numbering untouched.
+    expect(labeledDocument("一段落目。\n\n二段落目。", 10_000)).toBe(
+      "[0] 一段落目。\n\n[1] 二段落目。",
+    );
+  });
+
+  it("repeats an oversized paragraph's number on every continuation", () => {
+    // One paragraph far larger than the cap: split at its interior line
+    // breaks, every piece must still name paragraph 0 so the model can
+    // attribute a question drawn from any of them. The old label-then-
+    // byte-split left every piece past the first unlabeled.
+    const body = "あ\n".repeat(40);
+    const cap = Math.floor((Buffer.byteLength("[0] ", "utf-8") + Buffer.byteLength(body, "utf-8")) / 3);
+    const labeled = labeledDocument(body, cap);
+    const blocks = labeled.split("\n\n");
+    expect(blocks.length).toBeGreaterThan(1);
+    expect(blocks.every((block) => block.startsWith("[0] "))).toBe(true);
+
+    // chunk() packs the pre-sized blocks without re-splitting, so the
+    // label survives to what the model sees: every \n\n-delimited block in
+    // every chunk still opens with the paragraph number.
+    const chunks = chunk(labeled, cap);
+    expect(
+      chunks.flatMap((piece) => piece.split("\n\n")).every((block) => block.startsWith("[0] ")),
+    ).toBe(true);
   });
 });
 

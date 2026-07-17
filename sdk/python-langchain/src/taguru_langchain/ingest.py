@@ -220,7 +220,7 @@ class TaguruIngester:
 
         vocabulary = self._fetch_vocabulary()
         system = system_prompt(vocabulary, self.questions)
-        chunks = chunk(labeled_document(text), self.chunk_bytes)
+        chunks = chunk(labeled_document(text, self.chunk_bytes), self.chunk_bytes)
         outcome.chunks = len(chunks)
 
         outputs: list[ModelOutput] = []
@@ -310,7 +310,7 @@ class TaguruIngester:
 
         vocabulary = await self._afetch_vocabulary()
         system = system_prompt(vocabulary, self.questions)
-        chunks = chunk(labeled_document(text), self.chunk_bytes)
+        chunks = chunk(labeled_document(text, self.chunk_bytes), self.chunk_bytes)
         outcome.chunks = len(chunks)
 
         outputs: list[ModelOutput] = []

@@ -144,7 +144,7 @@ export class TaguruIngester {
 
     const vocabulary = await this.fetchVocabulary();
     const system = systemPrompt(vocabulary, this.questions);
-    const chunks = chunk(labeledDocument(text), this.chunk_bytes);
+    const chunks = chunk(labeledDocument(text, this.chunk_bytes), this.chunk_bytes);
     outcome.chunks = chunks.length;
 
     const outputs: ModelOutput[] = [];
