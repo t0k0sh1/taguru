@@ -202,8 +202,17 @@ export function isPreConnectFailure(error: unknown): boolean {
 }
 
 export function describeError(error: unknown): string {
+  if (error instanceof AggregateError) {
+    // AggregateError's own `.message` defaults to "" — the real detail
+    // lives in `.errors`, e.g. one entry per address a dual-stack connect
+    // attempt failed to reach.
+    return error.errors.map(describeError).join("; ") || error.message || error.name;
+  }
   if (error instanceof Error) {
     const cause = (error as { cause?: unknown }).cause;
+    if (cause instanceof AggregateError) {
+      return `${error.message}: ${describeError(cause)}`;
+    }
     if (cause instanceof Error && cause.message) {
       return `${error.message}: ${cause.message}`;
     }

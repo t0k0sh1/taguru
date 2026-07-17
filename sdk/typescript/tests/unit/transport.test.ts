@@ -3,7 +3,12 @@ import { describe, expect, it } from "vitest";
 import { Taguru } from "../../src/client.js";
 import { citationKey } from "../../src/models.js";
 import { TaguruError } from "../../src/errors.js";
-import { chunkAssociations, isPreConnectFailure, normalizeHeaders } from "../../src/transport.js";
+import {
+  chunkAssociations,
+  describeError,
+  isPreConnectFailure,
+  normalizeHeaders,
+} from "../../src/transport.js";
 import { errBody, okBody, stubClient, type StubRequest } from "./stub.js";
 
 const DIRECTORY_ROW = {
@@ -464,6 +469,33 @@ describe("isPreConnectFailure", () => {
     });
     expect(isPreConnectFailure(midFlight)).toBe(false);
     expect(isPreConnectFailure(new Error("boom"))).toBe(false);
+  });
+});
+
+describe("describeError", () => {
+  it("walks a plain Error cause", () => {
+    const error = new TypeError("fetch failed", { cause: new Error("connect timeout") });
+    expect(describeError(error)).toBe("fetch failed: connect timeout");
+  });
+
+  it("surfaces every inner error of an AggregateError cause", () => {
+    // Node's dual-stack connect throws one AggregateError whose own
+    // `.message` is "" once every resolved address refuses — the detail
+    // lives only in `.errors`, which a plain `.cause` walk never reads.
+    const error = new TypeError("fetch failed", {
+      cause: new AggregateError([
+        Object.assign(new Error("connect ECONNREFUSED ::1:8248"), { code: "ECONNREFUSED" }),
+        Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8248"), { code: "ECONNREFUSED" }),
+      ]),
+    });
+    expect(describeError(error)).toBe(
+      "fetch failed: connect ECONNREFUSED ::1:8248; connect ECONNREFUSED 127.0.0.1:8248",
+    );
+  });
+
+  it("recurses into an AggregateError nested inside another AggregateError's .errors", () => {
+    const error = new AggregateError([new AggregateError([new Error("a"), new Error("b")]), new Error("c")]);
+    expect(describeError(error)).toBe("a; b; c");
   });
 });
 
