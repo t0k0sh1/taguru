@@ -20,7 +20,7 @@
 //! so a server restart costs connected clients one silent refresh,
 //! and a stolen store file contains nothing replayable.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -122,14 +122,32 @@ pub fn s256_challenge(verifier: &str) -> String {
 /// Evicts grants until `vec` is under `cap`, called just before a new
 /// grant for `client_id` is pushed. Prefers the oldest grant that
 /// belongs to `client_id` itself — so a client that floods its own
-/// grants only ever evicts its OWN past ones — falling back to the
-/// store's oldest grant overall only when this client has none in the
-/// store yet (its first grant ever, or all already reclaimed); without
-/// that preference a single client hammering the token or authorize
-/// endpoint would evict OTHER clients' live grants out from under
-/// them. All grants in one store share a TTL, so the smallest
-/// `expires_at` IS the oldest one — unlike the insertion-ordered
-/// client list, these stores drop spent entries via `swap_remove` (see
+/// grants only ever evicts its OWN past ones — falling back, when this
+/// client has none in the store yet (its first grant ever, or all
+/// already reclaimed), to the grant whose OWNER was registered most
+/// recently, rather than the store's oldest grant overall.
+///
+/// That fallback used to pick the store's oldest grant outright, but
+/// registration is free and unauthenticated (RFC 7591): an attacker
+/// can mint a brand-new client_id before every single grant, and a
+/// fresh client_id by definition has zero entries here, so its first
+/// grant always took that fallback — evicting whichever unrelated,
+/// still-live client happened to be oldest, repeatably and without
+/// bound. Preferring the most-recently-registered owner instead still
+/// costs an existing client its slot the FIRST time a client_id this
+/// store has never seen shows up — unavoidable, and a legitimate new
+/// client pays the identical cost — but every subsequent grant from a
+/// freshly-registered client_id now finds an even more recently
+/// registered one to evict first: the attacker's own prior throwaway
+/// client_id. The flood becomes self-consuming instead of indefinite.
+/// `client_registered_at` returns 0 for a client_id with no
+/// registration on record (already evicted from `clients` — its
+/// tokens outlive that, see `register_client`), so it is never
+/// preferred over a client still on record.
+///
+/// All grants in one store share a TTL, so the smallest `expires_at`
+/// IS the oldest one — unlike the insertion-ordered client list, these
+/// stores drop spent entries via `swap_remove` (see
 /// `exchange_code`/`exchange_refresh`), so index 0 is not reliably the
 /// oldest and must be looked up instead.
 fn evict_oldest<T>(
@@ -138,6 +156,7 @@ fn evict_oldest<T>(
     client_id: &str,
     client_of: impl Fn(&T) -> &str,
     expires_at: impl Fn(&T) -> u64,
+    client_registered_at: impl Fn(&str) -> u64,
 ) {
     while vec.len() >= cap {
         let target = vec
@@ -148,7 +167,7 @@ fn evict_oldest<T>(
             .or_else(|| {
                 vec.iter()
                     .enumerate()
-                    .min_by_key(|(_, item)| expires_at(item))
+                    .max_by_key(|(_, item)| client_registered_at(client_of(item)))
             })
             .map(|(index, _)| index)
             .expect("vec is non-empty: the while guard checked len() >= cap > 0");
@@ -219,10 +238,13 @@ pub struct Oauth {
     // Each of these is held only long enough to mutate it, never across
     // `persist`'s fsync-heavy write, and never together with another.
     // `persist_now` (`clients` then `refresh`, to snapshot both for the
-    // store file) and `register_client` (`refresh` then `clients`, to
+    // store file), `register_client` (`refresh` then `clients`, to
     // know which registrations are approved before choosing an eviction
-    // target) are the only places that read more than one — each
-    // releases the first before the next is touched, so the two
+    // target), and `issue_code`/`mint` (`clients` ALONE, released via
+    // `client_registered_ats` before `codes`/`access`/`refresh` is ever
+    // locked, so `evict_oldest`'s fallback can weigh registration time)
+    // are the only places that read more than one field — each
+    // releases the first before the next is touched, so these
     // (different) orders never actually overlap. That keeps `client()`
     // — which `/oauth/authorize` calls on every request — and any
     // in-progress registration or mint from ever waiting on disk I/O;
@@ -456,6 +478,21 @@ impl Oauth {
             .cloned()
     }
 
+    /// Snapshot of every registered client's `created_at`, for
+    /// `evict_oldest`'s fallback (see its doc comment). Locks `clients`
+    /// alone and releases it before returning — callers must take this
+    /// BEFORE locking `codes`/`access`/`refresh`, never while already
+    /// holding one, to keep the "never two of these locks at once"
+    /// invariant documented on the `clients` field above.
+    fn client_registered_ats(&self) -> HashMap<String, u64> {
+        self.clients
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|client| (client.client_id.clone(), client.created_at))
+            .collect()
+    }
+
     /// The consent decision made flesh: a short-lived, single-use code
     /// binding (client, redirect target, PKCE challenge) to the key
     /// the operator delegated.
@@ -468,6 +505,7 @@ impl Oauth {
         now: u64,
     ) -> String {
         let code = random_token();
+        let registered_at = self.client_registered_ats();
         let mut codes = self.codes.lock().unwrap();
         codes.retain(|grant| grant.expires_at > now);
         evict_oldest(
@@ -476,6 +514,7 @@ impl Oauth {
             &client.client_id,
             |grant| &grant.client_id,
             |grant| grant.expires_at,
+            |cid| registered_at.get(cid).copied().unwrap_or(0),
         );
         codes.push(CodeGrant {
             code_hash: digest_hex(&code),
@@ -582,6 +621,7 @@ impl Oauth {
     fn mint(&self, key: String, client_id: &str, now: u64) -> TokenGrant {
         let access_token = random_token();
         let refresh_token = random_token();
+        let registered_at = self.client_registered_ats();
         {
             let mut access = self.access.lock().unwrap();
             access.retain(|token| token.expires_at > now);
@@ -591,6 +631,7 @@ impl Oauth {
                 client_id,
                 |token| &token.client_id,
                 |token| token.expires_at,
+                |cid| registered_at.get(cid).copied().unwrap_or(0),
             );
             access.push(AccessToken {
                 hash: digest_hex(&access_token),
@@ -612,6 +653,7 @@ impl Oauth {
                 client_id,
                 |token| &token.client_id,
                 |token| token.expires_at,
+                |cid| registered_at.get(cid).copied().unwrap_or(0),
             );
             refresh.push(RefreshToken {
                 hash: digest_hex(&refresh_token),
@@ -1315,6 +1357,78 @@ mod tests {
                 .authenticate(&attacker_grants[0].access_token, ACCESS_CAP as u64)
                 .is_none(),
             "the flooding client's own oldest grant is evicted instead"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Registration is free and unauthenticated (RFC 7591), so an
+    /// attacker is never forced to flood grants under one client_id —
+    /// it can register a brand-new client_id before EVERY grant
+    /// instead. A fresh client_id always has zero entries in `access`,
+    /// so under the old "fall back to the store's oldest grant
+    /// overall" rule its very first grant would evict whichever
+    /// unrelated client happened to be oldest — repeatably, without
+    /// ever engaging the "own oldest first" preference at all. This
+    /// pins that the fallback instead prefers the most-recently
+    /// registered owner: the victim (registered, and granted, before
+    /// any of this) is never that owner once even one other
+    /// registration has happened more recently, so only the very first
+    /// attacker grant can possibly cost an existing client a slot —
+    /// every grant after that finds the attacker's own prior throwaway
+    /// client_id to evict first.
+    #[test]
+    fn a_registration_per_grant_cannot_evict_the_victim_past_the_first_round() {
+        let (oauth, dir) = scratch_oauth("cross-client-evict-fresh-registration");
+        let victim = oauth
+            .register_client("victim", vec!["https://victim.example/cb".to_string()])
+            .unwrap();
+        // The victim's grant is the oldest thing `access` will ever
+        // hold — under the old fallback this is exactly what a
+        // fresh-registration attacker's first grant would reach for.
+        let victim_grant = oauth.mint("victim-key".to_string(), &victim.client_id, 0);
+
+        // Fill the rest of the cap with a second client's grants,
+        // registered and minted after the victim — so this filler, not
+        // the victim, is "most recently registered" once the fallback
+        // is forced to pick someone.
+        let filler = oauth
+            .register_client("filler", vec!["https://filler.example/cb".to_string()])
+            .unwrap();
+        for i in 1..ACCESS_CAP as u64 {
+            oauth.mint(format!("filler-key{i}"), &filler.client_id, i);
+        }
+        assert_eq!(
+            oauth.access.lock().unwrap().len(),
+            ACCESS_CAP,
+            "the store is exactly at cap before the attack starts"
+        );
+
+        // The attacker registers a brand-new client_id before EVERY
+        // single grant — never flooding twice under the same
+        // client_id, so the "own oldest first" preference never once
+        // engages for it.
+        for round in 0..5u64 {
+            let attacker = oauth
+                .register_client(
+                    &format!("attacker{round}"),
+                    vec!["https://evil.example/cb".to_string()],
+                )
+                .unwrap();
+            oauth.mint(
+                "stolen-key".to_string(),
+                &attacker.client_id,
+                ACCESS_CAP as u64 + round,
+            );
+        }
+
+        assert!(
+            oauth
+                .authenticate(&victim_grant.access_token, ACCESS_CAP as u64 + 5)
+                .is_some(),
+            "a flood of one-grant-per-fresh-registration must not reach into \
+             another, unrelated (and older) client's live grant just because \
+             every attacker client_id happens to be brand new"
         );
 
         let _ = std::fs::remove_dir_all(dir);
