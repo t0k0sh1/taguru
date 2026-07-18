@@ -47,11 +47,11 @@ parking_lot = "0.12"
 # Already in the tree through reqwest; made direct for CatchPanicLayer,
 # so a handler panic becomes a logged 500 instead of silently dropping
 # the request's metrics, access log, and trace out from under it.
-tower-http = { version = "0.6.11", default-features = false, features = ["catch-panic"] }
+tower-http = { version = "0.7.0", default-features = false, features = ["catch-panic"] }
 # No-op marker consumed by cargo-mutants. It keeps deliberately untestable
 # capacity preflights visible at their definition instead of hiding them in a
 # global name filter.
-mutants = "0.0.3"
+mutants = "0.0.4"
 
 [dev-dependencies]
 # Property-based tests for the hand-rolled binary formats (context
