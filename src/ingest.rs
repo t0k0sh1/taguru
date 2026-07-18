@@ -996,9 +996,11 @@ pub(crate) struct Applied {
     /// canonical split.
     pub(crate) questions_dropped: usize,
     pub(crate) sections_stored: usize,
-    /// Sections naming a paragraph their passage's split does not
-    /// have — same convention and same likely cause as
-    /// `questions_dropped`.
+    /// Sections naming a paragraph their passage's split does not have
+    /// (same convention and same likely cause as `questions_dropped`),
+    /// plus any but the last of two or more sections claiming the same
+    /// paragraph — a start marker governs until the next one, so only
+    /// one can ever apply.
     pub(crate) sections_dropped: usize,
     /// Association paragraph locators naming a spot this batch's own
     /// passage split does not have. Dropped exactly as `questions_dropped`

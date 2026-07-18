@@ -2803,7 +2803,8 @@ pub struct SectionSpec {
 /// historical number, now named); the question and section tallies
 /// report doc2query/section bookkeeping — a dropped question or
 /// section named a paragraph that does not exist in the text it rode
-/// in with.
+/// in with, or (sections only) lost out to a later marker claiming the
+/// same paragraph.
 #[derive(Serialize)]
 pub struct StoredPassages {
     pub stored: usize,

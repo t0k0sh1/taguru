@@ -75,7 +75,8 @@ pub(crate) struct StoreOutcome {
 /// applies when it filters, exposed standalone so a caller can get the
 /// count without building the record: `preview_batch`'s read-only
 /// twin of `apply_batch` calls this to report what a real store would
-/// drop.
+/// drop. Sections additionally count paragraphs claimed more than
+/// once — see [`filter_sections`].
 pub(crate) fn preview_drops(
     paragraph_count: usize,
     questions: &[(u32, String)],
@@ -84,8 +85,37 @@ pub(crate) fn preview_drops(
     let out_of_range = |&&(paragraph, _): &&(u32, String)| paragraph as usize >= paragraph_count;
     (
         questions.iter().filter(out_of_range).count(),
-        sections.iter().filter(out_of_range).count(),
+        filter_sections(sections, paragraph_count).1,
     )
+}
+
+/// Keeps only sections naming a paragraph within `paragraph_count`,
+/// then collapses same-paragraph entries to the last one submitted —
+/// a section is a start marker, and [`PassageRecord::section_for`]'s
+/// binary search can only ever surface one label per paragraph, so an
+/// earlier marker for a paragraph that has a later one can never be
+/// reached again once stored. Dropping it here instead (rather than
+/// letting it ride into storage unreachable forever) matches the rest
+/// of the store's last-write-wins convention and keeps the drop count
+/// honest. Returns the survivors, sorted by paragraph as
+/// `PassageRecord` stores them, and how many entries — out of range or
+/// shadowed — were dropped. The one place this is decided, so
+/// `PassageRecord::new` and `preview_drops` can never disagree about
+/// which sections a submission keeps.
+fn filter_sections(
+    sections: &[(u32, String)],
+    paragraph_count: usize,
+) -> (Vec<(u32, String)>, usize) {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept: Vec<(u32, String)> = sections
+        .iter()
+        .rev()
+        .filter(|&&(paragraph, _)| (paragraph as usize) < paragraph_count && seen.insert(paragraph))
+        .cloned()
+        .collect();
+    kept.sort_by_key(|&(paragraph, _)| paragraph);
+    let dropped = sections.len() - kept.len();
+    (kept, dropped)
 }
 
 /// One source's resident passage: the byte-exact text, its paragraph
@@ -102,10 +132,12 @@ pub(crate) struct PassageRecord {
     pub(crate) paragraphs: Vec<ParagraphSpan>,
     pub(crate) questions: Vec<(u32, String)>,
     /// (paragraph index of section start, label) pairs, sorted by
-    /// paragraph — a section implicitly extends until the next
-    /// marker or the end of the passage. Populated by the ingest
-    /// batch format's `section` line (see `ingest.rs`); resolved
-    /// through `section_for`.
+    /// paragraph, at most one per paragraph — a section implicitly
+    /// extends until the next marker or the end of the passage.
+    /// Populated by the ingest batch format's `section` line (see
+    /// `ingest.rs`); resolved through `section_for`. See
+    /// [`filter_sections`] for how a paragraph claimed more than once
+    /// is resolved before it ever reaches here.
     pub(crate) sections: Vec<(u32, String)>,
 }
 
@@ -113,8 +145,9 @@ impl PassageRecord {
     /// Builds the record, keeping only questions and section markers
     /// whose paragraph exists in THIS text's split — the one
     /// validation point both the live path and replay go through, so
-    /// they can never disagree. Returns how many questions and how
-    /// many sections were dropped.
+    /// they can never disagree. Sections are additionally collapsed to
+    /// one per paragraph (see [`filter_sections`]). Returns how many
+    /// questions and how many sections were dropped.
     pub(crate) fn new(
         text: Arc<str>,
         questions: Vec<(u32, String)>,
@@ -128,13 +161,7 @@ impl PassageRecord {
             .collect();
         questions.sort_by_key(|&(paragraph, _)| paragraph);
         let questions_dropped = questions_offered - questions.len();
-        let sections_offered = sections.len();
-        let mut sections: Vec<(u32, String)> = sections
-            .into_iter()
-            .filter(|&(paragraph, _)| (paragraph as usize) < paragraphs.len())
-            .collect();
-        sections.sort_by_key(|&(paragraph, _)| paragraph);
-        let sections_dropped = sections_offered - sections.len();
+        let (sections, sections_dropped) = filter_sections(&sections, paragraphs.len());
         (
             Arc::new(Self {
                 text,
@@ -1251,6 +1278,40 @@ mod tests {
             "the out-of-range section drops and the rest sort by paragraph"
         );
         assert_eq!(sections_dropped, 1);
+    }
+
+    #[test]
+    fn passage_record_collapses_a_paragraph_claimed_by_more_than_one_section() {
+        let sections = vec![
+            (1, "前編".to_string()),
+            (1, "後編".to_string()),
+            (9, "存在しない段落への見出し".to_string()),
+        ];
+        let (record, _questions_dropped, sections_dropped) = PassageRecord::new(
+            Arc::from("一つ目。\n\n二つ目。"),
+            Vec::new(),
+            sections.clone(),
+        );
+        assert_eq!(
+            record.sections,
+            vec![(1, "後編".to_string())],
+            "the earlier marker for a paragraph that has a later one is dropped, \
+             not kept alongside it — only one label can ever govern a paragraph"
+        );
+        assert_eq!(
+            sections_dropped, 2,
+            "one out-of-range plus one shadowed by a later marker for the same paragraph"
+        );
+        assert_eq!(
+            record.section_for(1),
+            Some("後編"),
+            "the surviving marker is the one section_for already resolved to"
+        );
+        assert_eq!(
+            preview_drops(2, &[], &sections).1,
+            sections_dropped,
+            "preview must count the same drops apply does"
+        );
     }
 
     #[test]
