@@ -52,104 +52,11 @@ jobs:
         with:
           command: check advisories
 
-  # Separate from `check`: the instrumented build roughly doubles the
-  # runtime, which would slow down the fast fmt/clippy/test feedback.
-  coverage:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Clean coverage artifacts
-        run: cargo llvm-cov clean --workspace
-      # A couple of HTTP integration tests SIGKILL a spawned `taguru`
-      # subprocess on purpose (graph_writes_survive_a_hard_kill and its
-      # sibling in tests/http_api.rs) to prove the WAL alone carries data
-      # across a crash. On an instrumented build that subprocess is also
-      # writing a profraw file, and SIGKILL gives its profiling runtime
-      # no chance to flush — the file is left mid-write (observed
-      # locally as a bare 4096-byte fragment) and later fails
-      # llvm-profdata merge as "file header is corrupt". That's a
-      # by-product of the crash the test is deliberately causing, not a
-      # sign the coverage run itself is broken, so --failure-mode=all
-      # below tells the merge to only fail if every profraw is invalid.
-      # Separately, capping --test-threads reduces CPU contention on
-      # this runner's core count, which a couple of timing-sensitive
-      # concurrency tests need to stay non-flaky under an instrumented
-      # binary's slower execution.
-      - name: Run instrumented tests
-        run: cargo llvm-cov --workspace --locked --no-report -- --test-threads=2
-      - name: Per-file summary
-        run: |
-          cargo llvm-cov report --failure-mode all > coverage-summary.txt
-          {
-            echo "### Coverage (line/region/function, per source file)"
-            echo
-            echo '```'
-            cat coverage-summary.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: LCOV report
-        run: |
-          mkdir -p target/llvm-cov
-          cargo llvm-cov report --failure-mode all --lcov --output-path target/llvm-cov/lcov.info
-      - name: HTML report
-        run: cargo llvm-cov report --failure-mode all --html
-      - uses: actions/upload-artifact@v7
-        with:
-          name: coverage-report
-          path: |
-            coverage-summary.txt
-            target/llvm-cov/lcov.info
-            target/llvm-cov/html
-          if-no-files-found: error
-          retention-days: 14
-
-  # Full mutation runs are intentionally local and module-scoped. On a
-  # pull request, mutate only production lines touched since the merge
-  # base so the feedback stays bounded by the size of the change. A wide
-  # audit diff can still spawn dozens of mutants, each its own build+test,
-  # so run two at a time (safe on the runner's cores and disk) and give
-  # the job a ceiling that clears a large change rather than one tuned to
-  # a small one — the job still ends the moment the mutants finish, so the
-  # higher ceiling costs nothing on an ordinary PR.
-  mutants:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
-        with:
-          toolchain: 1.97.0
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@c28c615c385dc3e96ea7a032f6586e24a50476cf
-        with:
-          tool: cargo-mutants@27.1.0
-      - name: Build pull-request diff
-        run: git diff "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" > pr.diff
-      - name: Test mutants in changed code
-        run: cargo mutants --workspace --in-diff pr.diff --jobs 2
-      # A diff with no Rust source changes (deps-only bumps, workflow
-      # tweaks, etc.) makes cargo-mutants exit early without writing
-      # mutants.out at all. That's a legitimate outcome, not a broken
-      # run — cargo-mutants itself would have failed the step above if
-      # something had gone wrong — so a missing directory here only
-      # warrants a warning, not failing the whole job.
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: mutants-in-diff
-          path: mutants.out
-          if-no-files-found: warn
-          retention-days: 14
+  # Coverage and per-PR mutation testing used to run here too. Both
+  # retired to keep CI at the signals that gate a merge: coverage
+  # produced a report nobody's decision hung on, and diff-scoped
+  # mutants stopped fitting a CI budget the moment a PR carried a new
+  # module (a ~1.5k-line diff is hundreds of mutants, each its own
+  # build+test — see #140, which timed out the hour ceiling). Mutation
+  # runs remain a local, module-scoped tool: `cargo mutants` with the
+  # `[profile.mutants]` in Cargo.toml.
