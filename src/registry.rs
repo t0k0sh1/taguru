@@ -2048,10 +2048,32 @@ impl AppState {
         // reported as `Stuck` — see this function's doc — so the only
         // way back is finishing the move and the membership rewrite, at
         // boot if not now.
+        //
+        // `entry`'s usage counters stay reachable via `note_read`/
+        // `note_write`'s lock-free `lookup(from)` for as long as `from`
+        // sits in the registry — right up to the `remove` just above.
+        // `drain_entry_for_rename` snapshotted usage earlier (to have
+        // something to hand `save_files` while `from` was still Hot, or
+        // nothing at all if it was already Cold), so any read/write
+        // counted after that snapshot — or ever, in the Cold case — is
+        // invisible to the sidecar `read_meta_file` reads back below.
+        // A second snapshot taken here, once `from` can no longer be
+        // found by name, cannot miss anything a same-named lookup could
+        // still land: the same monotonic counters only grow between the
+        // two reads, so folding it in by field-wise max recovers the
+        // count without holding any lock longer than today.
+        let final_usage = entry.usage.snapshot();
         if let Err(error) = move_context_files(&self.0.data_dir, &from_stem, &to_stem) {
             return RenameOutcome::Stuck(RenameContextError::Io(error));
         }
         let MetaFile { meta, stats, usage } = read_meta_file(&self.0.data_dir, &to_stem);
+        let usage = ContextUsage {
+            reads: usage.reads.max(final_usage.reads),
+            empty_reads: usage.empty_reads.max(final_usage.empty_reads),
+            writes: usage.writes.max(final_usage.writes),
+            last_read_epoch: usage.last_read_epoch.max(final_usage.last_read_epoch),
+            last_write_epoch: usage.last_write_epoch.max(final_usage.last_write_epoch),
+        };
         let pinned = meta.pinned;
         let wal_bytes = fs::metadata(wal_path(&self.0.data_dir, &to_stem))
             .map(|metadata| metadata.len())
@@ -15388,6 +15410,52 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `note_read`/`note_write` bump their atomics through a bare
+    /// `lookup(name)` regardless of Hot or Cold — nothing about them
+    /// checks the slot. `drain_entry_for_rename` only ever hands its
+    /// usage snapshot to `save_files` inside the `Slot::Hot` branch, so
+    /// a Cold context's usage — whatever was counted since its last
+    /// flush, which for a Cold entry may be everything it has ever
+    /// counted — was silently dropped on every rename before the fix:
+    /// the new entry was seeded from whatever sidecar already happened
+    /// to sit on disk, untouched by the rename.
+    #[test]
+    fn rename_carries_usage_counted_while_the_context_was_cold() {
+        let dir = scratch_dir("rename-usage-cold");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state.note_read("sake", false);
+        state.note_write("sake");
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+
+        // Counted while Cold — no flush or eviction will ever see these
+        // before the rename runs.
+        state.note_read("sake", false);
+        state.note_read("sake", true);
+        state.note_write("sake");
+
+        state.rename_context("sake", "sake2").unwrap();
+
+        let usage = state
+            .directory_entry("sake2")
+            .expect("the new name must answer")
+            .usage;
+        assert_eq!(
+            (usage.reads, usage.empty_reads, usage.writes),
+            (3, 1, 2),
+            "usage counted while the context sat Cold must survive the \
+             rename, not just whatever was already on disk before it went \
+             Cold"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Regression for the critical data-loss bug in
