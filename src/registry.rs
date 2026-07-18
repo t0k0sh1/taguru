@@ -1098,6 +1098,11 @@ pub struct BootOptions {
     pub passage_vector_limit: usize,
     pub embed_parallel: usize,
     pub default_semantic_floor: Option<f32>,
+    /// Present when replication is on: the shipper's progress map,
+    /// consulted (never waited on) before the housekeeping log resets
+    /// so the shipped stream stays gapless — see
+    /// [`crate::ship::ShipProgress::allows_reset`].
+    pub(crate) ship_progress: Option<Arc<crate::ship::ShipProgress>>,
 }
 
 impl Default for BootOptions {
@@ -1110,6 +1115,7 @@ impl Default for BootOptions {
             passage_vector_limit: DEFAULT_PASSAGE_VECTOR_LIMIT,
             embed_parallel: 1,
             default_semantic_floor: None,
+            ship_progress: None,
         }
     }
 }
@@ -1157,7 +1163,15 @@ impl BootConfig {
     }
 
     /// [`AppState::boot_with`], parameterized by this configuration.
-    pub fn boot(&self, embedder: Option<Arc<dyn EmbeddingProvider>>) -> io::Result<AppState> {
+    /// `ship_progress` is present only under `serve` with replication
+    /// on — the offline commands (import, export, compact) pass `None`
+    /// and their writes reach the bucket through the next serve's
+    /// baseline sync.
+    pub fn boot(
+        &self,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
+        ship_progress: Option<Arc<crate::ship::ShipProgress>>,
+    ) -> io::Result<AppState> {
         AppState::boot_with(
             self.data_dir.clone(),
             self.cache_bytes,
@@ -1170,6 +1184,7 @@ impl BootConfig {
                 passage_vector_limit: self.passage_vector_limit,
                 embed_parallel: self.embed_parallel,
                 default_semantic_floor: self.semantic_floor,
+                ship_progress,
             },
         )
     }
@@ -1324,6 +1339,12 @@ struct StateInner {
     /// synchronous, so this is the only lever for provider-side
     /// concurrency.
     embed_parallel: usize,
+    /// Present when replication is on. Consulted (one atomic-ish map
+    /// read, never a wait) before the housekeeping WAL resets — the
+    /// graph lane's post-flush truncate and the passage lane's
+    /// post-compaction reset — so the shipper reads a log's tail
+    /// before it disappears. See [`crate::ship::ShipProgress`].
+    ship_progress: Option<Arc<crate::ship::ShipProgress>>,
     /// See [`PendingNames`] for why `create`, `delete`, and
     /// `rename_context` share one mutex here instead of one each.
     pending: Mutex<PendingNames>,
@@ -1485,6 +1506,7 @@ impl AppState {
             embed_passages: options.embed_passages,
             passage_vector_limit: options.passage_vector_limit,
             embed_parallel: options.embed_parallel,
+            ship_progress: options.ship_progress,
             pending: Mutex::new(PendingNames::default()),
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
@@ -3019,8 +3041,23 @@ impl AppState {
     /// it has published. Failure is harmless — the image's watermark
     /// already makes the logged records replay-inert — so it warns and
     /// moves on.
+    ///
+    /// With replication on, the reset additionally waits (by skipping,
+    /// never by blocking) until the shipper has read the records it is
+    /// about to discard: the retained tail is replay-inert either way,
+    /// so deferring costs nothing but bytes, while resetting under the
+    /// shipper's feet forces it through the series-restart path — a
+    /// whole-image upload instead of a few log records. Bounded by the
+    /// shipper's own deferral budget, so a dead bucket can never walk
+    /// this log into its cap.
     fn truncate_wal(&self, name: &str, inner: &mut EntryInner) {
-        match wal::reset(&wal_path(&self.0.data_dir, &file_stem(name))) {
+        let path = wal_path(&self.0.data_dir, &file_stem(name));
+        if let Some(progress) = &self.0.ship_progress
+            && !progress.allows_reset(&path, inner.wal_seq - 1, inner.wal_bytes)
+        {
+            return;
+        }
+        match wal::reset(&path) {
             Ok(()) => inner.wal_bytes = 0,
             Err(error) => {
                 tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");

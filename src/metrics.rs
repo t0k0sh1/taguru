@@ -8,7 +8,7 @@
 //! per-bin counts and defer the cumulative `le` semantics to render
 //! (scrape) time.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -194,6 +194,32 @@ pub struct Metrics {
     /// tick that completes without panicking — self-healing, same shape
     /// as `flush_degraded`.
     flusher_panicked: AtomicBool,
+    /// Replication ("WAL shipping") counters. Uploads and errors are
+    /// plain counters; `replication_fenced` LATCHES — unlike
+    /// `flush_degraded` there is no retry loop behind it, because a
+    /// fenced shipper stops for good by design, and the latch is the
+    /// dashboard-visible half of that fail-stop.
+    replication_uploads: AtomicU64,
+    replication_errors: AtomicU64,
+    replication_fenced: AtomicBool,
+    /// Unix seconds of the last cycle that shipped everything it found
+    /// (0 = none since boot) — `time() - this` on a dashboard bounds
+    /// the DR restore's data loss window, the number this feature
+    /// exists to shrink.
+    replication_last_success_epoch: AtomicU64,
+    /// (context, lane) → how far the local log is beyond the shipped
+    /// one, refreshed by the shipper each cycle. BTreeMap so the
+    /// rendered series come out sorted — render must stay
+    /// deterministic.
+    replication_lag: Mutex<BTreeMap<(String, &'static str), ReplicationLag>>,
+}
+
+/// One log lane's shipping lag as the dashboard sees it: records not
+/// yet in the bucket, and how long the oldest of them has waited.
+#[derive(Clone, Copy, Default)]
+struct ReplicationLag {
+    behind_records: u64,
+    age_secs: u64,
 }
 
 /// Why a request answered 500. The status code alone cannot separate
@@ -562,6 +588,60 @@ impl Metrics {
         .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_replication_upload(&self) {
+        self.replication_uploads.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_replication_error(&self) {
+        self.replication_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One cycle that shipped everything it found. Deliberately NOT
+    /// part of `/health`: a degraded bucket must page whoever watches
+    /// the dashboards, never convince an orchestrator to restart a
+    /// server whose local durability is fine.
+    pub fn record_replication_success(&self) {
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or(0);
+        self.replication_last_success_epoch
+            .store(epoch, Ordering::Relaxed);
+    }
+
+    /// Latches the fenced flag — the metric half of the shipper's
+    /// fail-stop (the audit line is the other half). Never cleared:
+    /// only a restart re-contests the bucket.
+    pub fn record_replication_fenced(&self) {
+        self.replication_fenced.store(true, Ordering::Relaxed);
+    }
+
+    /// Refreshes one lane's lag series, keyed (context, lane).
+    pub fn note_replication_lane(
+        &self,
+        context: &str,
+        lane: &'static str,
+        behind_records: u64,
+        age_secs: u64,
+    ) {
+        self.replication_lag.lock().unwrap().insert(
+            (context.to_string(), lane),
+            ReplicationLag {
+                behind_records,
+                age_secs,
+            },
+        );
+    }
+
+    /// Drops a deleted context's lane series so the scrape does not
+    /// carry ghost labels forever.
+    pub fn forget_replication_lane(&self, context: &str, lane: &'static str) {
+        self.replication_lag
+            .lock()
+            .unwrap()
+            .remove(&(context.to_string(), lane));
+    }
+
     /// The full Prometheus text-exposition body. Deterministic: the
     /// dynamic keys (routes, statuses) are sorted before emission, so
     /// identical state renders byte-identical output.
@@ -844,6 +924,63 @@ impl Metrics {
         );
         push_value(
             &mut out,
+            "taguru_replication_uploads_total",
+            "counter",
+            "Objects uploaded to the replication bucket (files, WAL segments, markers).",
+            self.replication_uploads.load(Ordering::Relaxed),
+        );
+        push_value(
+            &mut out,
+            "taguru_replication_errors_total",
+            "counter",
+            "Failed replication operations (uploads, deletes, fence claims); the shipper retries.",
+            self.replication_errors.load(Ordering::Relaxed),
+        );
+        push_value(
+            &mut out,
+            "taguru_replication_fenced",
+            "gauge",
+            "1 once a newer writer claimed the bucket and shipping fail-stopped (latched; restart to contest).",
+            u64::from(self.replication_fenced.load(Ordering::Relaxed)),
+        );
+        push_value(
+            &mut out,
+            "taguru_replication_last_success_timestamp_seconds",
+            "gauge",
+            "Unix time of the last cycle that shipped everything it found (0 = none since boot); time() minus this bounds the DR restore's loss window.",
+            self.replication_last_success_epoch.load(Ordering::Relaxed),
+        );
+        {
+            let lag = self.replication_lag.lock().unwrap();
+            push_header(
+                &mut out,
+                "taguru_replication_lag_records",
+                "gauge",
+                "Acknowledged log records not yet in the bucket, per context and lane.",
+            );
+            for ((context, lane), entry) in lag.iter() {
+                out.push_str(&format!(
+                    "taguru_replication_lag_records{{context=\"{}\",lane=\"{lane}\"}} {}\n",
+                    escape_label(context),
+                    entry.behind_records
+                ));
+            }
+            push_header(
+                &mut out,
+                "taguru_replication_lag_seconds",
+                "gauge",
+                "Age of the oldest unshipped record, per context and lane (0 = caught up).",
+            );
+            for ((context, lane), entry) in lag.iter() {
+                out.push_str(&format!(
+                    "taguru_replication_lag_seconds{{context=\"{}\",lane=\"{lane}\"}} {}\n",
+                    escape_label(context),
+                    entry.age_secs
+                ));
+            }
+        }
+        push_value(
+            &mut out,
             "taguru_inflight_requests",
             "gauge",
             "Requests currently being served (probe endpoints exempt).",
@@ -873,6 +1010,17 @@ impl Metrics {
 
 fn push_header(out: &mut String, name: &str, kind: &str, help: &str) {
     out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
+}
+
+/// Prometheus label-value escaping. Context names are user text — a
+/// name carrying a quote or a backslash must not be able to break the
+/// exposition line it rides in (label values may hold anything else,
+/// UTF-8 included).
+fn escape_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// One gauge or counter family with a single, label-free value.

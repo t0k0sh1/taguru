@@ -53,6 +53,18 @@ tower-http = { version = "0.7.0", default-features = false, features = ["catch-p
 # global name filter.
 mutants = "0.0.4"
 
+# Continuous replication (issue #127): one API over S3 / GCS / Azure
+# Blob (and local paths for tests), each cloud's default credential
+# chain included, plus the conditional writes epoch fencing needs.
+# The `fs` feature backs the file:// scheme used by tests and
+# air-gapped verification. Cost, measured and accepted up front in the
+# issue: the scratch binary grows (TLS + HTTP client + a second crypto
+# provider, aws-lc-rs beside ureq's ring) and deny.toml's audit
+# surface widens.
+object_store = { version = "0.14.1", default-features = false, features = ["aws", "gcp", "azure", "fs"] }
+# object_store's async surface (list streams) consumed by the shipper.
+futures-util = { version = "0.3", default-features = false }
+
 [dev-dependencies]
 # Property-based tests for the hand-rolled binary formats (context
 # images, WAL records, the BM25/embedding sidecars, passage

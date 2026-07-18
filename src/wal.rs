@@ -810,6 +810,90 @@ pub fn reset(path: &Path) -> io::Result<()> {
     }
 }
 
+/// One complete log line as the replication shipper reads it: the
+/// record's `seq` plus its raw bytes, WITHOUT deserializing the op —
+/// the shipper tails both the graph log and the passage log through
+/// one code path, and the two speak different op vocabularies it has
+/// no business knowing. What it must still guarantee is that a
+/// shipped line is a line replay would accept, so
+/// [`shippable_records`] applies the same per-record integrity checks
+/// replay does, minus the op-shaped ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ShippableRecord<'a> {
+    pub(crate) seq: u64,
+    /// The exact on-disk bytes, trailing `\n` excluded.
+    pub(crate) line: &'a [u8],
+}
+
+/// Scans raw log bytes into the complete, integrity-checked records a
+/// replication shipper may copy off the machine, in file order:
+///
+/// - A non-empty final segment missing its `\n` is a crash (or a
+///   racing append) mid-write. Replay classifies it against the op
+///   vocabulary; the shipper cannot, so EITHER shape is simply not
+///   shippable yet — skipped, never an error. A `Recovered` tail ships
+///   one heal (or one more append) later; nothing is lost by waiting.
+/// - Every checksummed line is verified against its canonical bytes
+///   ([`canonical_bytes_of_line`]), exactly as replay verifies it — a
+///   mismatch is real corruption and errors, because copying rot into
+///   the backup would spread it to every future restore.
+/// - A line without a `crc` field parses for `seq` alone. The
+///   op-vocabulary checks replay adds on top (unknown-op refusal,
+///   [`line_has_a_field_the_op_cannot_explain`]) need the op type and
+///   run when a restored directory is actually loaded — shipping is a
+///   byte transport, not the trust boundary.
+pub(crate) fn shippable_records(bytes: &[u8]) -> io::Result<Vec<ShippableRecord<'_>>> {
+    #[derive(Deserialize)]
+    struct SeqOnly {
+        seq: u64,
+        crc: Option<u32>,
+    }
+    let mut segments: Vec<&[u8]> = bytes.split(|&byte| byte == b'\n').collect();
+    // A complete file ends in '\n', making the final segment empty; a
+    // non-empty one is a write still in flight (see the doc comment).
+    segments.pop();
+    let mut records = Vec::new();
+    for (index, line) in segments.iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let parsed: SeqOnly = serde_json::from_slice(line).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("corrupt WAL record at line {}: {error}", index + 1),
+            )
+        })?;
+        if let Some(stored) = parsed.crc {
+            let canonical = canonical_bytes_of_line(line).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "corrupt WAL record at line {}: parsed a crc field but could \
+                         not find it in the raw line",
+                        index + 1
+                    ),
+                )
+            })?;
+            let computed = crate::crc32c::crc32c(&canonical);
+            if computed != stored {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "corrupt WAL record at line {}: checksum mismatch (stored \
+                         {stored:#010x}, computed {computed:#010x})",
+                        index + 1
+                    ),
+                ));
+            }
+        }
+        records.push(ShippableRecord {
+            seq: parsed.seq,
+            line,
+        });
+    }
+    Ok(records)
+}
+
 /// Rewinds the log to exactly `len` bytes — same in-place, no-rename
 /// shape as `reset`, but to an arbitrary prior length rather than
 /// zero. The caller for this is a batch write whose live apply stopped
@@ -883,6 +967,43 @@ mod tests {
         let (none, top) = replay::<WalOp>(&path, 9).unwrap();
         assert!(none.is_empty());
         assert_eq!(top, 9);
+    }
+
+    #[test]
+    fn shippable_records_take_complete_verified_lines_and_skip_a_torn_tail() {
+        let path = scratch_wal("shippable");
+        append_batch(&path, 1, &[associate("a"), associate("b")]).unwrap();
+
+        let bytes = fs::read(&path).unwrap();
+        let records = shippable_records(&bytes).unwrap();
+        assert_eq!(
+            records.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        // The raw line bytes round-trip: joining them with newlines
+        // reproduces the file — the property the shipper's
+        // byte-prefix cursor stands on.
+        let mut rejoined: Vec<u8> = Vec::new();
+        for record in &records {
+            rejoined.extend_from_slice(record.line);
+            rejoined.push(b'\n');
+        }
+        assert_eq!(rejoined, bytes);
+
+        // A trailing fragment missing its newline is mid-write from
+        // the shipper's seat — not shippable yet, never an error.
+        let mut torn = bytes.clone();
+        torn.extend_from_slice(b"{\"seq\":3,\"op\":\"assoc");
+        let records = shippable_records(&torn).unwrap();
+        assert_eq!(records.len(), 2);
+
+        // Interior corruption that keeps its checksum field fails the
+        // verification, exactly as replay would — rot must not ship.
+        let mut rotted = String::from_utf8(bytes).unwrap();
+        rotted = rotted.replace("好き", "嫌い");
+        let error = shippable_records(rotted.as_bytes())
+            .expect_err("a flipped byte with an intact crc field must refuse");
+        assert!(error.to_string().contains("checksum mismatch"), "{error}");
     }
 
     #[test]

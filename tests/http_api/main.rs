@@ -23,6 +23,7 @@ mod metrics;
 mod observability;
 mod offline_import;
 mod passages;
+mod replication;
 mod resolve_match;
 mod retrieval_core;
 mod search_log;
