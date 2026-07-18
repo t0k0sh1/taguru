@@ -125,10 +125,16 @@ jobs:
         run: git diff "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" > pr.diff
       - name: Test mutants in changed code
         run: cargo mutants --workspace --in-diff pr.diff --jobs 2
+      # A diff with no Rust source changes (deps-only bumps, workflow
+      # tweaks, etc.) makes cargo-mutants exit early without writing
+      # mutants.out at all. That's a legitimate outcome, not a broken
+      # run — cargo-mutants itself would have failed the step above if
+      # something had gone wrong — so a missing directory here only
+      # warrants a warning, not failing the whole job.
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants-in-diff
           path: mutants.out
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
