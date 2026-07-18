@@ -10,6 +10,7 @@ import {
   renderBatch,
   splitParagraphs,
   labelVocabulary,
+  type Extraction,
   type ModelAlias,
   type ModelAssociation,
   type ModelOutput,
@@ -310,5 +311,27 @@ describe("batch rendering", () => {
     const lines = body.trim().split("\n").map((line) => JSON.parse(line));
     expect(lines).toHaveLength(2);
     expect(lines[1]).not.toHaveProperty("paragraph");
+  });
+
+  it("orders aliases by alias then canonical, not by their comma-joined string form", () => {
+    // "a,b" -> "c" and "a" -> "b,c" both join to the identical string "a,b,c",
+    // so a bare `.sort()` (which stringifies each tuple) would leave them in
+    // insertion order instead of ordering by alias.
+    const extraction: Extraction = {
+      associations: [],
+      concepts: new Map([
+        ["a,b", "c"],
+        ["a", "b,c"],
+      ]),
+      labels: new Map(),
+      questions: [],
+      duplicates: 0,
+      dropped: 0,
+    };
+    const body = renderBatch("ctx", "src", null, extraction, null);
+    const lines = body.trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toEqual({ alias: "a", canonical: "b,c", kind: "concept" });
+    expect(lines[2]).toEqual({ alias: "a,b", canonical: "c", kind: "concept" });
   });
 });

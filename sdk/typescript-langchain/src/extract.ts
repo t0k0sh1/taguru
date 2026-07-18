@@ -544,6 +544,17 @@ export function merge(
 // -- batch rendering (mirrors extract.rs render_batch) ---------------------------------
 
 /**
+ * Lexicographic order on [alias, canonical] tuples — the default `.sort()`
+ * would coerce each tuple to a comma-joined string and compare THAT, silently
+ * misordering whenever a comma appears in either field.
+ */
+function byAliasThenCanonical(a: [string, string], b: [string, string]): number {
+  if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1;
+  if (a[1] !== b[1]) return a[1] < b[1] ? -1 : 1;
+  return 0;
+}
+
+/**
  * Header, passage (the document itself), questions, facts, then aliases —
  * one JSON object per line, the exact stream `POST /import` applies.
  */
@@ -579,10 +590,10 @@ export function renderBatch(
     }
     lines.push(JSON.stringify(entry));
   }
-  for (const [alias, canonical] of [...extraction.concepts.entries()].sort()) {
+  for (const [alias, canonical] of [...extraction.concepts.entries()].sort(byAliasThenCanonical)) {
     lines.push(JSON.stringify({ alias, canonical, kind: "concept" }));
   }
-  for (const [alias, canonical] of [...extraction.labels.entries()].sort()) {
+  for (const [alias, canonical] of [...extraction.labels.entries()].sort(byAliasThenCanonical)) {
     lines.push(JSON.stringify({ alias, canonical, kind: "label" }));
   }
   return lines.join("\n") + "\n";
