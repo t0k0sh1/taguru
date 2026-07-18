@@ -48,13 +48,21 @@ jobs:
           path: bin
       - run: chmod +x bin/taguru
       - name: Install packages
+        # setuptools rides along: the runner's tool-cache copy lags
+        # behind known advisories, and the environment audit below
+        # rightly refuses to look away.
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools
           pip install -e "sdk/python[dev]" -e "sdk/python-langchain[dev]"
-      - name: Audit dependencies (core)
-        run: pip-audit sdk/python
-      - name: Audit dependencies (langchain)
-        run: pip-audit sdk/python-langchain
+      # Audit the environment the install step just resolved, the way the
+      # typescript job audits its installed workspace. Handing pip-audit a
+      # project directory re-resolves it from PyPI instead, which fails at
+      # release time: the langchain package then requires a core version
+      # the tag has not published yet. --skip-editable exempts only the
+      # two local packages themselves; their dependency trees are still
+      # audited.
+      - name: Audit dependencies
+        run: pip-audit --skip-editable
       - name: Lint (core)
         run: |
           ruff check sdk/python/src sdk/python/scripts sdk/python/tests
