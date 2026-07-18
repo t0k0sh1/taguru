@@ -8,7 +8,7 @@
 # credential), and set TAGURU_RATE_LIMIT_PER_MIN when you do.
 services:
   taguru:
-    image: ghcr.io/t0k0sh1/taguru:0.2.0 # pin; `latest` moves
+    image: ghcr.io/t0k0sh1/taguru:0.3.0 # pin; `latest` moves
     ports:
       - "127.0.0.1:8248:8248"
     environment:
