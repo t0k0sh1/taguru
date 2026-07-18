@@ -980,7 +980,22 @@ impl Hydrator {
                     }
                     return Ok(false);
                 }
-                if !local.is_empty() {
+                if local.len() < shipped {
+                    // The replica's steady tailing beat, not an
+                    // anomaly: the shipped stream grew past the local
+                    // copy (or, rarely, the local bytes diverged
+                    // within it — indistinguishable without the
+                    // download, identical remedy). Nothing beyond the
+                    // shipped extent exists locally, so nothing is
+                    // discarded; the refetch is bounded by the lane's
+                    // size, which the writer's flush cadence resets.
+                    tracing::debug!(
+                        lane = %name,
+                        local = local.len(),
+                        shipped,
+                        "shipped stream is ahead of the local log; fetching the lane",
+                    );
+                } else if !local.is_empty() {
                     tracing::warn!(
                         lane = %name,
                         "local log diverged from the bucket lineage; refetching — any \
