@@ -20,6 +20,6 @@ from __future__ import annotations
 from .ingest import IngestOutcome, TaguruIngester
 from .retrievers import TaguruRetriever
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = ["TaguruRetriever", "TaguruIngester", "IngestOutcome", "__version__"]
