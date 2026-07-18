@@ -1176,9 +1176,14 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
     // already brackets this call along with every step that follows —
     // clearing it here too would reopen the batch to the exact gap it
     // exists to close.
-    let (retracted, passage_dropped, passage_removal_errored) = state
+    let (retracted, passage_removed, passage_removal_errored) = state
         .retract_source_unmarked(&batch.context, &batch.source)
         .map_err(ApplyRefusal::Access)?;
+    // `passage_removed` alone is unconditional — true whenever a prior
+    // passage existed and was removed, with no notion of a forthcoming
+    // replacement. `Applied::passage_dropped` promises the narrower
+    // "and the batch carried no replacement," same as `preview_batch`.
+    let passage_dropped = passage_removed && batch.passage.is_none();
 
     // A genuine passage-store failure here only self-heals when this
     // batch carries a replacement passage: `store_passages` below then
@@ -2132,6 +2137,48 @@ mod tests {
             saw_the_refusal,
             "the sweep never reached the passage-retract fault point"
         );
+    }
+
+    /// `Applied::passage_dropped` is documented as "retracted AND no
+    /// replacement carried" — `preview_batch` implements exactly that
+    /// AND, so a routine re-import that supplies a replacement passage
+    /// must report `passage_dropped: false` from both entrances alike.
+    #[test]
+    fn apply_and_preview_agree_that_a_replaced_passage_is_not_dropped() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-ingest-passage-replace-parity-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        let seeded = parse(
+            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \"create\": {}}\n\
+             {\"passage\": \"杜氏は高瀬。\"}\n",
+        )
+        .unwrap();
+        apply_batch(&state, &seeded).unwrap();
+
+        let reimport = parse(
+            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
+             {\"passage\": \"杜氏は高瀬二代目。\"}\n",
+        )
+        .unwrap();
+
+        let previewed = preview_batch(&state, &reimport).unwrap();
+        assert!(
+            !previewed.passage_dropped,
+            "preview: a replacement passage was carried, so nothing was dropped"
+        );
+
+        let applied = apply_batch(&state, &reimport).unwrap();
+        assert!(
+            !applied.passage_dropped,
+            "apply: a replacement passage was carried, so nothing was dropped, \
+             matching preview_batch's own report for the identical batch"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A batch whose associations land before its alias step trips a
