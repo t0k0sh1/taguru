@@ -665,6 +665,31 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
             "the refusal must name the writer: {answer}"
         );
     }
+    // The OAuth grant surface is merged onto the router AFTER
+    // routes(), so it exercises the OUTER copy of the gate — minting
+    // credentials is a write, and it refuses like one. OAuth needs an
+    // API key to boot, so a dedicated replica carries both (its
+    // /oauth/register is bearer-exempt by design: the refusal below
+    // is the replica gate's, not auth's).
+    let oauth_replica = Server::start_with_env(
+        "repl-reader-oauth",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+            ("TAGURU_REPLICA", "1"),
+            ("TAGURU_API_TOKENS", "ops:sesame"),
+            ("TAGURU_PUBLIC_URL", "http://replica.internal:8248"),
+        ],
+    );
+    let (status, answer) = oauth_replica.call(
+        "POST",
+        "/oauth/register",
+        Some(json!({"client_name": "probe", "redirect_uris": ["http://127.0.0.1/cb"]})),
+    );
+    assert_eq!(status, 403, "{answer}");
+    assert_eq!(answer["code"], "read_only_replica", "{answer}");
+    drop(oauth_replica);
+
     let read_tool = replica.call_tool(1, "recall", json!({"context": "sake", "cue": "青嶺酒造"}));
     assert_ne!(read_tool["isError"], json!(true), "{read_tool}");
     let write_tool = replica.call_tool(

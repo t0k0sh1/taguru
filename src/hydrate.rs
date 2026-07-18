@@ -287,7 +287,19 @@ pub(crate) async fn prepare_replica(
     let fence = match ship::newest_fence(store, root).await {
         Ok(fence) => fence,
         Err(error) => {
-            if !empty && record.is_some() {
+            // Degraded boot serves only a VERIFIED cache: a directory
+            // whose record carries `hydrated_from` completed a shared
+            // hydration against that generation once (the second half
+            // of the two-phase record write below). A directory that
+            // never got that far — empty, or mid-first-conversion when
+            // it crashed — has nothing this replica can honestly
+            // serve, and a demoted writer's un-shipped tail must never
+            // slip out through that gap.
+            if !empty
+                && record
+                    .as_ref()
+                    .is_some_and(|record| record.hydrated_from.is_some())
+            {
                 // A cache with local files serves its last watermark
                 // while the tailer keeps knocking — read availability
                 // is the whole point of a replica.
@@ -300,7 +312,12 @@ pub(crate) async fn prepare_replica(
             }
             return Err(io::Error::other(format!(
                 "cannot reach the replication bucket, and this replica has nothing \
-                 to serve yet (its directory is empty): {error}"
+                 to serve yet ({}): {error}",
+                if empty {
+                    "its directory is empty"
+                } else {
+                    "its hydration never completed, so it is not yet a verified cache"
+                }
             )));
         }
     };
@@ -351,17 +368,28 @@ pub(crate) async fn prepare_replica(
     };
 
     // From here the directory IS a cache of the lineage — and never a
-    // writer's truth again until a writer-mode boot claims over it: the
-    // record drops any stale claim (the newest-writer refusal above is
-    // why none can be current) and names what we hydrate from, so a
-    // crash mid-hydration resumes as cache mode.
+    // writer's truth again until a writer-mode boot claims over it.
+    // The record is written in TWO phases, deliberately inverted from
+    // the writer path's write-first order (there, an early record
+    // makes a crashed half-hydration re-verify instead of booting as
+    // truth; here, degraded boot TRUSTS the record, so it must not
+    // overpromise): phase one drops any stale claim (the newest-writer
+    // refusal above is why none can be current) and marks the
+    // directory as this URL's replica workspace — keeping whatever
+    // generation an EARLIER completed hydration verified — and only
+    // after the shared hydration lands does phase two advance
+    // `hydrated_from` to this generation. A crash in between leaves a
+    // record that promises no more than what was actually verified:
+    // a first conversion that never finished stays un-servable while
+    // the bucket is unreachable, and a demoted writer's un-shipped
+    // tail cannot leak through a half-converted directory.
     std::fs::create_dir_all(data_dir)?;
     ship::write_replication_record(
         data_dir,
         &ship::ReplicationRecord {
             url: url.to_string(),
             claimed_generation: None,
-            hydrated_from: Some(generation),
+            hydrated_from: record.as_ref().and_then(|record| record.hydrated_from),
         },
     )?;
 
@@ -374,6 +402,14 @@ pub(crate) async fn prepare_replica(
         LanePolicy::ShippedExact,
     ));
     let report = hydrator.hydrate_shared().await?;
+    ship::write_replication_record(
+        data_dir,
+        &ship::ReplicationRecord {
+            url: url.to_string(),
+            claimed_generation: None,
+            hydrated_from: Some(generation),
+        },
+    )?;
     tracing::info!(
         generation,
         contexts = hydrator.context_stems().len(),
@@ -1477,8 +1513,73 @@ mod tests {
             .expect_err("an empty replica with no bucket has nothing to serve");
         assert!(error.to_string().contains("nothing to serve"), "{error}");
 
+        // An UNVERIFIED conversion (a record without `hydrated_from` —
+        // phase one of the two-phase write) is not a cache yet: with
+        // the bucket unreachable there is nothing honest to serve.
+        let half = scratch("replica-degraded-half");
+        std::fs::write(half.join("ctx_a.ctx"), b"a demoted writer's bytes").unwrap();
+        ship::write_replication_record(
+            &half,
+            &ship::ReplicationRecord {
+                url: url_of("gone"),
+                claimed_generation: None,
+                hydrated_from: None,
+            },
+        )
+        .unwrap();
+        let error = prepare_replica(&unreachable, &StorePath::default(), &url_of("gone"), &half)
+            .await
+            .expect_err("an unverified conversion must not serve degraded");
+        assert!(
+            error.to_string().contains("not yet a verified cache"),
+            "{error}"
+        );
+
         let _ = std::fs::remove_file(&gone);
-        for dir in [empty_bucket, target, cache, empty] {
+        for dir in [empty_bucket, target, cache, empty, half] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_verified_watermark_advances_only_after_hydration_lands() {
+        let (bucket, writer) = shipped_bucket("two-phase", true).await;
+        let store = local_store(&bucket);
+        let url = url_of("two-phase");
+        let target = scratch("two-phase-target");
+
+        // Break the shared hydration: the manifest names a meta whose
+        // object is gone (set aside, as a mid-upload crash or an
+        // eventually-consistent read would present it).
+        let meta_key = bucket
+            .join("gen-00000000000000000001")
+            .join("files")
+            .join("ctx_a.meta.json");
+        let aside = bucket.join("meta-aside");
+        std::fs::rename(&meta_key, &aside).unwrap();
+
+        let error = prepare_replica(&store, &StorePath::default(), &url, &target)
+            .await
+            .expect_err("a shared hydration that cannot land refuses the boot");
+        assert!(error.to_string().contains("ctx_a.meta.json"), "{error}");
+        let record = ship::read_replication_record(&target)
+            .expect("phase one marked the directory as this URL's replica workspace");
+        assert_eq!(
+            record.hydrated_from, None,
+            "the verified watermark must not advance past a failed hydration"
+        );
+
+        // The object returns; the same boot completes and phase two
+        // records the verified generation.
+        std::fs::rename(&aside, &meta_key).unwrap();
+        let hydrator = prepare_replica(&store, &StorePath::default(), &url, &target)
+            .await
+            .expect("the retry hydrates");
+        assert_eq!(hydrator.generation(), Some(1));
+        let record = ship::read_replication_record(&target).unwrap();
+        assert_eq!(record.hydrated_from, Some(1));
+
+        for dir in [bucket, writer, target] {
             let _ = std::fs::remove_dir_all(dir);
         }
     }

@@ -493,6 +493,18 @@ async fn serve(serve_args: cli::ServeArgs) {
         })),
         None => app,
     };
+    // The replica gate AGAIN, outside the merges: a `.layer()` wraps
+    // only the routes already on the router it is called on, so the
+    // copy inside `routes()` (which the /mcp dispatch clone needs)
+    // never reaches the OAuth router merged above — whose grant and
+    // token POSTs would otherwise mutate a replica's cache-owned
+    // credential store. Idempotent on the shared routes (both copies
+    // judge identically); the OAuth discovery GETs still pass, the
+    // mutating POSTs refuse like every other write.
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        api::replica_gate,
+    ));
     // `routes()` applies its own CatchPanicLayer (see the comment at
     // its end) before this function ever adds the /mcp route or merges
     // the OAuth router above, so — for the exact same reason the auth

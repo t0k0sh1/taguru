@@ -22,6 +22,20 @@
 //! watermark (and the poll-age metric says so) instead of failing
 //! reads.
 //!
+//! # What may write to the cache, and when
+//!
+//! Steady state, only the hydrator/tailer touch the data directory —
+//! every locally-derived persistence path (usage counters, BM25
+//! flushes, eviction's passage compaction) is suppressed under the
+//! replica role. BOOT is the one deliberate exception: `boot_with`'s
+//! scan may finish a shipped mid-rename and reconcile group records
+//! exactly as any boot does. Those one-shot writes cannot loop — the
+//! tailer's first diff detects any byte that diverged from the
+//! manifest and refetches it, converging the cache — and keeping the
+//! boot path identical to the writer's is what keeps a replica's view
+//! of a directory from ever meaning something different than a
+//! writer's would.
+//!
 //! # Promotion is manual, and a restart
 //!
 //! The series decision (#127) stands: no lease, no auto-failover. A
@@ -211,8 +225,16 @@ impl Tailer {
         {
             let holder =
                 ship::fence_holder(self.store.as_ref(), &self.root, fence.generation).await;
+            let resolved = holder.is_some();
             self.info.note_fence(fence.generation, holder);
-            self.fence_seen = Some(fence.generation);
+            // A transient GET failure must not silence the refusal's
+            // holder line for this generation forever: only a resolved
+            // body settles the lookup; an unresolved one retries next
+            // poll (one small GET — a fence body that genuinely never
+            // parses costs that per poll, and nothing else).
+            if resolved {
+                self.fence_seen = Some(fence.generation);
+            }
         }
         let generation =
             match ship::newest_complete_generation(self.store.as_ref(), &self.root).await {
@@ -248,30 +270,24 @@ impl Tailer {
             return Ok(());
         };
 
-        if self.hydrator.generation() != Some(generation) {
+        let switched = self.hydrator.generation() != Some(generation);
+        if switched {
             tracing::info!(
                 generation,
                 from = self.hydrator.generation(),
                 "the bucket lineage moved to a new generation; re-verifying the cache \
                  against it"
             );
-            // Durably restate what this directory is a cache of BEFORE
-            // touching files, so a crash mid-switch re-verifies against
-            // the new generation instead of trusting a half-moved cache.
-            ship::write_replication_record(
-                &self.data_dir,
-                &ship::ReplicationRecord {
-                    url: self.url.clone(),
-                    claimed_generation: None,
-                    hydrated_from: Some(generation),
-                },
-            )?;
         }
 
         let report = self
             .hydrator
             .retarget(generation, generation_root, manifest.clone());
         self.state.metrics().note_replica_generation(generation);
+        if switched {
+            // Applied seqs are per-lineage: see `reset_replica_lanes`.
+            self.state.metrics().reset_replica_lanes();
+        }
         for stem in &report.vanished {
             let Some(name) = crate::registry::name_from_stem(stem) else {
                 continue;
@@ -333,6 +349,22 @@ impl Tailer {
                 "{} context families could not be tailed; retrying next poll",
                 failed.len()
             )));
+        }
+        if switched {
+            // The record's `hydrated_from` is a VERIFIED watermark —
+            // degraded boots trust it — so it advances only after the
+            // whole diff landed. A crash mid-switch leaves the record
+            // naming the last fully-applied generation: an honest
+            // claim for an unreachable-bucket boot, and a reachable
+            // one re-verifies against the newest lineage regardless.
+            ship::write_replication_record(
+                &self.data_dir,
+                &ship::ReplicationRecord {
+                    url: self.url.clone(),
+                    claimed_generation: None,
+                    hydrated_from: Some(generation),
+                },
+            )?;
         }
         self.manifest_stamp = Some((generation, stamp));
         Ok(())

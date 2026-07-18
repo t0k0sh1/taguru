@@ -760,6 +760,19 @@ impl Metrics {
         lag.remove(&(context.to_string(), "passages"));
     }
 
+    /// Clears every replica lag row — the tailer's move on a
+    /// generation switch. Applied seqs are meaningful only within one
+    /// lineage: a successor that started from an older watermark (a
+    /// promotion that lost the deposed writer's tail) ships LOWER
+    /// seqs, and a predecessor's applied value surviving beside them
+    /// would read as caught-up on a lane that has not applied the new
+    /// lineage at all. The rows rebuild from the switch's own apply
+    /// results, so a family that fails to land shows its gap from
+    /// zero instead of a stale success.
+    pub fn reset_replica_lanes(&self) {
+        self.replica_lag.lock().unwrap().clear();
+    }
+
     /// The full Prometheus text-exposition body. Deterministic: the
     /// dynamic keys (routes, statuses) are sorted before emission, so
     /// identical state renders byte-identical output.
@@ -1578,6 +1591,19 @@ mod tests {
         assert!(
             !rendered.contains("context=\"sake\""),
             "ghost labels must not linger: {rendered}"
+        );
+
+        // A generation switch clears the whole family: applied seqs
+        // are per-lineage, and a successor that started from an older
+        // watermark ships LOWER seqs — a surviving predecessor value
+        // would fake a caught-up lane.
+        metrics.note_replica_lane("sake", "graph", 9, 9);
+        metrics.reset_replica_lanes();
+        metrics.note_replica_shipped("sake", "graph", 4);
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            rendered.contains("taguru_replica_applied_seq{context=\"sake\",lane=\"graph\"} 0"),
+            "the successor's gap must show from zero, not the predecessor's applied: {rendered}"
         );
     }
 
