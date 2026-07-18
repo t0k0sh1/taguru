@@ -403,7 +403,15 @@ impl Hydrator {
                     runtime.block_on(self.hydrate_family(stem))
                 })
                 .join()
-                .expect("the hydration worker must not panic")
+                // A worker panic must land in the ordinary error arm
+                // below — re-panicking here would strand the stem
+                // InFlight forever, deadlocking every thread parked on
+                // `settled` (a veto, a coalescing touch, the fill).
+                .unwrap_or_else(|_| {
+                    Err(io::Error::other(
+                        "the hydration worker panicked; the family will be retried",
+                    ))
+                })
         });
 
         let mut states = self.states.lock().unwrap();

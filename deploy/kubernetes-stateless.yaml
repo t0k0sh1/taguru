@@ -97,7 +97,10 @@ spec:
             allowPrivilegeEscalation: false
       securityContext:
         # The scratch image runs as 65532; the volume must be writable
-        # by that uid.
+        # by that uid — and the platform, not the image metadata, is
+        # what enforces "never root".
+        runAsNonRoot: true
+        runAsUser: 65532
         fsGroup: 65532
       volumes:
         - name: data
