@@ -289,26 +289,34 @@ fn pick(arguments: &Value, keys: &[&str]) -> Value {
 /// Builds a `?a=1&b=2` query string from the listed keys, skipping
 /// absent/null ones — the GET-request counterpart of `pick`, for tools
 /// that carry no body. Numbers pass through their JSON text; strings
-/// are percent-encoded.
-fn query_string(arguments: &Value, keys: &[&str]) -> String {
-    let pairs: Vec<String> = keys
-        .iter()
-        .filter_map(|&key| {
-            let value = arguments.get(key).filter(|value| !value.is_null())?;
-            let text = match value {
-                Value::String(text) => segment(text),
-                Value::Number(number) => number.to_string(),
-                Value::Bool(boolean) => boolean.to_string(),
-                _ => return None,
-            };
-            Some(format!("{key}={text}"))
-        })
-        .collect();
-    if pairs.is_empty() {
+/// are percent-encoded. Like `need`/`optional_bool`, a present value of
+/// the wrong type is refused rather than silently dropped: erasing the
+/// key here would remove it before any request is built, so unlike
+/// `pick`'s untyped copy-through, nothing downstream ever gets a chance
+/// to reject the mistake.
+fn query_string(arguments: &Value, keys: &[&str]) -> Result<String, String> {
+    let mut pairs = Vec::new();
+    for &key in keys {
+        let Some(value) = arguments.get(key).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let text = match value {
+            Value::String(text) => segment(text),
+            Value::Number(number) => number.to_string(),
+            Value::Bool(boolean) => boolean.to_string(),
+            _ => {
+                return Err(format!(
+                    "argument '{key}' must be a string, number, or boolean"
+                ));
+            }
+        };
+        pairs.push(format!("{key}={text}"));
+    }
+    Ok(if pairs.is_empty() {
         String::new()
     } else {
         format!("?{}", pairs.join("&"))
-    }
+    })
 }
 
 /// Like `pick`, but a value under `alias` counts for `canonical` when
@@ -1021,7 +1029,7 @@ pub fn route_tool(
             }
             (
                 "POST",
-                format!("/import{}", query_string(arguments, &["dry_run"])),
+                format!("/import{}", query_string(arguments, &["dry_run"])?),
                 Some(Value::String(stream.to_string())),
             )
         }
@@ -1029,7 +1037,7 @@ pub fn route_tool(
             "GET",
             format!(
                 "/contexts{}",
-                query_string(arguments, &["limit", "after", "pinned"])
+                query_string(arguments, &["limit", "after", "pinned"])?
             ),
             None,
         ),
@@ -1057,7 +1065,7 @@ pub fn route_tool(
         }
         "list_groups" => (
             "GET",
-            format!("/groups{}", query_string(arguments, &["limit", "after"])),
+            format!("/groups{}", query_string(arguments, &["limit", "after"])?),
             None,
         ),
         "create_group" => (
@@ -1119,7 +1127,7 @@ pub fn route_tool(
             format!(
                 "{}/sources{}",
                 context_path("context")?,
-                query_string(arguments, &["limit", "after", "prefix"])
+                query_string(arguments, &["limit", "after", "prefix"])?
             ),
             None,
         ),
@@ -1223,7 +1231,7 @@ pub fn route_tool(
             format!(
                 "{}/labels{}",
                 context_path("context")?,
-                query_string(arguments, &["limit", "after", "prefix"])
+                query_string(arguments, &["limit", "after", "prefix"])?
             ),
             None,
         ),
@@ -1232,7 +1240,7 @@ pub fn route_tool(
             format!(
                 "{}/aliases{}",
                 context_path("context")?,
-                query_string(arguments, &["limit", "after", "prefix"])
+                query_string(arguments, &["limit", "after", "prefix"])?
             ),
             None,
         ),
@@ -1938,7 +1946,7 @@ mod tests {
     fn query_string_encodes_present_keys_and_skips_absent_or_null_ones() {
         let arguments = json!({"limit": 50, "after": null, "extra": "x"});
         assert_eq!(
-            query_string(&arguments, &["limit", "after", "absent"]),
+            query_string(&arguments, &["limit", "after", "absent"]).unwrap(),
             "?limit=50"
         );
     }
@@ -1947,14 +1955,27 @@ mod tests {
     fn query_string_percent_encodes_string_values() {
         let arguments = json!({"after": "日本 語"});
         assert_eq!(
-            query_string(&arguments, &["after"]),
+            query_string(&arguments, &["after"]).unwrap(),
             "?after=%E6%97%A5%E6%9C%AC%20%E8%AA%9E"
         );
     }
 
     #[test]
     fn query_string_is_empty_when_no_keys_are_present() {
-        assert_eq!(query_string(&json!({}), &["limit", "after"]), "");
+        assert_eq!(query_string(&json!({}), &["limit", "after"]).unwrap(), "");
+    }
+
+    /// A present-but-wrong-typed argument must be refused like `need`
+    /// and `optional_bool` refuse theirs, not silently dropped — the
+    /// value never reaches a request for anything downstream to
+    /// reject, so this is the only place the mistake can be caught.
+    #[test]
+    fn query_string_rejects_a_present_but_wrong_typed_value_instead_of_dropping_it() {
+        let arguments = json!({"limit": [5]});
+        assert_eq!(
+            query_string(&arguments, &["limit", "after"]).unwrap_err(),
+            "argument 'limit' must be a string, number, or boolean"
+        );
     }
 
     /// `create_context`/`update_context` advertise `pinned: boolean`,
@@ -1963,9 +1984,15 @@ mod tests {
     #[test]
     fn query_string_encodes_bool_values() {
         let arguments = json!({"pinned": true});
-        assert_eq!(query_string(&arguments, &["pinned"]), "?pinned=true");
+        assert_eq!(
+            query_string(&arguments, &["pinned"]).unwrap(),
+            "?pinned=true"
+        );
         let arguments = json!({"pinned": false});
-        assert_eq!(query_string(&arguments, &["pinned"]), "?pinned=false");
+        assert_eq!(
+            query_string(&arguments, &["pinned"]).unwrap(),
+            "?pinned=false"
+        );
     }
 
     /// list_contexts advertises limit/after and, when the caller
@@ -1995,6 +2022,18 @@ mod tests {
     fn list_contexts_without_arguments_has_no_query_string() {
         let (_, path, _) = route_tool("list_contexts", &json!({})).unwrap();
         assert_eq!(path, "/contexts");
+    }
+
+    /// A templating slip that sends `limit` as a one-element array must
+    /// surface as a routing error, not silently fall back to the
+    /// server's default page size with no sign `limit` was ignored.
+    #[test]
+    fn list_contexts_rejects_a_wrong_typed_limit_instead_of_dropping_it() {
+        let error = route_tool("list_contexts", &json!({"limit": [5]})).unwrap_err();
+        assert_eq!(
+            error,
+            "argument 'limit' must be a string, number, or boolean"
+        );
     }
 
     /// #62 item 6: `pinned` filters the directory (population, not a
