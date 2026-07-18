@@ -16,6 +16,13 @@ directory.
   boot (pinned contexts first, the rest lazily). Its header states
   what the variant trades away (a crashed pod's un-shipped tail) and
   why it bakes `TAGURU_TAKEOVER=1` in.
+- [`kubernetes-replicas.yaml`](kubernetes-replicas.yaml) — a read
+  pool beside either writer manifest: `replicas: N` of
+  `TAGURU_REPLICA=1` pods tailing the same bucket behind their own
+  `taguru-read` Service. Reads scale with the pool; writes answer
+  403 naming the writer (`TAGURU_WRITER_URL`); per-context lag —
+  the promotion-time RPO — is on `/metrics`. Its header carries the
+  manual-promotion runbook in short form.
 
 All pin the image version on purpose (`latest` moves), keep the
 credentials out of the manifest, and leave TLS to the layer in front —
@@ -28,8 +35,14 @@ Backups and restores are the same everywhere: set
 directory with the same URL and let it boot from the bucket; RPO ≈
 seconds of shipping lag), or `POST /flush` and snapshot the volume for
 a point-in-time copy (or `taguru export` for the portable stream);
-verify either with `taguru inspect`. Rehearse the restore —
-availability on this model is restore time. Starting a writer against
-a bucket IS the takeover act: while the previous writer looks alive
-(no clean stop, a heartbeat within the last 300s), the boot demands
-`--take-over` / `TAGURU_TAKEOVER=1` before it deposes them.
+verify either with `taguru inspect`. With a replica pool tailing the
+bucket, availability is promotion time: drain the replica's lag
+metrics to zero, start a writer against the bucket, flip the name —
+the runbook is in the architecture docs, and what the bucket never
+received (the dead writer's un-shipped tail) is the honestly-stated
+RPO. Without replicas, availability is restore time — rehearse
+whichever is the plan. Starting a writer against a bucket IS the
+takeover act: while the previous writer looks alive (no clean stop, a
+heartbeat within the last 300s), the boot demands `--take-over` /
+`TAGURU_TAKEOVER=1` before it deposes them. A replica never trips
+that guard — it deposes nobody.

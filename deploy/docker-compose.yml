@@ -34,5 +34,30 @@ services:
     # Raise this alongside TAGURU_EMBED_TIMEOUT_SECS if you widen that.
     stop_grace_period: 200s
 
+  # Read replicas (issue #129): with TAGURU_REPLICATE_URL set above,
+  # uncomment to serve reads from as many replicas as you like — each
+  # tails the bucket (staleness ≈ shipping lag + poll interval),
+  # refuses writes naming the writer, and shows its per-context lag on
+  # /metrics (the promotion-time RPO). Scale with
+  # `docker compose up -d --scale taguru-replica=3` after dropping the
+  # fixed host port for a proxy in front. Promotion is manual and
+  # documented in docs/architecture.html: drain the lag metric, then
+  # start a writer against the bucket with TAGURU_TAKEOVER=1.
+  #
+  # taguru-replica:
+  #   image: ghcr.io/t0k0sh1/taguru:0.3.0
+  #   ports:
+  #     - "127.0.0.1:8249:8248"
+  #   environment:
+  #     TAGURU_API_TOKENS: ${TAGURU_API_TOKENS:?set TAGURU_API_TOKENS=name:token}
+  #     TAGURU_REPLICA: "1"
+  #     TAGURU_REPLICATE_URL: s3://my-bucket/taguru
+  #     TAGURU_WRITER_URL: http://taguru:8248
+  #   volumes:
+  #     - taguru-replica-data:/data # a cache of the bucket, per replica
+  #   read_only: true
+  #   restart: unless-stopped
+
 volumes:
   taguru-data:
+  # taguru-replica-data:

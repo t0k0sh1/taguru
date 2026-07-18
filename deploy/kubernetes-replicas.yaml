@@ -1,0 +1,151 @@
+# Taguru read replicas (issue #129): a horizontally scalable READ pool
+# tailing the writer's replication bucket, behind its own Service. Add
+# it beside either writer manifest (kubernetes.yaml or
+# kubernetes-stateless.yaml) — the writer keeps its own name; retrieval
+# traffic moves to `taguru-read`.
+#
+#   kubectl -n taguru apply -f kubernetes-replicas.yaml
+#
+# What a replica is: `serve --replica` hydrates from
+# TAGURU_REPLICATE_URL exactly like a stateless writer boot, then keeps
+# tailing the bucket's manifest forever. It never claims a generation,
+# never ships, and refuses every mutating verb with 403
+# `read_only_replica` naming the writer (TAGURU_WRITER_URL below is
+# that name). Reads scale ~linearly with replicas because every
+# retrieval verb — resolve, describe, recall, query, activate, explore,
+# sources/search — is served from the replica's own hydrated copy.
+#
+# What a replica promises (state it to whoever consumes the pool):
+#   - Consistent per context at that context's applied watermark; two
+#     contexts may sit at different shipped cycles (cross-context skew).
+#   - Staleness ≤ the writer's shipping lag + TAGURU_REPLICATE_INTERVAL_MS.
+#     An unreachable bucket freezes the pool at its last watermark and
+#     keeps serving; `taguru_replica_last_poll_success_timestamp_seconds`
+#     on /metrics says so.
+#   - Per-context RPO on display: `taguru_replica_applied_seq` vs
+#     `taguru_replica_shipped_seq` (and `taguru_replica_behind_seconds`)
+#     — what an operator reads before promoting.
+#
+# The load-bearing choices:
+#   - replicas: N and RollingUpdate are FINE here — the single-writer
+#     model constrains the writer, not readers. Scale this number with
+#     read traffic.
+#   - emptyDir cache per pod: each replica hydrates its own copy from
+#     the bucket. NEVER point a replica at the writer's PVC — the
+#     directory lock would refuse the second process on a local disk
+#     and cannot be trusted to on a shared one, and a replica demotes
+#     whatever directory it is given to a cache.
+#   - Auth: give the pool the same TAGURU_API_TOKENS secret as the
+#     writer so one key works everywhere. OAuth (TAGURU_PUBLIC_URL)
+#     stays a writer concern: grants are minted at the writer's name,
+#     and a replica refuses the grant endpoints like any other write.
+#   - Probes: startupProbe sized like the stateless writer's (pinned
+#     bytes ÷ bucket bandwidth); /health stays 200 while the replica
+#     can serve reads — staleness is a dashboard concern (/metrics),
+#     not a routing one, so a bucket outage does not eject the whole
+#     pool from the Service at once.
+#
+# Manual promotion (the runbook, spelled out in docs/architecture.html):
+# a replica is read scale first, warm standby second. To promote after
+# losing the writer: (1) make sure the old writer is really stopped —
+# or accept that the fence will cut its shipping; (2) drain: watch
+# taguru_replica_behind_seconds reach 0 against a fresh manifest
+# timestamp; (3) start a writer against the same bucket with
+# TAGURU_TAKEOVER=1 (a crashed predecessor guards the claim for 300s)
+# — starting the writer IS the promotion; (4) the pool re-aims at the
+# new generation by itself, no restarts. What the bucket never
+# received — the dead writer's acknowledged-but-unshipped tail — is
+# lost: that is the async-replication RPO, and step (2) is where it
+# was on display.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taguru-replicas
+  labels: { app: taguru-replica }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: taguru-replica }
+  template:
+    metadata:
+      labels: { app: taguru-replica }
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: taguru
+          image: ghcr.io/t0k0sh1/taguru:0.3.0 # pin; `latest` moves
+          ports:
+            - containerPort: 8248
+              name: http
+          envFrom:
+            # Must carry TAGURU_REPLICATE_URL (the bucket to tail) and
+            # the same TAGURU_API_TOKENS the writer uses; the pod needs
+            # that cloud's identity (IRSA / Workload Identity) for the
+            # default credential chain.
+            - secretRef:
+                name: taguru-keys
+          env:
+            - name: TAGURU_DATA_DIR
+              value: /data
+            - name: TAGURU_REPLICA
+              value: "1"
+            # What the 403 write-refusal tells clients to call instead.
+            - name: TAGURU_WRITER_URL
+              value: http://taguru:8248
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+          startupProbe:
+            httpGet: { path: /live, port: http }
+            # Boot = shared-file hydration + pinned hydration from the
+            # bucket before the port opens; the rest tails in behind.
+            # 5s × 60 = five minutes — resize to pinned bytes ÷ bucket
+            # bandwidth.
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: { path: /live, port: http }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true # /data is the only write target
+            allowPrivilegeEscalation: false
+      securityContext:
+        # The scratch image runs as 65532; the volume must be writable
+        # by that uid — and the platform, not the image metadata, is
+        # what enforces "never root".
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      volumes:
+        - name: data
+          # Each replica's private cache of the bucket lineage. Size it
+          # like the writer's volume: the full data directory lands
+          # here as contexts hydrate.
+          emptyDir:
+            sizeLimit: 10Gi
+---
+# The read pool's name: point retrieval traffic here; writes keep
+# going to the writer's own Service (`taguru`), which is also what
+# TAGURU_WRITER_URL above tells any client that asks a replica to
+# write.
+apiVersion: v1
+kind: Service
+metadata:
+  name: taguru-read
+spec:
+  selector: { app: taguru-replica }
+  ports:
+    - name: http
+      port: 8248
+      targetPort: http
+# Expose beyond the cluster only behind TLS (Ingress/Gateway with a
+# certificate) — a bearer token is the whole credential.

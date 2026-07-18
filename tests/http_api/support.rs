@@ -46,6 +46,13 @@ impl Server {
         Self::spawn(tag, data_dir, &[])
     }
 
+    /// [`Server::start_on`] with extra environment — for reusing a
+    /// directory whose meaning depends on flags (a replica's cache
+    /// promoted to a writer, a takeover acknowledgment).
+    pub fn start_on_with_env(tag: &str, data_dir: PathBuf, extra_env: &[(&str, &str)]) -> Self {
+        Self::spawn(tag, data_dir, extra_env)
+    }
+
     fn spawn(tag: &str, data_dir: PathBuf, extra_env: &[(&str, &str)]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
         common::scrub_taguru_env(&mut command)

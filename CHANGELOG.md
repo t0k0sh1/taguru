@@ -8,6 +8,33 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Read replicas (#129): `serve --replica` / `TAGURU_REPLICA=1` serves
+  the replication bucket's lineage read-only and keeps tailing it —
+  issue #128's hydration running continuously. Every retrieval verb
+  (resolve, describe, recall, query, activate, explore,
+  sources/search, the listings and exports) serves from the replica's
+  own hydrated copy, so reads scale horizontally with the pool; every
+  mutating verb — raw HTTP and the MCP write tools alike — answers
+  `403 read_only_replica` naming the writer (`TAGURU_WRITER_URL`,
+  plus the bucket's fence holder), and neither SDK retries it. A
+  replica never claims a generation and never ships; deletions and
+  new contexts propagate; a new writer's generation is followed live,
+  no restart. Consistency, stated honestly: per context at that
+  context's applied watermark, cross-context skew possible, staleness
+  bounded by shipping lag + `TAGURU_REPLICATE_INTERVAL_MS`; a bucket
+  outage freezes the replica at its last watermark and it keeps
+  serving. `deploy/kubernetes-replicas.yaml` is the read-pool
+  manifest.
+- Replica lag on `/metrics` (#129): `taguru_replica_applied_seq` vs
+  `taguru_replica_shipped_seq` per context and lane,
+  `taguru_replica_behind_seconds`, the followed generation, and the
+  manifest/poll freshness timestamps — the promotion-time RPO on
+  display, which is what the manual promotion runbook (now in the
+  architecture docs, rehearsed end-to-end by an integration test)
+  reads before flipping a replica's directory into the next writer.
+  Availability with a replica pool is promotion time, not restore
+  time; what the bucket never received — the deposed writer's
+  un-shipped tail — remains the async-replication RPO.
 - Boot from the bucket (#128): with `TAGURU_REPLICATE_URL` set, a
   server started on an **empty** data directory materializes itself
   from the bucket's newest complete generation instead of starting

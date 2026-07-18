@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from taguru import RateLimitError, ServerError, TransportError
+from taguru import PermissionDeniedError, RateLimitError, ServerError, TransportError
 from taguru._retry import parse_retry_after
 
 from .conftest import err_response, ok_response, sync_client
@@ -120,6 +120,31 @@ def test_retries_zero_disables_retry() -> None:
     with pytest.raises(RateLimitError):
         client.context("sake").recall("cue")
     assert handler.calls == 1
+
+
+def test_a_replica_write_refusal_surfaces_first_try_naming_the_writer() -> None:
+    """A read replica answers every mutating verb 403 ``read_only_replica``
+    (server issue #129) — a deliberate refusal retrying cannot change. The
+    client must raise on the FIRST attempt (no silent retry loop toward a
+    server that will never say yes), with the server's writer-naming
+    message and machine-readable code intact for rerouting."""
+    handler = FlakyHandler(
+        99,
+        lambda: err_response(
+            403,
+            "this instance is a read replica: it serves every retrieval verb, "
+            "but writes go to the writer at http://writer.internal:8248",
+            code="read_only_replica",
+        ),
+    )
+    client = sync_client(handler)
+    with pytest.raises(PermissionDeniedError) as caught:
+        client.context("sake").add_associations(
+            [{"subject": "s", "label": "l", "object": "o", "weight": 1.0}]
+        )
+    assert handler.calls == 1
+    assert caught.value.code == "read_only_replica"
+    assert "http://writer.internal:8248" in str(caught.value)
 
 
 def test_retry_budget_exhausts_and_raises_last_error() -> None:

@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { RateLimitError, ServerError, TransportError } from "../../src/errors.js";
+import {
+  PermissionDeniedError,
+  RateLimitError,
+  ServerError,
+  TransportError,
+} from "../../src/errors.js";
 import { parseRetryAfter } from "../../src/retry.js";
 import { errBody, okBody, stubClient, type StubResult } from "./stub.js";
 
@@ -115,6 +120,30 @@ describe("retry policy", () => {
     const client = stubClient(handler, { retries: 2 });
     await expect(client.context("sake").recall("cue")).rejects.toBeInstanceOf(RateLimitError);
     expect(calls()).toBe(3); // initial + 2 retries
+  });
+
+  it("surfaces a replica's write refusal first try, writer named (no retry loop)", async () => {
+    // A read replica answers every mutating verb 403 `read_only_replica`
+    // (server issue #129) — a deliberate refusal retrying cannot change,
+    // so it must raise on the FIRST attempt with the writer's address and
+    // machine-readable code intact for rerouting.
+    const { handler, calls } = flaky(99, () =>
+      errBody(
+        403,
+        "this instance is a read replica: it serves every retrieval verb, " +
+          "but writes go to the writer at http://writer.internal:8248",
+        undefined,
+        "read_only_replica",
+      ),
+    );
+    const client = stubClient(handler);
+    const refusal = client.context("sake").addAssociations([OP]);
+    await expect(refusal).rejects.toBeInstanceOf(PermissionDeniedError);
+    await refusal.catch((error: PermissionDeniedError) => {
+      expect(error.code).toBe("read_only_replica");
+      expect(error.message).toContain("http://writer.internal:8248");
+    });
+    expect(calls()).toBe(1);
   });
 });
 

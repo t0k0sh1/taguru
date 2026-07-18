@@ -68,7 +68,7 @@
     </p>
     <div class="hero-meta">
       <span><b>Image:</b> ghcr.io/t0k0sh1/taguru (scratch, ~13 MB)</span>
-      <span><b>Manifests:</b> deploy/kubernetes.yaml · kubernetes-stateless.yaml</span>
+      <span><b>Manifests:</b> deploy/kubernetes.yaml · kubernetes-stateless.yaml · kubernetes-replicas.yaml</span>
     </div>
   </header>
 
@@ -81,8 +81,8 @@
     </p>
     <ul>
       <li><b>Deploys are stop-then-start.</b> The downtime is the boot: cold registration is cheap however many contexts exist, and pinned contexts preload in parallel — the port opens when they finish. Never let the platform run two pods against one volume, even during a rollout.</li>
-      <li><b>Availability is restore time, not failover.</b> There is no leader election or automatic promotion; the recovery unit is the data directory. Three rungs: continuous replication to object storage (<code>TAGURU_REPLICATE_URL</code>) restores via <code>taguru restore</code> with seconds of RPO — or skips the step entirely: a server started on an <b>empty</b> volume with that URL boots straight from the bucket (the <a href="#stateless">stateless variant</a> makes this the whole story). A storage-layer snapshot restores the volume byte-exactly (fastest, same-version), and a <code>taguru export</code> stream restores anywhere through <code>taguru import</code> / <code>POST /import</code> (portable across versions and machines). Rehearse whichever rung is the plan.</li>
-      <li><b>Scale horizontally by partitioning, not clustering.</b> A context is the unit of routing, so independent instances each owning a disjoint set of contexts scale reads and writes with no coordination protocol — point each client (or each MCP bridge) at the instance holding its contexts. What does <b>not</b> work is two instances sharing one data directory: on local disks the lock refuses it, and on NFS/EFS the lock may fail to.</li>
+      <li><b>Availability is promotion time with a replica pool; restore time without one.</b> There is still no leader election or automatic promotion — by design. Without replication, the recovery unit is the data directory: a storage-layer snapshot restores byte-exactly, an export stream restores anywhere. With <code>TAGURU_REPLICATE_URL</code> set, the bucket carries the lineage continuously (seconds of RPO), an empty volume boots straight from it (the <a href="#stateless">stateless variant</a>) — and a <a href="#read-pool">read replica</a> is the warm standby: losing the writer costs the <b>manual promotion walk</b> (drain the lag metric to zero, start a writer with stated intent, flip the name) plus the dead writer's un-shipped tail, which the replica's <code>/metrics</code> had on display the whole time. Rehearse whichever rung is the plan — the promotion drill is automated as an integration test server-side, but your fleet's version of it is yours to time.</li>
+      <li><b>Scale reads with replicas; scale writes by partitioning.</b> Read traffic — and LLM-memory traffic is read-dominant — fans out across a <a href="#read-pool">replica pool</a> tailing the same bucket, with no coordination protocol. Write throughput scales the way it always has: independent writer instances each owning a disjoint set of contexts (a context is the unit of routing; groups and cross-context search reach only their own instance's contexts). What does <b>not</b> work is two instances sharing one data directory: on local disks the lock refuses it, and on NFS/EFS the lock may fail to.</li>
       <li><b>A rollback is a restore.</b> Image formats migrate forward on load and never write the old version back out, so rolling the binary back past a format bump needs the data directory rolled back with it (snapshot) or re-imported from an export stream. Check the release notes for format bumps before downgrading.</li>
     </ul>
     <p class="note">
@@ -171,6 +171,43 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
       whose owner still looks alive demands <code>serve --take-over</code> /
       <code>TAGURU_TAKEOVER=1</code> — starting a writer against a bucket IS the promotion
       act.
+    </p>
+  </section>
+
+  <section id="read-pool">
+    <h2>The read pool: replicas tail the bucket</h2>
+    <p class="section-sub">
+      <a href="https://github.com/t0k0sh1/taguru/blob/main/deploy/kubernetes-replicas.yaml"><code>deploy/kubernetes-replicas.yaml</code></a>
+      adds a horizontally scaled read Deployment (<code>TAGURU_REPLICA=1</code>, emptyDir,
+      <code>replicas: N</code>, RollingUpdate allowed) behind its own <code>taguru-read</code>
+      Service, beside either writer manifest.
+    </p>
+    <p>
+      A replica is the stateless boot running forever: hydrate from the bucket, then keep
+      tailing its manifest — new writes land within the writer's shipping lag plus the poll
+      interval (<code>TAGURU_REPLICATE_INTERVAL_MS</code>, one knob for both roles). Every
+      retrieval verb serves from the replica's own copy, so reads scale with the pool; every
+      mutating verb — the raw HTTP routes and the MCP write tools alike — answers
+      <code>403 read_only_replica</code> naming the writer (<code>TAGURU_WRITER_URL</code>, the
+      writer Service's name), so a misdirected client fails crisply instead of retrying into a
+      loop. The topology stays boring on purpose: writes go to the writer's Service, reads to
+      <code>taguru-read</code>, discovery is DNS — no cluster protocol, no gossip.
+    </p>
+    <p>
+      What the pool promises, honestly: each context is <b>consistent at its own applied
+      watermark</b> (a shipped-cycle boundary — never a torn read), but two contexts can sit at
+      different cycles, and staleness is bounded by shipping lag + poll interval. A bucket
+      outage freezes replicas at their last watermark — they keep serving, <code>/health</code>
+      stays green (routing away a whole healthy pool over a bucket blip would be worse), and
+      the staleness shows on <code>/metrics</code>:
+      <code>taguru_replica_applied_seq</code> vs <code>taguru_replica_shipped_seq</code> per
+      context and lane, <code>taguru_replica_behind_seconds</code>, and the manifest/poll
+      timestamps. Those same gauges are the <b>promotion-time RPO on display</b> — the number
+      the <a href="architecture.html#replicas">manual promotion runbook</a> reads before a
+      replica's directory (or any empty one) is restarted as the next writer. Auth note: give
+      the pool the writer's <code>TAGURU_API_TOKENS</code> secret; OAuth delegation stays at
+      the writer (grants are minted there, and a replica refuses the grant endpoints like any
+      other write).
     </p>
   </section>
 

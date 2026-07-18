@@ -189,6 +189,8 @@ load-bearing ones:
 | `TAGURU_WAL` | on | fsync every acknowledged write before applying it — a crash loses nothing |
 | `TAGURU_REPLICATE_URL` | — | Continuous replication to object storage (`s3://` / `gs://` / `az://` / `file://`), epoch-fenced; restore with `taguru restore`, or boot an empty directory straight from the bucket. Unset = off |
 | `TAGURU_TAKEOVER` | off | `1` (or `serve --take-over`) acknowledges deposing the bucket's newest writer while it still looks alive — starting a writer against a bucket IS the promotion act |
+| `TAGURU_REPLICA` | off | `1` (or `serve --replica`) serves the bucket lineage read-only, tailing it continuously: reads scale across replicas, writes answer 403 `read_only_replica` naming the writer, per-context lag on `/metrics` |
+| `TAGURU_WRITER_URL` | — | Where a replica's write-refusal points clients (the writer's base URL / LB name); unset = the refusal names only the bucket's fence holder |
 | `TAGURU_CACHE_BYTES` | 512 MiB | Resident budget for unpinned contexts (LRU eviction) |
 | `TAGURU_EMBED_URL` / `_MODEL` / `_API_KEY` | — | Semantic entry tier (OpenAI-compatible `/embeddings`); unset keeps the entrance purely lexical |
 | `TAGURU_EMBED_AUTO` | off | Re-embed changes with each flush — recommended whenever agents drive the ingest |
@@ -223,12 +225,30 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   [CONTRIBUTING.md](CONTRIBUTING.md#platform-support).
 - **One writer per data directory.** The directory admits one taguru
   process at a time (serve or import) via an advisory lock — dependable
-  on local disks, *not* on NFS/EFS. Deploys are stop-then-start;
-  availability is restore time, not failover; scale horizontally by
-  giving independent instances disjoint sets of contexts. Note that
-  groups and cross-context search reach only the contexts of their own
-  instance — keep contexts that must be searched together on the same
-  one when sharding.
+  on local disks, *not* on NFS/EFS. Deploys are stop-then-start. Scale
+  reads with replicas (below); scale writes by giving independent
+  instances disjoint sets of contexts. Note that groups and
+  cross-context search reach only the contexts of their own instance —
+  keep contexts that must be searched together on the same one when
+  sharding.
+- **Read replicas; availability is promotion time.** `serve --replica`
+  (or `TAGURU_REPLICA=1`) against the same `TAGURU_REPLICATE_URL`
+  serves the bucket lineage read-only and keeps tailing it: every
+  retrieval verb works from the replica's own copy (reads scale
+  ~linearly with the pool), every write answers 403
+  `read_only_replica` naming the writer (`TAGURU_WRITER_URL`), and
+  each context is consistent at its applied watermark — staleness ≤
+  shipping lag + poll interval, cross-context skew possible, all of it
+  on `/metrics` (`taguru_replica_applied_seq` vs `_shipped_seq`,
+  `_behind_seconds`). A replica doubles as the warm standby: losing
+  the writer costs the **manual promotion** (drain the lag metric,
+  start a writer against the bucket with `--take-over` if the old one
+  crashed, flip the name — replicas re-aim at the new generation by
+  themselves) plus the dead writer's un-shipped tail, which those
+  metrics had on display. No leases, no auto-failover — by design; the
+  runbook lives in the
+  [architecture page](https://t0k0sh1.github.io/taguru/architecture.html#replicas)
+  and is rehearsed by an integration test.
 - **Health and metrics.** `GET /health` is readiness (503 while the
   write path is degraded — route away, don't restart), `GET /live` is
   liveness, `GET /metrics` is Prometheus text. Every request lands in

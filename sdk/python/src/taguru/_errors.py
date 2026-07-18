@@ -66,7 +66,11 @@ class AuthenticationError(TaguruError):
 
 
 class PermissionDeniedError(TaguruError):
-    """403 — the key's role or context scope does not cover this operation."""
+    """403 — the key's role or context scope does not cover this operation.
+
+    Also every write sent to a read replica: ``code`` is then
+    ``"read_only_replica"`` and the message names the writer to send
+    writes to. Deliberate refusals both — never retried."""
 
 
 class NotFoundError(TaguruError):

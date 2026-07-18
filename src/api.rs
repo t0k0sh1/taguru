@@ -114,6 +114,12 @@ pub(crate) enum ErrorCode {
     /// 503 while a `POST /maintenance/compact` sweep holds the server
     /// closed to ordinary traffic — an intentional pause, not a fault.
     Maintenance,
+    /// 403 from a read replica for any mutating verb: writes go to the
+    /// writer, which the message names as precisely as the replica can
+    /// (`TAGURU_WRITER_URL`, plus the bucket's fence holder). A 4xx on
+    /// purpose — a deliberate refusal that retrying cannot change, so
+    /// no SDK or client retry loop ever forms around it.
+    ReadOnlyReplica,
 }
 
 impl ErrorCode {
@@ -142,6 +148,7 @@ impl ErrorCode {
             Self::Unhealthy => "unhealthy",
             Self::StorageFull => "storage_full",
             Self::Maintenance => "maintenance",
+            Self::ReadOnlyReplica => "read_only_replica",
         }
     }
 
@@ -158,7 +165,7 @@ impl ErrorCode {
                 StatusCode::BAD_REQUEST
             }
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::Forbidden | Self::ReadOnlyReplica => StatusCode::FORBIDDEN,
             Self::NoContext
             | Self::NoSource
             | Self::NoParagraph
@@ -220,6 +227,49 @@ fn ok<T: Serialize>(result: T, started_at: Instant) -> Response {
 /// own rejection status.
 pub(crate) fn error(code: ErrorCode, message: impl Into<String>, started_at: Instant) -> Response {
     coded(code.status(), code, message, started_at)
+}
+
+/// Refuses every mutating verb on a read replica (issue #129), crisply
+/// and with the writer named — a no-op layer on a writer. Layered
+/// inside `routes()` on purpose: the `/mcp` in-process dispatch clones
+/// that router, so a write TOOL call is judged here exactly like the
+/// raw HTTP verb it dispatches into, while `/mcp` itself (Role::Read —
+/// the transport, not a mutation) passes and its read tools work
+/// unchanged.
+///
+/// What passes: GET/HEAD (this API keeps them side-effect-free — the
+/// probes, the listings, the exports, OAuth discovery), plus every
+/// route [`crate::auth::required_role`] classifies `Read` (the
+/// retrieval POSTs). Everything else — the ingest loop, the operator
+/// verbs, OAuth's grant endpoints, and any FUTURE unclassified POST —
+/// refuses, which is the same deny-by-default posture the role table
+/// itself keeps. Requests no route matched fall through to the
+/// ordinary 404/405 shapes: "unknown path" is a more useful answer
+/// than "read only".
+pub(crate) async fn replica_gate(
+    axum::extract::State(state): axum::extract::State<crate::registry::AppState>,
+    matched: Option<axum::extract::MatchedPath>,
+    request: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(replica) = state.replica() else {
+        return next.run(request).await;
+    };
+    let Some(matched) = matched else {
+        return next.run(request).await;
+    };
+    let method = request.method();
+    if method == Method::GET
+        || method == Method::HEAD
+        || crate::auth::required_role(method, matched.as_str()) == crate::auth::Role::Read
+    {
+        return next.run(request).await;
+    }
+    error(
+        ErrorCode::ReadOnlyReplica,
+        replica.refusal(),
+        Instant::now(),
+    )
 }
 
 fn coded(
