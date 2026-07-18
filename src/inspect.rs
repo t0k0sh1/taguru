@@ -417,6 +417,15 @@ fn inspect_groups(
                      bytes aside as {stem}.group.corrupt, and resets the record to empty)"
                 );
                 failures += 1;
+                // scan_groups registers the name with an empty record
+                // rather than dropping it — the reference checks below
+                // must see the same shape boot will, or a parent naming
+                // this group as a child gets a false "boot drops this
+                // reference" warning (boot only drops references whose
+                // name is genuinely absent), and the shape preview below
+                // would prune the edge before repair_nesting ever runs,
+                // skewing the cycle/depth check for unrelated edges too.
+                records.insert(name, GroupRecord::default());
             }
         }
     }

@@ -1210,6 +1210,49 @@ fn inspect_flags_group_trouble_and_previews_boot_repairs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A corrupt `.group` file is still a group at boot — `scan_groups`
+/// registers its name with an empty record rather than dropping it, so
+/// a sibling naming it as a child must not get a false "boot drops this
+/// reference" warning, and it must still be counted in the total.
+#[test]
+fn inspect_does_not_flag_a_corrupt_child_group_as_a_dangling_reference() {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-cli-inspect-corrupt-child-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("parent.group"),
+        "{\"description\": \"\", \"contexts\": [], \"groups\": [\"child\"]}",
+    )
+    .unwrap();
+    std::fs::write(dir.join("child.group"), b"{not json").unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The corrupt child still fails the check (restoring it would reset
+    // the record), but that is not a dangling-reference problem for
+    // `parent` — boot keeps the edge, just to an empty group.
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("child: CORRUPT group"), "{stdout}");
+    assert!(
+        !stdout.contains("child group(s) have no group here"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("parent: ok  0 member context(s) · 1 child group(s)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("child: ok  0 member context(s) · 0 child group(s)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("total: 0 contexts · 2 groups"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `taguru compact` offline: the report names the shrink, and inspect
 /// vouches for the rewritten family.
 #[test]
