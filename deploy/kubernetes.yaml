@@ -60,7 +60,10 @@ spec:
             # `taguru restore`): set TAGURU_REPLICATE_URL to an
             # s3://, gs://, or az:// bucket and grant the pod that
             # cloud's identity (IRSA / Workload Identity) — the
-            # client rides the default credential chain.
+            # client rides the default credential chain. With it set,
+            # an EMPTY volume boots straight from the bucket — and
+            # kubernetes-stateless.yaml is the variant that makes that
+            # the whole story (emptyDir, no PVC).
           volumeMounts:
             - name: data
               mountPath: /data

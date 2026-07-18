@@ -68,7 +68,7 @@
     </p>
     <div class="hero-meta">
       <span><b>Image:</b> ghcr.io/t0k0sh1/taguru (scratch, ~13 MB)</span>
-      <span><b>Manifest:</b> deploy/kubernetes.yaml</span>
+      <span><b>Manifests:</b> deploy/kubernetes.yaml · kubernetes-stateless.yaml</span>
     </div>
   </header>
 
@@ -81,7 +81,7 @@
     </p>
     <ul>
       <li><b>Deploys are stop-then-start.</b> The downtime is the boot: cold registration is cheap however many contexts exist, and pinned contexts preload in parallel — the port opens when they finish. Never let the platform run two pods against one volume, even during a rollout.</li>
-      <li><b>Availability is restore time, not failover.</b> There is no leader election or automatic promotion; the recovery unit is the data directory. Three rungs: continuous replication to object storage (<code>TAGURU_REPLICATE_URL</code>) restores via <code>taguru restore</code> with seconds of RPO, a storage-layer snapshot restores the volume byte-exactly (fastest, same-version), and a <code>taguru export</code> stream restores anywhere through <code>taguru import</code> / <code>POST /import</code> (portable across versions and machines). Rehearse whichever rung is the plan.</li>
+      <li><b>Availability is restore time, not failover.</b> There is no leader election or automatic promotion; the recovery unit is the data directory. Three rungs: continuous replication to object storage (<code>TAGURU_REPLICATE_URL</code>) restores via <code>taguru restore</code> with seconds of RPO — or skips the step entirely: a server started on an <b>empty</b> volume with that URL boots straight from the bucket (the <a href="#stateless">stateless variant</a> makes this the whole story). A storage-layer snapshot restores the volume byte-exactly (fastest, same-version), and a <code>taguru export</code> stream restores anywhere through <code>taguru import</code> / <code>POST /import</code> (portable across versions and machines). Rehearse whichever rung is the plan.</li>
       <li><b>Scale horizontally by partitioning, not clustering.</b> A context is the unit of routing, so independent instances each owning a disjoint set of contexts scale reads and writes with no coordination protocol — point each client (or each MCP bridge) at the instance holding its contexts. What does <b>not</b> work is two instances sharing one data directory: on local disks the lock refuses it, and on NFS/EFS the lock may fail to.</li>
       <li><b>A rollback is a restore.</b> Image formats migrate forward on load and never write the old version back out, so rolling the binary back past a format bump needs the data directory rolled back with it (snapshot) or re-imported from an export stream. Check the release notes for format bumps before downgrading.</li>
     </ul>
@@ -132,6 +132,48 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
     </ul>
   </section>
 
+  <section id="stateless">
+    <h2>The stateless variant: the volume becomes a cache</h2>
+    <p class="section-sub">
+      <a href="https://github.com/t0k0sh1/taguru/blob/main/deploy/kubernetes-stateless.yaml"><code>deploy/kubernetes-stateless.yaml</code></a>
+      makes the bucket the source of truth: emptyDir instead of the PVC, and the pod hydrates
+      from <code>TAGURU_REPLICATE_URL</code> at boot.
+    </p>
+    <p>
+      With replication on, an empty data directory is not a problem to refuse — it is a node
+      that has not downloaded its state yet. The stateless pod boots by hydrating: shared
+      files (groups, the grant store, every context's sidecar meta) land first so the whole
+      directory is enumerable, <b>pinned contexts download in parallel before the port
+      opens</b> (the same readiness shape as the ordinary preload — size the
+      <code>startupProbe</code> as pinned bytes ÷ bucket bandwidth), and everything else
+      hydrates on first touch or via a background fill. Local files whose bytes already match
+      the bucket's manifest are reused without a download, so a pod that kept its emptyDir
+      across a container restart comes back cheap. Instance loss stops being volume surgery:
+      any node starts empty and serves.
+    </p>
+    <p>
+      What this variant trades away, stated plainly: <b>RPO becomes the shipping lag for
+      real.</b> A crashed pod's un-shipped tail (seconds at the default cadence) lived only
+      in its emptyDir; the PVC variant's WAL replay would have recovered it, this one loses
+      it. And because every fresh pod starts empty, the manifest bakes in
+      <code>TAGURU_TAKEOVER=1</code>: after a crash the replacement must depose its
+      predecessor's generation — still fresh by heartbeat, never cleanly retired — or it
+      would refuse to start for the 300-second takeover grace. That acknowledgment is the
+      politeness layer only; <a href="architecture.html">epoch fencing</a> remains the
+      arbiter, so even a misconfigured duplicate Deployment cannot corrupt the lineage — but
+      it <i>will</i> silently depose the writer you meant to keep. Never point two
+      deployments at one bucket prefix.
+    </p>
+    <p class="note">
+      On the PVC variant the same machinery is the recovery story rather than the boot
+      story: a rescheduled pod reuses its volume untouched (its writer holds the bucket's
+      newest generation, so nothing is re-verified), and starting a writer against a bucket
+      whose owner still looks alive demands <code>serve --take-over</code> /
+      <code>TAGURU_TAKEOVER=1</code> — starting a writer against a bucket IS the promotion
+      act.
+    </p>
+  </section>
+
   <section id="backup">
     <h2>Backups and restore</h2>
     <p class="section-sub">Continuous replication to object storage is the primary path; volume snapshots remain for point-in-time copies.</p>
@@ -141,7 +183,9 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
       server ships every file family to the bucket continuously: <b>RPO is the shipping lag
       (seconds, exported at <code>/metrics</code>) instead of the snapshot interval</b>, and DR
       degrades to the bucket's own cross-region replication. Recovery is
-      <code>taguru restore --out /data</code> into a fresh volume, then <code>taguru inspect</code>.
+      <code>taguru restore --out /data</code> into a fresh volume, then <code>taguru inspect</code> —
+      or no step at all: a server started on an empty volume with the same URL boots straight
+      from the bucket (see <a href="#stateless">the stateless variant</a>).
       The bucket is epoch-fenced: if two live instances ever point at one URL (a botched
       restore, a duplicated deployment), the newer claim wins and the older server's shipper
       fail-stops loudly (<code>taguru_replication_fenced</code>, plus a <code>taguru::audit</code>

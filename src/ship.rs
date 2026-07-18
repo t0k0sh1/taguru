@@ -87,13 +87,26 @@
 //!
 //! ```text
 //! {prefix}/fence/{N:020}                       one immutable claim per generation
-//! {prefix}/gen-{N:020}/complete                baseline finished; restore requires it
+//! {prefix}/gen-{N:020}/complete                the manifest; restore requires it
+//! {prefix}/gen-{N:020}/heartbeat               refreshed every minute while the writer lives
+//! {prefix}/gen-{N:020}/retired                 written by a graceful stop
 //! {prefix}/gen-{N:020}/files/{filename}        published files, named as on disk
 //! {prefix}/gen-{N:020}/wal/{filename}/{series:010}-{seg:010}.jsonl
 //! ```
 //!
-//! A restore reads the newest generation carrying `complete`: download
-//! `files/*`, concatenate each lane's newest series in segment order,
+//! `complete` carries the [`Manifest`] — every shipped file's and
+//! lane's exact extent (length + CRC-32C), refreshed after each batch
+//! of uploads — so its existence still means "this generation
+//! restores whole", and its body lets a reader verify every
+//! downloaded byte and reuse local files without downloading at all
+//! (the boot-from-bucket path, `crate::hydrate`). `heartbeat` and
+//! `retired` feed that path's takeover guard: liveness and clean
+//! shutdown as objects, read by the NEXT claimant's boot — pure
+//! ergonomics on top of the fence, never a substitute for it.
+//!
+//! A restore reads the newest generation carrying `complete`:
+//! download `files/*`, concatenate each lane's newest series in
+//! segment order — manifest-verified when the manifest is present —
 //! and the result is a data directory the ordinary boot path loads —
 //! crash-consistent by the same argument as a local crash, since every
 //! shipped object is either a whole published file or a gapless run
@@ -333,6 +346,14 @@ impl FileSig {
     }
 }
 
+/// One published file as last shipped: the change signature the scan
+/// compares, plus the uploaded bytes' extent for the manifest.
+#[derive(Debug, Clone, Copy)]
+struct ShippedFile {
+    sig: FileSig,
+    content: ManifestFile,
+}
+
 /// One log lane's shipping cursor — everything needed to prove the
 /// next tail read is a strict continuation of what already shipped
 /// (see the module doc's "Log-lane correctness").
@@ -401,6 +422,110 @@ fn store_error(context: &str, error: object_store::Error) -> ShipError {
 
 const FENCE_PREFIX: &str = "fence";
 const COMPLETE_MARKER: &str = "complete";
+pub(crate) const HEARTBEAT_MARKER: &str = "heartbeat";
+pub(crate) const RETIRED_MARKER: &str = "retired";
+
+/// How often a live shipper refreshes `gen-{N}/heartbeat`. The object's
+/// `last_modified` is what a later claimant's takeover guard reads to
+/// ask "is this generation's writer still alive?" — pure ergonomics,
+/// not correctness (the fence stays the only mutual-exclusion
+/// primitive), so a coarse cadence is fine and keeps the idle-time
+/// PUT rate negligible.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How recently a generation must have shown life (its fence claim or
+/// its last heartbeat) for the takeover guard to demand explicit
+/// intent. Wider than the heartbeat cadence by 5× so a paused-but-live
+/// writer (GC, a stalled node) is not casually deposed at the first
+/// missed beat.
+pub(crate) const TAKEOVER_GRACE: Duration = Duration::from_secs(300);
+
+/// The local file remembering this data directory's relationship with
+/// the bucket: which generation its writer last claimed, and — when
+/// the directory was materialized FROM the bucket — which generation
+/// it hydrated from (the cache-mode marker `crate::hydrate` keys on).
+/// Never shipped (see [`classify`]): it describes the local replica of
+/// the relationship, not the data.
+pub(crate) const REPLICATION_RECORD: &str = ".taguru.replication";
+
+/// What [`REPLICATION_RECORD`] holds.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ReplicationRecord {
+    /// The bucket URL the record speaks about — a directory re-pointed
+    /// at a different bucket must not inherit the old bucket's
+    /// generation arithmetic.
+    pub(crate) url: String,
+    /// The generation this directory's writer last claimed; `None`
+    /// between a hydration creating the directory and its first claim.
+    pub(crate) claimed_generation: Option<u64>,
+    /// Present iff the directory began life as a materialization of
+    /// the bucket — from this generation. A directory carrying this is
+    /// a CACHE of the bucket lineage: any boot that cannot prove it is
+    /// the lineage's own newest writer re-verifies local files against
+    /// the bucket instead of trusting them (see `crate::hydrate`).
+    #[serde(default)]
+    pub(crate) hydrated_from: Option<u64>,
+}
+
+pub(crate) fn read_replication_record(data_dir: &FsPath) -> Option<ReplicationRecord> {
+    let bytes = std::fs::read(data_dir.join(REPLICATION_RECORD)).ok()?;
+    match serde_json::from_slice(&bytes) {
+        Ok(record) => Some(record),
+        Err(error) => {
+            // A corrupt record only weakens ergonomics (the takeover
+            // guard, the warm-restart shortcut) — never correctness,
+            // which rests on the fence. Say so and treat it as absent.
+            tracing::warn!(%error, "ignoring a corrupt {REPLICATION_RECORD}");
+            None
+        }
+    }
+}
+
+pub(crate) fn write_replication_record(
+    data_dir: &FsPath,
+    record: &ReplicationRecord,
+) -> io::Result<()> {
+    crate::storage::write_atomic(
+        &data_dir.join(REPLICATION_RECORD),
+        &serde_json::to_vec(record).expect("no unserializable field"),
+    )
+}
+
+/// What `gen-{N}/complete` holds since issue #128: the exact shipped
+/// state, so a reader can verify every downloaded byte and decide
+/// whether a LOCAL file already matches without downloading anything.
+/// The marker's existence still means what it always did — this
+/// generation restores whole — and a pre-manifest (empty) marker still
+/// restores through the listing fallback, just without the per-object
+/// verification or the local-reuse shortcut.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Manifest {
+    pub(crate) generation: u64,
+    /// Published files: name → exactly the bytes last uploaded.
+    pub(crate) files: BTreeMap<String, ManifestFile>,
+    /// Log lanes: name → the newest series and its concatenated
+    /// extent (every segment in order, as one byte string).
+    pub(crate) lanes: BTreeMap<String, ManifestLane>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ManifestFile {
+    pub(crate) len: u64,
+    pub(crate) crc: u32,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ManifestLane {
+    pub(crate) series: u64,
+    pub(crate) segments: u64,
+    /// Length and CRC-32C of the series' segments concatenated in
+    /// order — the same prefix arithmetic the shipping cursor keeps,
+    /// so a local log whose prefix matches IS the shipped stream.
+    pub(crate) len: u64,
+    pub(crate) crc: u32,
+    /// Highest record seq shipped in the series.
+    pub(crate) seq: u64,
+}
 
 /// Fixed-width decimal so lexicographic object listing IS numeric
 /// ordering — restore sorts names, never parses to sort.
@@ -410,11 +535,11 @@ fn fence_key(root: &StorePath, generation: u64) -> StorePath {
         .join(format!("{generation:020}"))
 }
 
-fn gen_root(root: &StorePath, generation: u64) -> StorePath {
+pub(crate) fn gen_root(root: &StorePath, generation: u64) -> StorePath {
     root.clone().join(format!("gen-{generation:020}"))
 }
 
-fn segment_name(series: u64, seg: u64) -> String {
+pub(crate) fn segment_name(series: u64, seg: u64) -> String {
     format!("{series:010}-{seg:010}.jsonl")
 }
 
@@ -436,7 +561,7 @@ struct FenceBody {
 /// server itself reads, and staging litter (`*.tmp{N}`) must never
 /// ship at all — those names are mid-write by definition.
 fn classify(name: &str) -> EntryKind {
-    if name == ".taguru.lock" {
+    if name == ".taguru.lock" || name == REPLICATION_RECORD {
         return EntryKind::Skip;
     }
     // `staging_path` builds `{final}.tmp{nonce}` names; matching the
@@ -497,11 +622,20 @@ pub(crate) struct Shipper {
     root: StorePath,
     generation: u64,
     data_dir: PathBuf,
-    files: BTreeMap<String, FileSig>,
+    files: BTreeMap<String, ShippedFile>,
     lanes: BTreeMap<String, LaneState>,
     progress: Arc<ShipProgress>,
     state: AppState,
+    /// Present when this boot hydrated lazily from the bucket: the
+    /// manifest (`complete`) must not be written while contexts are
+    /// still only in the PREDECESSOR generation — a `complete` written
+    /// early would crown a generation missing every un-hydrated
+    /// family, and a restore would pick it. Until the hydrator drains,
+    /// the newest complete generation stays the one this boot restored
+    /// from, which really does hold everything.
+    hydration: Option<Arc<crate::hydrate::Hydrator>>,
     baseline_complete: bool,
+    last_heartbeat: Option<Instant>,
 }
 
 impl Shipper {
@@ -512,11 +646,16 @@ impl Shipper {
     pub(crate) async fn claim(
         store: Arc<dyn ObjectStore>,
         root: StorePath,
+        url: String,
         data_dir: PathBuf,
         progress: Arc<ShipProgress>,
         state: AppState,
+        hydration: Option<Arc<crate::hydrate::Hydrator>>,
     ) -> Result<Self, ShipError> {
-        let mut generation = newest_fence(&store, &root).await?.unwrap_or(0) + 1;
+        let mut generation = newest_fence(&store, &root)
+            .await?
+            .map_or(0, |f| f.generation)
+            + 1;
         loop {
             let body = FenceBody {
                 generation,
@@ -551,6 +690,23 @@ impl Shipper {
             generation,
             "replication generation claimed",
         );
+        // Remember the claim locally: the next boot of THIS directory
+        // proves "the bucket's newest writer was me" by comparing this
+        // number against the newest fence — the warm-restart shortcut,
+        // and the reason a plain restart never trips the takeover
+        // guard. Best-effort: without it the next boot just re-verifies
+        // (cache mode) or asks for explicit intent (a recent foreign
+        // generation).
+        let record = ReplicationRecord {
+            url: url.clone(),
+            claimed_generation: Some(generation),
+            hydrated_from: read_replication_record(&data_dir)
+                .filter(|record| record.url == url)
+                .and_then(|record| record.hydrated_from),
+        };
+        if let Err(error) = write_replication_record(&data_dir, &record) {
+            tracing::warn!(%error, "could not persist {REPLICATION_RECORD}");
+        }
         Ok(Self {
             store,
             root,
@@ -560,7 +716,9 @@ impl Shipper {
             lanes: BTreeMap::new(),
             progress,
             state,
+            hydration,
             baseline_complete: false,
+            last_heartbeat: None,
         })
     }
 
@@ -570,65 +728,121 @@ impl Shipper {
     /// first successor's fence is the one to watch for.
     async fn fenced_by(&self) -> Result<Option<u64>, ShipError> {
         match newest_fence(&self.store, &self.root).await? {
-            Some(newest) if newest > self.generation => Ok(Some(newest)),
+            Some(newest) if newest.generation > self.generation => Ok(Some(newest.generation)),
             _ => Ok(None),
         }
     }
 
-    /// One poll cycle: scan, and if anything changed, re-check the
-    /// fence and ship the difference. Returns whether anything
-    /// shipped. `Fenced` is terminal — the caller stops the loop.
+    /// One poll cycle: scan, and if anything changed (or a heartbeat
+    /// is due), re-check the fence and ship the difference. Returns
+    /// whether anything shipped. `Fenced` is terminal — the caller
+    /// stops the loop.
     pub(crate) async fn cycle(&mut self) -> Result<bool, ShipError> {
         let scan = self.scan()?;
-        let dirty = !self.baseline_complete
+        // Under a lazy hydration the baseline is not writable yet (see
+        // the `hydration` field): until the hydrator drains, only real
+        // local changes make a cycle dirty.
+        let hydration_drained = self.hydration.as_ref().is_none_or(|h| h.drained());
+        let dirty = (!self.baseline_complete && hydration_drained)
             || !scan.changed.is_empty()
             || !scan.vanished.is_empty()
             || !scan.lanes.is_empty();
-        if !dirty {
+        let heartbeat_due = self
+            .last_heartbeat
+            .is_none_or(|at| at.elapsed() >= HEARTBEAT_INTERVAL);
+        if !dirty && !heartbeat_due {
             return Ok(false);
         }
         // The fence check gates UPLOADS, not local reads: an idle
         // deposed shipper discovers its deposition on its next real
-        // work, which is exactly when it matters — and never sooner,
-        // because a fenced check with nothing to ship would fail-stop
-        // a server whose bucket successor changes nothing about its
-        // local correctness.
+        // work — a due heartbeat included, since beating past one's
+        // successor would advertise a liveness the takeover already
+        // ended — and never sooner, because a fenced check with
+        // nothing to ship would fail-stop a server whose bucket
+        // successor changes nothing about its local correctness.
         if let Some(newer_generation) = self.fenced_by().await? {
             return Err(ShipError::Fenced { newer_generation });
         }
         let mut shipped = false;
-        for name in &scan.vanished {
-            self.retire_file(name).await?;
-            shipped = true;
+        if dirty {
+            for name in &scan.vanished {
+                self.retire_file(name).await?;
+                shipped = true;
+            }
+            for name in &scan.changed {
+                // The lane loop below owns log files; `scan` never lists
+                // them here.
+                let file = self.ship_published(name).await?;
+                self.files.insert(name.clone(), file);
+                shipped = true;
+            }
+            for name in &scan.lanes {
+                shipped |= self.ship_lane(name).await?;
+            }
+            // The manifest (`complete`) follows every batch of uploads
+            // so it always describes the bucket's current state — but
+            // never before a lazy hydration has drained (the field doc
+            // explains why an early `complete` would be a lie).
+            if (!self.baseline_complete || shipped) && hydration_drained {
+                self.put_manifest().await?;
+                shipped = true;
+                if !self.baseline_complete {
+                    self.baseline_complete = true;
+                    tracing::info!(
+                        target: "taguru::audit",
+                        generation = self.generation,
+                        "replication baseline complete — the bucket can restore this directory",
+                    );
+                }
+            }
         }
-        for name in &scan.changed {
-            // The lane loop below owns log files; `scan` never lists
-            // them here.
-            let sig = self.ship_published(name).await?;
-            self.files.insert(name.clone(), sig);
-            shipped = true;
-        }
-        for name in &scan.lanes {
-            shipped |= self.ship_lane(name).await?;
-        }
-        if !self.baseline_complete {
+        if heartbeat_due {
             self.put(
-                &gen_root(&self.root, self.generation).join(COMPLETE_MARKER),
+                &gen_root(&self.root, self.generation).join(HEARTBEAT_MARKER),
                 Vec::new(),
             )
             .await?;
-            self.baseline_complete = true;
-            tracing::info!(
-                target: "taguru::audit",
-                generation = self.generation,
-                "replication baseline complete — the bucket can restore this directory",
-            );
-            shipped = true;
+            self.last_heartbeat = Some(Instant::now());
         }
         if shipped {
             self.state.metrics().record_replication_success();
         }
         Ok(shipped)
+    }
+
+    /// Uploads the manifest under the `complete` key: the generation's
+    /// exact shipped state, and (on its first write) the marker that
+    /// makes the generation restorable at all.
+    async fn put_manifest(&self) -> Result<(), ShipError> {
+        let manifest = Manifest {
+            generation: self.generation,
+            files: self
+                .files
+                .iter()
+                .map(|(name, file)| (name.clone(), file.content))
+                .collect(),
+            lanes: self
+                .lanes
+                .iter()
+                .map(|(name, lane)| {
+                    (
+                        name.clone(),
+                        ManifestLane {
+                            series: lane.series,
+                            segments: lane.next_seg,
+                            len: lane.shipped_offset,
+                            crc: lane.shipped_crc,
+                            seq: lane.shipped_seq,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        self.put(
+            &gen_root(&self.root, self.generation).join(COMPLETE_MARKER),
+            serde_json::to_vec(&manifest).expect("no unserializable field"),
+        )
+        .await
     }
 
     /// Reads the directory once and buckets every entry. Log lanes are
@@ -662,7 +876,7 @@ impl Shipper {
                 EntryKind::Published => {
                     seen.insert(name.clone());
                     let sig = FileSig::of(&metadata);
-                    if self.files.get(&name) != Some(&sig) {
+                    if self.files.get(&name).map(|file| file.sig) != Some(sig) {
                         scan.changed.push(name);
                     }
                 }
@@ -685,16 +899,20 @@ impl Shipper {
     /// too. The signature is taken BEFORE the read: taking it after
     /// could stamp version N+1's signature on version N's bytes and
     /// never re-ship N+1.
-    async fn ship_published(&mut self, name: &str) -> Result<FileSig, ShipError> {
+    async fn ship_published(&mut self, name: &str) -> Result<ShippedFile, ShipError> {
         let path = self.data_dir.join(name);
         let metadata = std::fs::metadata(&path).map_err(ShipError::Io)?;
         let sig = FileSig::of(&metadata);
         let bytes = std::fs::read(&path).map_err(ShipError::Io)?;
+        let content = ManifestFile {
+            len: bytes.len() as u64,
+            crc: crate::crc32c::crc32c(&bytes),
+        };
         let key = gen_root(&self.root, self.generation)
             .join("files")
             .join(name);
         self.put(&key, bytes).await?;
-        Ok(sig)
+        Ok(ShippedFile { sig, content })
     }
 
     /// Removes a vanished file's remote counterpart — and, for a log
@@ -768,9 +986,10 @@ impl Shipper {
                     // one) already shipped exactly this version — the
                     // common case, since the reset that diverged the
                     // lane follows the very flush that published it.
-                    if self.files.get(&parent) != Some(&FileSig::of(&metadata)) {
-                        let sig = self.ship_published(&parent).await?;
-                        self.files.insert(parent, sig);
+                    if self.files.get(&parent).map(|file| file.sig) != Some(FileSig::of(&metadata))
+                    {
+                        let file = self.ship_published(&parent).await?;
+                        self.files.insert(parent, file);
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -860,6 +1079,19 @@ impl Shipper {
             }
         }
     }
+
+    /// Marks this generation cleanly stopped (`gen-{N}/retired`): the
+    /// takeover guard reads it as "no live writer remains", so the
+    /// next boot against this bucket proceeds without explicit intent.
+    /// Best-effort — a miss (crash, unreachable bucket) only means the
+    /// next claimant waits out [`TAKEOVER_GRACE`] or passes
+    /// `--take-over`, exactly the posture a crash should leave.
+    pub(crate) async fn retire_generation(&self) {
+        let key = gen_root(&self.root, self.generation).join(RETIRED_MARKER);
+        if let Err(error) = self.put(&key, Vec::new()).await {
+            tracing::warn!(%error, "could not mark the replication generation retired");
+        }
+    }
 }
 
 /// The newest (highest) seq among the file's complete lines, ignoring
@@ -886,22 +1118,36 @@ struct Scan {
     lanes: Vec<String>,
 }
 
+/// The newest fence: its generation and when it was claimed, by the
+/// store's own clock (`last_modified`) — the one clock every reader
+/// shares, which is why the takeover guard reads it rather than the
+/// fence body's writer-stamped time.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FenceInfo {
+    pub(crate) generation: u64,
+    pub(crate) claimed: Option<SystemTime>,
+}
+
 /// The highest generation with a fence object, scanned by listing the
 /// fence prefix — names are fixed-width decimals, so the maximum is
 /// the lexicographic maximum.
-async fn newest_fence(
+pub(crate) async fn newest_fence(
     store: &Arc<dyn ObjectStore>,
     root: &StorePath,
-) -> Result<Option<u64>, ShipError> {
+) -> Result<Option<FenceInfo>, ShipError> {
     let prefix = root.clone().join(FENCE_PREFIX);
-    let mut newest = None;
+    let mut newest: Option<FenceInfo> = None;
     let mut listing = store.list(Some(&prefix));
     while let Some(meta) = listing.next().await {
         let meta = meta.map_err(|error| store_error("listing the replication fence", error))?;
         if let Some(name) = meta.location.filename()
             && let Ok(generation) = name.parse::<u64>()
+            && newest.is_none_or(|fence| fence.generation < generation)
         {
-            newest = newest.max(Some(generation));
+            newest = Some(FenceInfo {
+                generation,
+                claimed: Some(SystemTime::from(meta.last_modified)),
+            });
         }
     }
     Ok(newest)
@@ -958,20 +1204,24 @@ impl ShipperHandle {
 pub(crate) fn spawn(
     store: Arc<dyn ObjectStore>,
     root: StorePath,
+    replicate: ReplicateConfig,
     data_dir: PathBuf,
-    interval: Duration,
     progress: Arc<ShipProgress>,
     state: AppState,
+    hydration: Option<Arc<crate::hydrate::Hydrator>>,
 ) -> ShipperHandle {
+    let ReplicateConfig { url, interval } = replicate;
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(async move {
         let mut shipper = loop {
             match Shipper::claim(
                 Arc::clone(&store),
                 root.clone(),
+                url.clone(),
                 data_dir.clone(),
                 Arc::clone(&progress),
                 state.clone(),
+                hydration.clone(),
             )
             .await
             {
@@ -1016,6 +1266,11 @@ pub(crate) fn spawn(
                 }
             }
             if stopping {
+                // The final cycle above drained the post-flush state;
+                // saying "cleanly stopped" is now true, and it is what
+                // lets the next writer against this bucket start
+                // without a takeover handshake.
+                shipper.retire_generation().await;
                 return;
             }
             tokio::select! {
@@ -1183,8 +1438,10 @@ pub(crate) fn run(args: &[String]) -> i32 {
     }
 }
 
-/// The restore body: pick the newest complete generation, download
-/// `files/*` verbatim, and reassemble each log lane's newest series.
+/// The restore body: pick the newest complete generation and
+/// materialize it. A manifest-bearing `complete` (issue #128 onward)
+/// drives an exact, verified restore; an empty pre-manifest marker
+/// falls back to restoring by listing, as before.
 pub(crate) async fn restore_into(
     store: &dyn ObjectStore,
     root: &StorePath,
@@ -1197,6 +1454,33 @@ pub(crate) async fn restore_into(
         ..RestoreReport::default()
     };
 
+    if let Some(manifest) = read_manifest(store, &generation_root).await? {
+        // Manifest-driven: the object set is exactly what the writer
+        // said it shipped, and every downloaded byte is checked
+        // against the writer's own CRC before it lands — a swapped or
+        // rotted object is a refusal, not a quiet divergence.
+        for (name, expect) in &manifest.files {
+            let key = generation_root.clone().join("files").join(name.as_str());
+            let bytes = fetch(store, &key).await?;
+            verify_file_bytes(name, &bytes, *expect)?;
+            write_restored_file(out, name, &bytes)?;
+            report.files += 1;
+        }
+        for (name, lane) in &manifest.lanes {
+            let assembled = fetch_lane(store, &generation_root, name, *lane).await?;
+            let records = crate::wal::shippable_records(&assembled).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("lane {name} series {}: {error}", lane.series),
+                )
+            })?;
+            report.records += records.len();
+            crate::storage::write_atomic(&out.join(name), &assembled)?;
+            report.lanes += 1;
+        }
+        return Ok(report);
+    }
+
     // files/* — verbatim, atomically (stage + rename via the same
     // helper the server writes with, so a crash mid-restore leaves
     // whole files or nothing, never a torn image). The grant store is
@@ -1206,12 +1490,7 @@ pub(crate) async fn restore_into(
     for name in names {
         let key = files_prefix.clone().join(name.as_str());
         let bytes = fetch(store, &key).await?;
-        let path = out.join(&name);
-        if name == "oauth.json" {
-            crate::storage::write_atomic_private(&path, &bytes)?;
-        } else {
-            crate::storage::write_atomic(&path, &bytes)?;
-        }
+        write_restored_file(out, &name, &bytes)?;
         report.files += 1;
     }
 
@@ -1277,11 +1556,100 @@ pub(crate) async fn restore_into(
     Ok(report)
 }
 
+/// Reads the generation's manifest out of its `complete` marker.
+/// `None` for the pre-manifest (empty) marker; an error for a
+/// non-empty body that does not parse — that is rot, not age.
+pub(crate) async fn read_manifest(
+    store: &dyn ObjectStore,
+    generation_root: &StorePath,
+) -> io::Result<Option<Manifest>> {
+    let bytes = fetch(store, &generation_root.clone().join(COMPLETE_MARKER)).await?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the generation's manifest (complete) does not parse: {error}"),
+        )
+    })
+}
+
+/// Refuses downloaded bytes that do not match what the manifest says
+/// was uploaded.
+pub(crate) fn verify_file_bytes(name: &str, bytes: &[u8], expect: ManifestFile) -> io::Result<()> {
+    if bytes.len() as u64 != expect.len || crate::crc32c::crc32c(bytes) != expect.crc {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{name}: downloaded bytes do not match the manifest — the bucket rotted, \
+                 or an object was replaced under the reader"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Lands one restored file locally, atomically, preserving the grant
+/// store's owner-only mode — the one secret-bearing family member.
+pub(crate) fn write_restored_file(out: &FsPath, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let path = out.join(name);
+    if name == "oauth.json" {
+        crate::storage::write_atomic_private(&path, bytes)
+    } else {
+        crate::storage::write_atomic(&path, bytes)
+    }
+}
+
+/// Downloads and reassembles one lane exactly as the manifest
+/// describes it — the segment names are derivable (`series` +
+/// `0..segments`), so no listing is involved — and verifies the
+/// concatenation's extent against the manifest's prefix arithmetic.
+pub(crate) async fn fetch_lane(
+    store: &dyn ObjectStore,
+    generation_root: &StorePath,
+    name: &str,
+    lane: ManifestLane,
+) -> io::Result<Vec<u8>> {
+    let lane_prefix = generation_root.clone().join("wal").join(name);
+    let mut assembled = Vec::with_capacity(lane.len as usize);
+    for seg in 0..lane.segments {
+        let key = lane_prefix.clone().join(segment_name(lane.series, seg));
+        // Segments hold acknowledged writes; one the bucket cannot
+        // hand back — lost, dropped, or deleted — is a refusal with
+        // its position named, never a quiet skip.
+        let bytes = fetch(store, &key).await.map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "lane {name} series {}: segment {seg} of {}: {error}",
+                    lane.series, lane.segments
+                ),
+            )
+        })?;
+        assembled.extend_from_slice(&bytes);
+    }
+    if assembled.len() as u64 != lane.len || crate::crc32c::crc32c(&assembled) != lane.crc {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "lane {name} series {}: the reassembled segments do not match the \
+                 manifest — the bucket rotted, or an object was replaced",
+                lane.series
+            ),
+        ));
+    }
+    Ok(assembled)
+}
+
 /// The newest generation whose baseline finished (`complete` exists).
 /// A newer INCOMPLETE generation is normal — a writer that claimed
 /// and is mid-baseline, or died there — and restoring it would hand
 /// back a directory with holes; fall back to the newest complete one.
-async fn newest_complete_generation(store: &dyn ObjectStore, root: &StorePath) -> io::Result<u64> {
+pub(crate) async fn newest_complete_generation(
+    store: &dyn ObjectStore,
+    root: &StorePath,
+) -> io::Result<u64> {
     let fence_prefix = root.clone().join(FENCE_PREFIX);
     let mut generations = Vec::new();
     let mut listing = store.list(Some(&fence_prefix));
@@ -1349,7 +1717,7 @@ fn parse_segment_name(name: &str) -> Option<(u64, u64)> {
     Some((series.parse().ok()?, seg.parse().ok()?))
 }
 
-async fn fetch(store: &dyn ObjectStore, key: &StorePath) -> io::Result<Vec<u8>> {
+pub(crate) async fn fetch(store: &dyn ObjectStore, key: &StorePath) -> io::Result<Vec<u8>> {
     let result = store
         .get(key)
         .await
@@ -1398,9 +1766,11 @@ mod tests {
         Shipper::claim(
             Arc::clone(store) as Arc<dyn ObjectStore>,
             StorePath::default(),
+            "mem://test".to_string(),
             dir.to_path_buf(),
             Arc::clone(progress),
             state.clone(),
+            None,
         )
         .await
         .unwrap()
@@ -1772,9 +2142,97 @@ mod tests {
         assert!(progress.allows_reset(log, 0, 0));
     }
 
+    #[tokio::test]
+    async fn the_manifest_records_every_shipped_extent_and_restore_verifies_it() {
+        let dir = scratch_dir("manifest");
+        let state = state_for(&dir);
+        let progress = Arc::new(ShipProgress::new());
+        let store = Arc::new(InMemory::new());
+
+        std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
+        let wal_path = dir.join("ctx_a.wal.jsonl");
+        wal::append_batch(&wal_path, 1, &[associate("a")]).unwrap();
+        let mut shipper = claimed(&store, &dir, &state, &progress).await;
+        shipper.cycle().await.unwrap();
+
+        let manifest: Manifest =
+            serde_json::from_slice(&read_object(&store, "gen-00000000000000000001/complete").await)
+                .expect("complete carries the manifest now");
+        assert_eq!(manifest.generation, 1);
+        let image = manifest
+            .files
+            .get("ctx_a.ctx")
+            .expect("the image is listed");
+        assert_eq!(image.len, 8);
+        assert_eq!(image.crc, crate::crc32c::crc32c(b"image-v1"));
+        let wal_bytes = std::fs::read(&wal_path).unwrap();
+        let lane = manifest
+            .lanes
+            .get("ctx_a.wal.jsonl")
+            .expect("the lane is listed");
+        assert_eq!((lane.series, lane.segments, lane.seq), (0, 1, 1));
+        assert_eq!(lane.len, wal_bytes.len() as u64);
+        assert_eq!(lane.crc, crate::crc32c::crc32c(&wal_bytes));
+
+        // Tampered bytes no longer restore quietly: the manifest CRC
+        // refuses them by name.
+        (store.as_ref() as &dyn ObjectStore)
+            .put(
+                &StorePath::parse("gen-00000000000000000001/files/ctx_a.ctx").unwrap(),
+                PutPayload::from(b"tampered".to_vec()),
+            )
+            .await
+            .unwrap();
+        let restored_dir = scratch_dir("manifest-out");
+        let error = restore_into(
+            store.as_ref() as &dyn ObjectStore,
+            &StorePath::default(),
+            &restored_dir,
+        )
+        .await
+        .expect_err("bytes that contradict the manifest must refuse");
+        assert!(error.to_string().contains("manifest"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&restored_dir);
+    }
+
+    #[tokio::test]
+    async fn a_claim_is_recorded_locally_and_liveness_markers_land() {
+        let dir = scratch_dir("liveness");
+        let state = state_for(&dir);
+        let progress = Arc::new(ShipProgress::new());
+        let store = Arc::new(InMemory::new());
+
+        let mut shipper = claimed(&store, &dir, &state, &progress).await;
+        let record = read_replication_record(&dir).expect("the claim writes the record");
+        assert_eq!(record.claimed_generation, Some(1));
+        assert_eq!(record.url, "mem://test");
+        assert!(record.hydrated_from.is_none());
+
+        shipper.cycle().await.unwrap();
+        let names = object_names(&store).await;
+        assert!(
+            names.contains(&"gen-00000000000000000001/heartbeat".to_string()),
+            "the first cycle beats: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name.contains(REPLICATION_RECORD)),
+            "the local record must never ship: {names:?}"
+        );
+
+        shipper.retire_generation().await;
+        assert!(
+            object_names(&store)
+                .await
+                .contains(&"gen-00000000000000000001/retired".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn classification_and_lane_parents_agree_with_the_family_layout() {
         assert_eq!(classify(".taguru.lock"), EntryKind::Skip);
+        assert_eq!(classify(REPLICATION_RECORD), EntryKind::Skip);
         assert_eq!(classify("x.ctx.tmp42"), EntryKind::Skip);
         assert_eq!(classify("x.ctx"), EntryKind::Published);
         assert_eq!(classify("x.meta.json"), EntryKind::Published);

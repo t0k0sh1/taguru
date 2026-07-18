@@ -248,7 +248,7 @@ pub fn run(args: &[String]) -> i32 {
     };
     // The same knobs serve boots with — one reading for both entrances
     // (cli.rs documents them once).
-    let state = match crate::registry::BootConfig::from_env().boot(embedder, None) {
+    let state = match crate::registry::BootConfig::from_env().boot(embedder, None, None) {
         Ok(state) => state,
         Err(error) => {
             eprintln!("taguru: import: {error}");

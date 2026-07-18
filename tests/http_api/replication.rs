@@ -235,14 +235,16 @@ fn a_second_writer_fences_the_first_which_fail_stops_but_keeps_serving() {
             .exists()
     });
 
-    // A second instance pointed at the same bucket — the exact
-    // misconfiguration fencing exists for. Its claim deposes the
-    // first writer.
+    // A second instance pointed at the same bucket. Since issue #128
+    // deposing a live writer takes stated intent (the takeover guard
+    // has its own test below); past the guard, fencing works exactly
+    // as before.
     let second = Server::start_with_env(
         "repl-usurper",
         &[
             ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
             ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+            ("TAGURU_TAKEOVER", "1"),
         ],
     );
     wait_for("the second writer's claim", || {
@@ -290,4 +292,230 @@ fn a_second_writer_fences_the_first_which_fail_stops_but_keeps_serving() {
     let _ = std::fs::remove_dir_all(first.stop_gracefully());
     let _ = std::fs::remove_dir_all(second.stop_gracefully());
     let _ = std::fs::remove_dir_all(bucket);
+}
+
+#[test]
+fn an_empty_disk_boots_from_the_bucket_and_serves_the_lineage() {
+    let bucket = scratch("bootstrap-bucket");
+    let first = Server::start_with_env(
+        "repl-boot-source",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+        ],
+    );
+
+    // Two contexts — one pinned (the eager half of hydration), one
+    // not (the lazy half) — plus passages and a group, so every file
+    // family crosses the bucket.
+    first.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "酒蔵の知識"})),
+    );
+    first.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source": "第2段落"},
+        ])),
+    );
+    first.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {
+            "第2段落": "青嶺酒造は、仕込み水に雲居山の伏流水を使う。杜氏は高瀬である。",
+        }})),
+    );
+    first.ok(
+        "PUT",
+        "/contexts/glossary",
+        Some(json!({"description": "用語集"})),
+    );
+    first.ok("PATCH", "/contexts/glossary", Some(json!({"pinned": true})));
+    first.ok(
+        "POST",
+        "/contexts/glossary/associations",
+        Some(json!([
+            {"subject": "杜氏", "label": "意味", "object": "醸造責任者", "weight": 1.0},
+        ])),
+    );
+    first.ok(
+        "PUT",
+        "/groups/breweries",
+        Some(json!({"contexts": ["sake"]})),
+    );
+    wait_for("the source baseline", || {
+        bucket
+            .join("gen-00000000000000000001")
+            .join("complete")
+            .exists()
+    });
+    let first_dir = first.stop_gracefully();
+    assert!(
+        bucket
+            .join("gen-00000000000000000001")
+            .join("retired")
+            .exists(),
+        "a graceful stop retires its generation"
+    );
+
+    // An EMPTY directory against the same bucket: the successor
+    // hydrates the lineage instead of starting blank. The retired
+    // marker is why no takeover acknowledgment is needed.
+    let second = Server::start_with_env(
+        "repl-boot-successor",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+        ],
+    );
+
+    // Readiness semantics: the port opened, so the pinned context is
+    // already local (preload hydrates it eagerly, before binding).
+    assert!(
+        second.data_dir.join("glossary.ctx").exists(),
+        "a pinned context hydrates before the port opens"
+    );
+
+    // The whole directory is enumerable — including the lazy context.
+    let page = second.ok("GET", "/contexts", None);
+    let names: Vec<&str> = page["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["glossary", "sake"], "{page}");
+
+    // First touch serves the hydrated truth: recall and passages both.
+    let recall = second.ok(
+        "POST",
+        "/contexts/sake/recall",
+        Some(json!({"cue": "青嶺酒造", "limit": 5})),
+    );
+    assert_eq!(recall["total"], json!(1), "{recall}");
+    let hits = second.ok(
+        "POST",
+        "/contexts/sake/sources/search",
+        Some(json!({"query": "伏流水", "limit": 3})),
+    );
+    assert!(!hits.as_array().unwrap().is_empty(), "{hits}");
+    assert_eq!(hits[0]["source"], "第2段落", "{hits}");
+
+    // The successor owns the lineage: once every family settles, its
+    // own generation completes — the manifest gate in action.
+    wait_for("the successor's own complete generation", || {
+        bucket
+            .join("gen-00000000000000000002")
+            .join("complete")
+            .exists()
+    });
+    let second_dir = second.stop_gracefully();
+
+    // Equivalence where it is defined: both directories export
+    // byte-identical batch streams.
+    let export_first = scratch("bootstrap-export-first");
+    let out = run_cli(
+        &["export", "--out", &export_first.display().to_string()],
+        &[("TAGURU_DATA_DIR", &first_dir.display().to_string())],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let export_second = scratch("bootstrap-export-second");
+    let out = run_cli(
+        &["export", "--out", &export_second.display().to_string()],
+        &[("TAGURU_DATA_DIR", &second_dir.display().to_string())],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        dir_contents(&export_first),
+        dir_contents(&export_second),
+        "a bucket boot must serve exactly the lineage it inherited"
+    );
+
+    for dir in [bucket, first_dir, second_dir, export_first, export_second] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn deposing_a_live_writer_needs_stated_intent_but_a_retired_one_does_not() {
+    let bucket = scratch("intent-bucket");
+    let first = Server::start_with_env(
+        "repl-intent-holder",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+        ],
+    );
+    first.ok("PUT", "/contexts/sake", Some(json!({})));
+    wait_for("the holder's baseline", || {
+        bucket
+            .join("gen-00000000000000000001")
+            .join("complete")
+            .exists()
+    });
+
+    // While the first writer lives (fresh heartbeat, no retired
+    // marker), an empty-disk boot against its bucket refuses fast and
+    // names the acknowledgment it wants.
+    let refused_dir = scratch("intent-refused");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    crate::support::common::scrub_taguru_env(&mut command)
+        .env("TAGURU_ADDR", "127.0.0.1:0")
+        .env("TAGURU_DATA_DIR", &refused_dir)
+        .env("TAGURU_REPLICATE_URL", bucket_url(&bucket))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().expect("server binary must spawn");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("the takeover guard must refuse promptly, not boot");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stderr = String::new();
+    use std::io::Read as _;
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(!status.success(), "the boot must be refused");
+    assert!(stderr.contains("take-over"), "{stderr}");
+
+    // A clean stop retires the generation, and the same empty-disk
+    // boot proceeds with no acknowledgment at all.
+    let first_dir = first.stop_gracefully();
+    let second = Server::start_with_env(
+        "repl-intent-successor",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+        ],
+    );
+    let page = second.ok("GET", "/contexts", None);
+    assert_eq!(
+        page["contexts"].as_array().unwrap().len(),
+        1,
+        "the retired lineage hydrates freely: {page}"
+    );
+
+    for dir in [bucket, refused_dir, first_dir, second.stop_gracefully()] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

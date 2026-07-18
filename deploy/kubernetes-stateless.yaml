@@ -1,0 +1,121 @@
+# Taguru on Kubernetes, STATELESS variant (issue #128): the bucket is
+# the source of truth and the volume is an emptyDir cache — the pod
+# boots anywhere by hydrating from TAGURU_REPLICATE_URL, so instance
+# loss stops being volume surgery. Use kubernetes.yaml (the PVC
+# variant) when you would rather not put object storage on the boot
+# path.
+#
+#   kubectl create namespace taguru
+#   kubectl -n taguru create secret generic taguru-keys \
+#     --from-literal=TAGURU_API_TOKENS='ops:CHANGE-ME' \
+#     --from-literal=TAGURU_REPLICATE_URL='s3://my-bucket/taguru'
+#   kubectl -n taguru apply -f kubernetes-stateless.yaml
+#
+# What changes against the PVC variant, and why:
+#   - emptyDir instead of the PersistentVolumeClaim: any node will do.
+#     What it costs: RPO becomes the shipping lag for real — a crashed
+#     pod's un-shipped tail (seconds at the default interval) is gone,
+#     where the PVC variant's WAL replay would have kept it. State the
+#     trade honestly before choosing this file.
+#   - TAGURU_TAKEOVER=1 baked in: every fresh pod starts empty, so
+#     after a CRASH (no clean shutdown, heartbeat still fresh) the
+#     replacement must depose its predecessor's generation to serve at
+#     all — without this it would refuse for the 300s takeover grace.
+#     The guard this disables is only the politeness layer; epoch
+#     fencing still makes any accidental second writer fail-stop its
+#     shipping, loudly, so a misconfigured duplicate Deployment cannot
+#     corrupt the bucket lineage — but it WILL silently depose the
+#     writer you meant to keep, so never point two of these at one
+#     bucket prefix.
+#   - replicas: 1 + strategy: Recreate still: fencing arbitrates
+#     writers; it does not make two of them useful. The single-writer
+#     model is unchanged — this file only changes where truth lives.
+#   - startupProbe sized for hydration, not just preload: an empty
+#     disk downloads the shared files and every pinned context before
+#     the port opens (unpinned contexts hydrate on first touch or in
+#     the background fill). Budget ≈ pinned bytes ÷ bucket bandwidth;
+#     resize failureThreshold to the fleet you actually have.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taguru
+  labels: { app: taguru }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: taguru }
+  template:
+    metadata:
+      labels: { app: taguru }
+    spec:
+      terminationGracePeriodSeconds: 200
+      containers:
+        - name: taguru
+          image: ghcr.io/t0k0sh1/taguru:0.3.0 # pin; `latest` moves
+          ports:
+            - containerPort: 8248
+              name: http
+          envFrom:
+            # Must carry TAGURU_REPLICATE_URL — truth lives there now —
+            # with the pod granted that cloud's identity (IRSA /
+            # Workload Identity); the client rides the default
+            # credential chain.
+            - secretRef:
+                name: taguru-keys
+          env:
+            - name: TAGURU_DATA_DIR
+              value: /data
+            - name: TAGURU_TAKEOVER
+              value: "1" # see the header: crash recovery needs it
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+          startupProbe:
+            httpGet: { path: /live, port: http }
+            # Boot = shared-file hydration + parallel pinned hydration
+            # from the bucket; the port opens when the pinned set is
+            # local. 5s × 60 = five minutes of grace — resize to
+            # pinned bytes ÷ bucket bandwidth.
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: { path: /live, port: http }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true # /data is the only write target
+            allowPrivilegeEscalation: false
+      securityContext:
+        # The scratch image runs as 65532; the volume must be writable
+        # by that uid.
+        fsGroup: 65532
+      volumes:
+        - name: data
+          # The cache. Size it like the PVC it replaces: the full data
+          # directory lands here as contexts hydrate. sizeLimit evicts
+          # the POD when exceeded — generous beats a surprise restart.
+          emptyDir:
+            sizeLimit: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: taguru
+spec:
+  selector: { app: taguru }
+  ports:
+    - name: http
+      port: 8248
+      targetPort: http
+# Expose beyond the cluster only behind TLS (Ingress/Gateway with a
+# certificate) — a bearer token is the whole credential.
