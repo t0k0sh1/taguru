@@ -2018,12 +2018,24 @@ impl Context {
             .concepts
             .iter()
             .enumerate()
-            .map(|(id, record)| {
-                // Widen before summing: the two u32 halves can together
-                // exceed u32 — the same reason validate_chains sums
-                // them in u64.
-                let degree = (record.outgoing_count as usize) + (record.incoming_count as usize);
-                (degree, id as u32)
+            .map(|(id, _)| {
+                let id = id as u32;
+                // outgoing_count/incoming_count are chain LENGTHS — every
+                // edge ever created, including ones retract_association/
+                // retract_source zeroed without unlinking. Walk the chains
+                // and count only count > 0 edges instead, the same
+                // dead-edge test describe/explore/adjacent apply, so a
+                // concept that has had every association withdrawn can't
+                // still rank as "most connected".
+                let degree = self
+                    .outgoing(id)
+                    .filter(|&edge_id| self.edges[edge_id as usize].count > 0)
+                    .count()
+                    + self
+                        .incoming(id)
+                        .filter(|&edge_id| self.edges[edge_id as usize].count > 0)
+                        .count();
+                (degree, id)
             })
             .collect();
         ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
@@ -6386,6 +6398,27 @@ mod tests {
         assert_eq!(top, vec![("私", 4), ("りんご", 2)]);
         // A limit beyond the table is just everything.
         assert_eq!(context.top_concepts(100).len(), 4);
+    }
+
+    #[test]
+    fn top_concepts_excludes_retracted_associations() {
+        let mut context = Context::default();
+        associate_examples(&mut context);
+        context
+            .associate_from("私", "食べられる", "りんご", -0.2, "文書1", None)
+            .unwrap();
+
+        // Retracting zeroes the edge's count but leaves it linked into
+        // both concepts' chains — outgoing_count/incoming_count (chain
+        // length) don't shrink. top_concepts must not still credit 私 and
+        // りんご for a withdrawn association.
+        context
+            .retract_association("私", "食べられる", "りんご")
+            .unwrap();
+
+        let top = context.top_concepts(4);
+        assert_eq!(top.iter().find(|&&(n, _)| n == "私").unwrap().1, 3);
+        assert_eq!(top.iter().find(|&&(n, _)| n == "りんご").unwrap().1, 1);
     }
 
     #[test]
