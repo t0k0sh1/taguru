@@ -493,25 +493,41 @@ pub(crate) fn run(args: &[String]) -> i32 {
             }
             "--out" => match rest.next() {
                 Some(path) => out = Some(PathBuf::from(path)),
-                None => return usage_error("--out needs a directory path"),
+                None => {
+                    return crate::config::subcommand_usage_error(
+                        "export",
+                        "--out needs a directory path",
+                    );
+                }
             },
             "--config" => match rest.next() {
                 Some(path) => config = Some(PathBuf::from(path)),
-                None => return usage_error("--config needs a file path"),
+                None => {
+                    return crate::config::subcommand_usage_error(
+                        "export",
+                        "--config needs a file path",
+                    );
+                }
             },
             other if other.starts_with('-') => {
-                return usage_error(&format!("unknown flag '{other}'"));
+                return crate::config::subcommand_usage_error(
+                    "export",
+                    &format!("unknown flag '{other}'"),
+                );
             }
             name => names.push(name.to_string()),
         }
     }
     let Some(out) = out else {
-        return usage_error("--out DIR is required (where the streams land)");
+        return crate::config::subcommand_usage_error(
+            "export",
+            "--out DIR is required (where the streams land)",
+        );
     };
     // SAFETY (same contract as serve/import): applied while the
     // process is still single-threaded — export never starts a runtime.
     if let Some(path) = &config {
-        crate::cli::load_config(path);
+        crate::config::load_config(path);
     }
 
     // Registry warnings (WAL replay notes, load errors) must reach the
@@ -600,7 +616,7 @@ fn export_group_file(
     out: &std::path::Path,
 ) -> Result<String, String> {
     let path = out.join(format!("{}.group.jsonl", crate::registry::file_stem(name)));
-    crate::registry::write_atomic(&path, render_group(name, record).as_bytes())
+    crate::storage::write_atomic(&path, render_group(name, record).as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     Ok(format!(
         "{}: group '{name}' → {} member context(s), {} child group(s)",
@@ -629,7 +645,7 @@ fn export_one(state: &AppState, name: &str, out: &std::path::Path) -> Result<Str
     // refusal, and a crash while REFRESHING an existing backup must not
     // shred the previous good copy — the exact hazard the same helper
     // guards for the server's own images.
-    crate::registry::write_atomic(&path, rendered.stream.as_bytes())
+    crate::storage::write_atomic(&path, rendered.stream.as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     Ok(format!(
         "{}: context '{name}' → {} batch(es), {} association line(s), {} alias(es){}{}",
@@ -646,11 +662,6 @@ fn export_one(state: &AppState, name: &str, out: &std::path::Path) -> Result<Str
             dropped => format!(", {dropped} alias(es) dropped (canonical has no live association)"),
         },
     ))
-}
-
-fn usage_error(message: &str) -> i32 {
-    eprintln!("taguru: export: {message} — try 'taguru export --help'");
-    2
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@
 //! recomputed when a passage becomes resident (the same
 //! rebuild-on-load posture as the entry index).
 
-use crate::embedding::fnv1a;
+use crate::hash::fnv1a;
 
 /// One paragraph's place in its source text: `[start, end)` byte
 /// offsets (always on `\n` boundaries, so always valid UTF-8 cuts) and

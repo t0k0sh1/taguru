@@ -640,7 +640,7 @@ impl PassageStore {
             }
         });
         let bytes = snapshot_to_bytes(&sources, seen_seq - 1);
-        crate::registry::write_atomic(&self.snapshot_path, &bytes)?;
+        crate::storage::write_atomic(&self.snapshot_path, &bytes)?;
 
         // The snapshot's rename is durable, so the legacy file's
         // contents live there now (any base it fed is baked in) and the
@@ -648,7 +648,7 @@ impl PassageStore {
         // the whole point: removing it BEFORE a durable snapshot exists
         // would strand the passages of a crash in between. A failed
         // unlink lingers harmlessly and retries next compaction.
-        if let Err(error) = crate::registry::remove_persisted_file(&self.legacy_path)
+        if let Err(error) = crate::storage::remove_persisted_file(&self.legacy_path)
             && error.kind() != io::ErrorKind::NotFound
         {
             tracing::warn!(

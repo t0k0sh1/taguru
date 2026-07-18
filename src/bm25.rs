@@ -18,7 +18,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::embedding::{FNV1A_OFFSET, fnv1a_fold};
+use crate::hash::{FNV1A_OFFSET, fnv1a_fold};
 use crate::passages::PassageRecord;
 use crate::registry::passage_terms;
 

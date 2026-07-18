@@ -15,6 +15,10 @@
 //!
 //! Run with `--nocapture` for the per-question table.
 
+#[path = "common/recall.rs"]
+mod common;
+
+use common::{Question, assert_golden_recall};
 use taguru::context::Context;
 
 /// The corpus: one small cache crate as an ingester following the
@@ -93,12 +97,6 @@ fn corpus() -> Context {
     context
 }
 
-struct Question {
-    ask: &'static str,
-    cues: &'static [&'static str],
-    needed: &'static [(&'static str, &'static str, &'static str)],
-}
-
 const QUESTIONS: &[Question] = &[
     Question {
         ask: "fetchBlock は何を呼ぶ? (camelCase cue → snake_case 識別子)",
@@ -161,14 +159,12 @@ const QUESTIONS: &[Question] = &[
     },
 ];
 
-/// The mechanical retrieval loop an LLM client runs: resolve every cue
-/// against both namespaces, keep every resolution tied at the top
-/// score (code vocabularies collide on case, and both referents are
-/// legitimate answers), activate from the resolved origins, then
-/// role-pinned queries on them.
-fn retrieve(context: &Context, cues: &[&str]) -> Vec<(String, String, String)> {
+/// Every resolution tied at the top score becomes an origin, not just
+/// the first — code vocabularies collide on case (`Frame`/`frame`
+/// both normalize to the same entry form and both come back at 1.0),
+/// and an argmax strategy would silently drop one referent.
+fn resolve_origins(context: &Context, cues: &[&str]) -> Vec<String> {
     let mut origins: Vec<String> = Vec::new();
-    let mut labels: Vec<String> = Vec::new();
     for cue in cues {
         let resolutions = context.resolve(cue);
         if let Some(best) = resolutions.first().map(|top| top.score) {
@@ -181,88 +177,17 @@ fn retrieve(context: &Context, cues: &[&str]) -> Vec<(String, String, String)> {
                 }
             }
         }
-        if let Some(top) = context.resolve_label(cue).into_iter().next()
-            && !labels.contains(&top.name)
-        {
-            labels.push(top.name);
-        }
     }
-    let origin_refs: Vec<&str> = origins.iter().map(String::as_str).collect();
-    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-
-    let triple = |a: taguru::context::Association| (a.subject, a.label, a.object);
-    let mut facts: Vec<(String, String, String)> = Vec::new();
-    facts.extend(
-        context
-            .activate(&origin_refs, 0.5, 20)
-            .1
-            .into_iter()
-            .map(|activation| triple(activation.association)),
-    );
-    facts.extend(
-        context
-            .query_any(&origin_refs, &[], &[])
-            .into_iter()
-            .map(triple),
-    );
-    facts.extend(
-        context
-            .query_any(&[], &[], &origin_refs)
-            .into_iter()
-            .map(triple),
-    );
-    if !label_refs.is_empty() {
-        facts.extend(
-            context
-                .query_any(&origin_refs, &label_refs, &[])
-                .into_iter()
-                .map(triple),
-        );
-    }
-    facts
+    origins
 }
 
 #[test]
 fn golden_code_questions_recall_every_needed_fact() {
     let context = corpus();
-
-    let mut needed_total = 0usize;
-    let mut needed_hit = 0usize;
-    let mut unanswered: Vec<&str> = Vec::new();
-
-    println!("\n=== code needed-fact recall ===");
-    for question in QUESTIONS {
-        let facts = retrieve(&context, question.cues);
-        let mut all = true;
-        for &(s, l, o) in question.needed {
-            needed_total += 1;
-            let hit = facts
-                .iter()
-                .any(|(fs, fl, fo)| fs == s && fl == l && fo == o);
-            if hit {
-                needed_hit += 1;
-            } else {
-                all = false;
-                println!("  MISS {} — 不足: ({s}, {l}, {o})", question.ask);
-            }
-        }
-        if all {
-            println!("  ok   {}", question.ask);
-        } else {
-            unanswered.push(question.ask);
-        }
-    }
-    println!(
-        "  → 必要事実の再現率 {needed_hit}/{needed_total}, 完答 {}/{}",
-        QUESTIONS.len() - unanswered.len(),
-        QUESTIONS.len()
-    );
-
-    // The regression floor: every question must stay fully answered.
-    // A failure here means an identifier-entry or reachability
-    // regression — read the MISS lines above.
-    assert!(
-        unanswered.is_empty(),
-        "unanswered questions: {unanswered:?}"
+    assert_golden_recall(
+        "code needed-fact recall",
+        &context,
+        QUESTIONS,
+        resolve_origins,
     );
 }

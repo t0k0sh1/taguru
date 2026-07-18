@@ -600,38 +600,25 @@ impl Metrics {
         );
         for ((method, route), stat) in &routes {
             let snapshot = stat.latency.snapshot();
-            for ((_, le), value) in LATENCY_BUCKETS.iter().zip(snapshot.cumulative) {
-                out.push_str(&format!(
-                    "taguru_http_request_duration_seconds_bucket{{method=\"{method}\",route=\"{route}\",le=\"{le}\"}} {value}\n"
-                ));
-            }
-            let count = snapshot.count;
-            let sum = snapshot.sum_micros as f64 / 1e6;
-            out.push_str(&format!(
-                "taguru_http_request_duration_seconds_bucket{{method=\"{method}\",route=\"{route}\",le=\"+Inf\"}} {count}\n"
-            ));
-            out.push_str(&format!(
-                "taguru_http_request_duration_seconds_sum{{method=\"{method}\",route=\"{route}\"}} {sum}\n"
-            ));
-            out.push_str(&format!(
-                "taguru_http_request_duration_seconds_count{{method=\"{method}\",route=\"{route}\"}} {count}\n"
-            ));
+            push_histogram(
+                &mut out,
+                "taguru_http_request_duration_seconds",
+                &format!("method=\"{method}\",route=\"{route}\""),
+                &snapshot,
+            );
         }
         drop(http);
 
         // Fixed-cardinality families always emit every label
         // combination, zeros included, so dashboards never see an
         // absent series.
-        push_header(
+        push_value(
             &mut out,
             "taguru_cache_hits_total",
             "counter",
             "Context cache hits (already resident, no disk load).",
+            self.cache_hits.load(Ordering::Relaxed),
         );
-        out.push_str(&format!(
-            "taguru_cache_hits_total {}\n",
-            self.cache_hits.load(Ordering::Relaxed)
-        ));
         push_outcomes(
             &mut out,
             "taguru_cache_loads_total",
@@ -695,22 +682,7 @@ impl Metrics {
              (calls past the top bucket land in +Inf).",
         );
         let snapshot = self.embed_latency.snapshot();
-        for ((_, le), value) in LATENCY_BUCKETS.iter().zip(snapshot.cumulative) {
-            out.push_str(&format!(
-                "taguru_embedding_duration_seconds_bucket{{le=\"{le}\"}} {value}\n"
-            ));
-        }
-        let count = snapshot.count;
-        out.push_str(&format!(
-            "taguru_embedding_duration_seconds_bucket{{le=\"+Inf\"}} {count}\n"
-        ));
-        out.push_str(&format!(
-            "taguru_embedding_duration_seconds_sum {}\n",
-            snapshot.sum_micros as f64 / 1_000_000.0
-        ));
-        out.push_str(&format!(
-            "taguru_embedding_duration_seconds_count {count}\n"
-        ));
+        push_histogram(&mut out, "taguru_embedding_duration_seconds", "", &snapshot);
 
         push_header(
             &mut out,
@@ -786,140 +758,104 @@ impl Metrics {
             ));
         }
 
-        push_header(
+        push_value(
             &mut out,
             "taguru_contexts_registered",
             "gauge",
             "Contexts known to the registry.",
+            gauges.contexts_registered,
         );
-        out.push_str(&format!(
-            "taguru_contexts_registered {}\n",
-            gauges.contexts_registered
-        ));
-        push_header(
+        push_value(
             &mut out,
             "taguru_groups_registered",
             "gauge",
             "Groups known to the registry.",
+            gauges.groups_registered,
         );
-        out.push_str(&format!(
-            "taguru_groups_registered {}\n",
-            gauges.groups_registered
-        ));
-        push_header(
+        push_value(
             &mut out,
             "taguru_contexts_resident",
             "gauge",
             "Contexts currently resident in memory.",
+            gauges.contexts_resident,
         );
-        out.push_str(&format!(
-            "taguru_contexts_resident {}\n",
-            gauges.contexts_resident
-        ));
-        push_header(
+        push_value(
             &mut out,
             "taguru_resident_bytes",
             "gauge",
             "Modeled resident estimate of loaded contexts and cached vector stores (graph and vector footprints, NOT process RSS).",
+            gauges.resident_bytes,
         );
-        out.push_str(&format!(
-            "taguru_resident_bytes {}\n",
-            gauges.resident_bytes
-        ));
-        push_header(
+        push_value(
             &mut out,
             "taguru_wal_bytes",
             "gauge",
             "Total bytes across all write-ahead logs; sustained growth means image flushes are failing.",
+            gauges.wal_bytes,
         );
-        out.push_str(&format!("taguru_wal_bytes {}\n", gauges.wal_bytes));
-        push_header(
+        push_value(
             &mut out,
             "taguru_passages_wal_bytes",
             "gauge",
             "Total bytes across all passage logs; these legitimately grow to about each context's snapshot size, so alert on growth far past that.",
+            gauges.passages_wal_bytes,
         );
-        out.push_str(&format!(
-            "taguru_passages_wal_bytes {}\n",
-            gauges.passages_wal_bytes
-        ));
-        push_header(
+        push_value(
             &mut out,
             "taguru_dead_edges",
             "gauge",
             "Live count of edges with count == 0 across all contexts — dead weight compaction would shed right now.",
+            gauges.dead_edges_total,
         );
-        out.push_str(&format!("taguru_dead_edges {}\n", gauges.dead_edges_total));
-        push_header(
+        push_value(
             &mut out,
             "taguru_dead_attributions",
             "gauge",
             "Live count of attribution records unlinked from every chain but not yet reclaimed, across all contexts.",
+            gauges.dead_attributions_total,
         );
-        out.push_str(&format!(
-            "taguru_dead_attributions {}\n",
-            gauges.dead_attributions_total
-        ));
-        push_header(
+        push_value(
             &mut out,
             "taguru_arena_slack_bytes",
             "gauge",
             "Lower-bound arena bytes behind removed aliases across all contexts — bytes compaction would not carry forward.",
+            gauges.arena_slack_total,
         );
-        out.push_str(&format!(
-            "taguru_arena_slack_bytes {}\n",
-            gauges.arena_slack_total
-        ));
-        push_header(
+        push_value(
             &mut out,
             "taguru_unsourced_edges",
             "gauge",
             "Live count of edges carrying weight no named source explains, across all contexts.",
+            gauges.unsourced_edges_total,
         );
-        out.push_str(&format!(
-            "taguru_unsourced_edges {}\n",
-            gauges.unsourced_edges_total
-        ));
-        push_header(
+        push_value(
             &mut out,
             "taguru_unsourced_weight",
             "gauge",
             "Total unsourced weight (absolute value), summed across all contexts.",
+            gauges.unsourced_weight_total,
         );
-        out.push_str(&format!(
-            "taguru_unsourced_weight {}\n",
-            gauges.unsourced_weight_total
-        ));
-        push_header(
+        push_value(
             &mut out,
             "taguru_last_flush_success_timestamp_seconds",
             "gauge",
             "Unix time of the last successful image flush (0 = none since boot); alert on time() minus this.",
+            self.last_flush_success_epoch.load(Ordering::Relaxed),
         );
-        out.push_str(&format!(
-            "taguru_last_flush_success_timestamp_seconds {}\n",
-            self.last_flush_success_epoch.load(Ordering::Relaxed)
-        ));
-        push_header(
+        push_value(
             &mut out,
             "taguru_inflight_requests",
             "gauge",
             "Requests currently being served (probe endpoints exempt).",
+            self.inflight.load(Ordering::Relaxed),
         );
-        out.push_str(&format!(
-            "taguru_inflight_requests {}\n",
-            self.inflight.load(Ordering::Relaxed)
-        ));
-        push_header(
+        push_value(
             &mut out,
             "taguru_requests_shed_total",
             "counter",
             "Requests refused with a 503 at the in-flight ceiling (TAGURU_MAX_CONCURRENT_REQUESTS).",
+            self.requests_shed.load(Ordering::Relaxed),
         );
-        out.push_str(&format!(
-            "taguru_requests_shed_total {}\n",
-            self.requests_shed.load(Ordering::Relaxed)
-        ));
         push_header(
             &mut out,
             "taguru_build_info",
@@ -937,6 +873,43 @@ impl Metrics {
 
 fn push_header(out: &mut String, name: &str, kind: &str, help: &str) {
     out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
+}
+
+/// One gauge or counter family with a single, label-free value.
+fn push_value(out: &mut String, name: &str, kind: &str, help: &str, value: impl std::fmt::Display) {
+    push_header(out, name, kind, help);
+    out.push_str(&format!("{name} {value}\n"));
+}
+
+/// A latency histogram family — bucket counts, the +Inf bucket, sum,
+/// and count, the shape both `_duration_seconds` histograms share.
+/// `labels` is the label body (no braces) every line in the family
+/// carries ahead of `le`, or "" for the label-free embedding histogram.
+fn push_histogram(out: &mut String, name: &str, labels: &str, snapshot: &HistogramSnapshot) {
+    let le_prefix = if labels.is_empty() {
+        String::new()
+    } else {
+        format!("{labels},")
+    };
+    let block = if labels.is_empty() {
+        String::new()
+    } else {
+        format!("{{{labels}}}")
+    };
+    for ((_, le), value) in LATENCY_BUCKETS.iter().zip(snapshot.cumulative) {
+        out.push_str(&format!(
+            "{name}_bucket{{{le_prefix}le=\"{le}\"}} {value}\n"
+        ));
+    }
+    let count = snapshot.count;
+    out.push_str(&format!(
+        "{name}_bucket{{{le_prefix}le=\"+Inf\"}} {count}\n"
+    ));
+    out.push_str(&format!(
+        "{name}_sum{block} {}\n",
+        snapshot.sum_micros as f64 / 1_000_000.0
+    ));
+    out.push_str(&format!("{name}_count{block} {count}\n"));
 }
 
 /// One counter family with the ok/failed outcome label, zeros included.
@@ -987,19 +960,9 @@ pub async fn track_http(
     // it cannot ride the signature as an extractor the way MatchedPath
     // (which supports optional extraction) does.
     let (mut parts, body) = request.into_parts();
-    let name = {
-        use axum::extract::FromRequestParts as _;
-        axum::extract::RawPathParams::from_request_parts(&mut parts, &())
-            .await
-            .ok()
-            .and_then(|params| {
-                params
-                    .iter()
-                    .find(|(name, _)| *name == "name")
-                    .map(|(_, value)| value.to_string())
-            })
-            .unwrap_or_else(|| "-".to_string())
-    };
+    let name = crate::api::path_param(&mut parts, "name")
+        .await
+        .unwrap_or_else(|| "-".to_string());
     // The name lands in the column matching its kind — on the group
     // routes `{name}` is a GROUP — so a log query over `context=`
     // never silently matches group names (the audit lines and the

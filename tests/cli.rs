@@ -7,6 +7,9 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
+#[path = "common/spawn.rs"]
+mod common;
+
 fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_taguru"))
         .args(args)
@@ -33,17 +36,7 @@ fn write_config(tag: &str, lines: &str) -> (PathBuf, PathBuf) {
 /// address), then stops it and returns the whole stderr.
 fn serve_with_config(config: &std::path::Path, extra_env: &[(&str, &str)]) -> String {
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
-    command
-        .args(["--config", &config.display().to_string()])
-        .env_remove("TAGURU_ADDR")
-        .env_remove("TAGURU_DATA_DIR")
-        .env_remove("TAGURU_EMBED_URL")
-        .env_remove("TAGURU_API_TOKEN")
-        .env_remove("TAGURU_CONFIG")
-        .env_remove("TAGURU_LOG_SEARCHES")
-        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_PROTOCOL");
+    common::scrub_taguru_env(&mut command).args(["--config", &config.display().to_string()]);
     for (key, value) in extra_env {
         command.env(key, value);
     }
@@ -54,16 +47,7 @@ fn serve_with_config(config: &std::path::Path, extra_env: &[(&str, &str)]) -> St
         .expect("server must spawn");
 
     let stdout = child.stdout.take().expect("stdout must be piped");
-    let mut lines = BufReader::new(stdout).lines();
-    loop {
-        let line = lines
-            .next()
-            .expect("server must reach its listen line")
-            .expect("stdout must be readable");
-        if line.starts_with("listening on ") {
-            break;
-        }
-    }
+    common::read_listen_line("cli server", stdout);
     let _ = child.kill();
     let _ = child.wait();
     let mut stderr = String::new();
@@ -82,27 +66,17 @@ fn spawn_server(tag: &str) -> (std::process::Child, String, PathBuf) {
     let dir = std::env::temp_dir().join(format!("taguru-cli-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_taguru"))
-        .env_remove("TAGURU_CONFIG")
-        .env_remove("TAGURU_API_TOKEN")
-        .env_remove("TAGURU_EMBED_URL")
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    common::scrub_taguru_env(&mut command)
         .env("TAGURU_ADDR", "127.0.0.1:0")
-        .env("TAGURU_DATA_DIR", dir.join("data"))
+        .env("TAGURU_DATA_DIR", dir.join("data"));
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("server must spawn");
     let stdout = child.stdout.take().expect("stdout must be piped");
-    let mut lines = BufReader::new(stdout).lines();
-    let addr = loop {
-        let line = lines
-            .next()
-            .expect("server must reach its listen line")
-            .expect("stdout must be readable");
-        if let Some(addr) = line.strip_prefix("listening on ") {
-            break addr.to_string();
-        }
-    };
+    let (addr, _) = common::read_listen_line("cli server", stdout);
     (child, addr, dir)
 }
 
@@ -210,28 +184,14 @@ fn a_missing_config_file_refuses_to_boot() {
 fn taguru_config_variable_names_the_file_too() {
     let (dir, config) = write_config("viaenv", "TAGURU_ADDR=127.0.0.1:0\n");
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
-    command
-        .env_remove("TAGURU_ADDR")
-        .env_remove("TAGURU_DATA_DIR")
-        .env_remove("TAGURU_EMBED_URL")
-        .env_remove("TAGURU_API_TOKEN")
-        .env("TAGURU_CONFIG", &config);
+    common::scrub_taguru_env(&mut command).env("TAGURU_CONFIG", &config);
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("server must spawn");
     let stdout = child.stdout.take().expect("stdout must be piped");
-    let mut lines = BufReader::new(stdout).lines();
-    loop {
-        let line = lines
-            .next()
-            .expect("server must reach its listen line")
-            .expect("stdout must be readable");
-        if line.starts_with("listening on ") {
-            break;
-        }
-    }
+    common::read_listen_line("cli server", stdout);
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);

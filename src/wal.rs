@@ -332,7 +332,7 @@ fn injected_create_fsync_failure() -> Option<io::Error> {
     })
 }
 
-/// [`crate::registry::fsync_parent_dir`] for the directory-entry sync
+/// [`crate::storage::fsync_parent_dir`] for the directory-entry sync
 /// [`append_batch`] performs right after creating a new WAL file —
 /// test-fault-aware the same way [`injected_append_failure`] is for the
 /// append itself, so a regression test can fail this specific sync (and
@@ -343,7 +343,7 @@ fn fsync_parent_dir_after_create(path: &Path) -> io::Result<()> {
     if let Some(error) = injected_create_fsync_failure() {
         return Err(error);
     }
-    crate::registry::fsync_parent_dir(path)
+    crate::storage::fsync_parent_dir(path)
 }
 
 /// The shape of a non-empty final WAL line missing its trailing `\n` —
@@ -376,7 +376,7 @@ fn append_missing_newline(path: &Path) -> io::Result<()> {
     if let Some(error) = injected_newline_heal_failure() {
         return Err(error);
     }
-    if let Some(error) = crate::registry::injected_persistence_failure("WAL newline heal") {
+    if let Some(error) = crate::storage::injected_persistence_failure("WAL newline heal") {
         return Err(error);
     }
     let mut file = fs::OpenOptions::new().append(true).open(path)?;
@@ -404,7 +404,7 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
     if let Some(error) = injected_append_failure() {
         return Err(error);
     }
-    if let Some(error) = crate::registry::injected_persistence_failure("WAL append") {
+    if let Some(error) = crate::storage::injected_persistence_failure("WAL append") {
         return Err(error);
     }
     let mut buffer = Vec::new();
@@ -454,7 +454,7 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
         // that failure to a caller. Retrying the sync instead gives the
         // directory entry a second chance to actually land: on success
         // the batch proceeds with a file that is now durable after all.
-        if crate::registry::remove_persisted_file(path).is_err() {
+        if crate::storage::remove_persisted_file(path).is_err() {
             if let Err(retry_error) = fsync_parent_dir_after_create(path) {
                 // The sync failed twice AND the cleanup failed once
                 // already — a disk in serious trouble. Leaving the file
@@ -467,7 +467,7 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
                 // the original disk failure is exceedingly rare to
                 // begin with, and rarer still to also make the cleanup
                 // fail twice over.
-                let _ = crate::registry::remove_persisted_file(path);
+                let _ = crate::storage::remove_persisted_file(path);
                 return Err(retry_error);
             }
         } else {
@@ -823,7 +823,7 @@ pub fn truncate_to(path: &Path, len: u64) -> io::Result<()> {
     if let Some(error) = injected_truncate_failure() {
         return Err(error);
     }
-    if let Some(error) = crate::registry::injected_persistence_failure("WAL truncate") {
+    if let Some(error) = crate::storage::injected_persistence_failure("WAL truncate") {
         return Err(error);
     }
     let file = fs::OpenOptions::new().write(true).open(path)?;
@@ -1400,9 +1400,9 @@ mod tests {
         // `remove_persisted_file`'s "unlink" check (fails — the arm was
         // at 0). The directory fsync itself never touches this counter,
         // so its failure/retry is driven entirely by `fail_next_create_fsyncs`.
-        crate::registry::fail_persistence_ops_after(1);
+        crate::storage::fail_persistence_ops_after(1);
         let result = append_batch(&path, 1, &[associate("a")]);
-        let past_end = crate::registry::clear_persistence_fault();
+        let past_end = crate::storage::clear_persistence_fault();
 
         result.unwrap();
         assert!(
@@ -1426,9 +1426,9 @@ mod tests {
         let path = scratch_wal("create-fsync-retry-fails");
 
         fail_next_create_fsyncs(2);
-        crate::registry::fail_persistence_ops_after(1);
+        crate::storage::fail_persistence_ops_after(1);
         let result = append_batch(&path, 1, &[associate("a")]);
-        let past_end = crate::registry::clear_persistence_fault();
+        let past_end = crate::storage::clear_persistence_fault();
 
         let error = result.unwrap_err();
         assert!(

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use taguru::context::Context;
 
 use crate::bm25::Bm25Index;
-use crate::cli::fmt_bytes;
+use crate::config::fmt_bytes;
 use crate::embedding::{PassageKey, PassageVectorStore};
 use crate::passages::{PassageRecord, record_bytes};
 use crate::registry::DEFAULT_PASSAGE_VECTOR_LIMIT;

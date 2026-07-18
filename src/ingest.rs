@@ -123,10 +123,18 @@ pub fn run(args: &[String]) -> i32 {
             "--no-embed" => no_embed = true,
             "--config" => match rest.next() {
                 Some(path) => config = Some(PathBuf::from(path)),
-                None => return usage_error("--config needs a file path"),
+                None => {
+                    return crate::config::subcommand_usage_error(
+                        "import",
+                        "--config needs a file path",
+                    );
+                }
             },
             other if other.starts_with('-') => {
-                return usage_error(&format!("unknown flag '{other}'"));
+                return crate::config::subcommand_usage_error(
+                    "import",
+                    &format!("unknown flag '{other}'"),
+                );
             }
             path => paths.push(path.to_string()),
         }
@@ -138,12 +146,12 @@ pub fn run(args: &[String]) -> i32 {
     // SAFETY (same contract as serve): applied while the process is
     // still single-threaded — import never starts a runtime at all.
     if let Some(path) = &config {
-        crate::cli::load_config(path);
+        crate::config::load_config(path);
     }
 
     let files = match expand(&paths) {
         Ok(files) => files,
-        Err(message) => return usage_error(&message),
+        Err(message) => return crate::config::subcommand_usage_error("import", &message),
     };
 
     // Pass 1 — every file parses, or nothing applies. Apply-stage
@@ -360,11 +368,6 @@ fn describe_group(name: &str, record: &GroupRecord) -> String {
         record.contexts.len(),
         record.groups.len()
     )
-}
-
-fn usage_error(message: &str) -> i32 {
-    eprintln!("taguru: import: {message} — try 'taguru import --help'");
-    2
 }
 
 /// Explicit files are taken as given; a directory contributes its
@@ -2098,9 +2101,9 @@ mod tests {
             )
             .unwrap();
 
-            crate::registry::fail_persistence_ops_after(failure);
+            crate::storage::fail_persistence_ops_after(failure);
             let result = apply_batch(&state, &reimport);
-            let past_end = crate::registry::clear_persistence_fault();
+            let past_end = crate::storage::clear_persistence_fault();
 
             if let Err(ApplyRefusal::Io(message)) = &result
                 && message.contains("could not be retracted")
@@ -2257,9 +2260,9 @@ mod tests {
             )
             .unwrap();
 
-            crate::registry::fail_persistence_ops_after(failure);
+            crate::storage::fail_persistence_ops_after(failure);
             let first = apply_batch(&state, &batch);
-            let past_end = crate::registry::clear_persistence_fault();
+            let past_end = crate::storage::clear_persistence_fault();
             let marker = crate::registry::import_marker_path(&dir, "sake", "doc-1");
 
             if past_end {

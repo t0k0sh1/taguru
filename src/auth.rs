@@ -390,15 +390,12 @@ pub async fn require_bearer(
     if !gate.fail_limiter.is_disabled() {
         let peer = crate::limits::peer_ip(&request).unwrap_or_else(|| Arc::from("peer:unknown"));
         if let Err(retry_after) = gate.fail_limiter.admit(&peer, started_at) {
-            let mut response = api::error(
+            return crate::limits::shed(
                 api::ErrorCode::RateLimited,
                 format!("too many failed authentication attempts — retry in {retry_after}s"),
+                retry_after,
                 started_at,
             );
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from(retry_after));
-            return response;
         }
     }
 
@@ -537,16 +534,7 @@ pub async fn enforce_authorization(
             "/groups/{name}" | "/groups/{name}/export" | "/groups/{name}/rename"
         )
     {
-        use axum::extract::FromRequestParts as _;
-        let context = axum::extract::RawPathParams::from_request_parts(&mut parts, &())
-            .await
-            .ok()
-            .and_then(|params| {
-                params
-                    .iter()
-                    .find(|(name, _)| *name == "name")
-                    .map(|(_, value)| value.to_string())
-            });
+        let context = api::path_param(&mut parts, "name").await;
         if let Some(context) = context
             && !scope.allows_context(&context)
         {

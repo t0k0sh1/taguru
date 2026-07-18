@@ -12,6 +12,10 @@
 //! whether these cues land, and this test turns that into a number.
 //! Run with `--nocapture` for the per-question table.
 
+#[path = "common/recall.rs"]
+mod common;
+
+use common::{Question, assert_golden_recall};
 use taguru::context::Context;
 
 /// The corpus: 34 assertions across five paragraphs, plus the aliases
@@ -69,12 +73,6 @@ fn corpus() -> Context {
         .add_concept_alias("Aomine Brewery", "青嶺酒造")
         .unwrap();
     context
-}
-
-struct Question {
-    ask: &'static str,
-    cues: &'static [&'static str],
-    needed: &'static [(&'static str, &'static str, &'static str)],
 }
 
 const QUESTIONS: &[Question] = &[
@@ -144,101 +142,27 @@ const QUESTIONS: &[Question] = &[
     },
 ];
 
-/// The mechanical retrieval loop an LLM client runs: resolve every cue
-/// against both namespaces, activate from the resolved origins, then
-/// role-pinned queries on them (plus the label-narrowed query when a
-/// cue resolved as a label).
-fn retrieve(context: &Context, cues: &[&str]) -> Vec<(String, String, String)> {
+/// Only the top hit becomes an origin — unlike code_recall.rs's tied
+/// identifiers, this corpus has no case-twin ambiguity to preserve.
+fn resolve_origins(context: &Context, cues: &[&str]) -> Vec<String> {
     let mut origins: Vec<String> = Vec::new();
-    let mut labels: Vec<String> = Vec::new();
     for cue in cues {
         if let Some(top) = context.resolve(cue).into_iter().next()
             && !origins.contains(&top.name)
         {
             origins.push(top.name);
         }
-        if let Some(top) = context.resolve_label(cue).into_iter().next()
-            && !labels.contains(&top.name)
-        {
-            labels.push(top.name);
-        }
     }
-    let origin_refs: Vec<&str> = origins.iter().map(String::as_str).collect();
-    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-
-    let triple = |a: taguru::context::Association| (a.subject, a.label, a.object);
-    let mut facts: Vec<(String, String, String)> = Vec::new();
-    facts.extend(
-        context
-            .activate(&origin_refs, 0.5, 20)
-            .1
-            .into_iter()
-            .map(|activation| triple(activation.association)),
-    );
-    facts.extend(
-        context
-            .query_any(&origin_refs, &[], &[])
-            .into_iter()
-            .map(triple),
-    );
-    facts.extend(
-        context
-            .query_any(&[], &[], &origin_refs)
-            .into_iter()
-            .map(triple),
-    );
-    if !label_refs.is_empty() {
-        facts.extend(
-            context
-                .query_any(&origin_refs, &label_refs, &[])
-                .into_iter()
-                .map(triple),
-        );
-    }
-    facts
+    origins
 }
 
 #[test]
 fn golden_questions_recall_every_needed_fact() {
     let context = corpus();
-
-    let mut needed_total = 0usize;
-    let mut needed_hit = 0usize;
-    let mut unanswered: Vec<&str> = Vec::new();
-
-    println!("\n=== QA needed-fact recall ===");
-    for question in QUESTIONS {
-        let facts = retrieve(&context, question.cues);
-        let mut all = true;
-        for &(s, l, o) in question.needed {
-            needed_total += 1;
-            let hit = facts
-                .iter()
-                .any(|(fs, fl, fo)| fs == s && fl == l && fo == o);
-            if hit {
-                needed_hit += 1;
-            } else {
-                all = false;
-                println!("  MISS {} — 不足: ({s}, {l}, {o})", question.ask);
-            }
-        }
-        if all {
-            println!("  ok   {}", question.ask);
-        } else {
-            unanswered.push(question.ask);
-        }
-    }
-    println!(
-        "  → 必要事実の再現率 {needed_hit}/{needed_total}, 完答 {}/{}",
-        QUESTIONS.len() - unanswered.len(),
-        QUESTIONS.len()
-    );
-
-    // The regression floor: every question in the golden set must stay
-    // fully answered. A failure here means an entry or reachability
-    // regression — read the MISS lines above.
-    assert!(
-        unanswered.is_empty(),
-        "unanswered questions: {unanswered:?}"
+    assert_golden_recall(
+        "QA needed-fact recall",
+        &context,
+        QUESTIONS,
+        resolve_origins,
     );
 }

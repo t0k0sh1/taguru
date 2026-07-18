@@ -121,12 +121,12 @@ pub fn run(args: &[String]) -> i32 {
     // process is still single-threaded — extract never starts a
     // runtime at all.
     if let Some(path) = &args.config {
-        crate::cli::load_config(path);
+        crate::config::load_config(path);
     }
 
     let files = match expand_documents(&args.paths) {
         Ok(files) => files,
-        Err(message) => return usage_error(&message),
+        Err(message) => return crate::config::subcommand_usage_error("extract", &message),
     };
 
     // The provider is demanded up front even when every document ends
@@ -166,7 +166,12 @@ pub fn run(args: &[String]) -> i32 {
         None => match std::env::var("TAGURU_EXTRACT_PARALLEL") {
             Ok(value) => match value.parse::<usize>() {
                 Ok(n) if n >= 1 => n,
-                _ => return usage_error("TAGURU_EXTRACT_PARALLEL needs an integer of at least 1"),
+                _ => {
+                    return crate::config::subcommand_usage_error(
+                        "extract",
+                        "TAGURU_EXTRACT_PARALLEL needs an integer of at least 1",
+                    );
+                }
             },
             Err(_) => 1,
         },
@@ -294,65 +299,114 @@ impl Args {
                         questions = n;
                     }
                     Some(_) => {
-                        return Err(usage_error(&format!(
-                            "--questions takes 1..={} (per paragraph)",
-                            crate::api::MAX_QUESTIONS_PER_PARAGRAPH
-                        )));
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            &format!(
+                                "--questions takes 1..={} (per paragraph)",
+                                crate::api::MAX_QUESTIONS_PER_PARAGRAPH
+                            ),
+                        ));
                     }
-                    None => return Err(usage_error("--questions needs a count")),
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--questions needs a count",
+                        ));
+                    }
                 },
                 "--config" => match rest.next() {
                     Some(path) => config = Some(PathBuf::from(path)),
-                    None => return Err(usage_error("--config needs a file path")),
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--config needs a file path",
+                        ));
+                    }
                 },
                 "--parallel" => match rest.next().map(|value| value.parse::<usize>()) {
                     Some(Ok(n)) if n >= 1 => parallel = Some(n),
-                    _ => return Err(usage_error("--parallel needs an integer of at least 1")),
+                    _ => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--parallel needs an integer of at least 1",
+                        ));
+                    }
                 },
                 "--context" => match rest.next() {
                     Some(name) => context = Some(name.clone()),
-                    None => return Err(usage_error("--context needs a name")),
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--context needs a name",
+                        ));
+                    }
                 },
                 "--description" => match rest.next() {
                     Some(text) => description = Some(text.clone()),
-                    None => return Err(usage_error("--description needs a text")),
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--description needs a text",
+                        ));
+                    }
                 },
                 "--out" => match rest.next() {
                     Some(dir) => out = Some(PathBuf::from(dir)),
-                    None => return Err(usage_error("--out needs a directory")),
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--out needs a directory",
+                        ));
+                    }
                 },
                 other if other.starts_with('-') => {
-                    return Err(usage_error(&format!("unknown flag '{other}'")));
+                    return Err(crate::config::subcommand_usage_error(
+                        "extract",
+                        &format!("unknown flag '{other}'"),
+                    ));
                 }
                 path => paths.push(path.to_string()),
             }
         }
         let Some(context) = context else {
-            return Err(usage_error("--context NAME is required"));
+            return Err(crate::config::subcommand_usage_error(
+                "extract",
+                "--context NAME is required",
+            ));
         };
         let Some(out) = out else {
-            return Err(usage_error("--out DIR is required"));
+            return Err(crate::config::subcommand_usage_error(
+                "extract",
+                "--out DIR is required",
+            ));
         };
         if context.len() > MAX_CONTEXT_NAME_BYTES {
-            return Err(usage_error(&format!(
-                "context name of {} bytes exceeds the {MAX_CONTEXT_NAME_BYTES}-byte cap",
-                context.len()
-            )));
+            return Err(crate::config::subcommand_usage_error(
+                "extract",
+                &format!(
+                    "context name of {} bytes exceeds the {MAX_CONTEXT_NAME_BYTES}-byte cap",
+                    context.len()
+                ),
+            ));
         }
         if let Some(text) = &description
             && text.len() > MAX_DESCRIPTION_BYTES
         {
-            return Err(usage_error(&format!(
-                "description of {} bytes exceeds the {MAX_DESCRIPTION_BYTES}-byte cap",
-                text.len()
-            )));
+            return Err(crate::config::subcommand_usage_error(
+                "extract",
+                &format!(
+                    "description of {} bytes exceeds the {MAX_DESCRIPTION_BYTES}-byte cap",
+                    text.len()
+                ),
+            ));
         }
         if paths.is_empty() {
             eprint!("{USAGE}");
             return Err(2);
         }
         if questions > 0 && no_passage {
-            return Err(usage_error(
+            return Err(crate::config::subcommand_usage_error(
+                "extract",
                 "--questions needs the passage (--no-passage strips the text the \
                  questions would attach to)",
             ));
@@ -482,7 +536,7 @@ impl Run {
                  ({message}) — a bug in taguru, not in the document"
             ));
         }
-        if let Err(error) = crate::registry::write_atomic(&out_path, body.as_bytes()) {
+        if let Err(error) = crate::storage::write_atomic(&out_path, body.as_bytes()) {
             return Err(format!("writing {}: {error}", out_path.display()));
         }
         self.manifest.record(
@@ -678,11 +732,6 @@ fn read_document(path: &Path) -> Result<String, String> {
     })
 }
 
-fn usage_error(message: &str) -> i32 {
-    eprintln!("taguru: extract: {message} — try 'taguru extract --help'");
-    2
-}
-
 /// Explicit files are taken as given; a directory contributes its
 /// `.md` and `.txt` files in name order — the same shape as import's
 /// expansion, and an empty directory is likewise a mistake.
@@ -736,7 +785,7 @@ impl ChatClient {
         })?;
         let model = std::env::var("TAGURU_EXTRACT_MODEL")
             .map_err(|_| "TAGURU_EXTRACT_MODEL is not set".to_string())?;
-        let timeout = crate::env_number("TAGURU_EXTRACT_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
+        let timeout = crate::env::env_number("TAGURU_EXTRACT_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
         // 4xx/5xx answers carry a body `complete` quotes in its error
         // messages, so have them come back as responses, not errors.
         let mut config = ureq::Agent::config_builder().http_status_as_error(false);
@@ -1565,7 +1614,7 @@ impl Manifest {
 
     fn save(&self, path: &Path) -> std::io::Result<()> {
         let text = serde_json::to_string_pretty(self).expect("a manifest serializes");
-        crate::registry::write_atomic(path, text.as_bytes())
+        crate::storage::write_atomic(path, text.as_bytes())
     }
 }
 

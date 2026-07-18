@@ -46,14 +46,27 @@ pub(crate) fn run(args: &[String]) -> i32 {
             }
             "--config" => match rest.next() {
                 Some(path) => config = Some(PathBuf::from(path)),
-                None => return usage_error("--config needs a file path"),
+                None => {
+                    return crate::config::subcommand_usage_error(
+                        "compact",
+                        "--config needs a file path",
+                    );
+                }
             },
             "--parallel" => match rest.next().map(|value| value.parse::<usize>()) {
                 Some(Ok(n)) if n >= 1 => parallel = n,
-                _ => return usage_error("--parallel needs an integer of at least 1"),
+                _ => {
+                    return crate::config::subcommand_usage_error(
+                        "compact",
+                        "--parallel needs an integer of at least 1",
+                    );
+                }
             },
             other if other.starts_with('-') => {
-                return usage_error(&format!("unknown flag '{other}'"));
+                return crate::config::subcommand_usage_error(
+                    "compact",
+                    &format!("unknown flag '{other}'"),
+                );
             }
             name => names.push(name.to_string()),
         }
@@ -61,7 +74,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
     // SAFETY (same contract as serve/import/export): applied while the
     // process is still single-threaded — no runtime ever starts here.
     if let Some(path) = &config {
-        crate::cli::load_config(path);
+        crate::config::load_config(path);
     }
 
     crate::ingest::init_logging();
@@ -122,11 +135,6 @@ pub(crate) fn run(args: &[String]) -> i32 {
     if failures > 0 { 1 } else { 0 }
 }
 
-fn usage_error(message: &str) -> i32 {
-    eprintln!("taguru: compact: {message} — try 'taguru compact --help'");
-    2
-}
-
 /// Prints one context's outcome in the shape both the sequential and
 /// `--parallel` paths share, so the two can never drift apart. Returns
 /// whether it succeeded, for the caller's failure count.
@@ -135,8 +143,8 @@ fn report_outcome(name: &str, result: &Result<CompactOutcome, AccessError>) -> b
         Ok(outcome) => {
             println!(
                 "context '{name}': {} → {} ({} dead edge(s) shed{})",
-                crate::cli::fmt_bytes(outcome.bytes_before as u64),
-                crate::cli::fmt_bytes(outcome.bytes_after as u64),
+                crate::config::fmt_bytes(outcome.bytes_before as u64),
+                crate::config::fmt_bytes(outcome.bytes_after as u64),
                 outcome.dead_edges,
                 match outcome.aliases_dropped {
                     0 => String::new(),

@@ -10,11 +10,13 @@ use taguru::deadline::Deadline;
 use crate::metrics::{ErrorKind, SearchOp};
 use crate::registry::{AppState, CitationLookup, PassageExplainLookup};
 
+use super::aliases::KeysetQuery;
+use super::recall::cross_targets;
 use super::{
-    AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, KeysetQuery, MAX_MATCH_LIMIT,
-    MAX_NAME_BYTES, access_error, bounded_parallel_map, clamp, cross_search_concurrency,
-    cross_targets, deadline_exceeded, empty, error, not_found, ok, overlong, oversized,
-    search_log_enabled,
+    AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, MAX_MATCH_LIMIT, MAX_NAME_BYTES,
+    MAX_PASSAGES_PER_REQUEST, MAX_QUESTION_BYTES, MAX_QUESTIONS_PER_PARAGRAPH, MAX_SECTION_BYTES,
+    access_error, bounded_parallel_map, clamp, cross_search_concurrency, deadline_exceeded, empty,
+    error, not_found, ok, orphaned_source, overlong, oversized, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -909,6 +911,219 @@ pub async fn cross_search_passages(
             .collect::<Vec<_>>(),
         started_at,
     )
+}
+
+/// Original text passages keyed by source id — the same opaque ids that
+/// appear on attributions — plus, optionally, doc2query questions and
+/// section markers per source, each naming a paragraph of that
+/// source's text IN THIS REQUEST (a question or section cannot attach
+/// to text the request does not carry: storage replaces per source,
+/// wholesale).
+#[derive(Debug, Deserialize)]
+pub struct StorePassagesRequest {
+    pub passages: BTreeMap<String, String>,
+    #[serde(default)]
+    pub questions: BTreeMap<String, Vec<QuestionSpec>>,
+    #[serde(default)]
+    pub sections: BTreeMap<String, Vec<SectionSpec>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionSpec {
+    pub paragraph: u32,
+    pub question: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SectionSpec {
+    pub paragraph: u32,
+    pub section: String,
+}
+
+/// What a passage store accomplished. `stored` counts the batch (the
+/// historical number, now named); the question and section tallies
+/// report doc2query/section bookkeeping — a dropped question or
+/// section named a paragraph that does not exist in the text it rode
+/// in with, or (sections only) lost out to a later marker claiming the
+/// same paragraph.
+#[derive(Serialize)]
+pub struct StoredPassages {
+    pub stored: usize,
+    pub questions_stored: usize,
+    pub questions_dropped: usize,
+    pub sections_stored: usize,
+    pub sections_dropped: usize,
+}
+
+pub async fn store_passages(
+    State(state): State<AppState>,
+    AppPath(name): AppPath<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
+    AppJson(request): AppJson<StorePassagesRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    // Refused before any tokenization or lock is taken: nothing of an
+    // oversized batch is stored.
+    if request.passages.len() > MAX_PASSAGES_PER_REQUEST {
+        return error(
+            ErrorCode::OverLimit,
+            format!(
+                "batch of {} passages exceeds the per-request limit of \
+                 {MAX_PASSAGES_PER_REQUEST}; split the store",
+                request.passages.len()
+            ),
+            started_at,
+        );
+    }
+    // Source ids are names (the passage text itself is a document and
+    // rides under the body cap instead) — and like every name, an
+    // empty one is refused: it would list as a blank entry in GET
+    // /sources and answer lookups nothing sensible ever asks.
+    for source in request.passages.keys() {
+        if let Some(refusal) = oversized("a passage source id", source, MAX_NAME_BYTES, started_at)
+        {
+            return refusal;
+        }
+        if let Some(refusal) = empty("a passage source id", source, started_at) {
+            return refusal;
+        }
+    }
+    // Question structure is the request's to get right: sources must
+    // name passages in THIS request, sizes and per-paragraph counts
+    // stay under the shared caps. (Whether a paragraph index exists in
+    // the text is settled at store time, one rule for every entrance.)
+    for (source, questions) in &request.questions {
+        if let Some(refusal) = orphaned_source("questions", source, &request.passages, started_at) {
+            return refusal;
+        }
+        let mut per_paragraph: BTreeMap<u32, usize> = BTreeMap::new();
+        for spec in questions {
+            if spec.question.len() > MAX_QUESTION_BYTES {
+                return error(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "a question for '{source}' is {} bytes; questions are capped at \
+                         {MAX_QUESTION_BYTES} bytes",
+                        spec.question.len()
+                    ),
+                    started_at,
+                );
+            }
+            // Embedded verbatim on the next refresh, where providers
+            // refuse zero-length input — which would stall the whole
+            // refresh pass at this row, every pass.
+            if let Some(refusal) = empty(
+                &format!("a question for '{source}'"),
+                &spec.question,
+                started_at,
+            ) {
+                return refusal;
+            }
+            let count = per_paragraph.entry(spec.paragraph).or_insert(0);
+            *count += 1;
+            if *count > MAX_QUESTIONS_PER_PARAGRAPH {
+                return error(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "paragraph {} of '{source}' carries more than \
+                         {MAX_QUESTIONS_PER_PARAGRAPH} questions",
+                        spec.paragraph
+                    ),
+                    started_at,
+                );
+            }
+        }
+    }
+    // Section structure follows questions' rule: sources must name
+    // passages in THIS request, sizes stay under the shared cap.
+    // (Whether a paragraph index exists in the text is settled at
+    // store time, same as questions; ingest's batch format has no
+    // per-paragraph section count limit either, so neither does this.)
+    for (source, sections) in &request.sections {
+        if let Some(refusal) = orphaned_source("sections", source, &request.passages, started_at) {
+            return refusal;
+        }
+        for spec in sections {
+            if spec.section.len() > MAX_SECTION_BYTES {
+                return error(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "a section label for '{source}' is {} bytes; section labels are \
+                         capped at {MAX_SECTION_BYTES} bytes",
+                        spec.section.len()
+                    ),
+                    started_at,
+                );
+            }
+            if let Some(refusal) = empty(
+                &format!("a section label for '{source}'"),
+                &spec.section,
+                started_at,
+            ) {
+                return refusal;
+            }
+        }
+    }
+    let mut questions = request.questions;
+    let mut sections = request.sections;
+    let passages: BTreeMap<String, crate::passages::PassageSubmission> = request
+        .passages
+        .into_iter()
+        .map(|(source, text)| {
+            let questions = questions
+                .remove(&source)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|spec| (spec.paragraph, spec.question))
+                .collect();
+            let sections = sections
+                .remove(&source)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|spec| (spec.paragraph, spec.section))
+                .collect();
+            (
+                source,
+                crate::passages::PassageSubmission {
+                    text,
+                    questions,
+                    sections,
+                },
+            )
+        })
+        .collect();
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
+    // Off the async worker: the store fsyncs its log, and folding the
+    // new paragraphs into a resident index tokenizes them.
+    let outcome = tokio::task::block_in_place(|| state.store_passages(&name, passages));
+    match outcome {
+        None => not_found(&name, started_at),
+        Some(Ok(outcome)) => {
+            state.note_write(&name);
+            ok(
+                StoredPassages {
+                    stored: outcome.stored,
+                    questions_stored: outcome.questions_stored,
+                    questions_dropped: outcome.questions_dropped,
+                    sections_stored: outcome.sections_stored,
+                    sections_dropped: outcome.sections_dropped,
+                },
+                started_at,
+            )
+        }
+        Some(Err(io_error)) => {
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                ErrorCode::Internal,
+                format!("passages could not be persisted: {io_error}"),
+                started_at,
+            )
+        }
+    }
 }
 
 #[cfg(test)]

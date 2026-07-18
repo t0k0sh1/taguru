@@ -84,13 +84,22 @@ pub async fn enforce_timeout(
 /// auth and the rate gate — probes and scrapes must see the overload,
 /// not join it. The counter doubles as the `taguru_inflight_requests`
 /// gauge, ticking whether or not a ceiling is set.
-/// Shapes an immediate shed response: the `ApiError` body plus the
-/// `Retry-After: 1` header every shed reason below shares.
-fn shed(code: api::ErrorCode, message: impl Into<String>) -> Response {
-    let mut response = api::error(code, message, Instant::now());
+/// Shapes an immediate refusal with a `Retry-After` header — the shape
+/// every unconditional shed reason below AND a spent rate limit share.
+/// `retry_after` is 1 for a shed (maintenance, in-flight/heavy-ops
+/// ceilings — a fixed "try shortly" hint) and the token bucket's own
+/// computed wait for a rate limit ([`enforce_rate_limit`], and
+/// [`crate::auth`]'s failed-credential throttle).
+pub(crate) fn shed(
+    code: api::ErrorCode,
+    message: impl Into<String>,
+    retry_after: u64,
+    started_at: Instant,
+) -> Response {
+    let mut response = api::error(code, message, started_at);
     response
         .headers_mut()
-        .insert(header::RETRY_AFTER, HeaderValue::from(1u32));
+        .insert(header::RETRY_AFTER, HeaderValue::from(retry_after));
     response
 }
 
@@ -136,6 +145,8 @@ impl HeavyOpsLimiter {
                          shortly (TAGURU_MAX_CONCURRENT_HEAVY_OPS tunes this)",
                         self.limit
                     ),
+                    1,
+                    Instant::now(),
                 ))
             })
     }
@@ -174,6 +185,8 @@ pub async fn enforce_concurrency(
         return shed(
             api::ErrorCode::Maintenance,
             "a maintenance compaction sweep is running — retry shortly",
+            1,
+            Instant::now(),
         );
     }
     if !state.metrics().admit_inflight(limit) {
@@ -184,6 +197,8 @@ pub async fn enforce_concurrency(
                 "server is at its in-flight ceiling ({limit} requests) — retry \
                  shortly (TAGURU_MAX_CONCURRENT_REQUESTS tunes this)"
             ),
+            1,
+            Instant::now(),
         );
     }
     // Drop-guard, not a manual decrement: the count must come back
@@ -321,21 +336,16 @@ pub async fn enforce_rate_limit(
     };
     match limiter.admit(&key, started_at) {
         Ok(()) => next.run(request).await,
-        Err(retry_after) => {
-            let mut response = api::error(
-                api::ErrorCode::RateLimited,
-                format!(
-                    "key '{key}' is over its request budget ({} per minute) — \
-                     retry in {retry_after}s",
-                    limiter.per_minute
-                ),
-                started_at,
-            );
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from(retry_after));
-            response
-        }
+        Err(retry_after) => shed(
+            api::ErrorCode::RateLimited,
+            format!(
+                "key '{key}' is over its request budget ({} per minute) — \
+                 retry in {retry_after}s",
+                limiter.per_minute
+            ),
+            retry_after,
+            started_at,
+        ),
     }
 }
 

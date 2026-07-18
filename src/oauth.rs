@@ -715,7 +715,7 @@ impl Oauth {
             refresh: refresh.to_vec(),
         };
         let bytes = serde_json::to_vec_pretty(&file).unwrap_or_default();
-        if let Err(error) = crate::registry::write_atomic_private(&self.store_path, &bytes) {
+        if let Err(error) = crate::storage::write_atomic_private(&self.store_path, &bytes) {
             tracing::warn!(%error, "could not persist the OAuth store");
         }
     }

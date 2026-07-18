@@ -14,7 +14,7 @@ use std::path::Path;
 
 use taguru::context::Context;
 
-use crate::cli::fmt_bytes;
+use crate::config::fmt_bytes;
 use crate::groups::{
     GroupRecord, MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, repair_nesting, trim_membership,
 };

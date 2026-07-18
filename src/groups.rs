@@ -23,10 +23,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::registry::{
-    ResumedRenames, commit_staged, remove_persisted_file, resume_rename_markers,
-    scanned_stem_and_name, write_atomic,
-};
+use crate::registry::{ResumedRenames, resume_rename_markers, scanned_stem_and_name};
+use crate::storage::{commit_staged, remove_persisted_file, write_atomic};
 
 /// The nesting ceiling: a chain of nested groups may stack at most
 /// this many groups (a root, a child, a grandchild). Deep taxonomies
