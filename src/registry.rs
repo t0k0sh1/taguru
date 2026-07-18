@@ -1099,9 +1099,11 @@ pub struct BootOptions {
     pub embed_parallel: usize,
     pub default_semantic_floor: Option<f32>,
     /// Present when replication is on: the shipper's progress map,
-    /// consulted (never waited on) before the housekeeping log resets
-    /// so the shipped stream stays gapless — see
-    /// [`crate::ship::ShipProgress::allows_reset`].
+    /// consulted (never waited on) before the graph lane's
+    /// housekeeping WAL reset so that shipped stream stays gapless —
+    /// see [`crate::ship::ShipProgress::allows_reset`], and the
+    /// `StateInner` field's doc for why the passage lane's reset
+    /// deliberately does not consult it.
     pub(crate) ship_progress: Option<Arc<crate::ship::ShipProgress>>,
 }
 
@@ -1339,11 +1341,20 @@ struct StateInner {
     /// synchronous, so this is the only lever for provider-side
     /// concurrency.
     embed_parallel: usize,
-    /// Present when replication is on. Consulted (one atomic-ish map
-    /// read, never a wait) before the housekeeping WAL resets — the
-    /// graph lane's post-flush truncate and the passage lane's
-    /// post-compaction reset — so the shipper reads a log's tail
-    /// before it disappears. See [`crate::ship::ShipProgress`].
+    /// Present when replication is on. Consulted (one mutexed map
+    /// read, never a wait) before the GRAPH lane's post-flush WAL
+    /// reset, so the shipper reads that log's tail before it
+    /// disappears. Deliberately NOT consulted by the passage lane's
+    /// post-compaction reset: compaction is self-triggered from
+    /// inside the write path by a ratio of `log_bytes`, so deferring
+    /// its reset would leave `log_bytes` high and re-fire a full
+    /// snapshot rewrite on every subsequent store — putting a slow
+    /// bucket back on the write path through the side door. The
+    /// shipper's series-restart path (snapshot first, then a fresh
+    /// series) keeps the passage lane restore-correct without any
+    /// hook; the cost is only a briefly wider RPO window for records
+    /// compacted away un-shipped, at compaction's low cadence. See
+    /// [`crate::ship::ShipProgress`].
     ship_progress: Option<Arc<crate::ship::ShipProgress>>,
     /// See [`PendingNames`] for why `create`, `delete`, and
     /// `rename_context` share one mutex here instead of one each.

@@ -227,14 +227,19 @@ pub(crate) fn open_store(url: &str) -> io::Result<(Arc<dyn ObjectStore>, StorePa
 }
 
 /// The flusher's one window into shipping progress, consulted before
-/// the housekeeping WAL reset that follows a successful image flush
-/// (and before the passage log's post-compaction reset). Holding the
-/// reset until the tail has shipped keeps the shipped stream gapless —
-/// the cheap, common path — WITHOUT coupling correctness to it: a
-/// reset that proceeds anyway (shipping stalled past the deferral
-/// budget, or a rollback truncate, which never consults this) just
-/// diverges the prefix, and the shipper answers with a
-/// parent-snapshot-first series restart.
+/// the GRAPH lane's housekeeping WAL reset (the one that follows a
+/// successful image flush). Holding the reset until the tail has
+/// shipped keeps the shipped stream gapless — the cheap, common path —
+/// WITHOUT coupling correctness to it: a reset that proceeds anyway
+/// (shipping stalled past the deferral budget, a rollback truncate,
+/// or the passage log's post-compaction reset, none of which consult
+/// this) just diverges the prefix, and the shipper answers with a
+/// parent-snapshot-first series restart. The passage lane is excluded
+/// on purpose: its reset rides a ratio-triggered compaction inside
+/// the write path, and deferring it would re-fire whole-snapshot
+/// rewrites on every store while the bucket lags — see the
+/// `StateInner::ship_progress` doc in `registry.rs` for the full
+/// argument.
 ///
 /// Everything here is advisory and non-blocking: one mutexed map
 /// touched by the shipper once per shipped segment and read by the
