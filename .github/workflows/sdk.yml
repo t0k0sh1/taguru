@@ -48,8 +48,11 @@ jobs:
           path: bin
       - run: chmod +x bin/taguru
       - name: Install packages
+        # setuptools rides along: the runner's tool-cache copy lags
+        # behind known advisories, and the environment audit below
+        # rightly refuses to look away.
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools
           pip install -e "sdk/python[dev]" -e "sdk/python-langchain[dev]"
       # Audit the environment the install step just resolved, the way the
       # typescript job audits its installed workspace. Handing pip-audit a
