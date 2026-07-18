@@ -187,6 +187,7 @@ load-bearing ones:
 | `TAGURU_API_TOKENS` | — | Named keys (`"ci:tokA,laptop:tokB"`): the access log says which key, a leak costs one revocation |
 | `TAGURU_KEY_SCOPES` | — | Per-key grants as one JSON object: roles `read` ⊂ `write` ⊂ `admin`, optionally restricted to named contexts |
 | `TAGURU_WAL` | on | fsync every acknowledged write before applying it — a crash loses nothing |
+| `TAGURU_REPLICATE_URL` | — | Continuous replication to object storage (`s3://` / `gs://` / `az://` / `file://`), epoch-fenced; restore with `taguru restore`. Unset = off |
 | `TAGURU_CACHE_BYTES` | 512 MiB | Resident budget for unpinned contexts (LRU eviction) |
 | `TAGURU_EMBED_URL` / `_MODEL` / `_API_KEY` | — | Semantic entry tier (OpenAI-compatible `/embeddings`); unset keeps the entrance purely lexical |
 | `TAGURU_EMBED_AUTO` | off | Re-embed changes with each flush — recommended whenever agents drive the ingest |
@@ -234,14 +235,22 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   operations additionally leave one self-contained `taguru::audit`
   line. Distributed tracing is opt-in via
   `OTEL_EXPORTER_OTLP_ENDPOINT`.
-- **Backups.** `POST /flush`, then snapshot the data directory (every
-  writer is fsync+rename, so filesystem snapshots are safe at any
-  instant; back up each context's file family as a set) — or take the
-  portable JSONL stream with `taguru export` and restore anywhere
-  through `taguru import` / `POST /import`. Verify either with
-  `taguru inspect` — images, passage snapshots, and WAL records carry
-  CRC-32C checksums, so "ok" means the bytes were proven intact, not
-  just parseable. Reclaim revision-heavy contexts with
+- **Backups.** Set `TAGURU_REPLICATE_URL` and the server continuously
+  ships every file family — both log lanes tailed record-by-record,
+  published files whole — to object storage (S3/GCS/Azure, credentials
+  via each cloud's default chain): RPO becomes seconds of shipping lag
+  (per-lane at `/metrics`) instead of a snapshot interval, DR degrades
+  to bucket cross-region replication, and the bucket is epoch-fenced so
+  a second accidental writer fail-stops loudly instead of corrupting
+  the lineage. Recover with `taguru restore --out DIR`. Point-in-time
+  alternatives, unchanged: `POST /flush` then snapshot the data
+  directory (every writer is fsync+rename, so filesystem snapshots are
+  safe at any instant; back up each context's file family as a set) —
+  or take the portable JSONL stream with `taguru export` and restore
+  anywhere through `taguru import` / `POST /import`. Verify any of them
+  with `taguru inspect` — images, passage snapshots, and WAL records
+  carry CRC-32C checksums, so "ok" means the bytes were proven intact,
+  not just parseable. Reclaim revision-heavy contexts with
   `taguru compact`; size targets with `taguru estimate`.
 - **Recovering from a bad alias.** Alias registration takes effect
   immediately and resolves that spelling on every subsequent write — a

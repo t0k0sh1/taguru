@@ -7,6 +7,41 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+- Continuous replication to object storage (#127): set
+  `TAGURU_REPLICATE_URL` (`s3://` / `gs://` / `az://` / `file://`,
+  credentials via each cloud's default chain) and a background shipper
+  continuously copies every context's complete file family to the
+  bucket — both log lanes (the graph WAL and the passage log) tailed
+  record-by-record with the same CRC-32C verification replay runs,
+  published files (images, meta, sources, passage snapshots, derived
+  sidecars, groups, the OAuth grant store, crash markers) whole on
+  change. Durability becomes two honest tiers: a local crash still
+  loses nothing (unchanged), and losing the machine or volume now
+  costs at most the shipping lag — seconds, exported per lane as
+  `taguru_replication_lag_records` / `_lag_seconds` in `/metrics`,
+  beside upload/error counters and a last-success timestamp. Shipping
+  polls; the acknowledge path gains no work, no latency, and no new
+  failure modes (a dead bucket degrades replication only).
+  `TAGURU_REPLICATE_INTERVAL_MS` (default 1000) is the cadence.
+- `taguru restore --out DIR [URL]`: materializes a data directory from
+  the bucket's newest complete generation — published files verbatim,
+  each log lane reassembled from its shipped segments and re-verified
+  record-by-record — refusing gapped segment runs and non-empty
+  targets. Verify the result with `taguru inspect`; the derived
+  sidecars ride along but remain rebuildable, so a restore tolerates
+  their absence.
+- Epoch fencing on the replication bucket (#127): each writer claims a
+  monotonic generation with a conditional create and ships only into
+  its own `gen-N/` namespace, so two live writers behind one URL (a
+  botched restore, a doubled deployment) can never interleave one
+  lineage. A deposed writer's shipper fail-stops permanently and
+  loudly (`taguru_replication_fenced` latches, plus a `taguru::audit`
+  line) while its serve path keeps answering from local truth.
+  Deliberately no TTL, heartbeats, or automatic failover — the fence
+  is lease-compatible (a permanent lease with TTL 0) for any future
+  automation layer.
+
 ## [0.3.0] - 2026-07-18
 
 ### Added

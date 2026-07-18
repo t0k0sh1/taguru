@@ -13,6 +13,9 @@ services:
       - "127.0.0.1:8248:8248"
     environment:
       TAGURU_API_TOKENS: ${TAGURU_API_TOKENS:?set TAGURU_API_TOKENS=name:token}
+      # Continuous off-host replication (recover with `taguru restore`):
+      #   TAGURU_REPLICATE_URL: s3://my-bucket/taguru
+      # plus that cloud's usual credential variables (AWS_*, etc).
       # Scope keys, budgets, and the embedding tier live here too —
       # `taguru --help` lists every knob; `--env-file` reads the same
       # KEY=VALUE file `taguru --config` does.

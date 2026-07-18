@@ -51,6 +51,12 @@ USAGE:
                                         accumulates (see: taguru compact
                                         --help); live servers use
                                         POST /contexts/{name}/compact
+  taguru restore --out DIR [URL]        materialize a data directory from a
+                                        replication bucket's newest complete
+                                        generation (see: taguru restore
+                                        --help); URL defaults to
+                                        TAGURU_REPLICATE_URL — verify the
+                                        result with taguru inspect
   taguru extract --context NAME --out DIR FILE|DIR...
                                         decompose documents into batch files
                                         through an OpenAI-compatible chat
@@ -72,6 +78,14 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_WAL_MAX_BYTES         per-context WAL ceiling, 0 = none (256 MiB)
   TAGURU_PASSAGES_WAL_MAX_BYTES  passage-log backstop, engages only when
                                compaction is stuck; 0 = none (1 GiB)
+  TAGURU_REPLICATE_URL         object-storage bucket for continuous
+                               replication — s3://, gs://, az://, or
+                               file:// — with each cloud's default
+                               credential chain; unset = off. Ships every
+                               file family and both log lanes, epoch-
+                               fenced; restore with taguru restore
+  TAGURU_REPLICATE_INTERVAL_MS replication poll cadence, the steady-state
+                               RPO knob (1000)
   TAGURU_API_TOKEN             bearer token; unset = UNAUTHENTICATED
   TAGURU_API_TOKENS            named keys 'ci:tokA,laptop:tokB' — the access
                                log carries the key name; rotate by overlap
@@ -168,6 +182,7 @@ pub fn dispatch() -> ServeArgs {
         Some("import") => exit(crate::ingest::run(&args[1..])),
         Some("export") => exit(crate::export::run(&args[1..])),
         Some("compact") => exit(crate::compact::run(&args[1..])),
+        Some("restore") => exit(crate::ship::run(&args[1..])),
         Some("extract") => exit(crate::extract::run(&args[1..])),
         Some(other) => {
             eprintln!("taguru: unknown argument '{other}' — try 'taguru --help'");

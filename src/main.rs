@@ -27,6 +27,7 @@ mod paragraph;
 mod passages;
 mod registry;
 mod remote_mcp;
+mod ship;
 mod storage;
 mod trace;
 mod wal;
@@ -277,7 +278,24 @@ async fn serve() {
         info!(floor, "semantic floor default recalibrated");
     }
 
-    let state = match config.boot(embedder) {
+    // Replication: resolve the URL BEFORE boot so a typo'd
+    // TAGURU_REPLICATE_URL refuses to start (a misspelled bucket
+    // silently shipping nowhere is the one failure an operator cannot
+    // see coming), while an unreachable-but-well-formed bucket only
+    // degrades — the shipper retries in the background.
+    let replicate =
+        ship::ReplicateConfig::from_env().map(|replicate| match ship::open_store(&replicate.url) {
+            Ok((store, root)) => (replicate, store, root),
+            Err(error) => {
+                tracing::error!(%error, "TAGURU_REPLICATE_URL is not usable");
+                std::process::exit(1);
+            }
+        });
+    let ship_progress = replicate
+        .as_ref()
+        .map(|_| Arc::new(ship::ShipProgress::new()));
+
+    let state = match config.boot(embedder, ship_progress.clone()) {
         Ok(state) => state,
         // A held lock or an unreadable directory is an operator
         // problem, not a bug: one line, no backtrace.
@@ -288,6 +306,22 @@ async fn serve() {
     };
 
     spawn_flusher(state.clone(), flush_secs, auto_embed);
+
+    let shipper = replicate.map(|(replicate, store, root)| {
+        info!(
+            url = %replicate.url,
+            interval_ms = replicate.interval.as_millis() as u64,
+            "replication enabled — shipping the data directory continuously"
+        );
+        ship::spawn(
+            store,
+            root,
+            config.data_dir.clone(),
+            replicate.interval,
+            ship_progress.expect("progress exists whenever replicate does"),
+            state.clone(),
+        )
+    });
 
     let app = routes(
         protocol_trailer,
@@ -476,6 +510,16 @@ async fn serve() {
     // where purely-read contexts get theirs onto disk.
     tokio::task::block_in_place(|| state.persist_usage());
     info!("flushed dirty contexts on shutdown");
+    // AFTER the final flush, so the shipper's last cycle carries the
+    // images that flush just published — the bucket ends as current as
+    // the disk. Best-effort by nature: an unreachable bucket already
+    // has the un-shipped tail counted in its lag metric, and holding
+    // shutdown hostage to it would trade a bounded RPO for an unbounded
+    // stop.
+    if let Some(shipper) = shipper {
+        shipper.shutdown().await;
+        info!("replication drained on shutdown");
+    }
     // The batch worker still owns the last spans; hand them to the
     // collector before the process ends.
     if let Some(provider) = tracer_provider

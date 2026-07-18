@@ -56,6 +56,11 @@ spec:
             # The image binds 0.0.0.0 by default; keep every other
             # knob in the secret or a ConfigMap as the deployment
             # grows (TAGURU_KEY_SCOPES, TAGURU_RATE_LIMIT_PER_MIN, …).
+            # Continuous off-cluster replication (recover with
+            # `taguru restore`): set TAGURU_REPLICATE_URL to an
+            # s3://, gs://, or az:// bucket and grant the pod that
+            # cloud's identity (IRSA / Workload Identity) — the
+            # client rides the default credential chain.
           volumeMounts:
             - name: data
               mountPath: /data

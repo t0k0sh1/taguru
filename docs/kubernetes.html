@@ -81,7 +81,7 @@
     </p>
     <ul>
       <li><b>Deploys are stop-then-start.</b> The downtime is the boot: cold registration is cheap however many contexts exist, and pinned contexts preload in parallel — the port opens when they finish. Never let the platform run two pods against one volume, even during a rollout.</li>
-      <li><b>Availability is restore time, not failover.</b> There is no replication or leader election; the recovery unit is the data directory. Two rungs: a storage-layer snapshot restores the volume byte-exactly (fastest, same-version), and a <code>taguru export</code> stream restores anywhere through <code>taguru import</code> / <code>POST /import</code> (portable across versions and machines). Rehearse whichever rung is the plan.</li>
+      <li><b>Availability is restore time, not failover.</b> There is no leader election or automatic promotion; the recovery unit is the data directory. Three rungs: continuous replication to object storage (<code>TAGURU_REPLICATE_URL</code>) restores via <code>taguru restore</code> with seconds of RPO, a storage-layer snapshot restores the volume byte-exactly (fastest, same-version), and a <code>taguru export</code> stream restores anywhere through <code>taguru import</code> / <code>POST /import</code> (portable across versions and machines). Rehearse whichever rung is the plan.</li>
       <li><b>Scale horizontally by partitioning, not clustering.</b> A context is the unit of routing, so independent instances each owning a disjoint set of contexts scale reads and writes with no coordination protocol — point each client (or each MCP bridge) at the instance holding its contexts. What does <b>not</b> work is two instances sharing one data directory: on local disks the lock refuses it, and on NFS/EFS the lock may fail to.</li>
       <li><b>A rollback is a restore.</b> Image formats migrate forward on load and never write the old version back out, so rolling the binary back past a format bump needs the data directory rolled back with it (snapshot) or re-imported from an export stream. Check the release notes for format bumps before downgrading.</li>
     </ul>
@@ -134,7 +134,20 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
 
   <section id="backup">
     <h2>Backups and restore</h2>
-    <p class="section-sub">The procedure is the same as everywhere; only the snapshot mechanism is the cluster's.</p>
+    <p class="section-sub">Continuous replication to object storage is the primary path; volume snapshots remain for point-in-time copies.</p>
+    <p>
+      Set <code>TAGURU_REPLICATE_URL</code> (<code>s3://bucket/prefix</code>, GCS and Azure Blob
+      likewise, credentials via the pod's usual identity — IRSA, Workload Identity) and the
+      server ships every file family to the bucket continuously: <b>RPO is the shipping lag
+      (seconds, exported at <code>/metrics</code>) instead of the snapshot interval</b>, and DR
+      degrades to the bucket's own cross-region replication. Recovery is
+      <code>taguru restore --out /data</code> into a fresh volume, then <code>taguru inspect</code>.
+      The bucket is epoch-fenced: if two live instances ever point at one URL (a botched
+      restore, a duplicated deployment), the newer claim wins and the older server's shipper
+      fail-stops loudly (<code>taguru_replication_fenced</code>, plus a <code>taguru::audit</code>
+      line) while the server itself keeps serving its local data.
+    </p>
+    <p class="section-sub">The snapshot procedure, unchanged, for point-in-time copies and format-rollback insurance:</p>
     <ol>
       <li><code>POST /flush</code> — write out everything dirty.</li>
       <li>Snapshot the PersistentVolume at the storage layer (a CSI VolumeSnapshot, or the backing store's own snapshot — every writer is fsync+rename, so a point-in-time snapshot is safe at any instant). Or take the portable stream with <code>GET /contexts/{name}/export</code> and restore anywhere through <code>POST /import</code>.</li>
@@ -142,8 +155,8 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
     </ol>
     <p class="note warn">
       Back up each context's file family <b>as a set, always</b> — copying files out of a live
-      volume does not guarantee cross-file consistency; snapshot, or stop the writer. And
-      <b>rehearse the restore</b>: on this model, the restore drill <i>is</i> the availability
+      volume does not guarantee cross-file consistency; snapshot, replicate, or stop the writer.
+      And <b>rehearse the restore</b>: on this model, the restore drill <i>is</i> the availability
       story. Details in <a href="getting-started.html#ops">operational basics</a>.
     </p>
   </section>
