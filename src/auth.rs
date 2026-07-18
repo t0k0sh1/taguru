@@ -179,6 +179,7 @@ impl Keyring {
                     ));
                 };
                 let name = name.trim();
+                let token = token.trim();
                 if name.is_empty() || token.is_empty() {
                     return Err(format!(
                         "TAGURU_API_TOKENS entry #{} has an empty name or token",
@@ -705,6 +706,21 @@ mod tests {
             .err()
             .expect("an '@' key name must be refused");
         assert!(error.contains('@') && !error.contains("sekrit"), "{error}");
+    }
+
+    /// The colon separator may carry operator formatting whitespace on
+    /// either side, mirroring the tolerance already given to the comma
+    /// between entries — the token half must end up trimmed the same
+    /// as the name half, not stored with a stray space that silently
+    /// fails every future presentation of the token the operator meant
+    /// to configure.
+    #[test]
+    fn a_token_with_whitespace_around_the_colon_is_trimmed_like_the_name() {
+        let keyring =
+            Keyring::parse(None, Some(" ci : abc123 , laptop:tok-b".to_string())).unwrap();
+        assert_eq!(keyring.authenticate("abc123").as_deref(), Some("ci"));
+        assert_eq!(keyring.authenticate(" abc123").as_deref(), None);
+        assert_eq!(keyring.authenticate("abc123 ").as_deref(), None);
     }
 
     #[tokio::test]
