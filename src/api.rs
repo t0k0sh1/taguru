@@ -2087,7 +2087,21 @@ fn explore_page(
             cursor.label.as_str(),
             cursor.object.as_str(),
         );
-        matches.retain(|recollection| explore_rank(recollection) > seat);
+        matches.retain(|recollection| {
+            let k = explore_rank(recollection);
+            // The cursor names a row by identity — `distance` only ranks
+            // it, and it's recomputed by a fresh BFS on every call, so a
+            // concurrent structural change (e.g. retracting a bridging
+            // edge) can change the distance this same edge gets between
+            // pages. Comparing on the current distance alone would then
+            // be able to rank this exact edge as still ahead of the
+            // cursor it itself produced, handing it back a second time —
+            // the same hazard page_by guards against for weight.
+            if (k.1, k.2, k.3) == (seat.1, seat.2, seat.3) {
+                return false;
+            }
+            k > seat
+        });
     }
     matches.sort_by(|a, b| explore_rank(a).cmp(&explore_rank(b)));
     matches.truncate(clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT));
@@ -6092,6 +6106,45 @@ mod tests {
             .map(|r| r.association.object.as_str())
             .collect();
         assert_eq!(objects, vec!["z"]);
+    }
+
+    #[test]
+    fn explore_page_never_returns_the_cursors_own_edge_even_if_its_distance_moved() {
+        // The cursor names "b" at distance 1. Between pages, a
+        // concurrent structural change (e.g. a bridging edge appearing
+        // or being retracted) moves b's distance to 2 in the fresh BFS.
+        // Ranking on that new distance alone would place b's current
+        // record ahead of the cursor it itself produced, and hand the
+        // same edge back a second time.
+        let matches = vec![
+            recollection("a", 1),
+            recollection("b", 1),
+            recollection("z", 2),
+        ];
+        let (_, first) = explore_page(matches, None, Some(2));
+        let last = first.last().unwrap();
+        assert_eq!(last.association.object, "b");
+        let cursor = ExploreCursor {
+            distance: last.distance,
+            subject: last.association.subject.clone(),
+            label: last.association.label.clone(),
+            object: last.association.object.clone(),
+        };
+
+        let mutated = vec![
+            recollection("a", 1),
+            recollection("b", 2),
+            recollection("z", 2),
+        ];
+        let (_, second) = explore_page(mutated, Some(&cursor), Some(10));
+        let objects: Vec<&str> = second
+            .iter()
+            .map(|r| r.association.object.as_str())
+            .collect();
+        assert!(
+            !objects.contains(&"b"),
+            "b must never come back just because its own distance moved: got {objects:?}"
+        );
     }
 
     #[test]
