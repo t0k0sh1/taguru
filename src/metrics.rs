@@ -211,6 +211,16 @@ pub struct Metrics {
     /// one, refreshed by the shipper each cycle. BTreeMap so the
     /// rendered series come out sorted — render must stay
     /// deterministic.
+    ///
+    /// The ONE deliberate exception to this file's "no context names
+    /// in labels" rule (see [`GaugeSnapshot`]): a restore's loss
+    /// window is per lane by nature — an aggregate would hide exactly
+    /// the one stuck context an operator needs named. Cardinality
+    /// stays bounded the way the route map's does: one series per
+    /// live lane, populated only while replication is on, and dropped
+    /// (`forget_replication_lane`) when the context's family leaves
+    /// the disk. Values are escaped at render (`escape_label`) since
+    /// names are client-minted text.
     replication_lag: Mutex<BTreeMap<(String, &'static str), ReplicationLag>>,
 }
 

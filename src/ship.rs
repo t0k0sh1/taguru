@@ -1097,10 +1097,16 @@ pub(crate) fn run(args: &[String]) -> i32 {
 
     // Refuse a target that already holds data: a restore layered over
     // an existing directory would interleave two histories — exactly
-    // the corruption the fence exists to prevent bucket-side.
+    // the corruption the fence exists to prevent bucket-side. A lone
+    // `.taguru.lock` does not count as data — it is the empty leftover
+    // of the lock below (an earlier restore that died before writing
+    // anything), and the lock file itself never ships.
     match std::fs::read_dir(&out) {
-        Ok(mut entries) => {
-            if entries.next().is_some() {
+        Ok(entries) => {
+            let occupied = entries
+                .filter_map(|entry| entry.ok())
+                .any(|entry| entry.file_name() != ".taguru.lock");
+            if occupied {
                 eprintln!(
                     "taguru: restore: {} is not empty — restore refuses to mix histories; \
                      point --out at a new or empty directory",
@@ -1120,6 +1126,18 @@ pub(crate) fn run(args: &[String]) -> i32 {
             return 1;
         }
     }
+    // Hold the same advisory lock every writer takes, for the whole
+    // materialization: a `taguru serve` pointed at this directory
+    // mid-restore would otherwise boot over a half-written family and
+    // cache the holes as truth. Import already refuses to run beside a
+    // live server through this exact lock; restore is a writer too.
+    let _dir_lock = match crate::storage::lock_data_dir(&out) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("taguru: restore: {error}");
+            return 1;
+        }
+    };
 
     let (store, root) = match open_store(&url) {
         Ok(opened) => opened,
@@ -1773,5 +1791,102 @@ mod tests {
         );
         assert_eq!(parse_segment_name(&segment_name(3, 4)), Some((3, 4)));
         assert_eq!(parse_segment_name("junk"), None);
+    }
+
+    /// The restore-equivalence property, generated: any interleaving
+    /// of appends, ship cycles, and flush-shaped resets must leave the
+    /// bucket restorable to exactly the acknowledged state — the
+    /// export/import fixed-point analog issue #127 asks for, phrased
+    /// at the lane level where this module's correctness argument
+    /// lives. The parent snapshot is a stand-in whose bytes ARE the
+    /// watermark, so the assertion can replay the restored lane over
+    /// the restored snapshot's watermark exactly as a real boot
+    /// replays a real image.
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(crate::context_proptest::config())]
+
+            #[test]
+            fn any_ship_reset_interleaving_restores_the_acknowledged_suffix(
+                generated in proptest::collection::vec(
+                    crate::context_proptest::wal_op_strategy(),
+                    1..16,
+                ),
+                schedule in proptest::collection::vec((any::<bool>(), any::<bool>()), 16),
+            ) {
+                let ops: Vec<WalOp> = generated.into_iter().map(WalOp::from).collect();
+                let dir = scratch_dir("prop");
+                let state = state_for(&dir);
+                let progress = Arc::new(ShipProgress::new());
+                let store = Arc::new(InMemory::new());
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+
+                let ctx_path = dir.join("ctx_a.ctx");
+                let wal_path = dir.join("ctx_a.wal.jsonl");
+                let mut watermark = 0u64;
+                std::fs::write(&ctx_path, watermark.to_le_bytes()).unwrap();
+                let mut shipper =
+                    runtime.block_on(claimed(&store, &dir, &state, &progress));
+
+                for (index, op) in ops.iter().enumerate() {
+                    let seq = index as u64 + 1;
+                    wal::append_batch(&wal_path, seq, std::slice::from_ref(op)).unwrap();
+                    let (ship, flush) = schedule[index];
+                    if ship {
+                        runtime.block_on(shipper.cycle()).unwrap();
+                    }
+                    if flush {
+                        // The flush shape: the image (stand-in) bakes
+                        // everything in, then the log resets — with or
+                        // without the shipper having read it first.
+                        watermark = seq;
+                        std::fs::write(&ctx_path, watermark.to_le_bytes()).unwrap();
+                        wal::reset(&wal_path).unwrap();
+                    }
+                }
+                runtime.block_on(shipper.cycle()).unwrap();
+
+                let restored_dir = scratch_dir("prop-out");
+                runtime
+                    .block_on(restore_into(
+                        store.as_ref() as &dyn ObjectStore,
+                        &StorePath::default(),
+                        &restored_dir,
+                    ))
+                    .unwrap();
+
+                let restored_watermark = u64::from_le_bytes(
+                    std::fs::read(restored_dir.join("ctx_a.ctx"))
+                        .unwrap()
+                        .try_into()
+                        .expect("the stand-in image is exactly its watermark"),
+                );
+                let (restored_ops, top) = wal::replay::<WalOp>(
+                    &restored_dir.join("ctx_a.wal.jsonl"),
+                    restored_watermark,
+                )
+                .unwrap();
+                // Replaying the restored lane over the restored
+                // snapshot's watermark yields exactly the acknowledged
+                // suffix: nothing doubled, nothing skipped, ending at
+                // the newest acknowledged write.
+                prop_assert_eq!(
+                    &restored_ops[..],
+                    &ops[restored_watermark as usize..],
+                    "restored replay must be the suffix past watermark {}",
+                    restored_watermark
+                );
+                prop_assert_eq!(top, ops.len() as u64);
+
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&restored_dir);
+            }
+        }
     }
 }
