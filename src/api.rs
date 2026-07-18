@@ -5182,33 +5182,59 @@ fn explain_resolve_verdict(
     };
 
     // The smallest VERIFIED limit that serves the canonical: rerun the
-    // real serve computation (bound, merge, trim), growing on a miss —
-    // the trim takes overflow out of the lexical tail first, so the
-    // unbounded rank alone is a floor, not an answer.
+    // real serve computation (bound, merge, trim). `serve_at` is NOT
+    // monotonic in `limit` — trim_to_limit spends overflow out of the
+    // lexical tail first, so a limit small enough that semantic
+    // candidates alone can fill it wipes the ENTIRE bounded lexical
+    // segment, and a canonical that is also a semantic candidate can
+    // already be served far below its unbounded `merged_at` rank.
+    // Symmetrically, the instant a growing limit pulls the canonical's
+    // own lexical rank into `bounded`, merge_tiers's dedup drops the
+    // semantic duplicate that had been carrying it, and the lexical
+    // rank alone can take a few more limits to clear the trim — a dip
+    // right after `merged_at + 1`. Both swings are bounded by how many
+    // semantic candidates there are to dedupe against
+    // (`SEMANTIC_RESOLVE_LIMIT`, capped at 5), so two short linear
+    // scans — one from 1, one just above `merged_at` — cover every
+    // limit where the verdict can flip before the doubling search
+    // (valid once neither effect can recur) takes over.
     let serve_at = |limit: usize| -> Vec<TieredResolution> {
         let mut bounded = full.clone();
         bounded.truncate(limit);
         trim_to_limit(merge_tiers(bounded, &tiers.semantic), limit)
     };
+    let serves_canonical = |candidate: usize| {
+        serve_at(candidate)
+            .iter()
+            .any(|served| served.name == canonical)
+    };
+    let semantic_span = tiers.semantic.len();
     let limit_to_reach = if served_at.is_some() {
         Some(limit)
     } else {
-        merged_at.map(|at| at + 1).and_then(|first| {
-            let mut candidate = first;
-            for _ in 0..8 {
-                if candidate > merged.len() {
-                    return None;
-                }
-                if serve_at(candidate)
-                    .iter()
-                    .any(|served| served.name == canonical)
-                {
-                    return Some(candidate);
-                }
-                candidate = candidate.saturating_mul(2).min(merged.len());
-            }
-            None
-        })
+        (1..=semantic_span.min(merged.len()))
+            .find(|&candidate| serves_canonical(candidate))
+            .or_else(|| {
+                merged_at.and_then(|at| {
+                    let window_end = (at + 1 + semantic_span).min(merged.len());
+                    ((at + 1)..=window_end).find(|&candidate| serves_canonical(candidate))
+                })
+            })
+            .or_else(|| {
+                merged_at.and_then(|at| {
+                    let mut candidate = (at + 1 + semantic_span + 1).min(merged.len());
+                    for _ in 0..8 {
+                        if candidate > merged.len() {
+                            return None;
+                        }
+                        if serves_canonical(candidate) {
+                            return Some(candidate);
+                        }
+                        candidate = candidate.saturating_mul(2).min(merged.len());
+                    }
+                    None
+                })
+            })
     };
 
     let target_score = target.map(|candidate| candidate.score);
@@ -6346,6 +6372,140 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recovered.status(), StatusCode::OK);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `limit_to_reach` must be the smallest limit VERIFIED to serve the
+    /// canonical, not just the first one a doubling search from
+    /// `merged_at + 1` happens to hit. This reproduces the exact shape
+    /// the fix at `limit_to_reach`'s definition targets: a canonical
+    /// that ties every decoy's lexical (containment) score — so
+    /// alphabetical order buries it last in the lexical tier — while
+    /// ALSO being the semantic tier's rank-1 hit. At `limit = 12`
+    /// (one past its lexical-only rank 12), `trim_to_limit` drops the
+    /// canonical's OWN lexical occurrence to make room, and the
+    /// dedup in `merge_tiers` means no semantic duplicate is left to
+    /// carry it — a below_cutoff verdict whose true `limit_to_reach`
+    /// is 1 (semantic tier alone already serves it), not the 13 an
+    /// unconditional doubling search from 12 would report.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn limit_to_reach_reports_the_smallest_verified_limit_not_a_stale_doubling_hit() {
+        use crate::embedding::{EmbedPurpose, EmbeddingProvider};
+        use crate::registry::ContextMeta;
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::routing::post;
+        use tower::util::ServiceExt;
+
+        struct PurposeSplitEmbeddings {
+            index: Vec<(&'static str, Vec<f32>)>,
+            query: Vec<(&'static str, Vec<f32>)>,
+        }
+        impl EmbeddingProvider for PurposeSplitEmbeddings {
+            fn model(&self) -> &str {
+                "mock-purpose-split"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let keys = match purpose {
+                    EmbedPurpose::Index => &self.index,
+                    EmbedPurpose::Query => &self.query,
+                };
+                Ok(texts
+                    .iter()
+                    .map(|text| {
+                        keys.iter()
+                            .find(|(key, _)| text.starts_with(key))
+                            .map(|(_, vector)| vector.clone())
+                            .unwrap_or_else(|| vec![0.0, 0.0, 1.0])
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-api-limit-to-reach-nonmonotonic-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // rank-1 cosine 1.0 for the canonical, rank-2 cosine 0.9 for a
+        // decoy that never touches the lexical tier — two semantic
+        // candidates are what actually produce the post-merged_at dip
+        // (one alone would leave nothing behind after the dedup drops
+        // it, per the comment at the fix site).
+        let embedder = Some(Arc::new(PurposeSplitEmbeddings {
+            index: vec![
+                ("AAA0012", vec![1.0, 0.0, 0.0]),
+                (
+                    "ZZZ_SEMANTIC_ONLY",
+                    vec![0.9, (1.0f32 - 0.81f32).sqrt(), 0.0],
+                ),
+            ],
+            query: vec![("AAA", vec![1.0, 0.0, 0.0])],
+        }) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), 1 << 20, embedder).unwrap();
+        state.create("ctx", ContextMeta::default()).unwrap();
+        state
+            .write_context("ctx", |context| {
+                // 12 names all containing "AAA", all the same length, so
+                // containment scores them identically and alphabetical
+                // order (sort_resolutions's tiebreak) puts AAA0012 dead
+                // last in the lexical tier.
+                for i in 1..=12 {
+                    let name = format!("AAA{i:04}");
+                    context.associate(&name, "分類", "何か", 1.0).unwrap();
+                }
+                context
+                    .associate("ZZZ_SEMANTIC_ONLY", "分類", "何か", 1.0)
+                    .unwrap();
+            })
+            .unwrap();
+        state
+            .refresh_embeddings("ctx", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let app = Router::new()
+            .route("/contexts/{name}/resolve/explain", post(explain_resolve))
+            .layer(axum::Extension(Deadline::unbounded()))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/contexts/ctx/resolve/explain")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"cue": "AAA", "expected": "AAA0012", "limit": 12}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let result = &body["result"];
+
+        assert_eq!(result["verdict"], "below_cutoff", "{result}");
+        assert_eq!(result["ranking"]["rank"], 12, "{result}");
+        assert_eq!(result["ranking"]["served"], false, "{result}");
+        assert_eq!(
+            result["ranking"]["limit_to_reach"], 1,
+            "the canonical is ALSO the top semantic hit, so limit 1 already \
+             serves it in semantic-only mode; a doubling search that starts \
+             past merged_at and never looks back would report 13 — {result}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
