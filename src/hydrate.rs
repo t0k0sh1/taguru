@@ -511,10 +511,7 @@ impl Hydrator {
             report.removed += 1;
         }
         for (name, expect) in &self.manifest.files {
-            let meta_of_family = FsPath::new(name)
-                .to_str()
-                .is_some_and(|name| name.ends_with(".meta.json"));
-            if family.contains(name) && !meta_of_family {
+            if family.contains(name) && !name.ends_with(".meta.json") {
                 continue;
             }
             match self.fetch_published_if_stale(name, *expect).await? {

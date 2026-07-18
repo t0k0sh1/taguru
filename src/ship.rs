@@ -545,8 +545,10 @@ pub(crate) fn segment_name(series: u64, seg: u64) -> String {
 
 /// What a fence object says. The claim is the object's existence — the
 /// body exists for operators (`who took the bucket from me?`) and as
-/// the future home of lease fields (a TTL, a heartbeat stamp), so
-/// automation could be layered on without changing the medium.
+/// the future home of lease fields (a TTL), so automation could be
+/// layered on without changing the medium. Liveness already lives
+/// beside it as `gen-{N}/heartbeat`, feeding the takeover guard
+/// (`crate::hydrate`) — ergonomics, deliberately not lease semantics.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct FenceBody {
     generation: u64,
