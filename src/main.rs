@@ -16,6 +16,7 @@ mod export;
 mod extract;
 mod groups;
 mod hash;
+mod hydrate;
 mod ingest;
 mod inspect;
 mod limits;
@@ -96,11 +97,11 @@ fn main() {
     if let Some(path) = &serve_args.config {
         config::load_config(path);
     }
-    serve();
+    serve(serve_args);
 }
 
 #[tokio::main]
-async fn serve() {
+async fn serve(serve_args: cli::ServeArgs) {
     // The subscriber must exist before anything can log — the
     // env_number warnings just below would otherwise be dropped
     // silently (tracing has no default subscriber and no buffering).
@@ -295,7 +296,27 @@ async fn serve() {
         .as_ref()
         .map(|_| Arc::new(ship::ShipProgress::new()));
 
-    let state = match config.boot(embedder, ship_progress.clone()) {
+    // Boot-from-bucket (issue #128): decide once — before the registry
+    // opens — whether this directory is the lineage's own tip (boot as
+    // ever), a cache to re-verify, or empty and about to hydrate; and
+    // whether starting here needs the operator's stated takeover
+    // intent. A refusal here is deliberate: it is the guard rail that
+    // keeps "starting a writer against a bucket" an explicit act.
+    let take_over = serve_args.take_over || env_bool("TAGURU_TAKEOVER", false);
+    let hydrator = match &replicate {
+        Some((replicate, store, root)) => {
+            match hydrate::prepare(store, root, &replicate.url, &config.data_dir, take_over).await {
+                Ok(hydrator) => hydrator,
+                Err(error) => {
+                    tracing::error!(%error, "refusing to start");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => None,
+    };
+
+    let state = match config.boot(embedder, ship_progress.clone(), hydrator.clone()) {
         Ok(state) => state,
         // A held lock or an unreadable directory is an operator
         // problem, not a bug: one line, no backtrace.
@@ -307,6 +328,14 @@ async fn serve() {
 
     spawn_flusher(state.clone(), flush_secs, auto_embed);
 
+    // AFTER boot, so the pinned preload's eager hydration went first —
+    // the fill mops up whatever first touch has not reached, closing
+    // the window in which the bucket's only complete generation is
+    // the predecessor's.
+    if let Some(hydrator) = &hydrator {
+        hydrator.spawn_background_fill();
+    }
+
     let shipper = replicate.map(|(replicate, store, root)| {
         info!(
             url = %replicate.url,
@@ -316,10 +345,11 @@ async fn serve() {
         ship::spawn(
             store,
             root,
+            replicate,
             config.data_dir.clone(),
-            replicate.interval,
             ship_progress.expect("progress exists whenever replicate does"),
             state.clone(),
+            hydrator.clone(),
         )
     });
 

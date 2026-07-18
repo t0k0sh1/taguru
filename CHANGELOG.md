@@ -8,6 +8,39 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Boot from the bucket (#128): with `TAGURU_REPLICATE_URL` set, a
+  server started on an **empty** data directory materializes itself
+  from the bucket's newest complete generation instead of starting
+  blank — the volume demotes to a cache of the bucket lineage, and
+  recovery becomes "start anywhere". Hydration is lazy and
+  priority-ordered: shared files (groups, the grant store, every
+  context's sidecar meta) land before boot, pinned contexts hydrate in
+  parallel before the port opens, and everything else hydrates on
+  first touch or via a background fill; local files whose bytes
+  already match the manifest are reused without a download, so warm
+  restarts of a cache-mode volume stay cheap. The successor's own
+  generation is not marked `complete` until every family has settled
+  locally, so a restore can never land on a hollow lineage.
+  `deploy/kubernetes-stateless.yaml` is the emptyDir variant this
+  enables.
+- The takeover guard (#128): starting a writer against a bucket IS the
+  takeover/promotion act, so while the bucket's newest generation
+  still looks alive — a heartbeat object refreshed every minute, no
+  clean-shutdown marker, within a 300s grace — booting a different
+  writer against it refuses unless the operator states the intent with
+  `serve --take-over` / `TAGURU_TAKEOVER=1`. A cleanly stopped writer
+  retires its generation on the way out and never trips the guard; a
+  crashed one ages out of it. Ergonomics only: epoch fencing (#127)
+  remains the sole arbiter, and a writer past the guard still deposes
+  its predecessor cleanly and loudly. The deposed writer's un-shipped
+  tail exists only on its own volume — a successor hydrating elsewhere
+  serves the lineage without it.
+- The `complete` marker now carries a manifest — every shipped file's
+  and lane's exact extent (length + CRC-32C), refreshed after each
+  batch of uploads. `taguru restore` verifies every downloaded object
+  against it (a swapped or rotted object is a refusal, not a quiet
+  divergence); pre-manifest buckets keep restoring through the listing
+  fallback, unverified as before.
 - Continuous replication to object storage (#127): set
   `TAGURU_REPLICATE_URL` (`s3://` / `gs://` / `az://` / `file://`,
   credentials via each cloud's default chain) and a background shipper

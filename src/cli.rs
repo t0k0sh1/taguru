@@ -19,7 +19,16 @@ const USAGE: &str = concat!(
     " — long-term semantic memory for LLMs
 
 USAGE:
-  taguru [serve] [--config FILE]        start the HTTP server (the default)
+  taguru [serve] [--config FILE] [--take-over]
+                                        start the HTTP server (the default).
+                                        With TAGURU_REPLICATE_URL set and an
+                                        empty data directory, the server boots
+                                        FROM the bucket: shared files and
+                                        pinned contexts hydrate before the
+                                        port opens, the rest on first touch.
+                                        --take-over acknowledges deposing a
+                                        recently-live writer on that bucket
+                                        (TAGURU_TAKEOVER=1 says the same)
   taguru version                        print the version
   taguru health [--config FILE] [URL]   exit 0 iff a running server's /health
                                         answers 200 — the container
@@ -83,9 +92,15 @@ ENVIRONMENT (every knob; unset = the shown default):
                                file:// — with each cloud's default
                                credential chain; unset = off. Ships every
                                file family and both log lanes, epoch-
-                               fenced; restore with taguru restore
+                               fenced; restore with taguru restore, or
+                               boot an empty directory straight from the
+                               bucket (lazy, pinned-first hydration)
   TAGURU_REPLICATE_INTERVAL_MS replication poll cadence, the steady-state
                                RPO knob (1000)
+  TAGURU_TAKEOVER              1 = same acknowledgment as serve's
+                               --take-over: depose the bucket's newest
+                               writer even though it was alive within the
+                               last 300s and did not stop cleanly (off)
   TAGURU_API_TOKEN             bearer token; unset = UNAUTHENTICATED
   TAGURU_API_TOKENS            named keys 'ci:tokA,laptop:tokB' — the access
                                log carries the key name; rotate by overlap
@@ -157,6 +172,11 @@ EXIT CODES: 0 ok · 1 failure or corruption found · 2 usage error
 /// listener, or telemetry exists.
 pub struct ServeArgs {
     pub config: Option<PathBuf>,
+    /// `--take-over`: the operator's stated intent to depose a
+    /// recently-live writer on the replication bucket (see
+    /// `crate::hydrate`'s takeover guard). `TAGURU_TAKEOVER=1` says
+    /// the same thing where flags are awkward (a container manifest).
+    pub take_over: bool,
 }
 
 /// Parses the process arguments, running and exiting for everything
@@ -191,9 +211,11 @@ pub fn dispatch() -> ServeArgs {
     }
 }
 
-/// `serve` takes exactly one optional `--config FILE`.
+/// `serve` takes one optional `--config FILE` and the `--take-over`
+/// acknowledgment.
 fn parse_serve(args: &[String]) -> ServeArgs {
     let mut config = None;
+    let mut take_over = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -202,6 +224,7 @@ fn parse_serve(args: &[String]) -> ServeArgs {
                 Some(_) => usage_error("--config given twice"),
                 None => usage_error("--config needs a file path"),
             },
+            "--take-over" => take_over = true,
             "--help" | "-h" => {
                 print!("{USAGE}");
                 exit(0)
@@ -212,7 +235,7 @@ fn parse_serve(args: &[String]) -> ServeArgs {
     // The flag beats the variable, so a shell override works even when
     // a container image bakes TAGURU_CONFIG in.
     let config = config.or_else(|| std::env::var("TAGURU_CONFIG").ok().map(PathBuf::from));
-    ServeArgs { config }
+    ServeArgs { config, take_over }
 }
 
 /// `taguru health [--config FILE] [URL]`: one GET against a running

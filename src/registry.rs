@@ -1105,6 +1105,11 @@ pub struct BootOptions {
     /// `StateInner` field's doc for why the passage lane's reset
     /// deliberately does not consult it.
     pub(crate) ship_progress: Option<Arc<crate::ship::ShipProgress>>,
+    /// Present when this boot hydrates lazily from the bucket (issue
+    /// #128): boot registers the manifest's contexts alongside the
+    /// scanned ones, and every load materializes its family through
+    /// [`crate::hydrate::Hydrator::ensure_context`] first.
+    pub(crate) hydrator: Option<Arc<crate::hydrate::Hydrator>>,
 }
 
 impl Default for BootOptions {
@@ -1118,6 +1123,7 @@ impl Default for BootOptions {
             embed_parallel: 1,
             default_semantic_floor: None,
             ship_progress: None,
+            hydrator: None,
         }
     }
 }
@@ -1165,14 +1171,15 @@ impl BootConfig {
     }
 
     /// [`AppState::boot_with`], parameterized by this configuration.
-    /// `ship_progress` is present only under `serve` with replication
-    /// on — the offline commands (import, export, compact) pass `None`
-    /// and their writes reach the bucket through the next serve's
-    /// baseline sync.
+    /// `ship_progress` and `hydrator` are present only under `serve`
+    /// with replication on — the offline commands (import, export,
+    /// compact) pass `None` and their writes reach the bucket through
+    /// the next serve's baseline sync.
     pub fn boot(
         &self,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
         ship_progress: Option<Arc<crate::ship::ShipProgress>>,
+        hydrator: Option<Arc<crate::hydrate::Hydrator>>,
     ) -> io::Result<AppState> {
         AppState::boot_with(
             self.data_dir.clone(),
@@ -1187,6 +1194,7 @@ impl BootConfig {
                 embed_parallel: self.embed_parallel,
                 default_semantic_floor: self.semantic_floor,
                 ship_progress,
+                hydrator,
             },
         )
     }
@@ -1356,6 +1364,12 @@ struct StateInner {
     /// compacted away un-shipped, at compaction's low cadence. See
     /// [`crate::ship::ShipProgress`].
     ship_progress: Option<Arc<crate::ship::ShipProgress>>,
+    /// Present when this boot hydrates lazily from the bucket (issue
+    /// #128). Every family materializes through it exactly once,
+    /// before its first load — `ensure_hot` and `entry_passages` for
+    /// reads and writes, `delete`/`rename_context` (which also veto
+    /// re-materialization) for the file-level operations.
+    hydrator: Option<Arc<crate::hydrate::Hydrator>>,
     /// See [`PendingNames`] for why `create`, `delete`, and
     /// `rename_context` share one mutex here instead of one each.
     pending: Mutex<PendingNames>,
@@ -1446,7 +1460,25 @@ impl AppState {
         // server) would each cache and flush independently — last
         // writer wins, silently.
         let dir_lock = lock_data_dir(&data_dir)?;
-        let (registry, resumed_context_renames) = scan_data_dir(&data_dir)?;
+        let (mut registry, resumed_context_renames) = scan_data_dir(&data_dir)?;
+        // A lazy bucket boot: the manifest's contexts are real even
+        // though their images are not local yet — register them cold
+        // from the sidecar metas the shared hydration already landed,
+        // so enumeration, description, and pinned preload see the
+        // whole directory from the first request. The `.ctx` scan
+        // above naturally found any family whose image IS local
+        // (cache-mode reuse); `or_insert`-style entry keeps those.
+        if let Some(hydrator) = &options.hydrator {
+            for stem in hydrator.context_stems() {
+                let Some(name) = name_from_stem(&stem) else {
+                    continue;
+                };
+                registry.entry(name).or_insert_with(|| {
+                    let MetaFile { meta, stats, usage } = read_meta_file(&data_dir, &stem);
+                    Arc::new(Entry::new(meta, stats, Slot::Cold, 0, 0, usage))
+                });
+            }
+        }
         // Groups scan after contexts (the context scan also sweeps
         // staging leftovers). Both scans finish moving any in-flight
         // rename's files, and hand back the (from, to) pairs whose
@@ -1518,6 +1550,7 @@ impl AppState {
             passage_vector_limit: options.passage_vector_limit,
             embed_parallel: options.embed_parallel,
             ship_progress: options.ship_progress,
+            hydrator: options.hydrator,
             pending: Mutex::new(PendingNames::default()),
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
@@ -1559,7 +1592,13 @@ impl AppState {
                             continue;
                         }
                         let preload_started = std::time::Instant::now();
-                        match ensure_hot(&self.0.data_dir, &name, &mut inner, &self.0.metrics) {
+                        match ensure_hot(
+                            &self.0.data_dir,
+                            &name,
+                            &mut inner,
+                            &self.0.metrics,
+                            self.0.hydrator.as_deref(),
+                        ) {
                             Ok(()) => tracing::info!(
                                 context = %name,
                                 ms = preload_started.elapsed().as_millis() as u64,
@@ -1934,6 +1973,18 @@ impl AppState {
         // it no longer than the in-memory teardown above needs.
         drop(in_flight);
         let stem = file_stem(name);
+        // A lazy bucket boot: the bucket's copy of this family must
+        // not re-materialize after the unlinks below — veto waits out
+        // any in-flight hydration so the two cannot interleave.
+        // Nothing needs hydrating FIRST: files that never became local
+        // were never shipped into this generation, and the manifest
+        // gate (`Hydrator::drained`) keeps this generation
+        // un-restorable until every family settles one way or the
+        // other, so the deleted family cannot resurrect from either
+        // generation.
+        if let Some(hydrator) = &self.0.hydrator {
+            hydrator.veto(&stem);
+        }
         // The durable half of the acknowledgment: while this marker
         // exists, boot resumes the unlinks — so a partial failure here
         // (a held handle, a flaky mount) can leak bytes only until the
@@ -2086,6 +2137,18 @@ impl AppState {
     fn rename_context_locked(&self, from: &str, to: &str, entry: &Arc<Entry>) -> RenameOutcome {
         let from_stem = file_stem(from);
         let to_stem = file_stem(to);
+        // A lazy bucket boot: the family must be LOCAL before it can
+        // move — the pivot-based move treats a missing source file as
+        // already-moved, which for an un-hydrated family would "move"
+        // nothing and leave the bucket copy to resurrect under the old
+        // name. Hydrate first, then veto re-materialization of the
+        // stem being vacated.
+        if let Some(hydrator) = &self.0.hydrator {
+            if let Err(error) = hydrator.ensure_context(&from_stem) {
+                return RenameOutcome::RolledBack(RenameContextError::Io(error));
+            }
+            hydrator.veto(&from_stem);
+        }
         let marker = renaming_marker_path(&self.0.data_dir, &from_stem);
         if let Err(error) = write_rename_marker(&marker, from, to) {
             return RenameOutcome::RolledBack(RenameContextError::Io(error));
@@ -2147,7 +2210,13 @@ impl AppState {
             .insert(to.to_string(), Arc::clone(&new_entry));
         if pinned {
             let mut inner = new_entry.inner.write();
-            match ensure_hot(&self.0.data_dir, to, &mut inner, &self.0.metrics) {
+            match ensure_hot(
+                &self.0.data_dir,
+                to,
+                &mut inner,
+                &self.0.metrics,
+                self.0.hydrator.as_deref(),
+            ) {
                 Ok(()) => self.recount_entry(&mut inner),
                 Err(error) => {
                     tracing::warn!(context = %to, %error, "renamed context not preloaded; it stays cold until first use");
@@ -2260,6 +2329,18 @@ impl AppState {
                     ),
                 ));
             }
+        }
+        // Passages can be a context's very first touch (a passage
+        // search needs no graph load), so the family hydrates here
+        // too — idempotent with `ensure_hot`'s hook, and quarantined
+        // the same way on failure.
+        if let Some(hydrator) = &self.0.hydrator
+            && let Err(error) = hydrator.ensure_context(stem)
+        {
+            let refusal = format!("passage family hydration failed: {error}");
+            *entry.passages_load_failure.lock() =
+                Some((std::time::Instant::now(), refusal.clone()));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, refusal));
         }
         // The live server heals a torn tail on load; the torn indicator
         // and the unverified-record count are for read-only inspection,
@@ -2458,7 +2539,13 @@ impl AppState {
                 inner.meta.semantic_floor = Some(floor.clamp(0.0, 1.0));
             }
             if inner.meta.pinned
-                && let Err(error) = ensure_hot(&self.0.data_dir, name, inner, &self.0.metrics)
+                && let Err(error) = ensure_hot(
+                    &self.0.data_dir,
+                    name,
+                    inner,
+                    &self.0.metrics,
+                    self.0.hydrator.as_deref(),
+                )
             {
                 rollback_meta(inner, previous);
                 self.recount_entry(inner);
@@ -2600,8 +2687,14 @@ impl AppState {
         // reader is fine — its load counts as ours.
         let result = offload(|| {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
-            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
-                .map_err(AccessError::Load)?;
+            ensure_hot(
+                &self.0.data_dir,
+                name,
+                &mut inner,
+                &self.0.metrics,
+                self.0.hydrator.as_deref(),
+            )
+            .map_err(AccessError::Load)?;
             self.recount_entry(&mut inner);
             let Slot::Hot(context) = &inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
@@ -2659,8 +2752,14 @@ impl AppState {
         // must not keep bumping a broken entry's LRU recency.
         let snapshot = offload(|| {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
-            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
-                .map_err(AccessError::Load)?;
+            ensure_hot(
+                &self.0.data_dir,
+                name,
+                &mut inner,
+                &self.0.metrics,
+                self.0.hydrator.as_deref(),
+            )
+            .map_err(AccessError::Load)?;
             self.recount_entry(&mut inner);
             let Slot::Hot(context) = &inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
@@ -2729,8 +2828,14 @@ impl AppState {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let outcome = offload(|| {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
-            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
-                .map_err(AccessError::Load)?;
+            ensure_hot(
+                &self.0.data_dir,
+                name,
+                &mut inner,
+                &self.0.metrics,
+                self.0.hydrator.as_deref(),
+            )
+            .map_err(AccessError::Load)?;
             let Slot::Hot(context) = &inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
             };
@@ -2868,8 +2973,14 @@ impl AppState {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let result = {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
-            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
-                .map_err(AccessError::Load)?;
+            ensure_hot(
+                &self.0.data_dir,
+                name,
+                &mut inner,
+                &self.0.metrics,
+                self.0.hydrator.as_deref(),
+            )
+            .map_err(AccessError::Load)?;
             let Slot::Hot(context) = &mut inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
             };
@@ -3148,8 +3259,14 @@ impl AppState {
             // this lock owns the name — appending here would recreate
             // the WAL file it just removed.
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
-            ensure_hot(&self.0.data_dir, name, &mut inner, &self.0.metrics)
-                .map_err(AccessError::Load)?;
+            ensure_hot(
+                &self.0.data_dir,
+                name,
+                &mut inner,
+                &self.0.metrics,
+                self.0.hydrator.as_deref(),
+            )
+            .map_err(AccessError::Load)?;
             // Count the promotion NOW, before the WAL-cap and append-failure
             // early returns below. A Cold→Hot load just added this context's
             // footprint to resident memory; a refusal that returns without
@@ -3842,6 +3959,7 @@ fn ensure_hot(
     name: &str,
     inner: &mut EntryInner,
     metrics: &Metrics,
+    hydrator: Option<&crate::hydrate::Hydrator>,
 ) -> Result<(), String> {
     if matches!(inner.slot, Slot::Hot(_)) {
         metrics.record_cache_hit();
@@ -3862,6 +3980,18 @@ fn ensure_hot(
         ));
     }
     let stem = file_stem(name);
+    // A lazy bucket boot materializes the family before its first
+    // load; hydrated families return instantly. A family that cannot
+    // be materialized cannot be loaded: same failure, same quarantine
+    // (and the same retry cadence once the bucket recovers).
+    if let Some(hydrator) = hydrator
+        && let Err(error) = hydrator.ensure_context(&stem)
+    {
+        let error = format!("context '{name}' hydration failed: {error}");
+        metrics.record_cache_load(false);
+        inner.load_failure = Some((std::time::Instant::now(), error.clone()));
+        return Err(error);
+    }
     let loaded = fs::read(image_path(data_dir, &stem))
         .map_err(|e| format!("context '{name}' image unreadable: {e}"))
         .and_then(|bytes| {
@@ -4107,7 +4237,7 @@ fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
 /// family" means, so both read this one list. Built from the same nine
 /// path builders every other caller uses, so a file kind added there
 /// cannot silently miss this list.
-fn context_files(stem: &str) -> [String; 9] {
+pub(crate) fn context_files(stem: &str) -> [String; 9] {
     let unrooted = Path::new("");
     [
         image_path(unrooted, stem),

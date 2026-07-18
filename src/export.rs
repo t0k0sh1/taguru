@@ -534,7 +534,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
     // operator; stdout stays reserved for the report lines.
     crate::ingest::init_logging();
     // Export reads; it never embeds, whatever the environment says.
-    let state = match crate::registry::BootConfig::from_env().boot(None, None) {
+    let state = match crate::registry::BootConfig::from_env().boot(None, None, None) {
         Ok(state) => state,
         Err(error) => {
             eprintln!("taguru: export: {error}");
