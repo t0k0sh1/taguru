@@ -68,11 +68,26 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Clean coverage artifacts
         run: cargo llvm-cov clean --workspace
+      # A couple of HTTP integration tests SIGKILL a spawned `taguru`
+      # subprocess on purpose (graph_writes_survive_a_hard_kill and its
+      # sibling in tests/http_api.rs) to prove the WAL alone carries data
+      # across a crash. On an instrumented build that subprocess is also
+      # writing a profraw file, and SIGKILL gives its profiling runtime
+      # no chance to flush — the file is left mid-write (observed
+      # locally as a bare 4096-byte fragment) and later fails
+      # llvm-profdata merge as "file header is corrupt". That's a
+      # by-product of the crash the test is deliberately causing, not a
+      # sign the coverage run itself is broken, so --failure-mode=all
+      # below tells the merge to only fail if every profraw is invalid.
+      # Separately, capping --test-threads reduces CPU contention on
+      # this runner's core count, which a couple of timing-sensitive
+      # concurrency tests need to stay non-flaky under an instrumented
+      # binary's slower execution.
       - name: Run instrumented tests
-        run: cargo llvm-cov --workspace --locked --no-report
+        run: cargo llvm-cov --workspace --locked --no-report -- --test-threads=2
       - name: Per-file summary
         run: |
-          cargo llvm-cov report > coverage-summary.txt
+          cargo llvm-cov report --failure-mode all > coverage-summary.txt
           {
             echo "### Coverage (line/region/function, per source file)"
             echo
@@ -83,9 +98,9 @@ jobs:
       - name: LCOV report
         run: |
           mkdir -p target/llvm-cov
-          cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info
+          cargo llvm-cov report --failure-mode all --lcov --output-path target/llvm-cov/lcov.info
       - name: HTML report
-        run: cargo llvm-cov report --html
+        run: cargo llvm-cov report --failure-mode all --html
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-report

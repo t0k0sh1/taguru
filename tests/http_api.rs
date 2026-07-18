@@ -6811,8 +6811,11 @@ fn a_failing_chunk_fails_the_document_without_dispatching_the_tail() {
             // beyond `failing_index + workers`, which is exactly the
             // best-effort spillover dispatch_chunks_concurrently's own
             // doc comment says is unbounded once a failure is slow to
-            // surface).
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            // surface). 100ms rather than 20ms: the coverage job's
+            // instrumented binary is slow enough, and its capped
+            // --test-threads busy enough, to burn through a 20ms margin
+            // on a loaded runner and flake this exact assertion.
+            std::thread::sleep(std::time::Duration::from_millis(100));
             chat_ok(&json!({"associations": []}).to_string())
         }
     });
