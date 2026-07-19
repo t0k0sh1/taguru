@@ -1010,6 +1010,16 @@ pub const DEFAULT_WAL_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// `PassageStore::store`).
 pub const DEFAULT_PASSAGES_WAL_MAX_BYTES: usize = 1024 * 1024 * 1024;
 
+/// Default trigger for ratio-triggered auto-compaction (issue #135):
+/// compact once a context's dead ratio strictly exceeds this — dead
+/// weight outgrowing live content, the graph-side restatement of the
+/// passages store's own `COMPACT_RATIO = 1` (pending log outgrows the
+/// snapshot). Edges, not bytes, because the graph's dead weight has an
+/// exact edge measure ([`Context::dead_ratio`]) while its byte measure
+/// is a lower bound only (arena slack), and the maintenance API
+/// already drew the operational line on the same scale.
+pub const DEFAULT_AUTO_COMPACT_RATIO: f64 = 0.5;
+
 /// The boot knobs `taguru serve` and `taguru import` read identically —
 /// one reading, so the two entrances cannot drift. The values stay
 /// visible (rather than being swallowed by [`AppState::boot_with`])
@@ -1025,6 +1035,7 @@ pub struct BootConfig {
     pub embed_parallel: usize,
     pub semantic_floor: Option<f32>,
     pub per_context_metrics: PerContextMetrics,
+    pub auto_compact: Option<f64>,
 }
 
 /// Default ceiling on how many rows per context get a vector
@@ -1359,6 +1370,14 @@ pub struct BootOptions {
     /// scrape carries — see [`PerContextMetrics`]. Off skips the
     /// flush-time disk sweeps entirely, not just the render.
     pub per_context_metrics: PerContextMetrics,
+    /// Ratio-triggered auto-compaction (issue #135): `Some(ratio)`
+    /// makes each flusher tick compact the worst context whose dead
+    /// ratio strictly exceeds `ratio` (at most one per tick, behind
+    /// the heavy-ops permit its caller takes); `None` restores the
+    /// manual-only posture. Defaults on at
+    /// [`DEFAULT_AUTO_COMPACT_RATIO`], matching the passages store's
+    /// own unasked self-compaction.
+    pub auto_compact: Option<f64>,
     /// Present when replication is on: the shipper's progress map,
     /// consulted (never waited on) before the graph lane's
     /// housekeeping WAL reset so that shipped stream stays gapless —
@@ -1387,6 +1406,7 @@ impl Default for BootOptions {
             embed_parallel: 1,
             default_semantic_floor: None,
             per_context_metrics: PerContextMetrics::Off,
+            auto_compact: Some(DEFAULT_AUTO_COMPACT_RATIO),
             ship_progress: None,
             hydrator: None,
             replica: None,
@@ -1434,6 +1454,12 @@ impl BootConfig {
             // than on every context.
             semantic_floor: crate::env::env_floor("TAGURU_SEMANTIC_FLOOR"),
             per_context_metrics: crate::env::env_per_context_metrics("TAGURU_METRICS_PER_CONTEXT"),
+            // Default on, like the passages store's own self-compaction;
+            // TAGURU_AUTO_COMPACT=0 restores the manual-only posture.
+            auto_compact: crate::env::env_auto_compact(
+                "TAGURU_AUTO_COMPACT",
+                "TAGURU_AUTO_COMPACT_RATIO",
+            ),
         }
     }
 
@@ -1462,6 +1488,7 @@ impl BootConfig {
                 embed_parallel: self.embed_parallel,
                 default_semantic_floor: self.semantic_floor,
                 per_context_metrics: self.per_context_metrics,
+                auto_compact: self.auto_compact,
                 ship_progress,
                 hydrator,
                 replica,
@@ -1644,6 +1671,11 @@ struct StateInner {
     /// entirely on `Off`, and `gauge_snapshot` collects rows (and
     /// applies `Top`'s cut) for anything else.
     per_context_metrics: PerContextMetrics,
+    /// The auto-compaction trigger (`TAGURU_AUTO_COMPACT`, issue
+    /// #135), read only by [`AppState::auto_compact_candidate`] —
+    /// which the flusher tick calls; a replica never consults it
+    /// because a replica runs no flusher at all.
+    auto_compact: Option<f64>,
     /// Present when replication is on. Consulted (one mutexed map
     /// read, never a wait) before the GRAPH lane's post-flush WAL
     /// reset, so the shipper reads that log's tail before it
@@ -1886,6 +1918,7 @@ impl AppState {
             passage_vector_limit: options.passage_vector_limit,
             embed_parallel: options.embed_parallel,
             per_context_metrics: options.per_context_metrics,
+            auto_compact: options.auto_compact,
             ship_progress: options.ship_progress,
             hydrator: options.hydrator,
             replica: options.replica,
@@ -3605,22 +3638,14 @@ impl AppState {
         Ok(outcome)
     }
 
-    /// Server-wide sweep: every context whose live dead ratio strictly
-    /// exceeds `min_dead_ratio` is rebuilt via [`Self::compact_context`],
-    /// worst ratio first, so a deadline that cuts the sweep short still
-    /// recovers the most it could. Candidates are read from each entry's
-    /// existing dead ratio ([`Context::dead_ratio`] while hot, the
-    /// cached snapshot's while cold) — nothing is loaded or rebuilt just
-    /// to be asked whether it qualifies. Sequential by design: the caller
-    /// (`POST /maintenance/compact`) has already drained ordinary
-    /// traffic before calling this, so there is no concurrency to hide
-    /// behind parallelism, and one context at a time caps the sweep's
-    /// peak memory at a single context's footprint.
-    pub fn run_maintenance_compaction(
-        &self,
-        min_dead_ratio: f64,
-        deadline: Deadline,
-    ) -> MaintenanceCompactionOutcome {
+    /// Every context whose dead ratio strictly exceeds
+    /// `min_dead_ratio`, worst first — read from each entry's existing
+    /// bookkeeping ([`Context::dead_ratio`] while hot, the cached
+    /// sidecar snapshot's while cold); nothing is loaded or rebuilt
+    /// just to be asked whether it qualifies. Shared by the manual
+    /// maintenance sweep and the flusher's auto-compaction so the two
+    /// can never disagree about what "needs compacting" means.
+    fn compaction_candidates(&self, min_dead_ratio: f64) -> Vec<(String, f64)> {
         let mut candidates: Vec<(String, f64)> = self
             .snapshot()
             .into_iter()
@@ -3638,7 +3663,42 @@ impl AppState {
             })
             .collect();
         candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+        candidates
+    }
 
+    /// The ratio-triggered auto-compaction's selection half (issue
+    /// #135): the single worst-ratio context past the configured
+    /// trigger, or `None` — always `None` while the feature is off.
+    /// The flusher tick asks this every pass and compacts at most that
+    /// one candidate, so the policy stays amortized like the passages
+    /// store's own (the next tick picks up the next-worst); the caller
+    /// takes the heavy-ops permit before acting on the answer, which
+    /// is why selection and compaction are separate steps rather than
+    /// one method holding a permit it didn't need when the fleet is
+    /// clean — the common case.
+    pub fn auto_compact_candidate(&self) -> Option<(String, f64)> {
+        let min_dead_ratio = self.0.auto_compact?;
+        self.compaction_candidates(min_dead_ratio)
+            .into_iter()
+            .next()
+    }
+
+    /// Server-wide sweep: every context whose live dead ratio strictly
+    /// exceeds `min_dead_ratio` is rebuilt via [`Self::compact_context`],
+    /// worst ratio first, so a deadline that cuts the sweep short still
+    /// recovers the most it could. Candidates come from
+    /// [`Self::compaction_candidates`] — bookkeeping reads only.
+    /// Sequential by design: the caller
+    /// (`POST /maintenance/compact`) has already drained ordinary
+    /// traffic before calling this, so there is no concurrency to hide
+    /// behind parallelism, and one context at a time caps the sweep's
+    /// peak memory at a single context's footprint.
+    pub fn run_maintenance_compaction(
+        &self,
+        min_dead_ratio: f64,
+        deadline: Deadline,
+    ) -> MaintenanceCompactionOutcome {
+        let candidates = self.compaction_candidates(min_dead_ratio);
         let mut contexts = Vec::with_capacity(candidates.len());
         let mut deadline_exceeded = false;
         for (name, _) in candidates {
@@ -6439,6 +6499,112 @@ mod tests {
         assert_eq!(outcome.contexts[0].name, "rotten");
         assert_eq!(outcome.contexts[0].outcome.dead_edges, 1);
         assert!(!outcome.deadline_exceeded);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// [`AppState::auto_compact_candidate`] answers with the single
+    /// worst context strictly past the trigger, ignores everything at
+    /// or under it, and — because compaction zeroes the winner's dead
+    /// edges — finds nothing on the next ask: the amortized loop the
+    /// flusher runs terminates by itself (issue #135).
+    #[test]
+    fn auto_compact_candidate_picks_the_worst_past_the_trigger_then_runs_dry() {
+        let dir = scratch_dir("auto-candidate");
+        // The deployment default: on, at DEFAULT_AUTO_COMPACT_RATIO.
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        state
+            .create("mild", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "mild",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "産地", "灘", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_source("mild", "gone.md").unwrap();
+
+        state
+            .create("rotten", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "rotten",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                    assoc_op("蔵", "廃止蔵", "旧蔵", 1.0, Some("gone.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_source("rotten", "gone.md").unwrap();
+
+        // mild sits at 1/4 — under the 0.5 default; rotten at 2/3.
+        let (name, ratio) = state
+            .auto_compact_candidate()
+            .expect("rotten is past the trigger");
+        assert_eq!(name, "rotten");
+        assert!((ratio - 2.0 / 3.0).abs() < 1e-9, "{ratio}");
+
+        state
+            .compact_context("rotten", Deadline::unbounded())
+            .unwrap();
+        assert_eq!(
+            state.auto_compact_candidate(),
+            None,
+            "the compacted winner must not re-trigger, and mild stays under"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `auto_compact: None` (TAGURU_AUTO_COMPACT=0) is a hard off:
+    /// selection answers nothing however rotten the fleet, so the
+    /// flusher never takes a permit — or any lock — for the feature.
+    #[test]
+    fn auto_compact_candidate_is_none_while_the_feature_is_off() {
+        let dir = scratch_dir("auto-off");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                auto_compact: None,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        state
+            .create("rotten", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "rotten",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_source("rotten", "gone.md").unwrap();
+
+        assert_eq!(state.auto_compact_candidate(), None);
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -8,6 +8,25 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Ratio-triggered auto-compaction for contexts (#135), default on:
+  each flusher tick rebuilds at most the one worst context whose dead
+  ratio (dead edges / total edges — the bookkeeping the maintenance
+  sweep already reads, live for hot contexts, sidecar stats for cold)
+  strictly exceeds `TAGURU_AUTO_COMPACT_RATIO` (default 0.5, i.e. dead
+  weight outgrew live content — the graph-side restatement of the
+  passages store's own self-compaction ratio). The compaction takes a
+  permit from the same `TAGURU_MAX_CONCURRENT_HEAVY_OPS` pool manual
+  calls contend on (no free slot: the candidate waits for a later
+  tick), reuses `compact_context` verbatim (same crash guarantee: the
+  fresh image carries the old WAL watermark), leaves the same
+  `taguru::audit` "context compacted" line with `trigger="auto"` and
+  the measured ratio, and shows on `/metrics` as
+  `taguru_auto_compactions_total{outcome}`,
+  `taguru_auto_compact_reclaimed_bytes_total`, and
+  `taguru_auto_compact_last_success_timestamp_seconds`.
+  `TAGURU_AUTO_COMPACT=0` restores manual-only compaction for
+  scheduled quiet-window sweeps; replicas never auto-compact (they run
+  no flusher — their images belong to the primary).
 - Per-context capacity gauges on `/metrics` (#137), behind
   `TAGURU_METRICS_PER_CONTEXT` (default off; `1`/`all` = every
   context, `N ≥ 2` = the top-N by total disk bytes): the

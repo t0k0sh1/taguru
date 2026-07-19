@@ -315,6 +315,91 @@ fn the_maintenance_compact_endpoint_sweeps_worst_ratio_first_and_is_admin_only()
     );
 }
 
+/// Ratio-triggered auto-compaction, end to end and by DEFAULT — no
+/// TAGURU_AUTO_COMPACT in the environment (issue #135): a context at
+/// 2 dead of 3 sits past the 0.5 trigger, so the flusher tick itself
+/// rebuilds it — no operator call — and the run shows on /metrics
+/// (outcome counter, reclaimed bytes, last-success clock) while the
+/// live content survives verbatim.
+#[test]
+fn auto_compaction_fires_from_the_flusher_tick_by_default() {
+    let server = Server::start_with_env("auto-compact", &[("TAGURU_FLUSH_SECS", "1")]);
+    let (status, _) = server.call("PUT", "/contexts/sake", Some(json!({"pinned": true})));
+    assert_eq!(status, 200);
+    server.call(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
+            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
+            {"subject": "蔵", "label": "廃止蔵", "object": "旧蔵", "weight": 1.0, "source": "gone.md"},
+        ])),
+    );
+    server.call(
+        "POST",
+        "/contexts/sake/sources/retract",
+        Some(json!({"source": "gone.md"})),
+    );
+
+    // The tick fires every second; give a loaded CI box a generous
+    // window before calling the loop broken.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let metric = |text: &str, name: &str| -> u64 {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.trim().parse().ok())
+            .unwrap_or_else(|| panic!("{name} must render: {text}"))
+    };
+    let text = loop {
+        let (status, body) = server.call("GET", "/metrics", None);
+        assert_eq!(status, 200);
+        let text = body
+            .as_str()
+            .expect("metrics body is text, not JSON")
+            .to_string();
+        if metric(&text, "taguru_auto_compactions_total{outcome=\"ok\"}") >= 1 {
+            break text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the flusher never auto-compacted: {text}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert_eq!(
+        metric(&text, "taguru_auto_compactions_total{outcome=\"failed\"}"),
+        0,
+        "{text}"
+    );
+    assert!(
+        metric(&text, "taguru_auto_compact_reclaimed_bytes_total") > 0,
+        "{text}"
+    );
+    assert!(
+        metric(&text, "taguru_auto_compact_last_success_timestamp_seconds") > 0,
+        "{text}"
+    );
+    assert_eq!(
+        metric(&text, "taguru_dead_edges"),
+        0,
+        "the rebuild shed both dead edges: {text}"
+    );
+
+    // Live content survived the automatic rebuild.
+    let (status, facts) = server.call(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "蔵"})),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(facts["result"]["total"], json!(1), "{facts}");
+    assert_eq!(
+        facts["result"]["matches"][0]["label"],
+        json!("杜氏"),
+        "{facts}"
+    );
+}
+
 /// The changelog's stated limitation, pinned: compaction — the live
 /// endpoint and the offline CLI both — leaves `.group` files
 /// byte-for-byte alone. Groups hold nothing to compact, and a rewrite

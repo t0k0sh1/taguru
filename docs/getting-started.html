@@ -124,6 +124,7 @@ taguru version</code></pre>
           <tr><td>TAGURU_REQUEST_TIMEOUT_SECS</td><td>30</td><td>Time budget per request. Raise to 60+ once an embedding provider is configured</td></tr>
           <tr><td>TAGURU_MAX_CONCURRENT_REQUESTS</td><td>256</td><td>Global in-flight ceiling. Excess requests are shed immediately with 503 + <code>Retry-After</code>; <code>0</code> disables</td></tr>
           <tr><td>TAGURU_MAX_CONCURRENT_HEAVY_OPS</td><td>2</td><td>Shared ceiling for vocabulary audits and context compactions. Excess calls are shed immediately with 503 + <code>Retry-After</code>; <code>0</code> disables</td></tr>
+          <tr><td>TAGURU_AUTO_COMPACT</td><td>on</td><td>Ratio-triggered auto-compaction: each flush tick rebuilds at most the one worst context whose dead ratio exceeds <code>TAGURU_AUTO_COMPACT_RATIO</code> (0.5 — dead weight outgrew live content), behind the heavy-ops ceiling above. <code>0</code> keeps compaction manual-only</td></tr>
         </tbody>
       </table>
     </div>

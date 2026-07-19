@@ -168,6 +168,14 @@ ENVIRONMENT (every knob; unset = the shown default):
                                audit_drift's include_twins, and
                                compact_context; excess calls are shed with
                                503 + Retry-After (2; 0 = off)
+  TAGURU_AUTO_COMPACT          ratio-triggered auto-compaction: each flush
+                               tick rebuilds at most the one worst context
+                               whose dead ratio exceeds the trigger, behind
+                               the heavy-ops ceiling (on; 0/false = manual
+                               compaction only)
+  TAGURU_AUTO_COMPACT_RATIO    that trigger: compact once dead edges /
+                               total edges exceeds this (0.5 — dead weight
+                               outgrew live content)
   TAGURU_CROSS_SEARCH_CONCURRENCY  member contexts searched in parallel by
                                a single cross-context (group) query (4)
   TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off)

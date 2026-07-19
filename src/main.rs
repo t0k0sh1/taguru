@@ -89,6 +89,12 @@ use tracing::{error, info, warn};
 ///   vocabulary audits (including a drift audit's `include_twins`) and
 ///   per-context compactions (default 2; 0 disables). Excess calls are
 ///   shed immediately with 503 + `Retry-After`.
+/// - `TAGURU_AUTO_COMPACT`: ratio-triggered auto-compaction (default
+///   on) — each flusher tick rebuilds at most the one worst context
+///   whose dead ratio exceeds `TAGURU_AUTO_COMPACT_RATIO` (default
+///   0.5, i.e. dead weight outgrew live content), behind the heavy-ops
+///   ceiling above. `0`/`false` restores manual-only compaction for
+///   operators who prefer scheduled quiet-window sweeps.
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT` (or the `_TRACES_` variant): turns
 ///   on OTLP/HTTP span export — one span per request, parented from an
 ///   inbound `traceparent` or `X-Amzn-Trace-Id`, `trace_id` stamped
@@ -155,6 +161,12 @@ async fn serve(serve_args: cli::ServeArgs) {
             "heavy-operation ceiling enabled for vocabulary audits and context compactions"
         );
     }
+    // One pool for every whole-context sweep, manual or automatic: the
+    // routes gate on it below, and the flusher's auto-compaction takes
+    // a permit from the same pool — so background housekeeping and
+    // operator-invoked heavy calls contend on one ceiling instead of
+    // stacking two.
+    let heavy_ops_limiter = limits::HeavyOpsLimiter::new(max_concurrent_heavy);
     // Failed-auth attempts are throttled per source IP so the gate
     // cannot be brute-forced for free (default 10/min; 0 disables).
     let auth_fail_per_minute = resolve_per_minute(
@@ -363,11 +375,18 @@ async fn serve(serve_args: cli::ServeArgs) {
 
     if replica_mode {
         // No flusher: a replica never has dirty state to persist, and
-        // its disk belongs to the tailer. The scrape flips into
-        // replica shape here, once, for the process's lifetime.
+        // its disk belongs to the tailer. (This is also why a replica
+        // never auto-compacts — its images belong to the primary.) The
+        // scrape flips into replica shape here, once, for the
+        // process's lifetime.
         state.metrics().set_replica_mode();
     } else {
-        spawn_flusher(state.clone(), flush_secs, auto_embed);
+        spawn_flusher(
+            state.clone(),
+            flush_secs,
+            auto_embed,
+            heavy_ops_limiter.clone(),
+        );
     }
 
     // AFTER boot, so the pinned preload's eager hydration went first —
@@ -434,12 +453,7 @@ async fn serve(serve_args: cli::ServeArgs) {
         _ => None,
     };
 
-    let app = routes(
-        protocol_trailer,
-        limits::HeavyOpsLimiter::new(max_concurrent_heavy),
-        state.clone(),
-    )
-    .with_state(state.clone());
+    let app = routes(protocol_trailer, heavy_ops_limiter, state.clone()).with_state(state.clone());
 
     // POST /mcp speaks the MCP Streamable HTTP transport over these
     // same routes. The dispatch handle is captured BEFORE the outer
@@ -822,11 +836,18 @@ fn routes(
 }
 
 /// The periodic flusher: every `flush_secs`, persist what is dirty —
-/// and, when auto embedding is on, refresh what just flushed. Best
-/// effort: a failed refresh is retried the next time a write dirties
-/// the context (the gloss diff is idempotent), and the manual endpoint
-/// always remains.
-fn spawn_flusher(state: AppState, flush_secs: usize, auto_embed: bool) {
+/// and, when auto embedding is on, refresh what just flushed; when
+/// auto-compaction is on, rebuild the worst dead-ratio context past
+/// its trigger (at most one per tick, behind a `heavy_ops` permit).
+/// Best effort: a failed refresh is retried the next time a write
+/// dirties the context (the gloss diff is idempotent), and the manual
+/// endpoint always remains.
+fn spawn_flusher(
+    state: AppState,
+    flush_secs: usize,
+    auto_embed: bool,
+    heavy_ops: limits::HeavyOpsLimiter,
+) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(flush_secs as u64));
         ticker.tick().await; // the first tick fires immediately; skip it
@@ -848,7 +869,7 @@ fn spawn_flusher(state: AppState, flush_secs: usize, auto_embed: bool) {
             // Catching it keeps the loop alive for the next tick and
             // lets `record_flusher_tick` turn it into a 503 instead.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_flush_tick(&state, auto_embed)
+                run_flush_tick(&state, auto_embed, &heavy_ops)
             }));
             state.metrics().record_flusher_tick(outcome.is_ok());
             if let Err(payload) = outcome {
@@ -872,7 +893,7 @@ fn spawn_flusher(state: AppState, flush_secs: usize, auto_embed: bool) {
 /// can run behind `catch_unwind` as a plain synchronous call — the
 /// guarded closure must not straddle an `.await`, which rules out
 /// wrapping the loop body in place.
-fn run_flush_tick(state: &AppState, auto_embed: bool) {
+fn run_flush_tick(state: &AppState, auto_embed: bool, heavy_ops: &limits::HeavyOpsLimiter) {
     // Serialization and fsyncs are blocking work; keep the
     // async workers free while images land on disk.
     let flushed = tokio::task::block_in_place(|| state.flush_dirty());
@@ -921,6 +942,50 @@ fn run_flush_tick(state: &AppState, auto_embed: bool) {
                     }
                 }
             });
+        }
+    }
+    // Ratio-triggered auto-compaction (issue #135), last: the flush
+    // above already landed, and `compact_context` persists its own
+    // rebuilt image. At most one context per tick — the worst dead
+    // ratio past the trigger — so the policy stays amortized like the
+    // passages store's own; the next tick takes the next-worst. The
+    // permit comes from the same pool manual heavy calls contend on:
+    // when they hold every slot, the candidate simply waits for a
+    // later tick, so auto-compaction can never stampede the server.
+    if let Some((name, dead_ratio)) = state.auto_compact_candidate()
+        && let Ok(_permit) = heavy_ops.try_acquire()
+    {
+        match tokio::task::block_in_place(|| state.compact_context(&name, Deadline::unbounded())) {
+            Ok(outcome) => {
+                // Saturating: a rebuild of a context with nothing to
+                // shed can come out marginally larger (container
+                // growth thresholds), and a negative wrap would poison
+                // the lifetime counter.
+                let reclaimed = outcome.bytes_before.saturating_sub(outcome.bytes_after) as u64;
+                state.metrics().record_auto_compaction(Some(reclaimed));
+                // The same audit line a manual compaction leaves — one
+                // grep finds every image rewrite — with the trigger
+                // named where a request would name its key.
+                tracing::info!(
+                    target: "taguru::audit",
+                    trigger = "auto",
+                    context = %name,
+                    dead_ratio,
+                    bytes_before = outcome.bytes_before,
+                    bytes_after = outcome.bytes_after,
+                    dead_edges = outcome.dead_edges,
+                    aliases_dropped = outcome.aliases_dropped,
+                    "context compacted",
+                );
+            }
+            Err(error) => {
+                state.metrics().record_auto_compaction(None);
+                warn!(
+                    context = %name,
+                    ?error,
+                    "auto-compaction failed; retrying while the dead ratio holds"
+                );
+            }
         }
     }
 }
