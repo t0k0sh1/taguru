@@ -384,7 +384,13 @@ shard or its load balancer does).
   is exact either way (each batch replaces its own source). At a
   quota, retractions, alias removals, `DELETE`, and compaction still
   work: shrink the context (or have the operator raise its quota)
-  and retry; do not blindly re-send the refused write.
+  and retry; do not blindly re-send the refused write. "Shrink" means
+  those explicit operations — a replacement that carries new content
+  counts as growth even when it would net smaller, because its true
+  size is only knowable after it applies. To slim a source at the
+  ceiling: retract it first (over `/import`, a header-only batch —
+  just `taguru_batch`/`context`/`source` — is exactly that
+  retraction), then re-send the smaller version.
 - `501` `/embeddings/refresh` without a provider configured
   (server-side TAGURU_EMBED_*). `502` embedding provider failure
   (refresh, or the semantic fallback inside resolve) — retry later.
