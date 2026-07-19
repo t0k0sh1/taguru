@@ -401,11 +401,27 @@ impl KeyringDiff {
 /// is one uncontended read lock and an `Arc` clone; the write happens
 /// only when an operator rotates keys.
 #[derive(Clone)]
-pub struct SharedKeyring(Arc<parking_lot::RwLock<Arc<Keyring>>>);
+pub struct SharedKeyring {
+    ring: Arc<parking_lot::RwLock<Arc<Keyring>>>,
+    /// Serializes whole reloads (source read → parse → judge → swap),
+    /// NOT request loads. Two triggers watch the same sources (SIGHUP
+    /// and the config watch), and without this their read-compute-
+    /// write cycles can interleave: the loser stores a table parsed
+    /// from a file state the winner already superseded, and — because
+    /// the config watch has by then recorded the newest (mtime, len)
+    /// as seen — nothing re-triggers until the file changes again.
+    /// The stale table would sit armed indefinitely. Held inside
+    /// [`reload_keyring`] so every trigger, future ones included, is
+    /// serialized by construction rather than by caller discipline.
+    reload_serial: Arc<parking_lot::Mutex<()>>,
+}
 
 impl SharedKeyring {
     pub fn new(keyring: Keyring) -> Self {
-        Self(Arc::new(parking_lot::RwLock::new(Arc::new(keyring))))
+        Self {
+            ring: Arc::new(parking_lot::RwLock::new(Arc::new(keyring))),
+            reload_serial: Arc::new(parking_lot::Mutex::new(())),
+        }
     }
 
     /// The current table. Callers hold the snapshot for their whole
@@ -414,11 +430,11 @@ impl SharedKeyring {
     /// between them would let a key a reload just removed fall
     /// through `scope_of` to the unscoped admin default.
     pub fn load(&self) -> Arc<Keyring> {
-        Arc::clone(&self.0.read())
+        Arc::clone(&self.ring.read())
     }
 
     fn store(&self, keyring: Arc<Keyring>) {
-        *self.0.write() = keyring;
+        *self.ring.write() = keyring;
     }
 }
 
@@ -507,14 +523,18 @@ pub enum ReloadOutcome {
 /// boot invariant "OAuth enabled ⇒ keys configured" across reloads,
 /// since armed → empty is the only transition that could break it.)
 ///
-/// Concurrent calls (a SIGHUP racing the config watch) are benign:
-/// both read the same sources, and the store is a pointer swap, so
-/// the loser overwrites the winner with an identical table.
+/// Concurrent triggers (a SIGHUP racing the config watch) are
+/// serialized end-to-end on [`SharedKeyring::reload_serial`]: without
+/// that, two reloads straddling a file rewrite could finish in the
+/// wrong order and leave the SUPERSEDED table armed — permanently,
+/// since the watch has by then already recorded the newest file state
+/// as seen. Request loads never touch this lock.
 pub fn reload_keyring(
     shared: &SharedKeyring,
     source: &AuthSource,
     trigger: &'static str,
 ) -> ReloadOutcome {
+    let _serialized = shared.reload_serial.lock();
     let refused = |error: String| {
         tracing::error!(%error, trigger, "keyring reload refused; the previous table stays armed");
         ReloadOutcome::Refused
