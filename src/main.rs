@@ -225,45 +225,30 @@ async fn serve(serve_args: cli::ServeArgs) {
         Err(_) => None,
     };
 
-    let embedder = embedding::HttpEmbeddings::from_env();
+    // Raised the moment the stop signal lands (see the graceful-
+    // shutdown future below): an in-flight provider wait is abandoned
+    // rather than holding the drain for the provider timeout.
+    let embed_shutdown = embedding::ShutdownFlag::default();
+    let embedder = embedding::HttpEmbeddings::from_env(embed_shutdown.clone());
     if let Some(embedder) = &embedder {
         info!(model = embedder.model(), "semantic entry tier enabled");
-        // The provider call runs in block_in_place, which the request
-        // timeout cannot preempt — a budget under the provider ceiling
-        // 408s spuriously whenever the provider is merely slow. And one
-        // embed() makes up to MAX_EMBED_ATTEMPTS sequential attempts on
-        // transient failures, so the worst-case hold is that many times
-        // the per-attempt ceiling, not one. This trap used to live only
-        // in a code comment; size it and say it at boot.
+        // Each provider attempt is bounded by the smaller of
+        // TAGURU_EMBED_TIMEOUT_SECS and the request's remaining budget,
+        // so a slow provider is cut at the request deadline (the
+        // semantic lane degrades for that request) instead of holding
+        // the request past its own timeout. Say which knob is the
+        // effective ceiling when the budgets cross.
         let embed_timeout = env_number("TAGURU_EMBED_TIMEOUT_SECS", 60).max(1);
-        let worst_case = embed_timeout.saturating_mul(embedding::MAX_EMBED_ATTEMPTS);
-        if timeout_secs <= worst_case {
-            warn!(
+        if timeout_secs < embed_timeout {
+            info!(
                 request_timeout_secs = timeout_secs,
                 embed_timeout_secs = embed_timeout,
-                embed_worst_case_secs = worst_case,
-                embed_attempts = embedding::MAX_EMBED_ATTEMPTS,
-                "TAGURU_REQUEST_TIMEOUT_SECS is at or under the embedding provider's \
-                 worst-case hold (TAGURU_EMBED_TIMEOUT_SECS × retries) — raise it above \
-                 that, or slow provider calls will answer 408 after the work was \
-                 already done"
+                "the request budget is under TAGURU_EMBED_TIMEOUT_SECS: a slow provider \
+                 call is cut at the request's remaining budget and its lane degrades \
+                 for that request — raise TAGURU_REQUEST_TIMEOUT_SECS if the provider \
+                 legitimately needs its full ceiling"
             );
         }
-        // The same worst-case hold applies to shutdown: the provider call
-        // runs in block_in_place, so a SIGTERM arriving mid-embed leaves
-        // axum's graceful drain waiting on it, not the request timeout
-        // above. A container orchestrator's own stop grace period
-        // (Kubernetes terminationGracePeriodSeconds, Docker
-        // stop_grace_period) is invisible to this process, so it can't be
-        // checked the way TAGURU_REQUEST_TIMEOUT_SECS was above — only
-        // said, once, here.
-        info!(
-            embed_worst_case_secs = worst_case,
-            "an in-flight embed call can hold graceful shutdown's drain for up to this \
-             long — size the container orchestrator's stop grace period at least this \
-             large, or a SIGKILL cuts the drain short (every write is still safe in the \
-             WAL; only the final flush and unwritten usage counters are lost)"
-        );
     }
     let auto_embed = embedder.is_some() && env_bool("TAGURU_EMBED_AUTO", false);
     if auto_embed {
@@ -631,7 +616,16 @@ async fn serve(serve_args: cli::ServeArgs) {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown({
+        let embed_shutdown = embed_shutdown.clone();
+        async move {
+            shutdown_signal().await;
+            // Before axum begins the drain: any in-flight (or future)
+            // embedding provider wait gives up promptly, so the drain
+            // waits for requests, never for the provider timeout.
+            embed_shutdown.begin();
+        }
+    })
     .await
     .unwrap();
 

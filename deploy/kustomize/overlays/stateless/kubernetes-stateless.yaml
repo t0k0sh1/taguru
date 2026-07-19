@@ -50,7 +50,7 @@ spec:
     metadata:
       labels: { app: taguru }
     spec:
-      terminationGracePeriodSeconds: 200
+      terminationGracePeriodSeconds: 60
       containers:
         - name: taguru
           image: ghcr.io/t0k0sh1/taguru:0.3.0 # pin; `latest` moves

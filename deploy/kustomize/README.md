@@ -90,8 +90,10 @@ patches:
 ```
 
 The same shapes cover the rest: `terminationGracePeriodSeconds` when
-the embedding tier's timeout is widened, a different secret name via a
-patch on `envFrom`, probe periods per fleet. The router overlay's map
+`TAGURU_REQUEST_TIMEOUT_SECS` is widened (the drain is bounded by the
+request budget — in-flight embedding calls abort on the stop signal),
+a different secret name via a patch on `envFrom`, probe periods per
+fleet. The router overlay's map
 (`overlays/router/route-map`) is a generated ConfigMap, so editing it
 and re-applying rolls the routers by itself — and adding a shard is
 copying a `shards/` directory, not templating one.

@@ -7,6 +7,33 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+- Embedding tier resilience (#132): the provider now sits behind a
+  small circuit breaker — three consecutive failed attempts open it,
+  every embedding call then fails fast (the lanes behind it degrade
+  exactly as they do today: `sources/search` serves its lexical lane,
+  resolve serves lexical candidates or answers the existing
+  `embeddings_failed`) instead of each paying the provider timeout,
+  and after a 30s cooldown a single probe decides whether to close.
+  Breaker state, opens, and short-circuit counts land on `/metrics`
+  as `taguru_embedding_breaker_state` /
+  `_consecutive_failures` / `_opened_total` / `_short_circuits_total`
+  (present only when a provider is configured).
+
+### Changed
+- Embedding provider calls are deadline-aware and stop-signal-aware:
+  each attempt's HTTP timeout is the smaller of
+  `TAGURU_EMBED_TIMEOUT_SECS` and the request's remaining budget (a
+  slow provider is cut at the budget and that request's lane
+  degrades, instead of holding the request past its own timeout and
+  answering 408 after the work was done), and SIGTERM/SIGINT abandons
+  in-flight provider waits, so a graceful drain no longer waits out
+  the timeout ladder (up to 180s at the defaults — measured down to
+  under a second). The deploy manifests resize accordingly:
+  `terminationGracePeriodSeconds` / `stop_grace_period` drop from
+  200(s) to 60(s), now sized by the request budget plus the final
+  flush.
+
 ### Fixed
 - Hydration against a LIVE lineage no longer mistakes the writer's own
   progress for rot: a replica (or stateless writer) booting while the

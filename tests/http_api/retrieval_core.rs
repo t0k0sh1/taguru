@@ -31,6 +31,84 @@ fn protocol_reports_the_semantic_tier_when_configured() {
     assert!(protocol.as_str().unwrap().contains("auto-refreshes"));
 }
 
+/// A request blocked mid-embed used to hold SIGTERM's graceful drain
+/// for the provider's timeout ladder (60s × 3 attempts at the
+/// defaults) — the deploy manifests carried 200s grace periods for
+/// exactly this. The stop signal now abandons the provider wait: the
+/// blocked search degrades to its lexical lane, answers during the
+/// drain, and the process exits in seconds.
+#[test]
+fn sigterm_drains_promptly_past_an_in_flight_embed() {
+    use std::time::Duration;
+
+    // A provider that accepts and never answers, sockets held open —
+    // announcing each arrival, so the test KNOWS when the search is
+    // blocked inside the provider call rather than guessing by sleep.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let provider_addr = listener.local_addr().unwrap();
+    let (arrived, provider_reached) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept() {
+            let _ = arrived.send(());
+            held.push(stream);
+        }
+    });
+
+    let provider_url = format!("http://{provider_addr}/v1/embeddings");
+    let server = Server::start_with_env(
+        "drain-embed",
+        &[
+            ("TAGURU_EMBED_URL", provider_url.as_str()),
+            ("TAGURU_EMBED_MODEL", "black-hole-model"),
+            ("TAGURU_EMBED_PASSAGES", "1"),
+            ("TAGURU_EMBED_TIMEOUT_SECS", "60"),
+            ("TAGURU_REQUEST_TIMEOUT_SECS", "60"),
+        ],
+    );
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {
+            "docs/aomine.md": "原料米には山田錦を使い、精米歩合は50パーセントまで磨く。"
+        }})),
+    );
+
+    // The vector lane embeds the query before anything else, so this
+    // search blocks inside the black-holed provider call.
+    let base = server.base.clone();
+    let searcher = std::thread::spawn(move || {
+        let response = test_agent()
+            .post(format!("{base}/contexts/sake/sources/search"))
+            .header("Content-Type", "application/json")
+            .send(r#"{"query": "精米歩合", "limit": 3}"#);
+        finish(response, "POST", "/contexts/sake/sources/search")
+    });
+    // Only signal once the search is provably blocked in the provider.
+    provider_reached
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the search must reach the provider");
+
+    let started = std::time::Instant::now();
+    let _dir = server.stop_gracefully();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "the drain held {elapsed:?}; the stop signal must abandon the in-flight \
+         provider wait instead of waiting out its 60s ceiling"
+    );
+
+    // Answered during the drain, not reset — by the lexical lane
+    // alone, the vector lane visibly absent from the hit.
+    let (status, body) = searcher.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    let hits = body["result"].as_array().expect("hits array");
+    assert!(!hits.is_empty(), "{body}");
+    assert!(hits[0]["lanes"]["bm25"].is_object(), "{body}");
+    assert!(hits[0]["lanes"]["vector"].is_null(), "{body}");
+}
+
 #[test]
 fn full_retrieval_loop_over_http() {
     let server = Server::start("loop");

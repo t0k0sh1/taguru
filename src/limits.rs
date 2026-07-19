@@ -44,16 +44,15 @@ pub(crate) fn peer_ip(request: &Request) -> Option<Arc<str>> {
 /// is a 408 in the ApiError shape — retryable and client-actionable
 /// (narrow the query), unlike a 503's "server unhealthy".
 ///
-/// Caveat, documented for operators: the embedding-backed endpoints
-/// run their provider round trip inside `block_in_place`, which a
-/// future race cannot preempt — those requests only see the deadline
-/// after the blocking call returns. With TAGURU_EMBED_URL configured,
-/// set the budget above the provider's own 60s ceiling.
-///
 /// Stamps a [`Deadline`] onto the request before handing it to `next`,
 /// so a `block_in_place` section downstream — invisible to this race
 /// once entered — can still check the same budget on its own and give
-/// up early instead of running to completion regardless.
+/// up early instead of running to completion regardless. The embedding
+/// provider honors it hardest: each provider attempt's HTTP timeout is
+/// the smaller of its own ceiling and the deadline's remaining budget,
+/// so a budget under TAGURU_EMBED_TIMEOUT_SECS truncates slow provider
+/// calls at the budget (their lane degrades) rather than answering 408
+/// after the work was already done.
 pub async fn enforce_timeout(
     State(budget): State<Duration>,
     mut request: Request,

@@ -1313,6 +1313,13 @@ struct StateInner {
     /// The optional semantic entry tier; `None` keeps resolve purely
     /// lexical.
     embedder: Option<Arc<dyn EmbeddingProvider>>,
+    /// The provider's circuit breaker, when it carries one (the HTTP
+    /// provider does; test mocks do not): [`AppState::timed_embed`]'s
+    /// pre-flight gate, and the source of the
+    /// `taguru_embedding_breaker_*` series on /metrics. A clone of the
+    /// breaker the provider itself consults — one shared state, two
+    /// readers.
+    embed_breaker: Option<crate::embedding::EmbedBreaker>,
     /// Fallback semantic floor when neither the call nor the context
     /// sets one — the server default ([`DEFAULT_SEMANTIC_FLOOR`] unless
     /// `TAGURU_SEMANTIC_FLOOR` recalibrates it for the configured
@@ -1545,6 +1552,9 @@ impl AppState {
         // holds from the first request on, without exception.
         reconcile_groups(&data_dir, &registry, &mut groups);
 
+        let embed_breaker = embedder
+            .as_ref()
+            .and_then(|provider| provider.breaker().cloned());
         let state = Self(Arc::new(StateInner {
             data_dir,
             _dir_lock: dir_lock,
@@ -1553,6 +1563,7 @@ impl AppState {
             groups: RwLock::new(groups),
             clock: AtomicU64::new(0),
             embedder,
+            embed_breaker,
             default_semantic_floor: options
                 .default_semantic_floor
                 .unwrap_or(DEFAULT_SEMANTIC_FLOOR)
@@ -1791,6 +1802,11 @@ impl AppState {
             arena_slack_total,
             unsourced_edges_total,
             unsourced_weight_total,
+            embed_breaker: self
+                .0
+                .embed_breaker
+                .as_ref()
+                .map(crate::embedding::EmbedBreaker::snapshot),
         }
     }
 
@@ -2529,7 +2545,11 @@ impl AppState {
 
     /// One provider round trip, timed into the embed-latency histogram
     /// whatever the outcome — the ok/failed counters cannot tell a
-    /// slow provider from a down one; the histogram can.
+    /// slow provider from a down one; the histogram can. An open
+    /// circuit breaker refuses BEFORE the call and outside the timing:
+    /// a short-circuit is not a provider round trip, and a burst of
+    /// ~0s refusal samples would make a dead provider read as a fast
+    /// one on the histogram.
     fn timed_embed(
         &self,
         embedder: &dyn EmbeddingProvider,
@@ -2537,6 +2557,11 @@ impl AppState {
         purpose: EmbedPurpose,
         deadline: Deadline,
     ) -> Result<Vec<Vec<f32>>, String> {
+        if let Some(breaker) = &self.0.embed_breaker
+            && let Some(refusal) = breaker.refusal()
+        {
+            return Err(refusal);
+        }
         let started = std::time::Instant::now();
         let outcome = embedder.embed(texts, purpose, deadline);
         self.0.metrics.record_embed_latency(started.elapsed());

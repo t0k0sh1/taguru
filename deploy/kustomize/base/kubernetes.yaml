@@ -18,13 +18,13 @@
 #     /live (restarts fix wedged processes, not disks); readiness on
 #     /health (503 while the write path is degraded — route away,
 #     don't restart).
-#   - terminationGracePeriodSeconds sized for the embedding tier's worst
-#     case, not the 30s default: a request that lands mid-embed can hold
-#     the graceful drain for TAGURU_EMBED_TIMEOUT_SECS × 3 retries (180s
-#     at the defaults), since that provider call can't be preempted by
-#     the request timeout. Too short a grace period gets the process
-#     SIGKILLed mid-drain instead — raise this alongside
-#     TAGURU_EMBED_TIMEOUT_SECS if you widen that.
+#   - terminationGracePeriodSeconds covers the drain plus the final
+#     flush. The stop signal aborts in-flight embedding provider calls,
+#     so the drain never waits out the provider timeout — it is bounded
+#     by the request budget (TAGURU_REQUEST_TIMEOUT_SECS, 30s default).
+#     60 doubles that budget; too short a grace period gets the process
+#     SIGKILLed mid-drain instead. Raise this alongside
+#     TAGURU_REQUEST_TIMEOUT_SECS if you widen that.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,7 +40,7 @@ spec:
     metadata:
       labels: { app: taguru }
     spec:
-      terminationGracePeriodSeconds: 200
+      terminationGracePeriodSeconds: 60
       containers:
         - name: taguru
           image: ghcr.io/t0k0sh1/taguru:0.3.0 # pin; `latest` moves

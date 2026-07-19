@@ -243,7 +243,9 @@ pub fn run(args: &[String]) -> i32 {
     let embedder: Option<std::sync::Arc<dyn crate::embedding::EmbeddingProvider>> = if no_embed {
         None
     } else {
-        crate::embedding::HttpEmbeddings::from_env()
+        // A fresh, never-raised flag: the import runs one command to
+        // completion, with no graceful drain to unblock.
+        crate::embedding::HttpEmbeddings::from_env(crate::embedding::ShutdownFlag::default())
             .map(|provider| std::sync::Arc::new(provider) as _)
     };
     // The same knobs serve boots with — one reading for both entrances

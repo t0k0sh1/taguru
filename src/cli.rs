@@ -165,9 +165,9 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off)
   TAGURU_EMBED_MODEL           embedding model name
   TAGURU_EMBED_API_KEY         embedding provider credential
-  TAGURU_EMBED_TIMEOUT_SECS    per-attempt provider budget (60); transient
-                               failures retry twice with backoff — keep
-                               TAGURU_REQUEST_TIMEOUT_SECS above this
+  TAGURU_EMBED_TIMEOUT_SECS    per-attempt provider ceiling (60); a request's
+                               remaining budget bounds an attempt further,
+                               and transient failures retry twice with backoff
   TAGURU_EMBED_PASSAGES        1/true also embeds stored paragraphs — the
                                semantic passage lane; opt-in spend (off)
   TAGURU_PASSAGE_VECTOR_LIMIT  max embedded paragraphs per context (20000);
