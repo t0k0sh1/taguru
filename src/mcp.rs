@@ -1344,9 +1344,15 @@ mod tests {
             if path.ends_with("/resolve") {
                 Ok(envelope(json!([])))
             } else if path.ends_with("/sources/search") {
-                Ok(envelope(json!([
-                    {"source": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
-                ])))
+                Ok(envelope(json!({
+                    "plan": {"contexts": [{"context": "sake", "lanes": {
+                        "bm25": {"ran": true},
+                        "vector": {"ran": false, "reason": "no embedding provider is configured"}
+                    }}]},
+                    "hits": [
+                        {"source": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
+                    ]
+                })))
             } else {
                 panic!("unexpected call: {path}");
             }
@@ -1354,6 +1360,10 @@ mod tests {
         .expect("run_retrieve succeeds");
 
         assert_eq!(result["passage_hits"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            result["search_plan"]["contexts"][0]["context"], "sake",
+            "the fallback search's plan rides beside its hits"
+        );
     }
 
     /// `text_fallback_only_if_empty: false` runs the fallback
@@ -1381,9 +1391,12 @@ mod tests {
                     }]
                 })))
             } else if path.ends_with("/sources/search") {
-                Ok(envelope(json!([
-                    {"source": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
-                ])))
+                Ok(envelope(json!({
+                    "plan": {"contexts": []},
+                    "hits": [
+                        {"source": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
+                    ]
+                })))
             } else {
                 panic!("unexpected call: {path}");
             }

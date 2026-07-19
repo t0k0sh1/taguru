@@ -78,10 +78,20 @@ export class FakeServer {
         );
       }
       // The cross-context search: one tagged hit per named context,
-      // already rank-interleaved the way the server merges.
+      // already rank-interleaved the way the server merges, the plan
+      // listing every target (#151).
       const { contexts } = body as { contexts: string[] };
-      return ok(
-        contexts.map((name) => ({
+      return ok({
+        plan: {
+          contexts: contexts.map((name) => ({
+            context: name,
+            lanes: {
+              bm25: { ran: true },
+              vector: { ran: false, reason: "no embedding provider is configured" },
+            },
+          })),
+        },
+        hits: contexts.map((name) => ({
           context: name,
           source: `docs/${name}.md`,
           paragraph: 0,
@@ -89,7 +99,7 @@ export class FakeServer {
           text: `${name} の段落。`,
           lanes: { bm25: { rank: 0, score: 2.0 } },
         })),
-      );
+      });
     }
     if (path.endsWith("/resolve")) {
       const cue = (body as { cue: string }).cue;
@@ -113,22 +123,35 @@ export class FakeServer {
       return ok({ text: "杜氏は高瀬である。", source, section: "人物" });
     }
     if (path.endsWith("/sources/search")) {
-      return ok([
-        {
-          source: "docs/aomine.md",
-          paragraph: 1,
-          score: 3.0,
-          text: "杜氏は高瀬である。",
-          lanes: { bm25: { rank: 0, score: 3.0 } },
+      return ok({
+        plan: {
+          contexts: [
+            {
+              context: "sake",
+              lanes: {
+                bm25: { ran: true },
+                vector: { ran: false, reason: "no embedding provider is configured" },
+              },
+            },
+          ],
         },
-        {
-          source: "docs/other.md",
-          paragraph: 0,
-          score: 1.0,
-          text: "別の文書の段落。",
-          lanes: { bm25: { rank: 1, score: 1.0 } },
-        },
-      ]);
+        hits: [
+          {
+            source: "docs/aomine.md",
+            paragraph: 1,
+            score: 3.0,
+            text: "杜氏は高瀬である。",
+            lanes: { bm25: { rank: 0, score: 3.0 } },
+          },
+          {
+            source: "docs/other.md",
+            paragraph: 0,
+            score: 1.0,
+            text: "別の文書の段落。",
+            lanes: { bm25: { rank: 1, score: 1.0 } },
+          },
+        ],
+      });
     }
     if (path.endsWith("/labels")) {
       return ok({ total: 2, labels: ["代表銘柄", "杜氏"] });

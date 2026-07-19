@@ -191,7 +191,7 @@ class TaguruRetriever(BaseRetriever):
             if self.include_text:
                 text_hits = self.client.context(target).search_passages(
                     query, limit=self.text_limit
-                )
+                ).hits
             return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
         targets = self._resolve_targets(self.client)
@@ -216,7 +216,9 @@ class TaguruRetriever(BaseRetriever):
             # isolation just above).
             try:
                 text_hits = list(
-                    self.client.search_passages(query, contexts=targets, limit=self.text_limit)
+                    self.client.search_passages(
+                        query, contexts=targets, limit=self.text_limit
+                    ).hits
                 )
             except Exception:
                 text_hits = []
@@ -292,9 +294,10 @@ class TaguruRetriever(BaseRetriever):
             )
             text_hits: list[PassageHit] = []
             if self.include_text:
-                text_hits = await self.async_client.context(target).search_passages(
+                page = await self.async_client.context(target).search_passages(
                     query, limit=self.text_limit
                 )
+                text_hits = page.hits
             return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
         targets = await self._aresolve_targets(self.async_client)
@@ -318,11 +321,10 @@ class TaguruRetriever(BaseRetriever):
             # Same isolation as the sync lane above: one gone target must
             # not blank out the graph lane's already-fetched results.
             try:
-                text_hits = list(
-                    await self.async_client.search_passages(
-                        query, contexts=targets, limit=self.text_limit
-                    )
+                page = await self.async_client.search_passages(
+                    query, contexts=targets, limit=self.text_limit
                 )
+                text_hits = list(page.hits)
             except Exception:
                 text_hits = []
         return _merge_lanes(graph_docs, text_hits, limit)

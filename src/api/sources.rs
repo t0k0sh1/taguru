@@ -338,6 +338,150 @@ impl From<crate::registry::PassageSearchHit> for PassageHit {
     }
 }
 
+/// The response-level execution plan of one passage search (#151): one
+/// entry per context actually searched, in effective order — for the
+/// cross variant, the resolved target list (groups expanded, grants
+/// applied), the same order the merge breaks ties by and the retrieval
+/// cache keys on. What the per-hit `lanes` evidence cannot say — "the
+/// semantic lane never ran here, and this is why" — lives here, so a
+/// caller can tell a lexical-only answer from a fused one without a
+/// separate explain call. The plan describes the computation that
+/// produced these hits; a cache tier may replay both together, and
+/// every event that could change the plan (a corpus write, a vector
+/// publish, a floor change) also moves the cache key.
+#[derive(Serialize, Deserialize)]
+pub struct SearchPlan {
+    pub contexts: Vec<SearchContextPlan>,
+}
+
+/// One searched context's account, mirroring the per-hit `lanes` shape.
+#[derive(Serialize, Deserialize)]
+pub struct SearchContextPlan {
+    pub context: String,
+    pub lanes: SearchLanesPlan,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SearchLanesPlan {
+    pub bm25: LanePlan,
+    pub vector: LanePlan,
+}
+
+/// One lane's verdict for the whole call: it ran (the vector lane also
+/// names the effective cosine `floor` it swept under — the resolved
+/// override → context setting → server default chain), or it did not
+/// and `reason` says why, in the same prose the explain endpoint uses.
+#[derive(Serialize, Deserialize)]
+pub struct LanePlan {
+    pub ran: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub floor: Option<f32>,
+}
+
+impl LanePlan {
+    fn ran() -> Self {
+        Self {
+            ran: true,
+            reason: None,
+            floor: None,
+        }
+    }
+
+    fn skipped(reason: String) -> Self {
+        Self {
+            ran: false,
+            reason: Some(reason),
+            floor: None,
+        }
+    }
+}
+
+impl SearchContextPlan {
+    /// One context's plan entry from the registry's account of its
+    /// search — the vector arm maps through the same reason strings
+    /// explain emits, so the two surfaces cannot drift apart in prose.
+    fn of(context: &str, lanes: &crate::registry::PassageSearchLanes) -> Self {
+        use crate::registry::{PassageSearchLanes, VectorLaneStatus};
+
+        let both = |reason: &str| SearchLanesPlan {
+            bm25: LanePlan::skipped(reason.to_string()),
+            vector: LanePlan::skipped(reason.to_string()),
+        };
+        let lanes = match lanes {
+            PassageSearchLanes::NoQueryTerms => both("the query yields no searchable terms"),
+            PassageSearchLanes::ZeroLimit => both("the requested limit is 0"),
+            PassageSearchLanes::Ran { vector } => SearchLanesPlan {
+                bm25: LanePlan::ran(),
+                vector: match vector {
+                    VectorLaneStatus::Off {
+                        provider_configured,
+                    } => LanePlan::skipped(vector_off_reason(*provider_configured)),
+                    VectorLaneStatus::QueryEmbeddingFailed(error) => {
+                        LanePlan::skipped(vector_failed_reason(error))
+                    }
+                    VectorLaneStatus::NoVectors => LanePlan::skipped(vector_empty_reason()),
+                    VectorLaneStatus::ModelChanged { stored, current } => {
+                        LanePlan::skipped(vector_model_changed_reason(stored, current))
+                    }
+                    VectorLaneStatus::Ran { floor } => LanePlan {
+                        floor: Some(*floor),
+                        ..LanePlan::ran()
+                    },
+                },
+            },
+        };
+        Self {
+            context: context.to_string(),
+            lanes,
+        }
+    }
+}
+
+/// [`search_passages`]' result: the plan beside the hits it accounts
+/// for. The hits array is unchanged from the pre-#151 bare-array shape
+/// — it moved under `hits`.
+#[derive(Serialize, Deserialize)]
+pub struct PassagePage {
+    pub plan: SearchPlan,
+    pub hits: Vec<PassageHit>,
+}
+
+/// [`cross_search_passages`]' result — the same wrap, context-tagged
+/// hits. The router mode re-merges this shape across shards.
+#[derive(Serialize, Deserialize)]
+pub struct CrossPassagePage {
+    pub plan: SearchPlan,
+    pub hits: Vec<CrossMatch<PassageHit>>,
+}
+
+/// The one set of wire reason strings for a semantic lane that did not
+/// run — shared by the explain report and the search plan.
+fn vector_off_reason(provider_configured: bool) -> String {
+    if provider_configured {
+        "passage embedding is off (TAGURU_EMBED_PASSAGES)".to_string()
+    } else {
+        "no embedding provider is configured".to_string()
+    }
+}
+
+fn vector_failed_reason(error: &str) -> String {
+    format!("the query embedding failed: {error}")
+}
+
+fn vector_empty_reason() -> String {
+    "no paragraph vectors exist yet — the embedding refresh has not covered this context"
+        .to_string()
+}
+
+fn vector_model_changed_reason(stored: &str, current: &str) -> String {
+    format!(
+        "stored vectors belong to model '{stored}' but the provider is \
+         '{current}' — they are never served, and the next refresh re-embeds"
+    )
+}
+
 pub async fn search_passages(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
@@ -438,11 +582,11 @@ pub async fn search_passages(
         // the embedding call this search's semantic lane also makes.
         Some(Err(_)) if deadline.expired() => deadline_exceeded(started_at),
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
-        Some(Ok(hits)) => {
-            state.note_search(SearchOp::SearchPassages, &name, hits.is_empty());
-            let target_empty = vec![hits.is_empty()];
+        Some(Ok(found)) => {
+            state.note_search(SearchOp::SearchPassages, &name, found.hits.is_empty());
+            let target_empty = vec![found.hits.is_empty()];
             let mut lane_hits = [0u64; 3];
-            for hit in &hits {
+            for hit in &found.hits {
                 state
                     .metrics()
                     .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
@@ -459,14 +603,23 @@ pub async fn search_passages(
                     context = %name,
                     op = "search_passages",
                     cue = %request.query,
-                    hits = hits.len(),
-                    top_score = hits.first().map_or(0.0, |hit| f64::from(hit.score)),
+                    hits = found.hits.len(),
+                    top_score = found.hits.first().map_or(0.0, |hit| f64::from(hit.score)),
                     "search",
                 );
             }
-            let payload: Vec<PassageHit> = hits.into_iter().map(PassageHit::from).collect();
-            let top_score = payload.first().map_or(0.0, |hit| hit.score);
-            let log_hits = payload.len();
+            // A transiently degraded fill must not be pinned — see
+            // `PassageSearchLanes::embedding_failed` (the semantic
+            // claim is skipped with it; both live behind the key).
+            let key = key.filter(|_| !found.lanes.embedding_failed());
+            let payload = PassagePage {
+                plan: SearchPlan {
+                    contexts: vec![SearchContextPlan::of(&name, &found.lanes)],
+                },
+                hits: found.hits.into_iter().map(PassageHit::from).collect(),
+            };
+            let top_score = payload.hits.first().map_or(0.0, |hit| hit.score);
+            let log_hits = payload.hits.len();
             cache_and_serve(
                 &state,
                 key,
@@ -682,39 +835,28 @@ impl SearchExplanation {
                 provider_configured,
             } => VectorExplain {
                 ran: false,
-                reason: Some(if *provider_configured {
-                    "passage embedding is off (TAGURU_EMBED_PASSAGES)".to_string()
-                } else {
-                    "no embedding provider is configured".to_string()
-                }),
+                reason: Some(vector_off_reason(*provider_configured)),
                 floor: None,
                 cosine: None,
                 rank: None,
             },
             VectorLaneReport::QueryEmbeddingFailed(error) => VectorExplain {
                 ran: false,
-                reason: Some(format!("the query embedding failed: {error}")),
+                reason: Some(vector_failed_reason(error)),
                 floor: None,
                 cosine: None,
                 rank: None,
             },
             VectorLaneReport::NoVectors => VectorExplain {
                 ran: false,
-                reason: Some(
-                    "no paragraph vectors exist yet — the embedding refresh has not \
-                     covered this context"
-                        .to_string(),
-                ),
+                reason: Some(vector_empty_reason()),
                 floor: None,
                 cosine: None,
                 rank: None,
             },
             VectorLaneReport::ModelChanged { stored, current } => VectorExplain {
                 ran: false,
-                reason: Some(format!(
-                    "stored vectors belong to model '{stored}' but the provider is \
-                     '{current}' — they are never served, and the next refresh re-embeds"
-                )),
+                reason: Some(vector_model_changed_reason(stored, current)),
                 floor: None,
                 cosine: None,
                 rank: None,
@@ -1050,6 +1192,8 @@ pub async fn cross_search_passages(
     // the abandoned work happened to fail with.
     let mut pool = Vec::new();
     let mut target_empty = Vec::with_capacity(targets.len());
+    let mut plans = Vec::with_capacity(targets.len());
+    let mut embedding_failed = false;
     let mut lane_hits = [0u64; 3];
     for (index, outcome) in fetched.into_iter().enumerate() {
         let name = &targets[index];
@@ -1057,10 +1201,12 @@ pub async fn cross_search_passages(
             None => return not_found(name, started_at),
             Some(Err(_)) if deadline.expired() => return deadline_exceeded(started_at),
             Some(Err(io_error)) => return passages_unreadable(&state, io_error, started_at),
-            Some(Ok(hits)) => {
-                state.note_search(SearchOp::SearchPassages, name, hits.is_empty());
-                target_empty.push(hits.is_empty());
-                for hit in &hits {
+            Some(Ok(found)) => {
+                state.note_search(SearchOp::SearchPassages, name, found.hits.is_empty());
+                target_empty.push(found.hits.is_empty());
+                plans.push(SearchContextPlan::of(name, &found.lanes));
+                embedding_failed |= found.lanes.embedding_failed();
+                for hit in &found.hits {
                     state
                         .metrics()
                         .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
@@ -1072,7 +1218,9 @@ pub async fn cross_search_passages(
                     }
                 }
                 pool.extend(
-                    hits.into_iter()
+                    found
+                        .hits
+                        .into_iter()
                         .enumerate()
                         .map(|(rank, hit)| (index, rank, hit)),
                 );
@@ -1094,15 +1242,21 @@ pub async fn cross_search_passages(
             "search",
         );
     }
-    let payload: Vec<CrossMatch<PassageHit>> = pool
-        .into_iter()
-        .map(|(index, _, hit)| CrossMatch {
-            context: targets[index].clone(),
-            inner: PassageHit::from(hit),
-        })
-        .collect();
-    let top_score = payload.first().map_or(0.0, |found| found.inner.score);
-    let log_hits = payload.len();
+    // One target's transient embedding failure uncaches the whole
+    // response — see `PassageSearchLanes::embedding_failed`.
+    let key = key.filter(|_| !embedding_failed);
+    let payload = CrossPassagePage {
+        plan: SearchPlan { contexts: plans },
+        hits: pool
+            .into_iter()
+            .map(|(index, _, hit)| CrossMatch {
+                context: targets[index].clone(),
+                inner: PassageHit::from(hit),
+            })
+            .collect(),
+    };
+    let top_score = payload.hits.first().map_or(0.0, |found| found.inner.score);
+    let log_hits = payload.hits.len();
     cache_and_serve(
         &state,
         key,

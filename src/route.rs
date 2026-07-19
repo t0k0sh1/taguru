@@ -1143,11 +1143,15 @@ async fn merge_matches(
     };
     let mut total = 0usize;
     let mut matches: Vec<api::CrossMatch<api::AssociationOut>> = Vec::new();
+    let mut searched: BTreeSet<String> = BTreeSet::new();
     for (shard, body) in gathered.answers {
         match serde_json::from_slice::<ShardEnvelope<api::CrossMatchPage>>(&body) {
             Ok(page) => {
                 total += page.result.total;
                 matches.extend(page.result.matches);
+                if let Some(plan) = page.result.plan {
+                    searched.extend(plan.contexts);
+                }
             }
             Err(error) => {
                 return api::error(
@@ -1184,8 +1188,25 @@ async fn merge_matches(
         api::DEFAULT_MATCH_LIMIT,
         api::MAX_MATCH_LIMIT,
     ));
+    // The merged plan re-seats the union of the shard plans into the
+    // single-instance effective order: direct names in request order,
+    // group-resolved members after them in name order (the shards
+    // resolved the groups — the router only reorders). A dead shard's
+    // contexts are honestly absent: they were not searched, and the
+    // `unreached` labels beside the plan say why.
+    let mut contexts: Vec<String> = scatter
+        .direct
+        .iter()
+        .filter(|name| searched.remove(name.as_str()))
+        .cloned()
+        .collect();
+    contexts.extend(searched);
     router_ok(
-        api::CrossMatchPage { total, matches },
+        api::CrossMatchPage {
+            total,
+            matches,
+            plan: Some(api::MatchPlan { contexts }),
+        },
         gathered.unreached,
         started_at,
     )
@@ -1231,21 +1252,24 @@ async fn cross_search_passages(
     // target-list position). Rank is recovered from each shard's page
     // — within it, one context's hits appear in rank order — and the
     // target-list position needs only the RELATIVE order of the
-    // contexts that actually produced hits: direct names first, in
-    // request order, then group-resolved members in name order, which
-    // is exactly how `cross_targets` seats them.
+    // searched contexts: direct names first, in request order, then
+    // group-resolved members in name order, which is exactly how
+    // `cross_targets` seats them. The shard plans name every searched
+    // context (hits alone would miss the empty-handed ones), so the
+    // seat map and the merged plan both come from them.
     let mut pool: Vec<(usize, api::CrossMatch<api::PassageHit>)> = Vec::new();
+    let mut plan_entries: Vec<api::SearchContextPlan> = Vec::new();
     for (shard, body) in gathered.answers {
-        match serde_json::from_slice::<ShardEnvelope<Vec<api::CrossMatch<api::PassageHit>>>>(&body)
-        {
+        match serde_json::from_slice::<ShardEnvelope<api::CrossPassagePage>>(&body) {
             Ok(page) => {
                 let mut rank_of: BTreeMap<String, usize> = BTreeMap::new();
-                for hit in page.result {
+                for hit in page.result.hits {
                     let rank = rank_of.entry(hit.context.clone()).or_insert(0);
                     let seat = *rank;
                     *rank += 1;
                     pool.push((seat, hit));
                 }
+                plan_entries.extend(page.result.plan.contexts);
             }
             Err(error) => {
                 return api::error(
@@ -1265,9 +1289,9 @@ async fn cross_search_passages(
         .enumerate()
         .map(|(position, name)| (name.clone(), position))
         .collect();
-    let resolved: BTreeSet<String> = pool
+    let resolved: BTreeSet<String> = plan_entries
         .iter()
-        .map(|(_, hit)| hit.context.clone())
+        .map(|entry| entry.context.clone())
         .filter(|name| !seat.contains_key(name))
         .collect();
     for (position, name) in resolved.into_iter().enumerate() {
@@ -1275,9 +1299,17 @@ async fn cross_search_passages(
     }
     pool.sort_by_key(|(rank, hit)| (*rank, seat.get(&hit.context).copied().unwrap_or(usize::MAX)));
     pool.truncate(api::clamp(request.limit, 5, api::MAX_MATCH_LIMIT));
-    let hits: Vec<api::CrossMatch<api::PassageHit>> =
-        pool.into_iter().map(|(_, hit)| hit).collect();
-    router_ok(hits, gathered.unreached, started_at)
+    plan_entries.sort_by_key(|entry| seat.get(&entry.context).copied().unwrap_or(usize::MAX));
+    router_ok(
+        api::CrossPassagePage {
+            plan: api::SearchPlan {
+                contexts: plan_entries,
+            },
+            hits: pool.into_iter().map(|(_, hit)| hit).collect(),
+        },
+        gathered.unreached,
+        started_at,
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -6,9 +6,9 @@ use std::sync::atomic::Ordering;
 use taguru::deadline::{Deadline, DeadlineExceeded};
 
 use super::{
-    AppState, ContextMeta, Entry, FusedHit, PassageExplainLookup, PassageSearchExplanation,
-    PassageSearchHit, PassageVectorGate, VectorLaneReport, bm25_path, file_stem, passage_terms,
-    spelled_passage_terms,
+    AppState, ContextMeta, Entry, FusedHit, PassageExplainLookup, PassageSearch,
+    PassageSearchExplanation, PassageSearchHit, PassageSearchLanes, PassageVectorGate,
+    VectorLaneReport, VectorLaneStatus, bm25_path, file_stem, passage_terms, spelled_passage_terms,
 };
 
 impl AppState {
@@ -49,31 +49,39 @@ impl AppState {
         limit: usize,
         floor_override: Option<f32>,
         deadline: Deadline,
-    ) -> Option<io::Result<Vec<PassageSearchHit>>> {
+    ) -> Option<io::Result<PassageSearch>> {
         let entry = self.lookup(name)?;
         if limit == 0 {
-            return entry.read_unless_deleted().map(|_| Ok(Vec::new()));
+            return entry.read_unless_deleted().map(|_| {
+                Ok(PassageSearch {
+                    hits: Vec::new(),
+                    lanes: PassageSearchLanes::ZeroLimit,
+                })
+            });
         }
         let query_grams = deduped_query_grams(query);
         if query_grams.is_empty() {
-            return entry.read_unless_deleted().map(|_| Ok(Vec::new()));
+            return entry.read_unless_deleted().map(|_| {
+                Ok(PassageSearch {
+                    hits: Vec::new(),
+                    lanes: PassageSearchLanes::NoQueryTerms,
+                })
+            });
         }
         let pool = lane_pool(limit);
 
         // The semantic lane's query embedding runs BEFORE any lock: a
         // provider round trip must never extend the fence below.
-        let cue = match self.passage_query_cue(query, deadline) {
-            Ok(cue) => cue,
-            Err(error) => {
-                // Degrade, loudly: the lexical lane still answers.
-                tracing::warn!(
-                    context = %name,
-                    error,
-                    "passage query embedding failed; serving the lexical lane alone"
-                );
-                None
-            }
-        };
+        let cue = self.passage_query_cue(query, deadline);
+        if let Err(error) = &cue {
+            // Degrade, loudly: the lexical lane still answers, and the
+            // plan hands the caller the same account this line logs.
+            tracing::warn!(
+                context = %name,
+                error,
+                "passage query embedding failed; serving the lexical lane alone"
+            );
+        }
 
         // Everything below holds the read fence: eviction and deletion
         // are excluded for the whole search, so `store` IS the resident
@@ -103,19 +111,48 @@ impl AppState {
         // semantic_resolve applies to its own cosine matches — the
         // caller's one-call override beats the context setting beats
         // the server default (`fence` is already this entry's read
-        // lock, taken above).
-        let semantic: Vec<(String, u32, u64, f32)> = match &cue {
-            Some(cue) => match self.passage_vector_gate(&entry, &file_stem(name)) {
-                PassageVectorGate::Ready(vectors) => semantic_lane_hits(
-                    vectors.top_matches(cue, pool, deadline),
-                    self.effective_semantic_floor(floor_override, &fence.meta),
+        // lock, taken above). Every arm also names what it did: the
+        // status the handler serializes into the response's plan.
+        let (semantic, vector): (Vec<(String, u32, u64, f32)>, VectorLaneStatus) = match &cue {
+            Err(error) => (
+                Vec::new(),
+                VectorLaneStatus::QueryEmbeddingFailed(error.clone()),
+            ),
+            Ok(None) => (
+                Vec::new(),
+                VectorLaneStatus::Off {
+                    provider_configured: self.0.embedder.is_some(),
+                },
+            ),
+            Ok(Some(cue)) => match self.passage_vector_gate(&entry, &file_stem(name)) {
+                PassageVectorGate::Ready(vectors) => {
+                    let floor = self.effective_semantic_floor(floor_override, &fence.meta);
+                    (
+                        semantic_lane_hits(vectors.top_matches(cue, pool, deadline), floor),
+                        VectorLaneStatus::Ran { floor },
+                    )
+                }
+                // Unreachable in practice (a cue exists only when the
+                // lane is on), kept for the same defensiveness as
+                // explain's mapping.
+                PassageVectorGate::Disabled => (
+                    Vec::new(),
+                    VectorLaneStatus::Off {
+                        provider_configured: self.0.embedder.is_some(),
+                    },
                 ),
-                _ => Vec::new(),
+                PassageVectorGate::Empty => (Vec::new(), VectorLaneStatus::NoVectors),
+                PassageVectorGate::ModelChanged { stored, current } => (
+                    Vec::new(),
+                    VectorLaneStatus::ModelChanged { stored, current },
+                ),
             },
-            None => Vec::new(),
         };
 
-        Some(Ok(fuse_passage_lanes(&store, lexical, semantic, limit)))
+        Some(Ok(PassageSearch {
+            hits: fuse_passage_lanes(&store, lexical, semantic, limit),
+            lanes: PassageSearchLanes::Ran { vector },
+        }))
     }
 
     /// The whole account of one source (or one of its paragraphs)

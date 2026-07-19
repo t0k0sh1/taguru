@@ -235,7 +235,16 @@ pub async fn unreachable_from(
             // it never counts as an empty read.
             state.note_read(&name, false);
             let matches = associations_out(&state, &name, matches);
-            ok(MatchPage { total, matches }, started_at)
+            // No plan: an orphan audit is not a search — the field
+            // stays off the wire here.
+            ok(
+                MatchPage {
+                    total,
+                    matches,
+                    plan: None,
+                },
+                started_at,
+            )
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }

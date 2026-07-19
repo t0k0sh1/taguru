@@ -91,7 +91,7 @@ fn an_offline_import_carries_questions_through_to_the_search_index() {
         "/contexts/sake/sources/search",
         Some(json!({"query": "杜氏は誰?", "limit": 3})),
     );
-    let hit = &hits[0];
+    let hit = &hits["hits"][0];
     assert_eq!(hit["source"], "doc-guide");
     assert_eq!(hit["paragraph"], 1, "the hit names the answering PARAGRAPH");
     let _ = std::fs::remove_dir_all(&batches);

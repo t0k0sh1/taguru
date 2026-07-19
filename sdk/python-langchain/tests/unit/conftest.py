@@ -106,19 +106,37 @@ class FakeServer:
                     },
                 )
             # The cross-context search: one tagged hit per named context,
-            # already rank-interleaved the way the server merges.
+            # already rank-interleaved the way the server merges, the
+            # plan listing every target (#151).
             return ok(
-                [
-                    {
-                        "context": name,
-                        "source": f"docs/{name}.md",
-                        "paragraph": 0,
-                        "score": 2.0,
-                        "text": f"{name} の段落。",
-                        "lanes": {"bm25": {"rank": 0, "score": 2.0}},
-                    }
-                    for name in body["contexts"]
-                ]
+                {
+                    "plan": {
+                        "contexts": [
+                            {
+                                "context": name,
+                                "lanes": {
+                                    "bm25": {"ran": True},
+                                    "vector": {
+                                        "ran": False,
+                                        "reason": "no embedding provider is configured",
+                                    },
+                                },
+                            }
+                            for name in body["contexts"]
+                        ]
+                    },
+                    "hits": [
+                        {
+                            "context": name,
+                            "source": f"docs/{name}.md",
+                            "paragraph": 0,
+                            "score": 2.0,
+                            "text": f"{name} の段落。",
+                            "lanes": {"bm25": {"rank": 0, "score": 2.0}},
+                        }
+                        for name in body["contexts"]
+                    ],
+                }
             )
         if path.endswith("/resolve"):
             hits = (
@@ -145,22 +163,38 @@ class FakeServer:
             return ok({"text": "杜氏は高瀬である。", "source": body["source"], "section": "人物"})
         if path.endswith("/sources/search"):
             return ok(
-                [
-                    {
-                        "source": "docs/aomine.md",
-                        "paragraph": 1,
-                        "score": 3.0,
-                        "text": "杜氏は高瀬である。",
-                        "lanes": {"bm25": {"rank": 0, "score": 3.0}},
+                {
+                    "plan": {
+                        "contexts": [
+                            {
+                                "context": "sake",
+                                "lanes": {
+                                    "bm25": {"ran": True},
+                                    "vector": {
+                                        "ran": False,
+                                        "reason": "no embedding provider is configured",
+                                    },
+                                },
+                            }
+                        ]
                     },
-                    {
-                        "source": "docs/other.md",
-                        "paragraph": 0,
-                        "score": 1.0,
-                        "text": "別の文書の段落。",
-                        "lanes": {"bm25": {"rank": 1, "score": 1.0}},
-                    },
-                ]
+                    "hits": [
+                        {
+                            "source": "docs/aomine.md",
+                            "paragraph": 1,
+                            "score": 3.0,
+                            "text": "杜氏は高瀬である。",
+                            "lanes": {"bm25": {"rank": 0, "score": 3.0}},
+                        },
+                        {
+                            "source": "docs/other.md",
+                            "paragraph": 0,
+                            "score": 1.0,
+                            "text": "別の文書の段落。",
+                            "lanes": {"bm25": {"rank": 1, "score": 1.0}},
+                        },
+                    ],
+                }
             )
         if path.endswith("/labels"):
             return ok({"total": 2, "labels": ["代表銘柄", "杜氏"]})

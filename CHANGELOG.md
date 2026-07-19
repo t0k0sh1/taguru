@@ -8,6 +8,18 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Execution plans on every search response (#151): recall/query
+  (single-context and cross) gain a `plan` object beside
+  `total`/`matches` — additive — carrying `contexts`, the list of
+  contexts actually consulted in effective order. For the cross
+  variants that is the resolved target list (groups expanded, the
+  key's grants applied), which the tagged matches alone cannot
+  reconstruct when a target comes back empty; it names nothing a
+  caller cannot already see through `GET /groups`. The passage-search
+  half of #151 is a response-shape change and lives under **Changed**
+  below. The MCP `retrieve` tool and both SDKs' composed `retrieve()`
+  forward the fallback search's plan as `search_plan` (null/absent
+  when no fallback ran).
 - Semantic retrieval cache for passage search (#153): with
   `TAGURU_SEMANTIC_CACHE_THRESHOLD` set (off by default), a
   paraphrased `sources/search` (single-context or cross, MCP
@@ -88,6 +100,30 @@ Entries that change an on-disk format or a response shape say so.
   (present only when a provider is configured).
 
 ### Changed
+- **Response shape**: `POST /contexts/{name}/sources/search` and cross
+  `POST /sources/search` now answer `{plan, hits}` instead of a bare
+  hit array (#151) — the hits themselves are unchanged, moved under
+  `hits`; `plan.contexts` carries, per context actually searched,
+  whether each lane ran (`bm25`/`vector`, mirroring the per-hit
+  `lanes` shape), the reason when one was skipped — embeddings off,
+  nothing embedded yet, model changed, provider refused, in the same
+  prose `sources/search/explain` uses — and the vector lane's
+  effective cosine floor when it swept (the override → context
+  setting → server default chain, resolved per context). This is what
+  makes "did the semantic lane actually run" visible without a
+  diagnostic call; a zero-hit page under a skipped lane no longer
+  reads as "nothing matched". Breaking for clients that parse the
+  search result as an array: both SDKs (`search_passages` /
+  `searchPassages` now return the page object with `.hits` and
+  `.plan`), the langchain retrievers, the MCP `retrieve` tool, and
+  `taguru route`'s shard merge move in lockstep in this release —
+  upgrade router and shards together, and pin older SDKs to older
+  servers (the pre-1.0 posture `GET /protocol` and this file already
+  declare; older Python SDKs fail loudly on the new shape rather than
+  mis-reading it). The plan rides inside the cached result bytes, so
+  #150 exact hits and #153 semantic serves replay it unchanged — every
+  event that could alter a plan (corpus write, vector publish, floor
+  change) already moves the cache key.
 - The approximate passage index now activates at 10 000 vector rows
   instead of 50 000 (#148). The old threshold sat above the default
   `TAGURU_PASSAGE_VECTOR_LIMIT` (20 000), so no default-config
@@ -114,6 +150,16 @@ Entries that change an on-disk format or a response shape say so.
   flush.
 
 ### Fixed
+- A passage search whose query embedding was refused by the provider
+  (a transient failure — the one vector-lane state that recovers with
+  no revision bump) is no longer filled into the retrieval caches
+  (#151): previously the degraded BM25-only page was cached like any
+  other result and kept serving — and could canonicalize semantic-tier
+  paraphrases onto itself — until the next unrelated corpus or config
+  write, silently outliving the provider's recovery. The degraded page
+  is still served (and its plan now confesses the failure); it is just
+  never pinned. Stable skip states (embeddings off, nothing embedded,
+  model changed) stay cacheable — config changes do move the key.
 - Hydration against a LIVE lineage no longer mistakes the writer's own
   progress for rot: a replica (or stateless writer) booting while the
   writer keeps shipping could fetch an object the writer had just

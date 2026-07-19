@@ -276,8 +276,13 @@ pub fn run_retrieve_bounded(
 
     // Step 5: text-lane fallback — only when the caller named a
     // fallback query, and (by default) only when no associations were
-    // gathered.
+    // gathered. The search's result is `{plan, hits}` (#151):
+    // `passage_hits` keeps its historical array contract, and the plan
+    // rides beside it as `search_plan` — null when no fallback ran,
+    // so "the search never happened" and "the semantic lane was
+    // skipped" stay distinguishable here too.
     let mut passage_hits = Value::Array(Vec::new());
+    let mut search_plan = Value::Null;
     if let Some(text_fallback_query) = arguments.get("text_fallback_query").and_then(Value::as_str)
         && (!text_fallback_only_if_empty || associations.is_empty())
     {
@@ -285,10 +290,15 @@ pub fn run_retrieve_bounded(
         if let Some(limit) = arguments.get("search_limit").filter(|v| !v.is_null()) {
             search_args["limit"] = limit.clone();
         }
-        passage_hits = call_tool("search_passages", search_args)?
+        let mut page = call_tool("search_passages", search_args)?
             .get("result")
             .cloned()
+            .unwrap_or(Value::Null);
+        passage_hits = page
+            .get_mut("hits")
+            .map(Value::take)
             .unwrap_or(Value::Array(Vec::new()));
+        search_plan = page.get_mut("plan").map(Value::take).unwrap_or(Value::Null);
     }
 
     Ok(json!({
@@ -298,5 +308,6 @@ pub fn run_retrieve_bounded(
         "activations": activations,
         "citations": citations,
         "passage_hits": passage_hits,
+        "search_plan": search_plan,
     }))
 }
