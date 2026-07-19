@@ -185,12 +185,24 @@ TAGURU_EMBED_AUTO=1         <span class="c"># don't count on the agent calling r
       <b>silently discarding every correct answer</b>. The symptom: resolve returns
       <code>[]</code> while the ranking underneath is perfect.
     </p>
-    <p>Calibrate once per embedding model:</p>
-    <ol>
-      <li>Ingest representative content and refresh the embeddings.</li>
-      <li>Probe with <b>paraphrase cues</b> that share no spelling with any stored name: <code>POST /contexts/{name}/resolve {"cue": "…", "semantic_floor": 0.05}</code></li>
-      <li>The scores separate into two bands. Set <code>TAGURU_SEMANTIC_FLOOR</code> between them.</li>
-    </ol>
+    <p>Calibrate once per embedding model — the ritual is mechanical, so the CLI runs it:</p>
+    <pre><code>taguru calibrate --context sake --probes probes.tsv http://127.0.0.1:8248</code></pre>
+    <p>
+      The probe file is TSV — <code>cue&lt;TAB&gt;expected</code>, one per line, where the cue is
+      a <b>paraphrase</b> sharing no spelling with any stored name and <code>expected</code> is
+      the stored concept it should reach. Ingest representative content and refresh embeddings
+      first. For each probe, the expected name's own gloss cosine feeds the upper band and the
+      best <i>other</i> candidate feeds the lower; the report prints both bands, the gap, and a
+      suggested <code>TAGURU_SEMANTIC_FLOOR</code> mid-gap (<code>--json</code> for automation),
+      stamped with the (model, width) it measured — the identity
+      <code>GET /contexts/{name}/embeddings</code> serves. Cues that lexically resolve — the
+      step humans get wrong — are detected and <b>excluded loudly</b>, and overlapping bands are
+      reported as exactly that (a model that cannot separate these names at this dimension),
+      never papered over with a number. The manual probe, when you want to see one score with
+      your own eyes: <code>POST /contexts/{name}/resolve {"cue": "…", "semantic_floor":
+      0.05}</code>.
+    </p>
+    <p>Measured floors — grow this table by running <code>taguru calibrate</code> and pasting the number:</p>
     <div class="tbl">
       <table>
         <thead><tr><th>Model</th><th>Floor</th></tr></thead>

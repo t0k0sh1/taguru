@@ -436,6 +436,7 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         | (&Method::GET, "/contexts/{name}/labels")
         | (&Method::GET, "/contexts/{name}/aliases")
         | (&Method::GET, "/contexts/{name}/sources")
+        | (&Method::GET, "/contexts/{name}/embeddings")
         | (&Method::GET, "/contexts/{name}/export")
         | (&Method::GET, "/protocol")
         | (&Method::POST, "/recall")

@@ -11,7 +11,8 @@ use crate::embedding::{
 use crate::hash::fnv1a;
 
 use super::{
-    AccessError, AppState, Entry, GlossLaneReport, PassageRefreshOutcome, SEMANTIC_RESOLVE_LIMIT,
+    AccessError, AppState, EmbeddingsStatus, Entry, GlossLaneReport, GlossSidecarStatus,
+    PassageRefreshOutcome, PassageSidecarStatus, SEMANTIC_RESOLVE_LIMIT,
     dispatch_chunks_concurrently, file_stem, pvectors_path, vectors_path,
 };
 
@@ -19,6 +20,40 @@ impl AppState {
     /// Whether the semantic entry tier has a provider at all.
     pub fn embeddings_configured(&self) -> bool {
         self.0.embedder.is_some()
+    }
+
+    /// The embedding identity in one read: the provider this server is
+    /// configured to call beside what each vector sidecar actually
+    /// holds. `None` when the context does not exist. Backs
+    /// `GET /contexts/{name}/embeddings` — the identity a calibration
+    /// report stamps its floor with (#131).
+    pub fn embeddings_status(&self, name: &str) -> Option<EmbeddingsStatus> {
+        let entry = self.lookup(name)?;
+        let stem = file_stem(name);
+        let store = self.entry_vectors(&entry, &stem);
+        // width() is Some exactly when anything is stored, so it doubles
+        // as the emptiness gate.
+        let glosses = store.width().map(|width| GlossSidecarStatus {
+            model: store.model.clone(),
+            width,
+            concepts: store.concepts.len(),
+            labels: store.labels.len(),
+        });
+        let passages = self.entry_passage_vectors(&entry, &stem);
+        let passages = (!passages.is_empty()).then(|| PassageSidecarStatus {
+            model: passages.model.clone(),
+            width: passages.dim(),
+            rows: passages.len(),
+        });
+        Some(EmbeddingsStatus {
+            provider_model: self
+                .0
+                .embedder
+                .as_ref()
+                .map(|embedder| embedder.model().to_string()),
+            glosses,
+            passages,
+        })
     }
 
     /// Name pairs whose GLOSSES sit close in embedding space — the

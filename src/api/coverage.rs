@@ -37,6 +37,24 @@ pub struct RefreshBreakdown {
     pub skipped_over_limit: Option<usize>,
 }
 
+/// `GET /contexts/{name}/embeddings` — the embedding identity in one
+/// read: the provider's configured model beside the (model, width)
+/// each vector sidecar was built with, and the row counts. What
+/// `taguru calibrate` stamps its report with (#131), and the state an
+/// operator checks after a model switch without provoking a search.
+pub async fn embeddings_status(
+    State(state): State<AppState>,
+    AppPath(name): AppPath<String>,
+) -> Response {
+    let started_at = Instant::now();
+    // A cold context loads here (the same admission resolve makes),
+    // and the sidecar reads are file I/O — keep the async workers free.
+    match tokio::task::block_in_place(|| state.embeddings_status(&name)) {
+        Some(status) => ok(status, started_at),
+        None => not_found(&name, started_at),
+    }
+}
+
 pub async fn refresh_embeddings(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,

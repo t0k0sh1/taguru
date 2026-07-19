@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod bm25;
+mod calibrate;
 mod cli;
 mod compact;
 mod config;
@@ -776,6 +777,7 @@ fn routes(
             post(api::retract_source),
         )
         .route("/contexts/{name}/citations", post(api::citation))
+        .route("/contexts/{name}/embeddings", get(api::embeddings_status))
         .route(
             "/contexts/{name}/embeddings/refresh",
             post(api::refresh_embeddings),
