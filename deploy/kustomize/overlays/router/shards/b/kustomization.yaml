@@ -1,0 +1,11 @@
+# The second shard — see ../a/kustomization.yaml for what the suffix
+# and the selector label are doing.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../base
+nameSuffix: -b
+labels:
+  - pairs:
+      shard: b
+    includeSelectors: true

@@ -1,0 +1,25 @@
+# The single-writer PVC model — deploy/kubernetes.yaml, consumed
+# VERBATIM. The reference manifest stays the single source of truth
+# (its comments carry the reasoning), so this base renders equivalent
+# to `kubectl apply -f ../../kubernetes.yaml` by construction; CI
+# asserts the equivalence on every PR that touches deploy/.
+#
+#   kubectl create namespace taguru
+#   kubectl -n taguru create secret generic taguru-keys \
+#     --from-literal=TAGURU_API_TOKENS='ops:CHANGE-ME'
+#   kubectl -n taguru apply -k .
+#
+# kubernetes.yaml here is a BYTE-IDENTICAL copy of the reference file,
+# not a fork: kustomize's load restrictor refuses `../../` references
+# and `kubectl apply -k` has no flag to relax it, so the file must
+# live in-tree — and CI diffs the pair on every PR touching deploy/,
+# so the copy cannot drift. Edit the reference, then `cp` it here.
+#
+# Retune knobs (image tag, storage class/size, resources, probe
+# budgets, grace period, secret names) in YOUR overlay with `patches:`
+# and `images:` — see ../README.md for worked examples — never by
+# editing the reference manifest.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - kubernetes.yaml

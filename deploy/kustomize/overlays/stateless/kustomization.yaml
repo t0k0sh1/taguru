@@ -1,0 +1,15 @@
+# The boot-from-bucket variant (issue #128) — the bucket is the source
+# of truth, the volume an emptyDir cache. The reference manifest
+# deploy/kubernetes-stateless.yaml is consumed verbatim; its header
+# states what the variant trades away (a crashed pod's un-shipped
+# tail) and why it bakes TAGURU_TAKEOVER=1 in. The secret must carry
+# TAGURU_REPLICATE_URL, and the pod that cloud's identity.
+#
+#   kubectl -n taguru apply -k .
+#
+# kubernetes-stateless.yaml here is a byte-identical, CI-diffed copy
+# of the reference file — see ../../base/kustomization.yaml for why.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - kubernetes-stateless.yaml

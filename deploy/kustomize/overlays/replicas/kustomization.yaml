@@ -1,0 +1,19 @@
+# Writer + read pool in one apply (issue #129): the PVC writer plus
+# deploy/kubernetes-replicas.yaml's bucket-tailing replica Deployment
+# behind its own `taguru-read` Service. Both reference manifests are
+# consumed verbatim — the replica file's header carries the pool's
+# consistency statement and the manual-promotion runbook.
+#
+# The writer must ship (TAGURU_REPLICATE_URL in the taguru-keys
+# secret) — a replica IS the bucket lineage, served locally. For the
+# stateless writer instead, swap ../../base for ../stateless.
+#
+#   kubectl -n taguru apply -k .
+#
+# kubernetes-replicas.yaml here is a byte-identical, CI-diffed copy of
+# the reference file — see ../../base/kustomization.yaml for why.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - kubernetes-replicas.yaml

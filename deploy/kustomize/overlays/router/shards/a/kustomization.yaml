@@ -1,0 +1,20 @@
+# One shard of the fleet: the PVC writer, renamed. nameSuffix gives
+# every resource — Deployment, PVC, Service — its own name (the
+# Service becomes `taguru-a`, which is what ../route-map points at),
+# and the shard label rides into the selectors so the two shards'
+# Services cannot select each other's pods. The `taguru-keys` secret
+# is NOT declared here, so its name is left untouched: every shard
+# reads the same keyring, which is exactly what the router's
+# pass-through auth requires.
+#
+# To add a shard: copy this directory, pick the next suffix, list it
+# in ../kustomization.yaml, and give it contexts in ../route-map.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../base
+nameSuffix: -a
+labels:
+  - pairs:
+      shard: a
+    includeSelectors: true

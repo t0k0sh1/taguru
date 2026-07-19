@@ -69,6 +69,7 @@
     <div class="hero-meta">
       <span><b>Image:</b> ghcr.io/t0k0sh1/taguru (scratch, ~13 MB)</span>
       <span><b>Manifests:</b> deploy/kubernetes.yaml · kubernetes-stateless.yaml · kubernetes-replicas.yaml</span>
+      <span><b>Packaging:</b> deploy/kustomize (base + stateless / replicas / router overlays)</span>
     </div>
   </header>
 
@@ -104,6 +105,18 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
       deployment grows (<code>TAGURU_RATE_LIMIT_PER_MIN</code>, the <code>TAGURU_EMBED_*</code>
       tier, cache budgets, …) — every knob is an environment variable, listed by
       <code>taguru --help</code>.
+    </p>
+    <p>
+      Prefer <code>kubectl apply -k</code>?
+      <a href="https://github.com/t0k0sh1/taguru/tree/main/deploy/kustomize"><code>deploy/kustomize</code></a>
+      packages these same manifests: the raw files as verbatim bases, overlays for the
+      <a href="#stateless">stateless</a> / <a href="#read-pool">replicas</a> /
+      <a href="#sharding">router</a> variants, and the retuned knobs (image tag, storage,
+      resources, probe budgets) as documented patches — its README records why kustomize
+      over a Helm chart, and CI — on every change under <code>deploy/</code> — keeps the
+      in-tree manifest copies byte-identical to the raw files, schema-validates every
+      rendered configuration, and keeps the base render-equivalent to
+      <code>kubernetes.yaml</code>.
     </p>
   </section>
 
@@ -217,6 +230,10 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
       <code>taguru route</code> (issue #130) turns manual sharding into one front door:
       a stateless Deployment — scale it freely, RollingUpdate, no volume — whose only
       config is a context→shard map file mounted from a ConfigMap.
+      <a href="https://github.com/t0k0sh1/taguru/tree/main/deploy/kustomize/overlays/router">The
+      router kustomize overlay</a> is this section worked out: two writer shards, the
+      route-map ConfigMap (content-hashed, so a map edit rolls the routers on apply), and
+      the front-door Deployment and Service.
     </p>
     <p>
       The map is boring on purpose: <code>context = shard-url</code> per line (point each URL

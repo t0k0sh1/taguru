@@ -1,0 +1,18 @@
+# The router's context→shard map (TAGURU_ROUTE_MAP): one
+# `context = shard-url` per line, `#` comments, and an optional
+# `* = shard-url` fallback for contexts the map does not name — new
+# contexts land there. The URLs are the shard Services the `shards/`
+# directories render.
+#
+# Editing this file and re-running `kubectl apply -k .` is the whole
+# reload story: the generated ConfigMap's name carries a content hash,
+# so a changed map rolls the router Deployment by itself — the
+# runbook's "edit the map, then roll the routers" collapses into one
+# apply. Moving a context between shards is still the full runbook
+# (quiesce → export → DELETE through the router → apply the edited
+# map, wait for the roll → re-import through the router); the order is
+# what keeps a leftover copy from answering group fan-outs twice.
+sake      = http://taguru-a:8248
+breweries = http://taguru-a:8248
+glossary  = http://taguru-b:8248
+*         = http://taguru-a:8248
