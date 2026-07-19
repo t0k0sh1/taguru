@@ -189,9 +189,9 @@ class TaguruRetriever(BaseRetriever):
             graph_docs = self._graph_lane(self.client, target, query) if self.include_graph else []
             text_hits: list[PassageHit] = []
             if self.include_text:
-                text_hits = self.client.context(target).search_passages(
-                    query, limit=self.text_limit
-                ).hits
+                text_hits = (
+                    self.client.context(target).search_passages(query, limit=self.text_limit).hits
+                )
             return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
         targets = self._resolve_targets(self.client)
@@ -216,9 +216,7 @@ class TaguruRetriever(BaseRetriever):
             # isolation just above).
             try:
                 text_hits = list(
-                    self.client.search_passages(
-                        query, contexts=targets, limit=self.text_limit
-                    ).hits
+                    self.client.search_passages(query, contexts=targets, limit=self.text_limit).hits
                 )
             except Exception:
                 text_hits = []
