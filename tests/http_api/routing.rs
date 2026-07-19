@@ -330,7 +330,16 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
 /// router holds none.
 #[test]
 fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
-    let keyed = &[("TAGURU_API_TOKEN", "sesame")][..];
+    // Two keys on every shard: an unscoped one for the test's own
+    // driving, and one granted `sake` only — the scoped-import case
+    // below needs it.
+    let keyed = &[
+        ("TAGURU_API_TOKENS", "ops:sesame,limited:hush"),
+        (
+            "TAGURU_KEY_SCOPES",
+            r#"{"limited": {"role": "write", "contexts": ["sake"]}}"#,
+        ),
+    ][..];
     let shard_a = Server::start_with_env("router-down-a", keyed);
     let shard_b = Server::start_with_env("router-down-b", keyed);
     let router = Server::start_router(
@@ -376,6 +385,32 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"]["total"], 2, "{body}");
     assert!(body.get("unreached").is_none(), "{body}");
+
+    // A scoped key whose stream carries an out-of-grant GROUP record:
+    // a single instance scope-checks the record's closure before
+    // anything applies and answers 403 with nothing landed. The
+    // router's preflight must keep that — the in-grant batch ahead of
+    // the record must NOT have been applied when the refusal comes
+    // back from the group projection on another shard.
+    let stream = concat!(
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"scoped-doc\"}\n",
+        "{\"subject\": \"密造\", \"label\": \"は\", \"object\": \"だめ\", \"weight\": 1.0}\n",
+        "{\"taguru_group\": 1, \"name\": \"overreach\", \"contexts\": [\"sake\", \"glossary\"]}\n",
+    );
+    let (status, body) = post_import(&router, stream, Some("hush"));
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["code"], "forbidden", "{body}");
+    let (status, body) = router.call_with_token(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "密造"})),
+        token,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["total"], 0,
+        "the refused stream's batch must not have landed: {body}"
+    );
 
     let shard_b_base = shard_b.base.clone();
     let glossary_dir = shard_b.stop_hard();

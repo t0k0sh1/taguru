@@ -244,7 +244,8 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
       group projections included) → edit the ConfigMap and roll the routers (stateless, a
       non-event) → re-import through the router, which now routes it to the new shard.
       Delete before re-import: a leftover copy keeps answering the old shard's slice of
-      every group fan-out. Each shard can keep its own bucket
+      every group fan-out. And finish the roll before re-importing — a router still on the
+      old ConfigMap would route the stream back to the old shard. Each shard can keep its own bucket
       (<code>TAGURU_REPLICATE_URL</code>) and read pool — the rungs compose.
     </p>
   </section>

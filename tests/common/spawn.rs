@@ -25,6 +25,7 @@ pub fn scrub_taguru_env(command: &mut Command) -> &mut Command {
         "TAGURU_SEMANTIC_FLOOR",
         "TAGURU_API_TOKEN",
         "TAGURU_API_TOKENS",
+        "TAGURU_KEY_SCOPES",
         "TAGURU_RATE_LIMIT_PER_MIN",
         "TAGURU_PUBLIC_URL",
         "TAGURU_LOG_SEARCHES",

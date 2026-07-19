@@ -15,9 +15,11 @@
 //! the router (the old shard drops it — and sweeps it from its group
 //! projections), edit the map and roll the routers, then re-import
 //! through the router (which now routes it to the new shard). The
-//! delete must precede the re-import: a copy left on the old shard
+//! delete must precede the re-import (a copy left on the old shard
 //! keeps answering that shard's slice of every group fan-out —
-//! duplicate hits, not just a stale listing.
+//! duplicate hits, not just a stale listing), and the restart must
+//! finish first too: a router still holding the old map would route
+//! the re-import back to the old shard.
 //!
 //! **Routing.** Context-scoped verbs proxy verbatim (streamed both
 //! ways) to the owning shard, so their responses — including error
@@ -2152,10 +2154,33 @@ async fn route_import(
         }
         Bytes::from(chunk)
     };
-    // Preflight: every chunk dry-runs first, so a scope refusal or a
-    // per-batch validation failure ANYWHERE refuses the whole stream
-    // with nothing applied — the single-instance contract, kept across
-    // shards. (A real dry_run request IS its own preflight.)
+    // Each shard's projected group-record stream, rendered once —
+    // preflighted below beside the batch chunks, then applied last.
+    let group_lines_for = |shard: usize| -> String {
+        let mut lines = String::new();
+        for (name, record) in &stream.groups {
+            let projected = crate::groups::GroupRecord {
+                description: record.description.clone(),
+                contexts: record
+                    .contexts
+                    .iter()
+                    .filter(|member| state.map().shard_of(member) == Some(shard))
+                    .cloned()
+                    .collect(),
+                groups: record.groups.clone(),
+            };
+            lines.push_str(&crate::export::render_group(name, &projected));
+        }
+        lines
+    };
+    // Preflight: every batch chunk AND every projected group stream
+    // dry-runs first, so a refusal a single instance would answer with
+    // nothing applied — malformed batches, a scoped key beyond its
+    // grant on a batch context or on a group record's closure — is
+    // answered the same way here, with nothing applied on any shard.
+    // (A real dry_run request IS its own preflight. Group VALIDATION
+    // against live state still runs after the batches land, exactly
+    // where the single instance runs it.)
     let preflight_query = "/import?dry_run=true";
     let real_query = if query.dry_run {
         "/import?dry_run=true"
@@ -2163,14 +2188,27 @@ async fn route_import(
         "/import"
     };
     if !query.dry_run {
-        for (shard, ranges) in &chunks {
+        let group_shards: Vec<usize> = if stream.groups.is_empty() {
+            Vec::new()
+        } else {
+            state.map().all().collect()
+        };
+        let preflights = chunks
+            .iter()
+            .map(|(shard, ranges)| (*shard, assemble(ranges)))
+            .chain(
+                group_shards
+                    .iter()
+                    .map(|&shard| (shard, Bytes::from(group_lines_for(shard)))),
+            );
+        for (shard, chunk) in preflights {
             match state
                 .call_shard(
-                    *shard,
+                    shard,
                     Method::POST,
                     preflight_query,
                     &headers,
-                    Some(assemble(ranges)),
+                    Some(chunk),
                     deadline,
                 )
                 .await
@@ -2187,7 +2225,7 @@ async fn route_import(
                 Err(error) => {
                     return unreachable_refusal(
                         &[Unreached {
-                            shard: state.map().url(*shard).to_string(),
+                            shard: state.map().url(shard).to_string(),
                             contexts: Vec::new(),
                             error,
                         }],
@@ -2245,27 +2283,13 @@ async fn route_import(
     if !stream.groups.is_empty() {
         let mut per_group: BTreeMap<usize, Vec<GroupOutcomeWire>> = BTreeMap::new();
         for shard in state.map().all() {
-            let mut lines = String::new();
-            for (name, record) in &stream.groups {
-                let projected = crate::groups::GroupRecord {
-                    description: record.description.clone(),
-                    contexts: record
-                        .contexts
-                        .iter()
-                        .filter(|member| state.map().shard_of(member) == Some(shard))
-                        .cloned()
-                        .collect(),
-                    groups: record.groups.clone(),
-                };
-                lines.push_str(&crate::export::render_group(name, &projected));
-            }
             match state
                 .call_shard(
                     shard,
                     Method::POST,
                     real_query,
                     &headers,
-                    Some(Bytes::from(lines)),
+                    Some(Bytes::from(group_lines_for(shard))),
                     deadline,
                 )
                 .await

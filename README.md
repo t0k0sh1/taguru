@@ -259,8 +259,9 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   (`after` anchors on the last match itself, so it forwards to every
   shard verbatim). Groups exist on every shard with members projected
   by the map; `/import` splits its batch stream by context and
-  preflight-validates so refusals stay all-or-nothing; `/mcp` works
-  unchanged. No data directory, no state — run any number of routers
+  dry-run-preflights batch chunks and projected group records alike,
+  so a stream one instance would refuse with nothing applied is
+  refused the same way here; `/mcp` works unchanged. No data directory, no state — run any number of routers
   behind one LB. Auth passes through: shards enforce keys and scopes
   (keep their keyrings identical), the router holds none. A shard that
   answers an error fails the request whole; a shard that cannot be

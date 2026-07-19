@@ -20,7 +20,8 @@ Entries that change an on-disk format or a response shape say so.
   holding the same contexts is pinned by an integration test. Groups
   exist on every shard with member lists projected by the map;
   `/import` splits its batch stream by context and dry-run-preflights
-  every chunk so refusals stay all-or-nothing; `POST /mcp` works
+  batch chunks and projected group records alike, so a stream one
+  instance would refuse with nothing applied is refused the same way; `POST /mcp` works
   unchanged (bearer re-attached to each dispatched call). Auth is
   pass-through — the router holds no key store (setting
   `TAGURU_API_TOKEN(S)`/`TAGURU_KEY_SCOPES`/`TAGURU_PUBLIC_URL` on it
