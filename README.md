@@ -206,6 +206,7 @@ load-bearing ones:
 | `TAGURU_RATE_LIMIT_PER_MIN` | 0 (off) | Per-key request budget — turn on whenever the server leaves localhost |
 | `TAGURU_REQUEST_TIMEOUT_SECS` | 30 | Per-request budget; raise it when an embedding provider is configured |
 | `TAGURU_MAX_CONCURRENT_HEAVY_OPS` | 2 | Shared ceiling for vocabulary audits and context compactions; excess calls get 503 + `Retry-After` (`0` disables) |
+| `TAGURU_AUTO_COMPACT` | on | Ratio-triggered auto-compaction: each flush tick rebuilds at most the one worst context whose dead ratio exceeds `TAGURU_AUTO_COMPACT_RATIO` (0.5 — dead weight outgrew live content), behind the heavy-ops ceiling; `0` keeps compaction manual-only |
 
 The full table — durability ceilings, observability (`RUST_LOG`,
 `TAGURU_LOG_FORMAT=json`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
@@ -310,9 +311,14 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   `taguru export` and restore anywhere through `taguru import` /
   `POST /import`. Verify any of them with `taguru inspect` — images,
   passage snapshots, and WAL records carry CRC-32C checksums, so "ok"
-  means the bytes were proven intact, not just parseable. Reclaim
-  revision-heavy contexts with `taguru compact`; size targets with
-  `taguru estimate`.
+  means the bytes were proven intact, not just parseable.
+  Revision-heavy contexts reclaim themselves: once a context's dead
+  ratio passes `TAGURU_AUTO_COMPACT_RATIO`, the flusher rebuilds it on
+  an upcoming tick — worst ratio first, one context per tick, as the
+  heavy-ops ceiling allows (audit line +
+  `taguru_auto_compactions_total` on `/metrics`). `taguru compact` and `POST /contexts/{name}/compact`
+  remain for opted-out deployments (`TAGURU_AUTO_COMPACT=0`) and
+  scheduled quiet-window sweeps; size targets with `taguru estimate`.
 - **Recovering from a bad alias.** Alias registration takes effect
   immediately and resolves that spelling on every subsequent write — a
   wrong alias silently pulls all matching ingestion onto the wrong

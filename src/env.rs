@@ -88,6 +88,27 @@ pub(crate) fn env_per_context_metrics(key: &str) -> crate::metrics::PerContextMe
     }
 }
 
+/// `TAGURU_AUTO_COMPACT` / `TAGURU_AUTO_COMPACT_RATIO` folded into one
+/// value: `None` = ratio-triggered auto-compaction off, `Some(ratio)`
+/// = the flusher compacts a context once its dead ratio strictly
+/// exceeds `ratio`. On by default — the passages store already runs
+/// the same policy on itself, unasked — with the ratio defaulting to
+/// [`crate::registry::DEFAULT_AUTO_COMPACT_RATIO`]. An unparseable or
+/// out-of-range ratio warns (inside [`env_floor`]) and keeps the
+/// default rather than silently disabling the loop; `1.0` is honored
+/// but can never fire (no dead ratio exceeds 1) — opting out is what
+/// the boolean is for.
+pub(crate) fn env_auto_compact(flag_key: &str, ratio_key: &str) -> Option<f64> {
+    if !env_bool(flag_key, true) {
+        return None;
+    }
+    Some(
+        env_floor(ratio_key)
+            .map(f64::from)
+            .unwrap_or(crate::registry::DEFAULT_AUTO_COMPACT_RATIO),
+    )
+}
+
 /// `tokio::time::interval` panics on a zero period — with
 /// `TAGURU_FLUSH_SECS=0` that panic fires inside the spawned flusher
 /// task, not the main thread, so the server keeps listening and
@@ -254,6 +275,49 @@ mod tests {
             assert_eq!(env_per_context_metrics(key), expected, "value {value}");
         }
         unsafe { std::env::remove_var(key) };
+    }
+
+    /// The boolean opts out entirely; the ratio picks the trigger,
+    /// falling back to the default on anything `env_floor` refuses —
+    /// a bad ratio must not silently disable the loop.
+    #[test]
+    fn auto_compact_folds_the_flag_and_the_ratio_with_loud_fallbacks() {
+        let flag = "TAGURU_TEST_AC_FLAG";
+        let ratio = "TAGURU_TEST_AC_RATIO";
+
+        // Both unset: on, at the default trigger.
+        assert_eq!(
+            env_auto_compact(flag, ratio),
+            Some(crate::registry::DEFAULT_AUTO_COMPACT_RATIO)
+        );
+        for (value, expected) in [
+            ("0.25", Some(0.25)),
+            ("1.0", Some(1.0)),
+            ("0", Some(0.0)),
+            ("1.5", Some(crate::registry::DEFAULT_AUTO_COMPACT_RATIO)),
+            ("-0.1", Some(crate::registry::DEFAULT_AUTO_COMPACT_RATIO)),
+            ("NaN", Some(crate::registry::DEFAULT_AUTO_COMPACT_RATIO)),
+            ("banana", Some(crate::registry::DEFAULT_AUTO_COMPACT_RATIO)),
+        ] {
+            unsafe { std::env::set_var(ratio, value) };
+            assert_eq!(env_auto_compact(flag, ratio), expected, "ratio {value}");
+        }
+        // The flag wins over any ratio; an unrecognized flag value
+        // warns and keeps the default (on).
+        unsafe { std::env::set_var(ratio, "1.0") };
+        for (value, expected) in [
+            ("0", None),
+            ("false", None),
+            ("FALSE", None),
+            ("1", Some(1.0)),
+            ("true", Some(1.0)),
+            ("banana", Some(1.0)),
+        ] {
+            unsafe { std::env::set_var(flag, value) };
+            assert_eq!(env_auto_compact(flag, ratio), expected, "flag {value}");
+        }
+        unsafe { std::env::remove_var(flag) };
+        unsafe { std::env::remove_var(ratio) };
     }
 
     #[test]

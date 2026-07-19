@@ -208,6 +208,17 @@ pub struct Metrics {
     /// tick that completes without panicking — self-healing, same shape
     /// as `flush_degraded`.
     flusher_panicked: AtomicBool,
+    /// Ratio-triggered auto-compaction (issue #135): how many the
+    /// flusher ran, by outcome; how many image bytes the successful
+    /// ones shed; and when one last succeeded (unix seconds, 0 = none
+    /// since boot — the same "how stale" convention as
+    /// `last_flush_success_epoch`). Manual compactions are absent by
+    /// design: they answer their caller directly, while these count
+    /// the loop nobody watches.
+    auto_compact_ok: AtomicU64,
+    auto_compact_failed: AtomicU64,
+    auto_compact_reclaimed_bytes: AtomicU64,
+    auto_compact_last_success_epoch: AtomicU64,
     /// Replication ("WAL shipping") counters. Uploads and errors are
     /// plain counters; `replication_fenced` LATCHES — unlike
     /// `flush_degraded` there is no retry loop behind it, because a
@@ -728,6 +739,31 @@ impl Metrics {
     /// reason message that names the actual fault.
     pub fn flusher_panicked(&self) -> bool {
         self.flusher_panicked.load(Ordering::Relaxed)
+    }
+
+    /// Record one ratio-triggered auto-compaction (issue #135):
+    /// `Some(bytes)` — the resident bytes the rebuild shed — counts a
+    /// success and stamps the last-success clock; `None` counts a
+    /// failure. Failures never latch anything: the candidate's ratio
+    /// still exceeds the trigger, so the next tick retries it, and the
+    /// counter pair is what makes a stuck retry loop visible.
+    pub fn record_auto_compaction(&self, reclaimed_bytes: Option<u64>) {
+        match reclaimed_bytes {
+            Some(bytes) => {
+                self.auto_compact_ok.fetch_add(1, Ordering::Relaxed);
+                self.auto_compact_reclaimed_bytes
+                    .fetch_add(bytes, Ordering::Relaxed);
+                let epoch = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|since| since.as_secs())
+                    .unwrap_or(0);
+                self.auto_compact_last_success_epoch
+                    .store(epoch, Ordering::Relaxed);
+            }
+            None => {
+                self.auto_compact_failed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     pub fn record_wal_append(&self, ok: bool) {
@@ -1476,6 +1512,27 @@ impl Metrics {
             "gauge",
             "Unix time of the last successful image flush (0 = none since boot); alert on time() minus this.",
             self.last_flush_success_epoch.load(Ordering::Relaxed),
+        );
+        push_outcomes(
+            &mut out,
+            "taguru_auto_compactions_total",
+            "Ratio-triggered auto-compactions run by the flusher tick (TAGURU_AUTO_COMPACT), by outcome; a failed candidate is retried while its dead ratio holds.",
+            &self.auto_compact_ok,
+            &self.auto_compact_failed,
+        );
+        push_value(
+            &mut out,
+            "taguru_auto_compact_reclaimed_bytes_total",
+            "counter",
+            "Resident bytes shed by successful auto-compactions (bytes before minus after, summed).",
+            self.auto_compact_reclaimed_bytes.load(Ordering::Relaxed),
+        );
+        push_value(
+            &mut out,
+            "taguru_auto_compact_last_success_timestamp_seconds",
+            "gauge",
+            "Unix time of the last successful auto-compaction (0 = none since boot).",
+            self.auto_compact_last_success_epoch.load(Ordering::Relaxed),
         );
         push_value(
             &mut out,
@@ -2389,6 +2446,35 @@ mod tests {
             metrics.flush_is_healthy(),
             "health returns once every failing context has flushed clean"
         );
+    }
+
+    /// Auto-compaction's three series: outcomes split, reclaimed bytes
+    /// accumulate on success only, and the last-success clock moves on
+    /// success only — a failing retry loop must not look recent.
+    #[test]
+    fn auto_compaction_counters_split_outcomes_and_stamp_success_only() {
+        let metrics = Metrics::default();
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            rendered.contains("taguru_auto_compactions_total{outcome=\"ok\"} 0"),
+            "the series a dashboard alerts on must exist at zero"
+        );
+        assert!(rendered.contains("taguru_auto_compact_last_success_timestamp_seconds 0"));
+
+        metrics.record_auto_compaction(None);
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(rendered.contains("taguru_auto_compactions_total{outcome=\"failed\"} 1"));
+        assert!(
+            rendered.contains("taguru_auto_compact_last_success_timestamp_seconds 0"),
+            "a failure must not stamp the success clock"
+        );
+
+        metrics.record_auto_compaction(Some(2048));
+        metrics.record_auto_compaction(Some(1000));
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(rendered.contains("taguru_auto_compactions_total{outcome=\"ok\"} 2"));
+        assert!(rendered.contains("taguru_auto_compact_reclaimed_bytes_total 3048"));
+        assert!(!rendered.contains("taguru_auto_compact_last_success_timestamp_seconds 0"));
     }
 
     /// A panicking flusher tick must degrade health just like a failed

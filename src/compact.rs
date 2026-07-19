@@ -5,8 +5,12 @@
 //! traffic grows monotonically. Compaction rebuilds each image from
 //! its live content alone ([`taguru::context::Context::compacted`])
 //! and persists the result; a running server serves the same at
-//! `POST /contexts/{name}/compact`. Passages need none of this: their
-//! store compacts itself ratio-triggered.
+//! `POST /contexts/{name}/compact`, and by default also runs the
+//! policy itself, ratio-triggered from the flusher tick
+//! (`TAGURU_AUTO_COMPACT`, issue #135) — this offline command remains
+//! for opted-out deployments and for reclaiming without booting a
+//! server. Passages need neither: their store compacts itself
+//! ratio-triggered from inside the write path.
 
 use std::path::PathBuf;
 
