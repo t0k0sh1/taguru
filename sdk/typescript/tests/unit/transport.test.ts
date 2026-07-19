@@ -382,15 +382,28 @@ describe("retrieve loop", () => {
         return okBody({ text: "杜氏は高瀬。", source: body["source"], section: "人物" });
       }
       if (req.path.endsWith("/sources/search")) {
-        return okBody([
-          {
-            source: "docs/aomine.md",
-            paragraph: 1,
-            score: 3.2,
-            text: "杜氏は高瀬。",
-            lanes: { bm25: { rank: 0, score: 3.2 } },
+        return okBody({
+          plan: {
+            contexts: [
+              {
+                context: "sake",
+                lanes: {
+                  bm25: { ran: true },
+                  vector: { ran: false, reason: "no embedding provider is configured" },
+                },
+              },
+            ],
           },
-        ]);
+          hits: [
+            {
+              source: "docs/aomine.md",
+              paragraph: 1,
+              score: 3.2,
+              text: "杜氏は高瀬。",
+              lanes: { bm25: { rank: 0, score: 3.2 } },
+            },
+          ],
+        });
       }
       throw new Error(req.path);
     };
@@ -427,6 +440,8 @@ describe("retrieve loop", () => {
     expect(empty.passage_hits).toHaveLength(1);
     expect(empty.passage_hits[0]!.lanes.bm25).toBeDefined();
     expect(empty.passage_hits[0]!.lanes.vector).toBeUndefined();
+    // The fallback search's plan rides beside its hits (#151).
+    expect(empty.search_plan?.contexts[0]?.lanes.vector.ran).toBe(false);
 
     const always = await ctx.retrieve("青嶺", {
       text_fallback_query: "杜氏は高瀬である",

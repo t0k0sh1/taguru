@@ -936,18 +936,24 @@
               </div>
               <div class="io-block">
                 <h4>Response</h4>
-                <pre><code>[{
-  <span class="k">"source"</span>: <span class="s">"docs/process.md"</span>,
-  <span class="k">"paragraph"</span>: <span class="nu">1</span>,
-  <span class="k">"score"</span>: <span class="nu">10.93</span>,
-  <span class="k">"text"</span>: <span class="s">"洗米の後は浸漬を行う。浸漬は米に適切な水分を吸わせる工程で、当蔵では夏場は40分、冬場は90分を目安に浸漬時間を調整している。気温や米の状態によって毎回微調整する。"</span>,
-  <span class="k">"lanes"</span>: {
-    <span class="hl"><span class="k">"bm25"</span>: {<span class="k">"rank"</span>:<span class="nu">1</span>,<span class="k">"score"</span>:<span class="nu">10.93</span>}</span>
-  }
-}, { <span style="color:var(--ink-faint)">// paragraph 2, score 1.02 …</span> }]</code></pre>
+                <pre><code>{
+  <span class="k">"plan"</span>: { <span class="k">"contexts"</span>: [{ <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"lanes"</span>: {
+    <span class="k">"bm25"</span>: {<span class="k">"ran"</span>: <span class="nu">true</span>},
+    <span class="k">"vector"</span>: {<span class="k">"ran"</span>: <span class="nu">false</span>, <span class="k">"reason"</span>: <span class="s">"no embedding provider is configured"</span>}
+  } }] },
+  <span class="k">"hits"</span>: [{
+    <span class="k">"source"</span>: <span class="s">"docs/process.md"</span>,
+    <span class="k">"paragraph"</span>: <span class="nu">1</span>,
+    <span class="k">"score"</span>: <span class="nu">10.93</span>,
+    <span class="k">"text"</span>: <span class="s">"洗米の後は浸漬を行う。浸漬は米に適切な水分を吸わせる工程で、当蔵では夏場は40分、冬場は90分を目安に浸漬時間を調整している。気温や米の状態によって毎回微調整する。"</span>,
+    <span class="k">"lanes"</span>: {
+      <span class="hl"><span class="k">"bm25"</span>: {<span class="k">"rank"</span>:<span class="nu">1</span>,<span class="k">"score"</span>:<span class="nu">10.93</span>}</span>
+    }
+  }, { <span style="color:var(--ink-faint)">// paragraph 2, score 1.02 …</span> }]
+}</code></pre>
               </div>
             </div>
-            <p class="step-note"><code>lanes</code> shows only <code>bm25</code> because this server runs with no embeddings configured — lexical lane only (set <code>TAGURU_EMBED_URL</code> and a <code>vector</code> lane runs alongside, robust to paraphrase too). Here the very words — 浸漬, 40分, 90分 — appear in the original text, so BM25 alone lands it in one shot.</p>
+            <p class="step-note"><code>lanes</code> shows only <code>bm25</code> because this server runs with no embeddings configured — lexical lane only (set <code>TAGURU_EMBED_URL</code> and a <code>vector</code> lane runs alongside, robust to paraphrase too). The response-level <code>plan</code> says so outright — <code>vector: {ran: false}</code> with the reason — so the caller can tell a lexical-only answer from a fused one without a diagnostic call. Here the very words — 浸漬, 40分, 90分 — appear in the original text, so BM25 alone lands it in one shot.</p>
           </div>
         </div>
       </div>

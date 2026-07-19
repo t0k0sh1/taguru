@@ -62,15 +62,31 @@ def routed_handler(calls: list[tuple[str, Any]]) -> Any:
             )
         if path.endswith("/sources/search"):
             return ok_response(
-                [
-                    {
-                        "source": "docs/aomine.md",
-                        "paragraph": 1,
-                        "score": 3.2,
-                        "text": "杜氏は高瀬。",
-                        "lanes": {"bm25": {"rank": 0, "score": 3.2}},
-                    }
-                ]
+                {
+                    "plan": {
+                        "contexts": [
+                            {
+                                "context": "sake",
+                                "lanes": {
+                                    "bm25": {"ran": True},
+                                    "vector": {
+                                        "ran": False,
+                                        "reason": "no embedding provider is configured",
+                                    },
+                                },
+                            }
+                        ]
+                    },
+                    "hits": [
+                        {
+                            "source": "docs/aomine.md",
+                            "paragraph": 1,
+                            "score": 3.2,
+                            "text": "杜氏は高瀬。",
+                            "lanes": {"bm25": {"rank": 0, "score": 3.2}},
+                        }
+                    ],
+                }
             )
         raise AssertionError(path)
 
@@ -115,6 +131,9 @@ def test_retrieve_text_fallback_fires_only_when_graph_is_empty() -> None:
     assert len(result.passage_hits) == 1
     assert result.passage_hits[0].lanes.bm25 is not None
     assert result.passage_hits[0].lanes.vector is None
+    # The fallback search's plan rides beside its hits (#151).
+    assert result.search_plan is not None
+    assert result.search_plan.contexts[0].lanes.vector.ran is False
 
     # only_if_empty=False → always runs.
     result = ctx.retrieve(

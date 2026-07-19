@@ -214,7 +214,17 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         json!({"groups": ["all"], "query": "麹", "limit": 2}),
     ] {
         let answer = assert_equivalent(&single, &router, "POST", "/sources/search", Some(body));
-        assert!(!answer["result"].as_array().unwrap().is_empty(), "{answer}");
+        assert!(
+            !answer["result"]["hits"].as_array().unwrap().is_empty(),
+            "{answer}"
+        );
+        assert!(
+            !answer["result"]["plan"]["contexts"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "the merged plan must match the single instance's byte for byte: {answer}"
+        );
     }
 
     // The directories and the group surfaces: unions must equal the

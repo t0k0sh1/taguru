@@ -250,13 +250,18 @@ def test_sources_and_citations(client: Taguru, fresh_name: str) -> None:
     assert lookup.passages["docs/aomine.md"] == AOMINE_DOC
     assert lookup.missing == ["missing.md"]
 
-    hits = ctx.search_passages("杜氏は高瀬である", limit=3)
-    assert hits
-    top = hits[0]
+    page = ctx.search_passages("杜氏は高瀬である", limit=3)
+    assert page.hits
+    top = page.hits[0]
     assert top.source == "docs/aomine.md"
     assert "高瀬" in top.text
     assert top.lanes.bm25 is not None  # lexical lane evidence
     assert top.lanes.vector is None  # no embedding provider in tests
+    # The plan (#151): response-level lane verdicts beside the hits.
+    entry = page.plan.contexts[0]
+    assert entry.lanes.bm25.ran is True
+    assert entry.lanes.vector.ran is False
+    assert entry.lanes.vector.reason == "no embedding provider is configured"
 
     cited = ctx.cite_passage("docs/aomine.md", 1)
     assert "杜氏は高瀬" in cited.text

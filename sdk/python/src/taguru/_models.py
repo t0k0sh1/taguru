@@ -195,11 +195,25 @@ class Association:
 
 
 @dataclass(slots=True, frozen=True)
+class MatchPlan:
+    """The execution plan of a graph search (#151): the contexts actually
+    consulted, in effective order. For the cross variants that is the
+    RESOLVED target list — groups expanded, the key's grants applied —
+    which the tagged matches alone cannot reconstruct when a target came
+    up empty. ``None`` from servers predating the field, and always for
+    the non-search :class:`MatchPage` producers (``unreachable_from`` —
+    an audit, not a search)."""
+
+    contexts: list[str]
+
+
+@dataclass(slots=True, frozen=True)
 class MatchPage:
     """Ranked matches. ``total`` above ``len(matches)`` means truncation."""
 
     total: int
     matches: list[Association]
+    plan: MatchPlan | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -221,6 +235,7 @@ class CrossMatchPage:
 
     total: int
     matches: list[CrossAssociation]
+    plan: MatchPlan | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -443,6 +458,63 @@ class CrossPassageHit(PassageHit):
     within one context only — the cross-context order is rank interleaving."""
 
     context: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class LanePlan:
+    """One lane's verdict for a whole search call (#151): it ran (the vector
+    lane also names the effective cosine ``floor`` it swept under — the
+    resolved override → context setting → server default chain), or it did
+    not and ``reason`` says why, in the same prose ``explain_search`` uses."""
+
+    ran: bool
+    reason: str | None = None
+    floor: float | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SearchLanesPlan:
+    """Both lanes' verdicts, mirroring the per-hit ``lanes`` shape."""
+
+    bm25: LanePlan
+    vector: LanePlan
+
+
+@dataclass(slots=True, frozen=True)
+class SearchContextPlan:
+    """One searched context's account within a :class:`SearchPlan`."""
+
+    context: str
+    lanes: SearchLanesPlan
+
+
+@dataclass(slots=True, frozen=True)
+class SearchPlan:
+    """The execution plan of one passage search (#151): one entry per
+    context actually searched, in effective order. What the per-hit lane
+    evidence cannot say — "the semantic lane never ran here, and this is
+    why" — lives here, so a lexical-only answer is distinguishable from a
+    fused one without a separate explain call."""
+
+    contexts: list[SearchContextPlan]
+
+
+@dataclass(slots=True, frozen=True)
+class PassagePage:
+    """``search_passages``' response: the :class:`SearchPlan` beside the
+    hits it accounts for."""
+
+    plan: SearchPlan
+    hits: list[PassageHit]
+
+
+@dataclass(slots=True, frozen=True)
+class CrossPassagePage:
+    """:class:`PassagePage` across contexts: the same wrap, every hit
+    tagged."""
+
+    plan: SearchPlan
+    hits: list[CrossPassageHit]
 
 
 @dataclass(slots=True, frozen=True)
@@ -671,3 +743,7 @@ class RetrievalResult:
     activations: list[Activation]
     citations: dict[tuple[str, int], Citation]
     passage_hits: list[PassageHit]
+    search_plan: SearchPlan | None = None
+    """The fallback search's :class:`SearchPlan` — ``None`` when no text
+    fallback ran, so "the search never happened" and "the semantic lane
+    was skipped" stay distinguishable."""

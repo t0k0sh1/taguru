@@ -160,7 +160,10 @@ fn a_paraphrase_serves_the_canonical_page_and_every_tripwire_splits() {
 
     // Fill, then prove the exact tier still fronts the semantic one.
     let base = search("does the mill produce oysters");
-    assert!(!base.as_array().unwrap().is_empty(), "the corpus matches");
+    assert!(
+        !base["hits"].as_array().unwrap().is_empty(),
+        "the corpus matches"
+    );
     assert_eq!(semantic(&server, "miss"), 1, "an empty bucket is a miss");
     search("does the mill produce oysters");
     assert_eq!(exact(&server, "hit"), 1);
@@ -244,7 +247,7 @@ fn a_write_turns_the_claim_stale_and_the_next_fill_recanonicalizes() {
         "the claim held; the corpus had moved on"
     );
     assert!(
-        refreshed
+        refreshed["hits"]
             .as_array()
             .unwrap()
             .iter()
@@ -327,7 +330,7 @@ fn scoped_keys_share_claims_exactly_when_their_grants_resolve_alike() {
         "ntok",
     );
     assert!(
-        narrow_page
+        narrow_page["hits"]
             .as_array()
             .unwrap()
             .iter()

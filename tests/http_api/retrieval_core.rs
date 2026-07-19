@@ -100,13 +100,23 @@ fn sigterm_drains_promptly_past_an_in_flight_embed() {
     );
 
     // Answered during the drain, not reset — by the lexical lane
-    // alone, the vector lane visibly absent from the hit.
+    // alone, the vector lane visibly absent from the hit, and the plan
+    // confessing the abandoned embedding instead of hiding it.
     let (status, body) = searcher.join().unwrap();
     assert_eq!(status, 200, "{body}");
-    let hits = body["result"].as_array().expect("hits array");
+    let hits = body["result"]["hits"].as_array().expect("hits array");
     assert!(!hits.is_empty(), "{body}");
     assert!(hits[0]["lanes"]["bm25"].is_object(), "{body}");
     assert!(hits[0]["lanes"]["vector"].is_null(), "{body}");
+    let vector_plan = &body["result"]["plan"]["contexts"][0]["lanes"]["vector"];
+    assert_eq!(vector_plan["ran"], json!(false), "{body}");
+    assert!(
+        vector_plan["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("the query embedding failed"),
+        "{body}"
+    );
 }
 
 #[test]
@@ -300,7 +310,7 @@ fn full_retrieval_loop_over_http() {
         "/contexts/sake/sources/search",
         Some(json!({"query": "仕込み水はどこの水?"})),
     );
-    assert_eq!(hits[0]["source"], json!("第2段落"));
+    assert_eq!(hits["hits"][0]["source"], json!("第2段落"));
     let retracted = server.ok(
         "POST",
         "/contexts/sake/sources/retract",

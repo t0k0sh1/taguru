@@ -187,7 +187,7 @@ fn doc2query_questions_land_lexically_without_embeddings() {
         "/contexts/sake/sources/search",
         Some(json!({"query": "米をどれくらい削る?"})),
     );
-    let hits = hits.as_array().unwrap();
+    let hits = hits["hits"].as_array().unwrap();
     assert!(!hits.is_empty(), "the question's terms must land the hit");
     assert_eq!(hits[0]["source"], json!("doc"), "{hits:?}");
     assert_eq!(hits[0]["paragraph"], json!(0), "{hits:?}");
@@ -213,7 +213,7 @@ fn doc2query_questions_land_lexically_without_embeddings() {
         Some(json!({"query": "米をどれくらい削る?"})),
     );
     assert_eq!(
-        hits.as_array().unwrap().len(),
+        hits["hits"].as_array().unwrap().len(),
         0,
         "without the question the wording matches nothing: {hits}"
     );
@@ -668,14 +668,14 @@ fn search_explain_names_the_first_verdict_that_applies() {
         "/contexts/sake/sources/search",
         Some(json!({"query": "精米歩合はどこまで磨く?"})),
     );
-    assert_eq!(hits[0]["source"], json!("docs/kura.md"));
+    assert_eq!(hits["hits"][0]["source"], json!("docs/kura.md"));
     let served = server.ok(
         "POST",
         "/contexts/sake/sources/search/explain",
         Some(json!({"query": "精米歩合はどこまで磨く?", "source": "docs/kura.md"})),
     );
     assert_eq!(served["verdict"], json!("served"), "{served}");
-    assert_eq!(served["paragraph"], hits[0]["paragraph"]);
+    assert_eq!(served["paragraph"], hits["hits"][0]["paragraph"]);
     assert_eq!(served["paragraph_named"], json!(false));
     assert_eq!(served["ranking"]["served"], json!(true));
     assert_eq!(served["ranking"]["rank"], json!(1));
@@ -723,7 +723,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
         Some(json!({"query": "霧沢", "limit": reach})),
     );
     assert!(
-        wider
+        wider["hits"]
             .as_array()
             .unwrap()
             .iter()
@@ -1070,6 +1070,10 @@ fn the_mcp_retrieve_tool_runs_the_composed_loop_end_to_end() {
         "{envelope}"
     );
     assert_eq!(envelope["passage_hits"], json!([]));
+    assert!(
+        envelope["search_plan"].is_null(),
+        "no fallback ran, so there is no search to account for: {envelope}"
+    );
 
     // A second call exercises the text-lane fallback (step 5) over the
     // same transport, forced on regardless of what associations came
@@ -1092,6 +1096,14 @@ fn the_mcp_retrieve_tool_runs_the_composed_loop_end_to_end() {
             .as_array()
             .unwrap()
             .is_empty(),
+        "{fallback_envelope}"
+    );
+    // The fallback search's plan rides beside its hits (#151).
+    let search_plan = &fallback_envelope["search_plan"]["contexts"][0];
+    assert_eq!(search_plan["context"], json!("sake"), "{fallback_envelope}");
+    assert_eq!(
+        search_plan["lanes"]["bm25"]["ran"],
+        json!(true),
         "{fallback_envelope}"
     );
 

@@ -65,8 +65,11 @@ Contexts can be bundled into **groups** (`PUT /groups/{name}`, nesting
 allowed), and the searches — `POST /recall`, `POST /query`,
 `POST /sources/search` — take `contexts` / `groups` lists to run one
 search across several contexts at once, every match tagged with the
-context it came from. Deep dives (`activate`, `explore`) stay
-per-context: search across, then pull the thread where it answered.
+context it came from. Every search response also carries a `plan`:
+which contexts were actually searched and — for passage search — which
+lanes ran there and why not when one was skipped, with the effective
+cosine floor. Deep dives (`activate`, `explore`) stay per-context:
+search across, then pull the thread where it answered.
 
 For the endpoint list and the ingest/retrieval discipline, ask the
 running server: `GET /protocol`. A guided tour is

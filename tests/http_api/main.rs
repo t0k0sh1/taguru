@@ -29,6 +29,7 @@ mod retrieval_cache;
 mod retrieval_core;
 mod routing;
 mod search_log;
+mod search_plan;
 mod semantic_cache;
 mod server;
 mod server_ops;

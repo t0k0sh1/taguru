@@ -59,7 +59,9 @@ pub(crate) use contexts::{ContextPage, ListContextsQuery};
 pub(crate) use groups::{GroupEntry, GroupPage};
 pub(crate) use import::ImportQuery;
 pub(crate) use recall::{CrossQueryRequest, CrossRecallRequest, cross_rank};
-pub(crate) use sources::{CrossSearchPassagesRequest, PassageHit};
+pub(crate) use sources::{
+    CrossPassagePage, CrossSearchPassagesRequest, PassageHit, SearchContextPlan, SearchPlan,
+};
 
 #[derive(Serialize)]
 pub struct ApiResponse<T> {
@@ -912,6 +914,23 @@ pub(crate) fn clamp(value: Option<usize>, default: usize, ceiling: usize) -> usi
 pub struct MatchPage {
     pub total: usize,
     pub matches: Vec<AssociationOut>,
+    /// The execution plan (#151) — recall/query fill it; the other
+    /// `MatchPage` producers leave it off the wire entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<MatchPlan>,
+}
+
+/// The response-level execution plan of a graph search: the contexts
+/// actually consulted, in effective order. For the cross variants that
+/// is the RESOLVED target list — groups expanded, the key's grants
+/// applied — which the tagged matches alone cannot reconstruct when a
+/// target came up empty. It exposes nothing a caller cannot already
+/// see: the list is exactly the grant-filtered slice `GET /groups`
+/// shows. Graph searches have no lanes; the passage search's richer
+/// plan lives in [`sources::SearchPlan`].
+#[derive(Serialize, Deserialize)]
+pub struct MatchPlan {
+    pub contexts: Vec<String>,
 }
 
 /// One cross-context result: the per-context wire shape, tagged with
@@ -931,6 +950,10 @@ pub struct CrossMatch<T> {
 pub struct CrossMatchPage {
     pub total: usize,
     pub matches: Vec<CrossMatch<AssociationOut>>,
+    /// See [`MatchPlan`]. `Option` so the router tolerates a shard
+    /// one release behind; the handlers always fill it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<MatchPlan>,
 }
 
 /// A match page's resume point: the rank key of the last item on the

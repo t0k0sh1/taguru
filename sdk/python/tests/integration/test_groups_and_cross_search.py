@@ -130,9 +130,11 @@ def test_cross_context_search_tags_every_match(client: Taguru, fresh_name: str) 
     assert {match.context for match in page.matches} == {sake, tea}
 
     # search_passages: rank-interleaved, hits tagged; score is per-context.
-    hits = client.search_passages("代表銘柄は青嶺", contexts=[sake, tea], limit=4)
-    assert {hit.context for hit in hits} == {sake, tea}
-    assert all(hit.text for hit in hits)
+    page = client.search_passages("代表銘柄は青嶺", contexts=[sake, tea], limit=4)
+    assert {hit.context for hit in page.hits} == {sake, tea}
+    assert all(hit.text for hit in page.hits)
+    # The plan lists both targets in effective order (#151).
+    assert [entry.context for entry in page.plan.contexts] == [sake, tea]
 
     # An empty target list is refused, an unknown group answers no_group.
     with pytest.raises(ValidationError) as empty:

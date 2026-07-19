@@ -21,7 +21,7 @@ import type {
   ContextPage,
   CrossMatchCursor,
   CrossMatchPage,
-  CrossPassageHit,
+  CrossPassagePage,
   DirectoryEntry,
   DriftAudit,
   ExploreCursor,
@@ -35,6 +35,7 @@ import type {
   OneOrMany,
   PassageHit,
   PassageLookup,
+  PassagePage,
   QuestionSpec,
   RefreshOutcome,
   ResolveExplanation,
@@ -42,6 +43,7 @@ import type {
   RetractOutcome,
   RetrievalResult,
   SearchExplanation,
+  SearchPlan,
   SectionSpec,
   SourcePage,
   StoredPassages,
@@ -368,7 +370,9 @@ export class Taguru {
    * corpus-local), so the merged order is rank interleaving — every
    * context's best hit first; `score` compares within one context only.
    * `semantic_floor` overrides every target's vector-lane cosine floor for
-   * this call (it floors only that lane; BM25-only hits still return).
+   * this call (it floors only that lane; BM25-only hits still return). The
+   * page's `plan` names every context actually searched and each lane's
+   * verdict there — see `SearchPlan`.
    */
   async searchPassages(
     query: string,
@@ -378,7 +382,7 @@ export class Taguru {
       limit?: number;
       semantic_floor?: number;
     } = {},
-  ): Promise<CrossPassageHit[]> {
+  ): Promise<CrossPassagePage> {
     const result = await this.requestJson("POST", "/sources/search", {
       jsonBody: dropUndefined({
         contexts: options.contexts,
@@ -388,7 +392,7 @@ export class Taguru {
         semantic_floor: options.semantic_floor,
       }),
     });
-    return result as CrossPassageHit[];
+    return result as CrossPassagePage;
   }
 
   /**
@@ -969,17 +973,18 @@ export class Context {
    * lands nearer the text you hope to find. `semantic_floor` overrides the
    * vector lane's cosine floor for this call — over the context setting,
    * over the server default (it floors only that lane; BM25-only hits still
-   * return).
+   * return). The page's `plan` says whether the semantic lane actually ran —
+   * and why not, when it did not — see `SearchPlan`.
    */
   async searchPassages(
     query: string,
     options: { limit?: number; semantic_floor?: number } = {},
-  ): Promise<PassageHit[]> {
+  ): Promise<PassagePage> {
     const result = await this.post(
       "/sources/search",
       dropUndefined({ query, limit: options.limit, semantic_floor: options.semantic_floor }),
     );
-    return result as PassageHit[];
+    return result as PassagePage;
   }
 
   /**
@@ -1386,15 +1391,18 @@ export class Context {
     }
 
     let passage_hits: PassageHit[] = [];
+    let search_plan: SearchPlan | undefined;
     if (
       options.text_fallback_query !== undefined &&
       (!onlyIfEmpty || associations.length === 0)
     ) {
-      passage_hits = await this.searchPassages(options.text_fallback_query, {
+      const page = await this.searchPassages(options.text_fallback_query, {
         limit: options.search_limit,
       });
+      passage_hits = page.hits;
+      search_plan = page.plan;
     }
 
-    return { resolved, outline, associations, activations, citations, passage_hits };
+    return { resolved, outline, associations, activations, citations, passage_hits, search_plan };
   }
 }

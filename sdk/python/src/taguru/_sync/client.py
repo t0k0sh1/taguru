@@ -30,7 +30,7 @@ from .._models import (
     ContextMeta,
     ContextPage,
     CrossMatchPage,
-    CrossPassageHit,
+    CrossPassagePage,
     DirectoryEntry,
     DriftAudit,
     ExplorePage,
@@ -41,12 +41,14 @@ from .._models import (
     MatchPage,
     PassageHit,
     PassageLookup,
+    PassagePage,
     RefreshOutcome,
     ResolveExplanation,
     RetractAssociationOutcome,
     RetractOutcome,
     RetrievalResult,
     SearchExplanation,
+    SearchPlan,
     SourcePage,
     StoredPassages,
     TieredResolution,
@@ -325,7 +327,7 @@ class Taguru:
         groups: Sequence[str] | None = None,
         limit: int | None = None,
         semantic_floor: float | None = None,
-    ) -> list[CrossPassageHit]:
+    ) -> CrossPassagePage:
         """Paragraph search across several contexts at once, hits tagged.
 
         Passage scores do NOT share a scale across contexts (BM25 statistics
@@ -333,6 +335,8 @@ class Taguru:
         context's best hit first; ``score`` compares within one context only.
         ``semantic_floor`` overrides every target's vector-lane cosine floor
         for this call (it floors only that lane; BM25-only hits still return).
+        The page's ``plan`` names every context actually searched and each
+        lane's verdict there — see :class:`SearchPlan`.
         """
         body = drop_none(
             {
@@ -344,7 +348,7 @@ class Taguru:
             }
         )
         result = self._request_json("POST", "/sources/search", json_body=body)
-        return decode(list[CrossPassageHit], result)  # type: ignore[no-any-return]
+        return decode(CrossPassagePage, result)  # type: ignore[no-any-return]
 
     def close(self) -> None:
         if self._owns_http:
@@ -916,18 +920,20 @@ class Context:
         *,
         limit: int | None = None,
         semantic_floor: float | None = None,
-    ) -> list[PassageHit]:
+    ) -> PassagePage:
         """Paragraph search (BM25 fused with embeddings where configured).
 
         Phrase the query as an answer, not a question — a plausible
         declarative sentence lands nearer the text you hope to find.
         ``semantic_floor`` overrides the vector lane's cosine floor for this
         call — over the context setting, over the server default (it floors
-        only that lane; BM25-only hits still return).
+        only that lane; BM25-only hits still return). The page's ``plan``
+        says whether the semantic lane actually ran — and why not, when it
+        did not — see :class:`SearchPlan`.
         """
         body = drop_none({"query": query, "limit": limit, "semantic_floor": semantic_floor})
         result = self._post("/sources/search", body)
-        return decode(list[PassageHit], result)  # type: ignore[no-any-return]
+        return decode(PassagePage, result)  # type: ignore[no-any-return]
 
     def explain_search_passages(
         self,
@@ -1246,10 +1252,13 @@ class Context:
                     continue
 
         passage_hits: list[PassageHit] = []
+        search_plan: SearchPlan | None = None
         if text_fallback_query is not None and (
             not text_fallback_only_if_empty or not associations
         ):
-            passage_hits = self.search_passages(text_fallback_query, limit=search_limit)
+            fallback = self.search_passages(text_fallback_query, limit=search_limit)
+            passage_hits = fallback.hits
+            search_plan = fallback.plan
 
         return RetrievalResult(
             resolved=resolved,
@@ -1258,4 +1267,5 @@ class Context:
             activations=activations,
             citations=citations,
             passage_hits=passage_hits,
+            search_plan=search_plan,
         )

@@ -342,7 +342,7 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
         "/sources/search",
         Some(json!({"contexts": ["izakaya", "sakagura"], "query": "蔵元"})),
     );
-    let hits = hits.as_array().unwrap();
+    let hits = hits["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 2, "both contexts must answer: {hits:?}");
     assert_eq!(hits[0]["context"], json!("izakaya"), "{hits:?}");
     assert_eq!(hits[1]["context"], json!("sakagura"), "{hits:?}");
@@ -624,7 +624,7 @@ fn cross_context_search_resolves_groups_beside_contexts() {
         "/sources/search",
         Some(json!({"contexts": ["sakagura"], "groups": ["sakaya"], "query": "蔵元"})),
     );
-    let hits = hits.as_array().unwrap();
+    let hits = hits["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 2, "both contexts must answer: {hits:?}");
     assert_eq!(hits[0]["context"], json!("sakagura"), "{hits:?}");
     assert_eq!(hits[1]["context"], json!("izakaya"), "{hits:?}");

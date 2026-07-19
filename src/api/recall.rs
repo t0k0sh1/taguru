@@ -17,9 +17,9 @@ use super::aliases::{OneOrMany, as_refs, validate_positions};
 use super::groups::{scope_allows, scope_refusal};
 use super::{
     AppJson, AppPath, CrossMatchPage, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT, MatchCursor,
-    MatchPage, access_error, associations_out, bounded_parallel_map, cache_and_serve, clamp,
-    cross_associations_out, cross_search_concurrency, deadline_exceeded, error, group_not_found,
-    ok, overlong, page, replay_cached_search, search_log_enabled,
+    MatchPage, MatchPlan, access_error, associations_out, bounded_parallel_map, cache_and_serve,
+    clamp, cross_associations_out, cross_search_concurrency, deadline_exceeded, error,
+    group_not_found, ok, overlong, page, replay_cached_search, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -92,7 +92,13 @@ pub async fn recall(
             cache_and_serve(
                 &state,
                 key,
-                &MatchPage { total, matches },
+                &MatchPage {
+                    total,
+                    matches,
+                    plan: Some(MatchPlan {
+                        contexts: vec![name.clone()],
+                    }),
+                },
                 vec![total == 0],
                 [0, 0, 0],
                 total,
@@ -469,7 +475,13 @@ pub async fn cross_recall(
     cache_and_serve(
         &state,
         key,
-        &CrossMatchPage { total, matches },
+        &CrossMatchPage {
+            total,
+            matches,
+            plan: Some(MatchPlan {
+                contexts: targets.to_vec(),
+            }),
+        },
         target_empty,
         [0, 0, 0],
         total,
@@ -568,7 +580,13 @@ pub async fn query(
             cache_and_serve(
                 &state,
                 key,
-                &MatchPage { total, matches },
+                &MatchPage {
+                    total,
+                    matches,
+                    plan: Some(MatchPlan {
+                        contexts: vec![name.clone()],
+                    }),
+                },
                 vec![total == 0],
                 [0, 0, 0],
                 total,
@@ -708,7 +726,13 @@ pub async fn cross_query(
     cache_and_serve(
         &state,
         key,
-        &CrossMatchPage { total, matches },
+        &CrossMatchPage {
+            total,
+            matches,
+            plan: Some(MatchPlan {
+                contexts: targets.to_vec(),
+            }),
+        },
         target_empty,
         [0, 0, 0],
         total,

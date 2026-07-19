@@ -219,9 +219,10 @@ export class TaguruRetriever extends BaseRetriever {
       const graphDocs = this.include_graph ? await this.graphLane(target, query) : [];
       let textHits: PassageHit[] = [];
       if (this.include_text) {
-        textHits = await this.client.context(target).searchPassages(query, {
+        const page = await this.client.context(target).searchPassages(query, {
           limit: this.text_limit,
         });
+        textHits = page.hits;
       }
       return mergeLanes(graphDocs, textHits, this.k, target);
     }
@@ -249,10 +250,11 @@ export class TaguruRetriever extends BaseRetriever {
       // lane's already-fetched results too (see the allSettled
       // isolation just above).
       try {
-        textHits = await this.client.searchPassages(query, {
+        const page = await this.client.searchPassages(query, {
           contexts: targets,
           limit: this.text_limit,
         });
+        textHits = page.hits;
       } catch {
         textHits = [];
       }

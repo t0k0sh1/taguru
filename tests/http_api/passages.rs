@@ -25,12 +25,12 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
         }})),
     );
 
-    let hits = server.ok(
+    let page = server.ok(
         "POST",
         "/contexts/sake/sources/search",
         Some(json!({"query": "精米歩合はどこまで磨く?", "limit": 3})),
     );
-    let hit = &hits[0];
+    let hit = &page["hits"][0];
     assert_eq!(hit["source"], "docs/aomine.md");
     assert_eq!(hit["paragraph"], 1, "the hit names the answering PARAGRAPH");
     assert!(hit["text"].as_str().unwrap().starts_with("原料米"), "{hit}");
@@ -44,13 +44,31 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
         "no provider, no vector key: {hit}"
     );
 
-    // A zero limit asks for nothing and gets nothing.
+    // The response-level plan (#151): the same story the per-hit
+    // evidence cannot tell — the semantic lane never ran here, and why.
+    let plan = &page["plan"]["contexts"][0];
+    assert_eq!(plan["context"], "sake", "{page}");
+    assert_eq!(plan["lanes"]["bm25"]["ran"], json!(true), "{page}");
+    assert_eq!(plan["lanes"]["vector"]["ran"], json!(false), "{page}");
+    assert_eq!(
+        plan["lanes"]["vector"]["reason"],
+        json!("no embedding provider is configured"),
+        "{page}"
+    );
+
+    // A zero limit asks for nothing and gets nothing — but still says
+    // what it did (nothing, on both lanes).
     let none = server.ok(
         "POST",
         "/contexts/sake/sources/search",
         Some(json!({"query": "精米", "limit": 0})),
     );
-    assert_eq!(none.as_array().unwrap().len(), 0);
+    assert_eq!(none["hits"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        none["plan"]["contexts"][0]["lanes"]["bm25"],
+        json!({"ran": false, "reason": "the requested limit is 0"}),
+        "{none}"
+    );
 }
 
 /// The citation endpoint's wire contract: given a known (source,
@@ -416,26 +434,39 @@ fn search_semantic_floor_override_rides_every_search_surface() {
     server.ok("POST", "/contexts/fruit/embeddings/refresh", None);
 
     // Under the default floor the paraphrase stays hidden — and the
-    // query shares no bigram with the text, so no lexical rescue.
+    // query shares no bigram with the text, so no lexical rescue. The
+    // plan names the floor that hid it: a zero-hit response is now
+    // distinguishable from a lane that never ran.
     let hidden = server.ok(
         "POST",
         "/contexts/fruit/sources/search",
         Some(json!({"query": "みかん"})),
     );
-    assert_eq!(hidden.as_array().unwrap().len(), 0, "{hidden}");
+    assert_eq!(hidden["hits"].as_array().unwrap().len(), 0, "{hidden}");
+    let vector_plan = &hidden["plan"]["contexts"][0]["lanes"]["vector"];
+    assert_eq!(vector_plan["ran"], json!(true), "{hidden}");
+    assert!(
+        (vector_plan["floor"].as_f64().unwrap() - 0.35).abs() < 1e-6,
+        "the plan reports the server-default floor: {hidden}"
+    );
 
     // The override admits it: a vector-only hit at cosine 0.28.
-    let hits = server.ok(
+    let page = server.ok(
         "POST",
         "/contexts/fruit/sources/search",
         Some(json!({"query": "みかん", "semantic_floor": 0.2})),
     );
-    assert_eq!(hits.as_array().unwrap().len(), 1, "{hits}");
-    let hit = &hits[0];
+    assert_eq!(page["hits"].as_array().unwrap().len(), 1, "{page}");
+    let hit = &page["hits"][0];
     assert_eq!(hit["source"], "docs/apple.md");
     assert!(hit["lanes"].get("bm25").is_none(), "no shared term: {hit}");
     let cosine = hit["lanes"]["vector"]["score"].as_f64().unwrap();
     assert!((cosine - 0.28).abs() < 1e-4, "{hit}");
+    let overridden = &page["plan"]["contexts"][0]["lanes"]["vector"];
+    assert!(
+        (overridden["floor"].as_f64().unwrap() - 0.2).abs() < 1e-6,
+        "the plan reports the override, not the default: {page}"
+    );
 
     // The explanation reports the floor of the call being explained.
     let explained = server.ok(
@@ -448,13 +479,59 @@ fn search_semantic_floor_override_rides_every_search_surface() {
     let floor = explained["vector"]["floor"].as_f64().unwrap();
     assert!((floor - 0.2).abs() < 1e-6, "{explained}");
 
-    // The cross-context fan-out forwards the same override.
+    // The cross-context fan-out forwards the same override, and its
+    // plan carries the per-target account under the same key.
     let across = server.ok(
         "POST",
         "/sources/search",
         Some(json!({"contexts": ["fruit"], "query": "みかん", "semantic_floor": 0.2})),
     );
-    assert_eq!(across.as_array().unwrap().len(), 1, "{across}");
-    assert_eq!(across[0]["context"], json!("fruit"), "{across}");
-    assert_eq!(across[0]["source"], json!("docs/apple.md"), "{across}");
+    assert_eq!(across["hits"].as_array().unwrap().len(), 1, "{across}");
+    assert_eq!(across["hits"][0]["context"], json!("fruit"), "{across}");
+    assert_eq!(
+        across["hits"][0]["source"],
+        json!("docs/apple.md"),
+        "{across}"
+    );
+    let cross_plan = &across["plan"]["contexts"][0];
+    assert_eq!(cross_plan["context"], json!("fruit"), "{across}");
+    assert!(
+        (cross_plan["lanes"]["vector"]["floor"].as_f64().unwrap() - 0.2).abs() < 1e-6,
+        "{across}"
+    );
+
+    // Two targets, two effective floors: a context's own setting beats
+    // the server default only for itself, and the plan reports each —
+    // the resolution chain was per-context all along, invisibly.
+    server.ok(
+        "PUT",
+        "/contexts/veggie",
+        Some(json!({"description": "菜園"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/veggie/sources",
+        Some(json!({"passages": {"docs/tomato.md": "りんごの隣にトマトが実った。"}})),
+    );
+    server.ok("POST", "/contexts/veggie/embeddings/refresh", None);
+    server.ok(
+        "PATCH",
+        "/contexts/veggie",
+        Some(json!({"semantic_floor": 0.6})),
+    );
+    let split = server.ok(
+        "POST",
+        "/sources/search",
+        Some(json!({"contexts": ["fruit", "veggie"], "query": "みかん"})),
+    );
+    let floors: Vec<f64> = split["plan"]["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["lanes"]["vector"]["floor"].as_f64().unwrap())
+        .collect();
+    assert!(
+        (floors[0] - 0.35).abs() < 1e-6 && (floors[1] - 0.6).abs() < 1e-6,
+        "per-context effective floors, in target order: {split}"
+    );
 }

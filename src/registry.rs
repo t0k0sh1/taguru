@@ -1036,6 +1036,74 @@ pub struct PassageSearchHit {
     pub vector: Option<(usize, f32)>,
 }
 
+/// One passage search's whole account: the served hits plus what each
+/// lane did for this call — the response-level half of the evidence
+/// posture ([`PassageSearchHit`] carries the per-hit half). The handler
+/// serializes `lanes` into the response's `plan`, so a caller can tell
+/// "the semantic lane found nothing" from "the semantic lane never ran"
+/// without a separate explain call.
+#[derive(Debug)]
+pub struct PassageSearch {
+    pub hits: Vec<PassageSearchHit>,
+    pub lanes: PassageSearchLanes,
+}
+
+/// What the two lanes did for one search call, including the two early
+/// returns that answer before either lane starts — an empty result must
+/// still say WHY it is empty.
+#[derive(Debug)]
+pub(crate) enum PassageSearchLanes {
+    /// The query yields no searchable terms; the search answered the
+    /// empty list before either lane ran.
+    NoQueryTerms,
+    /// `limit` was 0; nothing could be served, so neither lane ran.
+    ZeroLimit,
+    /// The lexical lane ran; `vector` is the semantic lane's account.
+    Ran { vector: VectorLaneStatus },
+}
+
+impl PassageSearchLanes {
+    /// The one lane state that recovers with no revision bump (the
+    /// provider comes back; no key moves) — the handlers' fill gate:
+    /// a transiently degraded result must not be pinned into the
+    /// retrieval caches, where it would keep serving BM25-only answers
+    /// (and canonicalize paraphrases onto them) until an unrelated
+    /// write. The stable skip states stay cacheable — a vector publish
+    /// or config change DOES move the key.
+    pub(crate) fn embedding_failed(&self) -> bool {
+        matches!(
+            self,
+            Self::Ran {
+                vector: VectorLaneStatus::QueryEmbeddingFailed(_)
+            }
+        )
+    }
+}
+
+/// The semantic lane's response-level account: [`VectorLaneReport`]'s
+/// taxonomy minus the explain-only per-target cosine. Two types on
+/// purpose — explain scores one named target and needs the cosine;
+/// search reports the lane as a whole and must not pretend to have
+/// one. The api layer maps both through one set of wire reason
+/// strings, so the taxonomies cannot drift apart in prose.
+#[derive(Debug)]
+pub(crate) enum VectorLaneStatus {
+    /// `TAGURU_EMBED_PASSAGES` is off, or no provider is configured —
+    /// `provider_configured` says which.
+    Off { provider_configured: bool },
+    /// The lane should have run; the provider refused the query.
+    QueryEmbeddingFailed(String),
+    /// Nothing embedded yet (no sidecar rows).
+    NoVectors,
+    /// The sidecar's rows belong to another model; they are never
+    /// served, and the next refresh discards and re-embeds them.
+    ModelChanged { stored: String, current: String },
+    /// The sweep ran, dropping matches below `floor` — the effective
+    /// value after the override → context setting → server default
+    /// chain, the one threshold a caller cannot reconstruct alone.
+    Ran { floor: f32 },
+}
+
 /// The outcome of resolving one `(source, paragraph index)` citation:
 /// found, or which half of the lookup missed. Kept distinct from the
 /// outer `Option<io::Result<_>>` (context-absent / I/O failure), which
@@ -8932,7 +9000,8 @@ mod tests {
                 Deadline::unbounded(),
             )
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(hits[0].source, "第2段落");
         assert!(hits[0].score > 0.0);
 
@@ -8948,6 +9017,7 @@ mod tests {
                 )
                 .unwrap()
                 .unwrap()
+                .hits
                 .is_empty()
         );
         assert!(
@@ -9003,7 +9073,8 @@ mod tests {
                 Deadline::unbounded(),
             )
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(hits[0].source, "第51篇");
         assert!(
             hits.len() < 2 || hits[0].score > hits[1].score,
@@ -9037,7 +9108,8 @@ mod tests {
             let hits = state
                 .search_passages("code", query, 3, None, Deadline::unbounded())
                 .unwrap()
-                .unwrap();
+                .unwrap()
+                .hits;
             assert_eq!(
                 hits.first().map(|hit| hit.source.as_str()),
                 Some("src/registry.rs:AppState"),
@@ -9076,7 +9148,8 @@ mod tests {
                 Deadline::unbounded(),
             )
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(
             (hits[0].source.as_str(), hits[0].index),
             ("docs/aomine.md", 1),
@@ -9111,6 +9184,7 @@ mod tests {
                 .search_passages("sake", "創業はいつ", 3, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
+                .hits
                 .is_empty()
         );
 
@@ -9126,7 +9200,8 @@ mod tests {
         let hits = state
             .search_passages("sake", "杜氏の出身", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(hits[0].source, "第2章");
 
         // And a retraction disappears the same way.
@@ -9136,6 +9211,7 @@ mod tests {
                 .search_passages("sake", "杜氏の出身", 3, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
+                .hits
                 .iter()
                 .all(|hit| hit.source != "第2章"),
             "a retracted source must leave the index too"
@@ -9172,7 +9248,8 @@ mod tests {
         let hits = state
             .search_passages("sake", "創業はいつ", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(hits[0].source, "第1章");
         let entry = state.lookup("sake").unwrap();
         assert!(
@@ -9218,7 +9295,8 @@ mod tests {
         let hits = state
             .search_passages("sake", "杜氏は誰", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert!(
             hits[0].text.contains("佐伯"),
             "the digest mismatch must repair 第1章 from the store, got {:?}",
@@ -9255,7 +9333,8 @@ mod tests {
         let hits = state
             .search_passages("sake", "蔵開きの祭り", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(hits[0].source, "第1章");
         state.flush_dirty();
         assert!(
@@ -9327,6 +9406,7 @@ mod tests {
                 .search_passages("sake", "蔵開きの祭り", 3, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
+                .hits
                 .is_empty()
         );
 
@@ -9340,7 +9420,8 @@ mod tests {
             state
                 .search_passages("sake", "蔵開きの祭り", 3, None, Deadline::unbounded())
                 .unwrap()
-                .unwrap()[0]
+                .unwrap()
+                .hits[0]
                 .source,
             "第1章",
             "the next search rebuilds and still answers"
@@ -9623,7 +9704,8 @@ mod tests {
         let hits = state
             .search_passages("sake", "QUERYMARKER", 2, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert!(
             hits.iter().any(|hit| hit.source == "target-doc"),
             "limit_to_reach must actually reach it: {hits:?}"
@@ -9745,7 +9827,8 @@ mod tests {
                 Deadline::unbounded(),
             )
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert!(
             hits.iter().any(|hit| hit.source == "target-doc"),
             "limit_to_reach must actually reach it: {hits:?}"
@@ -10147,7 +10230,8 @@ mod tests {
         let hits = state
             .search_passages("fruit", "アップル", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(hits.len(), 1, "one paragraph, one hit — never a dup");
         assert_eq!((hits[0].source.as_str(), hits[0].index), ("doc", 0));
         assert!(
@@ -10272,7 +10356,8 @@ mod tests {
         let hits = state
             .search_passages("fruit", "アップル", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(hits[0].source, "doc-a");
         assert!(
             hits[0].bm25.is_none(),
@@ -10314,7 +10399,8 @@ mod tests {
         let hits = state
             .search_passages("fruit", "りんごは真っ赤", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(hits[0].source, "doc-a");
         let (bm25_rank, bm25_score) = hits[0].bm25.expect("shared bigrams");
         let (vector_rank, _) = hits[0].vector.expect("same fruit, same axis");
@@ -10369,7 +10455,8 @@ mod tests {
         let hits = state
             .search_passages("fruit", "りんご", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(hits[0].source, "doc-a");
         assert!(hits[0].text.contains("青森"), "the CURRENT text is served");
         assert!(
@@ -10441,7 +10528,8 @@ mod tests {
         let hits = state
             .search_passages("fruit", "りんご", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(
             hits[0].source, "doc-a",
             "a broken decoration must not break the answer"
@@ -10474,7 +10562,8 @@ mod tests {
         let hits = state
             .search_passages("fruit", "りんご", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert!(hits[0].vector.is_none());
         let (rank, bm25_score) = hits[0].bm25.unwrap();
         assert_eq!(rank, 1);
@@ -10512,7 +10601,8 @@ mod tests {
         let hits = state
             .search_passages("fruit", "みかん", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert!(
             hits.is_empty(),
             "cosine 0.28 sits under the default floor: {hits:?}"
@@ -10554,7 +10644,8 @@ mod tests {
         let hits = state
             .search_passages("fruit", "みかん", 3, None, Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].source, "doc-a");
         let (rank, cosine) = hits[0].vector.expect("cleared the lowered floor");
@@ -10594,7 +10685,8 @@ mod tests {
         let hits = state
             .search_passages("fruit", "みかん", 3, Some(0.2), Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert_eq!(
             hits.len(),
             1,
@@ -10612,7 +10704,8 @@ mod tests {
         let hits = state
             .search_passages("fruit", "みかん", 3, Some(0.5), Deadline::unbounded())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hits;
         assert!(
             hits.is_empty(),
             "an override above the cosine drops it even under a context floor lowered below it: {hits:?}"

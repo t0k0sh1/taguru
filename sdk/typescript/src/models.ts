@@ -219,10 +219,23 @@ export interface Association {
   attributions: Attribution[];
 }
 
+/**
+ * The execution plan of a graph search (#151): the contexts actually
+ * consulted, in effective order. For the cross variants that is the RESOLVED
+ * target list — groups expanded, the key's grants applied — which the tagged
+ * matches alone cannot reconstruct when a target came up empty. Absent from
+ * servers predating the field, and always for the non-search `MatchPage`
+ * producers (`unreachableFrom` — an audit, not a search).
+ */
+export interface MatchPlan {
+  contexts: string[];
+}
+
 /** Ranked matches. `total` above `matches.length` means truncation. */
 export interface MatchPage {
   total: number;
   matches: Association[];
+  plan?: MatchPlan;
 }
 
 /**
@@ -242,6 +255,7 @@ export interface CrossAssociation extends Association {
 export interface CrossMatchPage {
   total: number;
   matches: CrossAssociation[];
+  plan?: MatchPlan;
 }
 
 export interface Recollection {
@@ -452,6 +466,53 @@ export interface PassageHit {
  */
 export interface CrossPassageHit extends PassageHit {
   context: string;
+}
+
+/**
+ * One lane's verdict for a whole search call (#151): it ran (the vector lane
+ * also names the effective cosine `floor` it swept under — the resolved
+ * override → context setting → server default chain), or it did not and
+ * `reason` says why, in the same prose `explainSearchPassages` uses.
+ */
+export interface LanePlan {
+  ran: boolean;
+  reason?: string;
+  floor?: number;
+}
+
+/** Both lanes' verdicts, mirroring the per-hit `lanes` shape. */
+export interface SearchLanesPlan {
+  bm25: LanePlan;
+  vector: LanePlan;
+}
+
+/** One searched context's account within a `SearchPlan`. */
+export interface SearchContextPlan {
+  context: string;
+  lanes: SearchLanesPlan;
+}
+
+/**
+ * The execution plan of one passage search (#151): one entry per context
+ * actually searched, in effective order. What the per-hit lane evidence
+ * cannot say — "the semantic lane never ran here, and this is why" — lives
+ * here, so a lexical-only answer is distinguishable from a fused one without
+ * a separate explain call.
+ */
+export interface SearchPlan {
+  contexts: SearchContextPlan[];
+}
+
+/** `searchPassages`' response: the `SearchPlan` beside the hits. */
+export interface PassagePage {
+  plan: SearchPlan;
+  hits: PassageHit[];
+}
+
+/** `PassagePage` across contexts: the same wrap, every hit tagged. */
+export interface CrossPassagePage {
+  plan: SearchPlan;
+  hits: CrossPassageHit[];
 }
 
 // -- search explain ------------------------------------------------------------
@@ -665,6 +726,12 @@ export interface RetrievalResult {
   activations: Activation[];
   citations: Map<string, Citation>;
   passage_hits: PassageHit[];
+  /**
+   * The fallback search's `SearchPlan` — absent when no text fallback ran,
+   * so "the search never happened" and "the semantic lane was skipped" stay
+   * distinguishable.
+   */
+  search_plan?: SearchPlan;
 }
 
 /**

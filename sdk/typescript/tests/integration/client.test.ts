@@ -267,10 +267,16 @@ describe("sources and citations", () => {
     expect(lookup.passages["docs/aomine.md"]).toBe(AOMINE_DOC);
     expect(lookup.missing).toEqual(["missing.md"]);
 
-    const hits = await ctx.searchPassages("杜氏は高瀬である", { limit: 3 });
-    expect(hits[0]!.source).toBe("docs/aomine.md");
-    expect(hits[0]!.lanes.bm25).toBeDefined();
-    expect(hits[0]!.lanes.vector).toBeUndefined();
+    const page = await ctx.searchPassages("杜氏は高瀬である", { limit: 3 });
+    expect(page.hits[0]!.source).toBe("docs/aomine.md");
+    expect(page.hits[0]!.lanes.bm25).toBeDefined();
+    expect(page.hits[0]!.lanes.vector).toBeUndefined();
+    // The plan (#151): response-level lane verdicts beside the hits.
+    expect(page.plan.contexts[0]!.lanes.bm25.ran).toBe(true);
+    expect(page.plan.contexts[0]!.lanes.vector.ran).toBe(false);
+    expect(page.plan.contexts[0]!.lanes.vector.reason).toBe(
+      "no embedding provider is configured",
+    );
 
     const cited = await ctx.citePassage("docs/aomine.md", 1);
     expect(cited.text).toContain("杜氏は高瀬");
@@ -596,12 +602,14 @@ describe("groups and cross-context search", () => {
     expect(new Set(queried.matches.map((m) => m.context))).toEqual(new Set([sake, tea]));
 
     // searchPassages: rank-interleaved, hits tagged; score is per-context.
-    const hits = await client.searchPassages("代表銘柄は青嶺", {
+    const searched = await client.searchPassages("代表銘柄は青嶺", {
       contexts: [sake, tea],
       limit: 4,
     });
-    expect(new Set(hits.map((h) => h.context))).toEqual(new Set([sake, tea]));
-    expect(hits.every((h) => h.text.length > 0)).toBe(true);
+    expect(new Set(searched.hits.map((h) => h.context))).toEqual(new Set([sake, tea]));
+    expect(searched.hits.every((h) => h.text.length > 0)).toBe(true);
+    // The plan lists both targets in effective order (#151).
+    expect(searched.plan.contexts.map((entry) => entry.context)).toEqual([sake, tea]);
 
     // An empty target list is refused, an unknown group answers no_group.
     await expect(client.recall("青嶺", { contexts: [] })).rejects.toMatchObject({
