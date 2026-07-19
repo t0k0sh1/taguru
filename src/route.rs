@@ -8,10 +8,16 @@
 //! directory, no lock, and no durable state of any kind — run as many
 //! as the load balancer wants. Config is one file (`TAGURU_ROUTE_MAP`):
 //! `context = shard-url` lines plus an optional `* = shard-url`
-//! fallback for contexts the map does not name. Editing the map (a
-//! context moved with `taguru export`/`import`, a rename) takes a
-//! router restart — restarts of a stateless process behind an LB are
-//! a rolling non-event.
+//! fallback for contexts the map does not name. Editing the map takes
+//! a router restart — restarts of a stateless process behind an LB
+//! are a rolling non-event. Moving a context between shards, in
+//! order: quiesce its writes, `taguru export` it, DELETE it through
+//! the router (the old shard drops it — and sweeps it from its group
+//! projections), edit the map and roll the routers, then re-import
+//! through the router (which now routes it to the new shard). The
+//! delete must precede the re-import: a copy left on the old shard
+//! keeps answering that shard's slice of every group fan-out —
+//! duplicate hits, not just a stale listing.
 //!
 //! **Routing.** Context-scoped verbs proxy verbatim (streamed both
 //! ways) to the owning shard, so their responses — including error

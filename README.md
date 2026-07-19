@@ -266,9 +266,12 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   answers an error fails the request whole; a shard that cannot be
   *reached* degrades fan-out reads to labeled partials (`unreached`
   in the envelope) and refuses routed verbs with 502
-  `shard_unreachable`. Moving a context = `taguru export` → `import`
-  on the new shard → edit the map → restart the routers (stateless, a
-  rolling non-event).
+  `shard_unreachable`. Moving a context, in order: quiesce its
+  writes → `taguru export` → DELETE it through the router (the old
+  shard also sweeps its group projections) → edit the map + rolling
+  router restart → re-import through the router, which now routes it
+  to the new shard. Delete before re-import — a leftover copy keeps
+  answering the old shard's slice of every group fan-out.
 - **Health and metrics.** `GET /health` is readiness (503 while the
   write path is degraded — route away, don't restart), `GET /live` is
   liveness, `GET /metrics` is Prometheus text. Every request lands in

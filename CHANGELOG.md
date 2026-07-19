@@ -31,8 +31,9 @@ Entries that change an on-disk format or a response shape say so.
   (response-shape note: new optional top-level field, absent when
   every shard answered) — and routed verbs answer the new
   `502 shard_unreachable` error code. Router-shaped `/metrics`
-  (`taguru_router_*`). Moving a context = `taguru export` → `import`
-  → map edit → rolling router restart (documented as a runbook).
+  (`taguru_router_*`). Moving a context is a documented runbook:
+  quiesce → export → delete from the old shard through the router →
+  map edit + rolling router restart → re-import through the router.
 - Read replicas (#129): `serve --replica` / `TAGURU_REPLICA=1` serves
   the replication bucket's lineage read-only and keeps tailing it —
   issue #128's hydration running continuously. Every retrieval verb

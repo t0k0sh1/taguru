@@ -71,8 +71,10 @@ services:
   #   archive   = http://taguru-2:8248
   #   *         = http://taguru:8248
   #
-  # Moving a context: `taguru export` → `import` on the new shard →
-  # edit the map → `docker compose restart taguru-router`.
+  # Moving a context, in order: quiesce its writes, `taguru export`,
+  # DELETE it through the router (the old shard drops it), edit the
+  # map, `docker compose restart taguru-router`, then re-import
+  # through the router — which now routes it to the new shard.
   #
   # taguru-router:
   #   image: ghcr.io/t0k0sh1/taguru:0.3.0

@@ -239,10 +239,13 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
       naming the shard and its contexts — and routed verbs answer <code>502
       shard_unreachable</code>, retryable by design. Per-shard outcomes are on the router's
       <code>/metrics</code> (<code>taguru_router_shard_requests_total</code>). Moving a
-      context between shards is a runbook, not a protocol: <code>taguru export</code> →
-      <code>import</code> on the new shard → edit the ConfigMap → roll the routers (stateless,
-      a non-event). Each shard can keep its own bucket (<code>TAGURU_REPLICATE_URL</code>)
-      and read pool — the rungs compose.
+      context between shards is a runbook, not a protocol — in order: quiesce its writes →
+      <code>taguru export</code> → DELETE it through the router (the old shard drops it,
+      group projections included) → edit the ConfigMap and roll the routers (stateless, a
+      non-event) → re-import through the router, which now routes it to the new shard.
+      Delete before re-import: a leftover copy keeps answering the old shard's slice of
+      every group fan-out. Each shard can keep its own bucket
+      (<code>TAGURU_REPLICATE_URL</code>) and read pool — the rungs compose.
     </p>
   </section>
 

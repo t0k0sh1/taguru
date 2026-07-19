@@ -32,8 +32,10 @@ search spanning every shard under the single-instance merge
 semantics. The `docker-compose.yml` carries a commented example;
 the topology notes live in the
 [Kubernetes page](https://t0k0sh1.github.io/taguru/kubernetes.html#sharding).
-Moving a context is `taguru export` → `import` on the new shard →
-map edit → rolling router restart.
+Moving a context, in order: quiesce its writes → `taguru export` →
+DELETE it through the router (the old shard drops it, group
+projections included) → map edit + rolling router restart →
+re-import through the router, which now routes it to the new shard.
 
 All pin the image version on purpose (`latest` moves), keep the
 credentials out of the manifest, and leave TLS to the layer in front —
