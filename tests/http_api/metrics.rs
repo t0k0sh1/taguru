@@ -45,6 +45,111 @@ fn metrics_expose_prometheus_text_reflecting_traffic() {
     assert!(text.contains("taguru_http_request_duration_seconds_bucket"));
     assert!(text.contains("taguru_flush_total{outcome=\"ok\"}"));
     assert!(text.contains("taguru_contexts_registered 0"));
+
+    // The per-context families stay off this scrape entirely — the
+    // TAGURU_METRICS_PER_CONTEXT knob is unset, and off means absent,
+    // not zero-valued (cardinality is the whole point of the knob).
+    assert!(!text.contains("taguru_context_"), "{text}");
+}
+
+/// The per-context gauge families (#137): present behind the knob,
+/// sized at flush time — never at scrape time — and matching the real
+/// files once a flush ran.
+#[test]
+fn per_context_gauges_measure_at_flush_time_behind_the_knob() {
+    let server = Server::start_with_env(
+        "pcgauges",
+        &[
+            ("TAGURU_METRICS_PER_CONTEXT", "all"),
+            // The sweep must run only when WE flush: a long interval
+            // keeps the timer out of the scrape-before-sweep window
+            // the first half of this test depends on.
+            ("TAGURU_FLUSH_SECS", "600"),
+        ],
+    );
+    server.ok(
+        "PUT",
+        "/contexts/pc",
+        Some(json!({"description": "計測対象", "pinned": true})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/pc/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
+             "weight": 1.0, "source": "p1"},
+            {"subject": "青嶺", "label": "原料米", "object": "山田錦",
+             "weight": 1.0, "source": "p1"},
+            {"subject": "青嶺", "label": "精米歩合", "object": "五割",
+             "weight": 1.0, "source": "p1"},
+        ])),
+    );
+
+    let gauge = |text: &str, series: &str| -> u64 {
+        text.lines()
+            .find_map(|line| {
+                line.strip_prefix(series)
+                    .and_then(|rest| rest.trim().parse().ok())
+            })
+            .unwrap_or_else(|| panic!("series {series} missing from: {text}"))
+    };
+
+    // The image is already on disk (create persisted it), but the boot
+    // sweep ran before the context existed: a scrape must not stat the
+    // data directory, so the disk series still read zero while the
+    // live-state series (counts, pinned, residency) are current.
+    let (status, body) = server.call("GET", "/metrics", None);
+    assert_eq!(status, 200);
+    let text = body.as_str().expect("metrics body is text");
+    assert!(server.data_dir.join("pc.ctx").exists());
+    assert_eq!(
+        gauge(
+            text,
+            "taguru_context_disk_bytes{context=\"pc\",file=\"image\"} "
+        ),
+        0,
+        "disk sizes are flush-time bookkeeping, not scrape-time stats"
+    );
+    assert_eq!(
+        gauge(text, "taguru_context_associations{context=\"pc\"} "),
+        3
+    );
+    assert_eq!(gauge(text, "taguru_context_sources{context=\"pc\"} "), 1);
+    assert_eq!(gauge(text, "taguru_context_pinned{context=\"pc\"} "), 1);
+    assert!(gauge(text, "taguru_context_resident_bytes{context=\"pc\"} ") > 0);
+
+    // POST /flush runs the sweep: the scraped image size becomes the
+    // real file's — the very bytes `to_bytes()` staged, which is also
+    // what `taguru estimate` measures with.
+    server.ok("POST", "/flush", None);
+    let (_, body) = server.call("GET", "/metrics", None);
+    let text = body.as_str().expect("metrics body is text");
+    let image_len = std::fs::metadata(server.data_dir.join("pc.ctx"))
+        .expect("image exists")
+        .len();
+    assert!(image_len > 0);
+    assert_eq!(
+        gauge(
+            text,
+            "taguru_context_disk_bytes{context=\"pc\",file=\"image\"} "
+        ),
+        image_len
+    );
+    assert!(
+        gauge(
+            text,
+            "taguru_context_disk_bytes{context=\"pc\",file=\"sidecars\"} "
+        ) > 0,
+        "the meta sidecar has bytes"
+    );
+    assert_eq!(
+        gauge(
+            text,
+            "taguru_context_disk_bytes{context=\"pc\",file=\"wal\"} "
+        ),
+        0,
+        "a successful flush truncates the graph WAL"
+    );
 }
 
 #[test]

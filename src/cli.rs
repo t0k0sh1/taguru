@@ -204,6 +204,9 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_LOG_FORMAT            json for JSON log lines (pretty)
   TAGURU_LOG_SEARCHES          1 = per-search event log; cues are memory
                                CONTENT, so this is opt-in (off)
+  TAGURU_METRICS_PER_CONTEXT   taguru_context_* gauges on /metrics: 1/all =
+                               every context, N = top-N by disk size (off —
+                               per-context labels cost Prometheus series)
   OTEL_EXPORTER_OTLP_ENDPOINT  turns on OTLP/HTTP span export (off)
 
 EXIT CODES: 0 ok · 1 failure or corruption found · 2 usage error

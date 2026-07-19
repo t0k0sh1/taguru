@@ -51,6 +51,43 @@ pub(crate) fn env_floor(key: &str) -> Option<f32> {
     }
 }
 
+/// `TAGURU_METRICS_PER_CONTEXT`: 0/false (and unset) = off, 1/true/all
+/// = every context, an integer ≥ 2 = the top-N contexts by total disk
+/// bytes. `1` deliberately reads as the boolean "on = all", not top-1:
+/// an operator typing `=1` almost certainly means the flag convention
+/// every other TAGURU_ boolean uses, and silently truncating the fleet
+/// to its single biggest context would be the misconfiguration this
+/// module exists to prevent — while "exactly my biggest context" is
+/// what `GET /contexts` answers already. Anything else warns and stays
+/// off, per the file's contract.
+pub(crate) fn env_per_context_metrics(key: &str) -> crate::metrics::PerContextMetrics {
+    use crate::metrics::PerContextMetrics;
+    let Ok(value) = std::env::var(key) else {
+        return PerContextMetrics::Off;
+    };
+    if value.eq_ignore_ascii_case("false") {
+        return PerContextMetrics::Off;
+    }
+    if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("all") {
+        return PerContextMetrics::All;
+    }
+    match value.parse::<usize>() {
+        // The numeric dialect folds into the boolean one by VALUE, not
+        // by spelling — "0"/"00" = off, "1"/"01" = all — so a leading
+        // zero cannot smuggle in the top-1 the doc above rules out.
+        Ok(0) => PerContextMetrics::Off,
+        Ok(1) => PerContextMetrics::All,
+        Ok(top) => PerContextMetrics::Top(top),
+        Err(_) => {
+            warn!(
+                "ignoring {key}={value}: not 0/false, 1/true/all, or a top-N \
+                 count; per-context metrics stay off"
+            );
+            PerContextMetrics::Off
+        }
+    }
+}
+
 /// `tokio::time::interval` panics on a zero period — with
 /// `TAGURU_FLUSH_SECS=0` that panic fires inside the spawned flusher
 /// task, not the main thread, so the server keeps listening and
@@ -185,6 +222,38 @@ mod tests {
     fn flush_secs_zero_is_floored_to_one_instead_of_panicking_the_flusher() {
         assert_eq!(resolve_flush_secs(0), 1);
         assert_eq!(resolve_flush_secs(5), 5);
+    }
+
+    /// The knob's three shapes — and the deliberate reading of `1` as
+    /// the boolean "all", never top-1 (see the parser's doc).
+    #[test]
+    fn per_context_metrics_parses_the_boolean_dialect_and_top_n() {
+        use crate::metrics::PerContextMetrics;
+
+        assert_eq!(
+            env_per_context_metrics("TAGURU_TEST_PCM_UNSET"),
+            PerContextMetrics::Off
+        );
+        let key = "TAGURU_TEST_PCM_VALUE";
+        for (value, expected) in [
+            ("0", PerContextMetrics::Off),
+            ("00", PerContextMetrics::Off),
+            ("false", PerContextMetrics::Off),
+            ("1", PerContextMetrics::All),
+            ("01", PerContextMetrics::All),
+            ("true", PerContextMetrics::All),
+            ("all", PerContextMetrics::All),
+            ("ALL", PerContextMetrics::All),
+            ("2", PerContextMetrics::Top(2)),
+            ("007", PerContextMetrics::Top(7)),
+            ("25", PerContextMetrics::Top(25)),
+            ("banana", PerContextMetrics::Off),
+            ("-3", PerContextMetrics::Off),
+        ] {
+            unsafe { std::env::set_var(key, value) };
+            assert_eq!(env_per_context_metrics(key), expected, "value {value}");
+        }
+        unsafe { std::env::remove_var(key) };
     }
 
     #[test]
