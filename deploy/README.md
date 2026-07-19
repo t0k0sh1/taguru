@@ -40,8 +40,10 @@ the two-shard fleet worked out — writer shards, the route-map
 ConfigMap, the front-door Deployment), and the knob retunes (image
 tag, storage, resources, probes) as documented patches. Its README
 records why kustomize over a Helm chart; `verify.sh` — run by CI on
-every PR touching `deploy/` — keeps the packaging render-equivalent
-to the raw manifests.
+every PR touching `deploy/` — keeps the in-tree manifest copies
+byte-identical to the raw files, schema-validates every rendered
+configuration, and keeps the base render-equivalent to
+`kubernetes.yaml`.
 Moving a context, in order: quiesce its writes → `taguru export` →
 DELETE it through the router (the old shard drops it, group
 projections included) → map edit + rolling router restart →

@@ -44,6 +44,9 @@ spec:
             - containerPort: 8248
               name: http
           env:
+            # The image itself binds 0.0.0.0 (its Dockerfile ENV) —
+            # same as every other manifest here, so the Service and
+            # the probes reach the pod without TAGURU_ADDR being set.
             - name: TAGURU_ROUTE_MAP
               value: /etc/taguru/route-map
           volumeMounts:

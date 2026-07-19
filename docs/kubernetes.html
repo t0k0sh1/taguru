@@ -113,8 +113,10 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
       <a href="#stateless">stateless</a> / <a href="#read-pool">replicas</a> /
       <a href="#sharding">router</a> variants, and the retuned knobs (image tag, storage,
       resources, probe budgets) as documented patches — its README records why kustomize
-      over a Helm chart, and CI keeps the packaging render-equivalent to the raw manifests
-      on every change under <code>deploy/</code>.
+      over a Helm chart, and CI — on every change under <code>deploy/</code> — keeps the
+      in-tree manifest copies byte-identical to the raw files, schema-validates every
+      rendered configuration, and keeps the base render-equivalent to
+      <code>kubernetes.yaml</code>.
     </p>
   </section>
 
