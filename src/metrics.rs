@@ -150,6 +150,12 @@ pub struct Metrics {
     /// dashboards stay continuous); this one says how they were
     /// computed. Nothing lands here while the cache is disabled.
     retrieval_cache: [[AtomicU64; 2]; RetrievalCacheOp::ALL.len()],
+    /// `[outcome]` per [`SemanticCacheOutcome`] — the semantic tier's
+    /// pulse, disjoint from `retrieval_cache` the same way that family
+    /// is disjoint from `searches`: a probe's rewritten exact lookup
+    /// is counted HERE (hit/stale), never there. Nothing lands here
+    /// while the tier is disabled.
+    semantic_cache: [AtomicU64; SemanticCacheOutcome::ALL.len()],
     resolve_tiers: [AtomicU64; ResolveTier::ALL.len()],
     /// Passage-search hits by which lane(s) surfaced them — the pulse
     /// of what the vector lane actually adds. Fixed three labels.
@@ -354,6 +360,45 @@ impl RetrievalCacheOp {
     }
 }
 
+/// How one semantic-cache probe ended — the label vocabulary of
+/// `taguru_semantic_cache_total`. No op label: the tier fronts passage
+/// search only. `guarded` and `stale` are first-class rather than
+/// folded into `miss` because they are the tuning signals the
+/// threshold's operational follow-up reads: `guarded` counts
+/// paraphrase-close pairs the text guard split, `stale` counts claims
+/// that held while the corpus moved on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SemanticCacheOutcome {
+    /// A claim held and its rewritten exact key was live: served.
+    Hit,
+    /// A claim held but the rewritten key missed (a write bumped a
+    /// lane, or the exact tier evicted the canonical): computed fresh.
+    Stale,
+    /// Cosine cleared the threshold but the negation/numeric/entity
+    /// guard refused every candidate: computed fresh.
+    Guarded,
+    /// No candidate cleared the threshold: computed fresh.
+    Miss,
+}
+
+impl SemanticCacheOutcome {
+    const ALL: [SemanticCacheOutcome; 4] = [
+        SemanticCacheOutcome::Hit,
+        SemanticCacheOutcome::Stale,
+        SemanticCacheOutcome::Guarded,
+        SemanticCacheOutcome::Miss,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            SemanticCacheOutcome::Hit => "hit",
+            SemanticCacheOutcome::Stale => "stale",
+            SemanticCacheOutcome::Guarded => "guarded",
+            SemanticCacheOutcome::Miss => "miss",
+        }
+    }
+}
+
 /// Which tier ultimately answered a resolve (or resolve_label) —
 /// classified from the served payload, so every serve path lands in
 /// exactly one bucket. The drift signal lives here: a rising
@@ -437,6 +482,9 @@ pub struct GaugeSnapshot {
     /// other gauge here, so they cannot drift.
     pub retrieval_cache_entries: u64,
     pub retrieval_cache_bytes: u64,
+    /// Equivalence claims resident in the semantic cache (slots, not
+    /// bytes — payloads live in the exact tier).
+    pub semantic_cache_entries: u64,
 }
 
 impl Metrics {
@@ -665,6 +713,10 @@ impl Metrics {
     /// vanishing mid-request), records nothing rather than a fake miss.
     pub fn record_retrieval_cache(&self, op: RetrievalCacheOp, hit: bool) {
         self.retrieval_cache[op as usize][usize::from(!hit)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_semantic_cache(&self, outcome: SemanticCacheOutcome) {
+        self.semantic_cache[outcome as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     /// A cache hit's replay of [`Metrics::record_passage_hit`]: the
@@ -1056,6 +1108,24 @@ impl Metrics {
         }
         push_header(
             &mut out,
+            "taguru_semantic_cache_total",
+            "counter",
+            "Semantic (similarity) cache probes for passage search, by outcome: \
+             hit = an equivalent earlier query's cached result served; stale = \
+             equivalence held but the corpus moved on; guarded = cosine cleared \
+             the threshold but the negation/numeric/entity guard refused; miss = \
+             no candidate cleared the threshold. Probes run only on an \
+             exact-cache miss with TAGURU_SEMANTIC_CACHE_THRESHOLD set.",
+        );
+        for outcome in SemanticCacheOutcome::ALL {
+            out.push_str(&format!(
+                "taguru_semantic_cache_total{{outcome=\"{}\"}} {}\n",
+                outcome.as_str(),
+                self.semantic_cache[outcome as usize].load(Ordering::Relaxed)
+            ));
+        }
+        push_header(
+            &mut out,
             "taguru_resolves_total",
             "counter",
             "Resolve and resolve_label requests by the tier that answered: \
@@ -1153,6 +1223,13 @@ impl Metrics {
             "gauge",
             "Bytes the exact-match retrieval cache holds (serialized responses; bounded by TAGURU_RETRIEVAL_CACHE_BYTES).",
             gauges.retrieval_cache_bytes,
+        );
+        push_value(
+            &mut out,
+            "taguru_semantic_cache_entries",
+            "gauge",
+            "Equivalence claims resident in the semantic cache (slots; payloads live in the exact-match cache).",
+            gauges.semantic_cache_entries,
         );
         push_value(
             &mut out,
@@ -1687,6 +1764,7 @@ mod tests {
             embed_breaker: None,
             retrieval_cache_entries: 0,
             retrieval_cache_bytes: 0,
+            semantic_cache_entries: 0,
         }
     }
 
@@ -2217,6 +2295,7 @@ mod tests {
             }),
             retrieval_cache_entries: 3,
             retrieval_cache_bytes: 4096,
+            semantic_cache_entries: 5,
         });
 
         // Every sample line's metric name must have been introduced by
