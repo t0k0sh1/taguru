@@ -8,6 +8,21 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Context revision counters (#149): every directory row (`GET
+  /contexts`, `GET /contexts/{name}`, and the MCP
+  `list_contexts`/`get_context` pass-throughs) now carries
+  `revision: {graph, passages, config}` — applied graph writes, the
+  passage log watermark, and config/embedding changes respectively —
+  the change token the upcoming retrieval caches key on. Group rows
+  gain a `fingerprint` hashing the scope-visible transitive members'
+  counters, so a group-level cache invalidates exactly when a
+  relevant member changed. Compare for equality only: within one
+  process the counters are live and strictly monotonic; across a
+  crash a cold context can lag until its first load, and a cache
+  that outlives the process must treat a restart (or a
+  delete-recreate) as invalidation. Response-shape addition only;
+  the `.meta.json` sidecar gains a `revision` field older sidecars
+  simply lack (they read as zeros until the first flush).
 - Passage search takes a per-request `semantic_floor` (#148): a
   one-call override of the vector lane's cosine floor — request beats
   the context setting beats the server default, the same chain

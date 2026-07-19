@@ -141,6 +141,18 @@ export interface ContextMeta {
   semantic_floor: number | null;
 }
 
+/**
+ * Change counters a retrieval cache keys on: graph writes, passage writes,
+ * and config/embedding changes count independently, so a consumer watches
+ * only the lanes it depends on. Compare for equality only, and re-check
+ * after a server restart.
+ */
+export interface ContextRevision {
+  graph: number;
+  passages: number;
+  config: number;
+}
+
 export interface DirectoryEntry {
   name: string;
   description: string;
@@ -150,6 +162,8 @@ export interface DirectoryEntry {
   semantic_floor: number | null;
   stats: ContextStats;
   usage: ContextUsage;
+  /** Absent only from a server that predates the field. */
+  revision?: ContextRevision;
 }
 
 /** One page of the context directory. `total` is the whole population. */
@@ -170,6 +184,12 @@ export interface GroupEntry {
   description: string;
   contexts: string[];
   groups: string[];
+  /**
+   * Change token over the transitive member contexts' revisions — same
+   * equality-only contract as {@link ContextRevision}. Absent only from a
+   * server that predates the field.
+   */
+  fingerprint?: string;
 }
 
 /** One page of the group directory. `total` is the whole population. */

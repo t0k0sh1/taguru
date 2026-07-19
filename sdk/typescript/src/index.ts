@@ -50,6 +50,7 @@ export {
   type CompactOutcome,
   type ConceptDescription,
   type ContextMeta,
+  type ContextRevision,
   type ContextPage,
   type ContextStats,
   type ContextUsage,

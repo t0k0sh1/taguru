@@ -18,6 +18,7 @@ __all__ = [
     "ContextStats",
     "ContextUsage",
     "ContextMeta",
+    "ContextRevision",
     "DirectoryEntry",
     "ContextPage",
     "GroupEntry",
@@ -111,6 +112,18 @@ class ContextMeta:
 
 
 @dataclass(slots=True, frozen=True)
+class ContextRevision:
+    """Change counters a retrieval cache keys on: graph writes, passage
+    writes, and config/embedding changes count independently, so a
+    consumer watches only the lanes it depends on. Compare for equality
+    only, and re-check after a server restart."""
+
+    graph: int
+    passages: int
+    config: int
+
+
+@dataclass(slots=True, frozen=True)
 class DirectoryEntry:
     name: str
     description: str
@@ -120,6 +133,8 @@ class DirectoryEntry:
     usage: ContextUsage
     dice_floor: float | None = None
     semantic_floor: float | None = None
+    #: ``None`` only from a server that predates the field.
+    revision: ContextRevision | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -142,6 +157,10 @@ class GroupEntry:
     description: str
     contexts: list[str]
     groups: list[str]
+    #: Change token over the transitive member contexts' revisions —
+    #: same equality-only contract as ``ContextRevision``. Empty only
+    #: from a server that predates the field.
+    fingerprint: str = ""
 
 
 @dataclass(slots=True, frozen=True)

@@ -29,6 +29,16 @@ fn normalized(value: &Value) -> Value {
                 if map.contains_key("loaded") {
                     map.insert("loaded".to_string(), json!(false));
                 }
+                // A group's change token is topology-specific BY
+                // DESIGN: each shard hashes the members it holds and
+                // the router folds the shard tokens, so the VALUE
+                // cannot equal the single instance's (it is already
+                // scope-specific on one instance, too). The FIELD must
+                // still exist on both sides — canonicalize the value,
+                // never remove the key.
+                if map.contains_key("fingerprint") {
+                    map.insert("fingerprint".to_string(), json!("…"));
+                }
                 for (_, child) in map.iter_mut() {
                     walk(child);
                 }
@@ -220,6 +230,36 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     assert_eq!(single_status, 200);
     assert_eq!(router_status, 200);
     assert_eq!(single_export, router_export, "the exported record diverged");
+
+    // The router's folded fingerprint honors the same contract as a
+    // shard's own (its VALUE is topology-specific — see `normalized` —
+    // but a member write on either shard must still move it). Mirror
+    // the write into the single instance so the corpora stay equal for
+    // the assertions below.
+    let fingerprint_before = router.ok("GET", "/groups/jp", None)["fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let member_write =
+        json!([{"subject": "甘口", "label": "意味する", "object": "甘い", "weight": 1.0}]);
+    router.ok(
+        "POST",
+        "/contexts/glossary/associations",
+        Some(member_write.clone()),
+    );
+    single.ok(
+        "POST",
+        "/contexts/glossary/associations",
+        Some(member_write),
+    );
+    let fingerprint_after = router.ok("GET", "/groups/jp", None)["fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        fingerprint_before, fingerprint_after,
+        "a member write on a shard must move the router's folded token"
+    );
 
     // Group deltas through the router: remove one member (a
     // projection-touching PATCH), compare the returned row, put it
