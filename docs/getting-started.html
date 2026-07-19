@@ -102,6 +102,7 @@ taguru version</code></pre>
           <tr><td>TAGURU_ADDR</td><td>127.0.0.1:8248</td><td>Bind address</td></tr>
           <tr><td>TAGURU_DATA_DIR</td><td>./data</td><td>Data directory</td></tr>
           <tr><td>TAGURU_CACHE_BYTES</td><td>512 MiB</td><td>Resident memory budget for unpinned contexts (LRU eviction)</td></tr>
+          <tr><td>TAGURU_RETRIEVAL_CACHE_BYTES</td><td>32 MiB</td><td>Exact-match result cache for recall/query/passage search: an identical request against an unchanged corpus answers from the stored response, invalidated by the per-context revision counters. Hit/miss on <code>/metrics</code> (<code>taguru_retrieval_cache_total</code>); <code>0</code> disables</td></tr>
           <tr><td>TAGURU_FLUSH_SECS</td><td>5</td><td>Image flush interval. With the WAL on, this is freshness cadence, not a loss window</td></tr>
           <tr><td>TAGURU_WAL</td><td>on</td><td>fsync every acknowledged write before applying it (a crash loses nothing). <code>0</code> restores the flush-interval loss window</td></tr>
           <tr><td>TAGURU_WAL_MAX_BYTES</td><td>256 MiB</td><td>Per-context WAL ceiling. Only approached when flushes keep failing; past it, writes are refused with 500</td></tr>

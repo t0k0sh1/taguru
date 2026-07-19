@@ -10,16 +10,16 @@ use serde::{Deserialize, Serialize};
 use taguru::context::{Association, Context};
 use taguru::deadline::Deadline;
 
-use crate::metrics::SearchOp;
+use crate::metrics::{RetrievalCacheOp, SearchOp};
 use crate::registry::AppState;
 
 use super::aliases::{OneOrMany, as_refs, validate_positions};
 use super::groups::{scope_allows, scope_refusal};
 use super::{
     AppJson, AppPath, CrossMatchPage, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT, MatchCursor,
-    MatchPage, access_error, associations_out, bounded_parallel_map, clamp, cross_associations_out,
-    cross_search_concurrency, deadline_exceeded, error, group_not_found, ok, overlong, page,
-    search_log_enabled,
+    MatchPage, access_error, associations_out, bounded_parallel_map, cache_and_serve, clamp,
+    cross_associations_out, cross_search_concurrency, deadline_exceeded, error, group_not_found,
+    ok, overlong, page, replay_cached_search, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +41,39 @@ pub async fn recall(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // Minted before the search on purpose — see `retrieval_key`. The
+    // leading tag keeps this variant's keys disjoint from the cross
+    // variant's (same op, different response shape); the limit goes in
+    // clamped so an omitted limit and an explicit default share one
+    // entry.
+    let key = state.retrieval_key(
+        RetrievalCacheOp::Recall,
+        std::slice::from_ref(&name),
+        serde_json::to_string(&(
+            "recall",
+            &request.cue,
+            clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT),
+            request.after.as_ref(),
+        ))
+        .ok(),
+    );
+    if let Some(key) = &key
+        && let Some(found) = state.retrieval_lookup(key)
+    {
+        replay_cached_search(&state, key, &found);
+        if search_log_enabled() {
+            tracing::info!(
+                target: "taguru::search",
+                context = %name,
+                op = "recall",
+                cue = %request.cue,
+                hits = found.log_hits,
+                cached = true,
+                "search",
+            );
+        }
+        return ok(found.payload.as_ref(), started_at);
+    }
     match state.read_context(&name, |context| context.recall(&request.cue)) {
         Ok(result) => {
             let (total, matches) = page(result, request.limit, request.after.as_ref());
@@ -56,7 +89,16 @@ pub async fn recall(
                 );
             }
             let matches = associations_out(&state, &name, matches);
-            ok(MatchPage { total, matches }, started_at)
+            cache_and_serve(
+                &state,
+                key,
+                &MatchPage { total, matches },
+                vec![total == 0],
+                [0, 0, 0],
+                total,
+                0.0,
+                started_at,
+            )
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
@@ -132,9 +174,11 @@ pub(super) fn cross_targets(
     Ok(targets.into())
 }
 
-/// One cross-context result page: the pre-cut total, and the surviving
-/// `(context, association)` pairs in page order.
-type CrossPage = (usize, Vec<(String, Association)>);
+/// One cross-context result page: the pre-cut total, the surviving
+/// `(context, association)` pairs in page order, and — aligned with
+/// the target list — whether each target's own search came back empty
+/// (what the retrieval cache replays through `note_search` on a hit).
+type CrossPage = (usize, Vec<(String, Association)>, Vec<bool>);
 
 /// [`MatchCursor`], cross-context: `(subject, label, object)` only
 /// identifies an edge *within* one context's `edge_ids` map, so two
@@ -282,10 +326,12 @@ async fn cross_matches(
 
     let mut total = 0;
     let mut pool: Vec<(usize, Association)> = Vec::new();
+    let mut empties = Vec::with_capacity(targets.len());
     for (index, outcome) in fetched.into_iter().enumerate() {
         match outcome {
             Ok(matches) => {
                 state.note_search(op, &targets[index], matches.is_empty());
+                empties.push(matches.is_empty());
                 total += matches.len();
                 pool.extend(matches.into_iter().map(|found| (index, found)));
                 if pool.len() >= limit * 2 {
@@ -307,7 +353,7 @@ async fn cross_matches(
         .into_iter()
         .map(|(index, association)| (targets[index].clone(), association))
         .collect();
-    Ok((total, tagged))
+    Ok((total, tagged, empties))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -359,6 +405,39 @@ pub async fn cross_recall(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // Keyed on the RESOLVED target list, in effective order: group
+    // indirection and the key's scope filtering are already
+    // materialized into it, so two credentials share an entry exactly
+    // when their grants resolve this request identically — which is
+    // when sharing is safe.
+    let key = state.retrieval_key(
+        RetrievalCacheOp::Recall,
+        &targets,
+        serde_json::to_string(&(
+            "cross_recall",
+            &request.cue,
+            clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT),
+            request.after.as_ref(),
+        ))
+        .ok(),
+    );
+    if let Some(key) = &key
+        && let Some(found) = state.retrieval_lookup(key)
+    {
+        replay_cached_search(&state, key, &found);
+        if search_log_enabled() {
+            tracing::info!(
+                target: "taguru::search",
+                contexts = %targets.join(","),
+                op = "recall",
+                cue = %request.cue,
+                hits = found.log_hits,
+                cached = true,
+                "search",
+            );
+        }
+        return ok(found.payload.as_ref(), started_at);
+    }
     // Computed before `search` moves `cue` out of `request`.
     let cue_log = request.cue.clone();
     let outcome = cross_matches(
@@ -371,7 +450,7 @@ pub async fn cross_recall(
         started_at,
     )
     .await;
-    let (total, page) = match outcome {
+    let (total, page, target_empty) = match outcome {
         Ok(result) => result,
         Err(refusal) => return *refusal,
     };
@@ -386,7 +465,16 @@ pub async fn cross_recall(
         );
     }
     let matches = cross_associations_out(&state, page);
-    ok(CrossMatchPage { total, matches }, started_at)
+    cache_and_serve(
+        &state,
+        key,
+        &CrossMatchPage { total, matches },
+        target_empty,
+        [0, 0, 0],
+        total,
+        0.0,
+        started_at,
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -418,6 +506,40 @@ pub async fn query(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // Same shape as `recall`'s key: tagged against the cross variant,
+    // pin lists in position order, limit pre-clamped.
+    let key = state.retrieval_key(
+        RetrievalCacheOp::Query,
+        std::slice::from_ref(&name),
+        serde_json::to_string(&(
+            "query",
+            as_refs(&request.subject),
+            as_refs(&request.label),
+            as_refs(&request.object),
+            clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT),
+            request.after.as_ref(),
+        ))
+        .ok(),
+    );
+    if let Some(key) = &key
+        && let Some(found) = state.retrieval_lookup(key)
+    {
+        replay_cached_search(&state, key, &found);
+        if search_log_enabled() {
+            tracing::info!(
+                target: "taguru::search",
+                context = %name,
+                op = "query",
+                subject = %as_refs(&request.subject).join(","),
+                label = %as_refs(&request.label).join(","),
+                object = %as_refs(&request.object).join(","),
+                hits = found.log_hits,
+                cached = true,
+                "search",
+            );
+        }
+        return ok(found.payload.as_ref(), started_at);
+    }
     match state.read_context(&name, |context| {
         context.query_any(
             &as_refs(&request.subject),
@@ -441,7 +563,16 @@ pub async fn query(
                 );
             }
             let matches = associations_out(&state, &name, matches);
-            ok(MatchPage { total, matches }, started_at)
+            cache_and_serve(
+                &state,
+                key,
+                &MatchPage { total, matches },
+                vec![total == 0],
+                [0, 0, 0],
+                total,
+                0.0,
+                started_at,
+            )
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
@@ -499,6 +630,40 @@ pub async fn cross_query(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // Same resolved-target keying as `cross_recall` — see the comment
+    // there.
+    let key = state.retrieval_key(
+        RetrievalCacheOp::Query,
+        &targets,
+        serde_json::to_string(&(
+            "cross_query",
+            as_refs(&request.subject),
+            as_refs(&request.label),
+            as_refs(&request.object),
+            clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT),
+            request.after.as_ref(),
+        ))
+        .ok(),
+    );
+    if let Some(key) = &key
+        && let Some(found) = state.retrieval_lookup(key)
+    {
+        replay_cached_search(&state, key, &found);
+        if search_log_enabled() {
+            tracing::info!(
+                target: "taguru::search",
+                contexts = %targets.join(","),
+                op = "query",
+                subject = %as_refs(&request.subject).join(","),
+                label = %as_refs(&request.label).join(","),
+                object = %as_refs(&request.object).join(","),
+                hits = found.log_hits,
+                cached = true,
+                "search",
+            );
+        }
+        return ok(found.payload.as_ref(), started_at);
+    }
     // Computed before `search` moves `subject`/`label`/`object` out of
     // `request` — `OneOrMany` has no `Clone` to fall back on.
     let subject_log = as_refs(&request.subject).join(",");
@@ -520,7 +685,7 @@ pub async fn cross_query(
         started_at,
     )
     .await;
-    let (total, page) = match outcome {
+    let (total, page, target_empty) = match outcome {
         Ok(result) => result,
         Err(refusal) => return *refusal,
     };
@@ -537,5 +702,14 @@ pub async fn cross_query(
         );
     }
     let matches = cross_associations_out(&state, page);
-    ok(CrossMatchPage { total, matches }, started_at)
+    cache_and_serve(
+        &state,
+        key,
+        &CrossMatchPage { total, matches },
+        target_empty,
+        [0, 0, 0],
+        total,
+        0.0,
+        started_at,
+    )
 }

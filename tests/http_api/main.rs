@@ -25,6 +25,7 @@ mod offline_import;
 mod passages;
 mod replication;
 mod resolve_match;
+mod retrieval_cache;
 mod retrieval_core;
 mod routing;
 mod search_log;

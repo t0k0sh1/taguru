@@ -17,7 +17,7 @@ use taguru::context::{Activation, Association, Attribution, Recollection};
 
 use crate::groups::{MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, NestingViolation};
 use crate::metrics::ErrorKind;
-use crate::registry::{AccessError, AppState, PartialWrite};
+use crate::registry::{AccessError, AppState, CachedRetrieval, PartialWrite, RetrievalKey};
 
 mod aliases;
 mod associations;
@@ -577,10 +577,72 @@ pub async fn method_not_allowed(method: Method, uri: Uri) -> Response {
 /// decision the operator must make, not inherit. When on, the lines
 /// feed keyword/phrase analysis downstream (what do clients actually
 /// ask, and which cues come back empty) — aggregation belongs to the
-/// log system, which is why there is no in-server top-K.
+/// log system, which is why there is no in-server top-K. A line
+/// served from the retrieval cache carries an extra `cached=true`
+/// field; the ask is just as real, the search path just didn't run.
 fn search_log_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| crate::env::env_bool("TAGURU_LOG_SEARCHES", false))
+}
+
+/// Replays a retrieval-cache hit's observable side effects: the same
+/// `note_search` per target (usage counters and the searches family)
+/// and the same passage-lane contributions the fresh path recorded
+/// when it computed the entry. Metrics describe served responses; the
+/// cache only changes how a response was computed, so a hit must not
+/// read as a quiet server. The hit/miss split itself lives in its own
+/// family (`taguru_retrieval_cache_total`), recorded at lookup.
+fn replay_cached_search(state: &AppState, key: &RetrievalKey, found: &CachedRetrieval) {
+    let op = key.op.search_op();
+    for (target, empty) in key.targets.iter().zip(found.target_empty.iter()) {
+        state.note_search(op, &target.name, *empty);
+    }
+    let [bm25_only, both_lanes, vector_only] = found.lane_hits;
+    if bm25_only > 0 || both_lanes > 0 || vector_only > 0 {
+        state
+            .metrics()
+            .record_passage_hit_counts(bm25_only, both_lanes, vector_only);
+    }
+}
+
+/// The retrieval fill path's tail: serialize the payload exactly once,
+/// file those bytes under `key` when one was minted, and serve them —
+/// so a later hit is byte-identical to the fill that produced it
+/// (round-tripping through `serde_json::Value` instead would widen
+/// `f32` scores to `f64` and change the wire text). `target_empty`,
+/// `lane_hits`, and the two log numbers are what a hit replays; see
+/// [`replay_cached_search`].
+#[allow(clippy::too_many_arguments)] // one call-shape per cached surface, not an API
+fn cache_and_serve<T: Serialize>(
+    state: &AppState,
+    key: Option<RetrievalKey>,
+    payload: &T,
+    target_empty: Vec<bool>,
+    lane_hits: [u64; 3],
+    log_hits: usize,
+    log_top_score: f32,
+    started_at: Instant,
+) -> Response {
+    let Ok(raw) = serde_json::value::to_raw_value(payload) else {
+        // Unreachable for these payload types (no non-string map keys,
+        // no non-finite floats) — serve uncached rather than fail a
+        // response the search already computed.
+        return ok(payload, started_at);
+    };
+    let raw: Arc<serde_json::value::RawValue> = raw.into();
+    if let Some(key) = key {
+        state.retrieval_store(
+            key,
+            CachedRetrieval {
+                payload: Arc::clone(&raw),
+                target_empty: target_empty.into(),
+                lane_hits,
+                log_hits,
+                log_top_score,
+            },
+        );
+    }
+    ok(raw.as_ref(), started_at)
 }
 
 fn access_error(
@@ -865,8 +927,9 @@ pub struct CrossMatchPage {
 /// identifies an edge within one context (the `edge_ids` bijection),
 /// so `weight` plus that triple is a total order with no possible tie
 /// — a client can always build the next `after` from the last match it
-/// received.
-#[derive(Debug, Clone, Deserialize)]
+/// received. (`Serialize` is for the retrieval cache's key, where the
+/// cursor is a result-affecting parameter like any other.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MatchCursor {
     pub weight: f64,

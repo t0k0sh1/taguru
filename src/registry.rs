@@ -69,6 +69,7 @@ mod embeddings;
 mod group_ops;
 mod passages;
 mod paths;
+mod retrieval_cache;
 mod search;
 mod terms;
 
@@ -80,6 +81,7 @@ pub(crate) use paths::{
     vectors_path, wal_path,
 };
 use paths::{rename_markers_targeting, write_rename_marker};
+pub(crate) use retrieval_cache::{CachedRetrieval, RetrievalKey};
 #[cfg(test)]
 use terms::text_terms;
 pub(crate) use terms::{passage_terms, spelled_passage_terms};
@@ -493,6 +495,7 @@ impl Entry {
                 wal_seq: 1,
                 graph_revision: revision.graph,
                 config_revision: revision.config,
+                cache_identity: next_cache_identity(),
                 wal_bytes,
                 passages_wal_bytes,
                 counted_bytes: 0,
@@ -613,6 +616,18 @@ struct EntryInner {
     /// siblings so `update_meta` can bump-and-persist atomically (and
     /// roll both back together when the sidecar write fails).
     config_revision: u64,
+    /// This incarnation's process-unique nonce — the retrieval cache's
+    /// answer to delete-and-recreate, which restarts the revision
+    /// counters at zero and could otherwise collide a recreated
+    /// context's key with a cached entry of the old incarnation.
+    /// Minted at construction ([`next_cache_identity`]) and re-minted
+    /// by `replica_refresh`: a tailed refresh deliberately `max`es the
+    /// revision counters (they must never walk backward), which pins
+    /// them still across an upstream delete+recreate — the one path
+    /// where content switches lineage under an unmoved revision, and
+    /// exactly what a fresh nonce makes unreachable. Never persisted:
+    /// the cache it guards dies with the process.
+    cache_identity: u64,
     /// Size of this context's log on disk — the growth signal behind
     /// the `taguru_wal_bytes` gauge and the `TAGURU_WAL_MAX_BYTES`
     /// backstop. Advanced on append, re-stat'ed on load, zeroed on
@@ -650,6 +665,16 @@ struct EntryInner {
     /// compaction while I staged" — this generation is what makes the
     /// two distinguishable.
     image_generation: u64,
+}
+
+/// Mints [`EntryInner::cache_identity`] values. A process-global
+/// static rather than a field on `AppState` because entries are also
+/// constructed before any state exists (the boot scan) — and the nonce
+/// only has to be unique within this process, the retrieval cache's
+/// whole lifetime.
+fn next_cache_identity() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Debug)]
@@ -1419,6 +1444,12 @@ struct StateInner {
     /// fallback path. Valid for the whole process because the provider
     /// (and so the model) is fixed at boot.
     cue_cache: Mutex<CueCache>,
+    /// The exact-match retrieval cache (issue #150): an identical
+    /// request against an identical corpus state answers from the
+    /// stored response. Unlike `cue_cache`, validity is
+    /// corpus-dependent, so every key carries the targets' revision
+    /// lanes and identity — see the module doc.
+    retrieval_cache: Mutex<retrieval_cache::RetrievalCache>,
     /// The shared observability registry; every `AppState` clone —
     /// handlers, middleware, the flusher task — increments the same
     /// counters.
@@ -1676,6 +1707,12 @@ impl AppState {
                 .unwrap_or(DEFAULT_SEMANTIC_FLOOR)
                 .clamp(0.0, 1.0),
             cue_cache: Mutex::new(CueCache::default()),
+            retrieval_cache: Mutex::new(retrieval_cache::RetrievalCache::new(
+                crate::env::env_number(
+                    "TAGURU_RETRIEVAL_CACHE_BYTES",
+                    retrieval_cache::DEFAULT_RETRIEVAL_CACHE_BYTES,
+                ),
+            )),
             metrics: Metrics::default(),
             wal_enabled: options.wal_enabled,
             wal_max_bytes: options.wal_max_bytes,
@@ -1898,6 +1935,7 @@ impl AppState {
                 .map(|store| store.pending_log_bytes())
                 .unwrap_or(cold_passages_wal_bytes);
         }
+        let (retrieval_cache_entries, retrieval_cache_bytes) = self.retrieval_cache_gauges();
         GaugeSnapshot {
             contexts_registered,
             groups_registered: self.0.groups.read().len() as u64,
@@ -1915,6 +1953,8 @@ impl AppState {
                 .embed_breaker
                 .as_ref()
                 .map(crate::embedding::EmbedBreaker::snapshot),
+            retrieval_cache_entries,
+            retrieval_cache_bytes,
         }
     }
 
@@ -2539,6 +2579,13 @@ impl AppState {
         entry
             .passage_revision
             .fetch_max(revision.passages, Ordering::Relaxed);
+        // The monotonic re-seed is exactly why the retrieval cache
+        // cannot key on revisions alone here: an upstream
+        // delete+recreate arrives as this same in-place refresh, with
+        // the counters pinned by the `max` while the content switches
+        // lineage. A fresh identity makes every key minted against the
+        // old bytes unreachable (see `EntryInner::cache_identity`).
+        inner.cache_identity = next_cache_identity();
         inner.load_failure = None;
         if matches!(inner.slot, Slot::Hot(_)) {
             inner.slot = Slot::Cold;
@@ -5314,6 +5361,42 @@ mod tests {
             state.context_revision("fruit").unwrap().config,
             1,
             "a refresh that embedded nothing new bumps nothing"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The retrieval cache's guard against a replica lineage switch: a
+    /// tailed refresh `max`es the revision counters (they must never
+    /// walk backward), so an upstream delete+recreate can change a
+    /// context's content while every lane reads unchanged — the fresh
+    /// `cache_identity` is what makes keys minted against the old
+    /// bytes unreachable. Recreate-on-a-writer needs no such hand:
+    /// delete tears the entry down and create builds a new one, which
+    /// mints its own identity.
+    #[test]
+    fn a_replica_refresh_mints_a_fresh_cache_identity_under_unmoved_revisions() {
+        let dir = scratch_dir("revision-remint");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        let key = |state: &AppState| {
+            state
+                .retrieval_key(
+                    crate::metrics::RetrievalCacheOp::Recall,
+                    std::slice::from_ref(&"sake".to_string()),
+                    Some("params".to_string()),
+                )
+                .expect("a live context keys")
+        };
+        let before = key(&state);
+        state.replica_refresh("sake");
+        let after = key(&state);
+        assert_eq!(
+            before.targets[0].lanes, after.targets[0].lanes,
+            "the refresh moved no revision lane"
+        );
+        assert_ne!(
+            before.targets[0].identity, after.targets[0].identity,
+            "the identity is re-minted, so the old key can never hit again"
         );
         let _ = fs::remove_dir_all(dir);
     }
