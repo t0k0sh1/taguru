@@ -1454,7 +1454,11 @@ async fn merge_groups(
 /// Unions one shard's row into the merged directory: member contexts
 /// are per-shard projections (disjoint by the map), children are
 /// broadcast whole, the description is identical everywhere a
-/// non-drifted record lives.
+/// non-drifted record lives. Fingerprints are folded together — each
+/// shard's token covers the members that shard holds, so the union's
+/// token must move whenever ANY shard's does; the fold order is the
+/// fan-out's shard order (stable across requests), so an unchanged
+/// fleet keeps an unchanged token.
 fn merge_group_entry(rows: &mut BTreeMap<String, api::GroupEntry>, entry: api::GroupEntry) {
     match rows.get_mut(&entry.name) {
         Some(held) => {
@@ -1462,6 +1466,12 @@ fn merge_group_entry(rows: &mut BTreeMap<String, api::GroupEntry>, entry: api::G
             members.extend(entry.contexts);
             held.contexts = members.into_iter().collect();
             held.groups.extend(entry.groups);
+            let mut digest = crate::hash::fnv1a_fold(
+                crate::hash::FNV1A_OFFSET,
+                held.fingerprint.bytes().chain([0xff]),
+            );
+            digest = crate::hash::fnv1a_fold(digest, entry.fingerprint.bytes());
+            held.fingerprint = format!("{digest:016x}");
         }
         None => {
             rows.insert(entry.name.clone(), entry);

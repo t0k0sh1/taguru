@@ -267,12 +267,12 @@ Source code takes the same discipline; only the naming changes.
 
 | Method | Path | Body / returns |
 |---|---|---|
-| GET | `/contexts` | `?limit=1000&after=name` → `{total, contexts:[{name, description, pinned, loaded, dice_floor, semantic_floor, stats, usage}]}` (keyset paging by name) |
+| GET | `/contexts` | `?limit=1000&after=name` → `{total, contexts:[{name, description, pinned, loaded, dice_floor, semantic_floor, stats, usage, revision}]}` (keyset paging by name; `revision` = change counters `{graph, passages, config}` — graph writes, passage writes, and config/embedding changes respectively; equal counters ⇒ that lane's answers are unchanged since you last looked, so a cache can key on them — compare for EQUALITY only, and re-check after a server restart: a crash can lag a cold context's counters until its first load, and delete-recreate restarts them) |
 | GET | `/contexts/{name}` | one directory row / 404 |
 | PUT | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → create |
 | PATCH | `/contexts/{name}` | `{description?, pinned?, dice_floor?, semantic_floor?}` → update metadata |
 | DELETE | `/contexts/{name}` | delete, files included |
-| GET | `/groups` | `?limit=1000&after=name` → `{total, groups:[{name, description, contexts, groups}]}` (keyset paging by name; a group bundles contexts many-to-many and may nest child groups — `groups` — at most 3 tall, cycles refused) |
+| GET | `/groups` | `?limit=1000&after=name` → `{total, groups:[{name, description, contexts, groups, fingerprint}]}` (keyset paging by name; a group bundles contexts many-to-many and may nest child groups — `groups` — at most 3 tall, cycles refused; `fingerprint` = one change token over the transitive member contexts' `revision` counters — it moves exactly when a member you can see changed: a write, an embedding refresh, a rename, or a membership edit — same equality-only, re-check-after-restart contract as `revision`) |
 | GET | `/groups/{name}` | one group row / 404 |
 | PUT | `/groups/{name}` | `{description?, contexts?:[name], groups?:[name]}` → create (groups and contexts are separate namespaces; every listed member — context or child group — must exist) |
 | PATCH | `/groups/{name}` | `{description?, add_contexts?, remove_contexts?, add_groups?, remove_groups?}` → the updated row (deltas, not a replacement list; removals apply first; added members must exist, removing a non-member is a no-op; the result holds at most 1000 member contexts and 1000 child groups — `over_limit` past that; split into nested child groups) |

@@ -565,3 +565,115 @@ fn a_failed_group_unlink_resurfaces_the_group_at_restart() {
     assert_eq!(row["contexts"], json!(["sake"]), "{row}");
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
+
+/// Context rows carry `revision` counters and group rows a
+/// `fingerprint` over the transitive members' revisions — the change
+/// tokens the retrieval caches key on (#149). The fingerprint moves
+/// exactly when a visible member's revision does — direct or through a
+/// nested child, on any lane, membership edits included — and reads
+/// move nothing.
+#[test]
+fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
+    let server = Server::start("group-fingerprint");
+    for name in ["apple", "banana", "outside"] {
+        server.ok("PUT", &format!("/contexts/{name}"), None);
+    }
+    let row = server.ok("GET", "/contexts/apple", None);
+    assert_eq!(
+        row["revision"],
+        json!({"graph": 0, "passages": 0, "config": 0}),
+        "{row}"
+    );
+
+    // parent holds apple directly and banana only through a child.
+    server.ok(
+        "PUT",
+        "/groups/child",
+        Some(json!({"contexts": ["banana"]})),
+    );
+    server.ok(
+        "PUT",
+        "/groups/parent",
+        Some(json!({"contexts": ["apple"], "groups": ["child"]})),
+    );
+    let fingerprint = |server: &Server| {
+        server.ok("GET", "/groups/parent", None)["fingerprint"]
+            .as_str()
+            .expect("every group row carries the token")
+            .to_string()
+    };
+    let start = fingerprint(&server);
+    assert_eq!(start.len(), 16, "one 64-bit token in hex: {start}");
+
+    // Reads change nothing.
+    server.ok("GET", "/contexts", None);
+    server.ok(
+        "POST",
+        "/contexts/apple/query",
+        Some(json!({"subject": "蔵"})),
+    );
+    assert_eq!(fingerprint(&server), start);
+
+    // A graph write to a direct member moves it…
+    server.ok(
+        "POST",
+        "/contexts/apple/associations",
+        Some(json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0}])),
+    );
+    let after_direct = fingerprint(&server);
+    assert_ne!(after_direct, start);
+
+    // …a passage write to a member reached only through the child too…
+    server.ok(
+        "POST",
+        "/contexts/banana/sources",
+        Some(json!({"passages": {"doc": "バナナの原文。"}})),
+    );
+    let after_nested = fingerprint(&server);
+    assert_ne!(after_nested, after_direct);
+
+    // …while the same writes to a non-member change nothing.
+    server.ok(
+        "POST",
+        "/contexts/outside/associations",
+        Some(json!([{"subject": "a", "label": "b", "object": "c", "weight": 1.0}])),
+    );
+    assert_eq!(fingerprint(&server), after_nested);
+
+    // The config lane (a floor edit) counts as a member change too.
+    server.ok(
+        "PATCH",
+        "/contexts/apple",
+        Some(json!({"semantic_floor": 0.5})),
+    );
+    let after_config = fingerprint(&server);
+    assert_ne!(after_config, after_nested);
+
+    // A membership edit moves it with no member written at all.
+    server.ok(
+        "PATCH",
+        "/groups/parent",
+        Some(json!({"add_contexts": ["outside"]})),
+    );
+    let after_membership = fingerprint(&server);
+    assert_ne!(after_membership, after_config);
+
+    // The counters ride the directory listing row for row.
+    let listing = server.ok("GET", "/contexts", None);
+    let apple = listing["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == json!("apple"))
+        .unwrap();
+    assert_eq!(apple["revision"]["graph"], json!(1), "{apple}");
+    assert_eq!(apple["revision"]["config"], json!(1), "{apple}");
+    let banana = listing["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == json!("banana"))
+        .unwrap();
+    assert_eq!(banana["revision"]["passages"], json!(1), "{banana}");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}

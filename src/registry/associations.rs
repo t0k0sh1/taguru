@@ -140,6 +140,12 @@ impl AppState {
                                 std::slice::from_ref(&source.to_string()),
                             );
                             entry.passages_embed_dirty.store(true, Ordering::Relaxed);
+                            // Same bump-after-apply as store_passages:
+                            // the retraction landed in the log, so the
+                            // watermark moved.
+                            entry
+                                .passage_revision
+                                .fetch_max(store.watermark(), Ordering::Relaxed);
                         }
                         (removed, false)
                     }

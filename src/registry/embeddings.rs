@@ -349,20 +349,34 @@ impl AppState {
         // from `existing`, which reads the memory cache — see above)
         // while the disk image is still whatever the failed save left
         // it as. Without this, that state would never retry the write.
-        if (newly_embedded > 0 || pruned > 0 || was_pending)
-            && let Err(error) = store.save(&path)
-        {
+        let save_error = if newly_embedded > 0 || pruned > 0 || was_pending {
+            store.save(&path).err()
+        } else {
+            None
+        };
+        if save_error.is_some() {
             entry.vectors_save_pending.store(true, Ordering::Relaxed);
-            // The provider already sold `embedded_concepts`/
-            // `embedded_labels`; cache the merged store anyway so the
-            // next refresh's `existing` (read from this same cache,
-            // not the disk — see above) does not buy them a second
-            // time. Only the sidecar write failed, not this.
-            *entry.vectors.lock() = Some(Arc::new(store));
-            return Some(Err(format!("vector store not persisted: {error}")));
         }
         // Publish the fresh store so queries never re-read the sidecar.
+        // On a failed save too: the provider already sold
+        // `embedded_concepts`/`embedded_labels`, and caching the merged
+        // store is what keeps the next refresh's `existing` (read from
+        // this same cache, not the disk — see above) from buying them a
+        // second time. Only the sidecar write failed, not this.
         *entry.vectors.lock() = Some(Arc::new(store));
+        drop(_fence);
+        // Served content changed the moment the merge published above —
+        // save success or not — so the config revision moves with it. A
+        // `was_pending`-only rewrite republished bytes the cache already
+        // served and bumps nothing. After the fence: the bump takes the
+        // entry's write lock, and its own tombstone check covers the
+        // delete race the fence covered here.
+        if newly_embedded > 0 || pruned > 0 {
+            self.bump_config_revision(name, &entry);
+        }
+        if let Some(error) = save_error {
+            return Some(Err(format!("vector store not persisted: {error}")));
+        }
         // What landed is durable; a provider failure still returns Err so
         // the caller sees the pass was partial, and the stale rows it
         // skipped stay stale for the next refresh to retry.
@@ -690,19 +704,38 @@ impl AppState {
             || fresh.len() != existing.len()
             || (fresh_model && !fresh.is_empty())
             || was_dirty;
+        // `changed` minus the `was_dirty`-only save retry: whether the
+        // rows about to publish differ from what was being SERVED — the
+        // config-revision signal, as opposed to the rewrite-the-sidecar
+        // signal above.
+        let published_change =
+            embedded > 0 || fresh.len() != existing.len() || (fresh_model && !fresh.is_empty());
         let _fence = entry.read_unless_deleted()?;
         let total_rows = fresh.len();
-        if changed && let Err(error) = fresh.save(&path) {
+        let save_error = if changed {
+            fresh.save(&path).err()
+        } else {
+            None
+        };
+        if save_error.is_some() {
             entry.passages_embed_dirty.store(true, Ordering::Relaxed);
-            // The provider already sold `embedded` of these rows; cache
-            // them anyway so the next refresh's `existing` (read from
-            // this same cache, not the disk — see above) does not buy
-            // them a second time. Only the sidecar write failed, not
-            // this.
-            *entry.passage_vectors.lock() = Some(Arc::new(fresh));
+        }
+        // Publish on a failed save too: the provider already sold
+        // `embedded` of these rows, and caching them is what keeps the
+        // next refresh's `existing` (read from this same cache, not the
+        // disk — see above) from buying them a second time. Only the
+        // sidecar write failed, not this.
+        *entry.passage_vectors.lock() = Some(Arc::new(fresh));
+        drop(_fence);
+        // Served content changed with the publish above, so the config
+        // revision moves with it — after the fence, exactly as the
+        // gloss refresh does (the bump re-checks the tombstone itself).
+        if published_change {
+            self.bump_config_revision(name, &entry);
+        }
+        if let Some(error) = save_error {
             return Some(Err(format!("passage vectors not persisted: {error}")));
         }
-        *entry.passage_vectors.lock() = Some(Arc::new(fresh));
         match failure {
             Some(error) => {
                 // What landed is durable; the rest stays claimed as work.

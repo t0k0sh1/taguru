@@ -42,6 +42,20 @@ pub struct GroupEntry {
     /// name is an organizational label, not context content, and the
     /// contexts BEHIND a child stay filtered wherever they are served.
     pub groups: BTreeSet<String>,
+    /// Change token over the group's transitive member contexts: a
+    /// stable hash of each visible member's name and revision counters
+    /// (see `ContextRevision`), so a group-level cache invalidates
+    /// exactly when a relevant member changed — a member write, an
+    /// embedding refresh, a rename, or a membership edit all move it;
+    /// anything else leaves it alone. Computed over the slice the
+    /// caller's key can see, so it leaks no change-signal about
+    /// contexts beyond a scoped grant. Compare for equality only, and
+    /// only against the same server process — the member revisions
+    /// behind it carry the same restart caveats they do individually.
+    /// `serde(default)` so a router merging rows from an older shard
+    /// reads an empty token instead of refusing the row.
+    #[serde(default)]
+    pub fingerprint: String,
 }
 
 /// Whether the key's grant lets it see the named context — no scope
@@ -65,16 +79,49 @@ pub(super) fn scope_allows(
 /// remove its own contexts there. The members are what a grant is
 /// about, so the members are what gets filtered.
 fn group_entry(
+    state: &AppState,
     name: String,
     record: GroupRecord,
     scope: &Option<axum::Extension<crate::auth::KeyScope>>,
 ) -> GroupEntry {
+    let fingerprint = group_fingerprint(state, &name, scope);
     GroupEntry {
         name,
         description: record.description,
         contexts: scoped_member_contexts(record.contexts, scope),
         groups: record.groups,
+        fingerprint,
     }
+}
+
+/// The change token on one group row: FNV-1a over the scope-visible
+/// transitive context closure, each member as its length-prefixed name
+/// followed by the three revision counters — structurally unambiguous,
+/// so distinct closures cannot collide by concatenation. The closure
+/// (not the direct members) because a group search fans out through
+/// nested children, and sorted iteration (the closure is a `BTreeSet`)
+/// makes the hash deterministic. A member registered but mid-delete
+/// contributes nothing, exactly as it answers no search.
+fn group_fingerprint(
+    state: &AppState,
+    name: &str,
+    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+) -> String {
+    let mut digest = crate::hash::FNV1A_OFFSET;
+    for context in state.group_context_closures([name]) {
+        if !scope_allows(scope, &context) {
+            continue;
+        }
+        let Some(revision) = state.context_revision(&context) else {
+            continue;
+        };
+        digest = crate::hash::fnv1a_fold(digest, (context.len() as u64).to_le_bytes());
+        digest = crate::hash::fnv1a_fold(digest, context.bytes());
+        digest = crate::hash::fnv1a_fold(digest, revision.graph.to_le_bytes());
+        digest = crate::hash::fnv1a_fold(digest, revision.passages.to_le_bytes());
+        digest = crate::hash::fnv1a_fold(digest, revision.config.to_le_bytes());
+    }
+    format!("{digest:016x}")
 }
 
 /// [`group_entry`]'s member filter on its own — the one loop behind
@@ -162,7 +209,7 @@ pub async fn list_groups(
     );
     let groups: Vec<_> = page
         .into_iter()
-        .map(|(name, record)| group_entry(name, record, &scope))
+        .map(|(name, record)| group_entry(&state, name, record, &scope))
         .collect();
     ok(GroupPage { total, groups }, started_at)
 }
@@ -174,7 +221,7 @@ pub async fn get_group(
 ) -> Response {
     let started_at = Instant::now();
     match state.group(&name) {
-        Some(record) => ok(group_entry(name, record, &scope), started_at),
+        Some(record) => ok(group_entry(&state, name, record, &scope), started_at),
         None => group_not_found(&name, started_at),
     }
 }
@@ -362,7 +409,7 @@ pub async fn update_group(
             request.remove_groups.into_iter().collect(),
         )
     }) {
-        Ok(record) => ok(group_entry(name, record, &scope), started_at),
+        Ok(record) => ok(group_entry(&state, name, record, &scope), started_at),
         Err(UpdateGroupError::NotFound) => group_not_found(&name, started_at),
         Err(UpdateGroupError::NoSuchContext(context)) => error(
             ErrorCode::NoContext,

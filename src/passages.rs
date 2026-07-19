@@ -685,6 +685,14 @@ impl PassageStore {
         self.inner.read().unwrap().log_bytes
     }
 
+    /// The last log sequence this store handed out (0 = nothing ever
+    /// logged) — the passage half of the context revision. Durable by
+    /// construction: appends are log-first and compaction bakes it
+    /// into the snapshot, so a reload always resumes the numbering.
+    pub(crate) fn watermark(&self) -> u64 {
+        self.inner.read().unwrap().next_seq - 1
+    }
+
     pub(crate) fn get(&self, source: &str) -> Option<Arc<PassageRecord>> {
         self.inner.read().unwrap().sources.get(source).cloned()
     }

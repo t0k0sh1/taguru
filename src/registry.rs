@@ -85,8 +85,10 @@ use terms::text_terms;
 pub(crate) use terms::{passage_terms, spelled_passage_terms};
 
 /// Server-side metadata for one context: the prose half of the routing
-/// directory plus the cache policy flag.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// directory plus the cache policy flag. `PartialEq` backs
+/// [`AppState::update_meta`]'s changed-check: only a PATCH that
+/// actually changed something bumps the config revision.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextMeta {
     /// What this 文脈 covers, written by whoever creates the context
@@ -239,6 +241,38 @@ pub struct ContextUsage {
     pub last_write_epoch: u64,
 }
 
+/// Change counters for one context — the "has anything changed since I
+/// last looked" token a retrieval cache keys on. Three counters rather
+/// than one because the lanes invalidate independently: passage-search
+/// results do not change on graph writes and graph reads do not change
+/// on passage writes, so a consumer watches the counters it depends on
+/// and compares for EQUALITY (never order across restarts).
+///
+/// - `graph`: applied graph write ops (associations, aliases,
+///   retractions). Not `wal_seq`: that freezes with the WAL disabled
+///   and rolls back on partial-batch bookkeeping, while this counts
+///   what actually applied.
+/// - `passages`: the passage log watermark (stores and retractions).
+/// - `config`: server-side configuration that changes how requests are
+///   answered — metadata updates (description, pin, floors) and
+///   embedding refreshes that published something.
+///
+/// Guarantees: within one process every read is live and strictly
+/// monotonic across changes; across a clean shutdown the persisted
+/// values are exact. Across a crash a cold context can briefly serve a
+/// lagging value until its first load catches the graph counter up to
+/// the WAL replay — the same posture as the cold stats snapshot — and
+/// a cache that outlives the process must treat a server restart (and
+/// a delete-recreate of the same name) as invalidation: values can
+/// repeat with different content there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextRevision {
+    pub graph: u64,
+    pub passages: u64,
+    pub config: u64,
+}
+
 /// Lock-free mirror of [`ContextUsage`]: bumped on the request path
 /// with relaxed atomics — counting a read must never queue behind a
 /// writer holding the entry lock — and snapshotted for the directory
@@ -293,6 +327,11 @@ struct MetaFile {
     meta: ContextMeta,
     stats: ContextStats,
     usage: ContextUsage,
+    /// The revision counters as of this save — what a cold entry (and
+    /// a replica's tailed refresh) seeds from. Defaulted for sidecars
+    /// from before the field existed: those report zeros until their
+    /// first load or flush catches them up.
+    revision: ContextRevision,
 }
 
 /// One row of `GET /contexts` — the routing directory an LLM client
@@ -312,6 +351,12 @@ pub struct DirectoryEntry {
     pub semantic_floor: Option<f32>,
     pub stats: ContextStats,
     pub usage: ContextUsage,
+    /// Change counters a retrieval cache keys on — see
+    /// [`ContextRevision`] for what each counts and what equality
+    /// guarantees. `serde(default)` so a router merging rows from an
+    /// older shard reads zeros instead of refusing the row.
+    #[serde(default)]
+    pub revision: ContextRevision,
 }
 
 /// Whether a context's network is resident. Cold entries keep only
@@ -421,6 +466,13 @@ pub struct Entry {
     /// the slot. Only ever locked while `passages` is held (or alone
     /// by the test aging helper), so it adds no lock-order edge.
     passages_load_failure: Mutex<Option<(std::time::Instant, String)>>,
+    /// [`ContextRevision::passages`]'s live value: the passage log
+    /// watermark. An atomic, not an `EntryInner` field, because the
+    /// passage mutators run under the SHARED tombstone fence (a read
+    /// lock on `inner`) and cannot write through it. Advanced with
+    /// `fetch_max` — store batches finish out of order, and a stale
+    /// watermark read must never overwrite a newer one.
+    passage_revision: AtomicU64,
 }
 
 impl Entry {
@@ -431,6 +483,7 @@ impl Entry {
         wal_bytes: u64,
         passages_wal_bytes: u64,
         usage: ContextUsage,
+        revision: ContextRevision,
     ) -> Self {
         Self {
             inner: RwLock::new(EntryInner {
@@ -438,6 +491,8 @@ impl Entry {
                 stats,
                 slot,
                 wal_seq: 1,
+                graph_revision: revision.graph,
+                config_revision: revision.config,
                 wal_bytes,
                 passages_wal_bytes,
                 counted_bytes: 0,
@@ -459,6 +514,19 @@ impl Entry {
             usage: UsageCounters::seeded(&usage),
             usage_dirty: AtomicBool::new(false),
             passages_load_failure: Mutex::new(None),
+            passage_revision: AtomicU64::new(revision.passages),
+        }
+    }
+
+    /// The three revision counters as one [`ContextRevision`] — the
+    /// shape the directory serves and the sidecar persists. Takes the
+    /// caller's `inner` guard (read or write) so every snapshot is
+    /// consistent with whatever that caller is about to publish.
+    fn revision_snapshot(&self, inner: &EntryInner) -> ContextRevision {
+        ContextRevision {
+            graph: inner.graph_revision,
+            passages: self.passage_revision.load(Ordering::Relaxed),
+            config: inner.config_revision,
         }
     }
 
@@ -533,6 +601,18 @@ struct EntryInner {
     /// write lock (append and flush both hold it). Meaningful while
     /// hot; a cold load recomputes it from the replay's tail.
     wal_seq: u64,
+    /// [`ContextRevision::graph`]'s live value: applied graph write
+    /// ops, bumped in `logged_write` by the count that actually landed.
+    /// Deliberately NOT `wal_seq` — that field freezes with the WAL
+    /// disabled and rolls back on partial-batch log bookkeeping while
+    /// the applied ops stand. Seeded from the sidecar at scan, floored
+    /// with the replay top on load so a lagging sidecar catches up.
+    graph_revision: u64,
+    /// [`ContextRevision::config`]'s live value: metadata updates and
+    /// embedding-refresh publications. Under the entry lock like its
+    /// siblings so `update_meta` can bump-and-persist atomically (and
+    /// roll both back together when the sidecar write fails).
+    config_revision: u64,
     /// Size of this context's log on disk — the growth signal behind
     /// the `taguru_wal_bytes` gauge and the `TAGURU_WAL_MAX_BYTES`
     /// backstop. Advanced on append, re-stat'ed on load, zeroed on
@@ -1506,8 +1586,13 @@ impl AppState {
                     continue;
                 };
                 registry.entry(name).or_insert_with(|| {
-                    let MetaFile { meta, stats, usage } = read_meta_file(&data_dir, &stem);
-                    Arc::new(Entry::new(meta, stats, Slot::Cold, 0, 0, usage))
+                    let MetaFile {
+                        meta,
+                        stats,
+                        usage,
+                        revision,
+                    } = read_meta_file(&data_dir, &stem);
+                    Arc::new(Entry::new(meta, stats, Slot::Cold, 0, 0, usage, revision))
                 });
             }
         }
@@ -1745,6 +1830,7 @@ impl AppState {
                 &guard.meta,
                 &guard.stats,
                 &entry.usage.snapshot(),
+                entry.revision_snapshot(&guard),
             );
             if let Err(error) = outcome {
                 entry.usage_dirty.store(true, Ordering::Relaxed);
@@ -1898,6 +1984,7 @@ impl AppState {
                     0,
                     0,
                     usage,
+                    ContextRevision::default(),
                 )),
             );
         });
@@ -1984,8 +2071,20 @@ impl AppState {
         context.set_dice_floor(meta.dice_floor);
         let stats = ContextStats::of(&context);
         let usage = ContextUsage::default();
-        save_files(&self.0.data_dir, name, meta, &stats, &usage, &context)
-            .map_err(CreateError::Io)?;
+        // A fresh context starts its revision at zeros — which also
+        // means a delete-recreate of the same name RESTARTS the
+        // counters; a cache keyed on them must treat that as a new
+        // lineage (see ContextRevision's doc).
+        save_files(
+            &self.0.data_dir,
+            name,
+            meta,
+            &stats,
+            &usage,
+            ContextRevision::default(),
+            &context,
+        )
+        .map_err(CreateError::Io)?;
         Ok((stats, usage, context))
     }
 
@@ -2242,7 +2341,12 @@ impl AppState {
         if let Err(error) = move_context_files(&self.0.data_dir, &from_stem, &to_stem) {
             return RenameOutcome::Stuck(RenameContextError::Io(error));
         }
-        let MetaFile { meta, stats, usage } = read_meta_file(&self.0.data_dir, &to_stem);
+        let MetaFile {
+            meta,
+            stats,
+            usage,
+            revision,
+        } = read_meta_file(&self.0.data_dir, &to_stem);
         let usage = ContextUsage {
             reads: usage.reads.max(final_usage.reads),
             empty_reads: usage.empty_reads.max(final_usage.empty_reads),
@@ -2257,6 +2361,10 @@ impl AppState {
         let passages_wal_bytes = fs::metadata(passages_wal_path(&self.0.data_dir, &to_stem))
             .map(|metadata| metadata.len())
             .unwrap_or(0);
+        // The revision moves with the sidecar: a rename is the same
+        // content under a new name, so the counters carry over intact
+        // (the group fingerprint still changes — the member NAME is
+        // part of its hash).
         let new_entry = Arc::new(Entry::new(
             meta,
             stats,
@@ -2264,6 +2372,7 @@ impl AppState {
             wal_bytes,
             passages_wal_bytes,
             usage,
+            revision,
         ));
         self.0
             .registry
@@ -2319,6 +2428,7 @@ impl AppState {
         let watermark = inner.wal_seq.saturating_sub(1);
         let meta = inner.meta.clone();
         let usage = entry.usage.snapshot();
+        let revision = entry.revision_snapshot(&inner);
         if let Slot::Hot(context) = &mut inner.slot {
             // `ensure_hot`'s replay only applies WAL entries past
             // `applied_seq`, so baking in this watermark before saving
@@ -2327,7 +2437,15 @@ impl AppState {
             // family moves.
             context.set_applied_seq(watermark);
             let stats = ContextStats::of(context);
-            save_files(&self.0.data_dir, name, &meta, &stats, &usage, context)?;
+            save_files(
+                &self.0.data_dir,
+                name,
+                &meta,
+                &stats,
+                &usage,
+                revision,
+                context,
+            )?;
             inner.stats = stats;
         }
         self.tombstone_locked(&mut inner, entry);
@@ -2378,8 +2496,13 @@ impl AppState {
         };
         let mut registry = self.0.registry.write();
         registry.entry(name).or_insert_with(|| {
-            let MetaFile { meta, stats, usage } = read_meta_file(&self.0.data_dir, stem);
-            Arc::new(Entry::new(meta, stats, Slot::Cold, 0, 0, usage))
+            let MetaFile {
+                meta,
+                stats,
+                usage,
+                revision,
+            } = read_meta_file(&self.0.data_dir, stem);
+            Arc::new(Entry::new(meta, stats, Slot::Cold, 0, 0, usage, revision))
         });
     }
 
@@ -2403,9 +2526,19 @@ impl AppState {
             meta,
             stats,
             usage: _,
+            revision,
         } = read_meta_file(&self.0.data_dir, &stem);
         inner.meta = meta;
         inner.stats = stats;
+        // Monotonic re-seed: the writer's sidecar lags its shipped WAL
+        // by a flush interval, and this replica's own last load may
+        // already have replayed past it — a tailed refresh must move
+        // the counters forward, never walk them back.
+        inner.graph_revision = inner.graph_revision.max(revision.graph);
+        inner.config_revision = inner.config_revision.max(revision.config);
+        entry
+            .passage_revision
+            .fetch_max(revision.passages, Ordering::Relaxed);
         inner.load_failure = None;
         if matches!(inner.slot, Slot::Hot(_)) {
             inner.slot = Slot::Cold;
@@ -2560,6 +2693,13 @@ impl AppState {
                 Some((std::time::Instant::now(), error.to_string()));
         })?;
         *entry.passages_load_failure.lock() = None;
+        // The load just replayed the log, so this is the exact
+        // watermark — it catches a sidecar-seeded value up after a
+        // crash, and every search loads the store before computing, so
+        // a cache fill never keys on the stale seed.
+        entry
+            .passage_revision
+            .fetch_max(store.watermark(), Ordering::Relaxed);
         let store = Arc::new(store);
         *slot = Some(Arc::clone(&store));
         Ok(store)
@@ -2772,15 +2912,28 @@ impl AppState {
             // A pin toggle moves the entry into or out of the budget's
             // world; the estimate must follow.
             self.recount_entry(inner);
+            // Bump-and-persist atomically: the config revision rides
+            // the same sidecar write as the change it tracks, and both
+            // roll back together below — so a served bump always means
+            // the new meta is durable. A PATCH that changed nothing
+            // bumps nothing: idempotent updates must not churn caches.
+            let changed = inner.meta != previous;
+            if changed {
+                inner.config_revision += 1;
+            }
             let result = write_meta(
                 &self.0.data_dir,
                 &file_stem(name),
                 &inner.meta,
                 &inner.stats,
                 &entry.usage.snapshot(),
+                entry.revision_snapshot(inner),
             )
             .map(|()| inner.meta.clone());
             if result.is_err() {
+                if changed {
+                    inner.config_revision -= 1;
+                }
                 rollback_meta(inner, previous);
                 self.recount_entry(inner);
             }
@@ -2788,6 +2941,49 @@ impl AppState {
         };
         self.enforce_budget(name);
         Some(outcome)
+    }
+
+    /// Advances a context's config revision after an embedding refresh
+    /// published vectors that differ from what was served before — and
+    /// persists the sidecar so the bump survives a restart. Called
+    /// AFTER the publish (never under the refresh's shared fence — this
+    /// takes the entry's write lock), so a reader observing the new
+    /// value always sees the new content; a failed sidecar write only
+    /// lags the durable copy (healed by the next flush), never the
+    /// served one. A tombstoned entry skips both halves: the delete
+    /// owns the name and its files.
+    fn bump_config_revision(&self, name: &str, entry: &Entry) {
+        let Some(mut guard) = entry.lock_unless_deleted() else {
+            return;
+        };
+        let inner = &mut *guard;
+        inner.config_revision += 1;
+        // A replica's refresh state is its own ephemeral view; a local
+        // sidecar write would diverge the cache the tailer owns.
+        if self.is_replica() {
+            return;
+        }
+        if let Err(error) = write_meta(
+            &self.0.data_dir,
+            &file_stem(name),
+            &inner.meta,
+            &inner.stats,
+            &entry.usage.snapshot(),
+            entry.revision_snapshot(inner),
+        ) {
+            tracing::warn!(
+                "config revision for '{name}' not persisted (lags until the next flush): {error}"
+            );
+        }
+    }
+
+    /// One context's current revision counters, or `None` for an
+    /// unknown or deleted context — what the group fingerprint hashes
+    /// per member, without loading anything.
+    pub fn context_revision(&self, name: &str) -> Option<ContextRevision> {
+        let entry = self.lookup(name)?;
+        let inner = entry.read_unless_deleted()?;
+        Some(entry.revision_snapshot(&inner))
     }
 
     /// The routing directory: every context's name, description, policy,
@@ -3348,6 +3544,12 @@ impl AppState {
             &meta,
             &stats,
             &entry.usage.snapshot(),
+            // Snapshot NOW, under the publication lock, not at staging:
+            // counters that moved while the image staged are exactly the
+            // sidecar-ahead-of-image posture the write order already
+            // tolerates, and the WAL replay re-derives the graph value
+            // on the next load either way.
+            entry.revision_snapshot(inner),
         )
         .and_then(|()| commit_staged(&staged, &image));
         let published = match outcome {
@@ -3568,65 +3770,71 @@ impl AppState {
                 };
             entry.dirty.store(true, Ordering::Relaxed);
             self.recount_entry(&mut inner);
+            // The graph revision counts what APPLIED, in both WAL
+            // modes — `wal_seq` cannot carry this: it does not move at
+            // all with the WAL disabled, and the partial-apply
+            // bookkeeping below rolls it back in states where the
+            // applied prefix stands in memory regardless.
+            let landed = applied(&result);
+            inner.graph_revision += landed as u64;
 
-            if let Some((path, len_before)) = staged {
-                let landed = applied(&result);
-                if landed < ops.len() {
-                    match wal::truncate_to(&path, len_before) {
-                        Ok(()) if landed > 0 => {
-                            match wal::append_batch(&path, first_seq, &ops[..landed]) {
-                                Ok(appended) => {
-                                    inner.wal_bytes = len_before + appended;
-                                    inner.wal_seq = first_seq + landed as u64;
-                                }
-                                Err(error) => {
-                                    // The applied prefix already happened
-                                    // in memory and will not be undone —
-                                    // and the truncate above already threw
-                                    // its records off the disk, so the
-                                    // caller now holds an acknowledgment
-                                    // the log cannot replay. Flush the
-                                    // image below (out of this lock) to
-                                    // close that crash window now rather
-                                    // than waiting out the flush interval.
-                                    tracing::warn!(
-                                        context = %name, %error,
-                                        "WAL re-append after a partial apply failed; \
-                                         flushing the image now to re-cover memory"
-                                    );
-                                    inner.wal_bytes = len_before;
-                                    inner.wal_seq = first_seq;
-                                    wal_behind = true;
-                                }
+            if let Some((path, len_before)) = staged
+                && landed < ops.len()
+            {
+                match wal::truncate_to(&path, len_before) {
+                    Ok(()) if landed > 0 => {
+                        match wal::append_batch(&path, first_seq, &ops[..landed]) {
+                            Ok(appended) => {
+                                inner.wal_bytes = len_before + appended;
+                                inner.wal_seq = first_seq + landed as u64;
+                            }
+                            Err(error) => {
+                                // The applied prefix already happened
+                                // in memory and will not be undone —
+                                // and the truncate above already threw
+                                // its records off the disk, so the
+                                // caller now holds an acknowledgment
+                                // the log cannot replay. Flush the
+                                // image below (out of this lock) to
+                                // close that crash window now rather
+                                // than waiting out the flush interval.
+                                tracing::warn!(
+                                    context = %name, %error,
+                                    "WAL re-append after a partial apply failed; \
+                                     flushing the image now to re-cover memory"
+                                );
+                                inner.wal_bytes = len_before;
+                                inner.wal_seq = first_seq;
+                                wal_behind = true;
                             }
                         }
-                        Ok(()) => {
-                            inner.wal_bytes = len_before;
-                            inner.wal_seq = first_seq;
-                        }
-                        Err(error) => {
-                            // The untried tail is still on disk looking
-                            // exactly like applied records, and replay
-                            // does not stop where the live apply did —
-                            // left until the next flush tick, a crash
-                            // would apply ops the caller was just told
-                            // failed. Same medicine as the re-append
-                            // failure above: flush the image now (out
-                            // of this lock). Its watermark covers the
-                            // whole batch's seqs, so the tail becomes
-                            // replay-inert even if the log keeps
-                            // refusing to shrink. Bookkeeping stays at
-                            // the full-batch values: that is what the
-                            // file still holds if the truncate never
-                            // landed, and a successful flush resets
-                            // both anyway.
-                            tracing::warn!(
-                                context = %name, %error,
-                                "WAL truncate after a partial apply failed; \
-                                 flushing the image now to retire the untried tail"
-                            );
-                            wal_behind = true;
-                        }
+                    }
+                    Ok(()) => {
+                        inner.wal_bytes = len_before;
+                        inner.wal_seq = first_seq;
+                    }
+                    Err(error) => {
+                        // The untried tail is still on disk looking
+                        // exactly like applied records, and replay
+                        // does not stop where the live apply did —
+                        // left until the next flush tick, a crash
+                        // would apply ops the caller was just told
+                        // failed. Same medicine as the re-append
+                        // failure above: flush the image now (out
+                        // of this lock). Its watermark covers the
+                        // whole batch's seqs, so the tail becomes
+                        // replay-inert even if the log keeps
+                        // refusing to shrink. Bookkeeping stays at
+                        // the full-batch values: that is what the
+                        // file still holds if the truncate never
+                        // landed, and a successful flush resets
+                        // both anyway.
+                        tracing::warn!(
+                            context = %name, %error,
+                            "WAL truncate after a partial apply failed; \
+                             flushing the image now to retire the untried tail"
+                        );
+                        wal_behind = true;
                     }
                 }
             }
@@ -3798,6 +4006,11 @@ impl AppState {
                     &inner.meta,
                     &stats,
                     &entry.usage.snapshot(),
+                    ContextRevision {
+                        graph: inner.graph_revision,
+                        passages: entry.passage_revision.load(Ordering::Relaxed),
+                        config: inner.config_revision,
+                    },
                     context,
                 ) {
                     tracing::warn!(
@@ -3902,6 +4115,7 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
         semantic_floor: inner.meta.semantic_floor,
         stats,
         usage: entry.usage.snapshot(),
+        revision: entry.revision_snapshot(&inner),
     })
 }
 
@@ -3991,7 +4205,12 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
     let registry: BTreeMap<String, Arc<Entry>> =
         parallel_map(candidates, workers, |(stem, name)| {
             let stem = stem.as_str();
-            let MetaFile { meta, stats, usage } = read_meta_file(data_dir, stem);
+            let MetaFile {
+                meta,
+                stats,
+                usage,
+                revision,
+            } = read_meta_file(data_dir, stem);
             // The gauge must see leftover logs from the first scrape,
             // not only after each context's first touch.
             let wal_bytes = fs::metadata(wal_path(data_dir, stem))
@@ -4009,6 +4228,7 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
                     wal_bytes,
                     passages_wal_bytes,
                     usage,
+                    revision,
                 )),
             )
         })
@@ -4256,6 +4476,11 @@ fn ensure_hot(
     inner.stats = ContextStats::of(&context);
     inner.slot = Slot::Hot(Box::new(context));
     inner.wal_seq = top + 1;
+    // Floor, don't overwrite: after a crash the sidecar-seeded value
+    // lags the WAL's tail and the replay top is the truth — but with
+    // the WAL disabled (or a WAL-off history) the sidecar value is the
+    // one that kept counting and the stale top must not regress it.
+    inner.graph_revision = inner.graph_revision.max(top);
     // Re-stat rather than trust the registration-time size: appends
     // and truncations may have happened while this entry sat cold.
     inner.wal_bytes = fs::metadata(wal_path(data_dir, &stem))
@@ -4420,6 +4645,7 @@ fn save_files(
     meta: &ContextMeta,
     stats: &ContextStats,
     usage: &ContextUsage,
+    revision: ContextRevision,
     context: &Context,
 ) -> io::Result<()> {
     let stem = file_stem(name);
@@ -4432,7 +4658,7 @@ fn save_files(
     // same-name create — never a durable image with a defaulted sidecar,
     // which would resurrect a context `create` told the client had failed.
     // (Image-then-meta would do exactly that; see `create`'s doc.)
-    write_meta(dir, &stem, meta, stats, usage)?;
+    write_meta(dir, &stem, meta, stats, usage, revision)?;
     write_atomic(&image_path(dir, &stem), &context.to_bytes())
 }
 
@@ -4442,11 +4668,13 @@ fn write_meta(
     meta: &ContextMeta,
     stats: &ContextStats,
     usage: &ContextUsage,
+    revision: ContextRevision,
 ) -> io::Result<()> {
     let file = MetaFile {
         meta: meta.clone(),
         stats: stats.clone(),
         usage: usage.clone(),
+        revision,
     };
     write_atomic(&meta_path(dir, stem), &serde_json::to_vec_pretty(&file)?)
 }
@@ -4802,6 +5030,292 @@ mod tests {
             "the marker leaves once the family did"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The three revision counters move on exactly their own lane —
+    /// graph writes, passage writes, config changes — and read-only
+    /// traffic and no-op updates move none of them (#149).
+    #[test]
+    fn revision_counts_each_lane_independently_and_ignores_reads() {
+        let dir = scratch_dir("revision-lanes");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        assert_eq!(
+            state.context_revision("sake").unwrap(),
+            ContextRevision::default(),
+            "a fresh context starts at zeros"
+        );
+
+        state
+            .add_associations(
+                "sake",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md")),
+                    assoc_op("蔵", "創業", "1832", 1.0, Some("a.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let after_graph = state.context_revision("sake").unwrap();
+        assert_eq!(after_graph.graph, 2, "one bump per applied op");
+        assert_eq!((after_graph.passages, after_graph.config), (0, 0));
+
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "a.md".to_string(),
+            crate::passages::PassageSubmission::plain("蔵は1832年創業。"),
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+        let after_passage = state.context_revision("sake").unwrap();
+        assert_eq!(after_passage.passages, 1, "the passage log watermark");
+        assert_eq!(
+            after_passage.graph, 2,
+            "a passage write moves no other lane"
+        );
+
+        state
+            .update_meta("sake", None, None, None, Some(0.5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.context_revision("sake").unwrap().config,
+            1,
+            "a metadata change bumps config"
+        );
+        state
+            .update_meta("sake", None, None, None, Some(0.5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.context_revision("sake").unwrap().config,
+            1,
+            "the same floor again changed nothing, so it bumps nothing"
+        );
+
+        state
+            .read_context("sake", |context| context.association_count())
+            .unwrap();
+        assert_eq!(
+            state.context_revision("sake").unwrap(),
+            ContextRevision {
+                graph: 2,
+                passages: 1,
+                config: 1
+            },
+            "reads move nothing"
+        );
+
+        // One retraction is a graph op AND a passage-log record: both
+        // data lanes move, config stays.
+        state.retract_source("sake", "a.md").unwrap();
+        assert_eq!(
+            state.context_revision("sake").unwrap(),
+            ContextRevision {
+                graph: 3,
+                passages: 2,
+                config: 1
+            }
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The guarantee ladder in [`ContextRevision`]'s doc: a clean
+    /// restart serves the exact counters while still cold, a crashed
+    /// one serves the sidecar's lagging value until the first load
+    /// catches each data lane up against its own log (#149).
+    #[test]
+    fn revision_is_stable_across_a_clean_restart_and_catches_up_after_a_crashed_one() {
+        let dir = scratch_dir("revision-restart");
+        let clean = {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert(
+                "a.md".to_string(),
+                crate::passages::PassageSubmission::plain("高瀬が杜氏。"),
+            );
+            state.store_passages("sake", passages).unwrap().unwrap();
+            state
+                .update_meta("sake", None, None, None, Some(0.4))
+                .unwrap()
+                .unwrap();
+            // The graceful-shutdown pair: the final flush, then the sweep.
+            state.flush_dirty();
+            state.persist_usage();
+            state.context_revision("sake").unwrap()
+        };
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let entry = state.directory_entry("sake").unwrap();
+        assert!(!entry.loaded, "the directory answer must not load anything");
+        assert_eq!(entry.revision, clean, "clean restart: exact, while cold");
+
+        // More writes on both data lanes, then a crash: no flush, no sweep.
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "創業", "1832", 1.0, Some("b.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "b.md".to_string(),
+            crate::passages::PassageSubmission::plain("創業は1832年。"),
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+        let live = state.context_revision("sake").unwrap();
+        assert_eq!(live.graph, clean.graph + 1);
+        assert_eq!(live.passages, clean.passages + 1);
+        drop(state);
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert_eq!(
+            state.context_revision("sake").unwrap(),
+            clean,
+            "cold after a crash: the sidecar's lagging values"
+        );
+        // A graph load replays the WAL and floors the counter with its top.
+        state
+            .read_context("sake", |context| context.association_count())
+            .unwrap();
+        assert_eq!(state.context_revision("sake").unwrap().graph, live.graph);
+        // A passage-store load replays its own log the same way.
+        state
+            .lookup_passages("sake", &["a.md".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.context_revision("sake").unwrap().passages,
+            live.passages,
+            "every search path loads before computing, so a cache fill never keys on the stale seed"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// With the WAL disabled `wal_seq` never moves — the revision has
+    /// its own counter precisely so that configuration still reports
+    /// changes, and a reload of the (empty) log must not walk it back
+    /// (#149).
+    #[test]
+    fn wal_off_writes_still_advance_the_graph_revision() {
+        let dir = scratch_dir("revision-wal-off");
+        let wal_off = || BootOptions {
+            wal_enabled: false,
+            ..BootOptions::default()
+        };
+        {
+            let state = AppState::boot_with(dir.clone(), usize::MAX, None, wal_off()).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(state.context_revision("sake").unwrap().graph, 1);
+            state.flush_dirty();
+        }
+        let state = AppState::boot_with(dir.clone(), usize::MAX, None, wal_off()).unwrap();
+        assert_eq!(
+            state.context_revision("sake").unwrap().graph,
+            1,
+            "flushed WAL-off writes keep their count across a restart"
+        );
+        state
+            .read_context("sake", |context| context.association_count())
+            .unwrap();
+        assert_eq!(
+            state.context_revision("sake").unwrap().graph,
+            1,
+            "the stale replay top (there is no log) must not regress the counter"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A rename carries the counters (same content, new name); a
+    /// delete-recreate restarts them — the lineage reset callers must
+    /// treat as invalidation (#149).
+    #[test]
+    fn revision_rides_a_rename_and_resets_on_recreate() {
+        let dir = scratch_dir("revision-rename");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let before = state.context_revision("sake").unwrap();
+        state.rename_context("sake", "brewery").unwrap();
+        assert_eq!(
+            state.context_revision("brewery").unwrap(),
+            before,
+            "a rename is the same content under a new name"
+        );
+        state.delete("brewery").unwrap().unwrap();
+        state.create("brewery", ContextMeta::default()).unwrap();
+        assert_eq!(
+            state.context_revision("brewery").unwrap(),
+            ContextRevision::default(),
+            "a recreate is a new lineage"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// An embedding refresh that published something bumps the config
+    /// counter; the idempotent second pass must not churn caches
+    /// (#149).
+    #[test]
+    fn embedding_refresh_bumps_config_only_when_it_publishes() {
+        let dir = scratch_dir("revision-refresh");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state.create("fruit", ContextMeta::default()).unwrap();
+        state
+            .add_associations(
+                "fruit",
+                vec![assoc_op("りんご", "分類", "果物", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.context_revision("fruit").unwrap().config, 0);
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.context_revision("fruit").unwrap().config,
+            1,
+            "vectors the semantic lane now serves are a config change"
+        );
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.context_revision("fruit").unwrap().config,
+            1,
+            "a refresh that embedded nothing new bumps nothing"
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// Every stage/commit/unlink position in context deletion either

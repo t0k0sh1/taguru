@@ -28,6 +28,12 @@ impl AppState {
                     // paragraphs into the resident index.
                     self.refresh_bm25(&entry, &store, &sources);
                     entry.passages_embed_dirty.store(true, Ordering::Relaxed);
+                    // Bump AFTER the batch applied (a reader observing
+                    // the new value sees the new passages); fetch_max
+                    // because concurrent batches finish out of order.
+                    entry
+                        .passage_revision
+                        .fetch_max(store.watermark(), Ordering::Relaxed);
                 }
                 stored
             }
