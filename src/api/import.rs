@@ -355,7 +355,11 @@ pub async fn import_batch(
             // The storage-quota pre-check (issue #136), batch-granular
             // like the deadline above and skipped on dry runs — a
             // preview's capacity answers are documented as advisory
-            // ("can only surface by actually applying"). The WAL lanes
+            // ("can only surface by actually applying"). Only batches
+            // that CARRY GROWTH are gated: a header-only batch is a
+            // pure source retraction, the import-shaped way down in
+            // size, and must stay open at the ceiling exactly as the
+            // write path keeps retract/unalias open. The WAL lanes
             // behind the check are live, so re-checking per batch IS
             // the running remaining-budget check: used bytes advance
             // as batches land, and the import stops at the first batch
@@ -363,6 +367,7 @@ pub async fn import_batch(
             // deadline. The gates inside the write path still stand
             // behind this for the batch that crosses mid-apply.
             if !query.dry_run
+                && batch.carries_growth()
                 && let Some((used, ceiling)) = state.storage_quota_refusal(&batch.context)
             {
                 state.metrics().record_storage_quota_refusal();

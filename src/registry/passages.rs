@@ -39,9 +39,13 @@ impl AppState {
         // entrance only ever grows the context (retraction goes through
         // `retract_source`, which stays open at the ceiling), so no op
         // inspection is needed — the graph gate's `WalOp::grows` split
-        // has no counterpart here.
+        // has no counterpart here. The admission lock is what makes
+        // the gate real under the SHARED fence: without it, two
+        // concurrent stores could read the same pre-write usage, both
+        // pass, and only then serialize at the store's writer mutex —
+        // already past the gate (see `Entry::passages_admission`).
+        let admission = entry.passages_admission.lock();
         if let Some((used, ceiling)) = self.storage_quota_excess(name, &fence, &entry) {
-            drop(fence);
             self.0.metrics.record_storage_quota_refusal();
             return Some(Err(PassagesWriteError::QuotaExceeded(
                 super::storage_quota_message(name, used, ceiling),
@@ -51,6 +55,10 @@ impl AppState {
             Ok(store) => {
                 let sources: Vec<String> = passages.keys().cloned().collect();
                 let stored = store.store(passages);
+                // The append is settled (durable or refused) and its
+                // bytes are on the store's books — the next admission
+                // reads them; the index folding below needs no gate.
+                drop(admission);
                 if stored.is_ok() {
                     // Every store lock is released again; fold the new
                     // paragraphs into the resident index.
@@ -65,6 +73,8 @@ impl AppState {
                 }
                 stored.map_err(PassagesWriteError::Io)
             }
+            // The load failed before any write; the admission falls
+            // with the enclosing scope.
             Err(error) => Err(PassagesWriteError::Io(error)),
         };
         drop(fence);

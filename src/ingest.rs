@@ -437,6 +437,19 @@ impl Batch {
         self.associations.len() + self.concepts.len() + self.labels.len()
     }
 
+    /// Whether applying this batch can grow the context: any passage
+    /// or graph payload counts (questions/sections ride the passage).
+    /// A header-only batch is a pure source retraction — plus, at
+    /// most, a create — which is the import-shaped way DOWN in size,
+    /// so the storage-quota pre-check must let it through exactly as
+    /// the write path lets retract/unalias through.
+    pub(crate) fn carries_growth(&self) -> bool {
+        self.passage.is_some()
+            || !self.associations.is_empty()
+            || !self.concepts.is_empty()
+            || !self.labels.is_empty()
+    }
+
     /// The relation spellings this batch settles on — extract feeds
     /// them to later documents' prompts so one run reuses one
     /// vocabulary.

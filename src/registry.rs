@@ -472,6 +472,18 @@ pub struct Entry {
     /// the slot. Only ever locked while `passages` is held (or alone
     /// by the test aging helper), so it adds no lock-order edge.
     passages_load_failure: Mutex<Option<(std::time::Instant, String)>>,
+    /// Serializes the storage-quota admission with the passage store
+    /// it admits (issue #136). Passage stores run under the SHARED
+    /// tombstone fence — concurrent with each other by design — so
+    /// without this, two stores could read the same pre-write usage,
+    /// both pass the quota gate, and only then serialize at the
+    /// store's own writer mutex, already past the gate. The graph
+    /// gate has no such gap: `logged_write` checks under the entry's
+    /// EXCLUSIVE lock. Taken after the fence (a new lock-order edge
+    /// with no cycle: nothing takes the fence after this), released
+    /// once the append settles — the derived-index refresh needs no
+    /// admission.
+    passages_admission: Mutex<()>,
     /// [`ContextRevision::passages`]'s live value: the passage log
     /// watermark. An atomic, not an `EntryInner` field, because the
     /// passage mutators run under the SHARED tombstone fence (a read
@@ -542,6 +554,7 @@ impl Entry {
             usage: UsageCounters::seeded(&usage),
             usage_dirty: AtomicBool::new(false),
             passages_load_failure: Mutex::new(None),
+            passages_admission: Mutex::new(()),
             passage_revision: AtomicU64::new(revision.passages),
             disk: Mutex::new(ContextDiskUsage::default()),
         }

@@ -163,7 +163,23 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
         "the refusal names the resumable position: {message}"
     );
 
-    // The uncapped batch before the stop landed and stayed.
-    let (status, free) = server.call("GET", "/contexts/free", None);
-    assert_eq!(status, 200, "{free}");
+    // The uncapped batch before the stop landed whole — the created
+    // context AND its association line, not just the create block.
+    let directory = server.ok("GET", "/contexts", None);
+    let free = directory["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| context["name"] == "free")
+        .expect("free was created by the landed batch")
+        .clone();
+    assert_eq!(free["stats"]["associations"], json!(1), "{free}");
+
+    // A header-only batch is a pure source retraction — the
+    // import-shaped way down in size — so it passes the pre-check at
+    // the very ceiling that refused the growth batch above.
+    let retract_stream =
+        "{\"taguru_batch\": 1, \"context\": \"capped\", \"source\": \"keep.md\"}\n";
+    let (status, retracted) = post_import(&server, retract_stream, None);
+    assert_eq!(status, 200, "{retracted}");
 }
