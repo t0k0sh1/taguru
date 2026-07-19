@@ -68,6 +68,18 @@ use object_store::path::Path as StorePath;
 
 use crate::ship::{self, Manifest, ManifestFile, ManifestLane};
 
+/// How many manifest re-reads a fetch spends arbitrating a
+/// verification mismatch before calling it rot, and the pause between
+/// them. A live lineage legitimately advances under a reader — the
+/// writer replaces an object, then refreshes the manifest — and the
+/// gap between those two uploads is the window a fetch can fall into;
+/// a few paced re-reads outlast it, while true rot (bytes disagreeing
+/// with a manifest that is NOT moving) still refuses. Sized against
+/// the shipping cadence, not the poll interval: one cycle's uploads
+/// finish well inside these rounds.
+const FETCH_REFRESH_ROUNDS: usize = 4;
+const FETCH_REFRESH_PAUSE: Duration = Duration::from_millis(150);
+
 /// Decides, once per boot, how this data directory relates to the
 /// bucket: `None` — boot from local disk exactly as before (with the
 /// shipper claiming the next generation as usual); `Some` — the
@@ -967,17 +979,87 @@ impl Hydrator {
         expect: ManifestFile,
     ) -> io::Result<bool> {
         let path = self.data_dir.join(name);
-        if let Ok(local) = std::fs::read(&path)
-            && local.len() as u64 == expect.len
-            && crate::crc32c::crc32c(&local) == expect.crc
-        {
-            return Ok(false);
+        let mut expect = expect;
+        let mut round = 0usize;
+        loop {
+            if let Ok(local) = std::fs::read(&path)
+                && local.len() as u64 == expect.len
+                && crate::crc32c::crc32c(&local) == expect.crc
+            {
+                return Ok(false);
+            }
+            let key = root.clone().join("files").join(name);
+            let bytes = ship::fetch(self.store.as_ref(), &key).await?;
+            match ship::verify_file_bytes(name, &bytes, expect) {
+                Ok(()) => {
+                    ship::write_restored_file(&self.data_dir, name, &bytes)?;
+                    return Ok(true);
+                }
+                Err(error) => {
+                    if let Some(refreshed) = self
+                        .refreshed_extent(root, name, round, error, |manifest| {
+                            manifest.files.get(name).copied()
+                        })
+                        .await?
+                    {
+                        expect = refreshed;
+                    }
+                    round += 1;
+                }
+            }
         }
-        let key = root.clone().join("files").join(name);
-        let bytes = ship::fetch(self.store.as_ref(), &key).await?;
-        ship::verify_file_bytes(name, &bytes, expect)?;
-        ship::write_restored_file(&self.data_dir, name, &bytes)?;
-        Ok(true)
+    }
+
+    /// The mismatch-is-not-always-rot arbiter behind both fetchers: a
+    /// LIVE lineage legitimately advances mid-hydration — the writer
+    /// replaces an object, then refreshes the manifest — so a
+    /// verification failure first re-reads the generation's manifest
+    /// and retries against whatever it now says, and only a mismatch
+    /// that survives [`FETCH_REFRESH_ROUNDS`] re-reads (a STABLE
+    /// manifest disagreeing with the bytes) keeps the rot refusal.
+    /// Bounded, briefly paced: the window is one shipping cycle — the
+    /// object landed, its manifest refresh has not.
+    async fn refreshed_extent<T>(
+        &self,
+        root: &StorePath,
+        name: &str,
+        round: usize,
+        error: io::Error,
+        extent_of: impl Fn(&ship::Manifest) -> Option<T>,
+    ) -> io::Result<Option<T>> {
+        if round >= FETCH_REFRESH_ROUNDS {
+            return Err(error);
+        }
+        tokio::time::sleep(FETCH_REFRESH_PAUSE).await;
+        match ship::read_manifest(self.store.as_ref(), root).await {
+            Ok(Some(manifest)) => match extent_of(&manifest) {
+                Some(extent) => {
+                    tracing::info!(
+                        file = %name,
+                        round,
+                        "bucket object moved past the manifest snapshot; retrying \
+                         against the refreshed manifest — a live writer shipped \
+                         mid-hydration",
+                    );
+                    Ok(Some(extent))
+                }
+                // Vanished from the lineage: nothing newer to verify
+                // against — surface the original mismatch.
+                None => Err(error),
+            },
+            // A pre-manifest (empty) marker cannot re-verify anything.
+            Ok(None) => Err(error),
+            // A transient manifest read failure spends the round; the
+            // next attempt re-fetches under the extent it already had.
+            Err(read_error) => {
+                tracing::debug!(
+                    file = %name,
+                    error = %read_error,
+                    "manifest re-read failed while arbitrating a mismatch; retrying",
+                );
+                Ok(None)
+            }
+        }
     }
 
     /// A log lane reuses the local file iff the manifest's shipped
@@ -997,62 +1079,100 @@ impl Hydrator {
         lane: ManifestLane,
     ) -> io::Result<bool> {
         let path = self.data_dir.join(name);
-        match std::fs::read(&path) {
-            Ok(local) => {
-                let shipped = lane.len as usize;
-                if local.len() >= shipped && crate::crc32c::crc32c(&local[..shipped]) == lane.crc {
-                    if local.len() > shipped && matches!(self.lane_policy, LanePolicy::ShippedExact)
+        let mut lane = lane;
+        let mut round = 0usize;
+        loop {
+            match std::fs::read(&path) {
+                Ok(local) => {
+                    let shipped = lane.len as usize;
+                    if local.len() >= shipped
+                        && crate::crc32c::crc32c(&local[..shipped]) == lane.crc
                     {
-                        tracing::info!(
-                            lane = %name,
-                            kept = shipped,
-                            dropped = local.len() - shipped,
-                            "truncating a local log tail the lineage does not carry — \
-                             a replica serves the shipped stream exactly",
-                        );
-                        let file = std::fs::OpenOptions::new().write(true).open(&path)?;
-                        file.set_len(lane.len)?;
-                        file.sync_all()?;
+                        if local.len() > shipped
+                            && matches!(self.lane_policy, LanePolicy::ShippedExact)
+                        {
+                            tracing::info!(
+                                lane = %name,
+                                kept = shipped,
+                                dropped = local.len() - shipped,
+                                "truncating a local log tail the lineage does not carry — \
+                                 a replica serves the shipped stream exactly",
+                            );
+                            let file = std::fs::OpenOptions::new().write(true).open(&path)?;
+                            file.set_len(lane.len)?;
+                            file.sync_all()?;
+                        }
+                        return Ok(false);
                     }
-                    return Ok(false);
+                    if local.len() < shipped {
+                        // The replica's steady tailing beat, not an
+                        // anomaly: the shipped stream grew past the local
+                        // copy (or, rarely, the local bytes diverged
+                        // within it — indistinguishable without the
+                        // download, identical remedy). Nothing beyond the
+                        // shipped extent exists locally, so nothing is
+                        // discarded; the refetch is bounded by the lane's
+                        // size, which the writer's flush cadence resets.
+                        tracing::debug!(
+                            lane = %name,
+                            local = local.len(),
+                            shipped,
+                            "shipped stream is ahead of the local log; fetching the lane",
+                        );
+                    } else if !local.is_empty() {
+                        tracing::warn!(
+                            lane = %name,
+                            "local log diverged from the bucket lineage; refetching — any \
+                             un-shipped local tail is discarded",
+                        );
+                    }
                 }
-                if local.len() < shipped {
-                    // The replica's steady tailing beat, not an
-                    // anomaly: the shipped stream grew past the local
-                    // copy (or, rarely, the local bytes diverged
-                    // within it — indistinguishable without the
-                    // download, identical remedy). Nothing beyond the
-                    // shipped extent exists locally, so nothing is
-                    // discarded; the refetch is bounded by the lane's
-                    // size, which the writer's flush cadence resets.
-                    tracing::debug!(
-                        lane = %name,
-                        local = local.len(),
-                        shipped,
-                        "shipped stream is ahead of the local log; fetching the lane",
-                    );
-                } else if !local.is_empty() {
-                    tracing::warn!(
-                        lane = %name,
-                        "local log diverged from the bucket lineage; refetching — any \
-                         un-shipped local tail is discarded",
-                    );
-                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+            // Fetch + record verification as one attempt: a lane
+            // replaced under the reader (the writer's flush resets the
+            // series) can surface as a missing segment, an extent
+            // mismatch, or torn record framing — all the same story,
+            // arbitrated by [`Self::refreshed_extent`] exactly like a
+            // published file's.
+            let attempt = async {
+                let assembled = ship::fetch_lane(self.store.as_ref(), root, name, lane).await?;
+                // The same record-by-record verification restore runs:
+                // rot must refuse loudly, not replay quietly.
+                crate::wal::shippable_records(&assembled).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("lane {name} series {}: {error}", lane.series),
+                    )
+                })?;
+                Ok::<Vec<u8>, io::Error>(assembled)
+            }
+            .await;
+            match attempt {
+                Ok(assembled) => {
+                    crate::storage::write_atomic(&path, &assembled)?;
+                    return Ok(true);
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::InvalidData | io::ErrorKind::NotFound
+                    ) =>
+                {
+                    if let Some(refreshed) = self
+                        .refreshed_extent(root, name, round, error, |manifest| {
+                            manifest.lanes.get(name).copied()
+                        })
+                        .await?
+                    {
+                        lane = refreshed;
+                    }
+                    round += 1;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        let assembled = ship::fetch_lane(self.store.as_ref(), root, name, lane).await?;
-        // The same record-by-record verification restore runs: rot
-        // must refuse loudly, not replay quietly.
-        crate::wal::shippable_records(&assembled).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("lane {name} series {}: {error}", lane.series),
-            )
-        })?;
-        crate::storage::write_atomic(&path, &assembled)?;
-        Ok(true)
     }
 }
 
@@ -1130,6 +1250,175 @@ mod tests {
             shipper.retire_generation().await;
         }
         (bucket, writer)
+    }
+
+    /// A reader whose manifest snapshot has aged while the writer kept
+    /// shipping — the boot-time race a replica (or stateless boot)
+    /// falls into against a live lineage. Every fetched shape is
+    /// covered: a published file replaced under the reader (the meta,
+    /// via hydrate_shared; the image, via first touch) and a log lane
+    /// whose series was reset and its old segments removed. Each
+    /// mismatch must arbitrate through a manifest re-read and land the
+    /// NEWER bytes, not refuse as rot — a replica booting against an
+    /// actively-shipping writer would otherwise crash-loop on a window
+    /// it can never win.
+    #[tokio::test]
+    async fn a_mismatch_against_a_moving_lineage_heals_through_a_manifest_reread() {
+        let bucket = scratch("race-bucket");
+        let writer = scratch("race-writer");
+        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(
+            writer.join("ctx_a.meta.json"),
+            br#"{"description":"d","pinned":false}"#,
+        )
+        .unwrap();
+        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+        let state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
+        let mut shipper = Shipper::claim(
+            local_store(&bucket),
+            StorePath::default(),
+            url_of("race"),
+            writer.clone(),
+            Arc::new(ShipProgress::new()),
+            state,
+            None,
+        )
+        .await
+        .unwrap();
+        shipper.cycle().await.unwrap();
+
+        // The reader's snapshot: cycle 1's manifest, held while the
+        // writer moves on.
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let stale = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .expect("cycle 1 wrote a manifest");
+        let stale_series = stale.lanes["ctx_a.wal.jsonl"].series;
+
+        // Cycle 2: the image and meta are replaced, and the WAL's
+        // series resets (the writer's flush truncated it) — every
+        // extent the stale snapshot describes is now wrong.
+        std::fs::write(writer.join("ctx_a.ctx"), b"image-v2-and-longer").unwrap();
+        std::fs::write(
+            writer.join("ctx_a.meta.json"),
+            br#"{"description":"moved on","pinned":false}"#,
+        )
+        .unwrap();
+        std::fs::write(writer.join("ctx_a.wal.jsonl"), b"").unwrap();
+        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 9, &[associate("b")]).unwrap();
+        shipper.cycle().await.unwrap();
+        // The old series' segments age out of the bucket (a cleanup a
+        // future shipper may run; simulated here) — the stale lane
+        // fetch cannot even 404 its way to the old bytes.
+        let old_segment_prefix = format!("{stale_series:010}-");
+        for entry in walk_files(&bucket) {
+            let is_old_segment = entry
+                .parent()
+                .and_then(|parent| parent.parent())
+                .and_then(|lane_dir| lane_dir.file_name())
+                .is_some_and(|dir| dir == "wal")
+                && entry
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&old_segment_prefix));
+            if is_old_segment {
+                std::fs::remove_file(entry).unwrap();
+            }
+        }
+
+        let target = scratch("race-target");
+        let hydrator = Hydrator::new(
+            Arc::clone(&store),
+            1,
+            root,
+            target.clone(),
+            stale,
+            LanePolicy::ShippedExact,
+        );
+        // The shared pass fetches the meta: bytes v2 vs snapshot v1.
+        hydrator
+            .hydrate_shared()
+            .await
+            .expect("a moving lineage heals through the manifest re-read");
+        assert_eq!(
+            std::fs::read(target.join("ctx_a.meta.json")).unwrap(),
+            br#"{"description":"moved on","pinned":false}"#
+        );
+        // First touch fetches the image and the lane: both stale.
+        hydrator.ensure_context("ctx_a").unwrap();
+        assert_eq!(
+            std::fs::read(target.join("ctx_a.ctx")).unwrap(),
+            b"image-v2-and-longer"
+        );
+        let lane = std::fs::read(target.join("ctx_a.wal.jsonl")).unwrap();
+        assert!(
+            String::from_utf8_lossy(&lane).contains("\"b\""),
+            "the healed lane carries cycle 2's records"
+        );
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// The refusal the retry must NOT soften: bytes disagreeing with a
+    /// manifest that is not moving is rot, and it still fails the
+    /// fetch after the re-read rounds expire.
+    #[tokio::test]
+    async fn true_rot_still_refuses_after_the_reread_rounds() {
+        let (bucket, writer) = shipped_bucket("rot-arbiter", true).await;
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The object rots in place; the manifest never moves.
+        let meta = walk_files(&bucket)
+            .into_iter()
+            .find(|path| path.ends_with("files/ctx_a.meta.json"))
+            .expect("the shipped meta object exists");
+        std::fs::write(&meta, b"rotten").unwrap();
+
+        let target = scratch("rot-arbiter-target");
+        let hydrator = Hydrator::new(
+            Arc::clone(&store),
+            1,
+            root,
+            target.clone(),
+            manifest,
+            LanePolicy::ShippedExact,
+        );
+        let error = hydrator
+            .hydrate_shared()
+            .await
+            .expect_err("a stable manifest disagreeing with the bytes is rot");
+        assert!(
+            error.to_string().contains("do not match"),
+            "unexpected error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Every file under `dir`, recursively — the tests' tiny walker.
+    fn walk_files(dir: &FsPath) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(current).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files
     }
 
     fn url_of(tag: &str) -> String {

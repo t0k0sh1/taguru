@@ -1755,14 +1755,20 @@ fn parse_segment_name(name: &str) -> Option<(u64, u64)> {
 }
 
 pub(crate) async fn fetch(store: &dyn ObjectStore, key: &StorePath) -> io::Result<Vec<u8>> {
-    let result = store
-        .get(key)
-        .await
-        .map_err(|error| io::Error::other(format!("downloading {key}: {error}")))?;
-    let bytes = result
-        .bytes()
-        .await
-        .map_err(|error| io::Error::other(format!("downloading {key}: {error}")))?;
+    // A missing object keeps its kind: hydration's mismatch arbiter
+    // (`hydrate::Hydrator::refreshed_extent`) tells "the lineage moved
+    // and took this object with it" (retryable against a re-read
+    // manifest) from every other download failure by exactly this.
+    let wrap = |error: object_store::Error| {
+        let kind = if matches!(error, object_store::Error::NotFound { .. }) {
+            io::ErrorKind::NotFound
+        } else {
+            io::ErrorKind::Other
+        };
+        io::Error::new(kind, format!("downloading {key}: {error}"))
+    };
+    let result = store.get(key).await.map_err(wrap)?;
+    let bytes = result.bytes().await.map_err(wrap)?;
     Ok(bytes.to_vec())
 }
 
