@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use taguru::deadline::Deadline;
 
 use crate::metrics::{ErrorKind, RetrievalCacheOp, SearchOp};
-use crate::registry::{AppState, CitationLookup, PassageExplainLookup};
+use crate::registry::{AppState, CitationLookup, PassageExplainLookup, SemanticFill};
 
 use super::aliases::KeysetQuery;
 use super::recall::cross_targets;
@@ -348,6 +348,7 @@ pub async fn search_passages(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    let limit = clamp(request.limit, 5, MAX_MATCH_LIMIT);
     // Minted before the search — see `retrieval_key`. The raw
     // `semantic_floor` goes in unclamped: two spellings of one
     // effective floor just occupy two entries, which is only a hit-rate
@@ -358,28 +359,65 @@ pub async fn search_passages(
         serde_json::to_string(&(
             "search_passages",
             &request.query,
-            clamp(request.limit, 5, MAX_MATCH_LIMIT),
+            limit,
             request.semantic_floor,
         ))
         .ok(),
     );
-    if let Some(key) = &key
-        && let Some(found) = state.retrieval_lookup(key)
-    {
-        replay_cached_search(&state, key, &found);
-        if search_log_enabled() {
-            tracing::info!(
-                target: "taguru::search",
-                context = %name,
-                op = "search_passages",
-                cue = %request.query,
-                hits = found.log_hits,
-                top_score = f64::from(found.log_top_score),
-                cached = true,
-                "search",
-            );
+    let mut semantic_fill = None;
+    if let Some(key) = &key {
+        if let Some(found) = state.retrieval_lookup(key) {
+            replay_cached_search(&state, key, &found);
+            if search_log_enabled() {
+                tracing::info!(
+                    target: "taguru::search",
+                    context = %name,
+                    op = "search_passages",
+                    cue = %request.query,
+                    hits = found.log_hits,
+                    top_score = f64::from(found.log_top_score),
+                    cached = true,
+                    "search",
+                );
+            }
+            return ok(found.payload.as_ref(), started_at);
         }
-        return ok(found.payload.as_ref(), started_at);
+        // The semantic tier (see `semantic_retrieval`): the bucket is
+        // the key params with the query stripped, so equivalence can
+        // only pair requests that agree on everything else. Blocking
+        // section — the probe may pay the query embedding the search
+        // below would otherwise pay (same cue cache, one provider
+        // call either way).
+        if let Ok(sans_query) =
+            serde_json::to_string(&("search_passages", limit, request.semantic_floor))
+            && let Some(probe) = tokio::task::block_in_place(|| {
+                state.semantic_retrieval(key, &sans_query, &request.query, deadline)
+            })
+        {
+            if let Some(served) = probe.served {
+                replay_cached_search(&state, key, &served.value);
+                if search_log_enabled() {
+                    tracing::info!(
+                        target: "taguru::search",
+                        context = %name,
+                        op = "search_passages",
+                        cue = %request.query,
+                        hits = served.value.log_hits,
+                        top_score = f64::from(served.value.log_top_score),
+                        cached = true,
+                        similarity = f64::from(served.similarity),
+                        matched = %served.canonical,
+                        "search",
+                    );
+                }
+                return ok(served.value.payload.as_ref(), started_at);
+            }
+            semantic_fill = Some(SemanticFill {
+                params: sans_query,
+                query: request.query.clone(),
+                embedding: probe.embedding,
+            });
+        }
     }
     // Off the async worker: a residency's first search tokenizes the
     // whole corpus into the index (the audit endpoints' rule).
@@ -387,7 +425,7 @@ pub async fn search_passages(
         state.search_passages(
             &name,
             &request.query,
-            clamp(request.limit, 5, MAX_MATCH_LIMIT),
+            limit,
             request.semantic_floor,
             deadline,
         )
@@ -437,6 +475,7 @@ pub async fn search_passages(
                 lane_hits,
                 log_hits,
                 top_score,
+                semantic_fill,
                 started_at,
             )
         }
@@ -925,23 +964,59 @@ pub async fn cross_search_passages(
         ))
         .ok(),
     );
-    if let Some(key) = &key
-        && let Some(found) = state.retrieval_lookup(key)
-    {
-        replay_cached_search(&state, key, &found);
-        if search_log_enabled() {
-            tracing::info!(
-                target: "taguru::search",
-                contexts = %targets.join(","),
-                op = "search_passages",
-                cue = %request.query,
-                hits = found.log_hits,
-                top_score = f64::from(found.log_top_score),
-                cached = true,
-                "search",
-            );
+    let mut semantic_fill = None;
+    if let Some(key) = &key {
+        if let Some(found) = state.retrieval_lookup(key) {
+            replay_cached_search(&state, key, &found);
+            if search_log_enabled() {
+                tracing::info!(
+                    target: "taguru::search",
+                    contexts = %targets.join(","),
+                    op = "search_passages",
+                    cue = %request.query,
+                    hits = found.log_hits,
+                    top_score = f64::from(found.log_top_score),
+                    cached = true,
+                    "search",
+                );
+            }
+            return ok(found.payload.as_ref(), started_at);
         }
-        return ok(found.payload.as_ref(), started_at);
+        // The semantic tier, keyed on the resolved target list like
+        // the exact key above. A side effect worth having: the probe
+        // warms the cue cache before the fan-out, so a cold cross
+        // search no longer has up to `permits` targets each paying
+        // for the same query embedding.
+        if let Ok(sans_query) =
+            serde_json::to_string(&("cross_search_passages", limit, request.semantic_floor))
+            && let Some(probe) = tokio::task::block_in_place(|| {
+                state.semantic_retrieval(key, &sans_query, &request.query, deadline)
+            })
+        {
+            if let Some(served) = probe.served {
+                replay_cached_search(&state, key, &served.value);
+                if search_log_enabled() {
+                    tracing::info!(
+                        target: "taguru::search",
+                        contexts = %targets.join(","),
+                        op = "search_passages",
+                        cue = %request.query,
+                        hits = served.value.log_hits,
+                        top_score = f64::from(served.value.log_top_score),
+                        cached = true,
+                        similarity = f64::from(served.similarity),
+                        matched = %served.canonical,
+                        "search",
+                    );
+                }
+                return ok(served.value.payload.as_ref(), started_at);
+            }
+            semantic_fill = Some(SemanticFill {
+                params: sans_query,
+                query: request.query.clone(),
+                embedding: probe.embedding,
+            });
+        }
     }
     // Each residency's first search tokenizes its whole corpus, so the
     // fetch belongs on the blocking pool — bounded and concurrent, the
@@ -1036,6 +1111,7 @@ pub async fn cross_search_passages(
         lane_hits,
         log_hits,
         top_score,
+        semantic_fill,
         started_at,
     )
 }

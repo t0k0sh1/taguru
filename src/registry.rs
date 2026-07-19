@@ -71,6 +71,7 @@ mod passages;
 mod paths;
 mod retrieval_cache;
 mod search;
+mod semantic_cache;
 mod terms;
 
 pub(crate) use concurrency::{dispatch_chunks_concurrently, parallel_map};
@@ -82,6 +83,7 @@ pub(crate) use paths::{
 };
 use paths::{rename_markers_targeting, write_rename_marker};
 pub(crate) use retrieval_cache::{CachedRetrieval, RetrievalKey};
+pub(crate) use semantic_cache::SemanticFill;
 #[cfg(test)]
 use terms::text_terms;
 pub(crate) use terms::{passage_terms, spelled_passage_terms};
@@ -1450,6 +1452,12 @@ struct StateInner {
     /// corpus-dependent, so every key carries the targets' revision
     /// lanes and identity — see the module doc.
     retrieval_cache: Mutex<retrieval_cache::RetrievalCache>,
+    /// The semantic retrieval tier (issue #153): equivalence claims
+    /// that rewrite a paraphrased passage query onto its canonical's
+    /// exact-cache key. Holds no payloads and needs no invalidation —
+    /// see the module doc. Off unless
+    /// `TAGURU_SEMANTIC_CACHE_THRESHOLD` is set.
+    semantic_cache: Mutex<semantic_cache::SemanticCache>,
     /// The shared observability registry; every `AppState` clone —
     /// handlers, middleware, the flusher task — increments the same
     /// counters.
@@ -1713,6 +1721,9 @@ impl AppState {
                     retrieval_cache::DEFAULT_RETRIEVAL_CACHE_BYTES,
                 ),
             )),
+            semantic_cache: Mutex::new(semantic_cache::SemanticCache::new(crate::env::env_floor(
+                "TAGURU_SEMANTIC_CACHE_THRESHOLD",
+            ))),
             metrics: Metrics::default(),
             wal_enabled: options.wal_enabled,
             wal_max_bytes: options.wal_max_bytes,
@@ -1936,6 +1947,7 @@ impl AppState {
                 .unwrap_or(cold_passages_wal_bytes);
         }
         let (retrieval_cache_entries, retrieval_cache_bytes) = self.retrieval_cache_gauges();
+        let semantic_cache_entries = self.semantic_cache_entries();
         GaugeSnapshot {
             contexts_registered,
             groups_registered: self.0.groups.read().len() as u64,
@@ -1955,6 +1967,7 @@ impl AppState {
                 .map(crate::embedding::EmbedBreaker::snapshot),
             retrieval_cache_entries,
             retrieval_cache_bytes,
+            semantic_cache_entries,
         }
     }
 

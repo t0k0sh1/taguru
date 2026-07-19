@@ -97,6 +97,7 @@ pub async fn recall(
                 [0, 0, 0],
                 total,
                 0.0,
+                None,
                 started_at,
             )
         }
@@ -473,6 +474,7 @@ pub async fn cross_recall(
         [0, 0, 0],
         total,
         0.0,
+        None,
         started_at,
     )
 }
@@ -571,6 +573,7 @@ pub async fn query(
                 [0, 0, 0],
                 total,
                 0.0,
+                None,
                 started_at,
             )
         }
@@ -710,6 +713,7 @@ pub async fn cross_query(
         [0, 0, 0],
         total,
         0.0,
+        None,
         started_at,
     )
 }

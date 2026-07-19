@@ -8,6 +8,30 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Semantic retrieval cache for passage search (#153): with
+  `TAGURU_SEMANTIC_CACHE_THRESHOLD` set (off by default), a
+  paraphrased `sources/search` (single-context or cross, MCP
+  included) can answer from an equivalent earlier query's exact-cache
+  entry. Equivalence requires the query-vs-query embedding cosine
+  (through the same cue cache the search uses — no extra provider
+  calls on the fresh path) to clear the threshold AND a
+  negation/number/entity guard to find no mismatch between the two
+  query texts, so "does it X" never serves "does it not X", a changed
+  number, or a swapped name at high cosine. The tier stores only
+  equivalence claims — no payloads, no invalidation machinery: a
+  match rewrites the request's exact key to the canonical query's
+  params under current revision fingerprints, so every #150 freshness
+  guarantee (revision lanes, identity nonce, delete-recreate, replica
+  lineage) applies unchanged, and a post-write serve becomes a
+  `stale` fall-through that re-canonicalizes the cluster. Outcomes in
+  `taguru_semantic_cache_total{outcome=hit|stale|guarded|miss}` plus
+  a `taguru_semantic_cache_entries` gauge; semantic serves add
+  `similarity` and `matched` to the opt-in search log line. Guard
+  blind spots (spelled-out and kanji numerals, sentence-initial
+  English entities, entities in unsegmented scripts) are documented
+  in `src/registry/semantic_cache.rs` — the threshold is the primary
+  filter and the default posture is off. No request or response shape
+  changes.
 - Exact-match retrieval cache (#150): an identical
   recall/query/passage-search request (single-context and cross
   variants, MCP tool calls included) against an unchanged corpus now

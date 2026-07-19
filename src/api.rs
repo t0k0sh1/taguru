@@ -17,7 +17,9 @@ use taguru::context::{Activation, Association, Attribution, Recollection};
 
 use crate::groups::{MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, NestingViolation};
 use crate::metrics::ErrorKind;
-use crate::registry::{AccessError, AppState, CachedRetrieval, PartialWrite, RetrievalKey};
+use crate::registry::{
+    AccessError, AppState, CachedRetrieval, PartialWrite, RetrievalKey, SemanticFill,
+};
 
 mod aliases;
 mod associations;
@@ -580,6 +582,9 @@ pub async fn method_not_allowed(method: Method, uri: Uri) -> Response {
 /// log system, which is why there is no in-server top-K. A line
 /// served from the retrieval cache carries an extra `cached=true`
 /// field; the ask is just as real, the search path just didn't run.
+/// A semantic-tier serve additionally carries `similarity` and
+/// `matched` (the canonical query it was judged equivalent to) — the
+/// two numbers threshold tuning reads.
 fn search_log_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| crate::env::env_bool("TAGURU_LOG_SEARCHES", false))
@@ -611,7 +616,9 @@ fn replay_cached_search(state: &AppState, key: &RetrievalKey, found: &CachedRetr
 /// (round-tripping through `serde_json::Value` instead would widen
 /// `f32` scores to `f64` and change the wire text). `target_empty`,
 /// `lane_hits`, and the two log numbers are what a hit replays; see
-/// [`replay_cached_search`].
+/// [`replay_cached_search`]. `semantic` is the passage handlers'
+/// equivalence-claim material — registered right beside the exact
+/// store so a claim can never point at a fill that didn't happen.
 #[allow(clippy::too_many_arguments)] // one call-shape per cached surface, not an API
 fn cache_and_serve<T: Serialize>(
     state: &AppState,
@@ -621,6 +628,7 @@ fn cache_and_serve<T: Serialize>(
     lane_hits: [u64; 3],
     log_hits: usize,
     log_top_score: f32,
+    semantic: Option<SemanticFill>,
     started_at: Instant,
 ) -> Response {
     let Ok(raw) = serde_json::value::to_raw_value(payload) else {
@@ -631,6 +639,9 @@ fn cache_and_serve<T: Serialize>(
     };
     let raw: Arc<serde_json::value::RawValue> = raw.into();
     if let Some(key) = key {
+        if let Some(fill) = semantic {
+            state.semantic_register(&key, fill);
+        }
         state.retrieval_store(
             key,
             CachedRetrieval {

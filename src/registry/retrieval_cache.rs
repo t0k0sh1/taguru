@@ -277,6 +277,15 @@ impl AppState {
         found
     }
 
+    /// The semantic tier's delegated read of a rewritten key: same
+    /// map, same recency touch, NOT counted in
+    /// `taguru_retrieval_cache_total` — one request must not read as
+    /// two exact consultations; `taguru_semantic_cache_total` owns
+    /// this outcome (see [`AppState::semantic_retrieval`]).
+    pub(crate) fn retrieval_lookup_uncounted(&self, key: &RetrievalKey) -> Option<CachedRetrieval> {
+        self.0.retrieval_cache.lock().lookup(key)
+    }
+
     /// Files a computed response under its key. Only full successes
     /// arrive here — error responses are never cached.
     pub(crate) fn retrieval_store(&self, key: RetrievalKey, value: CachedRetrieval) {
