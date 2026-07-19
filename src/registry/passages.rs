@@ -4,6 +4,22 @@ use std::sync::atomic::Ordering;
 
 use super::{AppState, CitationLookup, file_stem};
 
+/// Why a passage store was refused — the write path's two failure
+/// families kept apart so a handler can answer 507 for the policy
+/// refusal and 500 for the disk one, instead of flattening both into
+/// one `io::Error`.
+#[derive(Debug)]
+pub enum PassagesWriteError {
+    /// The store itself failed (load, append, fsync) — an operator
+    /// problem, surfaced like every other io failure here.
+    Io(io::Error),
+    /// The context is at or over its declared storage ceiling
+    /// (`TAGURU_CONTEXT_QUOTAS`) — the same 507 `storage_full`
+    /// contract as the graph side's
+    /// [`super::AccessError::QuotaExceeded`].
+    QuotaExceeded(String),
+}
+
 impl AppState {
     /// Registers original text passages behind source ids, merge-upsert,
     /// persisted immediately. This is the server-side "storage of
@@ -16,13 +32,33 @@ impl AppState {
         &self,
         name: &str,
         passages: BTreeMap<String, crate::passages::PassageSubmission>,
-    ) -> Option<io::Result<crate::passages::StoreOutcome>> {
+    ) -> Option<Result<crate::passages::StoreOutcome, PassagesWriteError>> {
         let entry = self.lookup(name)?;
         let fence = entry.read_unless_deleted()?;
+        // The storage-quota gate, before the store is even loaded: this
+        // entrance only ever grows the context (retraction goes through
+        // `retract_source`, which stays open at the ceiling), so no op
+        // inspection is needed — the graph gate's `WalOp::grows` split
+        // has no counterpart here. The admission lock is what makes
+        // the gate real under the SHARED fence: without it, two
+        // concurrent stores could read the same pre-write usage, both
+        // pass, and only then serialize at the store's writer mutex —
+        // already past the gate (see `Entry::passages_admission`).
+        let admission = entry.passages_admission.lock();
+        if let Some((used, ceiling)) = self.storage_quota_excess(name, &fence, &entry) {
+            self.0.metrics.record_storage_quota_refusal();
+            return Some(Err(PassagesWriteError::QuotaExceeded(
+                super::storage_quota_message(name, used, ceiling),
+            )));
+        }
         let outcome = match self.entry_passages(&entry, &file_stem(name)) {
             Ok(store) => {
                 let sources: Vec<String> = passages.keys().cloned().collect();
                 let stored = store.store(passages);
+                // The append is settled (durable or refused) and its
+                // bytes are on the store's books — the next admission
+                // reads them; the index folding below needs no gate.
+                drop(admission);
                 if stored.is_ok() {
                     // Every store lock is released again; fold the new
                     // paragraphs into the resident index.
@@ -35,9 +71,11 @@ impl AppState {
                         .passage_revision
                         .fetch_max(store.watermark(), Ordering::Relaxed);
                 }
-                stored
+                stored.map_err(PassagesWriteError::Io)
             }
-            Err(error) => Err(error),
+            // The load failed before any write; the admission falls
+            // with the enclosing scope.
+            Err(error) => Err(PassagesWriteError::Io(error)),
         };
         drop(fence);
         // Passage text is resident now; give the budget a chance to

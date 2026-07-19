@@ -352,6 +352,48 @@ pub async fn import_batch(
                     started_at,
                 )));
             }
+            // The storage-quota pre-check (issue #136), batch-granular
+            // like the deadline above and skipped on dry runs — a
+            // preview's capacity answers are documented as advisory
+            // ("can only surface by actually applying"). Only batches
+            // that CARRY GROWTH are gated: a header-only batch is a
+            // pure source retraction, the import-shaped way down in
+            // size, and must stay open at the ceiling exactly as the
+            // write path keeps retract/unalias open. The WAL lanes
+            // behind the check are live, so re-checking per batch IS
+            // the running remaining-budget check: used bytes advance
+            // as batches land, and the import stops at the first batch
+            // past the line — a resumable prefix, like a spent
+            // deadline. The gates inside the write path still stand
+            // behind this for the batch that crosses mid-apply.
+            if !query.dry_run
+                && batch.carries_growth()
+                && let Some((used, ceiling)) = state.storage_quota_refusal(&batch.context)
+            {
+                state.metrics().record_storage_quota_refusal();
+                let note = import_batch_note(
+                    index,
+                    total,
+                    batch,
+                    outcomes.len(),
+                    query.dry_run,
+                    ("not previewed", "not attempted"),
+                    (
+                        "re-running the preview against a shrunk context is exact",
+                        "retracting or compacting the context (or raising its quota), then \
+                         re-POSTing the remaining stream is exact (each batch replaces its \
+                         own source)",
+                    ),
+                );
+                return Err(Box::new(error(
+                    ErrorCode::StorageFull,
+                    format!(
+                        "{note}{}",
+                        crate::registry::storage_quota_message(&batch.context, used, ceiling)
+                    ),
+                    started_at,
+                )));
+            }
             let applied = if query.dry_run {
                 crate::ingest::preview_batch(&state, batch)
             } else {

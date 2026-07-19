@@ -637,6 +637,9 @@ fn export_one(state: &AppState, name: &str, out: &std::path::Path) -> Result<Str
             // expires — unreachable in practice, kept for
             // exhaustiveness.
             AccessError::DeadlineExceeded => "deadline exceeded".to_string(),
+            // Same unreachability: the offline CLI boots with no quota
+            // declaration (and an export is a read besides).
+            AccessError::QuotaExceeded(error) => error,
         })?;
     let rendered = render(name, &snapshot, Deadline::unbounded())?;
     let path = out.join(format!("{}.jsonl", crate::registry::file_stem(name)));

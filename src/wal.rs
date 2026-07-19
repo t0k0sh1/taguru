@@ -65,6 +65,21 @@ pub enum WalOp {
     },
 }
 
+impl WalOp {
+    /// Whether applying this op grows the context's content — the
+    /// storage-quota gate fires only for batches that carry at least
+    /// one of these. The shrink ops (unalias, retract) stay allowed at
+    /// the ceiling: they are how a tenant gets back under it, the same
+    /// line the passage store draws for its own cap ("retractions are
+    /// how an operator shrinks the store").
+    pub fn grows(&self) -> bool {
+        matches!(
+            self,
+            WalOp::Associate(_) | WalOp::AliasConcept { .. } | WalOp::AliasLabel { .. }
+        )
+    }
+}
+
 #[cfg(test)]
 impl From<crate::context_proptest::GeneratedWalOp> for WalOp {
     fn from(op: crate::context_proptest::GeneratedWalOp) -> Self {

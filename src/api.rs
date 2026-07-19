@@ -705,6 +705,15 @@ fn access_error_noted(
             ),
             started_at,
         ),
+        // No error-kind counter here: a refusal at the declared
+        // ceiling is the policy working, not the server failing —
+        // the gate that produced this already counted it on
+        // `taguru_storage_quota_refusals_total`.
+        AccessError::QuotaExceeded(message) => error(
+            ErrorCode::StorageFull,
+            format!("{note}{message}"),
+            started_at,
+        ),
     }
 }
 

@@ -207,6 +207,7 @@ load-bearing ones:
 | `TAGURU_REQUEST_TIMEOUT_SECS` | 30 | Per-request budget; raise it when an embedding provider is configured |
 | `TAGURU_MAX_CONCURRENT_HEAVY_OPS` | 2 | Shared ceiling for vocabulary audits and context compactions; excess calls get 503 + `Retry-After` (`0` disables) |
 | `TAGURU_AUTO_COMPACT` | on | Ratio-triggered auto-compaction: each flush tick rebuilds at most the one worst context whose dead ratio exceeds `TAGURU_AUTO_COMPACT_RATIO` (0.5 — dead weight outgrew live content), behind the heavy-ops ceiling; `0` keeps compaction manual-only |
+| `TAGURU_CONTEXT_QUOTAS` | — | Per-context ceilings as one JSON object (`{"sake": {"storage_bytes": …, "cache_bytes": …}}`): `storage_bytes` refuses growth writes at the ceiling with 507 `storage_full` (retract/compact/delete stay open), `cache_bytes` bounds the context's resident share — under cache pressure the over-share context is evicted first, so one hot tenant cannot evict the rest beyond its ceiling. A broken declaration refuses boot, like broken credentials |
 
 The full table — durability ceilings, observability (`RUST_LOG`,
 `TAGURU_LOG_FORMAT=json`, `OTEL_EXPORTER_OTLP_ENDPOINT`,

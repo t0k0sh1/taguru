@@ -219,6 +219,14 @@ pub struct Metrics {
     auto_compact_failed: AtomicU64,
     auto_compact_reclaimed_bytes: AtomicU64,
     auto_compact_last_success_epoch: AtomicU64,
+    /// Growth writes refused at a declared storage ceiling
+    /// (`TAGURU_CONTEXT_QUOTAS`, issue #136) — every gate counts here:
+    /// the graph write path, the passage store path, and the import
+    /// loop's per-batch pre-check. Deliberately not an `errors_*`
+    /// counter: a refusal at the ceiling is the policy working, and a
+    /// tenant hammering a full context should read as its own signal,
+    /// not as server trouble.
+    storage_quota_refusals: AtomicU64,
     /// Replication ("WAL shipping") counters. Uploads and errors are
     /// plain counters; `replication_fenced` LATCHES — unlike
     /// `flush_degraded` there is no retry loop behind it, because a
@@ -487,6 +495,12 @@ pub struct ContextGaugeRow {
     pub disk_passages_wal_bytes: u64,
     /// Meta + sources + gloss vectors + passage vectors + BM25, summed.
     pub disk_sidecar_bytes: u64,
+    /// Declared ceilings (`TAGURU_CONTEXT_QUOTAS`, issue #136), when
+    /// this context has them — `None` renders no series at all, so an
+    /// uncapped fleet's scrape is byte-identical to before quotas
+    /// existed.
+    pub quota_storage_bytes: Option<u64>,
+    pub quota_cache_bytes: Option<u64>,
     pub concepts: u64,
     pub associations: u64,
     pub labels: u64,
@@ -764,6 +778,14 @@ impl Metrics {
                 self.auto_compact_failed.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    /// Count one growth write refused at a declared storage ceiling
+    /// (issue #136) — called by the gate that refuses, never by the
+    /// error mapping, so a refusal is counted exactly once wherever
+    /// it surfaces.
+    pub fn record_storage_quota_refusal(&self) {
+        self.storage_quota_refusals.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_wal_append(&self, ok: bool) {
@@ -1505,6 +1527,39 @@ impl Metrics {
                     ));
                 }
             }
+            // Declared ceilings only (issue #136) — an uncapped fleet
+            // renders no series and no header. Usage lives in the
+            // sibling families above, so quota-vs-usage is one
+            // division away on the dashboard.
+            if gauges
+                .per_context
+                .iter()
+                .any(|row| row.quota_storage_bytes.is_some() || row.quota_cache_bytes.is_some())
+            {
+                push_header(
+                    &mut out,
+                    "taguru_context_quota_bytes",
+                    "gauge",
+                    "Declared per-context ceilings (TAGURU_CONTEXT_QUOTAS): \
+                     resource=\"storage\" caps the on-disk family (the sum of \
+                     taguru_context_disk_bytes), resource=\"cache\" caps the \
+                     resident share (taguru_context_resident_bytes) under \
+                     eviction pressure.",
+                );
+                for row in &gauges.per_context {
+                    let context = escape_label(&row.name);
+                    for (resource, ceiling) in [
+                        ("cache", row.quota_cache_bytes),
+                        ("storage", row.quota_storage_bytes),
+                    ] {
+                        if let Some(ceiling) = ceiling {
+                            out.push_str(&format!(
+                                "taguru_context_quota_bytes{{context=\"{context}\",resource=\"{resource}\"}} {ceiling}\n"
+                            ));
+                        }
+                    }
+                }
+            }
         }
         push_value(
             &mut out,
@@ -1533,6 +1588,13 @@ impl Metrics {
             "gauge",
             "Unix time of the last successful auto-compaction (0 = none since boot).",
             self.auto_compact_last_success_epoch.load(Ordering::Relaxed),
+        );
+        push_value(
+            &mut out,
+            "taguru_storage_quota_refusals_total",
+            "counter",
+            "Growth writes refused at a declared per-context storage ceiling (TAGURU_CONTEXT_QUOTAS) — graph writes, passage stores, and the import loop's per-batch pre-check all count here.",
+            self.storage_quota_refusals.load(Ordering::Relaxed),
         );
         push_value(
             &mut out,
@@ -2036,6 +2098,8 @@ mod tests {
             disk_passages_bytes: 512,
             disk_passages_wal_bytes: 32,
             disk_sidecar_bytes: 256,
+            quota_storage_bytes: Some(4096),
+            quota_cache_bytes: Some(1536),
             concepts: 7,
             associations: 9,
             labels: 3,
@@ -2044,6 +2108,10 @@ mod tests {
         let with = metrics.render_prometheus(&gauges);
         let escaped = "日本\\\"酒\\\\";
         for line in [
+            format!("taguru_context_quota_bytes{{context=\"{escaped}\",resource=\"cache\"}} 1536"),
+            format!(
+                "taguru_context_quota_bytes{{context=\"{escaped}\",resource=\"storage\"}} 4096"
+            ),
             format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"image\"}} 2048"),
             format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"passages\"}} 512"),
             format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"passages_wal\"}} 32"),
@@ -2629,6 +2697,10 @@ mod tests {
                 disk_passages_bytes: 20,
                 disk_passages_wal_bytes: 5,
                 disk_sidecar_bytes: 30,
+                // Declared so the quota family renders — its HELP/TYPE
+                // discipline rides this same check.
+                quota_storage_bytes: Some(1000),
+                quota_cache_bytes: Some(2000),
                 concepts: 4,
                 associations: 6,
                 labels: 2,
