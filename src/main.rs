@@ -36,6 +36,7 @@ mod storage;
 mod trace;
 mod wal;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,7 +48,7 @@ use env::{
     needs_off_loopback_warning, resolve_body_bytes, resolve_flush_secs, resolve_heavy_ops,
     resolve_mcp_max_result_bytes, resolve_per_minute, resolve_timeout_secs,
 };
-use registry::AppState;
+use registry::{AccessError, AppState};
 use taguru::deadline::Deadline;
 use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -851,6 +852,9 @@ fn spawn_flusher(
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(flush_secs as u64));
         ticker.tick().await; // the first tick fires immediately; skip it
+        // Contexts whose auto-compaction blew AUTO_COMPACT_BUDGET —
+        // never re-selected (see `run_flush_tick`); a restart retries.
+        let mut oversized: HashSet<String> = HashSet::new();
         loop {
             ticker.tick().await;
             // A maintenance sweep is already rewriting images under its
@@ -869,7 +873,7 @@ fn spawn_flusher(
             // Catching it keeps the loop alive for the next tick and
             // lets `record_flusher_tick` turn it into a 503 instead.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_flush_tick(&state, auto_embed, &heavy_ops)
+                run_flush_tick(&state, auto_embed, &heavy_ops, &mut oversized)
             }));
             state.metrics().record_flusher_tick(outcome.is_ok());
             if let Err(payload) = outcome {
@@ -889,11 +893,26 @@ fn spawn_flusher(
     });
 }
 
+/// Ceiling on one auto-compaction inside the flusher tick. A rebuild
+/// is proportional to a single context's footprint and normally
+/// finishes in seconds; this is a backstop an order of magnitude
+/// above that (and above the request timeout manual compaction runs
+/// under), so hitting it means the context genuinely does not fit the
+/// background path — not that the box was briefly busy.
+const AUTO_COMPACT_BUDGET: Duration = Duration::from_secs(60);
+
 /// One flusher tick's actual work, split out of `spawn_flusher` so it
 /// can run behind `catch_unwind` as a plain synchronous call — the
 /// guarded closure must not straddle an `.await`, which rules out
-/// wrapping the loop body in place.
-fn run_flush_tick(state: &AppState, auto_embed: bool, heavy_ops: &limits::HeavyOpsLimiter) {
+/// wrapping the loop body in place. `oversized` accumulates the
+/// contexts whose auto-compaction blew [`AUTO_COMPACT_BUDGET`]; they
+/// are never re-selected for the life of the process.
+fn run_flush_tick(
+    state: &AppState,
+    auto_embed: bool,
+    heavy_ops: &limits::HeavyOpsLimiter,
+    oversized: &mut HashSet<String>,
+) {
     // Serialization and fsyncs are blocking work; keep the
     // async workers free while images land on disk.
     let flushed = tokio::task::block_in_place(|| state.flush_dirty());
@@ -952,10 +971,18 @@ fn run_flush_tick(state: &AppState, auto_embed: bool, heavy_ops: &limits::HeavyO
     // permit comes from the same pool manual heavy calls contend on:
     // when they hold every slot, the candidate simply waits for a
     // later tick, so auto-compaction can never stampede the server.
-    if let Some((name, dead_ratio)) = state.auto_compact_candidate()
+    if let Some((name, dead_ratio)) = state.auto_compact_candidate(oversized)
         && let Ok(_permit) = heavy_ops.try_acquire()
     {
-        match tokio::task::block_in_place(|| state.compact_context(&name, Deadline::unbounded())) {
+        // Bounded, unlike the flush above: a rebuild normally finishes
+        // in seconds (it is proportional to one context's footprint,
+        // which the cache budget caps), but this loop is also the only
+        // thing persisting every OTHER context, and manual compaction
+        // already lives under the request timeout — the background
+        // path should not be the one place a rebuild may stall
+        // housekeeping without limit.
+        let deadline = Deadline::after(AUTO_COMPACT_BUDGET);
+        match tokio::task::block_in_place(|| state.compact_context(&name, deadline)) {
             Ok(outcome) => {
                 // Saturating: a rebuild of a context with nothing to
                 // shed can come out marginally larger (container
@@ -976,6 +1003,21 @@ fn run_flush_tick(state: &AppState, auto_embed: bool, heavy_ops: &limits::HeavyO
                     dead_edges = outcome.dead_edges,
                     aliases_dropped = outcome.aliases_dropped,
                     "context compacted",
+                );
+            }
+            Err(AccessError::DeadlineExceeded) => {
+                // Retrying cannot heal this one — the context only
+                // grows — so re-selecting it would burn a budget's
+                // worth of CPU every tick forever. Set it aside for
+                // the process's lifetime and say how to finish the
+                // job; a restart offers the retry.
+                oversized.insert(name.clone());
+                state.metrics().record_auto_compaction(None);
+                warn!(
+                    context = %name,
+                    budget_secs = AUTO_COMPACT_BUDGET.as_secs(),
+                    "auto-compaction exceeded the tick budget; leaving this context to \
+                     POST /maintenance/compact or offline `taguru compact`"
                 );
             }
             Err(error) => {

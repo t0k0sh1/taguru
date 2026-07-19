@@ -313,9 +313,10 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   passage snapshots, and WAL records carry CRC-32C checksums, so "ok"
   means the bytes were proven intact, not just parseable.
   Revision-heavy contexts reclaim themselves: once a context's dead
-  ratio passes `TAGURU_AUTO_COMPACT_RATIO`, the next flush tick
-  rebuilds it (audit line + `taguru_auto_compactions_total` on
-  `/metrics`). `taguru compact` and `POST /contexts/{name}/compact`
+  ratio passes `TAGURU_AUTO_COMPACT_RATIO`, the flusher rebuilds it on
+  an upcoming tick — worst ratio first, one context per tick, as the
+  heavy-ops ceiling allows (audit line +
+  `taguru_auto_compactions_total` on `/metrics`). `taguru compact` and `POST /contexts/{name}/compact`
   remain for opted-out deployments (`TAGURU_AUTO_COMPACT=0`) and
   scheduled quiet-window sweeps; size targets with `taguru estimate`.
 - **Recovering from a bad alias.** Alias registration takes effect

@@ -17,6 +17,11 @@ Entries that change an on-disk format or a response shape say so.
   passages store's own self-compaction ratio). The compaction takes a
   permit from the same `TAGURU_MAX_CONCURRENT_HEAVY_OPS` pool manual
   calls contend on (no free slot: the candidate waits for a later
+  tick), runs under a 60-second budget so one oversized rebuild cannot
+  stall the loop that persists every other context (a context that
+  blows the budget is set aside for the process's lifetime with a
+  pointer at `POST /maintenance/compact` / offline `taguru compact` —
+  retrying a rebuild that cannot finish would burn the budget every
   tick), reuses `compact_context` verbatim (same crash guarantee: the
   fresh image carries the old WAL watermark), leaves the same
   `taguru::audit` "context compacted" line with `trigger="auto"` and

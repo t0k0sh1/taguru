@@ -3667,20 +3667,24 @@ impl AppState {
     }
 
     /// The ratio-triggered auto-compaction's selection half (issue
-    /// #135): the single worst-ratio context past the configured
-    /// trigger, or `None` — always `None` while the feature is off.
-    /// The flusher tick asks this every pass and compacts at most that
-    /// one candidate, so the policy stays amortized like the passages
-    /// store's own (the next tick picks up the next-worst); the caller
-    /// takes the heavy-ops permit before acting on the answer, which
-    /// is why selection and compaction are separate steps rather than
-    /// one method holding a permit it didn't need when the fleet is
-    /// clean — the common case.
-    pub fn auto_compact_candidate(&self) -> Option<(String, f64)> {
+    /// #135): the worst-ratio context past the configured trigger that
+    /// is not in `skip`, or `None` — always `None` while the feature
+    /// is off. `skip` holds the contexts whose rebuild already blew
+    /// the flusher's compaction budget: that failure cannot heal by
+    /// retrying (the context only grows), so re-selecting one would
+    /// burn a budget's worth of CPU every tick forever. The flusher
+    /// asks this every pass and compacts at most one candidate, so the
+    /// policy stays amortized like the passages store's own (the next
+    /// tick picks up the next-worst); the caller takes the heavy-ops
+    /// permit before acting on the answer, which is why selection and
+    /// compaction are separate steps rather than one method holding a
+    /// permit it didn't need when the fleet is clean — the common
+    /// case.
+    pub fn auto_compact_candidate(&self, skip: &HashSet<String>) -> Option<(String, f64)> {
         let min_dead_ratio = self.0.auto_compact?;
         self.compaction_candidates(min_dead_ratio)
             .into_iter()
-            .next()
+            .find(|(name, _)| !skip.contains(name))
     }
 
     /// Server-wide sweep: every context whose live dead ratio strictly
@@ -6505,7 +6509,9 @@ mod tests {
 
     /// [`AppState::auto_compact_candidate`] answers with the single
     /// worst context strictly past the trigger, ignores everything at
-    /// or under it, and — because compaction zeroes the winner's dead
+    /// or under it, steps to the next-worst when the worst is in the
+    /// oversized skip set (without ever promoting anything from under
+    /// the trigger), and — because compaction zeroes the winner's dead
     /// edges — finds nothing on the next ask: the amortized loop the
     /// flusher runs terminates by itself (issue #135).
     #[test]
@@ -6534,6 +6540,26 @@ mod tests {
         state.retract_source("mild", "gone.md").unwrap();
 
         state
+            .create("semi", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "semi",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                    assoc_op("蔵", "廃止蔵", "旧蔵", 1.0, Some("gone.md")),
+                    assoc_op("蔵", "廃止杜氏", "旧氏", 1.0, Some("gone.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_source("semi", "gone.md").unwrap();
+
+        state
             .create("rotten", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
@@ -6551,20 +6577,39 @@ mod tests {
             .unwrap();
         state.retract_source("rotten", "gone.md").unwrap();
 
-        // mild sits at 1/4 — under the 0.5 default; rotten at 2/3.
+        // mild sits at 1/4 — under the 0.5 default; semi at 3/5,
+        // rotten at 2/3: both qualify, worst first.
         let (name, ratio) = state
-            .auto_compact_candidate()
+            .auto_compact_candidate(&HashSet::new())
             .expect("rotten is past the trigger");
         assert_eq!(name, "rotten");
         assert!((ratio - 2.0 / 3.0).abs() < 1e-9, "{ratio}");
 
+        // An oversized rebuild remembered by the flusher steps the
+        // selection to the next-worst qualifier — the loop keeps
+        // working around a context it cannot finish.
+        let mut skip: HashSet<String> = ["rotten".to_string()].into();
+        let (name, ratio) = state
+            .auto_compact_candidate(&skip)
+            .expect("semi is the next-worst qualifier");
+        assert_eq!(name, "semi");
+        assert!((ratio - 3.0 / 5.0).abs() < 1e-9, "{ratio}");
+
+        // Skipping every qualifier must not promote mild from under
+        // the trigger.
+        skip.insert("semi".to_string());
+        assert_eq!(state.auto_compact_candidate(&skip), None);
+
         state
             .compact_context("rotten", Deadline::unbounded())
             .unwrap();
+        state
+            .compact_context("semi", Deadline::unbounded())
+            .unwrap();
         assert_eq!(
-            state.auto_compact_candidate(),
+            state.auto_compact_candidate(&HashSet::new()),
             None,
-            "the compacted winner must not re-trigger, and mild stays under"
+            "the compacted winners must not re-trigger, and mild stays under"
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -6604,7 +6649,7 @@ mod tests {
             .unwrap();
         state.retract_source("rotten", "gone.md").unwrap();
 
-        assert_eq!(state.auto_compact_candidate(), None);
+        assert_eq!(state.auto_compact_candidate(&HashSet::new()), None);
 
         let _ = fs::remove_dir_all(dir);
     }
