@@ -7,7 +7,7 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use taguru::deadline::Deadline;
 
-use crate::metrics::{ErrorKind, SearchOp};
+use crate::metrics::{ErrorKind, RetrievalCacheOp, SearchOp};
 use crate::registry::{AppState, CitationLookup, PassageExplainLookup};
 
 use super::aliases::KeysetQuery;
@@ -15,8 +15,9 @@ use super::recall::cross_targets;
 use super::{
     AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, MAX_MATCH_LIMIT, MAX_NAME_BYTES,
     MAX_PASSAGES_PER_REQUEST, MAX_QUESTION_BYTES, MAX_QUESTIONS_PER_PARAGRAPH, MAX_SECTION_BYTES,
-    access_error, bounded_parallel_map, clamp, cross_search_concurrency, deadline_exceeded, empty,
-    error, not_found, ok, orphaned_source, overlong, oversized, search_log_enabled,
+    access_error, bounded_parallel_map, cache_and_serve, clamp, cross_search_concurrency,
+    deadline_exceeded, empty, error, not_found, ok, orphaned_source, overlong, oversized,
+    replay_cached_search, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -347,6 +348,39 @@ pub async fn search_passages(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // Minted before the search — see `retrieval_key`. The raw
+    // `semantic_floor` goes in unclamped: two spellings of one
+    // effective floor just occupy two entries, which is only a hit-rate
+    // cost, never a correctness one.
+    let key = state.retrieval_key(
+        RetrievalCacheOp::SearchPassages,
+        std::slice::from_ref(&name),
+        serde_json::to_string(&(
+            "search_passages",
+            &request.query,
+            clamp(request.limit, 5, MAX_MATCH_LIMIT),
+            request.semantic_floor,
+        ))
+        .ok(),
+    );
+    if let Some(key) = &key
+        && let Some(found) = state.retrieval_lookup(key)
+    {
+        replay_cached_search(&state, key, &found);
+        if search_log_enabled() {
+            tracing::info!(
+                target: "taguru::search",
+                context = %name,
+                op = "search_passages",
+                cue = %request.query,
+                hits = found.log_hits,
+                top_score = f64::from(found.log_top_score),
+                cached = true,
+                "search",
+            );
+        }
+        return ok(found.payload.as_ref(), started_at);
+    }
     // Off the async worker: a residency's first search tokenizes the
     // whole corpus into the index (the audit endpoints' rule).
     let outcome = tokio::task::block_in_place(|| {
@@ -368,10 +402,18 @@ pub async fn search_passages(
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(hits)) => {
             state.note_search(SearchOp::SearchPassages, &name, hits.is_empty());
+            let target_empty = vec![hits.is_empty()];
+            let mut lane_hits = [0u64; 3];
             for hit in &hits {
                 state
                     .metrics()
                     .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
+                match (hit.bm25.is_some(), hit.vector.is_some()) {
+                    (true, false) => lane_hits[0] += 1,
+                    (true, true) => lane_hits[1] += 1,
+                    (false, true) => lane_hits[2] += 1,
+                    (false, false) => {}
+                }
             }
             if search_log_enabled() {
                 tracing::info!(
@@ -384,8 +426,17 @@ pub async fn search_passages(
                     "search",
                 );
             }
-            ok(
-                hits.into_iter().map(PassageHit::from).collect::<Vec<_>>(),
+            let payload: Vec<PassageHit> = hits.into_iter().map(PassageHit::from).collect();
+            let top_score = payload.first().map_or(0.0, |hit| hit.score);
+            let log_hits = payload.len();
+            cache_and_serve(
+                &state,
+                key,
+                &payload,
+                target_empty,
+                lane_hits,
+                log_hits,
+                top_score,
                 started_at,
             )
         }
@@ -860,6 +911,38 @@ pub async fn cross_search_passages(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // Resolved-target keying, minted before any fetch — the same
+    // contract as `cross_recall`'s key (see there) with this op's
+    // lanes.
+    let key = state.retrieval_key(
+        RetrievalCacheOp::SearchPassages,
+        &targets,
+        serde_json::to_string(&(
+            "cross_search_passages",
+            &request.query,
+            limit,
+            request.semantic_floor,
+        ))
+        .ok(),
+    );
+    if let Some(key) = &key
+        && let Some(found) = state.retrieval_lookup(key)
+    {
+        replay_cached_search(&state, key, &found);
+        if search_log_enabled() {
+            tracing::info!(
+                target: "taguru::search",
+                contexts = %targets.join(","),
+                op = "search_passages",
+                cue = %request.query,
+                hits = found.log_hits,
+                top_score = f64::from(found.log_top_score),
+                cached = true,
+                "search",
+            );
+        }
+        return ok(found.payload.as_ref(), started_at);
+    }
     // Each residency's first search tokenizes its whole corpus, so the
     // fetch belongs on the blocking pool — bounded and concurrent, the
     // same `bounded_parallel_map` shape as `cross_matches`'s gather.
@@ -891,6 +974,8 @@ pub async fn cross_search_passages(
     // budget is gone is reported as a timeout, not as whatever shape
     // the abandoned work happened to fail with.
     let mut pool = Vec::new();
+    let mut target_empty = Vec::with_capacity(targets.len());
+    let mut lane_hits = [0u64; 3];
     for (index, outcome) in fetched.into_iter().enumerate() {
         let name = &targets[index];
         match outcome {
@@ -899,10 +984,17 @@ pub async fn cross_search_passages(
             Some(Err(io_error)) => return passages_unreadable(&state, io_error, started_at),
             Some(Ok(hits)) => {
                 state.note_search(SearchOp::SearchPassages, name, hits.is_empty());
+                target_empty.push(hits.is_empty());
                 for hit in &hits {
                     state
                         .metrics()
                         .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
+                    match (hit.bm25.is_some(), hit.vector.is_some()) {
+                        (true, false) => lane_hits[0] += 1,
+                        (true, true) => lane_hits[1] += 1,
+                        (false, true) => lane_hits[2] += 1,
+                        (false, false) => {}
+                    }
                 }
                 pool.extend(
                     hits.into_iter()
@@ -927,13 +1019,23 @@ pub async fn cross_search_passages(
             "search",
         );
     }
-    ok(
-        pool.into_iter()
-            .map(|(index, _, hit)| CrossMatch {
-                context: targets[index].clone(),
-                inner: PassageHit::from(hit),
-            })
-            .collect::<Vec<_>>(),
+    let payload: Vec<CrossMatch<PassageHit>> = pool
+        .into_iter()
+        .map(|(index, _, hit)| CrossMatch {
+            context: targets[index].clone(),
+            inner: PassageHit::from(hit),
+        })
+        .collect();
+    let top_score = payload.first().map_or(0.0, |found| found.inner.score);
+    let log_hits = payload.len();
+    cache_and_serve(
+        &state,
+        key,
+        &payload,
+        target_empty,
+        lane_hits,
+        log_hits,
+        top_score,
         started_at,
     )
 }

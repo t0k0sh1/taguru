@@ -193,6 +193,7 @@ load-bearing ones:
 | `TAGURU_WRITER_URL` | — | Where a replica's write-refusal points clients (the writer's base URL / LB name); unset = the refusal names only the bucket's fence holder |
 | `TAGURU_ROUTE_MAP` | — | `taguru route` only: the context→shard map file (`context = shard-url` per line, optional `* = shard-url` fallback); edits take a router restart |
 | `TAGURU_CACHE_BYTES` | 512 MiB | Resident budget for unpinned contexts (LRU eviction) |
+| `TAGURU_RETRIEVAL_CACHE_BYTES` | 32 MiB | Exact-match result cache for recall/query/passage search — an identical request against an unchanged corpus answers without re-running the search; invalidated by the revision counters (`0` = off) |
 | `TAGURU_EMBED_URL` / `_MODEL` / `_API_KEY` | — | Semantic entry tier (OpenAI-compatible `/embeddings`); unset keeps the entrance purely lexical |
 | `TAGURU_EMBED_AUTO` | off | Re-embed changes with each flush — recommended whenever agents drive the ingest |
 | `TAGURU_EMBED_PASSAGES` | off | Also embed paragraphs (the semantic lane of passage search); a corpus is much larger than its glosses, so the spend is opt-in |

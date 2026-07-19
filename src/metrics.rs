@@ -144,6 +144,12 @@ pub struct Metrics {
     errors_panic: AtomicU64,
     /// `[op][outcome]`, outcome 0 = hit, 1 = empty.
     searches: [[AtomicU64; 2]; SearchOp::ALL.len()],
+    /// `[op][outcome]`, outcome 0 = hit, 1 = miss — the exact-match
+    /// retrieval cache's pulse. Disjoint from `searches` on purpose:
+    /// that family counts served retrievals (cache hits included, so
+    /// dashboards stay continuous); this one says how they were
+    /// computed. Nothing lands here while the cache is disabled.
+    retrieval_cache: [[AtomicU64; 2]; RetrievalCacheOp::ALL.len()],
     resolve_tiers: [AtomicU64; ResolveTier::ALL.len()],
     /// Passage-search hits by which lane(s) surfaced them — the pulse
     /// of what the vector lane actually adds. Fixed three labels.
@@ -308,6 +314,46 @@ impl SearchOp {
     }
 }
 
+/// The retrieval surfaces the exact-match cache fronts — the label
+/// vocabulary of `taguru_retrieval_cache_total`, and the cache key's
+/// op discriminant (each op reads a different pair of revision lanes,
+/// so the same request text under two ops must never collide). Cross
+/// variants fold into their base op: the resolved target list already
+/// distinguishes them in the key, and a per-variant label would split
+/// the hit-rate signal without adding meaning.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum RetrievalCacheOp {
+    Recall,
+    Query,
+    SearchPassages,
+}
+
+impl RetrievalCacheOp {
+    const ALL: [RetrievalCacheOp; 3] = [
+        RetrievalCacheOp::Recall,
+        RetrievalCacheOp::Query,
+        RetrievalCacheOp::SearchPassages,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            RetrievalCacheOp::Recall => "recall",
+            RetrievalCacheOp::Query => "query",
+            RetrievalCacheOp::SearchPassages => "search_passages",
+        }
+    }
+
+    /// The `searches` family op a cache hit replays its `note_search`
+    /// under — kept here so the two vocabularies cannot drift.
+    pub(crate) fn search_op(self) -> SearchOp {
+        match self {
+            RetrievalCacheOp::Recall => SearchOp::Recall,
+            RetrievalCacheOp::Query => SearchOp::Query,
+            RetrievalCacheOp::SearchPassages => SearchOp::SearchPassages,
+        }
+    }
+}
+
 /// Which tier ultimately answered a resolve (or resolve_label) —
 /// classified from the served payload, so every serve path lands in
 /// exactly one bucket. The drift signal lives here: a rising
@@ -386,6 +432,11 @@ pub struct GaugeSnapshot {
     /// lexical-only server's scrape, like the replica family off a
     /// writer.
     pub embed_breaker: Option<crate::embedding::BreakerSnapshot>,
+    /// Entries resident in the exact-match retrieval cache, and the
+    /// bytes they hold — read from the cache at scrape time like every
+    /// other gauge here, so they cannot drift.
+    pub retrieval_cache_entries: u64,
+    pub retrieval_cache_bytes: u64,
 }
 
 impl Metrics {
@@ -607,6 +658,26 @@ impl Metrics {
     /// Error responses never land here — a 500 is not an empty search.
     pub fn record_search(&self, op: SearchOp, empty: bool) {
         self.searches[op as usize][usize::from(empty)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One retrieval-cache consultation. Only consultations count: a
+    /// disabled cache, or a request the cache cannot key (a target
+    /// vanishing mid-request), records nothing rather than a fake miss.
+    pub fn record_retrieval_cache(&self, op: RetrievalCacheOp, hit: bool) {
+        self.retrieval_cache[op as usize][usize::from(!hit)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A cache hit's replay of [`Metrics::record_passage_hit`]: the
+    /// fresh path records lane contributions per served hit, so a hit
+    /// serving the same response must land the same counts — in bulk,
+    /// since the cached entry stores tallies, not hits.
+    pub fn record_passage_hit_counts(&self, bm25_only: u64, both_lanes: u64, vector_only: u64) {
+        self.passage_hits_bm25_only
+            .fetch_add(bm25_only, Ordering::Relaxed);
+        self.passage_hits_both_lanes
+            .fetch_add(both_lanes, Ordering::Relaxed);
+        self.passage_hits_vector_only
+            .fetch_add(vector_only, Ordering::Relaxed);
     }
 
     pub fn record_resolve_tier(&self, tier: ResolveTier) {
@@ -968,6 +1039,23 @@ impl Metrics {
         }
         push_header(
             &mut out,
+            "taguru_retrieval_cache_total",
+            "counter",
+            "Exact-match retrieval cache consultations by operation and outcome \
+             (a hit serves the cached response; a miss computes and fills). \
+             Requests served while the cache is disabled land in neither.",
+        );
+        for op in RetrievalCacheOp::ALL {
+            for (outcome, slot) in [("hit", 0), ("miss", 1)] {
+                out.push_str(&format!(
+                    "taguru_retrieval_cache_total{{op=\"{}\",outcome=\"{outcome}\"}} {}\n",
+                    op.as_str(),
+                    self.retrieval_cache[op as usize][slot].load(Ordering::Relaxed)
+                ));
+            }
+        }
+        push_header(
+            &mut out,
             "taguru_resolves_total",
             "counter",
             "Resolve and resolve_label requests by the tier that answered: \
@@ -1051,6 +1139,20 @@ impl Metrics {
             "gauge",
             "Modeled resident estimate of loaded contexts and cached vector stores (graph and vector footprints, NOT process RSS).",
             gauges.resident_bytes,
+        );
+        push_value(
+            &mut out,
+            "taguru_retrieval_cache_entries",
+            "gauge",
+            "Entries resident in the exact-match retrieval cache.",
+            gauges.retrieval_cache_entries,
+        );
+        push_value(
+            &mut out,
+            "taguru_retrieval_cache_bytes",
+            "gauge",
+            "Bytes the exact-match retrieval cache holds (serialized responses; bounded by TAGURU_RETRIEVAL_CACHE_BYTES).",
+            gauges.retrieval_cache_bytes,
         );
         push_value(
             &mut out,
@@ -1583,6 +1685,8 @@ mod tests {
             unsourced_edges_total: 0,
             unsourced_weight_total: 0.0,
             embed_breaker: None,
+            retrieval_cache_entries: 0,
+            retrieval_cache_bytes: 0,
         }
     }
 
@@ -2111,6 +2215,8 @@ mod tests {
                 opened_total: 2,
                 short_circuits_total: 7,
             }),
+            retrieval_cache_entries: 3,
+            retrieval_cache_bytes: 4096,
         });
 
         // Every sample line's metric name must have been introduced by

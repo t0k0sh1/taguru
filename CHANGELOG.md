@@ -8,6 +8,25 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Exact-match retrieval cache (#150): an identical
+  recall/query/passage-search request (single-context and cross
+  variants, MCP tool calls included) against an unchanged corpus now
+  answers from the stored response bytes without re-running the
+  search. Invalidation is the key itself: each entry is keyed on the
+  resolved target list plus, per target, the #149 revision lanes that
+  surface depends on (recall/query: graph+passages; passage search:
+  passages+config) and a per-incarnation identity — read before the
+  search runs — so a write simply makes stale entries unreachable
+  (delete-recreate and replica lineage switches included), with no
+  TTL and no purge hooks. Scoped keys share an entry exactly when
+  their grants resolve a request identically. Byte-budgeted LRU:
+  `TAGURU_RETRIEVAL_CACHE_BYTES` (default 32 MiB, `0` disables).
+  Hit/miss per op lands in `taguru_retrieval_cache_total` with
+  entry/byte gauges beside it, while `taguru_searches_total`, the
+  passage lane contributions, and per-context usage counters keep
+  counting served responses — dashboards read continuously. Cache
+  hits emit the opt-in search log line with `cached=true`. No
+  request or response shape changes.
 - Context revision counters (#149): every directory row (`GET
   /contexts`, `GET /contexts/{name}`, and the MCP
   `list_contexts`/`get_context` pass-throughs) now carries
