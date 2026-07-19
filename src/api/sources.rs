@@ -285,7 +285,7 @@ pub struct SearchPassagesRequest {
 /// when the semantic lane ran, the raw BM25 score otherwise; `lanes`
 /// carries each lane's own rank and raw score — evidence for the
 /// reading LLM, the same posture as resolve's tiers.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct PassageHit {
     pub source: String,
     pub paragraph: u32,
@@ -294,7 +294,7 @@ pub struct PassageHit {
     pub lanes: PassageLanes,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct PassageLanes {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bm25: Option<LaneEvidence>,
@@ -304,7 +304,7 @@ pub struct PassageLanes {
 
 /// Where one lane put this hit: 1-based rank within the lane's own
 /// candidate pool, and that lane's raw score (BM25, or cosine).
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct LaneEvidence {
     pub rank: usize,
     pub score: f32,
@@ -774,7 +774,7 @@ pub async fn explain_search_passages(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CrossSearchPassagesRequest {
     /// Full context names — no patterns.
     #[serde(default)]

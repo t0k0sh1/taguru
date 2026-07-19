@@ -64,6 +64,11 @@ mutants = "0.0.4"
 object_store = { version = "0.14.1", default-features = false, features = ["aws", "gcp", "azure", "fs"] }
 # object_store's async surface (list streams) consumed by the shipper.
 futures-util = { version = "0.3", default-features = false }
+# Router mode's outbound HTTP client (issue #130): async fan-out to
+# shards from axum handlers, streamed proxy bodies, pooled connections.
+# Already in the tree through opentelemetry-otlp and object_store with
+# these exact features — making it direct adds no new compilation.
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "http2", "stream"] }
 
 [dev-dependencies]
 # Property-based tests for the hand-rolled binary formats (context

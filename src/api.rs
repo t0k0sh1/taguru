@@ -49,6 +49,16 @@ pub use sources::{
 };
 pub use vocabulary::{audit_drift, audit_vocabulary};
 
+// The router mode's imports: the wire shapes it re-serializes when
+// merging shard pages, the exact merge comparator, and the query
+// shapes it pre-parses (`crate::route`).
+pub(crate) use aliases::KeysetQuery;
+pub(crate) use contexts::{ContextPage, ListContextsQuery};
+pub(crate) use groups::{GroupEntry, GroupPage};
+pub(crate) use import::ImportQuery;
+pub(crate) use recall::{CrossQueryRequest, CrossRecallRequest, cross_rank};
+pub(crate) use sources::{CrossSearchPassagesRequest, PassageHit};
+
 #[derive(Serialize)]
 pub struct ApiResponse<T> {
     result: T,
@@ -120,6 +130,11 @@ pub(crate) enum ErrorCode {
     /// purpose — a deliberate refusal that retrying cannot change, so
     /// no SDK or client retry loop ever forms around it.
     ReadOnlyReplica,
+    /// 502 from `taguru route` when a shard the request needs cannot
+    /// be REACHED (connect, timeout, torn body) — distinct from a
+    /// shard that answered an error, which passes through with the
+    /// shard's own code. Retryable once the shard (or its LB) answers.
+    ShardUnreachable,
 }
 
 impl ErrorCode {
@@ -149,6 +164,7 @@ impl ErrorCode {
             Self::StorageFull => "storage_full",
             Self::Maintenance => "maintenance",
             Self::ReadOnlyReplica => "read_only_replica",
+            Self::ShardUnreachable => "shard_unreachable",
         }
     }
 
@@ -178,7 +194,7 @@ impl ErrorCode {
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             Self::EmbeddingsUnconfigured => StatusCode::NOT_IMPLEMENTED,
-            Self::EmbeddingsFailed => StatusCode::BAD_GATEWAY,
+            Self::EmbeddingsFailed | Self::ShardUnreachable => StatusCode::BAD_GATEWAY,
             Self::Overloaded | Self::Unhealthy | Self::Maintenance => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
@@ -217,7 +233,7 @@ impl ApiError {
     }
 }
 
-fn ok<T: Serialize>(result: T, started_at: Instant) -> Response {
+pub(crate) fn ok<T: Serialize>(result: T, started_at: Instant) -> Response {
     (StatusCode::OK, Json(ApiResponse::ok(result, started_at))).into_response()
 }
 
@@ -642,12 +658,12 @@ fn partial_write_error(
 
 /// Cap applied to recall/query matches when the request names no limit:
 /// a hub concept must not flood an LLM client's prompt by default.
-const DEFAULT_MATCH_LIMIT: usize = 100;
+pub(crate) const DEFAULT_MATCH_LIMIT: usize = 100;
 
 /// The hard ceiling every per-request result limit is clamped to,
 /// whatever the request asks for — result sizing is a server
 /// protection, not a client entitlement.
-const MAX_MATCH_LIMIT: usize = 1000;
+pub(crate) const MAX_MATCH_LIMIT: usize = 1000;
 
 /// Hop ceiling for explore, applied even when `max_depth` is omitted:
 /// the walk's cost is bounded by depth, so the depth is what the
@@ -673,7 +689,7 @@ const MAX_INPUT_ITEMS: usize = 1000;
 
 /// Refuses a list-shaped input field longer than [`MAX_INPUT_ITEMS`],
 /// before any lock is taken. `None` means the length is fine.
-fn overlong(field: &str, len: usize, started_at: Instant) -> Option<Response> {
+pub(crate) fn overlong(field: &str, len: usize, started_at: Instant) -> Option<Response> {
     (len > MAX_INPUT_ITEMS).then(|| {
         error(
             ErrorCode::OverLimit,
@@ -812,7 +828,7 @@ fn orphaned_source(
 
 /// The one clamp every numeric cap in this file goes through: an
 /// omitted value takes the default, and nothing exceeds the ceiling.
-fn clamp(value: Option<usize>, default: usize, ceiling: usize) -> usize {
+pub(crate) fn clamp(value: Option<usize>, default: usize, ceiling: usize) -> usize {
     value.unwrap_or(default).min(ceiling)
 }
 
@@ -829,7 +845,7 @@ pub struct MatchPage {
 /// the context it came from — the tag is what makes the result
 /// actionable, since every follow-up (citations, lookups, activate)
 /// is a per-context call.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct CrossMatch<T> {
     pub context: String,
     #[serde(flatten)]
@@ -838,7 +854,7 @@ pub struct CrossMatch<T> {
 
 /// [`MatchPage`], cross-context: same `total`-above-count truncation
 /// contract, every match tagged.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct CrossMatchPage {
     pub total: usize,
     pub matches: Vec<CrossMatch<AssociationOut>>,
@@ -1071,7 +1087,7 @@ fn cross_search_concurrency() -> usize {
 /// paragraph locator, or when the locator falls outside every section
 /// marker the ingest batch recorded for that source — never a
 /// fabricated label.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct AttributionOut {
     pub source: String,
     /// This source's raw cumulative contribution, NOT averaged — divide
@@ -1085,7 +1101,7 @@ pub struct AttributionOut {
 
 /// `Association`'s wire shape: identical, except its attributions carry
 /// a resolved section label (see [`AttributionOut`]).
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct AssociationOut {
     pub subject: String,
     pub label: String,

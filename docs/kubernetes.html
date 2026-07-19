@@ -82,7 +82,7 @@
     <ul>
       <li><b>Deploys are stop-then-start.</b> The downtime is the boot: cold registration is cheap however many contexts exist, and pinned contexts preload in parallel — the port opens when they finish. Never let the platform run two pods against one volume, even during a rollout.</li>
       <li><b>Availability is promotion time with a replica pool; restore time without one.</b> There is still no leader election or automatic promotion — by design. Without replication, the recovery unit is the data directory: a storage-layer snapshot restores byte-exactly, an export stream restores anywhere. With <code>TAGURU_REPLICATE_URL</code> set, the bucket carries the lineage continuously (seconds of RPO), an empty volume boots straight from it (the <a href="#stateless">stateless variant</a>) — and a <a href="#read-pool">read replica</a> is the warm standby: losing the writer costs the <b>manual promotion walk</b> (drain the lag metric to zero, start a writer with stated intent, flip the name) plus the dead writer's un-shipped tail, which the replica's <code>/metrics</code> had on display the whole time. Rehearse whichever rung is the plan — the promotion drill is automated as an integration test server-side, but your fleet's version of it is yours to time.</li>
-      <li><b>Scale reads with replicas; scale writes by partitioning.</b> Read traffic — and LLM-memory traffic is read-dominant — fans out across a <a href="#read-pool">replica pool</a> tailing the same bucket, with no coordination protocol. Write throughput scales the way it always has: independent writer instances each owning a disjoint set of contexts (a context is the unit of routing; groups and cross-context search reach only their own instance's contexts). What does <b>not</b> work is two instances sharing one data directory: on local disks the lock refuses it, and on NFS/EFS the lock may fail to.</li>
+      <li><b>Scale reads with replicas; scale writes by sharding behind one router.</b> Read traffic — and LLM-memory traffic is read-dominant — fans out across a <a href="#read-pool">replica pool</a> tailing the same bucket, with no coordination protocol. Write throughput scales by giving independent writers disjoint sets of contexts and putting <a href="#sharding"><code>taguru route</code></a> in front: one Service for clients, groups and cross-context search spanning every shard with the single-instance merge semantics — contexts no longer need to cohabit to be searched together. What does <b>not</b> work is two instances sharing one data directory: on local disks the lock refuses it, and on NFS/EFS the lock may fail to.</li>
       <li><b>A rollback is a restore.</b> Image formats migrate forward on load and never write the old version back out, so rolling the binary back past a format bump needs the data directory rolled back with it (snapshot) or re-imported from an export stream. Check the release notes for format bumps before downgrading.</li>
     </ul>
     <p class="note">
@@ -208,6 +208,45 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
       the pool the writer's <code>TAGURU_API_TOKENS</code> secret; OAuth delegation stays at
       the writer (grants are minted there, and a replica refuses the grant endpoints like any
       other write).
+    </p>
+  </section>
+
+  <section id="sharding">
+    <h2>Sharding: one router in front of many writers</h2>
+    <p class="section-sub">
+      <code>taguru route</code> (issue #130) turns manual sharding into one front door:
+      a stateless Deployment — scale it freely, RollingUpdate, no volume — whose only
+      config is a context→shard map file mounted from a ConfigMap.
+    </p>
+    <p>
+      The map is boring on purpose: <code>context = shard-url</code> per line (point each URL
+      at that shard's writer Service), plus an optional <code>* = shard-url</code> fallback
+      for contexts the map does not name. Set <code>TAGURU_ROUTE_MAP</code> to the mounted
+      path. Context verbs proxy to the owning shard byte-for-byte; cross-context
+      <code>recall</code>/<code>query</code>/<code>sources/search</code> and groups span every
+      shard with the exact single-instance merge semantics (cursors forward verbatim — they
+      anchor on the last match, not on a per-instance position), and <code>POST /mcp</code>
+      works unchanged, so <code>taguru-mcp</code> and claude.ai-style clients point at the
+      router's Service like a single server. The router holds no keys: it forwards
+      <code>Authorization</code> and the shards enforce it, so give every shard the same
+      token Secret. OAuth (<code>TAGURU_PUBLIC_URL</code>) stays off the router — consents
+      are durable state a stateless fleet cannot hold.
+    </p>
+    <p>
+      Failure honesty: a shard that answers an error fails the request whole (exactly as one
+      failing context does on a single instance); a shard that cannot be reached degrades the
+      fan-out reads to labeled partials — the response gains an <code>unreached</code> array
+      naming the shard and its contexts — and routed verbs answer <code>502
+      shard_unreachable</code>, retryable by design. Per-shard outcomes are on the router's
+      <code>/metrics</code> (<code>taguru_router_shard_requests_total</code>). Moving a
+      context between shards is a runbook, not a protocol — in order: quiesce its writes →
+      <code>taguru export</code> → DELETE it through the router (the old shard drops it,
+      group projections included) → edit the ConfigMap and roll the routers (stateless, a
+      non-event) → re-import through the router, which now routes it to the new shard.
+      Delete before re-import: a leftover copy keeps answering the old shard's slice of
+      every group fan-out. And finish the roll before re-importing — a router still on the
+      old ConfigMap would route the stream back to the old shard. Each shard can keep its own bucket
+      (<code>TAGURU_REPLICATE_URL</code>) and read pool — the rungs compose.
     </p>
   </section>
 

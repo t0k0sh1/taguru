@@ -8,6 +8,33 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Router mode (#130): `taguru route` is a stateless scatter-gather
+  router over sharded instances — `TAGURU_ROUTE_MAP` names a
+  `context = shard-url` map file (optional `* = shard-url` fallback),
+  context verbs proxy byte-for-byte to the owning shard, and the
+  cross-context searches (`POST /recall`, `/query`,
+  `/sources/search`), the directories, and groups span every shard
+  with the exact single-instance merge semantics — `after` cursors
+  forward verbatim (they anchor on the last match, not on a
+  per-instance position), and equivalence with a single instance
+  holding the same contexts is pinned by an integration test. Groups
+  exist on every shard with member lists projected by the map;
+  `/import` splits its batch stream by context and dry-run-preflights
+  batch chunks and projected group records alike, so a stream one
+  instance would refuse with nothing applied is refused the same way; `POST /mcp` works
+  unchanged (bearer re-attached to each dispatched call). Auth is
+  pass-through — the router holds no key store (setting
+  `TAGURU_API_TOKEN(S)`/`TAGURU_KEY_SCOPES`/`TAGURU_PUBLIC_URL` on it
+  refuses to boot), shards keep enforcing keys, scopes, and rate
+  limits. Failure honesty: a shard that answers an error fails the
+  request whole; an unREACHABLE shard degrades fan-out reads to
+  labeled partials — the envelope gains an `unreached` array
+  (response-shape note: new optional top-level field, absent when
+  every shard answered) — and routed verbs answer the new
+  `502 shard_unreachable` error code. Router-shaped `/metrics`
+  (`taguru_router_*`). Moving a context is a documented runbook:
+  quiesce → export → delete from the old shard through the router →
+  map edit + rolling router restart → re-import through the router.
 - Read replicas (#129): `serve --replica` / `TAGURU_REPLICA=1` serves
   the replication bucket's lineage read-only and keeps tailing it —
   issue #128's hydration running continuously. Every retrieval verb

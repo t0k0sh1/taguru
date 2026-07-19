@@ -38,7 +38,7 @@ pub struct ListContextsQuery {
 /// and the figure is stable across pages. (The search endpoints' `total`
 /// counts post-filter matches instead: there the query itself defines
 /// the population of interest.)
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ContextPage {
     pub total: usize,
     pub contexts: Vec<crate::registry::DirectoryEntry>,

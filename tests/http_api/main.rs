@@ -26,6 +26,7 @@ mod passages;
 mod replication;
 mod resolve_match;
 mod retrieval_core;
+mod routing;
 mod search_log;
 mod server;
 mod server_ops;

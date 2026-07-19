@@ -18,7 +18,7 @@ use super::{
 
 /// One name or several: query positions accept `"住所"` and
 /// `["住所", "職歴"]` interchangeably.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OneOrMany {
     One(String),

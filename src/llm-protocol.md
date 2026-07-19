@@ -346,7 +346,11 @@ heavy-operation ceiling for vocabulary audits/context compactions;
 wait `Retry-After`) /
 `unhealthy` (the write path is degraded) / `maintenance` (a
 `POST /maintenance/compact` sweep is running — wait `Retry-After` and
-retry) / `storage_full`.
+retry) / `storage_full` / `read_only_replica` (403: this server is a
+read replica — do NOT retry here; send the write to the writer the
+message names) / `shard_unreachable` (502 from a `taguru route`
+router: a shard this request needs did not answer — retry once the
+shard or its load balancer does).
 
 - `401` auth (above). `404` unknown context or group. `409` duplicate
   create / alias conflict / a `POST /maintenance/compact` overlapping
@@ -396,6 +400,14 @@ retry) / `storage_full`.
   retracted in the instant it is read drops from that page while the
   rows after it still follow — so a short page is not the last one.
   Stop only once a page comes back empty.
+- Behind a `taguru route` router (sharded deployments), the
+  cross-context searches and the `/contexts` listing may answer 200
+  with an extra top-level `unreached` array —
+  `[{shard, contexts, error}]` — when a shard could not be REACHED:
+  the results are real but partial (that shard's contexts are
+  missing). Treat a non-empty `unreached` as a partial view; retry for
+  the full one. A shard that answered an error fails the request whole
+  instead, exactly as one failing context does on a single server.
 - A write that returned 200 is durable via the WAL (it survives a
   crash and replays on restart). Only when the server runs
   `TAGURU_WAL=0` can writes inside the flush interval (default 5 s)

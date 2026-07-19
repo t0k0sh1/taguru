@@ -191,6 +191,7 @@ load-bearing ones:
 | `TAGURU_TAKEOVER` | off | `1` (or `serve --take-over`) acknowledges deposing the bucket's newest writer while it still looks alive — starting a writer against a bucket IS the promotion act |
 | `TAGURU_REPLICA` | off | `1` (or `serve --replica`) serves the bucket lineage read-only, tailing it continuously: reads scale across replicas, writes answer 403 `read_only_replica` naming the writer, per-context lag on `/metrics` |
 | `TAGURU_WRITER_URL` | — | Where a replica's write-refusal points clients (the writer's base URL / LB name); unset = the refusal names only the bucket's fence holder |
+| `TAGURU_ROUTE_MAP` | — | `taguru route` only: the context→shard map file (`context = shard-url` per line, optional `* = shard-url` fallback); edits take a router restart |
 | `TAGURU_CACHE_BYTES` | 512 MiB | Resident budget for unpinned contexts (LRU eviction) |
 | `TAGURU_EMBED_URL` / `_MODEL` / `_API_KEY` | — | Semantic entry tier (OpenAI-compatible `/embeddings`); unset keeps the entrance purely lexical |
 | `TAGURU_EMBED_AUTO` | off | Re-embed changes with each flush — recommended whenever agents drive the ingest |
@@ -227,10 +228,9 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   process at a time (serve or import) via an advisory lock — dependable
   on local disks, *not* on NFS/EFS. Deploys are stop-then-start. Scale
   reads with replicas (below); scale writes by giving independent
-  instances disjoint sets of contexts. Note that groups and
-  cross-context search reach only the contexts of their own instance —
-  keep contexts that must be searched together on the same one when
-  sharding.
+  shards disjoint sets of contexts and putting `taguru route` in front
+  (below) — contexts no longer need to cohabit to be searched or
+  grouped together.
 - **Read replicas; availability is promotion time.** `serve --replica`
   (or `TAGURU_REPLICA=1`) against the same `TAGURU_REPLICATE_URL`
   serves the bucket lineage read-only and keeps tailing it: every
@@ -249,6 +249,30 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   runbook lives in the
   [architecture page](https://t0k0sh1.github.io/taguru/architecture.html#replicas)
   and is rehearsed by an integration test.
+- **Sharding, with one front door.** `taguru route` is a stateless
+  scatter-gather router over sharded instances: `TAGURU_ROUTE_MAP`
+  names a file of `context = shard-url` lines (plus an optional
+  `* = shard-url` fallback), context verbs proxy to the owning shard,
+  and cross-context `recall`/`query`/`sources/search` and groups span
+  every shard with the exact single-instance merge semantics — the
+  equivalence is pinned by an integration test, cursors included
+  (`after` anchors on the last match itself, so it forwards to every
+  shard verbatim). Groups exist on every shard with members projected
+  by the map; `/import` splits its batch stream by context and
+  dry-run-preflights batch chunks and projected group records alike,
+  so a stream one instance would refuse with nothing applied is
+  refused the same way here; `/mcp` works unchanged. No data directory, no state — run any number of routers
+  behind one LB. Auth passes through: shards enforce keys and scopes
+  (keep their keyrings identical), the router holds none. A shard that
+  answers an error fails the request whole; a shard that cannot be
+  *reached* degrades fan-out reads to labeled partials (`unreached`
+  in the envelope) and refuses routed verbs with 502
+  `shard_unreachable`. Moving a context, in order: quiesce its
+  writes → `taguru export` → DELETE it through the router (the old
+  shard also sweeps its group projections) → edit the map + rolling
+  router restart → re-import through the router, which now routes it
+  to the new shard. Delete before re-import — a leftover copy keeps
+  answering the old shard's slice of every group fan-out.
 - **Health and metrics.** `GET /health` is readiness (503 while the
   write path is degraded — route away, don't restart), `GET /live` is
   liveness, `GET /metrics` is Prometheus text. Every request lands in

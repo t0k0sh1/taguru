@@ -37,6 +37,19 @@ USAGE:
                                         scale horizontally, and the replica
                                         doubles as the warm standby a manual
                                         promotion turns into the next writer
+  taguru route [--config FILE]          start the stateless scatter-gather
+                                        router over sharded instances:
+                                        TAGURU_ROUTE_MAP names a file of
+                                        'context = shard-url' lines (plus an
+                                        optional '* = shard-url' fallback);
+                                        context verbs proxy to the owning
+                                        shard, cross-context recall/query/
+                                        sources/search and groups span every
+                                        shard with the single-instance merge
+                                        semantics, and /mcp works unchanged.
+                                        No data directory, no state — scale
+                                        routers freely behind one LB. Auth is
+                                        pass-through: the shards enforce keys
   taguru version                        print the version
   taguru health [--config FILE] [URL]   exit 0 iff a running server's /health
                                         answers 200 — the container
@@ -117,6 +130,10 @@ ENVIRONMENT (every knob; unset = the shown default):
                                clients (the writer's own base URL or LB
                                name); unset = the refusal names only the
                                bucket's fence holder
+  TAGURU_ROUTE_MAP             route mode only: the context→shard map file,
+                               'context = shard-url' per line, # comments,
+                               optional '* = shard-url' for contexts the map
+                               does not name; edits take a router restart
   TAGURU_API_TOKEN             bearer token; unset = UNAUTHENTICATED
   TAGURU_API_TOKENS            named keys 'ci:tokA,laptop:tokB' — the access
                                log carries the key name; rotate by overlap
@@ -185,7 +202,30 @@ EXIT CODES: 0 ok · 1 failure or corruption found · 2 usage error
 
 /// What `main` should do once the arguments are understood. Offline
 /// subcommands never return — they print and exit before any runtime,
-/// listener, or telemetry exists.
+/// listener, or telemetry exists; the two server modes come back here
+/// so `main` can load the config file first.
+pub enum Command {
+    Serve(ServeArgs),
+    Route(RouteArgs),
+}
+
+impl Command {
+    /// The config file to load into the environment before the server
+    /// boots, whichever mode is starting.
+    pub fn config(&self) -> Option<&PathBuf> {
+        match self {
+            Command::Serve(args) => args.config.as_ref(),
+            Command::Route(args) => args.config.as_ref(),
+        }
+    }
+}
+
+/// `taguru route`'s settings: the config file alone — the map itself
+/// rides `TAGURU_ROUTE_MAP` like every other knob rides a variable.
+pub struct RouteArgs {
+    pub config: Option<PathBuf>,
+}
+
 pub struct ServeArgs {
     pub config: Option<PathBuf>,
     /// `--take-over`: the operator's stated intent to depose a
@@ -200,13 +240,15 @@ pub struct ServeArgs {
 }
 
 /// Parses the process arguments, running and exiting for everything
-/// except `serve`, whose settings it returns.
-pub fn dispatch() -> ServeArgs {
+/// except the server modes (`serve`, `route`), whose settings it
+/// returns.
+pub fn dispatch() -> Command {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None => parse_serve(&[]),
-        Some("serve") => parse_serve(&args[1..]),
-        Some("--config") => parse_serve(&args),
+        None => Command::Serve(parse_serve(&[])),
+        Some("serve") => Command::Serve(parse_serve(&args[1..])),
+        Some("--config") => Command::Serve(parse_serve(&args)),
+        Some("route") => Command::Route(parse_route(&args[1..])),
         Some("version") => {
             refuse_extras("version", &args[1..]);
             println!("taguru {}", env!("CARGO_PKG_VERSION"));
@@ -229,6 +271,29 @@ pub fn dispatch() -> ServeArgs {
             exit(2)
         }
     }
+}
+
+/// `route` takes one optional `--config FILE` and nothing else — the
+/// shard map is a variable (`TAGURU_ROUTE_MAP`), not an argument.
+fn parse_route(args: &[String]) -> RouteArgs {
+    let mut config = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--config" => match rest.next() {
+                Some(path) if config.is_none() => config = Some(PathBuf::from(path)),
+                Some(_) => usage_error("--config given twice"),
+                None => usage_error("--config needs a file path"),
+            },
+            "--help" | "-h" => {
+                print!("{USAGE}");
+                exit(0)
+            }
+            other => usage_error(&format!("'route' does not take '{other}'")),
+        }
+    }
+    let config = config.or_else(|| std::env::var("TAGURU_CONFIG").ok().map(PathBuf::from));
+    RouteArgs { config }
 }
 
 /// `serve` takes one optional `--config FILE`, the `--take-over`
