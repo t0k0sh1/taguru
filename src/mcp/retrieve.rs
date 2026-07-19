@@ -280,7 +280,11 @@ pub fn run_retrieve_bounded(
     // `passage_hits` keeps its historical array contract, and the plan
     // rides beside it as `search_plan` — null when no fallback ran,
     // so "the search never happened" and "the semantic lane was
-    // skipped" stay distinguishable here too.
+    // skipped" stay distinguishable here too. Any other result shape —
+    // a pre-#151 server's bare array through the stdio bridge is the
+    // realistic one — is refused loudly: answering `passage_hits: []`
+    // for a search that DID find things would be a silent wrong
+    // answer, the one failure mode worse than an error.
     let mut passage_hits = Value::Array(Vec::new());
     let mut search_plan = Value::Null;
     if let Some(text_fallback_query) = arguments.get("text_fallback_query").and_then(Value::as_str)
@@ -294,11 +298,19 @@ pub fn run_retrieve_bounded(
             .get("result")
             .cloned()
             .unwrap_or(Value::Null);
-        passage_hits = page
-            .get_mut("hits")
-            .map(Value::take)
-            .unwrap_or(Value::Array(Vec::new()));
-        search_plan = page.get_mut("plan").map(Value::take).unwrap_or(Value::Null);
+        match page.get_mut("hits").map(Value::take) {
+            Some(hits @ Value::Array(_)) => {
+                passage_hits = hits;
+                search_plan = page.get_mut("plan").map(Value::take).unwrap_or(Value::Null);
+            }
+            _ => {
+                return Err(
+                    "search_passages answered without a 'hits' array — a server predating \
+                     the #151 response shape? upgrade it to match this MCP binary"
+                        .to_string(),
+                );
+            }
+        }
     }
 
     Ok(json!({

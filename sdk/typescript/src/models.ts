@@ -223,8 +223,9 @@ export interface Association {
  * The execution plan of a graph search (#151): the contexts actually
  * consulted, in effective order. For the cross variants that is the RESOLVED
  * target list — groups expanded, the key's grants applied — which the tagged
- * matches alone cannot reconstruct when a target came up empty. Absent only
- * from servers predating the field.
+ * matches alone cannot reconstruct when a target came up empty. Absent from
+ * servers predating the field, and always for the non-search `MatchPage`
+ * producers (`unreachableFrom` — an audit, not a search).
  */
 export interface MatchPlan {
   contexts: string[];

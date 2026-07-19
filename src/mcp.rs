@@ -1366,6 +1366,31 @@ mod tests {
         );
     }
 
+    /// A pre-#151 server's bare-array search result (reachable through
+    /// the stdio bridge under version skew) must fail the retrieve
+    /// loudly — an empty `passage_hits` for a search that found things
+    /// would be a silent wrong answer.
+    #[test]
+    fn run_retrieve_refuses_a_pre_plan_search_shape() {
+        let arguments = json!({
+            "context": "sake", "origins": ["nonexistent"],
+            "text_fallback_query": "some declarative fact"
+        });
+        let outcome = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([])))
+            } else if path.ends_with("/sources/search") {
+                Ok(envelope(json!([
+                    {"source": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
+                ])))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        });
+        let error = outcome.expect_err("the legacy shape must refuse");
+        assert!(error.contains("without a 'hits' array"), "{error}");
+    }
+
     /// `text_fallback_only_if_empty: false` runs the fallback
     /// unconditionally, even alongside associations already found.
     #[test]
@@ -1577,7 +1602,7 @@ mod tests {
                     "search_limit must ride the search body: {body}"
                 );
                 saw_search = true;
-                Ok(envelope(json!([])))
+                Ok(envelope(json!({"plan": {"contexts": []}, "hits": []})))
             } else {
                 panic!("unexpected call: {path}");
             }

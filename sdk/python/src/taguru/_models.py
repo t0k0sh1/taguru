@@ -200,7 +200,9 @@ class MatchPlan:
     consulted, in effective order. For the cross variants that is the
     RESOLVED target list — groups expanded, the key's grants applied —
     which the tagged matches alone cannot reconstruct when a target came
-    up empty. ``None`` only from servers predating the field."""
+    up empty. ``None`` from servers predating the field, and always for
+    the non-search :class:`MatchPage` producers (``unreachable_from`` —
+    an audit, not a search)."""
 
     contexts: list[str]
 
