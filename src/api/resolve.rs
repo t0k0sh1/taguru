@@ -684,6 +684,13 @@ fn explain_resolve_verdict(
                      '{current}' — awaiting re-embed"
                 ));
             }
+            GlossLaneReport::WidthChanged { stored, current } => {
+                explain.reason = Some(format!(
+                    "gloss vectors are {stored}-dimensional but the model now answers \
+                     {current} (a dimensions setting changed behind its name) — \
+                     awaiting re-embed"
+                ));
+            }
             GlossLaneReport::EmptyTable => {
                 explain.reason = Some(format!(
                     "no {namespace} gloss vectors exist yet — no embedding refresh has run"

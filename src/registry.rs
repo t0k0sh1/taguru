@@ -1098,6 +1098,12 @@ pub(crate) enum VectorLaneStatus {
     /// The sidecar's rows belong to another model; they are never
     /// served, and the next refresh discards and re-embeds them.
     ModelChanged { stored: String, current: String },
+    /// The sidecar's rows have a different dimension than the provider
+    /// now answers (a dimensions setting changed behind a stable model
+    /// name, #133). Scored anyway they would all be `similarity`'s
+    /// silent 0.0 — so they are never served, and the next refresh
+    /// discards and re-embeds them, exactly like a model change.
+    WidthChanged { stored: usize, current: usize },
     /// The sweep ran, dropping matches below `floor` — the effective
     /// value after the override → context setting → server default
     /// chain, the one threshold a caller cannot reconstruct alone.
@@ -1205,6 +1211,10 @@ pub(crate) enum VectorLaneReport {
     /// The sidecar's rows belong to another model; they are never
     /// served, and the next refresh discards and re-embeds them.
     ModelChanged { stored: String, current: String },
+    /// The sidecar's rows have a different dimension than the provider
+    /// now answers — never served, re-embedded by the next refresh
+    /// (see [`VectorLaneStatus::WidthChanged`]).
+    WidthChanged { stored: usize, current: usize },
     /// The sweep ran under `floor`; `cosine` is the target's best
     /// current-text row (text or doc2query question), `None` when it
     /// has none — not yet embedded, or embedded before its last edit.
@@ -1238,6 +1248,11 @@ pub(crate) enum GlossLaneReport {
     /// The gloss sidecar's vectors belong to another model; the next
     /// refresh discards and re-embeds them.
     ModelChanged { stored: String, current: String },
+    /// The gloss sidecar's vectors have a different dimension than the
+    /// provider now answers — every cosine would be `similarity`'s
+    /// silent 0.0, so the sweep is refused and named instead (#133);
+    /// the next refresh discards and re-embeds them.
+    WidthChanged { stored: usize, current: usize },
     /// The namespace holds no gloss vectors yet — no refresh has run
     /// (or none since this context gained its vocabulary).
     EmptyTable,
@@ -11219,6 +11234,15 @@ mod tests {
             store.concepts.values().all(|(_, v)| v.len() == 2),
             "a disagreeing vector must never reach the persisted concept table"
         );
+        // The width agreement spans BOTH tables: the label call answered
+        // width 3, which disagrees with the width the concept call
+        // already settled, so it drops too — a store persisting concepts
+        // at one width and labels at another is exactly the mixed file
+        // the loader refuses whole (#133).
+        assert!(
+            store.labels.is_empty(),
+            "a label at a width the refresh did not settle on must stay stale"
+        );
         // Flush before the reboot below: write_context's association is
         // otherwise only durable on the next periodic flush, and the
         // reboot must see it. Then release the data-directory lock so
@@ -11255,6 +11279,11 @@ mod tests {
             "the previously dropped remainder must still be stale and get embedded now"
         );
         assert!(store.concepts.values().all(|(_, v)| v.len() == 2));
+        assert_eq!(
+            store.labels.len(),
+            1,
+            "the dropped label was stale all along and lands once the provider settles"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

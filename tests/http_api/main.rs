@@ -33,3 +33,4 @@ mod search_plan;
 mod semantic_cache;
 mod server;
 mod server_ops;
+mod width_probe;

@@ -425,6 +425,9 @@ impl SearchContextPlan {
                     VectorLaneStatus::ModelChanged { stored, current } => {
                         LanePlan::skipped(vector_model_changed_reason(stored, current))
                     }
+                    VectorLaneStatus::WidthChanged { stored, current } => {
+                        LanePlan::skipped(vector_width_changed_reason(*stored, *current))
+                    }
                     VectorLaneStatus::Ran { floor } => LanePlan {
                         floor: Some(*floor),
                         ..LanePlan::ran()
@@ -479,6 +482,14 @@ fn vector_model_changed_reason(stored: &str, current: &str) -> String {
     format!(
         "stored vectors belong to model '{stored}' but the provider is \
          '{current}' — they are never served, and the next refresh re-embeds"
+    )
+}
+
+fn vector_width_changed_reason(stored: usize, current: usize) -> String {
+    format!(
+        "stored vectors are {stored}-dimensional but the model now answers \
+         {current} (a dimensions setting changed behind its name) — they are \
+         never served, and the next refresh re-embeds"
     )
 }
 
@@ -857,6 +868,13 @@ impl SearchExplanation {
             VectorLaneReport::ModelChanged { stored, current } => VectorExplain {
                 ran: false,
                 reason: Some(vector_model_changed_reason(stored, current)),
+                floor: None,
+                cosine: None,
+                rank: None,
+            },
+            VectorLaneReport::WidthChanged { stored, current } => VectorExplain {
+                ran: false,
+                reason: Some(vector_width_changed_reason(*stored, *current)),
                 floor: None,
                 cosine: None,
                 rank: None,
