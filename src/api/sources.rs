@@ -1490,7 +1490,13 @@ pub async fn store_passages(
                 started_at,
             )
         }
-        Some(Err(io_error)) => {
+        // No error-kind counter for the quota arm: a refusal at the
+        // declared ceiling is the policy working, not the server
+        // failing — `taguru_storage_quota_refusals_total` counts it.
+        Some(Err(crate::registry::PassagesWriteError::QuotaExceeded(message))) => {
+            error(ErrorCode::StorageFull, message, started_at)
+        }
+        Some(Err(crate::registry::PassagesWriteError::Io(io_error))) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
                 ErrorCode::Internal,

@@ -96,6 +96,14 @@ use tracing::{error, info, warn};
 ///   0.5, i.e. dead weight outgrew live content), behind the heavy-ops
 ///   ceiling above. `0`/`false` restores manual-only compaction for
 ///   operators who prefer scheduled quiet-window sweeps.
+/// - `TAGURU_CONTEXT_QUOTAS`: per-context ceilings, one JSON object in
+///   the `TAGURU_KEY_SCOPES` mold — `{"name": {"storage_bytes": N,
+///   "cache_bytes": M}}`, each field optional but never both absent.
+///   `storage_bytes` refuses growth writes (507 `storage_full`) once
+///   the context's on-disk family reaches it; retract/compact/delete
+///   stay open. `cache_bytes` bounds the context's resident share:
+///   under cache pressure a context past it is evicted first. A broken
+///   declaration refuses boot, like broken credentials.
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT` (or the `_TRACES_` variant): turns
 ///   on OTLP/HTTP span export — one span per request, parented from an
 ///   inbound `traceparent` or `X-Amzn-Trace-Id`, `trace_id` stamped
@@ -126,7 +134,7 @@ async fn serve(serve_args: cli::ServeArgs) {
     // silently (tracing has no default subscriber and no buffering).
     let tracer_provider = init_telemetry();
 
-    let config = registry::BootConfig::from_env();
+    let mut config = registry::BootConfig::from_env();
     let flush_secs = resolve_flush_secs(env_number("TAGURU_FLUSH_SECS", 5));
     let max_body_bytes =
         resolve_body_bytes(env_number("TAGURU_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES));
@@ -211,6 +219,24 @@ async fn serve(serve_args: cli::ServeArgs) {
         warn!(
             "TAGURU_API_TOKEN(S) is not set: the API accepts UNAUTHENTICATED requests \
              (fine on localhost, never on an exposed address)"
+        );
+    }
+
+    // Declared quotas share the credential story's failure posture: a
+    // ceiling that silently failed to arm is an unbounded tenant.
+    config.context_quotas = match registry::parse_context_quotas(
+        std::env::var("TAGURU_CONTEXT_QUOTAS").ok().as_deref(),
+    ) {
+        Ok(quotas) => quotas,
+        Err(error) => {
+            tracing::error!(%error, "refusing to start with a broken quota declaration");
+            std::process::exit(1);
+        }
+    };
+    if !config.context_quotas.is_empty() {
+        info!(
+            contexts = config.context_quotas.len(),
+            "per-context quotas declared"
         );
     }
 

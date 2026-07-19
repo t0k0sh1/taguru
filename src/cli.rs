@@ -176,6 +176,13 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_AUTO_COMPACT_RATIO    that trigger: compact once dead edges /
                                total edges exceeds this (0.5 — dead weight
                                outgrew live content)
+  TAGURU_CONTEXT_QUOTAS        JSON ceilings per context name:
+                               {\"sake\": {\"storage_bytes\": 1073741824,
+                               \"cache_bytes\": 134217728}} — storage refuses
+                               growth writes at the ceiling (507; retract/
+                               compact/delete stay open), cache evicts the
+                               over-share context first under pressure; a
+                               broken declaration refuses boot (off)
   TAGURU_CROSS_SEARCH_CONCURRENCY  member contexts searched in parallel by
                                a single cross-context (group) query (4)
   TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off)

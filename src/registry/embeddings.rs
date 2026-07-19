@@ -144,11 +144,13 @@ impl AppState {
         }) {
             Ok(()) => {}
             Err(AccessError::NotFound) => return None,
-            Err(AccessError::Load(message)) | Err(AccessError::Unpersisted(message)) => {
+            Err(AccessError::Load(message))
+            | Err(AccessError::Unpersisted(message))
+            | Err(AccessError::QuotaExceeded(message)) => {
                 // Vectors were readable but the graph was not: serve the
                 // unfiltered pairs and say why they are noisier. (A
-                // read never yields Unpersisted; the arm is for the
-                // type, not a path.)
+                // read never yields Unpersisted or QuotaExceeded; the
+                // arms are for the type, not a path.)
                 skipped = Some(format!(
                     "関連ペアの除外はスキップ (グラフ未ロード: {message})"
                 ));
@@ -215,7 +217,11 @@ impl AppState {
         }) {
             Ok(glosses) => glosses,
             Err(AccessError::NotFound) => return None,
-            Err(AccessError::Load(message)) | Err(AccessError::Unpersisted(message)) => {
+            // A read never yields Unpersisted or QuotaExceeded; the
+            // arms are for the type, not a path.
+            Err(AccessError::Load(message))
+            | Err(AccessError::Unpersisted(message))
+            | Err(AccessError::QuotaExceeded(message)) => {
                 return Some(Err(message));
             }
             // read_context never consults a deadline itself — the

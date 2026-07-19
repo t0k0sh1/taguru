@@ -167,6 +167,9 @@ fn report_outcome(name: &str, result: &Result<CompactOutcome, AccessError>) -> b
                 // expires — unreachable in practice, kept for
                 // exhaustiveness.
                 AccessError::DeadlineExceeded => "deadline exceeded".to_string(),
+                // Same unreachability: the offline CLI boots with no
+                // quota declaration (and compaction shrinks anyway).
+                AccessError::QuotaExceeded(error) => error.clone(),
             };
             eprintln!("taguru: compact: context '{name}': {message}");
             false

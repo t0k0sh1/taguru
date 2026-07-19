@@ -8,6 +8,36 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Per-context quotas (#136), declared as one JSON env in the
+  `TAGURU_KEY_SCOPES` mold — `TAGURU_CONTEXT_QUOTAS='{"name":
+  {"storage_bytes": …, "cache_bytes": …}}'`, each field optional but
+  never both absent; a broken declaration refuses boot, like broken
+  credentials. `storage_bytes` caps the context's whole on-disk family
+  (image, both WAL lanes, passages snapshot, sidecars — the same sum
+  `taguru_context_disk_bytes` serves, read from the live WAL
+  bookkeeping plus the flush-refreshed #137 snapshot, which now stays
+  on whenever a storage quota is declared even with the gauges off):
+  at or over the ceiling, growth writes refuse with the
+  already-documented 507 `storage_full` across every entrance — graph
+  batches (associations/aliases, via the one `logged_write`
+  chokepoint, gated only when a batch carries growth ops),
+  `store_passages`, and `/import`, which stops before the first capped
+  batch as a resumable prefix exactly like a spent deadline (dry runs
+  stay advisory). Retract, unalias, `DELETE`, and compaction stay open
+  at the ceiling — shrinking is how a tenant gets back under, the line
+  the passage store's own cap already draws. `cache_bytes` is the
+  ceiling side of the pinning floor: no reservation while there is
+  slack, but under cache pressure a context past its declared share is
+  evicted before any compliant one, so the eviction damage one
+  saturating context can inflict on the rest is bounded by its ceiling
+  (pinning still wins — a pinned context never enters the sweep).
+  Declared ceilings surface as
+  `taguru_context_quota_bytes{context,resource="storage"|"cache"}`
+  beside the #137 usage families (same knob, same top-N cut), and
+  refusals count on `taguru_storage_quota_refusals_total`. Offline
+  commands (`taguru import`/`compact`/…) run as the operator, outside
+  the policy; a replica refuses writes before any gate and honors only
+  the eviction ordering.
 - Ratio-triggered auto-compaction for contexts (#135), default on:
   each flusher tick rebuilds at most the one worst context whose dead
   ratio (dead edges / total edges — the bookkeeping the maintenance

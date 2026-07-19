@@ -372,8 +372,14 @@ shard or its load balancer does).
 - `401` auth (above). `404` unknown context or group. `409` duplicate
   create / alias conflict / a `POST /maintenance/compact` overlapping
   one already running.
-- `507` context full (`ContextFull`) — the write was NOT applied;
-  further knowledge goes to a new context.
+- `507` context full (`storage_full`) — the write was NOT applied.
+  Two ways here: the context hit the library's own capacity cap
+  (further knowledge goes to a new context), or it reached a
+  per-context storage quota the operator declared
+  (`TAGURU_CONTEXT_QUOTAS`) — the message says which. At a quota,
+  retractions, alias removals, `DELETE`, and compaction still work:
+  shrink the context (or have the operator raise its quota) and
+  retry; do not blindly re-send the refused write.
 - `501` `/embeddings/refresh` without a provider configured
   (server-side TAGURU_EMBED_*). `502` embedding provider failure
   (refresh, or the semantic fallback inside resolve) — retry later.

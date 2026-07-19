@@ -4,6 +4,22 @@ use std::sync::atomic::Ordering;
 
 use super::{AppState, CitationLookup, file_stem};
 
+/// Why a passage store was refused — the write path's two failure
+/// families kept apart so a handler can answer 507 for the policy
+/// refusal and 500 for the disk one, instead of flattening both into
+/// one `io::Error`.
+#[derive(Debug)]
+pub enum PassagesWriteError {
+    /// The store itself failed (load, append, fsync) — an operator
+    /// problem, surfaced like every other io failure here.
+    Io(io::Error),
+    /// The context is at or over its declared storage ceiling
+    /// (`TAGURU_CONTEXT_QUOTAS`) — the same 507 `storage_full`
+    /// contract as the graph side's
+    /// [`super::AccessError::QuotaExceeded`].
+    QuotaExceeded(String),
+}
+
 impl AppState {
     /// Registers original text passages behind source ids, merge-upsert,
     /// persisted immediately. This is the server-side "storage of
@@ -16,9 +32,21 @@ impl AppState {
         &self,
         name: &str,
         passages: BTreeMap<String, crate::passages::PassageSubmission>,
-    ) -> Option<io::Result<crate::passages::StoreOutcome>> {
+    ) -> Option<Result<crate::passages::StoreOutcome, PassagesWriteError>> {
         let entry = self.lookup(name)?;
         let fence = entry.read_unless_deleted()?;
+        // The storage-quota gate, before the store is even loaded: this
+        // entrance only ever grows the context (retraction goes through
+        // `retract_source`, which stays open at the ceiling), so no op
+        // inspection is needed — the graph gate's `WalOp::grows` split
+        // has no counterpart here.
+        if let Some((used, ceiling)) = self.storage_quota_excess(name, &fence, &entry) {
+            drop(fence);
+            self.0.metrics.record_storage_quota_refusal();
+            return Some(Err(PassagesWriteError::QuotaExceeded(
+                super::storage_quota_message(name, used, ceiling),
+            )));
+        }
         let outcome = match self.entry_passages(&entry, &file_stem(name)) {
             Ok(store) => {
                 let sources: Vec<String> = passages.keys().cloned().collect();
@@ -35,9 +63,9 @@ impl AppState {
                         .passage_revision
                         .fetch_max(store.watermark(), Ordering::Relaxed);
                 }
-                stored
+                stored.map_err(PassagesWriteError::Io)
             }
-            Err(error) => Err(error),
+            Err(error) => Err(PassagesWriteError::Io(error)),
         };
         drop(fence);
         // Passage text is resident now; give the budget a chance to

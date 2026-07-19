@@ -74,6 +74,8 @@ mod search;
 mod semantic_cache;
 mod terms;
 
+pub use passages::PassagesWriteError;
+
 pub(crate) use concurrency::{dispatch_chunks_concurrently, parallel_map};
 pub(crate) use paths::{
     IMPORT_MARKER_EXTENSION, ImportMarker, ResumedRenames, bm25_path, deleted_marker_path,
@@ -479,9 +481,11 @@ pub struct Entry {
     passage_revision: AtomicU64,
     /// Flush-time snapshot of this context's non-WAL on-disk bytes —
     /// written by [`AppState::refresh_disk_usage`], read by
-    /// `gauge_snapshot` so a scrape never stats the data directory.
-    /// Zeros until the first sweep (boot runs one when the per-context
-    /// gauges are on; they stay zeros, unread, when they are off).
+    /// `gauge_snapshot` (so a scrape never stats the data directory)
+    /// and by the storage-quota gates (so a growth write never does
+    /// either). Zeros until the first sweep — boot runs one when the
+    /// per-context gauges are on or any storage ceiling is declared;
+    /// with neither reader, they stay zeros, unread.
     disk: Mutex<ContextDiskUsage>,
 }
 
@@ -962,6 +966,24 @@ pub enum AccessError {
     /// `block_in_place` section. Never produced by the CLI binaries —
     /// they pass `Deadline::unbounded()` — only by HTTP handlers.
     DeadlineExceeded,
+    /// The context is at or over its declared storage ceiling
+    /// (`TAGURU_CONTEXT_QUOTAS`), so a growth write was refused —
+    /// 507 `storage_full`, the same client contract as the library's
+    /// own capacity cap. Deliberately distinct from [`Self::Unpersisted`]:
+    /// that 500 means the SERVER is failing to persist (an operator
+    /// problem); this means the TENANT's allotment is spent (retract,
+    /// compact, or raise the quota).
+    QuotaExceeded(String),
+}
+
+/// The one refusal message every storage-quota gate serves (the write
+/// path's two gates and the import loop's pre-check), naming the ways
+/// down so a refused client is never stranded at the ceiling.
+pub(crate) fn storage_quota_message(name: &str, used: u64, ceiling: u64) -> String {
+    format!(
+        "context '{name}' is at its storage quota ({used} of {ceiling} bytes): \
+         retract or compact to shrink it, or raise its TAGURU_CONTEXT_QUOTAS entry"
+    )
 }
 
 /// One requested association — the wire shape of the associations
@@ -1020,6 +1042,70 @@ pub const DEFAULT_PASSAGES_WAL_MAX_BYTES: usize = 1024 * 1024 * 1024;
 /// already drew the operational line on the same scale.
 pub const DEFAULT_AUTO_COMPACT_RATIO: f64 = 0.5;
 
+/// One context's declared ceilings (issue #136), parsed from the
+/// `TAGURU_CONTEXT_QUOTAS` JSON env. Both fields optional — a
+/// declaration may cap disk, cache share, or both — but never neither
+/// (the parser refuses an empty quota). `deny_unknown_fields` because a
+/// typo'd field name must fail loudly, not silently mean "unlimited".
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextQuota {
+    /// On-disk ceiling across the context's whole file family — the
+    /// same sum `taguru_context_disk_bytes` serves. At or over it,
+    /// growth writes are refused with 507 `storage_full`; shrink paths
+    /// (retract, unalias, compact, delete) stay open — they are how a
+    /// tenant gets back under.
+    #[serde(default)]
+    pub storage_bytes: Option<u64>,
+    /// Maximum resident share within the global `TAGURU_CACHE_BYTES`:
+    /// not a reservation — slack stays usable by anyone — but under
+    /// pressure a context past this is evicted before any compliant
+    /// one, so the eviction damage one saturating context can inflict
+    /// on the rest is bounded by its ceiling. Pinning wins over this:
+    /// a pinned context never enters the sweep at all.
+    #[serde(default)]
+    pub cache_bytes: Option<u64>,
+}
+
+/// Parses `TAGURU_CONTEXT_QUOTAS` — one JSON object mapping context
+/// names to [`ContextQuota`]s, the same declarative-policy shape as
+/// `TAGURU_KEY_SCOPES`. And the same failure posture: a deployment that
+/// DECLARED quotas must not run without them, so any parse or
+/// validation error refuses boot (the caller exits) instead of the
+/// env module's usual warn-and-default. Naming a context that does not
+/// exist yet is fine — contexts are created at runtime, and the
+/// declaration simply waits for the name.
+pub fn parse_context_quotas(json: Option<&str>) -> Result<HashMap<String, ContextQuota>, String> {
+    let Some(json) = json else {
+        return Ok(HashMap::new());
+    };
+    if json.trim().is_empty() {
+        return Err("TAGURU_CONTEXT_QUOTAS is set but empty".to_string());
+    }
+    let quotas: HashMap<String, ContextQuota> = serde_json::from_str(json).map_err(|error| {
+        format!(
+            "TAGURU_CONTEXT_QUOTAS is not the documented JSON shape \
+             ({{\"name\": {{\"storage_bytes\": …, \"cache_bytes\": …}}}}): {error}"
+        )
+    })?;
+    for (name, quota) in &quotas {
+        if quota.storage_bytes.is_none() && quota.cache_bytes.is_none() {
+            return Err(format!(
+                "TAGURU_CONTEXT_QUOTAS declares no ceiling for '{name}' — \
+                 give it storage_bytes, cache_bytes, or drop the entry"
+            ));
+        }
+        if quota.storage_bytes == Some(0) || quota.cache_bytes == Some(0) {
+            return Err(format!(
+                "TAGURU_CONTEXT_QUOTAS gives '{name}' a zero ceiling, which would refuse \
+                 every write (storage) or every residency (cache) — scope keys to \
+                 read-only via TAGURU_KEY_SCOPES if that is the intent"
+            ));
+        }
+    }
+    Ok(quotas)
+}
+
 /// The boot knobs `taguru serve` and `taguru import` read identically —
 /// one reading, so the two entrances cannot drift. The values stay
 /// visible (rather than being swallowed by [`AppState::boot_with`])
@@ -1036,6 +1122,12 @@ pub struct BootConfig {
     pub semantic_floor: Option<f32>,
     pub per_context_metrics: PerContextMetrics,
     pub auto_compact: Option<f64>,
+    /// Per-context ceilings (issue #136). Empty from
+    /// [`BootConfig::from_env`]: the declaration is policy for the
+    /// HTTP surface, so only `serve` parses `TAGURU_CONTEXT_QUOTAS`
+    /// (refusing boot on a broken one) and assigns it here — the
+    /// offline commands run as the operator, outside the policy.
+    pub context_quotas: HashMap<String, ContextQuota>,
 }
 
 /// Default ceiling on how many rows per context get a vector
@@ -1378,6 +1470,10 @@ pub struct BootOptions {
     /// [`DEFAULT_AUTO_COMPACT_RATIO`], matching the passages store's
     /// own unasked self-compaction.
     pub auto_compact: Option<f64>,
+    /// Per-context storage/cache ceilings (issue #136), keyed by
+    /// context name. Empty means no context is capped — the default,
+    /// and the only shape the offline commands ever pass.
+    pub context_quotas: HashMap<String, ContextQuota>,
     /// Present when replication is on: the shipper's progress map,
     /// consulted (never waited on) before the graph lane's
     /// housekeeping WAL reset so that shipped stream stays gapless —
@@ -1407,6 +1503,7 @@ impl Default for BootOptions {
             default_semantic_floor: None,
             per_context_metrics: PerContextMetrics::Off,
             auto_compact: Some(DEFAULT_AUTO_COMPACT_RATIO),
+            context_quotas: HashMap::new(),
             ship_progress: None,
             hydrator: None,
             replica: None,
@@ -1460,6 +1557,9 @@ impl BootConfig {
                 "TAGURU_AUTO_COMPACT",
                 "TAGURU_AUTO_COMPACT_RATIO",
             ),
+            // Serve assigns the parsed TAGURU_CONTEXT_QUOTAS after this;
+            // the offline commands keep it empty (see the field's doc).
+            context_quotas: HashMap::new(),
         }
     }
 
@@ -1489,6 +1589,7 @@ impl BootConfig {
                 default_semantic_floor: self.semantic_floor,
                 per_context_metrics: self.per_context_metrics,
                 auto_compact: self.auto_compact,
+                context_quotas: self.context_quotas.clone(),
                 ship_progress,
                 hydrator,
                 replica,
@@ -1667,15 +1768,27 @@ struct StateInner {
     embed_parallel: usize,
     /// Whether (and how much of) the per-context gauge families the
     /// scrape carries (`TAGURU_METRICS_PER_CONTEXT`, issue #137). Read
-    /// twice: [`AppState::refresh_disk_usage`] skips its stat sweep
-    /// entirely on `Off`, and `gauge_snapshot` collects rows (and
-    /// applies `Top`'s cut) for anything else.
+    /// twice: [`AppState::refresh_disk_usage`] skips its stat sweep on
+    /// `Off` — unless a declared storage quota needs it — and
+    /// `gauge_snapshot` collects rows (and applies `Top`'s cut) for
+    /// anything else.
     per_context_metrics: PerContextMetrics,
     /// The auto-compaction trigger (`TAGURU_AUTO_COMPACT`, issue
     /// #135), read only by [`AppState::auto_compact_candidate`] —
     /// which the flusher tick calls; a replica never consults it
     /// because a replica runs no flusher at all.
     auto_compact: Option<f64>,
+    /// Declared per-context ceilings (`TAGURU_CONTEXT_QUOTAS`, issue
+    /// #136). Storage ceilings gate the three growth entrances
+    /// ([`AppState::logged_write`], [`AppState::store_passages`], the
+    /// import loop's per-batch pre-check) and widen
+    /// [`AppState::refresh_disk_usage`]'s sweep condition; cache
+    /// ceilings reorder [`AppState::enforce_budget`]'s eviction. Both
+    /// surface on the per-context gauge rows. Empty on every offline
+    /// command and on a replica's storage side (writes are refused
+    /// there before any gate) — though a replica's eviction ordering
+    /// honors cache ceilings like anyone else's.
+    context_quotas: HashMap<String, ContextQuota>,
     /// Present when replication is on. Consulted (one mutexed map
     /// read, never a wait) before the GRAPH lane's post-flush WAL
     /// reset, so the shipper reads that log's tail before it
@@ -1919,6 +2032,7 @@ impl AppState {
             embed_parallel: options.embed_parallel,
             per_context_metrics: options.per_context_metrics,
             auto_compact: options.auto_compact,
+            context_quotas: options.context_quotas,
             ship_progress: options.ship_progress,
             hydrator: options.hydrator,
             replica: options.replica,
@@ -1927,9 +2041,11 @@ impl AppState {
             budget_ops: AtomicU64::new(0),
         }));
         state.preload_pinned();
-        // Seed the per-context disk gauges (a no-op while they are
-        // off) so the first scrape is not blind until the first flush
-        // tick — the scrape itself must never stat the data directory.
+        // Seed the per-context disk snapshot (a no-op while nothing
+        // reads it) so the first scrape is not blind until the first
+        // flush tick — and so a declared storage ceiling counts a
+        // restarted context's true size from the first write, not
+        // from zeros.
         state.refresh_disk_usage();
         Ok(state)
     }
@@ -2093,7 +2209,16 @@ impl AppState {
     /// to one flush interval after it lands on disk, the trade that
     /// buys zero scrape-time filesystem work.
     pub fn refresh_disk_usage(&self) {
-        if self.0.per_context_metrics == PerContextMetrics::Off {
+        // The gauges are one reader of the snapshot this fills; a
+        // declared storage ceiling is the other — its gates sum these
+        // lanes on every growth write — so quotas keep the sweep alive
+        // even with the gauges off.
+        let quotas_need_disk = self
+            .0
+            .context_quotas
+            .values()
+            .any(|quota| quota.storage_bytes.is_some());
+        if self.0.per_context_metrics == PerContextMetrics::Off && !quotas_need_disk {
             return;
         }
         let dir = &self.0.data_dir;
@@ -2203,6 +2328,10 @@ impl AppState {
             passages_wal_bytes += entry_passages_wal_bytes;
             if collect_rows {
                 let disk = *entry.disk.lock();
+                // Declared ceilings ride the row (issue #136) so
+                // usage-vs-quota is one division against the sibling
+                // series, under the same knob and Top-N cut.
+                let quota = self.0.context_quotas.get(&name);
                 per_context.push(ContextGaugeRow {
                     name,
                     pinned,
@@ -2212,6 +2341,8 @@ impl AppState {
                     disk_passages_bytes: disk.passages_bytes,
                     disk_passages_wal_bytes: entry_passages_wal_bytes,
                     disk_sidecar_bytes: disk.sidecar_bytes,
+                    quota_storage_bytes: quota.and_then(|quota| quota.storage_bytes),
+                    quota_cache_bytes: quota.and_then(|quota| quota.cache_bytes),
                     concepts: counts.0,
                     associations: counts.1,
                     labels: counts.2,
@@ -3800,7 +3931,8 @@ impl AppState {
         // After the images land: every caller of this (the flusher
         // tick, POST /flush, the shutdown sweep) is exactly when "the
         // sizes on disk changed" — refresh the per-context disk gauges
-        // here (a no-op while they are off) so a scrape never has to.
+        // here (a no-op while nothing reads it — neither the gauges
+        // nor a declared storage quota) so a scrape never has to.
         self.refresh_disk_usage();
         flushed
     }
@@ -4029,6 +4161,54 @@ impl AppState {
             .fetch_add(now as i64 - before as i64, Ordering::Relaxed);
     }
 
+    /// The used-vs-ceiling read behind every storage-quota gate: the
+    /// context's whole on-disk family, summed the same way the
+    /// `taguru_context_disk_bytes` gauges sum it — flush-refreshed
+    /// snapshot lanes (image, passages, sidecars) plus the live WAL
+    /// lanes — so enforcement and observability can never disagree
+    /// about what "used" means. `Some((used, ceiling))` when the
+    /// context is AT or over a declared ceiling: at, because a line
+    /// the next write would cross is a line that no longer admits
+    /// growth (the WAL cap compares the same way). Content growth
+    /// lands in the live lanes, so a burst inside one flush interval
+    /// cannot outrun this check; the snapshot lanes lag at most one
+    /// flush interval and refresh the moment images land.
+    fn storage_quota_excess(
+        &self,
+        name: &str,
+        inner: &EntryInner,
+        entry: &Entry,
+    ) -> Option<(u64, u64)> {
+        let ceiling = self.0.context_quotas.get(name)?.storage_bytes?;
+        let disk = *entry.disk.lock();
+        // A resident store knows its pending log; a cold one uses the
+        // scan/eviction-seeded field — the same read `gauge_snapshot`
+        // does, for the same reason.
+        let passages_wal = entry
+            .passages
+            .lock()
+            .as_ref()
+            .map(|store| store.pending_log_bytes())
+            .unwrap_or(inner.passages_wal_bytes);
+        let used = disk.image_bytes
+            + disk.passages_bytes
+            + disk.sidecar_bytes
+            + inner.wal_bytes
+            + passages_wal;
+        (used >= ceiling).then_some((used, ceiling))
+    }
+
+    /// [`Self::storage_quota_excess`] for a caller holding no entry
+    /// lock — the import loop's per-batch pre-check. `None` for an
+    /// unknown context too: creation is never quota-gated (a declared
+    /// name may not exist yet), and the growth gates inside the write
+    /// path cover everything a fresh batch then writes.
+    pub fn storage_quota_refusal(&self, name: &str) -> Option<(u64, u64)> {
+        let entry = self.lookup(name)?;
+        let inner = entry.read_unless_deleted()?;
+        self.storage_quota_excess(name, &inner, &entry)
+    }
+
     /// The write path of the HTTP mutators: stage the whole batch in
     /// the context's WAL — one fsync, group commit at exactly the
     /// granularity the API already locks at — and only then run
@@ -4069,13 +4249,28 @@ impl AppState {
                 self.0.hydrator.as_deref(),
             )
             .map_err(AccessError::Load)?;
-            // Count the promotion NOW, before the WAL-cap and append-failure
-            // early returns below. A Cold→Hot load just added this context's
-            // footprint to resident memory; a refusal that returns without
-            // counting it leaves the resident estimate short, so the budget
-            // sweep never reclaims those bytes. recount_entry is absolute, so
-            // the post-`operate` recount below just refreshes this.
+            // Count the promotion NOW, before the quota, WAL-cap, and
+            // append-failure early returns below. A Cold→Hot load just added
+            // this context's footprint to resident memory; a refusal that
+            // returns without counting it leaves the resident estimate short,
+            // so the budget sweep never reclaims those bytes. recount_entry is
+            // absolute, so the post-`operate` recount below just refreshes this.
             self.recount_entry(&mut inner);
+            // The policy ceiling, ahead of the failure backstop below and
+            // WAL on or off: only batches that GROW the context are gated —
+            // a retract/unalias batch always passes, because shrinking is
+            // how a tenant gets back under (the passage store's own cap
+            // draws the same line). If both this and the WAL cap hold, the
+            // refusal names the quota; the failing flush behind the cap is
+            // already warned about from the flusher itself every tick.
+            if ops.iter().any(WalOp::grows)
+                && let Some((used, ceiling)) = self.storage_quota_excess(name, &inner, &entry)
+            {
+                self.0.metrics.record_storage_quota_refusal();
+                return Err(AccessError::QuotaExceeded(storage_quota_message(
+                    name, used, ceiling,
+                )));
+            }
             let first_seq = inner.wal_seq;
             let mut staged = None;
             if self.0.wal_enabled {
@@ -4271,7 +4466,7 @@ impl AppState {
             return;
         }
 
-        let mut candidates: Vec<(u64, usize, String, Arc<Entry>)> = Vec::new();
+        let mut candidates: Vec<(bool, u64, usize, String, Arc<Entry>)> = Vec::new();
         let mut total = 0usize;
         for (name, entry) in self.snapshot() {
             let inner = entry.inner.read();
@@ -4296,8 +4491,24 @@ impl AppState {
             if bytes == 0 {
                 continue;
             }
+            // Strictly over its declared cache ceiling (issue #136):
+            // evicted before any compliant candidate below, however
+            // recently touched. The ceiling reorders who goes first
+            // under pressure; it reserves nothing while there is slack.
+            let over_ceiling = self
+                .0
+                .context_quotas
+                .get(&name)
+                .and_then(|quota| quota.cache_bytes)
+                .is_some_and(|ceiling| bytes as u64 > ceiling);
             total += bytes;
-            candidates.push((entry.last_touch.load(Ordering::Relaxed), bytes, name, entry));
+            candidates.push((
+                over_ceiling,
+                entry.last_touch.load(Ordering::Relaxed),
+                bytes,
+                name,
+                entry,
+            ));
         }
         // Reconcile the gate with measured reality — vectors included,
         // and any drift folded away.
@@ -4308,8 +4519,10 @@ impl AppState {
             return;
         }
 
-        candidates.sort_unstable_by_key(|&(touch, ..)| touch);
-        for (_, bytes, name, entry) in candidates {
+        // Over-ceiling first (their damage to the rest is what the
+        // ceiling bounds), least recently used within each half.
+        candidates.sort_unstable_by_key(|&(over, touch, ..)| (std::cmp::Reverse(over), touch));
+        for (_, _, bytes, name, entry) in candidates {
             if total <= self.0.cache_bytes {
                 break;
             }
@@ -6650,6 +6863,214 @@ mod tests {
         state.retract_source("rotten", "gone.md").unwrap();
 
         assert_eq!(state.auto_compact_candidate(&HashSet::new()), None);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The `TAGURU_CONTEXT_QUOTAS` parser (issue #136) accepts the
+    /// documented shape and refuses every trap — a declaration that
+    /// silently failed to arm is an unbounded tenant, so anything
+    /// short of exactly-as-documented must stop the boot.
+    #[test]
+    fn context_quota_parsing_accepts_the_shape_and_refuses_the_traps() {
+        assert!(parse_context_quotas(None).unwrap().is_empty());
+
+        let quotas = parse_context_quotas(Some(
+            r#"{"tenant-a": {"storage_bytes": 1024, "cache_bytes": 2048},
+                "tenant-b": {"storage_bytes": 512}}"#,
+        ))
+        .unwrap();
+        assert_eq!(quotas["tenant-a"].storage_bytes, Some(1024));
+        assert_eq!(quotas["tenant-a"].cache_bytes, Some(2048));
+        assert_eq!(quotas["tenant-b"].storage_bytes, Some(512));
+        assert_eq!(quotas["tenant-b"].cache_bytes, None);
+
+        // Set-but-empty, broken JSON, a ceiling-less quota, a typo'd
+        // field name, and a zero ceiling: each refuses loudly.
+        for broken in [
+            "",
+            "   ",
+            "{not json}",
+            r#"{"a": {}}"#,
+            r#"{"a": {"storage_byte": 1}}"#,
+            r#"{"a": {"storage_bytes": 0}}"#,
+            r#"{"a": {"cache_bytes": 0, "storage_bytes": 1}}"#,
+        ] {
+            assert!(parse_context_quotas(Some(broken)).is_err(), "{broken:?}");
+        }
+    }
+
+    /// The storage ceiling refuses growth writes once the file family
+    /// reaches it — through the live WAL lane before any flush, and
+    /// through the flush-stamped snapshot lanes after one (gauges off,
+    /// proving the quota alone keeps the disk sweep alive) — while the
+    /// shrink paths stay open and an uncapped sibling never notices.
+    #[test]
+    fn storage_quota_refuses_growth_and_keeps_the_shrink_paths_open() {
+        let dir = scratch_dir("storage-quota");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                context_quotas: HashMap::from([(
+                    "capped".to_string(),
+                    ContextQuota {
+                        storage_bytes: Some(1),
+                        cache_bytes: None,
+                    },
+                )]),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        // Creation is never gated: a declared name may not exist yet.
+        state
+            .create("capped", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // The first write lands — nothing is on disk yet — and its WAL
+        // append alone carries the family past the one-byte ceiling.
+        state
+            .add_associations(
+                "capped",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let refused = state.add_associations(
+            "capped",
+            vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md"))],
+            Deadline::unbounded(),
+        );
+        let Err(AccessError::QuotaExceeded(message)) = refused else {
+            panic!("growth past the ceiling must refuse, got {refused:?}");
+        };
+        assert!(message.contains("storage quota"), "{message}");
+        assert!(message.contains("retract or compact"), "{message}");
+        let aliases = state.add_aliases(
+            "capped",
+            &BTreeMap::from([("酒蔵".to_string(), "蔵".to_string())]),
+            &BTreeMap::new(),
+        );
+        assert!(
+            matches!(aliases, Err(AccessError::QuotaExceeded(_))),
+            "aliases are the other growth family: {aliases:?}"
+        );
+
+        // The shrink paths stay open at the ceiling…
+        state.retract_source("capped", "keep.md").unwrap();
+        state
+            .compact_context("capped", Deadline::unbounded())
+            .unwrap();
+        // …and after a flush moves the bytes from the live lane into
+        // the snapshot lanes (the WAL truncates; the image and meta
+        // keep the family over this ceiling), growth still refuses —
+        // the flush-time bookkeeping is what the gate reads.
+        state.flush_dirty();
+        assert!(matches!(
+            state.add_associations(
+                "capped",
+                vec![assoc_op("蔵", "産地", "灘", 1.0, Some("keep.md"))],
+                Deadline::unbounded(),
+            ),
+            Err(AccessError::QuotaExceeded(_))
+        ));
+        // The lock-free read the import pre-check uses agrees.
+        assert!(state.storage_quota_refusal("capped").is_some());
+
+        // An uncapped sibling never notices any of this.
+        state
+            .create("free", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "free",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.storage_quota_refusal("free"), None);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The cache ceiling's provability claim (issue #136): under
+    /// pressure, a context past its declared ceiling is evicted before
+    /// the LRU victim — so the eviction damage a saturating context
+    /// can inflict on compliant residents is bounded by its ceiling,
+    /// while recency still orders everything else.
+    #[test]
+    fn cache_ceiling_evicts_the_over_quota_context_before_the_lru_victim() {
+        let dir = scratch_dir("cache-ceiling");
+        // First boot: build three same-shaped contexts and measure one
+        // footprint, so the second boot's budget can be sized to hold
+        // exactly two of them.
+        let footprint = {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            for name in ["old", "hog", "fresh"] {
+                state
+                    .create(name, ContextMeta::default())
+                    .map_err(|_| "create")
+                    .unwrap();
+                state
+                    .add_associations(
+                        name,
+                        vec![
+                            assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                            assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
+                        ],
+                        Deadline::unbounded(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            state.flush_dirty();
+            state
+                .read_context("old", |context| context.footprint())
+                .map_err(|_| "read")
+                .unwrap()
+        };
+
+        let state = AppState::boot_with(
+            dir.clone(),
+            footprint * 5 / 2,
+            None,
+            BootOptions {
+                context_quotas: HashMap::from([(
+                    "hog".to_string(),
+                    ContextQuota {
+                        storage_bytes: None,
+                        cache_bytes: Some(1),
+                    },
+                )]),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        // old first (the would-be LRU victim), hog second (over its
+        // ceiling, more recently used than old), fresh last (its load
+        // pushes the total past the budget and triggers the sweep).
+        for name in ["old", "hog", "fresh"] {
+            state
+                .read_context(name, |context| context.association_count())
+                .map_err(|_| "read")
+                .unwrap();
+        }
+        let loaded = loaded_map(&state);
+        assert!(
+            !loaded["hog"],
+            "the over-ceiling context must go first: {loaded:?}"
+        );
+        assert!(
+            loaded["old"],
+            "plain LRU would have evicted old — the ceiling reordered it: {loaded:?}"
+        );
+        assert!(loaded["fresh"], "{loaded:?}");
 
         let _ = fs::remove_dir_all(dir);
     }

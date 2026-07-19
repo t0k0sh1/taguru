@@ -1088,6 +1088,11 @@ impl ApplyRefusal {
             // Deadline::unbounded(). Unreachable either way, kept for
             // exhaustiveness.
             Self::Access(AccessError::DeadlineExceeded) => "deadline exceeded".to_string(),
+            // Same unreachability, other leg: the CLI import boots with
+            // no quota declaration (offline commands run as the
+            // operator), and the HTTP path never calls `text()` on
+            // Access.
+            Self::Access(AccessError::QuotaExceeded(message)) => message.clone(),
             Self::Partial { message, .. } => message.clone(),
         }
     }
@@ -1225,7 +1230,17 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
                 )]),
             )
             .ok_or(ApplyRefusal::Access(AccessError::NotFound))?
-            .map_err(|io_error| ApplyRefusal::Io(format!("passage not persisted: {io_error}")))?;
+            .map_err(|error| match error {
+                // The policy refusal keeps its shape (507 over HTTP,
+                // via the same Access mapping every graph gate uses);
+                // only genuine disk trouble flattens to Io.
+                crate::registry::PassagesWriteError::QuotaExceeded(message) => {
+                    ApplyRefusal::Access(AccessError::QuotaExceeded(message))
+                }
+                crate::registry::PassagesWriteError::Io(io_error) => {
+                    ApplyRefusal::Io(format!("passage not persisted: {io_error}"))
+                }
+            })?;
         questions_stored = outcome.questions_stored;
         questions_dropped = outcome.questions_dropped;
         sections_stored = outcome.sections_stored;

@@ -125,6 +125,7 @@ taguru version</code></pre>
           <tr><td>TAGURU_MAX_CONCURRENT_REQUESTS</td><td>256</td><td>Global in-flight ceiling. Excess requests are shed immediately with 503 + <code>Retry-After</code>; <code>0</code> disables</td></tr>
           <tr><td>TAGURU_MAX_CONCURRENT_HEAVY_OPS</td><td>2</td><td>Shared ceiling for vocabulary audits and context compactions. Excess calls are shed immediately with 503 + <code>Retry-After</code>; <code>0</code> disables</td></tr>
           <tr><td>TAGURU_AUTO_COMPACT</td><td>on</td><td>Ratio-triggered auto-compaction: each flush tick rebuilds at most the one worst context whose dead ratio exceeds <code>TAGURU_AUTO_COMPACT_RATIO</code> (0.5 — dead weight outgrew live content), behind the heavy-ops ceiling above. <code>0</code> keeps compaction manual-only</td></tr>
+          <tr><td>TAGURU_CONTEXT_QUOTAS</td><td>—</td><td>Per-context ceilings as one JSON object, <code>{"sake": {"storage_bytes": …, "cache_bytes": …}}</code> — each field optional, never both absent. <code>storage_bytes</code> refuses growth writes at the ceiling with 507 <code>storage_full</code> (retract, compact, and delete stay open — they are the ways back under); <code>cache_bytes</code> bounds the context's resident share, evicting the over-share context first under cache pressure. Declared quotas surface as <code>taguru_context_quota_bytes</code> next to the per-context usage gauges. A broken declaration refuses boot, like broken credentials</td></tr>
         </tbody>
       </table>
     </div>
