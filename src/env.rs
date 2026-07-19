@@ -65,14 +65,18 @@ pub(crate) fn env_per_context_metrics(key: &str) -> crate::metrics::PerContextMe
     let Ok(value) = std::env::var(key) else {
         return PerContextMetrics::Off;
     };
-    if value == "0" || value.eq_ignore_ascii_case("false") {
+    if value.eq_ignore_ascii_case("false") {
         return PerContextMetrics::Off;
     }
-    if value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("all") {
+    if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("all") {
         return PerContextMetrics::All;
     }
     match value.parse::<usize>() {
-        // 0 and 1 matched above, so a parsed count is always ≥ 2.
+        // The numeric dialect folds into the boolean one by VALUE, not
+        // by spelling — "0"/"00" = off, "1"/"01" = all — so a leading
+        // zero cannot smuggle in the top-1 the doc above rules out.
+        Ok(0) => PerContextMetrics::Off,
+        Ok(1) => PerContextMetrics::All,
         Ok(top) => PerContextMetrics::Top(top),
         Err(_) => {
             warn!(
@@ -233,12 +237,15 @@ mod tests {
         let key = "TAGURU_TEST_PCM_VALUE";
         for (value, expected) in [
             ("0", PerContextMetrics::Off),
+            ("00", PerContextMetrics::Off),
             ("false", PerContextMetrics::Off),
             ("1", PerContextMetrics::All),
+            ("01", PerContextMetrics::All),
             ("true", PerContextMetrics::All),
             ("all", PerContextMetrics::All),
             ("ALL", PerContextMetrics::All),
             ("2", PerContextMetrics::Top(2)),
+            ("007", PerContextMetrics::Top(7)),
             ("25", PerContextMetrics::Top(25)),
             ("banana", PerContextMetrics::Off),
             ("-3", PerContextMetrics::Off),

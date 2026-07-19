@@ -7539,15 +7539,12 @@ mod tests {
             let before = state.gauge_snapshot();
             assert_eq!(before.per_context.len(), 2);
             let row = |snapshot: &GaugeSnapshot, name: &str| -> ContextGaugeRow {
-                let row = snapshot
+                snapshot
                     .per_context
                     .iter()
                     .find(|row| row.name == name)
-                    .unwrap();
-                ContextGaugeRow {
-                    name: row.name.clone(),
-                    ..*row
-                }
+                    .unwrap()
+                    .clone()
             };
             assert!(
                 fs::metadata(image_path(&dir, &file_stem("big")))

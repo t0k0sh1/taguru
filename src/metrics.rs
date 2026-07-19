@@ -463,6 +463,7 @@ pub enum PerContextMetrics {
 /// Disk sizes come from flush-time bookkeeping, everything else from
 /// registry state already in memory: a scrape never walks the data
 /// directory (see `AppState::refresh_disk_usage`).
+#[derive(Debug, Clone)]
 pub struct ContextGaugeRow {
     pub name: String,
     pub pinned: bool,
