@@ -29,6 +29,7 @@ mod passages;
 mod registry;
 mod remote_mcp;
 mod replica;
+mod route;
 mod ship;
 mod storage;
 mod trace;
@@ -90,15 +91,18 @@ fn main() {
     // Argument handling runs before ANY runtime, listener, or
     // telemetry exists: `taguru version` and friends must never start
     // a server (`--help` used to).
-    let serve_args = cli::dispatch();
+    let command = cli::dispatch();
     // The config file becomes environment variables HERE, while the
     // process is still single-threaded (set_var's soundness condition)
     // and before init_telemetry reads RUST_LOG/OTEL_* — file values
     // must steer those too.
-    if let Some(path) = &serve_args.config {
+    if let Some(path) = command.config() {
         config::load_config(path);
     }
-    serve(serve_args);
+    match command {
+        cli::Command::Serve(serve_args) => serve(serve_args),
+        cli::Command::Route(route_args) => route::run(route_args.config),
+    }
 }
 
 #[tokio::main]
@@ -925,7 +929,7 @@ fn run_flush_tick(state: &AppState, auto_embed: bool) {
 /// the bootstrap contract lines tests parse. When an OTLP endpoint is
 /// configured, an export layer rides alongside; `RUST_LOG` shapes only
 /// the stderr log, never what is exported.
-fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
+pub(crate) fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
     use tracing_subscriber::Layer as _;
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
@@ -994,7 +998,7 @@ fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
 /// stream when the first signal fired and installed a new one only after
 /// the spawn — a window in which a second signal would land on no handler
 /// and be lost, defeating the very escape hatch this arms.
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     let mut signals = TerminateSignals::install();
     signals.recv().await;
     tokio::spawn(async move {

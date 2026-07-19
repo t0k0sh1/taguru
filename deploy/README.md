@@ -24,6 +24,17 @@ directory.
   the promotion-time RPO — is on `/metrics`. Its header carries the
   manual-promotion runbook in short form.
 
+When several writers each own a disjoint set of contexts, `taguru
+route` puts one front door on the fleet: a stateless router (no
+volume, no keys — shards enforce auth) whose `TAGURU_ROUTE_MAP` file
+says which shard owns which context, with groups and cross-context
+search spanning every shard under the single-instance merge
+semantics. The `docker-compose.yml` carries a commented example;
+the topology notes live in the
+[Kubernetes page](https://t0k0sh1.github.io/taguru/kubernetes.html#sharding).
+Moving a context is `taguru export` → `import` on the new shard →
+map edit → rolling router restart.
+
 All pin the image version on purpose (`latest` moves), keep the
 credentials out of the manifest, and leave TLS to the layer in front —
 a bearer token is the whole credential, so nothing here publishes the

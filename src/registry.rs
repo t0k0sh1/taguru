@@ -300,7 +300,7 @@ struct MetaFile {
 /// prose description, and the mechanical stats that keep it honest.
 /// Stats are live for loaded contexts and the last saved snapshot for
 /// cold ones.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryEntry {
     pub name: String,
     pub description: String,

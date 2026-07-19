@@ -28,6 +28,7 @@ pub fn scrub_taguru_env(command: &mut Command) -> &mut Command {
         "TAGURU_RATE_LIMIT_PER_MIN",
         "TAGURU_PUBLIC_URL",
         "TAGURU_LOG_SEARCHES",
+        "TAGURU_ROUTE_MAP",
         "TAGURU_CONFIG",
         "OTEL_EXPORTER_OTLP_ENDPOINT",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",

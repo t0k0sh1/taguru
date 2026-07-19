@@ -58,6 +58,34 @@ services:
   #   read_only: true
   #   restart: unless-stopped
 
+  # Sharding router (issue #130): when several writer services each own
+  # a disjoint set of contexts, uncomment for one front door — context
+  # verbs route to the owning shard, groups and cross-context search
+  # span all of them with the single-instance merge semantics, /mcp
+  # included. Stateless: no volume, and NO keys here — the router
+  # forwards Authorization and the shards enforce it (give every shard
+  # the same keyring). The map file, one `context = shard-url` per line
+  # plus an optional `* = shard-url` fallback:
+  #
+  #   sake      = http://taguru:8248
+  #   archive   = http://taguru-2:8248
+  #   *         = http://taguru:8248
+  #
+  # Moving a context: `taguru export` → `import` on the new shard →
+  # edit the map → `docker compose restart taguru-router`.
+  #
+  # taguru-router:
+  #   image: ghcr.io/t0k0sh1/taguru:0.3.0
+  #   command: ["route"]
+  #   ports:
+  #     - "127.0.0.1:8250:8248"
+  #   environment:
+  #     TAGURU_ROUTE_MAP: /route-map
+  #   volumes:
+  #     - ./route-map:/route-map:ro
+  #   read_only: true
+  #   restart: unless-stopped
+
 volumes:
   taguru-data:
   # taguru-replica-data:

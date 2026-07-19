@@ -53,6 +53,39 @@ impl Server {
         Self::spawn(tag, data_dir, extra_env)
     }
 
+    /// Spawns `taguru route` over the given map contents (written to a
+    /// scratch file). The returned handle's `data_dir` is that scratch
+    /// directory — the router itself holds no data; the field only
+    /// keeps Drop's cleanup working.
+    pub fn start_router(tag: &str, map_contents: &str, extra_env: &[(&str, &str)]) -> Self {
+        let dir = std::env::temp_dir().join(format!("taguru-router-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("router scratch dir must be creatable");
+        let map_path = dir.join("route-map");
+        std::fs::write(&map_path, map_contents).expect("route map must be writable");
+
+        let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+        command.arg("route");
+        common::scrub_taguru_env(&mut command)
+            .env("TAGURU_ADDR", "127.0.0.1:0")
+            .env("TAGURU_ROUTE_MAP", &map_path);
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("router binary must spawn");
+        let stdout = child.stdout.take().expect("stdout must be piped");
+        let addr = read_listen_line_and_drain(&format!("router '{tag}'"), stdout);
+        Self {
+            child,
+            base: format!("http://{addr}"),
+            data_dir: dir,
+        }
+    }
+
     fn spawn(tag: &str, data_dir: PathBuf, extra_env: &[(&str, &str)]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
         common::scrub_taguru_env(&mut command)

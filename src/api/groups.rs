@@ -22,7 +22,7 @@ use super::{
 
 /// A bounded group-directory page; `total` counts the whole directory,
 /// cursor-independent, exactly as [`ContextPage`]'s does.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct GroupPage {
     pub total: usize,
     pub groups: Vec<GroupEntry>,
@@ -30,7 +30,7 @@ pub struct GroupPage {
 
 /// One group as served — the directory row, the single GET, and the
 /// PATCH response are all this one shape, as with [`DirectoryEntry`].
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct GroupEntry {
     pub name: String,
     pub description: String,

@@ -5,7 +5,7 @@ use std::time::Instant;
 use axum::extract::State;
 use axum::response::Response;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use taguru::context::{Association, Context};
 use taguru::deadline::Deadline;
@@ -144,7 +144,7 @@ type CrossPage = (usize, Vec<(String, Association)>);
 /// `context` ([`CrossMatch`]'s flattened shape), so a client builds
 /// this from the last match it received exactly as it builds
 /// [`MatchCursor`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CrossMatchCursor {
     pub weight: f64,
@@ -175,7 +175,7 @@ fn cross_key<'a>(
 /// N-tuple comparator — the two key shapes are concretely different
 /// arities, and this codebase prefers explicit small functions over
 /// generic machinery built for two call sites.
-fn cross_rank(
+pub(crate) fn cross_rank(
     a: (f64, &str, &str, &str, &str),
     b: (f64, &str, &str, &str, &str),
 ) -> std::cmp::Ordering {
@@ -310,7 +310,7 @@ async fn cross_matches(
     Ok((total, tagged))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CrossRecallRequest {
     /// Full context names — no patterns.
     #[serde(default)]
@@ -447,7 +447,7 @@ pub async fn query(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CrossQueryRequest {
     /// Full context names — no patterns.
     #[serde(default)]
