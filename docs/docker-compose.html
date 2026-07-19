@@ -121,16 +121,17 @@
       - taguru-data:/data
     read_only: true <span class="c"># /data is the only write target</span>
     restart: unless-stopped
-    <span class="c"># `docker stop` is a graceful shutdown (flush + usage sweep); give</span>
-    <span class="c"># a large flush a moment before the kill.</span>
-    stop_grace_period: 30s
+    <span class="c"># `docker stop` is a graceful shutdown (flush + usage sweep); the</span>
+    <span class="c"># drain is bounded by the request budget (30s default) — embedding</span>
+    <span class="c"># provider calls abort on the stop signal.</span>
+    stop_grace_period: 60s
 
 volumes:
   taguru-data:</code></pre>
     <ul>
       <li><b>The token is required, not defaulted</b>: <code>${TAGURU_API_TOKENS:?…}</code> fails the deploy loudly rather than starting an unauthenticated server. Named keys (<code>name:token</code>) mean the access log says which key was used and a leak costs one revocation.</li>
       <li><b>The port stays on loopback.</b> Expose it beyond this host only behind a TLS-terminating reverse proxy (a bearer token is the whole credential), and set <code>TAGURU_RATE_LIMIT_PER_MIN</code> when you do.</li>
-      <li><b><code>stop_grace_period: 30s</code></b> gives a large final flush room before the kill; <code>restart: unless-stopped</code> covers crashes without fighting an intentional stop.</li>
+      <li><b><code>stop_grace_period: 60s</code></b> covers the drain (bounded by <code>TAGURU_REQUEST_TIMEOUT_SECS</code>, 30s default — in-flight embedding calls abort on the stop signal) plus the final flush; <code>restart: unless-stopped</code> covers crashes without fighting an intentional stop.</li>
       <li>All other configuration is ordinary environment: add <code>TAGURU_EMBED_*</code>, cache and rate budgets, etc. right in <code>environment:</code>, or via <code>--env-file</code> — the same KEY=VALUE file <code>taguru --config</code> reads, so one file can drive a local binary and this container alike.</li>
     </ul>
   </section>

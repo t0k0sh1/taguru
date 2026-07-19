@@ -381,6 +381,11 @@ pub struct GaugeSnapshot {
     pub unsourced_edges_total: u64,
     /// Sum, across every context, of unsourced weight (absolute value).
     pub unsourced_weight_total: f64,
+    /// The embedding provider's circuit breaker, present exactly when a
+    /// provider with one is configured — the family is absent from a
+    /// lexical-only server's scrape, like the replica family off a
+    /// writer.
+    pub embed_breaker: Option<crate::embedding::BreakerSnapshot>,
 }
 
 impl Metrics {
@@ -890,10 +895,60 @@ impl Metrics {
             "taguru_embedding_duration_seconds",
             "histogram",
             "Embedding provider round-trip latency, retries included \
-             (calls past the top bucket land in +Inf).",
+             (calls past the top bucket land in +Inf). Circuit-breaker \
+             short-circuits never touch the provider and are excluded.",
         );
         let snapshot = self.embed_latency.snapshot();
         push_histogram(&mut out, "taguru_embedding_duration_seconds", "", &snapshot);
+        if let Some(breaker) = &gauges.embed_breaker {
+            push_header(
+                &mut out,
+                "taguru_embedding_breaker_state",
+                "gauge",
+                "Embedding provider circuit breaker: 0 = closed, 1 = open \
+                 (calls refused until the cooldown lets a probe through), \
+                 2 = half-open (probing).",
+            );
+            out.push_str(&format!(
+                "taguru_embedding_breaker_state {}\n",
+                breaker.state
+            ));
+            push_header(
+                &mut out,
+                "taguru_embedding_breaker_consecutive_failures",
+                "gauge",
+                "Consecutive provider-attempt failures counted toward the \
+                 breaker's opening threshold (pinned at the threshold while \
+                 open or half-open).",
+            );
+            out.push_str(&format!(
+                "taguru_embedding_breaker_consecutive_failures {}\n",
+                breaker.consecutive_failures
+            ));
+            push_header(
+                &mut out,
+                "taguru_embedding_breaker_opened_total",
+                "counter",
+                "Times the breaker opened (threshold of consecutive attempt \
+                 failures reached, or a half-open probe failed).",
+            );
+            out.push_str(&format!(
+                "taguru_embedding_breaker_opened_total {}\n",
+                breaker.opened_total
+            ));
+            push_header(
+                &mut out,
+                "taguru_embedding_breaker_short_circuits_total",
+                "counter",
+                "Embedding calls refused without touching the provider \
+                 because the breaker was open (or a probe was already in \
+                 flight).",
+            );
+            out.push_str(&format!(
+                "taguru_embedding_breaker_short_circuits_total {}\n",
+                breaker.short_circuits_total
+            ));
+        }
 
         push_header(
             &mut out,
@@ -1527,7 +1582,40 @@ mod tests {
             arena_slack_total: 0,
             unsourced_edges_total: 0,
             unsourced_weight_total: 0.0,
+            embed_breaker: None,
         }
+    }
+
+    /// The breaker family gates on the snapshot carrying one — a
+    /// lexical-only server's scrape stays free of it — and renders the
+    /// snapshot's values verbatim when it does.
+    #[test]
+    fn the_breaker_family_gates_on_the_snapshot() {
+        let metrics = Metrics::default();
+        let without = metrics.render_prometheus(&empty_gauges());
+        assert!(!without.contains("taguru_embedding_breaker"), "{without}");
+
+        let mut gauges = empty_gauges();
+        gauges.embed_breaker = Some(crate::embedding::BreakerSnapshot {
+            state: 2,
+            consecutive_failures: 3,
+            opened_total: 1,
+            short_circuits_total: 4,
+        });
+        let with = metrics.render_prometheus(&gauges);
+        assert!(with.contains("taguru_embedding_breaker_state 2"), "{with}");
+        assert!(
+            with.contains("taguru_embedding_breaker_consecutive_failures 3"),
+            "{with}"
+        );
+        assert!(
+            with.contains("taguru_embedding_breaker_opened_total 1"),
+            "{with}"
+        );
+        assert!(
+            with.contains("taguru_embedding_breaker_short_circuits_total 4"),
+            "{with}"
+        );
     }
 
     /// The replica family renders only in replica mode, and the lag
@@ -2017,6 +2105,12 @@ mod tests {
             arena_slack_total: 0,
             unsourced_edges_total: 0,
             unsourced_weight_total: 0.0,
+            embed_breaker: Some(crate::embedding::BreakerSnapshot {
+                state: 1,
+                consecutive_failures: 3,
+                opened_total: 2,
+                short_circuits_total: 7,
+            }),
         });
 
         // Every sample line's metric name must have been introduced by

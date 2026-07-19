@@ -16,10 +16,11 @@ use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use taguru::deadline::Deadline;
+use taguru::deadline::{Deadline, DeadlineExceeded};
 
 /// Why a batch is being embedded: glosses entering the store (`Index`)
 /// or a live cue looking things up (`Query`). Modern embedding APIs
@@ -43,20 +44,258 @@ impl EmbedPurpose {
     }
 }
 
+/// The process-wide "a stop signal has arrived" latch, cloned into
+/// [`HttpEmbeddings`] so an in-flight provider wait is abandoned the
+/// moment the graceful drain starts — the one blocking call in the
+/// serve path that neither the request timeout nor the runtime can
+/// preempt otherwise. Set once, never cleared: the process is exiting.
+#[derive(Clone, Default)]
+pub struct ShutdownFlag(Arc<AtomicBool>);
+
+impl ShutdownFlag {
+    pub fn begin(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn active(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Consecutive provider-attempt failures that open the breaker. Counted
+/// per ATTEMPT, not per `embed()` call, so one full retry ladder against
+/// a dead provider is enough to open it — the next caller fails fast
+/// instead of paying the timeout again.
+const BREAKER_THRESHOLD: u32 = 3;
+/// How long an open breaker refuses before letting one probe through.
+const BREAKER_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// A minimal circuit breaker over the embedding provider: open after
+/// [`BREAKER_THRESHOLD`] consecutive attempt failures, then one probe
+/// per [`BREAKER_COOLDOWN`] until a success closes it. Exists so a dead
+/// provider costs each request a refusal instead of a full timeout —
+/// the lanes behind it already know how to degrade; this makes the
+/// degradation cheap. Shared by handle: [`HttpEmbeddings`] holds one
+/// and the registry reads the same one for /metrics and its own
+/// fast-fail gate.
+#[derive(Clone)]
+pub struct EmbedBreaker(Arc<BreakerInner>);
+
+struct BreakerInner {
+    threshold: u32,
+    cooldown: Duration,
+    state: Mutex<BreakerState>,
+    opened_total: AtomicU64,
+    short_circuits_total: AtomicU64,
+}
+
+enum BreakerState {
+    Closed {
+        consecutive_failures: u32,
+    },
+    Open {
+        since: Instant,
+    },
+    /// One probe at a time: `probing` is the in-flight claim, released
+    /// by the probe's outcome (or [`EmbedBreaker::abandon`]).
+    HalfOpen {
+        probing: bool,
+    },
+}
+
+/// What [`EmbedBreaker::admit`] granted: an ordinary call, or the one
+/// half-open probe whose outcome decides the breaker's next state.
+#[derive(Clone, Copy, Debug)]
+pub enum Admission {
+    Normal,
+    Probe,
+}
+
+/// One scrape's view of the breaker, rendered under
+/// `taguru_embedding_breaker_*` on /metrics.
+pub struct BreakerSnapshot {
+    /// 0 = closed, 1 = open, 2 = half-open.
+    pub state: u8,
+    pub consecutive_failures: u64,
+    pub opened_total: u64,
+    pub short_circuits_total: u64,
+}
+
+impl Default for EmbedBreaker {
+    fn default() -> Self {
+        Self::with_policy(BREAKER_THRESHOLD, BREAKER_COOLDOWN)
+    }
+}
+
+impl EmbedBreaker {
+    /// The production policy is the constants above; tests shrink the
+    /// cooldown to keep the half-open walk fast.
+    pub fn with_policy(threshold: u32, cooldown: Duration) -> Self {
+        Self(Arc::new(BreakerInner {
+            threshold: threshold.max(1),
+            cooldown,
+            state: Mutex::new(BreakerState::Closed {
+                consecutive_failures: 0,
+            }),
+            opened_total: AtomicU64::new(0),
+            short_circuits_total: AtomicU64::new(0),
+        }))
+    }
+
+    /// Gate one provider attempt. `Err` is the refusal message the
+    /// caller returns without touching the provider; `Ok` says whether
+    /// this attempt is the half-open probe.
+    fn admit(&self) -> Result<Admission, String> {
+        let mut state = self.0.state.lock();
+        match &mut *state {
+            BreakerState::Closed { .. } => Ok(Admission::Normal),
+            BreakerState::Open { since } => {
+                let elapsed = since.elapsed();
+                if elapsed >= self.0.cooldown {
+                    *state = BreakerState::HalfOpen { probing: true };
+                    Ok(Admission::Probe)
+                } else {
+                    self.0.short_circuits_total.fetch_add(1, Ordering::Relaxed);
+                    Err(self.open_refusal(self.0.cooldown - elapsed))
+                }
+            }
+            BreakerState::HalfOpen { probing } => {
+                if *probing {
+                    self.0.short_circuits_total.fetch_add(1, Ordering::Relaxed);
+                    Err(PROBE_BUSY_REFUSAL.to_string())
+                } else {
+                    *probing = true;
+                    Ok(Admission::Probe)
+                }
+            }
+        }
+    }
+
+    /// The same refusal arms as [`Self::admit`], WITHOUT claiming the
+    /// probe slot — the registry's pre-flight gate, so a short-circuit
+    /// never lands in the provider-latency histogram as a ~0s sample.
+    /// `None` means "call the provider" (whose own `admit` then claims
+    /// the probe if one is due).
+    pub fn refusal(&self) -> Option<String> {
+        let state = self.0.state.lock();
+        let refusal = match &*state {
+            BreakerState::Closed { .. } => None,
+            BreakerState::Open { since } => {
+                let elapsed = since.elapsed();
+                (elapsed < self.0.cooldown).then(|| self.open_refusal(self.0.cooldown - elapsed))
+            }
+            BreakerState::HalfOpen { probing } => probing.then(|| PROBE_BUSY_REFUSAL.to_string()),
+        };
+        if refusal.is_some() {
+            self.0.short_circuits_total.fetch_add(1, Ordering::Relaxed);
+        }
+        refusal
+    }
+
+    /// One admitted attempt's outcome. A success closes the breaker
+    /// whatever granted the attempt; a failed probe re-opens for a
+    /// fresh cooldown; failed normal attempts count toward the
+    /// threshold only while closed (an already-open breaker needs no
+    /// more evidence, and a stale straggler must not kill a pending
+    /// probe).
+    fn record(&self, admission: Admission, ok: bool) {
+        let mut state = self.0.state.lock();
+        if ok {
+            *state = BreakerState::Closed {
+                consecutive_failures: 0,
+            };
+            return;
+        }
+        match (admission, &mut *state) {
+            (Admission::Probe, _) => {
+                *state = BreakerState::Open {
+                    since: Instant::now(),
+                };
+                self.0.opened_total.fetch_add(1, Ordering::Relaxed);
+            }
+            (
+                Admission::Normal,
+                BreakerState::Closed {
+                    consecutive_failures,
+                },
+            ) => {
+                *consecutive_failures += 1;
+                if *consecutive_failures >= self.0.threshold {
+                    *state = BreakerState::Open {
+                        since: Instant::now(),
+                    };
+                    self.0.opened_total.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            (Admission::Normal, _) => {}
+        }
+    }
+
+    /// Releases an admitted attempt that produced NO outcome (the
+    /// shutdown abandon): a claimed probe slot must not wedge the
+    /// breaker half-open forever, and an abandoned wait is no evidence
+    /// about the provider either way.
+    fn abandon(&self, admission: Admission) {
+        if let Admission::Probe = admission
+            && let BreakerState::HalfOpen { probing } = &mut *self.0.state.lock()
+        {
+            *probing = false;
+        }
+    }
+
+    pub fn snapshot(&self) -> BreakerSnapshot {
+        let state = self.0.state.lock();
+        let (state_code, consecutive_failures) = match &*state {
+            BreakerState::Closed {
+                consecutive_failures,
+            } => (0, u64::from(*consecutive_failures)),
+            BreakerState::Open { .. } => (1, u64::from(self.0.threshold)),
+            BreakerState::HalfOpen { .. } => (2, u64::from(self.0.threshold)),
+        };
+        BreakerSnapshot {
+            state: state_code,
+            consecutive_failures,
+            opened_total: self.0.opened_total.load(Ordering::Relaxed),
+            short_circuits_total: self.0.short_circuits_total.load(Ordering::Relaxed),
+        }
+    }
+
+    /// The open-state refusal. Client-facing (it rides 502 bodies and
+    /// explain reasons), so it names the recovery path, never the URL.
+    fn open_refusal(&self, retry_in: Duration) -> String {
+        format!(
+            "the embedding provider circuit is open after {} consecutive failures; \
+             the next probe is allowed in {}s",
+            self.0.threshold,
+            retry_in.as_secs().max(1)
+        )
+    }
+}
+
+const PROBE_BUSY_REFUSAL: &str = "the embedding provider circuit is half-open with a probe already in flight; \
+     not adding load until it settles";
+
 /// Anything that can turn short strings into vectors. The HTTP provider
 /// is the real one; tests inject a deterministic mock.
 pub trait EmbeddingProvider: Send + Sync {
     fn model(&self) -> &str;
-    /// Returns one vector per input text, all the same dimension.
-    /// `deadline` bounds retries, not the first attempt — a single slow
-    /// round trip can still run past it (the provider's own timeout is
-    /// the only ceiling on one attempt's wall time).
+    /// Returns one vector per input text, all the same dimension. Each
+    /// attempt is bounded by the smaller of the provider timeout and
+    /// `deadline`'s remaining budget, and the whole call gives up
+    /// early once the deadline expires or the process starts shutting
+    /// down.
     fn embed(
         &self,
         texts: &[&str],
         purpose: EmbedPurpose,
         deadline: Deadline,
     ) -> Result<Vec<Vec<f32>>, String>;
+    /// The provider's circuit breaker, when it has one — the registry
+    /// reads it for /metrics and its own fast-fail gate. Mocks keep
+    /// the default `None` and stay breaker-free.
+    fn breaker(&self) -> Option<&EmbedBreaker> {
+        None
+    }
 }
 
 /// OpenAI-compatible `/embeddings` client: `{model, input: [...]}` in,
@@ -66,6 +305,12 @@ pub struct HttpEmbeddings {
     model: String,
     api_key: Option<String>,
     agent: ureq::Agent,
+    /// One attempt's wall-clock ceiling (`TAGURU_EMBED_TIMEOUT_SECS`);
+    /// a request whose remaining budget is smaller shrinks the attempt
+    /// to that budget.
+    timeout: Duration,
+    shutdown: ShutdownFlag,
+    breaker: EmbedBreaker,
 }
 
 /// Transient provider failures retry this many times past the first
@@ -77,12 +322,13 @@ pub struct HttpEmbeddings {
 const RETRY_ATTEMPTS: usize = 2;
 const RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 
-/// The most attempts one `embed()` call can make (the first plus the
-/// retries). Exposed so the boot-time timeout-sanity warning can size
-/// the worst-case wall time a slow provider holds a request for —
-/// `attempts × per-attempt timeout` — instead of assuming a single
-/// attempt.
-pub(crate) const MAX_EMBED_ATTEMPTS: usize = RETRY_ATTEMPTS + 1;
+/// How often the wait on a worker-thread attempt re-checks the
+/// shutdown flag.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(50);
+
+/// What `embed()` answers once the stop signal is up — before an
+/// attempt starts, or mid-wait when the attempt is abandoned.
+const SHUTDOWN_REFUSAL: &str = "the embedding call was abandoned: the server is shutting down";
 
 /// One failed attempt: what to tell the caller, and whether trying
 /// again could plausibly answer differently — a dropped connection, a
@@ -94,22 +340,27 @@ struct Refusal {
 }
 
 impl HttpEmbeddings {
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env(shutdown: ShutdownFlag) -> Option<Self> {
         let url = std::env::var("TAGURU_EMBED_URL").ok()?;
         let model = std::env::var("TAGURU_EMBED_MODEL").ok()?;
-        // The provider budget (TAGURU_EMBED_TIMEOUT_SECS, default 60):
-        // a blocking call cannot be preempted by the request timeout,
-        // so this is the true ceiling on how long one attempt can hold
-        // a worker thread. Floored to 1 like the other second knobs.
+        // The per-attempt ceiling (TAGURU_EMBED_TIMEOUT_SECS, default
+        // 60): one provider round trip never runs longer — and a
+        // request deadline tighter than this bounds the attempt
+        // further still (see `supervised_attempt`). Floored to 1 like
+        // the other second knobs.
         let timeout_secs = crate::env::env_number("TAGURU_EMBED_TIMEOUT_SECS", 60).max(1);
+        let timeout = Duration::from_secs(timeout_secs as u64);
         Some(Self {
             url,
             model,
             api_key: std::env::var("TAGURU_EMBED_API_KEY").ok(),
             agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(timeout_secs as u64)))
+                .timeout_global(Some(timeout))
                 .build()
                 .into(),
+            timeout,
+            shutdown,
+            breaker: EmbedBreaker::default(),
         })
     }
 }
@@ -141,30 +392,145 @@ impl EmbeddingProvider for HttpEmbeddings {
         let mut backoff = RETRY_INITIAL_BACKOFF;
         let mut attempt = 0;
         loop {
-            match self.attempt(texts, purpose) {
-                Ok(vectors) => return Ok(vectors),
-                Err(refusal)
-                    if refusal.retryable && attempt < RETRY_ATTEMPTS && !deadline.expired() =>
-                {
-                    attempt += 1;
-                    tracing::warn!(
-                        attempt,
-                        of = RETRY_ATTEMPTS,
-                        error = %refusal.message,
-                        "transient embedding failure; retrying"
-                    );
-                    std::thread::sleep(backoff.min(deadline.remaining()));
-                    backoff *= 5;
+            if self.shutdown.active() {
+                return Err(SHUTDOWN_REFUSAL.to_string());
+            }
+            if deadline.expired() {
+                return Err(DeadlineExceeded.to_string());
+            }
+            let admission = self.breaker.admit()?;
+            match self.supervised_attempt(texts, purpose, deadline) {
+                AttemptOutcome::ShutDown => {
+                    // No outcome to judge the provider by — release the
+                    // admission (a claimed probe slot must not wedge)
+                    // and report the drain, not the provider.
+                    self.breaker.abandon(admission);
+                    return Err(SHUTDOWN_REFUSAL.to_string());
                 }
-                Err(refusal) => return Err(refusal.message),
+                AttemptOutcome::Finished(Ok(vectors)) => {
+                    self.breaker.record(admission, true);
+                    return Ok(vectors);
+                }
+                AttemptOutcome::Finished(Err(refusal)) => {
+                    self.breaker.record(admission, false);
+                    if refusal.retryable
+                        && attempt < RETRY_ATTEMPTS
+                        && !deadline.expired()
+                        && !self.shutdown.active()
+                    {
+                        attempt += 1;
+                        tracing::warn!(
+                            attempt,
+                            of = RETRY_ATTEMPTS,
+                            error = %refusal.message,
+                            "transient embedding failure; retrying"
+                        );
+                        std::thread::sleep(backoff.min(deadline.remaining()));
+                        backoff *= 5;
+                    } else {
+                        return Err(refusal.message);
+                    }
+                }
+            }
+        }
+    }
+
+    fn breaker(&self) -> Option<&EmbedBreaker> {
+        Some(&self.breaker)
+    }
+}
+
+/// One worker-thread attempt's result — or the news that nobody stayed
+/// to hear it.
+enum AttemptOutcome {
+    Finished(Result<Vec<Vec<f32>>, Refusal>),
+    /// The stop signal arrived mid-wait: the worker thread is left to
+    /// run out its own (bounded) timeout and exit; its result goes
+    /// nowhere.
+    ShutDown,
+}
+
+impl HttpEmbeddings {
+    /// Runs one provider round trip on its own thread and waits for it,
+    /// re-checking the shutdown flag every [`SHUTDOWN_POLL`]. A
+    /// blocking ureq call cannot be interrupted — but the WAIT can be
+    /// abandoned, which is what lets a graceful drain proceed the
+    /// moment the stop signal lands instead of waiting out the
+    /// provider timeout. The attempt itself is bounded by the smaller
+    /// of the provider timeout and the deadline's remaining budget, so
+    /// an abandoned worker exits on its own soon after.
+    fn supervised_attempt(
+        &self,
+        texts: &[&str],
+        purpose: EmbedPurpose,
+        deadline: Deadline,
+    ) -> AttemptOutcome {
+        let call = Arc::new(AttemptCall {
+            agent: self.agent.clone(),
+            url: self.url.clone(),
+            api_key: self.api_key.clone(),
+            body: serde_json::json!({ "model": self.model, "input": texts }).to_string(),
+            purpose,
+            timeout: self.timeout.min(deadline.remaining()),
+            expected: texts.len(),
+        });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = {
+            let call = Arc::clone(&call);
+            move || {
+                let _ = sender.send(call.run());
+            }
+        };
+        if std::thread::Builder::new()
+            .name("taguru-embed".to_string())
+            .spawn(worker)
+            .is_err()
+        {
+            // No thread to be had (fd/memory pressure): run inline.
+            // Loses only the shutdown abandon, never the deadline
+            // bound the call itself carries.
+            return AttemptOutcome::Finished(call.run());
+        }
+        loop {
+            match receiver.recv_timeout(SHUTDOWN_POLL) {
+                Ok(outcome) => return AttemptOutcome::Finished(outcome),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if self.shutdown.active() {
+                        return AttemptOutcome::ShutDown;
+                    }
+                }
+                // The worker panicking would drop its sender; ureq does
+                // not panic on I/O failure, so this names a bug rather
+                // than a provider state.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return AttemptOutcome::Finished(Err(Refusal {
+                        message: "the embedding worker thread died mid-call".to_string(),
+                        retryable: false,
+                    }));
+                }
             }
         }
     }
 }
 
-impl HttpEmbeddings {
+/// Everything one provider round trip needs, owned outright, so the
+/// attempt can run on a worker thread the caller is free to stop
+/// waiting on.
+struct AttemptCall {
+    agent: ureq::Agent,
+    url: String,
+    api_key: Option<String>,
+    body: String,
+    purpose: EmbedPurpose,
+    /// This attempt's whole-call ceiling: the provider timeout, or the
+    /// request's remaining budget when that is tighter.
+    timeout: Duration,
+    expected: usize,
+}
+
+impl AttemptCall {
     /// One provider round trip, classified for the retry loop above.
-    fn attempt(&self, texts: &[&str], purpose: EmbedPurpose) -> Result<Vec<Vec<f32>>, Refusal> {
+    fn run(&self) -> Result<Vec<Vec<f32>>, Refusal> {
         // Everything past the transport is a hard refusal: a malformed
         // body will be malformed again.
         let hard = |message: String| Refusal {
@@ -174,18 +540,20 @@ impl HttpEmbeddings {
         let mut request = self
             .agent
             .post(&self.url)
+            .config()
+            .timeout_global(Some(self.timeout))
+            .build()
             .header("Content-Type", "application/json")
-            .header("X-Taguru-Embed-Purpose", purpose.as_str());
+            .header("X-Taguru-Embed-Purpose", self.purpose.as_str());
         if let Some(key) = &self.api_key {
             request = request.header("Authorization", format!("Bearer {key}"));
         }
-        let body = serde_json::json!({ "model": self.model, "input": texts });
         // The messages stay clear of the provider URL: these strings
         // travel to CLIENTS in 502 bodies (refresh, resolve's semantic
         // tier), and the endpoint an operator configured is
         // infrastructure detail, not client business. The status code /
         // transport kind is what a caller can act on.
-        let response = request.send(body.to_string()).map_err(|error| {
+        let response = request.send(self.body.as_str()).map_err(|error| {
             let (message, retryable) = match &error {
                 // Overload and server-side failure answer differently
                 // in a moment; a 4xx refusal does not.
@@ -202,132 +570,130 @@ impl HttpEmbeddings {
             };
             Refusal { message, retryable }
         })?;
-        self.decode(response, texts).map_err(hard)
+        decode(response, self.expected).map_err(hard)
     }
+}
 
-    /// Decodes one successful response into per-input vectors.
-    fn decode(
-        &self,
-        response: ureq::http::Response<ureq::Body>,
-        texts: &[&str],
-    ) -> Result<Vec<Vec<f32>>, String> {
-        // ureq's `read_to_string`/`read_json` cap their reads at 10 MiB,
-        // below the largest honest reply — and the agent's 60s timeout
-        // bounds time, not bytes, so a misbehaving or misaddressed
-        // provider must not get an unbounded buffer either. Read through
-        // an explicit cap instead: 64 MiB clears the largest honest
-        // reply several times over (128 inputs × 4096 dims × ~24 JSON
-        // bytes per component ≈ 13 MiB) while keeping the buffer finite.
-        const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
-        let mut body = Vec::new();
-        {
-            use std::io::Read;
-            response
-                .into_body()
-                .into_reader()
-                .take(MAX_RESPONSE_BYTES + 1)
-                .read_to_end(&mut body)
-                .map_err(|error| format!("embedding response unreadable: {error}"))?;
-        }
-        if body.len() as u64 > MAX_RESPONSE_BYTES {
-            return Err(format!(
-                "embedding response is larger than {MAX_RESPONSE_BYTES} bytes; \
-                 refusing to buffer it"
-            ));
-        }
-        let parsed: serde_json::Value = serde_json::from_slice(&body)
+/// Decodes one successful response into per-input vectors (`expected`
+/// of them).
+fn decode(
+    response: ureq::http::Response<ureq::Body>,
+    expected: usize,
+) -> Result<Vec<Vec<f32>>, String> {
+    // ureq's `read_to_string`/`read_json` cap their reads at 10 MiB,
+    // below the largest honest reply — and the agent's 60s timeout
+    // bounds time, not bytes, so a misbehaving or misaddressed
+    // provider must not get an unbounded buffer either. Read through
+    // an explicit cap instead: 64 MiB clears the largest honest
+    // reply several times over (128 inputs × 4096 dims × ~24 JSON
+    // bytes per component ≈ 13 MiB) while keeping the buffer finite.
+    const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+    let mut body = Vec::new();
+    {
+        use std::io::Read;
+        response
+            .into_body()
+            .into_reader()
+            .take(MAX_RESPONSE_BYTES + 1)
+            .read_to_end(&mut body)
             .map_err(|error| format!("embedding response unreadable: {error}"))?;
-        let data = parsed
-            .get("data")
-            .and_then(|d| d.as_array())
-            .ok_or("embedding response carries no data array")?;
-        if data.len() != texts.len() {
+    }
+    if body.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(format!(
+            "embedding response is larger than {MAX_RESPONSE_BYTES} bytes; \
+                 refusing to buffer it"
+        ));
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|error| format!("embedding response unreadable: {error}"))?;
+    let data = parsed
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or("embedding response carries no data array")?;
+    if data.len() != expected {
+        return Err(format!(
+            "embedding response returned {} vectors for {expected} inputs",
+            data.len(),
+        ));
+    }
+    // A provider or proxy may return `data` out of input order; each
+    // entry's `index` names the input it belongs to (the OpenAI
+    // embedding contract). Place each vector at its index rather than
+    // trust array order, so a reordered response cannot silently pair
+    // every embedding with the wrong text. An entry that omits `index`
+    // falls back to its array position — the old, order-trusting
+    // behavior, so a provider that never sends `index` still works.
+    let mut slots: Vec<Option<Vec<f32>>> = vec![None; expected];
+    let mut width: Option<usize> = None;
+    for (position, item) in data.iter().enumerate() {
+        let index = item
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .unwrap_or(position);
+        if index >= slots.len() {
             return Err(format!(
-                "embedding response returned {} vectors for {} inputs",
-                data.len(),
-                texts.len()
+                "embedding response index {index} out of range for {expected} inputs"
             ));
         }
-        // A provider or proxy may return `data` out of input order; each
-        // entry's `index` names the input it belongs to (the OpenAI
-        // embedding contract). Place each vector at its index rather than
-        // trust array order, so a reordered response cannot silently pair
-        // every embedding with the wrong text. An entry that omits `index`
-        // falls back to its array position — the old, order-trusting
-        // behavior, so a provider that never sends `index` still works.
-        let mut slots: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
-        let mut width: Option<usize> = None;
-        for (position, item) in data.iter().enumerate() {
-            let index = item
-                .get("index")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|index| usize::try_from(index).ok())
-                .unwrap_or(position);
-            if index >= slots.len() {
-                return Err(format!(
-                    "embedding response index {index} out of range for {} inputs",
-                    texts.len()
-                ));
-            }
-            let embedding = item
-                .get("embedding")
-                .and_then(|e| e.as_array())
-                .ok_or("embedding entry carries no vector")?;
-            // Every other malformed shape here (missing vector, wrong
-            // width, out-of-range or repeated index) fails the whole
-            // response rather than patching around it; a non-numeric
-            // component gets the same treatment instead of silently
-            // becoming 0.0 and corrupting the stored vector's geometry.
-            let mut vector: Vec<f32> = embedding
-                .iter()
-                .map(|component| {
-                    let value = component.as_f64().ok_or_else(|| {
-                        format!("embedding entry {index} contains a non-numeric component")
-                    })? as f32;
-                    // A finite f64 past f32::MAX casts to ±inf; carried
-                    // into `normalize` it poisons the stored vector (inf
-                    // becomes NaN, or a norm that overflows and zeroes
-                    // every component). Name it at the boundary like any
-                    // other malformed component instead of persisting it.
-                    if !value.is_finite() {
-                        return Err(format!(
-                            "embedding entry {index} contains an out-of-range component"
-                        ));
-                    }
-                    Ok(value)
-                })
-                .collect::<Result<_, _>>()?;
-            // One response, one model, one width. A mixed-width response
-            // is a provider bug; carried into a store it would feed
-            // `similarity` mismatched dimensions later, which score as
-            // nothing — better to name the bug at the boundary.
-            match width {
-                None => width = Some(vector.len()),
-                Some(expected) if expected != vector.len() => {
+        let embedding = item
+            .get("embedding")
+            .and_then(|e| e.as_array())
+            .ok_or("embedding entry carries no vector")?;
+        // Every other malformed shape here (missing vector, wrong
+        // width, out-of-range or repeated index) fails the whole
+        // response rather than patching around it; a non-numeric
+        // component gets the same treatment instead of silently
+        // becoming 0.0 and corrupting the stored vector's geometry.
+        let mut vector: Vec<f32> = embedding
+            .iter()
+            .map(|component| {
+                let value = component.as_f64().ok_or_else(|| {
+                    format!("embedding entry {index} contains a non-numeric component")
+                })? as f32;
+                // A finite f64 past f32::MAX casts to ±inf; carried
+                // into `normalize` it poisons the stored vector (inf
+                // becomes NaN, or a norm that overflows and zeroes
+                // every component). Name it at the boundary like any
+                // other malformed component instead of persisting it.
+                if !value.is_finite() {
                     return Err(format!(
-                        "embedding response mixes vector widths ({expected} and {})",
-                        vector.len()
+                        "embedding entry {index} contains an out-of-range component"
                     ));
                 }
-                Some(_) => {}
-            }
-            normalize(&mut vector)?;
-            if slots[index].replace(vector).is_some() {
-                return Err(format!("embedding response repeated index {index}"));
-            }
-        }
-        // No slot can remain empty here — the count matched and no index
-        // repeated — but guard rather than unwrap so a response that both
-        // omits `index` and collides two entries onto one position fails
-        // cleanly instead of panicking.
-        slots
-            .into_iter()
-            .enumerate()
-            .map(|(index, slot)| {
-                slot.ok_or_else(|| format!("embedding response missing index {index}"))
+                Ok(value)
             })
-            .collect()
+            .collect::<Result<_, _>>()?;
+        // One response, one model, one width. A mixed-width response
+        // is a provider bug; carried into a store it would feed
+        // `similarity` mismatched dimensions later, which score as
+        // nothing — better to name the bug at the boundary.
+        match width {
+            None => width = Some(vector.len()),
+            Some(expected) if expected != vector.len() => {
+                return Err(format!(
+                    "embedding response mixes vector widths ({expected} and {})",
+                    vector.len()
+                ));
+            }
+            Some(_) => {}
+        }
+        normalize(&mut vector)?;
+        if slots[index].replace(vector).is_some() {
+            return Err(format!("embedding response repeated index {index}"));
+        }
     }
+    // No slot can remain empty here — the count matched and no index
+    // repeated — but guard rather than unwrap so a response that both
+    // omits `index` and collides two entries onto one position fails
+    // cleanly instead of panicking.
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            slot.ok_or_else(|| format!("embedding response missing index {index}"))
+        })
+        .collect()
 }
 
 /// Scales a vector to unit length, so similarity is a plain dot
@@ -956,6 +1322,24 @@ mod tests {
     use super::*;
     use crate::hash::{FNV1A_OFFSET, fnv1a_fold};
 
+    /// A provider aimed at a local stub listener: a fresh breaker and a
+    /// never-raised shutdown flag per test, so no test can trip
+    /// another's circuit.
+    fn stub_provider(addr: std::net::SocketAddr, timeout: Duration) -> HttpEmbeddings {
+        HttpEmbeddings {
+            url: format!("http://{addr}"),
+            model: "stub-model".to_string(),
+            api_key: None,
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(timeout))
+                .build()
+                .into(),
+            timeout,
+            shutdown: ShutdownFlag::default(),
+            breaker: EmbedBreaker::default(),
+        }
+    }
+
     #[test]
     fn vector_store_roundtrips_and_rejects_garbage() {
         let mut store = VectorStore {
@@ -1102,15 +1486,7 @@ mod tests {
                 }
             }
         });
-        let provider = HttpEmbeddings {
-            url: format!("http://{addr}"),
-            model: "stub-model".to_string(),
-            api_key: None,
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(5)))
-                .build()
-                .into(),
-        };
+        let provider = stub_provider(addr, Duration::from_secs(5));
         let vectors = provider
             .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
             .unwrap();
@@ -1132,20 +1508,229 @@ mod tests {
                 );
             }
         });
-        let provider = HttpEmbeddings {
-            url: format!("http://{addr}"),
-            model: "stub-model".to_string(),
-            api_key: None,
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(5)))
-                .build()
-                .into(),
-        };
+        let provider = stub_provider(addr, Duration::from_secs(5));
         let error = provider
             .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
             .unwrap_err();
         assert!(error.contains("401"), "{error}");
         assert_eq!(hits.load(Ordering::SeqCst), 1, "a 4xx never retries");
+    }
+
+    /// A listener that accepts, reads the request, and never answers —
+    /// the black-holed provider every cancellation test needs. Held
+    /// open (not closed) so the client sees silence, not a reset.
+    fn black_hole() -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let _ = read_full_request(&mut stream);
+                std::thread::sleep(Duration::from_secs(120));
+            }
+        });
+        addr
+    }
+
+    /// A single slow round trip used to be uncancellable — the agent's
+    /// global timeout was the only ceiling, whatever the request had
+    /// left. The attempt itself is now bounded by the deadline's
+    /// remaining budget: a black-holed provider costs a request about
+    /// its own budget, never the provider ceiling.
+    #[test]
+    fn an_attempt_is_bounded_by_the_request_deadline() {
+        let addr = black_hole();
+        let provider = stub_provider(addr, Duration::from_secs(60));
+        let started = std::time::Instant::now();
+        let error = provider
+            .embed(
+                &["x"],
+                EmbedPurpose::Query,
+                Deadline::after(Duration::from_millis(500)),
+            )
+            .unwrap_err();
+        assert!(error.contains("unreachable"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the attempt must be cut near the deadline, not the 60s provider \
+             ceiling: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The stop signal abandons an in-flight provider wait: the drain
+    /// proceeds in well under the provider timeout, and the orphaned
+    /// worker thread runs out its own bounded call in the background.
+    #[test]
+    fn the_stop_signal_abandons_an_in_flight_call() {
+        let addr = black_hole();
+        let shutdown = ShutdownFlag::default();
+        let mut provider = stub_provider(addr, Duration::from_secs(30));
+        provider.shutdown = shutdown.clone();
+
+        let raiser = std::thread::spawn({
+            let shutdown = shutdown.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(300));
+                shutdown.begin();
+            }
+        });
+        let started = std::time::Instant::now();
+        let error = provider
+            .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap_err();
+        raiser.join().unwrap();
+        assert!(error.contains("shutting down"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the wait must end moments after the flag, not at the 30s \
+             provider ceiling: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// One full retry ladder against a dead provider opens the breaker
+    /// (attempts count, not calls), and the next call is refused
+    /// without a round trip — the whole point: an outage costs each
+    /// caller a refusal, not a timeout.
+    #[test]
+    fn the_breaker_opens_after_one_ladder_and_short_circuits_the_next_call() {
+        use std::io::Write;
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let _ = read_full_request(&mut stream);
+                counted.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\
+                      Connection: close\r\n\r\n",
+                );
+            }
+        });
+
+        let provider = stub_provider(addr, Duration::from_secs(5));
+        let error = provider
+            .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap_err();
+        assert!(error.contains("503"), "{error}");
+        assert_eq!(hits.load(Ordering::SeqCst), 3, "the full ladder ran");
+
+        let error = provider
+            .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap_err();
+        assert!(error.contains("circuit is open"), "{error}");
+        assert_eq!(hits.load(Ordering::SeqCst), 3, "no fourth round trip");
+
+        let snapshot = provider.breaker.snapshot();
+        assert_eq!(snapshot.state, 1);
+        assert_eq!(snapshot.opened_total, 1);
+        assert!(snapshot.short_circuits_total >= 1);
+    }
+
+    /// Once the cooldown lets a probe through and the provider has
+    /// recovered, the breaker closes and traffic resumes — the outage
+    /// costs nothing past its own duration plus one cooldown.
+    #[test]
+    fn a_half_open_probe_closes_the_breaker_once_the_provider_recovers() {
+        use std::io::Write;
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let _ = read_full_request(&mut stream);
+                let attempt = counted.fetch_add(1, Ordering::SeqCst);
+                if attempt < 3 {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\
+                          Connection: close\r\n\r\n",
+                    );
+                } else {
+                    let body = br#"{"data":[{"embedding":[3.0,4.0]}]}"#;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(body);
+                }
+            }
+        });
+
+        let mut provider = stub_provider(addr, Duration::from_secs(5));
+        provider.breaker = EmbedBreaker::with_policy(3, Duration::ZERO);
+        let error = provider
+            .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap_err();
+        assert!(error.contains("503"), "{error}");
+        assert_eq!(provider.breaker.snapshot().state, 1, "opened by the ladder");
+
+        let vectors = provider
+            .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap();
+        assert_eq!(vectors, vec![vec![0.6, 0.8]]);
+        assert_eq!(provider.breaker.snapshot().state, 0, "the probe closed it");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            4,
+            "one probe, no extra traffic"
+        );
+    }
+
+    /// The state machine itself: a success resets the consecutive
+    /// count, one probe flies at a time, a failed probe re-opens, an
+    /// abandoned probe releases its slot without judging the provider.
+    #[test]
+    fn the_breaker_state_machine_counts_probes_and_resets() {
+        let breaker = EmbedBreaker::with_policy(2, Duration::from_secs(1000));
+        let first = breaker.admit().unwrap();
+        breaker.record(first, false);
+        let second = breaker.admit().unwrap();
+        breaker.record(second, true);
+        let third = breaker.admit().unwrap();
+        breaker.record(third, false);
+        assert_eq!(
+            breaker.snapshot().state,
+            0,
+            "one failure after a reset stays closed"
+        );
+        let fourth = breaker.admit().unwrap();
+        breaker.record(fourth, false);
+        assert_eq!(breaker.snapshot().state, 1, "the second in a row opens");
+        assert!(breaker.admit().is_err(), "cooling: nothing admitted");
+        assert!(
+            breaker.refusal().is_some(),
+            "the pre-flight gate refuses too"
+        );
+
+        let breaker = EmbedBreaker::with_policy(1, Duration::ZERO);
+        let only = breaker.admit().unwrap();
+        breaker.record(only, false);
+        let probe = breaker.admit().unwrap();
+        assert!(matches!(probe, Admission::Probe));
+        assert!(breaker.admit().is_err(), "one probe at a time");
+        breaker.record(probe, false);
+        assert_eq!(
+            breaker.snapshot().opened_total,
+            2,
+            "a failed probe re-opens"
+        );
+        let probe = breaker.admit().unwrap();
+        breaker.abandon(probe);
+        let probe = breaker
+            .admit()
+            .expect("an abandoned probe's slot frees immediately");
+        breaker.record(probe, true);
+        assert_eq!(breaker.snapshot().state, 0);
+        assert!(breaker.refusal().is_none());
     }
 
     /// The HTTP provider must tell a bridging proxy WHY it is embedding
@@ -1171,15 +1756,7 @@ mod tests {
             String::from_utf8_lossy(&request).to_string()
         });
 
-        let provider = HttpEmbeddings {
-            url: format!("http://{addr}"),
-            model: "stub-model".to_string(),
-            api_key: None,
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(5)))
-                .build()
-                .into(),
-        };
+        let provider = stub_provider(addr, Duration::from_secs(5));
         let vectors = provider
             .embed(&["こんにちは"], EmbedPurpose::Query, Deadline::unbounded())
             .unwrap();
@@ -1224,15 +1801,7 @@ mod tests {
             }
         });
 
-        let provider = HttpEmbeddings {
-            url: format!("http://{addr}"),
-            model: "stub-model".to_string(),
-            api_key: None,
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(10)))
-                .build()
-                .into(),
-        };
+        let provider = stub_provider(addr, Duration::from_secs(10));
         let error = provider
             .embed(&["こんにちは"], EmbedPurpose::Query, Deadline::unbounded())
             .unwrap_err();
@@ -1262,15 +1831,7 @@ mod tests {
             stream.write_all(body).unwrap();
         });
 
-        let provider = HttpEmbeddings {
-            url: format!("http://{addr}"),
-            model: "stub-model".to_string(),
-            api_key: None,
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(5)))
-                .build()
-                .into(),
-        };
+        let provider = stub_provider(addr, Duration::from_secs(5));
         let vectors = provider
             .embed(
                 &["first", "second"],
@@ -1307,15 +1868,7 @@ mod tests {
             stream.write_all(body).unwrap();
         });
 
-        let provider = HttpEmbeddings {
-            url: format!("http://{addr}"),
-            model: "stub-model".to_string(),
-            api_key: None,
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(5)))
-                .build()
-                .into(),
-        };
+        let provider = stub_provider(addr, Duration::from_secs(5));
         let error = provider
             .embed(
                 &["first", "second"],
@@ -1349,15 +1902,7 @@ mod tests {
             stream.write_all(body).unwrap();
         });
 
-        let provider = HttpEmbeddings {
-            url: format!("http://{addr}"),
-            model: "stub-model".to_string(),
-            api_key: None,
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(5)))
-                .build()
-                .into(),
-        };
+        let provider = stub_provider(addr, Duration::from_secs(5));
         let error = provider
             .embed(&["first"], EmbedPurpose::Query, Deadline::unbounded())
             .unwrap_err();
