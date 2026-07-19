@@ -10,6 +10,7 @@
 mod support;
 
 mod auth;
+mod calibrate;
 mod directory;
 mod directory_labels_compact;
 mod errors;

@@ -1283,6 +1283,43 @@ pub struct PassageRefreshOutcome {
     pub skipped_over_limit: usize,
 }
 
+/// What `GET /contexts/{name}/embeddings` serves: the provider this
+/// server is configured to call beside the (model, width) identity
+/// each vector sidecar actually carries. The facts a calibration
+/// report ties its floor to (#131) — and the state an operator reads
+/// after a model switch without provoking a search (#133 refuses
+/// mismatched vectors at serve time; this names the standing state).
+#[derive(Debug, Serialize)]
+pub struct EmbeddingsStatus {
+    /// The configured embedding model — `None` when embeddings are off.
+    pub provider_model: Option<String>,
+    /// The gloss sidecar; absent until a refresh has embedded a gloss.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glosses: Option<GlossSidecarStatus>,
+    /// The passage sidecar; absent until a refresh has embedded a row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passages: Option<PassageSidecarStatus>,
+}
+
+/// The gloss vector sidecar's identity and size.
+#[derive(Debug, Serialize)]
+pub struct GlossSidecarStatus {
+    pub model: String,
+    /// The one width every stored row shares (the uniformity invariant
+    /// `VectorStore::width` documents).
+    pub width: usize,
+    pub concepts: usize,
+    pub labels: usize,
+}
+
+/// The passage vector sidecar's identity and size.
+#[derive(Debug, Serialize)]
+pub struct PassageSidecarStatus {
+    pub model: String,
+    pub width: usize,
+    pub rows: usize,
+}
+
 /// The behavioral knobs [`AppState::boot_with`] takes as one struct:
 /// the list only grows with the server, and a test that wants ONE knob
 /// should not have to name seven.

@@ -91,6 +91,14 @@ USAGE:
                                         decompose documents into batch files
                                         through an OpenAI-compatible chat
                                         model (see: taguru extract --help)
+  taguru calibrate --context NAME --probes FILE [--json] [URL]
+                                        measure the semantic-floor bands of a
+                                        running server's embedding model with
+                                        (cue, expected) probe pairs and print
+                                        the floor between them — the floor is
+                                        a property of the model, remeasured
+                                        per switch (see: taguru calibrate
+                                        --help); URL defaults to TAGURU_ADDR
   taguru --help                         this text
 
 CONFIGURATION FILE (--config FILE, or TAGURU_CONFIG=FILE):
@@ -183,7 +191,8 @@ ENVIRONMENT (every knob; unset = the shown default):
                                serialized and multiply this
   TAGURU_SEMANTIC_FLOOR        semantic entry floor when neither the call nor
                                the context sets one (0.35, calibrated for
-                               text-embedding-3-large; model-dependent)
+                               text-embedding-3-large; model-dependent —
+                               'taguru calibrate' measures the right value)
   TAGURU_EXTRACT_URL           OpenAI-compatible /chat/completions endpoint,
                                read only by 'taguru extract' (off)
   TAGURU_EXTRACT_MODEL         extraction model name
@@ -267,6 +276,7 @@ pub fn dispatch() -> Command {
         Some("compact") => exit(crate::compact::run(&args[1..])),
         Some("restore") => exit(crate::ship::run(&args[1..])),
         Some("extract") => exit(crate::extract::run(&args[1..])),
+        Some("calibrate") => exit(crate::calibrate::run(&args[1..])),
         Some(other) => {
             eprintln!("taguru: unknown argument '{other}' — try 'taguru --help'");
             exit(2)
@@ -429,7 +439,10 @@ fn health(args: &[String]) -> i32 {
 /// that assignment is invisible to a second, later process — probing
 /// port 0 itself always fails, reporting a healthy server unhealthy
 /// forever rather than just once.
-fn default_base_url() -> Result<String, String> {
+///
+/// `calibrate` resolves its target the same way, for the same reason:
+/// one rule for "which server does a CLI verb mean".
+pub(crate) fn default_base_url() -> Result<String, String> {
     let addr = std::env::var("TAGURU_ADDR").unwrap_or_else(|_| "127.0.0.1:8248".to_string());
     base_url_for(&addr)
 }

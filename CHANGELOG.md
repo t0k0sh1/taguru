@@ -8,6 +8,28 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru calibrate` (#131): measures the semantic-floor bands of a
+  running server's embedding model instead of prescribing the manual
+  ritual. `--context NAME --probes FILE` (TSV `cue<TAB>expected`
+  pairs) drives the resolve/explain machinery: the expected name's own
+  gloss cosine feeds the upper band (measured floor-independently),
+  the best other semantic candidate a 0.05-floor resolve surfaces
+  feeds the lower, and the report prints both distributions, the gap,
+  and a suggested `TAGURU_SEMANTIC_FLOOR` mid-gap — `--json` for
+  automation, one provider embed per probe (the cue cache covers the
+  second call). Probes whose cue lexically resolves — the step humans
+  get wrong; the semantic tier never scores them — are excluded
+  loudly, each with its own diagnosis; overlapping bands earn a
+  warning verdict, never a fabricated number. Auth and URL resolution
+  ride the same variables the server reads (`TAGURU_API_TOKEN`/
+  `TAGURU_API_TOKENS`, `TAGURU_ADDR`, `--config`), and the run is
+  read-only, so a replica serves it.
+- `GET /contexts/{name}/embeddings` (#131): the embedding identity in
+  one read — the configured provider model beside the (model, width)
+  each vector sidecar was actually built with (#133's recorded
+  identity, now exposed), plus row counts. What `taguru calibrate`
+  stamps its report with, and the state to check after a model switch
+  without provoking a search. Read role, replica-safe.
 - Execution plans on every search response (#151): recall/query
   (single-context and cross) gain a `plan` object beside
   `total`/`matches` — additive — carrying `contexts`, the list of

@@ -39,7 +39,7 @@ pub use contexts::{
     create_context, delete_context, flush_all, get_context, list_contexts, maintenance_compact,
     protocol, protocol_text, protocol_trailer, rename_context, update_context,
 };
-pub use coverage::{labels, refresh_embeddings, unreachable_from};
+pub use coverage::{embeddings_status, labels, refresh_embeddings, unreachable_from};
 pub use explore::{activate, describe, explore};
 pub use groups::{create_group, delete_group, get_group, list_groups, rename_group, update_group};
 pub use import::{compact_context, export_context, export_group, import_batch};

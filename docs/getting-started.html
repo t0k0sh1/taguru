@@ -118,7 +118,7 @@ taguru version</code></pre>
           <tr><td>TAGURU_EMBED_URL / _MODEL / _API_KEY</td><td>—</td><td>Semantic entry tier (OpenAI-compatible <code>/embeddings</code>). Unset keeps the entrance purely lexical</td></tr>
           <tr><td>TAGURU_EMBED_AUTO</td><td>off</td><td>Re-embed only the changes on each flush. Recommended whenever agents drive the ingest (don't count on refresh being called)</td></tr>
           <tr><td>TAGURU_EMBED_PASSAGES</td><td>off</td><td>Also embed paragraphs = the semantic side of the text lane. A corpus is orders of magnitude larger than its glosses, so the spend is opt-in</td></tr>
-          <tr><td>TAGURU_SEMANTIC_FLOOR</td><td>0.35</td><td>Floor for the semantic entry tier. <b>A property of the embedding model</b> (default calibrated for text-embedding-3-large; ~0.2 for <a href="bedrock.html">Bedrock</a>'s Titan V2)</td></tr>
+          <tr><td>TAGURU_SEMANTIC_FLOOR</td><td>0.35</td><td>Floor for the semantic entry tier. <b>A property of the embedding model</b> (default calibrated for text-embedding-3-large; ~0.2 for <a href="bedrock.html">Bedrock</a>'s Titan V2) — <code>taguru calibrate</code> <a href="bedrock.html#floor">measures the right value</a></td></tr>
           <tr><td>TAGURU_PUBLIC_URL</td><td>—</td><td>Public base URL. Setting it enables OAuth on remote MCP (<code>/mcp</code>), which lets claude.ai custom connectors attach</td></tr>
           <tr><td>TAGURU_RATE_LIMIT_PER_MIN</td><td>0 (off)</td><td>Per-key request budget per minute. Enable it before leaving localhost</td></tr>
           <tr><td>TAGURU_REQUEST_TIMEOUT_SECS</td><td>30</td><td>Time budget per request. Raise to 60+ once an embedding provider is configured</td></tr>
