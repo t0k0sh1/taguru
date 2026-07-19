@@ -7,6 +7,20 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Fixed
+- Hydration against a LIVE lineage no longer mistakes the writer's own
+  progress for rot: a replica (or stateless writer) booting while the
+  writer keeps shipping could fetch an object the writer had just
+  replaced — newer bytes than the manifest snapshot — and refuse to
+  start with "downloaded bytes do not match the manifest". A
+  verification mismatch now re-reads the generation's manifest and
+  retries against whatever it currently says (a few paced rounds,
+  every fetched shape: published files, sidecar meta, log lanes with
+  reset series); true rot — bytes disagreeing with a manifest that is
+  NOT moving — still refuses exactly as before. Missing bucket objects
+  also keep their NotFound kind through the download wrapper, so a
+  lane whose old series aged out heals the same way.
+
 ### Added
 - Router mode (#130): `taguru route` is a stateless scatter-gather
   router over sharded instances — `TAGURU_ROUTE_MAP` names a
