@@ -1256,9 +1256,9 @@ class Context:
         if text_fallback_query is not None and (
             not text_fallback_only_if_empty or not associations
         ):
-            page = self.search_passages(text_fallback_query, limit=search_limit)
-            passage_hits = page.hits
-            search_plan = page.plan
+            fallback = self.search_passages(text_fallback_query, limit=search_limit)
+            passage_hits = fallback.hits
+            search_plan = fallback.plan
 
         return RetrievalResult(
             resolved=resolved,

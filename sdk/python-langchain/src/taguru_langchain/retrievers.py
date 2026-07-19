@@ -292,10 +292,10 @@ class TaguruRetriever(BaseRetriever):
             )
             text_hits: list[PassageHit] = []
             if self.include_text:
-                page = await self.async_client.context(target).search_passages(
+                single = await self.async_client.context(target).search_passages(
                     query, limit=self.text_limit
                 )
-                text_hits = page.hits
+                text_hits = single.hits
             return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
         targets = await self._aresolve_targets(self.async_client)
@@ -319,10 +319,10 @@ class TaguruRetriever(BaseRetriever):
             # Same isolation as the sync lane above: one gone target must
             # not blank out the graph lane's already-fetched results.
             try:
-                page = await self.async_client.search_passages(
+                crossed = await self.async_client.search_passages(
                     query, contexts=targets, limit=self.text_limit
                 )
-                text_hits = list(page.hits)
+                text_hits = list(crossed.hits)
             except Exception:
                 text_hits = []
         return _merge_lanes(graph_docs, text_hits, limit)
