@@ -170,8 +170,9 @@ ENVIRONMENT (every knob; unset = the shown default):
                                and transient failures retry twice with backoff
   TAGURU_EMBED_PASSAGES        1/true also embeds stored paragraphs — the
                                semantic passage lane; opt-in spend (off)
-  TAGURU_PASSAGE_VECTOR_LIMIT  max embedded paragraphs per context (20000);
-                               past it the lexical lane still serves them
+  TAGURU_PASSAGE_VECTOR_LIMIT  max embedded rows (paragraphs + their doc2query
+                               questions) per context (20000); past it the
+                               lexical lane still serves every paragraph
   TAGURU_EMBED_AUTO            1 = refresh embeddings with each flush (off)
   TAGURU_EMBED_PARALLEL        concurrent 128-item chunk dispatch for gloss
                                and passage embedding refresh (1 = old

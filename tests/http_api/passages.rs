@@ -315,3 +315,146 @@ fn live_answers_unauthenticated_even_with_auth_on() {
     assert_eq!(status, 200);
     assert_eq!(body, json!("ok"));
 }
+
+/// A minimal OpenAI-style embeddings endpoint on a local port: every
+/// `input` text gets a fixed unit vector by content — りんご texts sit
+/// on the first axis, みかん queries at cosine 0.28 to them, anything
+/// else orthogonal — so floor arithmetic over the real HTTP transport
+/// is as deterministic as the registry tests' in-process mock.
+fn spawn_fruity_embeddings() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let body_start = loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                    }
+                    if let Some(at) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&buffer[..body_start]).to_string();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().ok())?
+                    })
+                    .unwrap_or(0);
+                while buffer.len() < body_start + length {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let request: serde_json::Value =
+                    serde_json::from_slice(&buffer[body_start..body_start + length]).unwrap();
+                let data: Vec<serde_json::Value> = request["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|text| {
+                        let text = text.as_str().unwrap();
+                        let vector = if text.contains("みかん") {
+                            let x = 0.28f64;
+                            vec![x, (1.0 - x * x).sqrt(), 0.0]
+                        } else if text.contains("りんご") {
+                            vec![1.0, 0.0, 0.0]
+                        } else {
+                            vec![0.0, 0.0, 1.0]
+                        };
+                        json!({ "embedding": vector })
+                    })
+                    .collect();
+                let body = json!({ "data": data }).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    format!("http://{addr}/v1/embeddings")
+}
+
+/// The per-request `semantic_floor` override rides every search
+/// surface — the single-context handler, the explain handler (which
+/// must account for the call actually made), and the cross-context
+/// fan-out — through a real embedding round trip: a 0.28-cosine
+/// paraphrase hidden by the 0.35 default floor is admitted by an
+/// override of 0.2, and the explanation names the floor it ran under.
+#[test]
+fn search_semantic_floor_override_rides_every_search_surface() {
+    let provider = spawn_fruity_embeddings();
+    let server = Server::start_with_env(
+        "passage-floor-override",
+        &[
+            ("TAGURU_EMBED_URL", provider.as_str()),
+            ("TAGURU_EMBED_MODEL", "fruity-model"),
+            ("TAGURU_EMBED_PASSAGES", "1"),
+        ],
+    );
+    server.ok(
+        "PUT",
+        "/contexts/fruit",
+        Some(json!({"description": "果樹園"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/fruit/sources",
+        Some(json!({"passages": {"docs/apple.md": "りんごは真っ赤に実った。"}})),
+    );
+    server.ok("POST", "/contexts/fruit/embeddings/refresh", None);
+
+    // Under the default floor the paraphrase stays hidden — and the
+    // query shares no bigram with the text, so no lexical rescue.
+    let hidden = server.ok(
+        "POST",
+        "/contexts/fruit/sources/search",
+        Some(json!({"query": "みかん"})),
+    );
+    assert_eq!(hidden.as_array().unwrap().len(), 0, "{hidden}");
+
+    // The override admits it: a vector-only hit at cosine 0.28.
+    let hits = server.ok(
+        "POST",
+        "/contexts/fruit/sources/search",
+        Some(json!({"query": "みかん", "semantic_floor": 0.2})),
+    );
+    assert_eq!(hits.as_array().unwrap().len(), 1, "{hits}");
+    let hit = &hits[0];
+    assert_eq!(hit["source"], "docs/apple.md");
+    assert!(hit["lanes"].get("bm25").is_none(), "no shared term: {hit}");
+    let cosine = hit["lanes"]["vector"]["score"].as_f64().unwrap();
+    assert!((cosine - 0.28).abs() < 1e-4, "{hit}");
+
+    // The explanation reports the floor of the call being explained.
+    let explained = server.ok(
+        "POST",
+        "/contexts/fruit/sources/search/explain",
+        Some(json!({"query": "みかん", "source": "docs/apple.md", "semantic_floor": 0.2})),
+    );
+    assert_eq!(explained["verdict"], json!("served"), "{explained}");
+    assert_eq!(explained["vector"]["ran"], json!(true), "{explained}");
+    let floor = explained["vector"]["floor"].as_f64().unwrap();
+    assert!((floor - 0.2).abs() < 1e-6, "{explained}");
+
+    // The cross-context fan-out forwards the same override.
+    let across = server.ok(
+        "POST",
+        "/sources/search",
+        Some(json!({"contexts": ["fruit"], "query": "みかん", "semantic_floor": 0.2})),
+    );
+    assert_eq!(across.as_array().unwrap().len(), 1, "{across}");
+    assert_eq!(across[0]["context"], json!("fruit"), "{across}");
+    assert_eq!(across[0]["source"], json!("docs/apple.md"), "{across}");
+}

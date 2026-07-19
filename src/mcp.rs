@@ -113,10 +113,16 @@ mod tests {
         assert_eq!(path, "/query");
         assert_eq!(body.unwrap(), json!({"contexts": ["a"], "subject": "s"}));
 
-        let (_, path, body) =
-            route_tool("search_passages", &json!({"contexts": ["a"], "query": "q"})).unwrap();
+        let (_, path, body) = route_tool(
+            "search_passages",
+            &json!({"contexts": ["a"], "query": "q", "semantic_floor": 0.5}),
+        )
+        .unwrap();
         assert_eq!(path, "/sources/search");
-        assert_eq!(body.unwrap(), json!({"contexts": ["a"], "query": "q"}));
+        assert_eq!(
+            body.unwrap(),
+            json!({"contexts": ["a"], "query": "q", "semantic_floor": 0.5})
+        );
 
         // `groups` alone reaches the same route, and beside `contexts`
         // both ride the body.
@@ -696,14 +702,17 @@ mod tests {
         let (method, path, body) = route_tool(
             "explain_search",
             &json!({"context": "sake", "query": "酒造", "source": "docs/kura.md",
-                    "paragraph": 1, "limit": 5}),
+                    "paragraph": 1, "limit": 5, "semantic_floor": 0.2}),
         )
         .unwrap();
         assert_eq!(method, "POST");
         assert_eq!(path, "/contexts/sake/sources/search/explain");
         assert_eq!(
             body,
-            Some(json!({"query": "酒造", "source": "docs/kura.md", "paragraph": 1, "limit": 5}))
+            Some(
+                json!({"query": "酒造", "source": "docs/kura.md", "paragraph": 1, "limit": 5,
+                        "semantic_floor": 0.2})
+            )
         );
 
         let (method, path, body) = route_tool(

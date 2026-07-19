@@ -330,12 +330,15 @@ class AsyncTaguru:
         contexts: Sequence[str] | None = None,
         groups: Sequence[str] | None = None,
         limit: int | None = None,
+        semantic_floor: float | None = None,
     ) -> list[CrossPassageHit]:
         """Paragraph search across several contexts at once, hits tagged.
 
         Passage scores do NOT share a scale across contexts (BM25 statistics
         are corpus-local), so the merged order is rank interleaving — every
         context's best hit first; ``score`` compares within one context only.
+        ``semantic_floor`` overrides every target's vector-lane cosine floor
+        for this call (it floors only that lane; BM25-only hits still return).
         """
         body = drop_none(
             {
@@ -343,6 +346,7 @@ class AsyncTaguru:
                 "groups": list(groups) if groups is not None else None,
                 "query": query,
                 "limit": limit,
+                "semantic_floor": semantic_floor,
             }
         )
         result = await self._request_json("POST", "/sources/search", json_body=body)
@@ -920,13 +924,23 @@ class AsyncContext:
         result = await self._post("/sources/lookup", {"sources": list(sources)})
         return decode(PassageLookup, result)  # type: ignore[no-any-return]
 
-    async def search_passages(self, query: str, *, limit: int | None = None) -> list[PassageHit]:
+    async def search_passages(
+        self,
+        query: str,
+        *,
+        limit: int | None = None,
+        semantic_floor: float | None = None,
+    ) -> list[PassageHit]:
         """Paragraph search (BM25 fused with embeddings where configured).
 
         Phrase the query as an answer, not a question — a plausible
         declarative sentence lands nearer the text you hope to find.
+        ``semantic_floor`` overrides the vector lane's cosine floor for this
+        call — over the context setting, over the server default (it floors
+        only that lane; BM25-only hits still return).
         """
-        result = await self._post("/sources/search", drop_none({"query": query, "limit": limit}))
+        body = drop_none({"query": query, "limit": limit, "semantic_floor": semantic_floor})
+        result = await self._post("/sources/search", body)
         return decode(list[PassageHit], result)  # type: ignore[no-any-return]
 
     async def explain_search_passages(
@@ -936,17 +950,20 @@ class AsyncContext:
         *,
         paragraph: int | None = None,
         limit: int | None = None,
+        semantic_floor: float | None = None,
     ) -> SearchExplanation:
         """Why ``source`` did (or didn't) appear for ``query``. ``paragraph``
         (0-based) picks which of the source's paragraphs to account for;
-        omitted means its best showing. A diagnosed miss is a 200, not an
-        error."""
+        omitted means its best showing. Pass the ``semantic_floor`` of the
+        search call being explained, or the explanation accounts for a call
+        nobody made. A diagnosed miss is a 200, not an error."""
         body = drop_none(
             {
                 "query": query,
                 "source": source,
                 "paragraph": paragraph,
                 "limit": limit,
+                "semantic_floor": semantic_floor,
             }
         )
         result = await self._post("/sources/search/explain", body)

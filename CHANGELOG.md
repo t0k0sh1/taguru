@@ -8,6 +8,15 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Passage search takes a per-request `semantic_floor` (#148): a
+  one-call override of the vector lane's cosine floor — request beats
+  the context setting beats the server default, the same chain
+  resolve's override walks — on `/contexts/{name}/sources/search`,
+  cross-context `/sources/search`, and `…/sources/search/explain`
+  (the explanation reports the floor it actually ran under). Exposed
+  through the MCP tools and both SDKs. It floors only the vector
+  lane: BM25-only hits still return, and the fused score stays rank
+  arithmetic.
 - Embedding tier resilience (#132): the provider now sits behind a
   small circuit breaker — three consecutive failed attempts open it,
   every embedding call then fails fast (the lanes behind it degrade
@@ -21,6 +30,18 @@ Entries that change an on-disk format or a response shape say so.
   (present only when a provider is configured).
 
 ### Changed
+- The approximate passage index now activates at 10 000 vector rows
+  instead of 50 000 (#148). The old threshold sat above the default
+  `TAGURU_PASSAGE_VECTOR_LIMIT` (20 000), so no default-config
+  deployment could ever reach the index — every semantic sweep was
+  the linear scan. Calibrated by benchmark (in the PR): at 10k rows
+  the exact sweep costs 6–14 ms of read-fenced CPU per query against
+  <1 ms via the index at ~100% measured recall@10, and the lazy
+  one-time build (0.6–1.3 s) fits inside a request budget, which the
+  7–15 s build at 50k did not reliably do. A compile-time assertion
+  pins the threshold at or below the default vector limit, and boot
+  says so once when an operator-lowered limit puts the index out of
+  reach.
 - Embedding provider calls are deadline-aware and stop-signal-aware:
   each attempt's HTTP timeout is the smaller of
   `TAGURU_EMBED_TIMEOUT_SECS` and the request's remaining budget (a

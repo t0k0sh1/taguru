@@ -32,7 +32,7 @@ classes:
     search_passages:
       route: "POST /sources/search"
       args: [query]
-      options: [contexts, groups, limit]
+      options: [contexts, groups, limit, semantic_floor]
     close: {}
 
   Contexts:
@@ -125,11 +125,11 @@ classes:
     search_passages:
       route: "POST /contexts/{name}/sources/search"
       args: [query]
-      options: [limit]
+      options: [limit, semantic_floor]
     explain_search_passages:
       route: "POST /contexts/{name}/sources/search/explain"
       args: [query, source]
-      options: [paragraph, limit]
+      options: [paragraph, limit, semantic_floor]
     retract_source: { route: "POST /contexts/{name}/sources/retract", args: [source] }
     list_sources: { route: "GET /contexts/{name}/sources", options: [limit, after, prefix] }
     iter_sources: { route: "GET /contexts/{name}/sources", options: [limit, prefix] }

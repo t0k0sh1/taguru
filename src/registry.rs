@@ -899,12 +899,21 @@ pub struct BootConfig {
     pub semantic_floor: Option<f32>,
 }
 
-/// Default ceiling on how many paragraphs per context get a vector
-/// (`TAGURU_PASSAGE_VECTOR_LIMIT`). The vector lane's footprint is
-/// paragraphs × dimensions × 4 bytes — 20 000 rows of a 1536-dim model
+/// Default ceiling on how many rows per context get a vector
+/// (`TAGURU_PASSAGE_VECTOR_LIMIT`; a row is a paragraph text or one of
+/// its doc2query questions). The vector lane's footprint is
+/// rows × dimensions × 4 bytes — 20 000 rows of a 1536-dim model
 /// is ~120 MiB — and past the limit the lexical lane still serves
 /// every paragraph; only the semantic lane goes partial.
 pub const DEFAULT_PASSAGE_VECTOR_LIMIT: usize = 20_000;
+
+// The ANN path must stay reachable in default configuration: a store
+// capped below the activation threshold would make the whole
+// [`crate::embedding::PassageAnnIndex`] dead code, as it silently was
+// when the threshold sat at 50k over a 20k default limit. Bumping
+// either constant past the other is a decision, not an accident — make
+// it fail the build.
+const _: () = assert!(crate::embedding::PASSAGE_ANN_THRESHOLD <= DEFAULT_PASSAGE_VECTOR_LIMIT);
 
 /// One fused passage-search hit with its per-lane evidence: 1-based
 /// rank and raw score in each lane that surfaced it. BM25 scores and
@@ -1552,6 +1561,19 @@ impl AppState {
         // holds from the first request on, without exception.
         reconcile_groups(&data_dir, &registry, &mut groups);
 
+        // Legitimate for small corpora, but worth one line: under this
+        // configuration every semantic sweep is the exact scan, and an
+        // operator wondering why the ANN index never engages should
+        // not have to read the source to learn the relationship.
+        if options.embed_passages
+            && options.passage_vector_limit < crate::embedding::PASSAGE_ANN_THRESHOLD
+        {
+            tracing::info!(
+                limit = options.passage_vector_limit,
+                threshold = crate::embedding::PASSAGE_ANN_THRESHOLD,
+                "passage vector limit sits below the ANN activation threshold; passage search will always use the exact sweep"
+            );
+        }
         let embed_breaker = embedder
             .as_ref()
             .and_then(|provider| provider.breaker().cloned());
@@ -8292,7 +8314,13 @@ mod tests {
         // The procedural question never became a triple; the text lane
         // must still hand back the passage that answers it, first.
         let hits = state
-            .search_passages("sake", "精米歩合はどこまで磨く?", 3, Deadline::unbounded())
+            .search_passages(
+                "sake",
+                "精米歩合はどこまで磨く?",
+                3,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第2段落");
@@ -8301,14 +8329,20 @@ mod tests {
         // No shared bigrams at all → nothing, not noise.
         assert!(
             state
-                .search_passages("sake", "unrelated english words", 3, Deadline::unbounded())
+                .search_passages(
+                    "sake",
+                    "unrelated english words",
+                    3,
+                    None,
+                    Deadline::unbounded()
+                )
                 .unwrap()
                 .unwrap()
                 .is_empty()
         );
         assert!(
             state
-                .search_passages("nope", "x", 3, Deadline::unbounded())
+                .search_passages("nope", "x", 3, None, Deadline::unbounded())
                 .is_none()
         );
 
@@ -8355,6 +8389,7 @@ mod tests {
                 "papers",
                 "ambition must be made to counteract ambition",
                 2,
+                None,
                 Deadline::unbounded(),
             )
             .unwrap()
@@ -8390,7 +8425,7 @@ mod tests {
 
         for query in ["state", "State", "app", "path"] {
             let hits = state
-                .search_passages("code", query, 3, Deadline::unbounded())
+                .search_passages("code", query, 3, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             assert_eq!(
@@ -8423,7 +8458,13 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("sake", "精米歩合はどこまで磨く?", 3, Deadline::unbounded())
+            .search_passages(
+                "sake",
+                "精米歩合はどこまで磨く?",
+                3,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -8457,7 +8498,7 @@ mod tests {
         // First search builds the resident index.
         assert!(
             !state
-                .search_passages("sake", "創業はいつ", 3, Deadline::unbounded())
+                .search_passages("sake", "創業はいつ", 3, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -8473,7 +8514,7 @@ mod tests {
         );
         state.store_passages("sake", plain(more)).unwrap().unwrap();
         let hits = state
-            .search_passages("sake", "杜氏の出身", 3, Deadline::unbounded())
+            .search_passages("sake", "杜氏の出身", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第2章");
@@ -8482,7 +8523,7 @@ mod tests {
         state.retract_source("sake", "第2章").unwrap();
         assert!(
             state
-                .search_passages("sake", "杜氏の出身", 3, Deadline::unbounded())
+                .search_passages("sake", "杜氏の出身", 3, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .iter()
@@ -8510,7 +8551,7 @@ mod tests {
                 .unwrap();
             // First search builds and marks dirty; the tick persists.
             state
-                .search_passages("sake", "創業はいつ", 3, Deadline::unbounded())
+                .search_passages("sake", "創業はいつ", 3, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -8519,7 +8560,7 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let hits = state
-            .search_passages("sake", "創業はいつ", 3, Deadline::unbounded())
+            .search_passages("sake", "創業はいつ", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第1章");
@@ -8549,7 +8590,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             state
-                .search_passages("sake", "杜氏", 3, Deadline::unbounded())
+                .search_passages("sake", "杜氏", 3, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty(); // the sidecar now says 高瀬
@@ -8565,7 +8606,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let hits = state
-            .search_passages("sake", "杜氏は誰", 3, Deadline::unbounded())
+            .search_passages("sake", "杜氏は誰", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(
@@ -8602,7 +8643,7 @@ mod tests {
         fs::write(bm25_path(&dir, &file_stem("sake")), b"not an index").unwrap();
 
         let hits = state
-            .search_passages("sake", "蔵開きの祭り", 3, Deadline::unbounded())
+            .search_passages("sake", "蔵開きの祭り", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "第1章");
@@ -8633,7 +8674,7 @@ mod tests {
             .unwrap()
             .unwrap();
         state
-            .search_passages("sake", "麹室の湿度", 3, Deadline::unbounded())
+            .search_passages("sake", "麹室の湿度", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -8645,7 +8686,7 @@ mod tests {
         );
         // The next residency loads it clean instead of re-tokenizing.
         state
-            .search_passages("sake", "麹室の湿度", 3, Deadline::unbounded())
+            .search_passages("sake", "麹室の湿度", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         let entry = state.lookup("sake").unwrap();
@@ -8673,7 +8714,7 @@ mod tests {
             .unwrap();
         assert!(
             !state
-                .search_passages("sake", "蔵開きの祭り", 3, Deadline::unbounded())
+                .search_passages("sake", "蔵開きの祭り", 3, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -8687,7 +8728,7 @@ mod tests {
         );
         assert_eq!(
             state
-                .search_passages("sake", "蔵開きの祭り", 3, Deadline::unbounded())
+                .search_passages("sake", "蔵開きの祭り", 3, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()[0]
                 .source,
@@ -8946,6 +8987,7 @@ mod tests {
                 "target-doc",
                 None,
                 1,
+                None,
                 Deadline::unbounded(),
             )
             .unwrap()
@@ -8969,7 +9011,7 @@ mod tests {
         );
 
         let hits = state
-            .search_passages("sake", "QUERYMARKER", 2, Deadline::unbounded())
+            .search_passages("sake", "QUERYMARKER", 2, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(
@@ -9059,6 +9101,7 @@ mod tests {
                 "target-doc",
                 None,
                 3,
+                None,
                 Deadline::unbounded(),
             )
             .unwrap()
@@ -9088,6 +9131,7 @@ mod tests {
                 "sake",
                 "QUERYMARKER",
                 explanation.limit_to_reach.unwrap(),
+                None,
                 Deadline::unbounded(),
             )
             .unwrap()
@@ -9491,7 +9535,7 @@ mod tests {
         // both rows point at the same paragraph, so the lane must fold
         // them into one hit at the question row's better rank.
         let hits = state
-            .search_passages("fruit", "アップル", 3, Deadline::unbounded())
+            .search_passages("fruit", "アップル", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits.len(), 1, "one paragraph, one hit — never a dup");
@@ -9616,7 +9660,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "アップル", 3, Deadline::unbounded())
+            .search_passages("fruit", "アップル", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "doc-a");
@@ -9658,7 +9702,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんごは真っ赤", 3, Deadline::unbounded())
+            .search_passages("fruit", "りんごは真っ赤", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "doc-a");
@@ -9713,7 +9757,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3, Deadline::unbounded())
+            .search_passages("fruit", "りんご", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].source, "doc-a");
@@ -9785,7 +9829,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3, Deadline::unbounded())
+            .search_passages("fruit", "りんご", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -9818,7 +9862,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3, Deadline::unbounded())
+            .search_passages("fruit", "りんご", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(hits[0].vector.is_none());
@@ -9856,7 +9900,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3, Deadline::unbounded())
+            .search_passages("fruit", "みかん", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(
@@ -9898,13 +9942,120 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3, Deadline::unbounded())
+            .search_passages("fruit", "みかん", 3, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].source, "doc-a");
         let (rank, cosine) = hits[0].vector.expect("cleared the lowered floor");
         assert_eq!(rank, 1);
+        assert!((cosine - 0.28).abs() < 1e-6, "{cosine}");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_passages_request_floor_override_beats_the_context_and_server_floors() {
+        // The same 0.28 cosine as the two floor tests above, pushed
+        // through the third rung of the chain: a request override of
+        // 0.2 admits it past the untouched 0.35 server default, and a
+        // request override of 0.5 then drops it even though the
+        // context's own floor was lowered under it — the caller's word
+        // beats both, exactly as resolve's semantic_floor override.
+        let dir = scratch_dir("passages-floor-override");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages("fruit", "みかん", 3, Some(0.2), Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "an override under the cosine admits it past the server default: {hits:?}"
+        );
+        assert_eq!(hits[0].source, "doc-a");
+        let (rank, cosine) = hits[0].vector.expect("cleared the request floor");
+        assert_eq!(rank, 1);
+        assert!((cosine - 0.28).abs() < 1e-6, "{cosine}");
+
+        state
+            .update_meta("fruit", None, None, None, Some(0.2))
+            .unwrap()
+            .unwrap();
+        let hits = state
+            .search_passages("fruit", "みかん", 3, Some(0.5), Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert!(
+            hits.is_empty(),
+            "an override above the cosine drops it even under a context floor lowered below it: {hits:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn explain_passage_search_reports_the_request_floor_override_it_ran_under() {
+        // The explanation accounts for the call actually made: under
+        // the override the vector report carries the overridden floor,
+        // and the 0.28 cosine the default floor would have filtered is
+        // scored and shown.
+        let dir = scratch_dir("passages-explain-floor-override");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "fruit",
+                "みかん",
+                "doc-a",
+                None,
+                3,
+                Some(0.2),
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        let VectorLaneReport::Ran { floor, cosine } = explanation.vector else {
+            panic!("expected the vector lane to have run");
+        };
+        assert!((floor - 0.2).abs() < 1e-6, "{floor}");
+        let cosine = cosine.expect("the target's cosine is scored, not filtered");
         assert!((cosine - 0.28).abs() < 1e-6, "{cosine}");
 
         let _ = fs::remove_dir_all(dir);

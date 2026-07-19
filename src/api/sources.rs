@@ -275,6 +275,12 @@ pub struct SearchPassagesRequest {
     pub query: String,
     /// Omitted means 5.
     pub limit: Option<usize>,
+    /// One-call override of the vector lane's cosine floor — beats the
+    /// context setting, which beats the server default. Clamped to
+    /// [0, 1]. Floors only the semantic lane: cosine is the one scale
+    /// with absolute meaning here (the fused score is rank arithmetic,
+    /// and raw BM25 is corpus-local).
+    pub semantic_floor: Option<f32>,
 }
 
 /// One PARAGRAPH matched by passage search: the text lane, for
@@ -348,6 +354,7 @@ pub async fn search_passages(
             &name,
             &request.query,
             clamp(request.limit, 5, MAX_MATCH_LIMIT),
+            request.semantic_floor,
             deadline,
         )
     });
@@ -398,6 +405,10 @@ pub struct ExplainSearchRequest {
     /// The search call being explained; omitted means 5, the same
     /// default `sources/search` applies.
     pub limit: Option<usize>,
+    /// The floor override of the search call being explained — pass
+    /// the same value, or the explanation accounts for a call nobody
+    /// made.
+    pub semantic_floor: Option<f32>,
 }
 
 /// One verdict for "why didn't (or did) this source appear for this
@@ -753,6 +764,7 @@ pub async fn explain_search_passages(
             &request.source,
             request.paragraph,
             clamp(request.limit, 5, MAX_MATCH_LIMIT),
+            request.semantic_floor,
             deadline,
         )
     });
@@ -786,6 +798,12 @@ pub struct CrossSearchPassagesRequest {
     pub query: String,
     /// Omitted means 5.
     pub limit: Option<usize>,
+    /// One-call override of every target's vector-lane cosine floor —
+    /// beats each context's own setting, which beats the server
+    /// default. Clamped to [0, 1]. One value for all targets: cosine
+    /// shares a scale across contexts (unlike BM25 and the fused
+    /// number, which is why the merge interleaves by rank).
+    pub semantic_floor: Option<f32>,
 }
 
 /// [`search_passages`] across several named contexts at once, every
@@ -851,9 +869,16 @@ pub async fn cross_search_passages(
     let permits = cross_search_concurrency().min(targets.len().max(1));
     let owned_targets = Arc::clone(&targets);
     let query = request.query.clone();
+    let semantic_floor = request.semantic_floor;
     let job_state = state.clone();
     let fetched = bounded_parallel_map(targets.len(), permits, move |index| {
-        job_state.search_passages(&owned_targets[index], &query, limit, deadline)
+        job_state.search_passages(
+            &owned_targets[index],
+            &query,
+            limit,
+            semantic_floor,
+            deadline,
+        )
     })
     .await;
 
