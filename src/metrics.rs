@@ -439,6 +439,60 @@ impl ResolveTier {
     }
 }
 
+/// How much per-context detail the scrape carries
+/// (`TAGURU_METRICS_PER_CONTEXT`, issue #137). Off by default on
+/// purpose: per-context labels × many contexts is exactly the
+/// cardinality blow-up the route-template rule at the top of this
+/// file exists to prevent, so an operator opts in — and can bound a
+/// large fleet's series count with `Top`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PerContextMetrics {
+    /// No per-context families on the scrape (the default).
+    #[default]
+    Off,
+    /// Every context gets its rows.
+    All,
+    /// Only the N largest contexts by total on-disk bytes get rows —
+    /// membership shifts as sizes shift, which Prometheus handles as
+    /// series going stale, not as an error.
+    Top(usize),
+}
+
+/// One context's row behind the `taguru_context_*` families — collected
+/// by `gauge_snapshot` only while [`PerContextMetrics`] asks for it.
+/// Disk sizes come from flush-time bookkeeping, everything else from
+/// registry state already in memory: a scrape never walks the data
+/// directory (see `AppState::refresh_disk_usage`).
+pub struct ContextGaugeRow {
+    pub name: String,
+    pub pinned: bool,
+    /// Graph plus cached gloss/passage/BM25/vector stores — the same
+    /// per-entry accounting `taguru_resident_bytes` sums fleet-wide.
+    pub resident_bytes: u64,
+    pub disk_image_bytes: u64,
+    pub disk_wal_bytes: u64,
+    pub disk_passages_bytes: u64,
+    pub disk_passages_wal_bytes: u64,
+    /// Meta + sources + gloss vectors + passage vectors + BM25, summed.
+    pub disk_sidecar_bytes: u64,
+    pub concepts: u64,
+    pub associations: u64,
+    pub labels: u64,
+    pub sources: u64,
+}
+
+impl ContextGaugeRow {
+    /// Total on-disk bytes across every family — what a restore would
+    /// move, and the ranking key for [`PerContextMetrics::Top`].
+    pub fn disk_total_bytes(&self) -> u64 {
+        self.disk_image_bytes
+            + self.disk_wal_bytes
+            + self.disk_passages_bytes
+            + self.disk_passages_wal_bytes
+            + self.disk_sidecar_bytes
+    }
+}
+
 /// Point-in-time gauges, computed from the registry at scrape time
 /// rather than maintained incrementally — they cannot drift.
 pub struct GaugeSnapshot {
@@ -461,7 +515,9 @@ pub struct GaugeSnapshot {
     /// unbounded, user-chosen data, and this metrics surface only ever
     /// mints fixed-cardinality series (see `http`'s route-template
     /// comment). Per-context detail lives at `GET /contexts` and
-    /// `taguru inspect` instead.
+    /// `taguru inspect` — or, opted into and bounded via
+    /// `TAGURU_METRICS_PER_CONTEXT` (#137), in the `taguru_context_*`
+    /// families below.
     pub dead_edges_total: u64,
     /// Sum, across every context, of attribution records unlinked from
     /// every chain but not yet reclaimed by compaction.
@@ -487,6 +543,12 @@ pub struct GaugeSnapshot {
     /// Equivalence claims resident in the semantic cache (slots, not
     /// bytes — payloads live in the exact tier).
     pub semantic_cache_entries: u64,
+    /// Per-context rows, empty unless `TAGURU_METRICS_PER_CONTEXT`
+    /// asked for them — the one other sanctioned exception (after the
+    /// replication lag maps) to this file's no-context-labels rule,
+    /// and gated the same way the replica family is: an opted-out
+    /// scrape stays byte-identical to what it was.
+    pub per_context: Vec<ContextGaugeRow>,
 }
 
 impl Metrics {
@@ -1313,6 +1375,100 @@ impl Metrics {
             "Total unsourced weight (absolute value), summed across all contexts.",
             gauges.unsourced_weight_total,
         );
+        if !gauges.per_context.is_empty() {
+            push_header(
+                &mut out,
+                "taguru_context_disk_bytes",
+                "gauge",
+                "On-disk bytes per context and file family: image, graph WAL, \
+                 passages snapshot, passages WAL, and the sidecars (meta, \
+                 sources, gloss vectors, passage vectors, BM25) summed. The \
+                 WAL lanes are live bookkeeping; the rest refresh at each \
+                 flush tick and POST /flush, so they lag up to one flush \
+                 interval — a scrape never stats the data directory. Present \
+                 only with TAGURU_METRICS_PER_CONTEXT.",
+            );
+            for row in &gauges.per_context {
+                let context = escape_label(&row.name);
+                for (file, value) in [
+                    ("image", row.disk_image_bytes),
+                    ("passages", row.disk_passages_bytes),
+                    ("passages_wal", row.disk_passages_wal_bytes),
+                    ("sidecars", row.disk_sidecar_bytes),
+                    ("wal", row.disk_wal_bytes),
+                ] {
+                    out.push_str(&format!(
+                        "taguru_context_disk_bytes{{context=\"{context}\",file=\"{file}\"}} {value}\n"
+                    ));
+                }
+            }
+            push_header(
+                &mut out,
+                "taguru_context_resident_bytes",
+                "gauge",
+                "Modeled resident bytes per context (graph plus cached \
+                 gloss/passage/BM25/vector stores; 0 while cold) — the same \
+                 per-entry accounting taguru_resident_bytes sums fleet-wide.",
+            );
+            for row in &gauges.per_context {
+                out.push_str(&format!(
+                    "taguru_context_resident_bytes{{context=\"{}\"}} {}\n",
+                    escape_label(&row.name),
+                    row.resident_bytes
+                ));
+            }
+            push_header(
+                &mut out,
+                "taguru_context_pinned",
+                "gauge",
+                "1 when the context is pinned resident (exempt from cache \
+                 eviction).",
+            );
+            for row in &gauges.per_context {
+                out.push_str(&format!(
+                    "taguru_context_pinned{{context=\"{}\"}} {}\n",
+                    escape_label(&row.name),
+                    u64::from(row.pinned)
+                ));
+            }
+            type CountPick = fn(&ContextGaugeRow) -> u64;
+            let count_families: [(&str, &str, CountPick); 4] = [
+                (
+                    "taguru_context_concepts",
+                    "Concepts stored per context (live for hot contexts, \
+                     last-saved snapshot for cold).",
+                    |row| row.concepts,
+                ),
+                (
+                    "taguru_context_associations",
+                    "Associations stored per context (live for hot contexts, \
+                     last-saved snapshot for cold).",
+                    |row| row.associations,
+                ),
+                (
+                    "taguru_context_labels",
+                    "Distinct relation labels per context (live for hot \
+                     contexts, last-saved snapshot for cold).",
+                    |row| row.labels,
+                ),
+                (
+                    "taguru_context_sources",
+                    "Sources contributing to the graph per context (live for \
+                     hot contexts, last-saved snapshot for cold).",
+                    |row| row.sources,
+                ),
+            ];
+            for (name, help, pick) in count_families {
+                push_header(&mut out, name, "gauge", help);
+                for row in &gauges.per_context {
+                    out.push_str(&format!(
+                        "{name}{{context=\"{}\"}} {}\n",
+                        escape_label(&row.name),
+                        pick(row)
+                    ));
+                }
+            }
+        }
         push_value(
             &mut out,
             "taguru_last_flush_success_timestamp_seconds",
@@ -1798,6 +1954,51 @@ mod tests {
             retrieval_cache_entries: 0,
             retrieval_cache_bytes: 0,
             semantic_cache_entries: 0,
+            per_context: Vec::new(),
+        }
+    }
+
+    /// The per-context families gate on the snapshot carrying rows —
+    /// an opted-out scrape stays byte-free of them, like the breaker
+    /// and replica families — and render every row's series with the
+    /// context name escaped, since names are client-minted text.
+    #[test]
+    fn the_per_context_families_gate_on_the_snapshot_and_escape_names() {
+        let metrics = Metrics::default();
+        let without = metrics.render_prometheus(&empty_gauges());
+        assert!(!without.contains("taguru_context_"), "{without}");
+
+        let mut gauges = empty_gauges();
+        gauges.per_context.push(ContextGaugeRow {
+            name: "日本\"酒\\".to_string(),
+            pinned: true,
+            resident_bytes: 1024,
+            disk_image_bytes: 2048,
+            disk_wal_bytes: 64,
+            disk_passages_bytes: 512,
+            disk_passages_wal_bytes: 32,
+            disk_sidecar_bytes: 256,
+            concepts: 7,
+            associations: 9,
+            labels: 3,
+            sources: 2,
+        });
+        let with = metrics.render_prometheus(&gauges);
+        let escaped = "日本\\\"酒\\\\";
+        for line in [
+            format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"image\"}} 2048"),
+            format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"passages\"}} 512"),
+            format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"passages_wal\"}} 32"),
+            format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"sidecars\"}} 256"),
+            format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"wal\"}} 64"),
+            format!("taguru_context_resident_bytes{{context=\"{escaped}\"}} 1024"),
+            format!("taguru_context_pinned{{context=\"{escaped}\"}} 1"),
+            format!("taguru_context_concepts{{context=\"{escaped}\"}} 7"),
+            format!("taguru_context_associations{{context=\"{escaped}\"}} 9"),
+            format!("taguru_context_labels{{context=\"{escaped}\"}} 3"),
+            format!("taguru_context_sources{{context=\"{escaped}\"}} 2"),
+        ] {
+            assert!(with.contains(&line), "missing {line} in: {with}");
         }
     }
 
@@ -2329,6 +2530,23 @@ mod tests {
             retrieval_cache_entries: 3,
             retrieval_cache_bytes: 4096,
             semantic_cache_entries: 5,
+            // One row so the per-context families render — their
+            // HELP/TYPE discipline is checked here like everyone
+            // else's.
+            per_context: vec![ContextGaugeRow {
+                name: "sake".to_string(),
+                pinned: false,
+                resident_bytes: 640,
+                disk_image_bytes: 100,
+                disk_wal_bytes: 10,
+                disk_passages_bytes: 20,
+                disk_passages_wal_bytes: 5,
+                disk_sidecar_bytes: 30,
+                concepts: 4,
+                associations: 6,
+                labels: 2,
+                sources: 1,
+            }],
         });
 
         // Every sample line's metric name must have been introduced by

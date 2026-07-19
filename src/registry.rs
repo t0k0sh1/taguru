@@ -54,7 +54,7 @@ use taguru::deadline::Deadline;
 
 use crate::embedding::{EmbedPurpose, EmbeddingProvider, PassageVectorStore, VectorStore};
 use crate::groups::{self, GroupRecord};
-use crate::metrics::{GaugeSnapshot, Metrics};
+use crate::metrics::{ContextGaugeRow, GaugeSnapshot, Metrics, PerContextMetrics};
 #[cfg(test)]
 use crate::storage::{clear_persistence_fault, fail_persistence_ops_after, write_atomic_private};
 use crate::storage::{
@@ -477,6 +477,25 @@ pub struct Entry {
     /// `fetch_max` — store batches finish out of order, and a stale
     /// watermark read must never overwrite a newer one.
     passage_revision: AtomicU64,
+    /// Flush-time snapshot of this context's non-WAL on-disk bytes —
+    /// written by [`AppState::refresh_disk_usage`], read by
+    /// `gauge_snapshot` so a scrape never stats the data directory.
+    /// Zeros until the first sweep (boot runs one when the per-context
+    /// gauges are on; they stay zeros, unread, when they are off).
+    disk: Mutex<ContextDiskUsage>,
+}
+
+/// On-disk bytes for the file families a scrape cannot afford to stat
+/// (issue #137), grouped the way `taguru_context_disk_bytes` labels
+/// them. The WAL lanes are deliberately absent: `EntryInner::wal_bytes`
+/// and `passages_wal_bytes` already track those live, and a second
+/// bookkeeper for the same number would drift from the first.
+#[derive(Debug, Clone, Copy, Default)]
+struct ContextDiskUsage {
+    image_bytes: u64,
+    passages_bytes: u64,
+    /// Meta + sources + gloss vectors + passage vectors + BM25, summed.
+    sidecar_bytes: u64,
 }
 
 impl Entry {
@@ -520,6 +539,7 @@ impl Entry {
             usage_dirty: AtomicBool::new(false),
             passages_load_failure: Mutex::new(None),
             passage_revision: AtomicU64::new(revision.passages),
+            disk: Mutex::new(ContextDiskUsage::default()),
         }
     }
 
@@ -1004,6 +1024,7 @@ pub struct BootConfig {
     pub passage_vector_limit: usize,
     pub embed_parallel: usize,
     pub semantic_floor: Option<f32>,
+    pub per_context_metrics: PerContextMetrics,
 }
 
 /// Default ceiling on how many rows per context get a vector
@@ -1334,6 +1355,10 @@ pub struct BootOptions {
     pub passage_vector_limit: usize,
     pub embed_parallel: usize,
     pub default_semantic_floor: Option<f32>,
+    /// Whether (and how much of) the per-context gauge families the
+    /// scrape carries — see [`PerContextMetrics`]. Off skips the
+    /// flush-time disk sweeps entirely, not just the render.
+    pub per_context_metrics: PerContextMetrics,
     /// Present when replication is on: the shipper's progress map,
     /// consulted (never waited on) before the graph lane's
     /// housekeeping WAL reset so that shipped stream stays gapless —
@@ -1361,6 +1386,7 @@ impl Default for BootOptions {
             passage_vector_limit: DEFAULT_PASSAGE_VECTOR_LIMIT,
             embed_parallel: 1,
             default_semantic_floor: None,
+            per_context_metrics: PerContextMetrics::Off,
             ship_progress: None,
             hydrator: None,
             replica: None,
@@ -1407,6 +1433,7 @@ impl BootConfig {
             // recalibration lives beside TAGURU_EMBED_MODEL rather
             // than on every context.
             semantic_floor: crate::env::env_floor("TAGURU_SEMANTIC_FLOOR"),
+            per_context_metrics: crate::env::env_per_context_metrics("TAGURU_METRICS_PER_CONTEXT"),
         }
     }
 
@@ -1434,6 +1461,7 @@ impl BootConfig {
                 passage_vector_limit: self.passage_vector_limit,
                 embed_parallel: self.embed_parallel,
                 default_semantic_floor: self.semantic_floor,
+                per_context_metrics: self.per_context_metrics,
                 ship_progress,
                 hydrator,
                 replica,
@@ -1610,6 +1638,12 @@ struct StateInner {
     /// synchronous, so this is the only lever for provider-side
     /// concurrency.
     embed_parallel: usize,
+    /// Whether (and how much of) the per-context gauge families the
+    /// scrape carries (`TAGURU_METRICS_PER_CONTEXT`, issue #137). Read
+    /// twice: [`AppState::refresh_disk_usage`] skips its stat sweep
+    /// entirely on `Off`, and `gauge_snapshot` collects rows (and
+    /// applies `Top`'s cut) for anything else.
+    per_context_metrics: PerContextMetrics,
     /// Present when replication is on. Consulted (one mutexed map
     /// read, never a wait) before the GRAPH lane's post-flush WAL
     /// reset, so the shipper reads that log's tail before it
@@ -1851,6 +1885,7 @@ impl AppState {
             embed_passages: options.embed_passages,
             passage_vector_limit: options.passage_vector_limit,
             embed_parallel: options.embed_parallel,
+            per_context_metrics: options.per_context_metrics,
             ship_progress: options.ship_progress,
             hydrator: options.hydrator,
             replica: options.replica,
@@ -1859,6 +1894,10 @@ impl AppState {
             budget_ops: AtomicU64::new(0),
         }));
         state.preload_pinned();
+        // Seed the per-context disk gauges (a no-op while they are
+        // off) so the first scrape is not blind until the first flush
+        // tick — the scrape itself must never stat the data directory.
+        state.refresh_disk_usage();
         Ok(state)
     }
 
@@ -2007,6 +2046,43 @@ impl AppState {
         }
     }
 
+    /// Re-stats every context's non-WAL files into its entry's disk
+    /// cache — the flush-time half of the per-context gauges (issue
+    /// #137). Free while `TAGURU_METRICS_PER_CONTEXT` is off; otherwise
+    /// it runs from boot, the flusher's tick, and `POST /flush` (all
+    /// via [`AppState::flush_dirty`]) — never from a scrape, which
+    /// must not walk the data directory. The WAL lanes are absent on
+    /// purpose: their live bookkeeping ([`EntryInner::wal_bytes`],
+    /// `passages_wal_bytes`) already serves the scrape, so the
+    /// per-context `wal` series sum exactly to the global gauges.
+    ///
+    /// Lag is the contract, not a bug: a size lands on the scrape up
+    /// to one flush interval after it lands on disk, the trade that
+    /// buys zero scrape-time filesystem work.
+    pub fn refresh_disk_usage(&self) {
+        if self.0.per_context_metrics == PerContextMetrics::Off {
+            return;
+        }
+        let dir = &self.0.data_dir;
+        let len = |path: PathBuf| fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        for (name, entry) in self.snapshot() {
+            let stem = file_stem(&name);
+            let usage = ContextDiskUsage {
+                image_bytes: len(image_path(dir, &stem)),
+                passages_bytes: len(passages_path(dir, &stem)),
+                sidecar_bytes: len(meta_path(dir, &stem))
+                    + len(sources_path(dir, &stem))
+                    + len(vectors_path(dir, &stem))
+                    + len(pvectors_path(dir, &stem))
+                    + len(bm25_path(dir, &stem)),
+            };
+            // No tombstone check: stats only read, and a racing delete
+            // just leaves a snapshot nobody will render — the entry is
+            // already out of the registry the next scrape reads.
+            *entry.disk.lock() = usage;
+        }
+    }
+
     /// Point-in-time gauges for a scrape, computed from the registry
     /// so they cannot drift: how many contexts exist, how many are
     /// resident, and the resident-bytes estimate (loaded graphs plus
@@ -2024,17 +2100,33 @@ impl AppState {
         let mut arena_slack_total = 0u64;
         let mut unsourced_edges_total = 0u64;
         let mut unsourced_weight_total = 0.0f64;
-        for (_name, entry) in snapshot {
+        // Per-context rows ride the same single pass as the fleet-wide
+        // sums, from the same per-entry reads — the two can never
+        // disagree about one scrape's instant.
+        let collect_rows = self.0.per_context_metrics != PerContextMetrics::Off;
+        let mut per_context = Vec::new();
+        for (name, entry) in snapshot {
             let inner = entry.inner.read();
+            let mut graph_footprint = 0u64;
+            // (concepts, associations, labels, sources) — live for hot,
+            // the last-saved stats snapshot for cold, exactly the
+            // semantics `GET /contexts` serves.
+            let counts;
             if let Slot::Hot(context) = &inner.slot {
                 contexts_resident += 1;
-                resident_bytes += context.footprint() as u64;
+                graph_footprint = context.footprint() as u64;
                 dead_edges_total += context.dead_edges() as u64;
                 dead_attributions_total += context.dead_attributions() as u64;
                 arena_slack_total += context.arena_slack() as u64;
                 let (unsourced_edges, unsourced_weight) = context.unsourced_summary();
                 unsourced_edges_total += unsourced_edges as u64;
                 unsourced_weight_total += unsourced_weight;
+                counts = (
+                    context.concept_count() as u64,
+                    context.association_count() as u64,
+                    context.label_count() as u64,
+                    context.source_count() as u64,
+                );
             } else {
                 // Cold (or mid-delete): the graph is not in memory, so
                 // this stays whatever `inner.stats` last cached at
@@ -2047,24 +2139,64 @@ impl AppState {
                 arena_slack_total += inner.stats.arena_slack as u64;
                 unsourced_edges_total += inner.stats.unsourced_edges as u64;
                 unsourced_weight_total += inner.stats.unsourced_weight;
+                counts = (
+                    inner.stats.concepts as u64,
+                    inner.stats.associations as u64,
+                    inner.stats.labels as u64,
+                    inner.stats.sources as u64,
+                );
             }
-            wal_bytes += inner.wal_bytes;
+            resident_bytes += graph_footprint;
+            let entry_wal_bytes = inner.wal_bytes;
+            wal_bytes += entry_wal_bytes;
             let cold_passages_wal_bytes = inner.passages_wal_bytes;
+            let pinned = inner.meta.pinned;
             drop(inner);
-            resident_bytes += entry.vectors_footprint() as u64;
-            resident_bytes += entry.passages_footprint() as u64;
-            resident_bytes += entry.bm25_footprint() as u64;
-            resident_bytes += entry.passage_vectors_footprint() as u64;
+            let cache_footprint = entry.vectors_footprint() as u64
+                + entry.passages_footprint() as u64
+                + entry.bm25_footprint() as u64
+                + entry.passage_vectors_footprint() as u64;
+            resident_bytes += cache_footprint;
             // A resident store knows its pending log; a cold one uses
             // the value `evict_entry` cached on the way down — the
             // gauge must not go blind just because a context was
             // evicted, nor re-`stat` the log on every scrape.
-            passages_wal_bytes += entry
+            let entry_passages_wal_bytes = entry
                 .passages
                 .lock()
                 .as_ref()
                 .map(|store| store.pending_log_bytes())
                 .unwrap_or(cold_passages_wal_bytes);
+            passages_wal_bytes += entry_passages_wal_bytes;
+            if collect_rows {
+                let disk = *entry.disk.lock();
+                per_context.push(ContextGaugeRow {
+                    name,
+                    pinned,
+                    resident_bytes: graph_footprint + cache_footprint,
+                    disk_image_bytes: disk.image_bytes,
+                    disk_wal_bytes: entry_wal_bytes,
+                    disk_passages_bytes: disk.passages_bytes,
+                    disk_passages_wal_bytes: entry_passages_wal_bytes,
+                    disk_sidecar_bytes: disk.sidecar_bytes,
+                    concepts: counts.0,
+                    associations: counts.1,
+                    labels: counts.2,
+                    sources: counts.3,
+                });
+            }
+        }
+        if let PerContextMetrics::Top(keep) = self.0.per_context_metrics {
+            // Rank by total disk bytes (ties by name, so equal sizes
+            // cannot flap), cut, then restore name order — the render
+            // stays deterministic and diff-friendly either mode.
+            per_context.sort_by(|a, b| {
+                b.disk_total_bytes()
+                    .cmp(&a.disk_total_bytes())
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+            per_context.truncate(keep);
+            per_context.sort_by(|a, b| a.name.cmp(&b.name));
         }
         let (retrieval_cache_entries, retrieval_cache_bytes) = self.retrieval_cache_gauges();
         let semantic_cache_entries = self.semantic_cache_entries();
@@ -2088,6 +2220,7 @@ impl AppState {
             retrieval_cache_entries,
             retrieval_cache_bytes,
             semantic_cache_entries,
+            per_context,
         }
     }
 
@@ -3600,6 +3733,11 @@ impl AppState {
                 flushed.push(name);
             }
         }
+        // After the images land: every caller of this (the flusher
+        // tick, POST /flush, the shutdown sweep) is exactly when "the
+        // sizes on disk changed" — refresh the per-context disk gauges
+        // here (a no-op while they are off) so a scrape never has to.
+        self.refresh_disk_usage();
         flushed
     }
 
@@ -7335,6 +7473,132 @@ mod tests {
         assert_eq!(cold.arena_slack_total, hot.arena_slack_total);
         assert_eq!(cold.unsourced_edges_total, hot.unsourced_edges_total);
         assert_eq!(cold.unsourced_weight_total, hot.unsourced_weight_total);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The per-context rows (#137) measure disk at flush time — never
+    /// at scrape time — carry live counts for hot contexts and saved
+    /// ones for cold, and `Top(n)` cuts by total disk bytes.
+    #[test]
+    fn per_context_gauges_measure_at_flush_and_cut_top_n_by_disk() {
+        let dir = scratch_dir("per-context-gauges");
+        {
+            let state = AppState::boot_with(
+                dir.clone(),
+                usize::MAX,
+                None,
+                BootOptions {
+                    per_context_metrics: PerContextMetrics::All,
+                    ..BootOptions::default()
+                },
+            )
+            .unwrap();
+            state
+                .create("big", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .create(
+                    "small",
+                    ContextMeta {
+                        pinned: true,
+                        ..ContextMeta::default()
+                    },
+                )
+                .map_err(|_| "create")
+                .unwrap();
+            let seed: Vec<_> = (0..200)
+                .map(|index| {
+                    assoc_op(
+                        &format!("subject-{index}"),
+                        "label",
+                        &format!("object-{index}"),
+                        1.0,
+                        Some("s.md"),
+                    )
+                })
+                .collect();
+            state
+                .add_associations("big", seed, Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            state
+                .add_associations(
+                    "small",
+                    vec![assoc_op("a", "l", "b", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+
+            // Before any flush: the images EXIST on disk (create
+            // persisted them after the boot sweep ran), yet the disk
+            // gauges still read zero — the behavioral proof that a
+            // scrape never stats the data directory.
+            let before = state.gauge_snapshot();
+            assert_eq!(before.per_context.len(), 2);
+            let row = |snapshot: &GaugeSnapshot, name: &str| -> ContextGaugeRow {
+                let row = snapshot
+                    .per_context
+                    .iter()
+                    .find(|row| row.name == name)
+                    .unwrap();
+                ContextGaugeRow {
+                    name: row.name.clone(),
+                    ..*row
+                }
+            };
+            assert!(
+                fs::metadata(image_path(&dir, &file_stem("big")))
+                    .unwrap()
+                    .len()
+                    > 0
+            );
+            let big = row(&before, "big");
+            assert_eq!(big.disk_image_bytes, 0);
+            // Hot rows: live counts and real residency.
+            assert_eq!(big.associations, 200);
+            assert_eq!(big.sources, 1);
+            assert!(big.resident_bytes > 0);
+            assert!(!big.pinned);
+            assert!(row(&before, "small").pinned);
+
+            // The flush sweep publishes the real file sizes — the very
+            // bytes `to_bytes()` staged, which is also `estimate`'s
+            // measuring stick.
+            state.flush_dirty();
+            let after = state.gauge_snapshot();
+            let big = row(&after, "big");
+            let image_len = fs::metadata(image_path(&dir, &file_stem("big")))
+                .unwrap()
+                .len();
+            assert_eq!(big.disk_image_bytes, image_len);
+            assert!(big.disk_sidecar_bytes > 0, "the meta sidecar has bytes");
+            assert!(
+                big.disk_total_bytes() > row(&after, "small").disk_total_bytes(),
+                "200 associations outweigh 1"
+            );
+        }
+        // Reboot with Top(1): the cut keeps the bigger context, and the
+        // cold row's counts come from the saved stats snapshot.
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                per_context_metrics: PerContextMetrics::Top(1),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        let snapshot = state.gauge_snapshot();
+        assert_eq!(snapshot.per_context.len(), 1, "Top(1) cut to one row");
+        let row = &snapshot.per_context[0];
+        assert_eq!(row.name, "big");
+        assert_eq!(row.associations, 200, "cold counts read the sidecar");
+        assert_eq!(row.resident_bytes, 0, "a cold context holds nothing");
+        assert!(row.disk_image_bytes > 0, "the boot sweep seeded disk sizes");
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -79,6 +79,12 @@ use tracing::{error, info, warn};
 ///   per retrieval (context, op, cue, hits) for keyword analysis in
 ///   the log pipeline. Off by default: cues are memory content, and
 ///   the standard log stream carries no content.
+/// - `TAGURU_METRICS_PER_CONTEXT`: adds the `taguru_context_*` gauge
+///   families (disk bytes by file family, resident bytes, pinned,
+///   counts) to `/metrics` — `1`/`all` for every context, N ≥ 2 for
+///   the top-N by disk size. Off by default: per-context labels ×
+///   many contexts is a Prometheus cardinality cost an operator
+///   should choose, not inherit.
 /// - `TAGURU_MAX_CONCURRENT_HEAVY_OPS`: shared ceiling for concurrent
 ///   vocabulary audits (including a drift audit's `include_twins`) and
 ///   per-context compactions (default 2; 0 disables). Excess calls are

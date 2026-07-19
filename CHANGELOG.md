@@ -8,6 +8,18 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Per-context capacity gauges on `/metrics` (#137), behind
+  `TAGURU_METRICS_PER_CONTEXT` (default off; `1`/`all` = every
+  context, `N ≥ 2` = the top-N by total disk bytes): the
+  `taguru_context_*` families — on-disk bytes by file family (image,
+  graph WAL, passages snapshot, passages WAL, sidecars), modeled
+  resident bytes, the pinned flag, and concept/association/label/
+  source counts. Sizes come from a stat sweep at each flush tick,
+  `POST /flush`, and boot — never from the scrape, which reads only
+  registry state; counts and residency are live for hot contexts and
+  the last-saved snapshot for cold ones, the same semantics
+  `GET /contexts` serves. The WAL series reuse the existing live
+  bookkeeping, so they sum exactly to `taguru_wal_bytes` and friends.
 - `taguru calibrate` (#131): measures the semantic-floor bands of a
   running server's embedding model instead of prescribing the manual
   ritual. `--context NAME --probes FILE` (TSV `cue<TAB>expected`

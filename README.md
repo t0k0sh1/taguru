@@ -209,7 +209,8 @@ load-bearing ones:
 
 The full table — durability ceilings, observability (`RUST_LOG`,
 `TAGURU_LOG_FORMAT=json`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
-`TAGURU_LOG_SEARCHES`), body/concurrency caps — is in
+`TAGURU_LOG_SEARCHES`, per-context capacity gauges via
+`TAGURU_METRICS_PER_CONTEXT`), body/concurrency caps — is in
 [Getting started](https://t0k0sh1.github.io/taguru/getting-started.html)
 and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
 
@@ -280,11 +281,14 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   answering the old shard's slice of every group fan-out.
 - **Health and metrics.** `GET /health` is readiness (503 while the
   write path is degraded — route away, don't restart), `GET /live` is
-  liveness, `GET /metrics` is Prometheus text. Every request lands in
-  the access log with its key, context, and latency; destructive
-  operations additionally leave one self-contained `taguru::audit`
-  line. Distributed tracing is opt-in via
-  `OTEL_EXPORTER_OTLP_ENDPOINT`.
+  liveness, `GET /metrics` is Prometheus text.
+  `TAGURU_METRICS_PER_CONTEXT=all` (or top-`N` by disk size) adds
+  per-context capacity gauges — disk bytes by file family, resident
+  bytes, pinned, counts — measured at flush time, never by the scrape.
+  Every request lands in the access log with its key, context, and
+  latency; destructive operations additionally leave one
+  self-contained `taguru::audit` line. Distributed tracing is opt-in
+  via `OTEL_EXPORTER_OTLP_ENDPOINT`.
 - **Backups.** Set `TAGURU_REPLICATE_URL` and the server continuously
   ships every file family — both log lanes tailed record-by-record,
   published files whole — to object storage (S3/GCS/Azure, credentials
