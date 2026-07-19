@@ -41,12 +41,16 @@ fn protocol_reports_the_semantic_tier_when_configured() {
 fn sigterm_drains_promptly_past_an_in_flight_embed() {
     use std::time::Duration;
 
-    // A provider that accepts and never answers, sockets held open.
+    // A provider that accepts and never answers, sockets held open —
+    // announcing each arrival, so the test KNOWS when the search is
+    // blocked inside the provider call rather than guessing by sleep.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let provider_addr = listener.local_addr().unwrap();
+    let (arrived, provider_reached) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut held = Vec::new();
         while let Ok((stream, _)) = listener.accept() {
+            let _ = arrived.send(());
             held.push(stream);
         }
     });
@@ -81,8 +85,10 @@ fn sigterm_drains_promptly_past_an_in_flight_embed() {
             .send(r#"{"query": "精米歩合", "limit": 3}"#);
         finish(response, "POST", "/contexts/sake/sources/search")
     });
-    // Let the request reach the provider before the signal lands.
-    std::thread::sleep(Duration::from_millis(500));
+    // Only signal once the search is provably blocked in the provider.
+    provider_reached
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the search must reach the provider");
 
     let started = std::time::Instant::now();
     let _dir = server.stop_gracefully();
