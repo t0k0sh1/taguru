@@ -50,6 +50,28 @@ spec:
           envFrom:
             - secretRef:
                 name: taguru-keys
+          # Hot key rotation (issue #134): env vars are frozen at pod
+          # start, so the envFrom above can never rotate without a
+          # restart. To rotate keys live, mount the secret as a FILE
+          # and hand it to --config instead — the server watches the
+          # file (~5s) and swaps the auth table in place, fail closed:
+          #
+          #   kubectl -n taguru create secret generic taguru-keys \
+          #     --from-literal=taguru.env='TAGURU_API_TOKENS=ops:NEW-TOKEN' \
+          #     --dry-run=client -o yaml | kubectl apply -f -
+          #
+          # 1. Replace envFrom above with, under this container:
+          #      args: ["--config", "/etc/taguru/taguru.env"]
+          #      volumeMounts:
+          #        - { name: keys, mountPath: /etc/taguru, readOnly: true }
+          # 2. And under the pod's volumes:
+          #      - name: keys
+          #        secret: { secretName: taguru-keys }
+          # 3. Rotate with the kubectl apply above; the kubelet swaps
+          #    the mounted file atomically (~1 min) and the watch picks
+          #    it up — no exec, no signal, no restart. Watch
+          #    taguru_keyring_reload_refusals_total for a rotation that
+          #    failed to parse (the previous keys stay armed).
           env:
             - name: TAGURU_DATA_DIR
               value: /data
