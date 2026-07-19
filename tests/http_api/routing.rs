@@ -304,6 +304,15 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         normalized(&parse(&router_tool)),
         "the MCP recall tool diverged between the router and the single instance"
     );
+    // `initialize` hands out the shard's own manual — fetched through
+    // the router, it must be the same text a shard serves directly.
+    let initialize = json!({"jsonrpc": "2.0", "id": 9, "method": "initialize", "params": {}});
+    let (_, single_init) = single.call("POST", "/mcp", Some(initialize.clone()));
+    let (_, router_init) = router.call("POST", "/mcp", Some(initialize));
+    assert_eq!(
+        single_init["result"]["instructions"], router_init["result"]["instructions"],
+        "the router's initialize must hand out the shards' manual"
+    );
 
     // Deleting a context through the router routes to its shard and
     // the directory merge reflects it — writes are first-class, not a

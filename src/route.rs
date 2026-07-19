@@ -436,7 +436,15 @@ pub(crate) async fn run(config: Option<PathBuf>) {
                         reattach_authorization,
                     ));
                 async move {
-                    let instructions = state.mcp_instructions(deadline).await;
+                    // Only `initialize` reads the manual — a tool call
+                    // must never spend its budget probing shards for
+                    // text it will not use (with every shard down, the
+                    // probes would eat the whole deadline first).
+                    let instructions = if wants_instructions(&body) {
+                        state.mcp_instructions(deadline).await
+                    } else {
+                        Arc::new(String::new())
+                    };
                     crate::remote_mcp::serve(
                         dispatch,
                         instructions,
@@ -538,6 +546,21 @@ fn routes(state: RouterState) -> Router<RouterState> {
             let state = state.clone();
             move |payload| router_panic_response(payload, &state)
         }))
+}
+
+/// Whether an MCP message is an `initialize` — the one method whose
+/// reply carries the manual. A cheap peek, not a validation: anything
+/// unparseable goes to `remote_mcp::serve` for its own refusal.
+fn wants_instructions(body: &Bytes) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|message| {
+            message
+                .get("method")
+                .and_then(Value::as_str)
+                .map(|method| method == "initialize")
+        })
+        .unwrap_or(false)
 }
 
 /// The dispatched-call twin of the server's auth story: the outer
