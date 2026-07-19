@@ -367,10 +367,17 @@ export class Taguru {
    * scores do NOT share a scale across contexts (BM25 statistics are
    * corpus-local), so the merged order is rank interleaving — every
    * context's best hit first; `score` compares within one context only.
+   * `semantic_floor` overrides every target's vector-lane cosine floor for
+   * this call (it floors only that lane; BM25-only hits still return).
    */
   async searchPassages(
     query: string,
-    options: { contexts?: string[]; groups?: string[]; limit?: number } = {},
+    options: {
+      contexts?: string[];
+      groups?: string[];
+      limit?: number;
+      semantic_floor?: number;
+    } = {},
   ): Promise<CrossPassageHit[]> {
     const result = await this.requestJson("POST", "/sources/search", {
       jsonBody: dropUndefined({
@@ -378,6 +385,7 @@ export class Taguru {
         groups: options.groups,
         query,
         limit: options.limit,
+        semantic_floor: options.semantic_floor,
       }),
     });
     return result as CrossPassageHit[];
@@ -958,12 +966,18 @@ export class Context {
   /**
    * Paragraph search (BM25 fused with embeddings where configured). Phrase
    * the query as an answer, not a question — a plausible declarative sentence
-   * lands nearer the text you hope to find.
+   * lands nearer the text you hope to find. `semantic_floor` overrides the
+   * vector lane's cosine floor for this call — over the context setting,
+   * over the server default (it floors only that lane; BM25-only hits still
+   * return).
    */
-  async searchPassages(query: string, options: { limit?: number } = {}): Promise<PassageHit[]> {
+  async searchPassages(
+    query: string,
+    options: { limit?: number; semantic_floor?: number } = {},
+  ): Promise<PassageHit[]> {
     const result = await this.post(
       "/sources/search",
-      dropUndefined({ query, limit: options.limit }),
+      dropUndefined({ query, limit: options.limit, semantic_floor: options.semantic_floor }),
     );
     return result as PassageHit[];
   }
@@ -971,16 +985,24 @@ export class Context {
   /**
    * Why `source` did (or didn't) surface for `query`. Omit `paragraph` to
    * explain the source's best showing; name one (0-based) to interrogate it.
-   * A diagnosed miss is a 200 — read the `verdict`, then the lane evidence.
+   * Pass the `semantic_floor` of the search call being explained, or the
+   * explanation accounts for a call nobody made. A diagnosed miss is a 200 —
+   * read the `verdict`, then the lane evidence.
    */
   async explainSearchPassages(
     query: string,
     source: string,
-    options: { paragraph?: number; limit?: number } = {},
+    options: { paragraph?: number; limit?: number; semantic_floor?: number } = {},
   ): Promise<SearchExplanation> {
     const result = await this.post(
       "/sources/search/explain",
-      dropUndefined({ query, source, paragraph: options.paragraph, limit: options.limit }),
+      dropUndefined({
+        query,
+        source,
+        paragraph: options.paragraph,
+        limit: options.limit,
+        semantic_floor: options.semantic_floor,
+      }),
     );
     return result as SearchExplanation;
   }

@@ -838,9 +838,21 @@ const LEGACY_PASSAGE_VECTOR_MAGIC: &[u8; 8] = b"TAGURUP1";
 
 /// Below this many rows, [`PassageVectorStore::top_matches`] sweeps
 /// every row exactly — the flat layout already IS a fine index at
-/// that scale. At or above it, an approximate [`PassageAnnIndex`]
-/// narrows the sweep instead of scanning every row on every query.
-pub const PASSAGE_ANN_THRESHOLD: usize = 50_000;
+/// that scale, and exact ranking is worth more than the fraction of a
+/// millisecond an approximation would save. At or above it, an
+/// approximate [`PassageAnnIndex`] narrows the sweep instead of
+/// scanning every row on every query.
+///
+/// Calibrated by `passage_ann_threshold_calibration_sweep` (run it
+/// after touching the index): at 10k rows the exact sweep costs
+/// 6–14 ms of read-fenced CPU per query (dim 768–1536) against
+/// <1 ms for the index at ~100% measured recall@10, and the one-time
+/// lazy build (0.6–1.3 s) fits comfortably inside a request budget —
+/// which the build at the old 50k threshold (7–15 s) did not reliably
+/// do. Sits at half [`crate::registry::DEFAULT_PASSAGE_VECTOR_LIMIT`]
+/// so the index engages in default configuration with headroom (a
+/// `const` assertion beside that limit pins the relationship).
+pub const PASSAGE_ANN_THRESHOLD: usize = 10_000;
 
 /// Paragraph vectors for one context, `{stem}.pvectors.bin`. Unlike
 /// the gloss [`VectorStore`] this is a FLAT table — one contiguous
@@ -2044,6 +2056,46 @@ mod tests {
         store
     }
 
+    fn unit(mut v: Vec<f32>) -> Vec<f32> {
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in &mut v {
+                *x /= norm;
+            }
+        }
+        v
+    }
+
+    /// Rows drawn around a few dozen topic centroids — the shape real
+    /// text embeddings take, and the structure IVF recall lives on;
+    /// [`synthetic_passage_store`]'s uniform rows are its structureless
+    /// counterpart, the adversarial floor for the same measurements.
+    fn clustered_passage_store(rows: usize, dim: usize) -> PassageVectorStore {
+        const CENTERS: u64 = 48;
+        let mut store = PassageVectorStore::new("ann-test-model");
+        for i in 0..rows {
+            let center = deterministic_unit_vector(0xC_000_000 + (i as u64 % CENTERS), dim);
+            let noise = deterministic_unit_vector(i as u64, dim);
+            let v = unit(
+                center
+                    .iter()
+                    .zip(&noise)
+                    .map(|(c, n)| c + 0.55 * n)
+                    .collect(),
+            );
+            store.push(
+                PassageKey {
+                    source: format!("doc-{i}"),
+                    index: 0,
+                    hash: i as u64,
+                    question_hash: None,
+                },
+                v,
+            );
+        }
+        store
+    }
+
     /// Sorted descending by score, same tie-break as
     /// [`PassageVectorStore::exact_top_matches`] — computed independently
     /// here (not by calling that private method) so these tests stay an
@@ -2070,7 +2122,7 @@ mod tests {
     fn passage_ann_index_centroid_count_grows_like_sqrt_of_rows() {
         assert_eq!(PassageAnnIndex::centroid_count(1), 1);
         assert_eq!(PassageAnnIndex::centroid_count(100), 10);
-        assert_eq!(PassageAnnIndex::centroid_count(PASSAGE_ANN_THRESHOLD), 224);
+        assert_eq!(PassageAnnIndex::centroid_count(PASSAGE_ANN_THRESHOLD), 100);
     }
 
     #[test]
@@ -2173,12 +2225,14 @@ mod tests {
         let mut store = synthetic_passage_store(PASSAGE_ANN_THRESHOLD, dim);
         let query = deterministic_unit_vector(0xA11CE, dim);
         // Ten scattered rows (including row 0, the deterministic first
-        // centroid seed) become exact copies of the query: an
-        // unambiguous top-10 the index must surface in full, not just
-        // "mostly".
-        let planted = [
-            0usize, 137, 4096, 9001, 15000, 22222, 30000, 37500, 44444, 49999,
-        ];
+        // centroid seed, and the last row) become exact copies of the
+        // query: an unambiguous top-10 the index must surface in full,
+        // not just "mostly". Spread relative to the threshold so the
+        // fixture keeps covering the whole store when the threshold is
+        // recalibrated.
+        let planted: Vec<usize> = (0..10)
+            .map(|k| k * (PASSAGE_ANN_THRESHOLD - 1) / 9)
+            .collect();
         for &row in &planted {
             let start = row * dim;
             store.data[start..start + dim].copy_from_slice(&query);
@@ -2256,6 +2310,90 @@ mod tests {
             approx_elapsed < exact_elapsed,
             "expected the index to beat a full sweep at {rows} rows: exact={exact_elapsed:?} ann={approx_elapsed:?}"
         );
+    }
+
+    /// The data [`PASSAGE_ANN_THRESHOLD`] was calibrated on: exact
+    /// sweep vs ANN (one-time build + per-query search) wall clock and
+    /// ANN recall, swept across corpus sizes bracketing the threshold,
+    /// at realistic embedding dimensions, over both data shapes that
+    /// bound reality — topic-clustered rows and structureless uniform
+    /// ones. Queries are perturbed copies of stored rows (the
+    /// paraphrase case the lane exists for). Run it in release or the
+    /// numbers lie:
+    /// `cargo test --release passage_ann_threshold_calibration -- --ignored --nocapture`
+    #[test]
+    #[ignore = "calibration sweep for manual inspection: cargo test --release -- --ignored --nocapture"]
+    fn passage_ann_threshold_calibration_sweep() {
+        const QUERIES: usize = 20;
+        // lane_pool(5): what the semantic lane actually asks for at the
+        // default serve limit.
+        const SERVE_POOL: usize = 50;
+        for &dim in &[768usize, 1536] {
+            for &rows in &[5_000usize, 10_000, 20_000, 50_000] {
+                for clustered in [true, false] {
+                    let store = if clustered {
+                        clustered_passage_store(rows, dim)
+                    } else {
+                        synthetic_passage_store(rows, dim)
+                    };
+                    let queries: Vec<Vec<f32>> = (0..QUERIES)
+                        .map(|j| {
+                            let row = (j * rows) / QUERIES;
+                            let base = &store.data[row * dim..(row + 1) * dim];
+                            let noise = deterministic_unit_vector(0x9_000_000 + j as u64, dim);
+                            unit(base.iter().zip(&noise).map(|(b, n)| b + 0.6 * n).collect())
+                        })
+                        .collect();
+
+                    let mut exact_total = Duration::ZERO;
+                    let truths: Vec<Vec<(&PassageKey, f32)>> = queries
+                        .iter()
+                        .map(|q| {
+                            let at = std::time::Instant::now();
+                            let hits = store.exact_top_matches(q, SERVE_POOL);
+                            exact_total += at.elapsed();
+                            hits
+                        })
+                        .collect();
+
+                    let at = std::time::Instant::now();
+                    let index = PassageAnnIndex::build(&store, Deadline::unbounded());
+                    let build = at.elapsed();
+
+                    let mut ann_total = Duration::ZERO;
+                    let mut hit10 = 0usize;
+                    let mut hit50 = 0usize;
+                    for (q, truth) in queries.iter().zip(&truths) {
+                        let at = std::time::Instant::now();
+                        let hits = index.search(&store, q, SERVE_POOL);
+                        ann_total += at.elapsed();
+                        let id = |key: &PassageKey| (key.source.clone(), key.index);
+                        let want10: std::collections::HashSet<_> =
+                            truth.iter().take(10).map(|&(k, _)| id(k)).collect();
+                        let want50: std::collections::HashSet<_> =
+                            truth.iter().map(|&(k, _)| id(k)).collect();
+                        hit10 += hits
+                            .iter()
+                            .take(10)
+                            .filter(|&&(k, _)| want10.contains(&id(k)))
+                            .count();
+                        hit50 += hits
+                            .iter()
+                            .filter(|&&(k, _)| want50.contains(&id(k)))
+                            .count();
+                    }
+                    eprintln!(
+                        "dim {dim:>4} rows {rows:>6} {} | exact {:>10.1?}/q | ann {:>9.1?}/q build {:>10.1?} | recall@10 {:>5.1}% @50 {:>5.1}%",
+                        if clustered { "clustered" } else { "uniform  " },
+                        exact_total / QUERIES as u32,
+                        ann_total / QUERIES as u32,
+                        build,
+                        hit10 as f64 * 100.0 / (10 * QUERIES) as f64,
+                        hit50 as f64 * 100.0 / (SERVE_POOL * QUERIES) as f64,
+                    );
+                }
+            }
+        }
     }
 
     mod proptests {

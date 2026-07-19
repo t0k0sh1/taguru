@@ -321,7 +321,10 @@ pub fn route_tool(
             (
                 "POST",
                 path,
-                Some(pick(arguments, &["contexts", "groups", "query", "limit"])),
+                Some(pick(
+                    arguments,
+                    &["contexts", "groups", "query", "limit", "semantic_floor"],
+                )),
             )
         }
         "explain_search" => {
@@ -331,7 +334,10 @@ pub fn route_tool(
             (
                 "POST",
                 path,
-                Some(pick(arguments, &["query", "source", "paragraph", "limit"])),
+                Some(pick(
+                    arguments,
+                    &["query", "source", "paragraph", "limit", "semantic_floor"],
+                )),
             )
         }
         "cite_passage" => {

@@ -207,7 +207,10 @@
       (when <code>TAGURU_EMBED_PASSAGES</code> is on) a semantic lane over paragraph embeddings.
       Every hit carries <code>lanes</code>, always declaring which lane ranked it where — a
       vector-only hit means a paraphrase connected; a BM25-only hit means the surface forms
-      matched. Either is evidence, not a verdict. Read the text.
+      matched. Either is evidence, not a verdict. Read the text. The vector lane admits only
+      matches above a cosine floor — the context's <code>semantic_floor</code> or the server
+      default, overridable per call with <code>semantic_floor</code> in the search request;
+      it floors that lane alone, so BM25-only hits still return.
     </p>
     <p class="note">
       <b>Search with the shape of the answer, not the question.</b> Most embedding models place a

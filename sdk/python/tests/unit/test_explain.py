@@ -96,12 +96,17 @@ def test_explain_search_passages_posts_query_source_and_decodes() -> None:
     calls: list[tuple[str, Any]] = []
     client = sync_client(capturing_handler(SEARCH_EXPLANATION, calls))
     verdict = client.context("aomine").explain_search_passages(
-        "青嶺酒造の酒造", "docs/aomine.md", paragraph=1
+        "青嶺酒造の酒造", "docs/aomine.md", paragraph=1, semantic_floor=0.2
     )
 
     path, body = calls[0]
     assert path == "/contexts/aomine/sources/search/explain"
-    assert body == {"query": "青嶺酒造の酒造", "source": "docs/aomine.md", "paragraph": 1}
+    assert body == {
+        "query": "青嶺酒造の酒造",
+        "source": "docs/aomine.md",
+        "paragraph": 1,
+        "semantic_floor": 0.2,
+    }
 
     assert isinstance(verdict, SearchExplanation)
     assert verdict.verdict == "no_term_overlap"

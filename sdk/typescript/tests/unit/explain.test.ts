@@ -74,13 +74,17 @@ describe("resolve/search explain endpoints", () => {
     });
     const verdict: SearchExplanation = await client
       .context("aomine")
-      .explainSearchPassages("青嶺酒造の酒造", "docs/aomine.md", { paragraph: 1 });
+      .explainSearchPassages("青嶺酒造の酒造", "docs/aomine.md", {
+        paragraph: 1,
+        semantic_floor: 0.2,
+      });
 
     expect(seen!.path).toBe("/contexts/aomine/sources/search/explain");
     expect(JSON.parse(seen!.body!)).toEqual({
       query: "青嶺酒造の酒造",
       source: "docs/aomine.md",
       paragraph: 1,
+      semantic_floor: 0.2,
     });
 
     expect(verdict.verdict).toBe("no_term_overlap");

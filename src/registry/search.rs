@@ -35,11 +35,19 @@ impl AppState {
     /// Texts resolve through the store afterwards, hash-checked: a
     /// paragraph that changed between a lane's view and now is dropped
     /// rather than served with a stale score against fresh text.
+    ///
+    /// `floor_override` is the one-call override of the vector lane's
+    /// cosine floor — the same chain resolve's `semantic_floor` walks:
+    /// override beats context setting beats server default. It floors
+    /// the only lane with an absolute scale; the fused score is rank
+    /// arithmetic (raw BM25 in lexical-only deployments) and carries
+    /// no floorable meaning.
     pub fn search_passages(
         &self,
         name: &str,
         query: &str,
         limit: usize,
+        floor_override: Option<f32>,
         deadline: Deadline,
     ) -> Option<io::Result<Vec<PassageSearchHit>>> {
         let entry = self.lookup(name)?;
@@ -92,15 +100,15 @@ impl AppState {
 
         // Semantic lane: sweep the paragraph vectors with the
         // pre-embedded query, then drop candidates below the same floor
-        // semantic_resolve applies to its own cosine matches — context
-        // setting beats the server default (`fence` is already this
-        // entry's read lock, taken above; search_passages has no
-        // one-call override to slot in ahead of it).
+        // semantic_resolve applies to its own cosine matches — the
+        // caller's one-call override beats the context setting beats
+        // the server default (`fence` is already this entry's read
+        // lock, taken above).
         let semantic: Vec<(String, u32, u64, f32)> = match &cue {
             Some(cue) => match self.passage_vector_gate(&entry, &file_stem(name)) {
                 PassageVectorGate::Ready(vectors) => semantic_lane_hits(
                     vectors.top_matches(cue, pool, deadline),
-                    self.effective_semantic_floor(&fence.meta),
+                    self.effective_semantic_floor(floor_override, &fence.meta),
                 ),
                 _ => Vec::new(),
             },
@@ -118,8 +126,13 @@ impl AppState {
     /// sharing the most query terms when nothing ranked. `limit` is
     /// the search call being explained — the serve/cutoff boundary is
     /// recomputed exactly as `search_passages(limit)` computes it,
-    /// pool caps included. Read-only, and bounded like one normal
-    /// query plus one targeted scoring.
+    /// pool caps included, `floor_override` too: an explanation under
+    /// a different floor would account for a call nobody made.
+    /// Read-only, and bounded like one normal query plus one targeted
+    /// scoring.
+    // One parameter per field of the wire request being explained —
+    // bundling them would just rename the same arity.
+    #[allow(clippy::too_many_arguments)]
     pub fn explain_passage_search(
         &self,
         name: &str,
@@ -127,6 +140,7 @@ impl AppState {
         source: &str,
         paragraph: Option<u32>,
         limit: usize,
+        floor_override: Option<f32>,
         deadline: Deadline,
     ) -> Option<io::Result<PassageExplainLookup>> {
         let entry = self.lookup(name)?;
@@ -176,7 +190,7 @@ impl AppState {
         // of the same deterministically ordered sweep, so every pool
         // size fusion needs below is a `take` away.
         let lexical_full = index.search(&query_grams, usize::MAX);
-        let floor = self.effective_semantic_floor(&fence.meta);
+        let floor = self.effective_semantic_floor(floor_override, &fence.meta);
         let gate = match &cue {
             Ok(Some(_)) => Some(self.passage_vector_gate(&entry, &file_stem(name))),
             _ => None,
@@ -512,10 +526,11 @@ impl AppState {
     }
 
     /// The floor the semantic lane drops cosine matches below — the
-    /// same one `semantic_resolve` applies to its own matches; context
-    /// setting beats the server default.
-    fn effective_semantic_floor(&self, meta: &ContextMeta) -> f32 {
-        meta.semantic_floor
+    /// same chain `semantic_resolve` walks: the caller's one-call
+    /// override beats the context setting beats the server default.
+    fn effective_semantic_floor(&self, floor_override: Option<f32>, meta: &ContextMeta) -> f32 {
+        floor_override
+            .or(meta.semantic_floor)
             .unwrap_or(self.0.default_semantic_floor)
             .clamp(0.0, 1.0)
     }

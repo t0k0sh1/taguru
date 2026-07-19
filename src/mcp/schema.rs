@@ -488,7 +488,8 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             search_target_schema(
                 json!({
                     "query": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 0, "description": "default 5" }
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 5" },
+                    "semantic_floor": { "type": "number", "description": "one-call override of the vector lane's cosine floor (0-1); floors only the semantic lane — BM25-only hits still return" }
                 }),
                 &["query"],
             ),
@@ -502,7 +503,8 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "query": { "type": "string" },
                     "source": { "type": "string", "description": "the source you expected among the hits" },
                     "paragraph": { "type": "integer", "description": "zero-based paragraph position; omitted picks the source's best showing" },
-                    "limit": { "type": "integer", "minimum": 0, "description": "the search call being explained (default 5)" }
+                    "limit": { "type": "integer", "minimum": 0, "description": "the search call being explained (default 5)" },
+                    "semantic_floor": { "type": "number", "description": "the floor override of the search call being explained — pass the same value" }
                 }),
                 &["context", "query", "source"],
             ),
