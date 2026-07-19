@@ -164,9 +164,11 @@ TAGURU_EMBED_AUTO=1         <span class="c"># don't count on the agent calling r
       Taguru normalizes the vectors it receives, so Titan's raw (unnormalized) output is fine
       as-is. A changed <code>dimensions</code> setting behind the same model name is
       <b>detected, not trusted</b>: each vector sidecar records the (model, width) it was built
-      with, mismatched vectors are never served — search and resolve name the mismatch in their
-      <code>plan</code>/<code>explain</code> output instead of returning silently empty results —
-      and the next <code>embeddings/refresh</code> discards and re-embeds the store
+      with, and mismatched vectors are never served. The search response's <code>plan</code> and
+      the <code>search/explain</code> endpoint name the mismatch outright; a plain
+      <code>resolve</code> still answers <code>[]</code> (exactly like a model change — its
+      semantic tier is best-effort), so ask <code>resolve/explain</code>, which names it too.
+      The next <code>embeddings/refresh</code> discards and re-embeds the store
       (<code>taguru_embedding_width_rebuilds_total</code> counts these). Still pick one width and
       keep it: the rebuild is automatic, but it re-buys every vector at provider prices, and the
       calibrated floor below is width-specific too.
