@@ -1,0 +1,30 @@
+# The sharded fleet (issue #130): two PVC writer shards — the base
+# manifest instantiated twice under shards/ with distinct names and
+# selector labels — plus the stateless `taguru route` front door and
+# its context→shard map. Clients get one URL (the `taguru-router`
+# Service); groups and cross-context search span both shards with the
+# single-instance merge semantics.
+#
+#   kubectl create namespace taguru
+#   kubectl -n taguru create secret generic taguru-keys \
+#     --from-literal=TAGURU_API_TOKENS='ops:CHANGE-ME'
+#   kubectl -n taguru apply -k .
+#
+# One secret, on purpose: every shard reads the same `taguru-keys`
+# (the router's pass-through auth requires keyrings to agree), and the
+# router itself gets none of it — see router.yaml for why.
+#
+# The map is a generated ConfigMap so its name carries a content hash:
+# editing route-map and re-applying rolls the routers automatically.
+# Adding a shard = copy a shards/ directory, list it here, give it
+# contexts in route-map.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - shards/a
+  - shards/b
+  - router.yaml
+configMapGenerator:
+  - name: taguru-route-map
+    files:
+      - route-map

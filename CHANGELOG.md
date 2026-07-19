@@ -8,6 +8,23 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Kustomize packaging for the Kubernetes manifests (#139):
+  `deploy/kustomize/` serves `kubectl apply -k` over the reference
+  manifests — a base (the single-writer PVC model) and overlays for
+  the stateless, writer+replicas, and sharded-router variants; the
+  router overlay is the two-shard fleet worked out (writer shards via
+  nameSuffix + selector labels, the route-map as a content-hashed
+  generated ConfigMap so a map edit rolls the routers on apply, and
+  the front-door Deployment/Service). Kustomize over a Helm chart,
+  with the rationale recorded in `deploy/kustomize/README.md`: the
+  reference manifests stay the documentation (comments intact,
+  consumed verbatim), `apply -k` needs no extra tool, and the retuned
+  knobs are patches, not templates. `deploy/kustomize/verify.sh` —
+  run by a new CI workflow on every PR touching `deploy/` — keeps the
+  in-tree manifest copies byte-identical to the reference files,
+  schema-validates every rendered configuration (kubeconform), and
+  asserts the base renders equivalent to
+  `kubectl apply -f kubernetes.yaml`.
 - Router mode (#130): `taguru route` is a stateless scatter-gather
   router over sharded instances — `TAGURU_ROUTE_MAP` names a
   `context = shard-url` map file (optional `* = shard-url` fallback),

@@ -1,0 +1,130 @@
+# Taguru on Kubernetes — the documented single-writer model, spelled
+# out as manifests (README: "Deployment and availability").
+#
+#   kubectl create namespace taguru
+#   kubectl -n taguru create secret generic taguru-keys \
+#     --from-literal=TAGURU_API_TOKENS='ops:CHANGE-ME'
+#   kubectl -n taguru apply -f kubernetes.yaml
+#
+# The load-bearing choices, all of which follow from one data
+# directory owning durability:
+#   - replicas: 1 and strategy: Recreate — the advisory lock refuses a
+#     second writer on local disks and CANNOT be trusted to on shared
+#     network filesystems, so the platform must never run two pods
+#     against one volume.
+#   - ReadWriteOnce storage (block-backed: EBS/PD/Ceph RBD), never
+#     ReadWriteMany/NFS.
+#   - startupProbe on /live sized for the pinned preload; liveness on
+#     /live (restarts fix wedged processes, not disks); readiness on
+#     /health (503 while the write path is degraded — route away,
+#     don't restart).
+#   - terminationGracePeriodSeconds sized for the embedding tier's worst
+#     case, not the 30s default: a request that lands mid-embed can hold
+#     the graceful drain for TAGURU_EMBED_TIMEOUT_SECS × 3 retries (180s
+#     at the defaults), since that provider call can't be preempted by
+#     the request timeout. Too short a grace period gets the process
+#     SIGKILLed mid-drain instead — raise this alongside
+#     TAGURU_EMBED_TIMEOUT_SECS if you widen that.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taguru
+  labels: { app: taguru }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: taguru }
+  template:
+    metadata:
+      labels: { app: taguru }
+    spec:
+      terminationGracePeriodSeconds: 200
+      containers:
+        - name: taguru
+          image: ghcr.io/t0k0sh1/taguru:0.3.0 # pin; `latest` moves
+          ports:
+            - containerPort: 8248
+              name: http
+          envFrom:
+            - secretRef:
+                name: taguru-keys
+          env:
+            - name: TAGURU_DATA_DIR
+              value: /data
+            # The image binds 0.0.0.0 by default; keep every other
+            # knob in the secret or a ConfigMap as the deployment
+            # grows (TAGURU_KEY_SCOPES, TAGURU_RATE_LIMIT_PER_MIN, …).
+            # Continuous off-cluster replication (recover with
+            # `taguru restore`): set TAGURU_REPLICATE_URL to an
+            # s3://, gs://, or az:// bucket and grant the pod that
+            # cloud's identity (IRSA / Workload Identity) — the
+            # client rides the default credential chain. With it set,
+            # an EMPTY volume boots straight from the bucket — and
+            # kubernetes-stateless.yaml is the variant that makes that
+            # the whole story (emptyDir, no PVC).
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 250m
+              # Roughly TAGURU_CACHE_BYTES (default 512 MiB) plus
+              # pinned contexts and headroom; size with
+              # `taguru estimate`.
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+          startupProbe:
+            httpGet: { path: /live, port: http }
+            # Boot = cold registration + parallel pinned preload; the
+            # port opens when it finishes. 5s × 60 = five minutes of
+            # grace before the kill — resize to the fleet.
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: { path: /live, port: http }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true # /data is the only write target
+            allowPrivilegeEscalation: false
+      securityContext:
+        # The scratch image runs as 65532; the volume must be writable
+        # by that uid — and the platform, not the image metadata, is
+        # what enforces "never root".
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: taguru-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: taguru-data
+spec:
+  # Single-attachment is what keeps the single-writer model honest —
+  # see the header comment.
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: taguru
+spec:
+  selector: { app: taguru }
+  ports:
+    - name: http
+      port: 8248
+      targetPort: http
+# Expose beyond the cluster only behind TLS (Ingress/Gateway with a
+# certificate) — a bearer token is the whole credential.

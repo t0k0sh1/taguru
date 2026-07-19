@@ -1,0 +1,92 @@
+# The sharding router (issue #130): `taguru route` in front of the
+# shard writers this overlay renders beside it — one Service for
+# clients, context verbs routed to the owning shard, groups and
+# cross-context search spanning every shard with the single-instance
+# merge semantics, /mcp included.
+#
+# The load-bearing choices:
+#   - Stateless on purpose: no volume, RollingUpdate, replicas: N —
+#     scale it freely; nothing pins a router.
+#   - NO taguru-keys envFrom, deliberately: the router forwards
+#     Authorization verbatim and holds no key store — key variables on
+#     a router are a boot REFUSAL (advertised enforcement that would
+#     never happen), so the shards' shared secret must not reach it.
+#   - The map arrives as a generated ConfigMap (see ../route-map): its
+#     hashed name means a map edit rolls this Deployment on apply.
+#   - Probes: /live is liveness, /health readiness — a router is ready
+#     the moment it binds (it has no flusher to degrade); shard health
+#     surfaces per request as pass-through errors and `unreached`
+#     labels, and per shard on /metrics
+#     (taguru_router_shard_requests_total).
+#   - terminationGracePeriodSeconds just over the 30s request budget:
+#     a draining router only owes its in-flight proxied requests, and
+#     none outlives TAGURU_REQUEST_TIMEOUT_SECS. No embed tier here,
+#     so the writers' 200s sizing does not apply.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taguru-router
+  labels: { app: taguru-router }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: taguru-router }
+  template:
+    metadata:
+      labels: { app: taguru-router }
+    spec:
+      terminationGracePeriodSeconds: 35
+      containers:
+        - name: taguru
+          image: ghcr.io/t0k0sh1/taguru:0.3.0 # pin; `latest` moves
+          args: ["route"]
+          ports:
+            - containerPort: 8248
+              name: http
+          env:
+            - name: TAGURU_ROUTE_MAP
+              value: /etc/taguru/route-map
+          volumeMounts:
+            - name: route-map
+              mountPath: /etc/taguru
+              readOnly: true
+          resources:
+            # A proxy's footprint: fan-out buffers and connection
+            # pools, not a graph in memory — far below a shard's.
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          livenessProbe:
+            httpGet: { path: /live, port: http }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true # a router writes nothing at all
+            allowPrivilegeEscalation: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      volumes:
+        - name: route-map
+          configMap:
+            name: taguru-route-map
+---
+# The fleet's one front door: point every client here. The per-shard
+# Services (taguru-a, taguru-b) stay reachable for operator work — the
+# move runbook's direct export, a shard's own /metrics.
+apiVersion: v1
+kind: Service
+metadata:
+  name: taguru-router
+spec:
+  selector: { app: taguru-router }
+  ports:
+    - name: http
+      port: 8248
+      targetPort: http
+# Expose beyond the cluster only behind TLS (Ingress/Gateway with a
+# certificate) — a bearer token is the whole credential.

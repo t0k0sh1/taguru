@@ -1,0 +1,43 @@
+# The deploy packaging's gate (issue #139): on any change under
+# deploy/, every kustomize configuration must render, validate against
+# the Kubernetes schemas, keep its manifest copies byte-identical to
+# the reference files, and keep the base render-equivalent to
+# `kubectl apply -f kubernetes.yaml`. The checks themselves live in
+# deploy/kustomize/verify.sh so they run identically on a laptop.
+name: Deploy manifests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/**"
+      - ".github/workflows/deploy.yml"
+  pull_request:
+    paths:
+      - "deploy/**"
+      - ".github/workflows/deploy.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  kustomize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # kubectl (with its embedded kustomize) is preinstalled on the
+      # runner; kubeconform is not — pinned by version AND checksum, so
+      # a moved release tag cannot slip different bytes into the gate.
+      - name: Install kubeconform
+        run: |
+          curl -sSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz
+          echo "c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3  kubeconform.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf kubeconform.tar.gz -C "$HOME/.local/bin" kubeconform
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Verify packaging
+        run: deploy/kustomize/verify.sh

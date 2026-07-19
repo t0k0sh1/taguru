@@ -32,6 +32,16 @@ search spanning every shard under the single-instance merge
 semantics. The `docker-compose.yml` carries a commented example;
 the topology notes live in the
 [Kubernetes page](https://t0k0sh1.github.io/taguru/kubernetes.html#sharding).
+
+[`kustomize/`](kustomize/) packages the same manifests for
+`kubectl apply -k`: the raw files above as verbatim bases, overlays
+for the stateless / replicas / router variants (the router overlay is
+the two-shard fleet worked out — writer shards, the route-map
+ConfigMap, the front-door Deployment), and the knob retunes (image
+tag, storage, resources, probes) as documented patches. Its README
+records why kustomize over a Helm chart; `verify.sh` — run by CI on
+every PR touching `deploy/` — keeps the packaging render-equivalent
+to the raw manifests.
 Moving a context, in order: quiesce its writes → `taguru export` →
 DELETE it through the router (the old shard drops it, group
 projections included) → map edit + rolling router restart →
