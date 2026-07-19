@@ -28,6 +28,7 @@ mod paragraph;
 mod passages;
 mod registry;
 mod remote_mcp;
+mod replica;
 mod ship;
 mod storage;
 mod trace;
@@ -292,18 +293,43 @@ async fn serve(serve_args: cli::ServeArgs) {
                 std::process::exit(1);
             }
         });
-    let ship_progress = replicate
-        .as_ref()
-        .map(|_| Arc::new(ship::ShipProgress::new()));
+    // Read replica (issue #129): same bucket machinery, opposite role —
+    // hydrate continuously, never claim, never ship, refuse writes.
+    let replica_mode = serve_args.replica || env_bool("TAGURU_REPLICA", false);
+    if replica_mode && replicate.is_none() {
+        tracing::error!(
+            "--replica needs TAGURU_REPLICATE_URL: a replica IS the bucket lineage, \
+             served locally — without a bucket there is nothing to replicate"
+        );
+        std::process::exit(1);
+    }
+    let ship_progress = (!replica_mode)
+        .then(|| {
+            replicate
+                .as_ref()
+                .map(|_| Arc::new(ship::ShipProgress::new()))
+        })
+        .flatten();
 
     // Boot-from-bucket (issue #128): decide once — before the registry
     // opens — whether this directory is the lineage's own tip (boot as
     // ever), a cache to re-verify, or empty and about to hydrate; and
     // whether starting here needs the operator's stated takeover
     // intent. A refusal here is deliberate: it is the guard rail that
-    // keeps "starting a writer against a bucket" an explicit act.
+    // keeps "starting a writer against a bucket" an explicit act. A
+    // replica takes the sibling path: always a cache, never a claimant,
+    // no guard to trip (it deposes nobody).
     let take_over = serve_args.take_over || env_bool("TAGURU_TAKEOVER", false);
     let hydrator = match &replicate {
+        Some((replicate, store, root)) if replica_mode => {
+            match hydrate::prepare_replica(store, root, &replicate.url, &config.data_dir).await {
+                Ok(hydrator) => Some(hydrator),
+                Err(error) => {
+                    tracing::error!(%error, "refusing to start");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some((replicate, store, root)) => {
             match hydrate::prepare(store, root, &replicate.url, &config.data_dir, take_over).await {
                 Ok(hydrator) => hydrator,
@@ -315,8 +341,21 @@ async fn serve(serve_args: cli::ServeArgs) {
         }
         None => None,
     };
+    let replica_info = replica_mode.then(|| {
+        Arc::new(replica::ReplicaInfo::new(
+            std::env::var("TAGURU_WRITER_URL")
+                .ok()
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty()),
+        ))
+    });
 
-    let state = match config.boot(embedder, ship_progress.clone(), hydrator.clone()) {
+    let state = match config.boot(
+        embedder,
+        ship_progress.clone(),
+        hydrator.clone(),
+        replica_info.clone(),
+    ) {
         Ok(state) => state,
         // A held lock or an unreadable directory is an operator
         // problem, not a bug: one line, no backtrace.
@@ -326,32 +365,78 @@ async fn serve(serve_args: cli::ServeArgs) {
         }
     };
 
-    spawn_flusher(state.clone(), flush_secs, auto_embed);
+    if replica_mode {
+        // No flusher: a replica never has dirty state to persist, and
+        // its disk belongs to the tailer. The scrape flips into
+        // replica shape here, once, for the process's lifetime.
+        state.metrics().set_replica_mode();
+    } else {
+        spawn_flusher(state.clone(), flush_secs, auto_embed);
+    }
 
     // AFTER boot, so the pinned preload's eager hydration went first —
     // the fill mops up whatever first touch has not reached, closing
     // the window in which the bucket's only complete generation is
-    // the predecessor's.
-    if let Some(hydrator) = &hydrator {
+    // the predecessor's. A replica has no fill thread: its tailer's
+    // first pass does exactly this job, and keeps doing it forever.
+    if !replica_mode && let Some(hydrator) = &hydrator {
         hydrator.spawn_background_fill();
     }
 
-    let shipper = replicate.map(|(replicate, store, root)| {
-        info!(
-            url = %replicate.url,
-            interval_ms = replicate.interval.as_millis() as u64,
-            "replication enabled — shipping the data directory continuously"
-        );
-        ship::spawn(
-            store,
-            root,
-            replicate,
-            config.data_dir.clone(),
-            ship_progress.expect("progress exists whenever replicate does"),
-            state.clone(),
-            hydrator.clone(),
-        )
-    });
+    let shipper = match &replicate {
+        Some((replicate, store, root)) if !replica_mode => {
+            info!(
+                url = %replicate.url,
+                interval_ms = replicate.interval.as_millis() as u64,
+                "replication enabled — shipping the data directory continuously"
+            );
+            Some(ship::spawn(
+                Arc::clone(store),
+                root.clone(),
+                ship::ReplicateConfig {
+                    url: replicate.url.clone(),
+                    interval: replicate.interval,
+                },
+                config.data_dir.clone(),
+                ship_progress
+                    .clone()
+                    .expect("progress exists whenever a writer replicates"),
+                state.clone(),
+                hydrator.clone(),
+            ))
+        }
+        _ => None,
+    };
+    let tailer = match &replicate {
+        Some((replicate, store, root)) if replica_mode => {
+            info!(
+                url = %replicate.url,
+                interval_ms = replicate.interval.as_millis() as u64,
+                "replica mode — tailing the bucket lineage; writes are refused"
+            );
+            Some(replica::spawn(
+                Arc::clone(store),
+                root.clone(),
+                ship::ReplicateConfig {
+                    url: replicate.url.clone(),
+                    interval: replicate.interval,
+                },
+                config.data_dir.clone(),
+                state.clone(),
+                Arc::clone(
+                    hydrator
+                        .as_ref()
+                        .expect("a replica boot always has a hydrator"),
+                ),
+                Arc::clone(
+                    replica_info
+                        .as_ref()
+                        .expect("replica info exists whenever replica_mode does"),
+                ),
+            ))
+        }
+        _ => None,
+    };
 
     let app = routes(
         protocol_trailer,
@@ -408,6 +493,18 @@ async fn serve(serve_args: cli::ServeArgs) {
         })),
         None => app,
     };
+    // The replica gate AGAIN, outside the merges: a `.layer()` wraps
+    // only the routes already on the router it is called on, so the
+    // copy inside `routes()` (which the /mcp dispatch clone needs)
+    // never reaches the OAuth router merged above — whose grant and
+    // token POSTs would otherwise mutate a replica's cache-owned
+    // credential store. Idempotent on the shared routes (both copies
+    // judge identically); the OAuth discovery GETs still pass, the
+    // mutating POSTs refuse like every other write.
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        api::replica_gate,
+    ));
     // `routes()` applies its own CatchPanicLayer (see the comment at
     // its end) before this function ever adds the /mcp route or merges
     // the OAuth router above, so — for the exact same reason the auth
@@ -549,6 +646,14 @@ async fn serve(serve_args: cli::ServeArgs) {
     if let Some(shipper) = shipper {
         shipper.shutdown().await;
         info!("replication drained on shutdown");
+    }
+    // The tailer stops between polls (or mid-apply, at the next stem
+    // boundary): nothing to drain — a replica's disk state is exactly
+    // as durable as the last applied diff, and the next boot
+    // re-verifies it against the bucket anyway.
+    if let Some(tailer) = tailer {
+        tokio::task::block_in_place(|| tailer.shutdown());
+        info!("replica tailer stopped on shutdown");
     }
     // The batch worker still owns the last spans; hand them to the
     // collector before the process ends.
@@ -696,9 +801,18 @@ fn routes(
         // `panic_response` is the only signal a dispatched call's panic
         // leaves behind, since the /mcp response itself stays 200 (see
         // `panic_response`'s doc comment).
-        .layer(CatchPanicLayer::custom(move |payload| {
-            api::panic_response(payload, &state)
+        .layer(CatchPanicLayer::custom({
+            let state = state.clone();
+            move |payload| api::panic_response(payload, &state)
         }))
+        // Outside the panic catcher, inside everything `serve()` adds:
+        // a no-op on a writer, the write-refusal on a replica — and,
+        // because the /mcp dispatch clones this router, the refusal
+        // covers dispatched write TOOLS exactly like raw HTTP verbs.
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            api::replica_gate,
+        ))
 }
 
 /// The periodic flusher: every `flush_secs`, persist what is dirty —

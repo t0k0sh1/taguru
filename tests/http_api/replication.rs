@@ -519,3 +519,411 @@ fn deposing_a_live_writer_needs_stated_intent_but_a_retired_one_does_not() {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+/// The /metrics body as text (it is not JSON; the harness hands it
+/// back as a JSON string).
+fn metrics_text(server: &Server) -> String {
+    let (status, body) = server.call("GET", "/metrics", None);
+    assert_eq!(status, 200);
+    body.as_str().expect("metrics is text").to_string()
+}
+
+/// The names GET /contexts currently answers with.
+fn context_names(server: &Server) -> Vec<String> {
+    let page = server.ok("GET", "/contexts", None);
+    page["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
+    let bucket = scratch("reader-bucket");
+    let writer = Server::start_with_env(
+        "repl-reader-writer",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+        ],
+    );
+
+    // The same spread the bucket-boot test ships: a pinned context
+    // (the eager half), a lazy one with passages, and a group.
+    writer.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "酒蔵の知識"})),
+    );
+    writer.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source": "第2段落"},
+        ])),
+    );
+    writer.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {
+            "第2段落": "青嶺酒造は、仕込み水に雲居山の伏流水を使う。杜氏は高瀬である。",
+        }})),
+    );
+    writer.ok(
+        "PUT",
+        "/contexts/glossary",
+        Some(json!({"description": "用語集"})),
+    );
+    writer.ok("PATCH", "/contexts/glossary", Some(json!({"pinned": true})));
+    writer.ok(
+        "PUT",
+        "/groups/breweries",
+        Some(json!({"contexts": ["sake"]})),
+    );
+    // The writer keeps running (unlike the bucket-boot test's graceful
+    // stop), so "complete exists" alone could be an EARLIER cycle's
+    // manifest: wait until it carries the whole spread — the pinned
+    // meta's current version rode the same (or an earlier) cycle as
+    // the group file, since every cycle ships all changed files.
+    wait_for("the writer to ship the whole spread", || {
+        std::fs::read_to_string(bucket.join("gen-00000000000000000001").join("complete"))
+            .map(|manifest| {
+                manifest.contains("breweries.group") && manifest.contains("glossary.ctx")
+            })
+            .unwrap_or(false)
+    });
+
+    // A replica against the same bucket, on an empty directory: it
+    // hydrates like a bucket boot (pinned before the port opens),
+    // then keeps tailing.
+    let replica = Server::start_with_env(
+        "repl-reader-replica",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+            ("TAGURU_REPLICA", "1"),
+            ("TAGURU_WRITER_URL", "http://writer.internal:8248"),
+        ],
+    );
+    assert!(
+        replica.data_dir.join("glossary.ctx").exists(),
+        "a pinned context hydrates before the replica's port opens"
+    );
+    assert_eq!(context_names(&replica), ["glossary", "sake"]);
+
+    // Every read verb family: graph recall, passage search, the group
+    // directory — all serve the lineage.
+    let recall = replica.ok(
+        "POST",
+        "/contexts/sake/recall",
+        Some(json!({"cue": "青嶺酒造", "limit": 5})),
+    );
+    assert_eq!(recall["total"], json!(1), "{recall}");
+    let hits = replica.ok(
+        "POST",
+        "/contexts/sake/sources/search",
+        Some(json!({"query": "伏流水", "limit": 3})),
+    );
+    assert_eq!(hits[0]["source"], "第2段落", "{hits}");
+    let groups = replica.ok("GET", "/groups", None);
+    assert_eq!(groups["groups"][0]["name"], "breweries", "{groups}");
+
+    // The scrape carries the replica shape from boot; the generation
+    // gauge lands with the tailer's first poll.
+    assert!(
+        metrics_text(&replica).contains("taguru_replica 1"),
+        "the role gauge is a boot fact"
+    );
+    wait_for("the generation gauge to land", || {
+        metrics_text(&replica).contains("taguru_replica_generation 1")
+    });
+
+    // Writes refuse crisply, naming the writer — the ingest loop, the
+    // operator verbs, and a dispatched MCP write tool alike. Read
+    // tools on /mcp work unchanged.
+    for (method, path, body) in [
+        ("PUT", "/contexts/fresh", Some(json!({}))),
+        (
+            "POST",
+            "/contexts/sake/associations",
+            Some(json!([{"subject": "a", "label": "l", "object": "o", "weight": 1.0}])),
+        ),
+        ("DELETE", "/contexts/sake", None),
+        ("POST", "/flush", None),
+        ("POST", "/contexts/sake/compact", None),
+    ] {
+        let (status, answer) = replica.call(method, path, body);
+        assert_eq!(status, 403, "{method} {path} -> {answer}");
+        assert_eq!(answer["code"], "read_only_replica", "{answer}");
+        assert!(
+            answer["error"]
+                .as_str()
+                .unwrap()
+                .contains("http://writer.internal:8248"),
+            "the refusal must name the writer: {answer}"
+        );
+    }
+    // The OAuth grant surface is merged onto the router AFTER
+    // routes(), so it exercises the OUTER copy of the gate — minting
+    // credentials is a write, and it refuses like one. OAuth needs an
+    // API key to boot, so a dedicated replica carries both (its
+    // /oauth/register is bearer-exempt by design: the refusal below
+    // is the replica gate's, not auth's).
+    let oauth_replica = Server::start_with_env(
+        "repl-reader-oauth",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+            ("TAGURU_REPLICA", "1"),
+            ("TAGURU_API_TOKENS", "ops:sesame"),
+            ("TAGURU_PUBLIC_URL", "http://replica.internal:8248"),
+        ],
+    );
+    let (status, answer) = oauth_replica.call(
+        "POST",
+        "/oauth/register",
+        Some(json!({"client_name": "probe", "redirect_uris": ["http://127.0.0.1/cb"]})),
+    );
+    assert_eq!(status, 403, "{answer}");
+    assert_eq!(answer["code"], "read_only_replica", "{answer}");
+    drop(oauth_replica);
+
+    let read_tool = replica.call_tool(1, "recall", json!({"context": "sake", "cue": "青嶺酒造"}));
+    assert_ne!(read_tool["isError"], json!(true), "{read_tool}");
+    let write_tool = replica.call_tool(
+        2,
+        "add_associations",
+        json!({"context": "sake", "associations": [
+            {"subject": "a", "label": "l", "object": "o", "weight": 1.0}
+        ]}),
+    );
+    assert_eq!(write_tool["isError"], json!(true), "{write_tool}");
+    assert!(
+        write_tool["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("read replica"),
+        "{write_tool}"
+    );
+
+    // Live tailing: the writer moves — a new fact, a new context —
+    // and the replica follows within shipping lag + poll interval.
+    writer.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "銘柄", "object": "雲居", "weight": 1.0},
+        ])),
+    );
+    writer.ok(
+        "PUT",
+        "/contexts/news",
+        Some(json!({"description": "新着"})),
+    );
+    wait_for("the replica to tail the new fact", || {
+        let recall = replica.ok(
+            "POST",
+            "/contexts/sake/recall",
+            Some(json!({"cue": "青嶺酒造", "limit": 5})),
+        );
+        recall["total"] == json!(2)
+    });
+    wait_for("the replica to tail the new context", || {
+        context_names(&replica).contains(&"news".to_string())
+    });
+
+    // The lag arithmetic drains to zero on display.
+    wait_for("the lag metrics to drain", || {
+        let scrape = metrics_text(&replica);
+        scrape.contains("taguru_replica_behind_seconds{context=\"sake\",lane=\"graph\"} 0")
+    });
+
+    // A deletion propagates: the context leaves the directory AND its
+    // files leave the replica's disk.
+    writer.ok("DELETE", "/contexts/news", None);
+    wait_for("the deletion to propagate", || {
+        !context_names(&replica).contains(&"news".to_string())
+    });
+    wait_for("the deleted family to leave the replica's disk", || {
+        !replica.data_dir.join("news.ctx").exists()
+            && !replica.data_dir.join("news.meta.json").exists()
+    });
+
+    let writer_dir = writer.stop_gracefully();
+    let replica_dir = replica.stop_gracefully();
+    for dir in [bucket, writer_dir, replica_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn promotion_rehearsal_the_standby_drains_flips_and_the_pool_follows() {
+    let bucket = scratch("promote-bucket");
+    let writer = Server::start_with_env(
+        "repl-promote-writer",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+        ],
+    );
+    writer.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "酒蔵の知識"})),
+    );
+    writer.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0},
+        ])),
+    );
+    // The very first complete can predate the seed (an empty writer's
+    // first cycle manifests an empty directory): wait until the
+    // manifest actually carries the context.
+    wait_for("the writer to ship the seed", || {
+        std::fs::read_to_string(bucket.join("gen-00000000000000000001").join("complete"))
+            .map(|manifest| manifest.contains("sake.ctx"))
+            .unwrap_or(false)
+    });
+
+    // Two replicas: the standby that will be promoted, and a pool
+    // member that must ride through the promotion.
+    let standby_env = [
+        ("TAGURU_REPLICATE_URL", bucket_url(&bucket)),
+        ("TAGURU_REPLICATE_INTERVAL_MS", "100".to_string()),
+        ("TAGURU_REPLICA", "1".to_string()),
+    ];
+    let standby_env: Vec<(&str, &str)> = standby_env
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let standby = Server::start_with_env("repl-promote-standby", &standby_env);
+    let pool = Server::start_with_env("repl-promote-pool", &standby_env);
+
+    // The writer advances once more; both replicas tail it — the
+    // steady state a promotion starts from.
+    writer.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "銘柄", "object": "雲居", "weight": 1.0},
+        ])),
+    );
+    for (name, replica) in [("standby", &standby), ("pool", &pool)] {
+        wait_for(&format!("the {name} to reach the writer's tip"), || {
+            let recall = replica.ok(
+                "POST",
+                "/contexts/sake/recall",
+                Some(json!({"cue": "青嶺酒造", "limit": 5})),
+            );
+            recall["total"] == json!(2)
+        });
+    }
+
+    // Runbook step 1 — the writer dies, uncleanly (no retired marker,
+    // heartbeat fresh: the worst case the guard exists for).
+    let writer_dir = writer.stop_hard();
+
+    // Step 2 — drain: the standby's lag reads zero against the bucket.
+    wait_for("the standby to drain the shipped tail", || {
+        let scrape = metrics_text(&standby);
+        scrape.contains("taguru_replica_behind_seconds{context=\"sake\",lane=\"graph\"} 0")
+    });
+
+    // Step 3+4 — flip: stop the standby, restart its directory as the
+    // writer. The crashed predecessor is why bare `serve` refuses and
+    // asks for the acknowledgment…
+    let standby_dir = standby.stop_gracefully();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    crate::support::common::scrub_taguru_env(&mut command)
+        .env("TAGURU_ADDR", "127.0.0.1:0")
+        .env("TAGURU_DATA_DIR", &standby_dir)
+        .env("TAGURU_REPLICATE_URL", bucket_url(&bucket))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().expect("server binary must spawn");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("promoting over a crashed writer must demand stated intent");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stderr = String::new();
+    use std::io::Read as _;
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(!status.success());
+    assert!(stderr.contains("take-over"), "{stderr}");
+
+    // …and with it, the standby's cache becomes the writer: it claims
+    // the next generation (fencing the dead predecessor wherever it
+    // is) and takes writes.
+    let promoted = Server::start_on_with_env(
+        "repl-promote-promoted",
+        standby_dir,
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+            ("TAGURU_TAKEOVER", "1"),
+        ],
+    );
+    promoted.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "创業", "object": "1897年", "weight": 1.0},
+        ])),
+    );
+    let recall = promoted.ok(
+        "POST",
+        "/contexts/sake/recall",
+        Some(json!({"cue": "青嶺酒造", "limit": 5})),
+    );
+    assert_eq!(
+        recall["total"],
+        json!(3),
+        "the promoted writer serves the whole history plus the new write: {recall}"
+    );
+    wait_for("the promoted writer's own complete generation", || {
+        bucket
+            .join("gen-00000000000000000002")
+            .join("complete")
+            .exists()
+    });
+
+    // The pool replica re-aims at the new generation live — no
+    // restart — and serves the post-promotion write, while still
+    // refusing writes itself.
+    wait_for("the pool replica to follow the promoted lineage", || {
+        let recall = pool.ok(
+            "POST",
+            "/contexts/sake/recall",
+            Some(json!({"cue": "青嶺酒造", "limit": 5})),
+        );
+        recall["total"] == json!(3)
+    });
+    wait_for("the pool replica's generation gauge to advance", || {
+        metrics_text(&pool).contains("taguru_replica_generation 2")
+    });
+    let (status, answer) = pool.call("PUT", "/contexts/fresh", Some(json!({})));
+    assert_eq!(status, 403, "{answer}");
+    assert_eq!(answer["code"], "read_only_replica", "{answer}");
+
+    let promoted_dir = promoted.stop_gracefully();
+    let pool_dir = pool.stop_gracefully();
+    for dir in [bucket, writer_dir, promoted_dir, pool_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

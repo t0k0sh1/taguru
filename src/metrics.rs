@@ -222,6 +222,19 @@ pub struct Metrics {
     /// the disk. Values are escaped at render (`escape_label`) since
     /// names are client-minted text.
     replication_lag: Mutex<BTreeMap<(String, &'static str), ReplicationLag>>,
+    /// Replica-side telemetry (issue #129), populated only under
+    /// `serve --replica` — the whole family renders only then, so a
+    /// writer's scrape stays exactly what it was. The lag map mirrors
+    /// `replication_lag`'s shape (and its deliberate context-name
+    /// labels): per lane, the seq this replica has applied vs the
+    /// newest the bucket ships, and since when the two diverge — the
+    /// promotion-time RPO, on display.
+    replica_mode: AtomicBool,
+    replica_generation: AtomicU64,
+    replica_manifest_epoch: AtomicU64,
+    replica_last_poll_epoch: AtomicU64,
+    replica_poll_errors: AtomicU64,
+    replica_lag: Mutex<BTreeMap<(String, &'static str), ReplicaLag>>,
 }
 
 /// One log lane's shipping lag as the dashboard sees it: records not
@@ -230,6 +243,16 @@ pub struct Metrics {
 struct ReplicationLag {
     behind_records: u64,
     age_secs: u64,
+}
+
+/// One log lane's tail lag as a replica sees it: the record seq its
+/// local materialization carries vs the newest the manifest ships,
+/// and (unix seconds, 0 = caught up) since when it has been behind.
+#[derive(Clone, Copy, Default)]
+struct ReplicaLag {
+    applied_seq: u64,
+    shipped_seq: u64,
+    behind_since_epoch: u64,
 }
 
 /// Why a request answered 500. The status code alone cannot separate
@@ -652,6 +675,104 @@ impl Metrics {
             .remove(&(context.to_string(), lane));
     }
 
+    fn unix_now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Flips this process's scrape into replica shape — set once at
+    /// boot under `serve --replica`, never cleared (a role is a boot
+    /// decision, not a runtime one).
+    pub fn set_replica_mode(&self) {
+        self.replica_mode.store(true, Ordering::Relaxed);
+    }
+
+    /// One tailer poll finished; errors count, successes stamp the
+    /// freshness gauge. Like the shipper's counters, deliberately NOT
+    /// part of `/health`: an unreachable bucket must page whoever
+    /// watches dashboards, not convince an orchestrator to restart a
+    /// replica that is still serving its watermark fine.
+    pub fn record_replica_poll(&self, ok: bool) {
+        if ok {
+            self.replica_last_poll_epoch
+                .store(Self::unix_now(), Ordering::Relaxed);
+        } else {
+            self.replica_poll_errors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The generation this replica currently follows (its hydration
+    /// target after the latest retarget).
+    pub fn note_replica_generation(&self, generation: u64) {
+        self.replica_generation.store(generation, Ordering::Relaxed);
+    }
+
+    /// The newest complete manifest's store-clock `last_modified`, as
+    /// seen by the latest poll — `time() - this` plus the poll
+    /// interval bounds this replica's staleness.
+    pub fn note_replica_manifest(&self, modified: SystemTime) {
+        let epoch = modified
+            .duration_since(UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or(0);
+        self.replica_manifest_epoch.store(epoch, Ordering::Relaxed);
+    }
+
+    /// One lane fully applied: applied == shipped, gap closed.
+    pub fn note_replica_lane(
+        &self,
+        context: &str,
+        lane: &'static str,
+        applied_seq: u64,
+        shipped_seq: u64,
+    ) {
+        let mut lag = self.replica_lag.lock().unwrap();
+        let entry = lag.entry((context.to_string(), lane)).or_default();
+        entry.applied_seq = applied_seq;
+        entry.shipped_seq = shipped_seq;
+        entry.behind_since_epoch = if applied_seq >= shipped_seq {
+            0
+        } else if entry.behind_since_epoch == 0 {
+            Self::unix_now()
+        } else {
+            entry.behind_since_epoch
+        };
+    }
+
+    /// The shipped side alone — for a lane whose family could not be
+    /// applied this poll: the applied seq stays where it was (or at 0
+    /// for a lane never applied), and the age starts counting.
+    pub fn note_replica_shipped(&self, context: &str, lane: &'static str, shipped_seq: u64) {
+        let mut lag = self.replica_lag.lock().unwrap();
+        let entry = lag.entry((context.to_string(), lane)).or_default();
+        entry.shipped_seq = shipped_seq;
+        if entry.applied_seq < shipped_seq && entry.behind_since_epoch == 0 {
+            entry.behind_since_epoch = Self::unix_now();
+        }
+    }
+
+    /// Drops a vanished context's replica lag rows (both lanes).
+    pub fn forget_replica_context(&self, context: &str) {
+        let mut lag = self.replica_lag.lock().unwrap();
+        lag.remove(&(context.to_string(), "graph"));
+        lag.remove(&(context.to_string(), "passages"));
+    }
+
+    /// Clears every replica lag row — the tailer's move on a
+    /// generation switch. Applied seqs are meaningful only within one
+    /// lineage: a successor that started from an older watermark (a
+    /// promotion that lost the deposed writer's tail) ships LOWER
+    /// seqs, and a predecessor's applied value surviving beside them
+    /// would read as caught-up on a lane that has not applied the new
+    /// lineage at all. The rows rebuild from the switch's own apply
+    /// results, so a family that fails to land shows its gap from
+    /// zero instead of a stale success.
+    pub fn reset_replica_lanes(&self) {
+        self.replica_lag.lock().unwrap().clear();
+    }
+
     /// The full Prometheus text-exposition body. Deterministic: the
     /// dynamic keys (routes, statuses) are sorted before emission, so
     /// identical state renders byte-identical output.
@@ -986,6 +1107,87 @@ impl Metrics {
                     "taguru_replication_lag_seconds{{context=\"{}\",lane=\"{lane}\"}} {}\n",
                     escape_label(context),
                     entry.age_secs
+                ));
+            }
+        }
+        if self.replica_mode.load(Ordering::Relaxed) {
+            push_value(
+                &mut out,
+                "taguru_replica",
+                "gauge",
+                "1 when this process serves as a read replica (writes refused, the bucket tailed).",
+                1,
+            );
+            push_value(
+                &mut out,
+                "taguru_replica_generation",
+                "gauge",
+                "The replication generation this replica follows (0 = none complete in the bucket yet).",
+                self.replica_generation.load(Ordering::Relaxed),
+            );
+            push_value(
+                &mut out,
+                "taguru_replica_manifest_timestamp_seconds",
+                "gauge",
+                "Store-clock mtime of the newest complete manifest at the last poll; time() minus this, plus the poll interval, bounds staleness.",
+                self.replica_manifest_epoch.load(Ordering::Relaxed),
+            );
+            push_value(
+                &mut out,
+                "taguru_replica_last_poll_success_timestamp_seconds",
+                "gauge",
+                "Unix time of the last successful tailer poll (0 = none since boot); a growing gap means the bucket is unreachable and staleness is unbounded.",
+                self.replica_last_poll_epoch.load(Ordering::Relaxed),
+            );
+            push_value(
+                &mut out,
+                "taguru_replica_poll_errors_total",
+                "counter",
+                "Failed tailer polls (bucket errors, un-appliable families); the tailer retries.",
+                self.replica_poll_errors.load(Ordering::Relaxed),
+            );
+            let lag = self.replica_lag.lock().unwrap();
+            push_header(
+                &mut out,
+                "taguru_replica_applied_seq",
+                "gauge",
+                "Highest record seq this replica has applied, per context and lane.",
+            );
+            for ((context, lane), entry) in lag.iter() {
+                out.push_str(&format!(
+                    "taguru_replica_applied_seq{{context=\"{}\",lane=\"{lane}\"}} {}\n",
+                    escape_label(context),
+                    entry.applied_seq
+                ));
+            }
+            push_header(
+                &mut out,
+                "taguru_replica_shipped_seq",
+                "gauge",
+                "Newest record seq the bucket ships, per context and lane; minus applied_seq = the promotion-time RPO in records.",
+            );
+            for ((context, lane), entry) in lag.iter() {
+                out.push_str(&format!(
+                    "taguru_replica_shipped_seq{{context=\"{}\",lane=\"{lane}\"}} {}\n",
+                    escape_label(context),
+                    entry.shipped_seq
+                ));
+            }
+            push_header(
+                &mut out,
+                "taguru_replica_behind_seconds",
+                "gauge",
+                "How long the lane has been behind the shipped stream (0 = caught up).",
+            );
+            let now = Self::unix_now();
+            for ((context, lane), entry) in lag.iter() {
+                let behind = match entry.behind_since_epoch {
+                    0 => 0,
+                    since => now.saturating_sub(since),
+                };
+                out.push_str(&format!(
+                    "taguru_replica_behind_seconds{{context=\"{}\",lane=\"{lane}\"}} {behind}\n",
+                    escape_label(context),
                 ));
             }
         }
@@ -1326,6 +1528,83 @@ mod tests {
             unsourced_edges_total: 0,
             unsourced_weight_total: 0.0,
         }
+    }
+
+    /// The replica family renders only in replica mode, and the lag
+    /// arithmetic transitions the way the tailer drives it: behind
+    /// when shipped outruns applied (age counting from the first poll
+    /// that saw the gap), caught up the moment they meet.
+    #[test]
+    fn the_replica_family_gates_on_role_and_tracks_the_gap() {
+        let metrics = Metrics::default();
+        metrics.note_replica_lane("sake", "graph", 2, 2);
+        let writer_scrape = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            !writer_scrape.contains("taguru_replica ")
+                && !writer_scrape.contains("taguru_replica_applied_seq"),
+            "a writer's scrape carries no replica series (the replicaTION \
+             family is a different prefix): {writer_scrape}"
+        );
+
+        metrics.set_replica_mode();
+        metrics.note_replica_generation(3);
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(rendered.contains("taguru_replica 1"), "{rendered}");
+        assert!(
+            rendered.contains("taguru_replica_generation 3"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("taguru_replica_applied_seq{context=\"sake\",lane=\"graph\"} 2"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("taguru_replica_behind_seconds{context=\"sake\",lane=\"graph\"} 0"),
+            "{rendered}"
+        );
+
+        // The shipped side outruns the applied one: the gap shows, and
+        // its age starts counting.
+        metrics.note_replica_shipped("sake", "graph", 5);
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            rendered.contains("taguru_replica_shipped_seq{context=\"sake\",lane=\"graph\"} 5"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("taguru_replica_applied_seq{context=\"sake\",lane=\"graph\"} 2"),
+            "{rendered}"
+        );
+
+        // Catching up zeroes the age.
+        metrics.note_replica_lane("sake", "graph", 5, 5);
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            rendered.contains("taguru_replica_behind_seconds{context=\"sake\",lane=\"graph\"} 0"),
+            "{rendered}"
+        );
+
+        // A vanished context's rows leave the scrape.
+        metrics.note_replica_lane("sake", "passages", 1, 1);
+        metrics.forget_replica_context("sake");
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            !rendered.contains("context=\"sake\""),
+            "ghost labels must not linger: {rendered}"
+        );
+
+        // A generation switch clears the whole family: applied seqs
+        // are per-lineage, and a successor that started from an older
+        // watermark ships LOWER seqs — a surviving predecessor value
+        // would fake a caught-up lane.
+        metrics.note_replica_lane("sake", "graph", 9, 9);
+        metrics.reset_replica_lanes();
+        metrics.note_replica_shipped("sake", "graph", 4);
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            rendered.contains("taguru_replica_applied_seq{context=\"sake\",lane=\"graph\"} 0"),
+            "the successor's gap must show from zero, not the predecessor's applied: {rendered}"
+        );
     }
 
     /// The in-flight counter: a ceiling refuses at capacity, zero means

@@ -416,6 +416,18 @@ impl From<io::Error> for ShipError {
     }
 }
 
+/// The replica tailer speaks `io::Error`; `Fenced` cannot reach it (a
+/// replica never ships, so nothing ever answers it with a fence), but
+/// the conversion stays total rather than panicking on the impossible.
+impl From<ShipError> for io::Error {
+    fn from(error: ShipError) -> Self {
+        match error {
+            ShipError::Io(error) => error,
+            ShipError::Fenced { .. } => io::Error::other(error.to_string()),
+        }
+    }
+}
+
 fn store_error(context: &str, error: object_store::Error) -> ShipError {
     ShipError::Io(io::Error::other(format!("{context}: {error}")))
 }
@@ -498,7 +510,7 @@ pub(crate) fn write_replication_record(
 /// generation restores whole — and a pre-manifest (empty) marker still
 /// restores through the listing fallback, just without the per-object
 /// verification or the local-reuse shortcut.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Manifest {
     pub(crate) generation: u64,
     /// Published files: name → exactly the bytes last uploaded.
@@ -514,7 +526,7 @@ pub(crate) struct ManifestFile {
     pub(crate) crc: u32,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ManifestLane {
     pub(crate) series: u64,
     pub(crate) segments: u64,
@@ -529,7 +541,7 @@ pub(crate) struct ManifestLane {
 
 /// Fixed-width decimal so lexicographic object listing IS numeric
 /// ordering — restore sorts names, never parses to sort.
-fn fence_key(root: &StorePath, generation: u64) -> StorePath {
+pub(crate) fn fence_key(root: &StorePath, generation: u64) -> StorePath {
     root.clone()
         .join(FENCE_PREFIX)
         .join(format!("{generation:020}"))
@@ -537,6 +549,13 @@ fn fence_key(root: &StorePath, generation: u64) -> StorePath {
 
 pub(crate) fn gen_root(root: &StorePath, generation: u64) -> StorePath {
     root.clone().join(format!("gen-{generation:020}"))
+}
+
+/// The generation's `complete` key — the manifest object a replica
+/// polls (its store-clock `last_modified` is the cheap "anything
+/// new?" probe).
+pub(crate) fn complete_key(generation_root: &StorePath) -> StorePath {
+    generation_root.clone().join(COMPLETE_MARKER)
 }
 
 pub(crate) fn segment_name(series: u64, seg: u64) -> String {
@@ -603,8 +622,9 @@ fn parent_snapshot_of(lane_name: &str) -> Option<String> {
 
 /// The per-lane label pair the lag metric carries: the context's
 /// decoded name where the stem decodes (it always should — these files
-/// were written by the server), plus which lane.
-fn lane_metric_labels(lane_name: &str) -> (String, &'static str) {
+/// were written by the server), plus which lane. The replica's lag
+/// rows reuse it so the two vocabularies cannot drift.
+pub(crate) fn lane_metric_labels(lane_name: &str) -> (String, &'static str) {
     if let Some(stem) = lane_name.strip_suffix(".passages.wal.jsonl") {
         (
             crate::registry::name_from_stem(stem).unwrap_or_else(|| stem.to_string()),
@@ -1153,6 +1173,21 @@ pub(crate) async fn newest_fence(
         }
     }
     Ok(newest)
+}
+
+/// The holder a fence body names (`HOSTNAME#pid`, stamped at claim
+/// time) — for the replica's write-refusal message and its status
+/// surface. Best-effort: a missing or unreadable body leaves the
+/// writer unnamed, never fails a poll.
+pub(crate) async fn fence_holder(
+    store: &dyn ObjectStore,
+    root: &StorePath,
+    generation: u64,
+) -> Option<String> {
+    let bytes = fetch(store, &fence_key(root, generation)).await.ok()?;
+    serde_json::from_slice::<FenceBody>(&bytes)
+        .ok()
+        .map(|body| body.holder)
 }
 
 /// Deletes every object under `prefix`, for retiring a vanished

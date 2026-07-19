@@ -57,7 +57,7 @@
 //! reusing the very same volume in cache mode keeps a tail whose
 //! shipped prefix still matches, and discards one that diverged.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -204,14 +204,16 @@ pub(crate) async fn prepare(
 
     let hydrator = Arc::new(Hydrator::new(
         Arc::clone(store),
+        generation,
         generation_root,
         data_dir.to_path_buf(),
         manifest,
+        LanePolicy::KeepAckedTail,
     ));
     let report = hydrator.hydrate_shared().await?;
     tracing::info!(
         generation,
-        contexts = hydrator.states.lock().unwrap().len(),
+        contexts = hydrator.context_stems().len(),
         shared_fetched = report.fetched,
         shared_reused = report.reused,
         removed = report.removed,
@@ -219,6 +221,205 @@ pub(crate) async fn prepare(
          hydrate on preload, first touch, or the background fill",
     );
     Ok(Some(hydrator))
+}
+
+/// The replica's boot decision — [`prepare`]'s sibling with the writer
+/// posture stripped out: a replica never claims a generation, never
+/// heartbeats, never deposes anyone (so the takeover guard does not
+/// apply), and its directory is never "local truth" — it is a cache of
+/// the bucket lineage, always re-verified, with any writer-role log
+/// tail truncated ([`LanePolicy::ShippedExact`]). What remains of the
+/// table:
+///
+/// - A directory with real data and NO replication record is refused:
+///   it is somebody's truth (a pre-replication writer, a restore), and
+///   a replica would verify-and-replace its files against the bucket.
+///   Deliberately strict — the operator points a replica at an empty
+///   directory, or at that replica's own previous cache.
+/// - A directory whose record claims the bucket's NEWEST generation is
+///   refused: that is the current writer's directory, and demoting it
+///   would discard its un-shipped tail — data with no other home. A
+///   FORMER writer (its claim deposed by a newer one) demotes freely;
+///   its divergent tail is already lost to the lineage, and truncating
+///   it merely says so.
+/// - An unreachable bucket degrades a cache to serving its last
+///   watermark (the tailer keeps trying), refuses an empty directory
+///   (nothing to serve), and a virgin bucket serves empty until its
+///   first complete generation appears — the tailer provisions the
+///   target the moment one does.
+pub(crate) async fn prepare_replica(
+    store: &Arc<dyn ObjectStore>,
+    root: &StorePath,
+    url: &str,
+    data_dir: &FsPath,
+) -> io::Result<Arc<Hydrator>> {
+    let record = ship::read_replication_record(data_dir).filter(|record| {
+        if record.url != url {
+            tracing::warn!(
+                recorded = %record.url,
+                configured = %url,
+                "the data directory's replication record names a different bucket; \
+                 treating this directory as new to the configured one"
+            );
+            return false;
+        }
+        true
+    });
+    let empty = essentially_empty(data_dir)?;
+    if !empty && record.is_none() {
+        return Err(io::Error::other(
+            "this data directory holds data that is not a cache of the configured \
+             bucket — a replica serves the bucket lineage and would verify (and \
+             replace) local files against it. Point the replica at an empty \
+             directory, or at its own previous cache; a writer's directory keeps \
+             its meaning only under `serve` without --replica",
+        ));
+    }
+
+    let unprovisioned = || {
+        Arc::new(Hydrator::unprovisioned(
+            Arc::clone(store),
+            data_dir.to_path_buf(),
+            LanePolicy::ShippedExact,
+        ))
+    };
+
+    let fence = match ship::newest_fence(store, root).await {
+        Ok(fence) => fence,
+        Err(error) => {
+            // Degraded boot serves only a VERIFIED cache: a directory
+            // whose record carries `hydrated_from` completed a shared
+            // hydration against that generation once (the second half
+            // of the two-phase record write below). A directory that
+            // never got that far — empty, or mid-first-conversion when
+            // it crashed — has nothing this replica can honestly
+            // serve, and a demoted writer's un-shipped tail must never
+            // slip out through that gap.
+            if !empty
+                && record
+                    .as_ref()
+                    .is_some_and(|record| record.hydrated_from.is_some())
+            {
+                // A cache with local files serves its last watermark
+                // while the tailer keeps knocking — read availability
+                // is the whole point of a replica.
+                tracing::warn!(
+                    error = %error,
+                    "replication bucket unreachable at boot; serving the cache's \
+                     last watermark until the tailer reaches it"
+                );
+                return Ok(unprovisioned());
+            }
+            return Err(io::Error::other(format!(
+                "cannot reach the replication bucket, and this replica has nothing \
+                 to serve yet ({}): {error}",
+                if empty {
+                    "its directory is empty"
+                } else {
+                    "its hydration never completed, so it is not yet a verified cache"
+                }
+            )));
+        }
+    };
+
+    if let Some(fence) = fence
+        && record.as_ref().and_then(|record| record.claimed_generation) == Some(fence.generation)
+    {
+        return Err(io::Error::other(format!(
+            "this directory is the bucket's newest writer (generation {}): a replica \
+             would demote it to a cache and truncate its un-shipped log tail — data \
+             with no other home. Start it with `serve` (as the writer), or point the \
+             replica at a different directory",
+            fence.generation,
+        )));
+    }
+
+    let generation = match ship::newest_complete_generation(store.as_ref(), root).await {
+        Ok(generation) => generation,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // A virgin bucket, or claimants that all died mid-baseline:
+            // nothing to tail yet. Serve what the cache holds (nothing,
+            // for an empty directory) and let the tailer provision the
+            // target when the first complete generation lands.
+            tracing::info!(
+                error = %error,
+                "no complete generation to replicate yet; serving until one appears"
+            );
+            std::fs::create_dir_all(data_dir)?;
+            ship::write_replication_record(
+                data_dir,
+                &ship::ReplicationRecord {
+                    url: url.to_string(),
+                    claimed_generation: None,
+                    hydrated_from: record.as_ref().and_then(|record| record.hydrated_from),
+                },
+            )?;
+            return Ok(unprovisioned());
+        }
+        Err(error) => return Err(error),
+    };
+    let generation_root = ship::gen_root(root, generation);
+    let Some(manifest) = ship::read_manifest(store.as_ref(), &generation_root).await? else {
+        return Err(io::Error::other(format!(
+            "generation {generation} predates the shipping manifest, so a replica \
+             cannot verify or tail it — let a current writer ship once to refresh \
+             the bucket"
+        )));
+    };
+
+    // From here the directory IS a cache of the lineage — and never a
+    // writer's truth again until a writer-mode boot claims over it.
+    // The record is written in TWO phases, deliberately inverted from
+    // the writer path's write-first order (there, an early record
+    // makes a crashed half-hydration re-verify instead of booting as
+    // truth; here, degraded boot TRUSTS the record, so it must not
+    // overpromise): phase one drops any stale claim (the newest-writer
+    // refusal above is why none can be current) and marks the
+    // directory as this URL's replica workspace — keeping whatever
+    // generation an EARLIER completed hydration verified — and only
+    // after the shared hydration lands does phase two advance
+    // `hydrated_from` to this generation. A crash in between leaves a
+    // record that promises no more than what was actually verified:
+    // a first conversion that never finished stays un-servable while
+    // the bucket is unreachable, and a demoted writer's un-shipped
+    // tail cannot leak through a half-converted directory.
+    std::fs::create_dir_all(data_dir)?;
+    ship::write_replication_record(
+        data_dir,
+        &ship::ReplicationRecord {
+            url: url.to_string(),
+            claimed_generation: None,
+            hydrated_from: record.as_ref().and_then(|record| record.hydrated_from),
+        },
+    )?;
+
+    let hydrator = Arc::new(Hydrator::new(
+        Arc::clone(store),
+        generation,
+        generation_root,
+        data_dir.to_path_buf(),
+        manifest,
+        LanePolicy::ShippedExact,
+    ));
+    let report = hydrator.hydrate_shared().await?;
+    ship::write_replication_record(
+        data_dir,
+        &ship::ReplicationRecord {
+            url: url.to_string(),
+            claimed_generation: None,
+            hydrated_from: Some(generation),
+        },
+    )?;
+    tracing::info!(
+        generation,
+        contexts = hydrator.context_stems().len(),
+        shared_fetched = report.fetched,
+        shared_reused = report.reused,
+        removed = report.removed,
+        "replica hydrating from the bucket — shared files landed; context \
+         families hydrate on preload, first touch, or the tailer",
+    );
+    Ok(hydrator)
 }
 
 /// How recently the generation showed life: the youngest of its fence
@@ -249,7 +450,7 @@ async fn liveness(
 
 /// The object's `last_modified` by the store's clock, or `None` when
 /// it does not exist.
-async fn head_modified(
+pub(crate) async fn head_modified(
     store: &Arc<dyn ObjectStore>,
     key: &StorePath,
 ) -> io::Result<Option<SystemTime>> {
@@ -283,48 +484,121 @@ fn essentially_empty(data_dir: &FsPath) -> io::Result<bool> {
 
 /// What one shared-hydration pass did, for the boot log.
 #[derive(Debug, Default)]
-struct SharedReport {
-    fetched: usize,
-    reused: usize,
-    removed: usize,
+pub(crate) struct SharedReport {
+    pub(crate) fetched: usize,
+    pub(crate) reused: usize,
+    pub(crate) removed: usize,
 }
 
-/// Where one context family stands in this boot's hydration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What one [`Hydrator::retarget`] touched — the replica tailer's
+/// work list.
+#[derive(Debug, Default)]
+pub(crate) struct RetargetReport {
+    /// Families whose local materialization no longer matches the new
+    /// manifest (new families included): re-hydrate, then drop any
+    /// loaded copy so the next read serves the new bytes.
+    pub(crate) stale: Vec<String>,
+    /// Families the new manifest no longer carries: their files are
+    /// gone from the lineage, so deregister them (each reported once).
+    pub(crate) vanished: Vec<String>,
+}
+
+/// How a log lane treats local bytes beyond the manifest's shipped
+/// extent. A writer-side cache keeps them (they are acknowledged
+/// records this very directory appended, and WAL replay is their
+/// normal recovery); a replica truncates them (it serves the shipped
+/// stream and nothing else — a record the lineage cannot back must
+/// not surface in reads, and the writer role is where such a tail
+/// belongs).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LanePolicy {
+    KeepAckedTail,
+    ShippedExact,
+}
+
+/// The manifest slice one context family occupies: what a fetch needs,
+/// and what a retarget compares to decide staleness.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct FamilySig {
+    files: BTreeMap<String, ManifestFile>,
+    lanes: BTreeMap<String, ManifestLane>,
+}
+
+impl FamilySig {
+    fn of(manifest: &Manifest, stem: &str) -> Self {
+        let mut sig = Self::default();
+        for name in crate::registry::context_files(stem) {
+            if let Some(file) = manifest.files.get(&name) {
+                sig.files.insert(name, *file);
+            } else if let Some(lane) = manifest.lanes.get(&name) {
+                sig.lanes.insert(name, *lane);
+            }
+        }
+        sig
+    }
+}
+
+/// Where one context family stands in this hydrator's current target.
+#[derive(Debug, Clone, PartialEq)]
 enum StemState {
-    /// Not hydrated yet — first touch, the preload, or the background
-    /// fill will take it.
+    /// Not hydrated yet — first touch, the preload, the background
+    /// fill, or the replica tailer will take it.
     Pending,
     /// Someone is hydrating it right now; wait, don't duplicate.
     InFlight,
-    /// Locally materialized and verified (or reused) — never looked at
-    /// again: everything after this point is this server's own work.
-    Done,
+    /// Locally materialized and verified (or reused) as this exact
+    /// manifest slice — looked at again only if a retarget moves the
+    /// slice out from under it.
+    Done(FamilySig),
     /// Deleted or renamed away locally before hydration reached it —
     /// the bucket copy must NOT be re-materialized, or the vanished
-    /// family would resurrect on the next boot.
+    /// family would resurrect on the next boot. A later retarget may
+    /// revive the stem if a newer manifest carries it again.
     Vetoed,
 }
 
+/// The generation a hydrator is currently materializing. The writer
+/// path provisions it once at boot and never moves it; the replica
+/// tailer swaps it on every manifest change ([`Hydrator::retarget`]).
+/// `None` is a replica serving without a lineage yet — a virgin
+/// bucket, or a cache booted while the bucket was unreachable — where
+/// every local load passes through untouched until the first
+/// successful poll provisions the target.
+#[derive(Debug, Clone)]
+struct Target {
+    generation: u64,
+    root: StorePath,
+    manifest: Manifest,
+}
+
+#[derive(Debug)]
+struct HydratorInner {
+    target: Option<Target>,
+    states: BTreeMap<String, StemState>,
+}
+
 /// The lazy half of a bucket boot, shared by the registry (first
-/// touch, the pinned preload), the background fill, and the shipper
-/// (whose manifest write gates on [`Hydrator::drained`]).
+/// touch, the pinned preload), the background fill, the shipper
+/// (whose manifest write gates on [`Hydrator::drained`]) — and, in
+/// replica mode, the tailer, which re-aims the same machine at every
+/// newer manifest the bucket grows.
 #[derive(Debug)]
 pub(crate) struct Hydrator {
     store: Arc<dyn ObjectStore>,
-    generation_root: StorePath,
     data_dir: PathBuf,
-    manifest: Manifest,
-    states: Mutex<BTreeMap<String, StemState>>,
+    lane_policy: LanePolicy,
+    inner: Mutex<HydratorInner>,
     settled: Condvar,
 }
 
 impl Hydrator {
     fn new(
         store: Arc<dyn ObjectStore>,
-        generation_root: StorePath,
+        generation: u64,
+        root: StorePath,
         data_dir: PathBuf,
         manifest: Manifest,
+        lane_policy: LanePolicy,
     ) -> Self {
         let states = manifest
             .files
@@ -334,19 +608,55 @@ impl Hydrator {
             .collect();
         Self {
             store,
-            generation_root,
             data_dir,
-            manifest,
-            states: Mutex::new(states),
+            lane_policy,
+            inner: Mutex::new(HydratorInner {
+                target: Some(Target {
+                    generation,
+                    root,
+                    manifest,
+                }),
+                states,
+            }),
             settled: Condvar::new(),
         }
     }
 
-    /// Every context stem the manifest carries, for boot's registry
-    /// registration — the sidecar metas these describe are already
-    /// local by the time boot runs ([`Self::hydrate_shared`]).
+    /// A hydrator with no lineage to materialize yet: every touch is a
+    /// pass-through and local files serve as they are, until the first
+    /// [`Self::retarget`] provisions a manifest. This is the replica's
+    /// degraded boot (bucket unreachable, or nothing complete in it) —
+    /// it exists so the load path's hydration hooks are in place from
+    /// the very first request, not bolted on when the bucket appears.
+    fn unprovisioned(
+        store: Arc<dyn ObjectStore>,
+        data_dir: PathBuf,
+        lane_policy: LanePolicy,
+    ) -> Self {
+        Self {
+            store,
+            data_dir,
+            lane_policy,
+            inner: Mutex::new(HydratorInner {
+                target: None,
+                states: BTreeMap::new(),
+            }),
+            settled: Condvar::new(),
+        }
+    }
+
+    /// The generation currently being materialized (`None` until a
+    /// degraded replica boot first reaches its bucket).
+    pub(crate) fn generation(&self) -> Option<u64> {
+        let inner = self.inner.lock().unwrap();
+        inner.target.as_ref().map(|target| target.generation)
+    }
+
+    /// Every context stem the current target carries, for boot's
+    /// registry registration — the sidecar metas these describe are
+    /// already local by the time boot runs ([`Self::hydrate_shared`]).
     pub(crate) fn context_stems(&self) -> Vec<String> {
-        self.states.lock().unwrap().keys().cloned().collect()
+        self.inner.lock().unwrap().states.keys().cloned().collect()
     }
 
     /// Whether every family is settled (hydrated or vetoed): the
@@ -354,11 +664,12 @@ impl Hydrator {
     /// `complete` written earlier would crown a generation that lacks
     /// every family still waiting in the predecessor.
     pub(crate) fn drained(&self) -> bool {
-        self.states
+        self.inner
             .lock()
             .unwrap()
+            .states
             .values()
-            .all(|state| matches!(state, StemState::Done | StemState::Vetoed))
+            .all(|state| matches!(state, StemState::Done(_) | StemState::Vetoed))
     }
 
     /// Marks a family off-limits before its local files are deleted or
@@ -367,13 +678,64 @@ impl Hydrator {
     /// the caller's deletion cannot interleave with a half-landed
     /// download.
     pub(crate) fn veto(&self, stem: &str) {
-        let mut states = self.states.lock().unwrap();
-        while matches!(states.get(stem), Some(StemState::InFlight)) {
-            states = self.settled.wait(states).unwrap();
+        let mut inner = self.inner.lock().unwrap();
+        while matches!(inner.states.get(stem), Some(StemState::InFlight)) {
+            inner = self.settled.wait(inner).unwrap();
         }
-        if states.contains_key(stem) {
-            states.insert(stem.to_string(), StemState::Vetoed);
+        if inner.states.contains_key(stem) {
+            inner.states.insert(stem.to_string(), StemState::Vetoed);
         }
+    }
+
+    /// Re-aims the hydrator at a newer manifest — the replica tailer's
+    /// one verb. Families whose manifest slice moved (or that are new)
+    /// go back to `Pending` and are reported as `stale`; families the
+    /// new manifest no longer carries are vetoed and reported as
+    /// `vanished`, exactly once. Waits out in-flight fetches first so
+    /// nothing lands as `Done` against a target that just moved —
+    /// fetches are bounded, and a poll-cadence caller can afford them.
+    pub(crate) fn retarget(
+        &self,
+        generation: u64,
+        root: StorePath,
+        manifest: Manifest,
+    ) -> RetargetReport {
+        let mut report = RetargetReport::default();
+        let mut inner = self.inner.lock().unwrap();
+        while inner
+            .states
+            .values()
+            .any(|state| matches!(state, StemState::InFlight))
+        {
+            inner = self.settled.wait(inner).unwrap();
+        }
+        let stems: BTreeSet<String> = manifest
+            .files
+            .keys()
+            .filter_map(|name| name.strip_suffix(".ctx"))
+            .map(str::to_string)
+            .collect();
+        for stem in &stems {
+            let sig = FamilySig::of(&manifest, stem);
+            let fresh =
+                matches!(inner.states.get(stem), Some(StemState::Done(have)) if *have == sig);
+            if !fresh {
+                inner.states.insert(stem.clone(), StemState::Pending);
+                report.stale.push(stem.clone());
+            }
+        }
+        for (stem, state) in inner.states.iter_mut() {
+            if !stems.contains(stem) && !matches!(state, StemState::Vetoed) {
+                *state = StemState::Vetoed;
+                report.vanished.push(stem.clone());
+            }
+        }
+        inner.target = Some(Target {
+            generation,
+            root,
+            manifest,
+        });
+        report
     }
 
     /// Materializes one context's family before its first load —
@@ -383,16 +745,26 @@ impl Hydrator {
     /// manifest does not know (created after this boot) return
     /// immediately; concurrent callers of the same stem coalesce.
     pub(crate) fn ensure_context(&self, stem: &str) -> io::Result<()> {
-        let mut states = self.states.lock().unwrap();
-        loop {
-            match states.get(stem) {
-                None | Some(StemState::Done | StemState::Vetoed) => return Ok(()),
-                Some(StemState::InFlight) => states = self.settled.wait(states).unwrap(),
-                Some(StemState::Pending) => break,
+        let (root, sig) = {
+            let mut inner = self.inner.lock().unwrap();
+            loop {
+                match inner.states.get(stem) {
+                    None | Some(StemState::Done(_) | StemState::Vetoed) => return Ok(()),
+                    Some(StemState::InFlight) => inner = self.settled.wait(inner).unwrap(),
+                    Some(StemState::Pending) => break,
+                }
             }
-        }
-        states.insert(stem.to_string(), StemState::InFlight);
-        drop(states);
+            // Snapshot the target under the same lock that grants
+            // InFlight: the fetch below runs against exactly this
+            // slice even if a retarget swaps the manifest meanwhile.
+            let target = inner
+                .target
+                .as_ref()
+                .expect("a pending stem implies a provisioned target");
+            let snapshot = (target.root.clone(), FamilySig::of(&target.manifest, stem));
+            inner.states.insert(stem.to_string(), StemState::InFlight);
+            snapshot
+        };
 
         let outcome = std::thread::scope(|scope| {
             scope
@@ -400,7 +772,7 @@ impl Hydrator {
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()?;
-                    runtime.block_on(self.hydrate_family(stem))
+                    runtime.block_on(self.hydrate_family(stem, &root, &sig))
                 })
                 .join()
                 // A worker panic must land in the ordinary error arm
@@ -414,23 +786,37 @@ impl Hydrator {
                 })
         });
 
-        let mut states = self.states.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         match &outcome {
             Ok((fetched, reused)) => {
                 // A veto cannot have landed meanwhile — veto() waits
                 // for InFlight to settle — so this InFlight is ours.
-                states.insert(stem.to_string(), StemState::Done);
+                // What landed is the SNAPSHOT's slice: Done only while
+                // that is still the current one (retarget waits out
+                // in-flight fetches, so a drift here is belt to its
+                // suspenders — but a fetch that raced a swap must
+                // re-run, not masquerade as the successor's bytes).
+                let current = inner
+                    .target
+                    .as_ref()
+                    .map(|target| FamilySig::of(&target.manifest, stem));
+                let state = if current.as_ref() == Some(&sig) {
+                    StemState::Done(sig.clone())
+                } else {
+                    StemState::Pending
+                };
+                inner.states.insert(stem.to_string(), state);
                 tracing::info!(stem, fetched, reused, "context family hydrated");
             }
             Err(error) => {
                 // Back to Pending: the next touch (or fill pass)
                 // retries. The caller surfaces the error through the
                 // same quarantine a failed local load uses.
-                states.insert(stem.to_string(), StemState::Pending);
+                inner.states.insert(stem.to_string(), StemState::Pending);
                 tracing::warn!(stem, %error, "context family hydration failed");
             }
         }
-        drop(states);
+        drop(inner);
         self.settled.notify_all();
         outcome.map(|_| ())
     }
@@ -449,8 +835,9 @@ impl Hydrator {
                 let started = Instant::now();
                 loop {
                     let pending: Vec<String> = {
-                        let states = hydrator.states.lock().unwrap();
-                        states
+                        let inner = hydrator.inner.lock().unwrap();
+                        inner
+                            .states
                             .iter()
                             .filter(|(_, state)| matches!(state, StemState::Pending))
                             .map(|(stem, _)| stem.clone())
@@ -480,21 +867,33 @@ impl Hydrator {
             .expect("spawning the hydration fill thread");
     }
 
-    /// The eager half, run once before boot: land every non-family
-    /// file (groups, the grant store, crash markers) plus every
-    /// family's sidecar meta — everything enumeration and description
-    /// need — and remove local files the manifest does not know, which
-    /// in cache mode are relics of a lineage that moved on (a deleted
+    /// The eager half, run once before boot and again by the replica
+    /// tailer on every manifest change: land every non-family file
+    /// (groups, the grant store, crash markers) plus every family's
+    /// sidecar meta — everything enumeration and description need —
+    /// and remove local files the manifest does not know, which in
+    /// cache mode are relics of a lineage that moved on (a deleted
     /// context's family, a superseded group) and would resurrect on
-    /// scan if left behind.
-    async fn hydrate_shared(&self) -> io::Result<SharedReport> {
+    /// scan if left behind. A no-op until a target is provisioned:
+    /// with no manifest there is nothing to verify against, and
+    /// removing files against an EMPTY one would wipe the very cache
+    /// a degraded boot is serving.
+    pub(crate) async fn hydrate_shared(&self) -> io::Result<SharedReport> {
+        let Some((root, manifest)) = ({
+            let inner = self.inner.lock().unwrap();
+            inner
+                .target
+                .as_ref()
+                .map(|target| (target.root.clone(), target.manifest.clone()))
+        }) else {
+            return Ok(SharedReport::default());
+        };
         let mut report = SharedReport::default();
-        let family: std::collections::BTreeSet<String> = self
-            .states
-            .lock()
-            .unwrap()
+        let family: BTreeSet<String> = manifest
+            .files
             .keys()
-            .flat_map(|stem| crate::registry::context_files(stem))
+            .filter_map(|name| name.strip_suffix(".ctx"))
+            .flat_map(crate::registry::context_files)
             .collect();
         for entry in std::fs::read_dir(&self.data_dir)? {
             let entry = entry?;
@@ -506,8 +905,8 @@ impl Hydrator {
             };
             if name == ".taguru.lock"
                 || name == ship::REPLICATION_RECORD
-                || self.manifest.files.contains_key(&name)
-                || self.manifest.lanes.contains_key(&name)
+                || manifest.files.contains_key(&name)
+                || manifest.lanes.contains_key(&name)
             {
                 continue;
             }
@@ -518,11 +917,11 @@ impl Hydrator {
             std::fs::remove_file(entry.path())?;
             report.removed += 1;
         }
-        for (name, expect) in &self.manifest.files {
+        for (name, expect) in &manifest.files {
             if family.contains(name) && !name.ends_with(".meta.json") {
                 continue;
             }
-            match self.fetch_published_if_stale(name, *expect).await? {
+            match self.fetch_published_if_stale(&root, name, *expect).await? {
                 true => report.fetched += 1,
                 false => report.reused += 1,
             }
@@ -530,17 +929,22 @@ impl Hydrator {
         Ok(report)
     }
 
-    /// One family, verified file by file against the manifest: bytes
-    /// that already match are reused in place, the rest are fetched.
-    /// Returns (fetched, reused).
-    async fn hydrate_family(&self, stem: &str) -> io::Result<(usize, usize)> {
+    /// One family, verified file by file against the snapshot's slice:
+    /// bytes that already match are reused in place, the rest are
+    /// fetched. Returns (fetched, reused).
+    async fn hydrate_family(
+        &self,
+        stem: &str,
+        root: &StorePath,
+        sig: &FamilySig,
+    ) -> io::Result<(usize, usize)> {
         let mut fetched = 0usize;
         let mut reused = 0usize;
         for name in crate::registry::context_files(stem) {
-            let landed = if let Some(expect) = self.manifest.files.get(&name) {
-                self.fetch_published_if_stale(&name, *expect).await?
-            } else if let Some(lane) = self.manifest.lanes.get(&name) {
-                self.fetch_lane_if_stale(&name, *lane).await?
+            let landed = if let Some(expect) = sig.files.get(&name) {
+                self.fetch_published_if_stale(root, &name, *expect).await?
+            } else if let Some(lane) = sig.lanes.get(&name) {
+                self.fetch_lane_if_stale(root, &name, *lane).await?
             } else {
                 // Not in the manifest: hydrate_shared already removed
                 // any local relic under this name before boot, and
@@ -556,7 +960,12 @@ impl Hydrator {
         Ok((fetched, reused))
     }
 
-    async fn fetch_published_if_stale(&self, name: &str, expect: ManifestFile) -> io::Result<bool> {
+    async fn fetch_published_if_stale(
+        &self,
+        root: &StorePath,
+        name: &str,
+        expect: ManifestFile,
+    ) -> io::Result<bool> {
         let path = self.data_dir.join(name);
         if let Ok(local) = std::fs::read(&path)
             && local.len() as u64 == expect.len
@@ -564,7 +973,7 @@ impl Hydrator {
         {
             return Ok(false);
         }
-        let key = self.generation_root.clone().join("files").join(name);
+        let key = root.clone().join("files").join(name);
         let bytes = ship::fetch(self.store.as_ref(), &key).await?;
         ship::verify_file_bytes(name, &bytes, expect)?;
         ship::write_restored_file(&self.data_dir, name, &bytes)?;
@@ -573,21 +982,56 @@ impl Hydrator {
 
     /// A log lane reuses the local file iff the manifest's shipped
     /// extent is literally its prefix — the same arithmetic the
-    /// shipping cursor lives by. A LONGER matching file keeps its
-    /// tail: those are acknowledged records this very directory
-    /// appended beyond the shipped stream (a crash before they
-    /// shipped), and WAL replay is their normal recovery. A diverged
-    /// or shorter file is refetched whole, and any diverged local
-    /// tail is discarded — that is the takeover's stated cost.
-    async fn fetch_lane_if_stale(&self, name: &str, lane: ManifestLane) -> io::Result<bool> {
+    /// shipping cursor lives by. What happens to a LONGER matching
+    /// file is the [`LanePolicy`]: a writer-side cache keeps the tail
+    /// (acknowledged records this very directory appended beyond the
+    /// shipped stream — a crash before they shipped — recovered by
+    /// WAL replay as ever), a replica truncates it to the shipped
+    /// extent. A diverged or shorter file is refetched whole, and any
+    /// diverged local tail is discarded — that is the takeover's
+    /// stated cost.
+    async fn fetch_lane_if_stale(
+        &self,
+        root: &StorePath,
+        name: &str,
+        lane: ManifestLane,
+    ) -> io::Result<bool> {
         let path = self.data_dir.join(name);
         match std::fs::read(&path) {
             Ok(local) => {
                 let shipped = lane.len as usize;
                 if local.len() >= shipped && crate::crc32c::crc32c(&local[..shipped]) == lane.crc {
+                    if local.len() > shipped && matches!(self.lane_policy, LanePolicy::ShippedExact)
+                    {
+                        tracing::info!(
+                            lane = %name,
+                            kept = shipped,
+                            dropped = local.len() - shipped,
+                            "truncating a local log tail the lineage does not carry — \
+                             a replica serves the shipped stream exactly",
+                        );
+                        let file = std::fs::OpenOptions::new().write(true).open(&path)?;
+                        file.set_len(lane.len)?;
+                        file.sync_all()?;
+                    }
                     return Ok(false);
                 }
-                if !local.is_empty() {
+                if local.len() < shipped {
+                    // The replica's steady tailing beat, not an
+                    // anomaly: the shipped stream grew past the local
+                    // copy (or, rarely, the local bytes diverged
+                    // within it — indistinguishable without the
+                    // download, identical remedy). Nothing beyond the
+                    // shipped extent exists locally, so nothing is
+                    // discarded; the refetch is bounded by the lane's
+                    // size, which the writer's flush cadence resets.
+                    tracing::debug!(
+                        lane = %name,
+                        local = local.len(),
+                        shipped,
+                        "shipped stream is ahead of the local log; fetching the lane",
+                    );
+                } else if !local.is_empty() {
                     tracing::warn!(
                         lane = %name,
                         "local log diverged from the bucket lineage; refetching — any \
@@ -598,8 +1042,7 @@ impl Hydrator {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let assembled =
-            ship::fetch_lane(self.store.as_ref(), &self.generation_root, name, lane).await?;
+        let assembled = ship::fetch_lane(self.store.as_ref(), root, name, lane).await?;
         // The same record-by-record verification restore runs: rot
         // must refuse loudly, not replay quietly.
         crate::wal::shippable_records(&assembled).map_err(|error| {
@@ -927,6 +1370,268 @@ mod tests {
         );
 
         for dir in [bucket, target, diverged_target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replica_boot_is_always_a_cache_never_a_claimant_and_never_foreign_truth() {
+        let (bucket, writer) = shipped_bucket("replica-table", false).await;
+        let store = local_store(&bucket);
+        let url = url_of("replica-table");
+
+        // Real data, no record: somebody's truth — refused, even
+        // though the same directory would boot fine as a writer.
+        let foreign = scratch("replica-foreign");
+        std::fs::write(foreign.join("mine.ctx"), b"local truth").unwrap();
+        let error = prepare_replica(&store, &StorePath::default(), &url, &foreign)
+            .await
+            .expect_err("a replica must not consume a directory that is not a cache");
+        assert!(error.to_string().contains("not a cache"), "{error}");
+
+        // The bucket's newest writer's own directory: demoting it
+        // would discard its un-shipped tail — refused.
+        let error = prepare_replica(&store, &StorePath::default(), &url, &writer)
+            .await
+            .expect_err("the current writer's directory must not demote");
+        assert!(error.to_string().contains("newest writer"), "{error}");
+
+        // No takeover guard applies: the writer above is un-retired
+        // and freshly alive, yet an EMPTY directory replicates freely
+        // (a replica deposes nobody).
+        let target = scratch("replica-table-target");
+        let hydrator = prepare_replica(&store, &StorePath::default(), &url, &target)
+            .await
+            .expect("an empty directory replicates a live lineage without ceremony");
+        assert_eq!(hydrator.generation(), Some(1));
+        let record = ship::read_replication_record(&target).unwrap();
+        assert_eq!(record.hydrated_from, Some(1));
+        assert_eq!(record.claimed_generation, None);
+
+        // A FORMER writer (its claim deposed by a newer fence) demotes
+        // freely, and the demotion clears the stale claim.
+        std::fs::write(bucket.join("fence").join(format!("{:020}", 9)), b"{}").unwrap();
+        let deposed = prepare_replica(&store, &StorePath::default(), &url, &writer)
+            .await
+            .expect("a deposed writer's directory demotes to a cache");
+        assert_eq!(deposed.generation(), Some(1));
+        let record = ship::read_replication_record(&writer).unwrap();
+        assert_eq!(
+            record.claimed_generation, None,
+            "the stale claim is dropped"
+        );
+
+        for dir in [bucket, writer, foreign, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replica_truncates_an_acked_tail_where_a_writer_cache_keeps_it() {
+        let (bucket, writer) = shipped_bucket("replica-tail", true).await;
+        let store = local_store(&bucket);
+        let url = url_of("replica-tail");
+
+        // Seed a cache directory holding the shipped log PLUS a
+        // genuine acked tail — exactly the writer-cache reuse case.
+        let target = scratch("replica-tail-target");
+        let shipped_wal = std::fs::read(writer.join("ctx_a.wal.jsonl")).unwrap();
+        std::fs::write(target.join("ctx_a.wal.jsonl"), &shipped_wal).unwrap();
+        wal::append_batch(&target.join("ctx_a.wal.jsonl"), 2, &[associate("tail")]).unwrap();
+        ship::write_replication_record(
+            &target,
+            &ship::ReplicationRecord {
+                url: url.clone(),
+                claimed_generation: None,
+                hydrated_from: Some(1),
+            },
+        )
+        .unwrap();
+
+        let hydrator = prepare_replica(&store, &StorePath::default(), &url, &target)
+            .await
+            .expect("a cache re-verifies");
+        hydrator.ensure_context("ctx_a").unwrap();
+        assert_eq!(
+            std::fs::read(target.join("ctx_a.wal.jsonl")).unwrap(),
+            shipped_wal,
+            "a replica serves the shipped stream exactly: the tail is truncated away"
+        );
+
+        for dir in [bucket, writer, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replica_with_nothing_to_tail_serves_what_it_has_and_waits() {
+        // A virgin bucket: an empty replica boots unprovisioned (and
+        // the tailer will provision it when a lineage appears).
+        let empty_bucket = scratch("replica-virgin-bucket");
+        let store = local_store(&empty_bucket);
+        let target = scratch("replica-virgin-target");
+        let hydrator = prepare_replica(&store, &StorePath::default(), &url_of("virgin-r"), &target)
+            .await
+            .expect("a virgin bucket replicates as empty");
+        assert_eq!(hydrator.generation(), None);
+        assert!(hydrator.drained(), "nothing pending");
+        hydrator.ensure_context("anything").unwrap();
+
+        // An unreachable bucket: a cache serves its last watermark
+        // degraded; an empty directory has nothing to serve — refused.
+        // (A merely-ABSENT local path lists as empty — i.e. virgin —
+        // so "unreachable" here is the path turning into a file, which
+        // errors every listing the way a dead endpoint would.)
+        let gone = scratch("replica-gone-bucket");
+        let unreachable = local_store(&gone);
+        std::fs::remove_dir_all(&gone).unwrap();
+        std::fs::write(&gone, b"not a directory").unwrap();
+        let cache = scratch("replica-degraded-cache");
+        std::fs::write(cache.join("ctx_a.ctx"), b"cached image").unwrap();
+        ship::write_replication_record(
+            &cache,
+            &ship::ReplicationRecord {
+                url: url_of("gone"),
+                claimed_generation: None,
+                hydrated_from: Some(1),
+            },
+        )
+        .unwrap();
+        let degraded =
+            prepare_replica(&unreachable, &StorePath::default(), &url_of("gone"), &cache)
+                .await
+                .expect("a cache boots degraded when the bucket is unreachable");
+        assert_eq!(degraded.generation(), None);
+        assert_eq!(
+            std::fs::read(cache.join("ctx_a.ctx")).unwrap(),
+            b"cached image",
+            "nothing is wiped while unprovisioned"
+        );
+        let empty = scratch("replica-degraded-empty");
+        let error = prepare_replica(&unreachable, &StorePath::default(), &url_of("gone"), &empty)
+            .await
+            .expect_err("an empty replica with no bucket has nothing to serve");
+        assert!(error.to_string().contains("nothing to serve"), "{error}");
+
+        // An UNVERIFIED conversion (a record without `hydrated_from` —
+        // phase one of the two-phase write) is not a cache yet: with
+        // the bucket unreachable there is nothing honest to serve.
+        let half = scratch("replica-degraded-half");
+        std::fs::write(half.join("ctx_a.ctx"), b"a demoted writer's bytes").unwrap();
+        ship::write_replication_record(
+            &half,
+            &ship::ReplicationRecord {
+                url: url_of("gone"),
+                claimed_generation: None,
+                hydrated_from: None,
+            },
+        )
+        .unwrap();
+        let error = prepare_replica(&unreachable, &StorePath::default(), &url_of("gone"), &half)
+            .await
+            .expect_err("an unverified conversion must not serve degraded");
+        assert!(
+            error.to_string().contains("not yet a verified cache"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_file(&gone);
+        for dir in [empty_bucket, target, cache, empty, half] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_verified_watermark_advances_only_after_hydration_lands() {
+        let (bucket, writer) = shipped_bucket("two-phase", true).await;
+        let store = local_store(&bucket);
+        let url = url_of("two-phase");
+        let target = scratch("two-phase-target");
+
+        // Break the shared hydration: the manifest names a meta whose
+        // object is gone (set aside, as a mid-upload crash or an
+        // eventually-consistent read would present it).
+        let meta_key = bucket
+            .join("gen-00000000000000000001")
+            .join("files")
+            .join("ctx_a.meta.json");
+        let aside = bucket.join("meta-aside");
+        std::fs::rename(&meta_key, &aside).unwrap();
+
+        let error = prepare_replica(&store, &StorePath::default(), &url, &target)
+            .await
+            .expect_err("a shared hydration that cannot land refuses the boot");
+        assert!(error.to_string().contains("ctx_a.meta.json"), "{error}");
+        let record = ship::read_replication_record(&target)
+            .expect("phase one marked the directory as this URL's replica workspace");
+        assert_eq!(
+            record.hydrated_from, None,
+            "the verified watermark must not advance past a failed hydration"
+        );
+
+        // The object returns; the same boot completes and phase two
+        // records the verified generation.
+        std::fs::rename(&aside, &meta_key).unwrap();
+        let hydrator = prepare_replica(&store, &StorePath::default(), &url, &target)
+            .await
+            .expect("the retry hydrates");
+        assert_eq!(hydrator.generation(), Some(1));
+        let record = ship::read_replication_record(&target).unwrap();
+        assert_eq!(record.hydrated_from, Some(1));
+
+        for dir in [bucket, writer, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn retarget_diffs_families_vetoes_vanished_and_revives_readded_ones() {
+        let (bucket, _writer) = shipped_bucket("retarget", true).await;
+        let store = local_store(&bucket);
+        let url = url_of("retarget");
+        let target = scratch("retarget-target");
+        let hydrator = prepare_replica(&store, &StorePath::default(), &url, &target)
+            .await
+            .expect("hydrates");
+        hydrator.ensure_context("ctx_a").unwrap();
+        assert!(hydrator.drained());
+
+        let generation_root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &generation_root)
+            .await
+            .unwrap()
+            .expect("the shipped generation carries a manifest");
+
+        // The same manifest again: nothing is stale, nothing vanished.
+        let report = hydrator.retarget(1, generation_root.clone(), manifest.clone());
+        assert!(report.stale.is_empty(), "{report:?}");
+        assert!(report.vanished.is_empty(), "{report:?}");
+
+        // A moved lane slice marks the family stale.
+        let mut moved = manifest.clone();
+        moved
+            .lanes
+            .get_mut("ctx_a.wal.jsonl")
+            .expect("the lane exists")
+            .seq += 1;
+        let report = hydrator.retarget(1, generation_root.clone(), moved);
+        assert_eq!(report.stale, ["ctx_a"], "{report:?}");
+        assert!(!hydrator.drained(), "a stale family is pending again");
+
+        // A manifest without the family vetoes it, exactly once.
+        let report = hydrator.retarget(2, generation_root.clone(), Manifest::default());
+        assert_eq!(report.vanished, ["ctx_a"], "{report:?}");
+        assert!(hydrator.drained(), "vetoed counts as settled");
+        let report = hydrator.retarget(2, generation_root.clone(), Manifest::default());
+        assert!(report.vanished.is_empty(), "vanished reports once");
+
+        // A later manifest carrying it again revives it.
+        let report = hydrator.retarget(3, generation_root.clone(), manifest);
+        assert_eq!(report.stale, ["ctx_a"], "{report:?}");
+        hydrator.ensure_context("ctx_a").unwrap();
+        assert!(hydrator.drained());
+
+        for dir in [bucket, target] {
             let _ = std::fs::remove_dir_all(dir);
         }
     }

@@ -19,7 +19,7 @@ const USAGE: &str = concat!(
     " — long-term semantic memory for LLMs
 
 USAGE:
-  taguru [serve] [--config FILE] [--take-over]
+  taguru [serve] [--config FILE] [--take-over] [--replica]
                                         start the HTTP server (the default).
                                         With TAGURU_REPLICATE_URL set and an
                                         empty data directory, the server boots
@@ -28,7 +28,15 @@ USAGE:
                                         port opens, the rest on first touch.
                                         --take-over acknowledges deposing a
                                         recently-live writer on that bucket
-                                        (TAGURU_TAKEOVER=1 says the same)
+                                        (TAGURU_TAKEOVER=1 says the same).
+                                        --replica (TAGURU_REPLICA=1) serves
+                                        the bucket lineage read-only instead:
+                                        it tails newer manifests continuously,
+                                        never claims a generation, and refuses
+                                        every write naming the writer — reads
+                                        scale horizontally, and the replica
+                                        doubles as the warm standby a manual
+                                        promotion turns into the next writer
   taguru version                        print the version
   taguru health [--config FILE] [URL]   exit 0 iff a running server's /health
                                         answers 200 — the container
@@ -101,6 +109,14 @@ ENVIRONMENT (every knob; unset = the shown default):
                                --take-over: depose the bucket's newest
                                writer even though it was alive within the
                                last 300s and did not stop cleanly (off)
+  TAGURU_REPLICA               1 = serve --replica: read-only, tailing the
+                               bucket lineage; TAGURU_REPLICATE_INTERVAL_MS
+                               is the poll cadence — staleness is bounded
+                               by the writer's shipping lag plus it (off)
+  TAGURU_WRITER_URL            where a replica's write-refusal points
+                               clients (the writer's own base URL or LB
+                               name); unset = the refusal names only the
+                               bucket's fence holder
   TAGURU_API_TOKEN             bearer token; unset = UNAUTHENTICATED
   TAGURU_API_TOKENS            named keys 'ci:tokA,laptop:tokB' — the access
                                log carries the key name; rotate by overlap
@@ -177,6 +193,10 @@ pub struct ServeArgs {
     /// `crate::hydrate`'s takeover guard). `TAGURU_TAKEOVER=1` says
     /// the same thing where flags are awkward (a container manifest).
     pub take_over: bool,
+    /// `--replica`: serve the replication bucket's lineage read-only,
+    /// tailing it continuously (issue #129) — `TAGURU_REPLICA=1` says
+    /// the same.
+    pub replica: bool,
 }
 
 /// Parses the process arguments, running and exiting for everything
@@ -211,11 +231,12 @@ pub fn dispatch() -> ServeArgs {
     }
 }
 
-/// `serve` takes one optional `--config FILE` and the `--take-over`
-/// acknowledgment.
+/// `serve` takes one optional `--config FILE`, the `--take-over`
+/// acknowledgment, and the `--replica` role flag.
 fn parse_serve(args: &[String]) -> ServeArgs {
     let mut config = None;
     let mut take_over = false;
+    let mut replica = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -225,6 +246,7 @@ fn parse_serve(args: &[String]) -> ServeArgs {
                 None => usage_error("--config needs a file path"),
             },
             "--take-over" => take_over = true,
+            "--replica" => replica = true,
             "--help" | "-h" => {
                 print!("{USAGE}");
                 exit(0)
@@ -235,7 +257,11 @@ fn parse_serve(args: &[String]) -> ServeArgs {
     // The flag beats the variable, so a shell override works even when
     // a container image bakes TAGURU_CONFIG in.
     let config = config.or_else(|| std::env::var("TAGURU_CONFIG").ok().map(PathBuf::from));
-    ServeArgs { config, take_over }
+    ServeArgs {
+        config,
+        take_over,
+        replica,
+    }
 }
 
 /// `taguru health [--config FILE] [URL]`: one GET against a running
