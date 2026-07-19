@@ -125,6 +125,19 @@ impl AppState {
                 },
             ),
             Ok(Some(cue)) => match self.passage_vector_gate(&entry, &file_stem(name)) {
+                // The gate checks the model NAME; the width can still
+                // disagree (a dimensions setting changed behind a
+                // stable name, #133). Swept anyway, every row would be
+                // `similarity`'s silent 0.0 — an empty lane the plan
+                // would then call "ran" — so the mismatch is named
+                // instead, exactly like a model change.
+                PassageVectorGate::Ready(vectors) if cue.len() != vectors.dim() => (
+                    Vec::new(),
+                    VectorLaneStatus::WidthChanged {
+                        stored: vectors.dim(),
+                        current: cue.len(),
+                    },
+                ),
                 PassageVectorGate::Ready(vectors) => {
                     let floor = self.effective_semantic_floor(floor_override, &fence.meta);
                     (
@@ -333,6 +346,19 @@ impl AppState {
             (Ok(Some(_)), Some(PassageVectorGate::Empty)) => VectorLaneReport::NoVectors,
             (Ok(Some(_)), Some(PassageVectorGate::ModelChanged { stored, current })) => {
                 VectorLaneReport::ModelChanged { stored, current }
+            }
+            // Same width guard as the search itself: `vector_rows` is
+            // already empty (top_matches refuses a mismatched query),
+            // and without this arm that silence would be reported as
+            // `Ran { cosine: None }` — "not yet embedded", the wrong
+            // diagnosis with the wrong repair.
+            (Ok(Some(cue)), Some(PassageVectorGate::Ready(vectors)))
+                if cue.len() != vectors.dim() =>
+            {
+                VectorLaneReport::WidthChanged {
+                    stored: vectors.dim(),
+                    current: cue.len(),
+                }
             }
             (Ok(Some(_)), Some(PassageVectorGate::Ready(_))) => {
                 // The target's best cosine across its rows (text row

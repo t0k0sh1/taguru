@@ -100,6 +100,17 @@ Entries that change an on-disk format or a response shape say so.
   (present only when a provider is configured).
 
 ### Changed
+- **On-disk format**: the gloss vector sidecar (`{stem}.vectors.bin`)
+  now records its vector width beside the model — header `TAGURUV2` →
+  `TAGURUV3` (#133). Existing V2 sidecars load exactly as before (the
+  width is taken from the rows, which loads now verify are uniform)
+  and are stamped to V3 by their next save, so the upgrade costs no
+  provider spend; a binary older than this release, however, reads a
+  V3 file as corrupt and re-embeds on its next refresh. Loads of
+  either header refuse rows that mix widths, and a V3 header
+  disagreeing with its rows, the same way they refuse other
+  corruption: discard, warn, re-embed — never serve. The passage
+  sidecar (`TAGURUP2`) already recorded (model, dim) and is unchanged.
 - **Response shape**: `POST /contexts/{name}/sources/search` and cross
   `POST /sources/search` now answer `{plan, hits}` instead of a bare
   hit array (#151) — the hits themselves are unchanged, moved under
@@ -150,6 +161,25 @@ Entries that change an on-disk format or a response shape say so.
   flush.
 
 ### Fixed
+- A provider changing vector width behind an unchanged model name (a
+  `dimensions` setting is a request-time parameter on Titan V2 and
+  Matryoshka-style models) no longer produces silently empty semantic
+  results in the window before the next refresh (#133). The refresh
+  side already detected the change and re-embedded both stores
+  wholesale; the serve side now refuses to score across the mismatch
+  — every cosine would be `similarity`'s 0.0 width-mismatch sentinel
+  — and names it instead: search plans and `sources/search/explain`
+  report stored vs current width as a `ran: false` reason (the plan
+  previously claimed `ran: true` over that all-zero sweep), and
+  `resolve/explain`'s semantic report does the same where it
+  previously presented the 0.0 sentinel as a measured cosine and
+  prescribed lowering a floor no value could satisfy. `resolve`
+  itself keeps folding to empty, exactly like a model change. The
+  width-triggered wipe is now counted
+  (`taguru_embedding_width_rebuilds_total{store="gloss"|"passages"}`)
+  beside its existing warn line, and the Bedrock page's "pick a
+  dimension once and never change it" instruction became "detected
+  and rebuilt — still pick one width; rebuilds cost provider spend".
 - A passage search whose query embedding was refused by the provider
   (a transient failure — the one vector-lane state that recovers with
   no revision bump) is no longer filled into the retrieval caches

@@ -10,7 +10,11 @@
 //! Vectors are a derived cache of (model × name), kept per context in a
 //! `{name}.vectors.bin` sidecar — refreshed explicitly (POST
 //! /contexts/{name}/embeddings/refresh), loaded on demand by the
-//! semantic fallback, and discarded wholesale when the model changes.
+//! semantic fallback, and discarded wholesale when the model changes —
+//! or when its output width changes behind a stable model name (a
+//! dimensions setting is a request-time parameter on modern models):
+//! the sidecar records both, the refresh detects both, and the serve
+//! paths refuse to score across either mismatch.
 
 use std::collections::HashMap;
 use std::io;
@@ -754,9 +758,26 @@ pub struct VectorStore {
     pub labels: VectorTable,
 }
 
-const VECTOR_MAGIC: &[u8; 8] = b"TAGURUV2";
+const VECTOR_MAGIC: &[u8; 8] = b"TAGURUV3";
+/// The pre-#133 gloss header, model only — no dimension field. Accepted
+/// on load (the width is taken from the rows themselves, which the same
+/// load verifies are uniform) and stamped to the current header by the
+/// next save, so the upgrade costs no provider spend.
+const LEGACY_VECTOR_MAGIC: &[u8; 8] = b"TAGURUV2";
 
 impl VectorStore {
+    /// The one dimension every stored row shares — `None` while nothing
+    /// is stored. Uniformity is an invariant, enforced at both ends: a
+    /// refresh drops rows that disagree with their batch and wipes the
+    /// store on a width change, and `from_bytes` refuses a file whose
+    /// rows mix widths — so the first row speaks for all of them.
+    pub fn width(&self) -> Option<usize> {
+        self.concepts
+            .values()
+            .chain(self.labels.values())
+            .map(|(_, vector)| vector.len())
+            .next()
+    }
     /// Reads a sidecar, returning an empty store on any problem — a
     /// corrupt vector cache costs a re-embed, never an outage.
     pub fn load(path: &Path) -> Self {
@@ -790,6 +811,7 @@ impl VectorStore {
         let mut out = Vec::new();
         out.extend_from_slice(VECTOR_MAGIC);
         write_string(&mut out, &self.model);
+        out.extend_from_slice(&(self.width().unwrap_or(0) as u32).to_le_bytes());
         write_table(&mut out, &self.concepts);
         write_table(&mut out, &self.labels);
         out
@@ -797,18 +819,43 @@ impl VectorStore {
 
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let mut pos = 0usize;
-        if bytes.get(..8)? != VECTOR_MAGIC {
+        let magic = bytes.get(..8)?;
+        let legacy = magic == LEGACY_VECTOR_MAGIC;
+        if !legacy && magic != VECTOR_MAGIC {
             return None;
         }
         pos += 8;
         let model = read_string(bytes, &mut pos)?;
+        let declared = if legacy {
+            None
+        } else {
+            Some(read_u32(bytes, &mut pos)? as usize)
+        };
         let concepts = read_table(bytes, &mut pos)?;
         let labels = read_table(bytes, &mut pos)?;
-        (pos == bytes.len()).then_some(Self {
+        if pos != bytes.len() {
+            return None;
+        }
+        let store = Self {
             model,
             concepts,
             labels,
-        })
+        };
+        // Rows mixing widths cannot come from any honest writer, and
+        // served they would feed `similarity` mismatched dimensions —
+        // rows that score as silent zeros. Same for a header whose
+        // declared width disagrees with the rows under it: corrupt,
+        // re-embed, never serve.
+        let width = store.width();
+        let uniform = store
+            .concepts
+            .values()
+            .chain(store.labels.values())
+            .all(|(_, vector)| Some(vector.len()) == width);
+        if !uniform || declared.is_some_and(|declared| declared != width.unwrap_or(0)) {
+            return None;
+        }
+        Some(store)
     }
 }
 
@@ -913,6 +960,14 @@ impl PassageVectorStore {
 
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+
+    /// The store's row dimension — 0 until the first row lands. The
+    /// serve path compares a query vector against this before sweeping:
+    /// a mismatched width matches nothing (`similarity` scores it 0.0),
+    /// and that silence must be named, not served as an empty page.
+    pub fn dim(&self) -> usize {
+        self.dim
     }
 
     /// Every (key, unit row) pair, in insertion order.
@@ -1369,6 +1424,74 @@ mod tests {
 
         assert!(VectorStore::from_bytes(b"garbage").is_none());
         assert!(VectorStore::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+    }
+
+    /// A legacy TAGURUV2 sidecar (model only, no width field) loads as
+    /// it always did — the upgrade must not cost a re-embed — and the
+    /// next save writes the current header, width included.
+    #[test]
+    fn a_legacy_v2_sidecar_loads_and_the_next_save_stamps_the_width() {
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(LEGACY_VECTOR_MAGIC);
+        write_string(&mut legacy, "test-model");
+        let mut concepts = VectorTable::new();
+        concepts.insert("りんご".into(), (7, vec![1.0, 0.0]));
+        write_table(&mut legacy, &concepts);
+        write_table(&mut legacy, &VectorTable::new());
+
+        let loaded = VectorStore::from_bytes(&legacy).expect("V2 must stay loadable");
+        assert_eq!(loaded.model, "test-model");
+        assert_eq!(loaded.width(), Some(2));
+
+        let stamped = loaded.to_bytes();
+        assert_eq!(&stamped[..8], VECTOR_MAGIC);
+        let restamped = VectorStore::from_bytes(&stamped).expect("the stamp must round-trip");
+        assert_eq!(restamped.concepts["りんご"], (7, vec![1.0, 0.0]));
+        assert_eq!(restamped.width(), Some(2));
+    }
+
+    /// Rows mixing widths cannot come from any honest writer; served,
+    /// they would feed `similarity` mismatched dimensions — rows that
+    /// score as silent zeros. Refused whole, on the legacy header too.
+    #[test]
+    fn a_sidecar_mixing_row_widths_is_refused_as_corrupt() {
+        let mut concepts = VectorTable::new();
+        concepts.insert("a".into(), (1, vec![1.0, 0.0]));
+        let mut labels = VectorTable::new();
+        labels.insert("b".into(), (2, vec![0.0, 1.0, 0.0]));
+
+        for magic in [VECTOR_MAGIC, LEGACY_VECTOR_MAGIC] {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(magic);
+            write_string(&mut bytes, "test-model");
+            if magic == VECTOR_MAGIC {
+                bytes.extend_from_slice(&2u32.to_le_bytes());
+            }
+            write_table(&mut bytes, &concepts);
+            write_table(&mut bytes, &labels);
+            assert!(
+                VectorStore::from_bytes(&bytes).is_none(),
+                "mixed widths must refuse to load (magic {magic:?})"
+            );
+        }
+    }
+
+    /// A width header disagreeing with the rows under it is the same
+    /// kind of corruption: whichever side is right, serving the other
+    /// would be scoring against the wrong geometry.
+    #[test]
+    fn a_width_header_disagreeing_with_its_rows_is_refused() {
+        let mut store = VectorStore {
+            model: "test-model".into(),
+            ..Default::default()
+        };
+        store.concepts.insert("a".into(), (1, vec![1.0, 0.0]));
+        let mut bytes = store.to_bytes();
+        // The width field sits right after the magic and the model
+        // string: 8 + 4 + len("test-model").
+        let at = 8 + 4 + "test-model".len();
+        bytes[at..at + 4].copy_from_slice(&5u32.to_le_bytes());
+        assert!(VectorStore::from_bytes(&bytes).is_none());
     }
 
     /// A NaN or infinite component can only reach this file through
@@ -2428,28 +2551,34 @@ mod tests {
             .prop_map(|s| s.to_string())
         }
 
-        fn vector_table_strategy() -> impl Strategy<Value = VectorTable> {
+        /// Every row across BOTH tables shares one dimension — the
+        /// invariant the refresh enforces (one settled width per pass, a
+        /// change wipes the store) and `from_bytes` verifies — so the
+        /// dimension is fixed once and threaded through every row.
+        fn vector_table_strategy(dim: usize) -> impl Strategy<Value = VectorTable> {
             prop::collection::hash_map(
                 name_strategy(),
                 (
                     any::<u64>(),
-                    prop::collection::vec(finite_f32_strategy(), 0..8),
+                    prop::collection::vec(finite_f32_strategy(), dim..=dim),
                 ),
                 0..8,
             )
         }
 
         fn vector_store_strategy() -> impl Strategy<Value = VectorStore> {
-            (
-                "[a-z0-9-]{1,12}",
-                vector_table_strategy(),
-                vector_table_strategy(),
-            )
-                .prop_map(|(model, concepts, labels)| VectorStore {
-                    model,
-                    concepts,
-                    labels,
-                })
+            (1usize..6).prop_flat_map(|dim| {
+                (
+                    "[a-z0-9-]{1,12}",
+                    vector_table_strategy(dim),
+                    vector_table_strategy(dim),
+                )
+                    .prop_map(|(model, concepts, labels)| VectorStore {
+                        model,
+                        concepts,
+                        labels,
+                    })
+            })
         }
 
         fn passage_key_strategy() -> impl Strategy<Value = PassageKey> {

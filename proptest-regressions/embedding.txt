@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5661e82ee8367d3826278c51fc54ba2ebb5e5b2873f99750153160d4724e799e # shrinks to store = VectorStore { model: "0", concepts: {}, labels: {"バナナ": (0, [0.0, 0.0, 0.0, 0.0]), "りんご": (1382790933373, [-388.58853, 229.86868, -978.56494])} }

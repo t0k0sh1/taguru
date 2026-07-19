@@ -98,8 +98,9 @@ answers back into prose are your job.
    - The response's `plan` says what the search chose to do at all:
      which contexts were searched and, per context, whether the
      semantic lane actually ran — and why not when it did not
-     (embeddings off, nothing embedded yet, model changed, provider
-     refused) — plus the effective cosine floor when it did. Check
+     (embeddings off, nothing embedded yet, model or vector width
+     changed, provider refused) — plus the effective cosine floor
+     when it did. Check
      BOTH lanes before concluding "not in the corpus": empty `hits`
      with `bm25: {ran: true}` and `vector: {ran: false}` is a
      lexical-only answer, not a semantic miss — and when both lanes

@@ -138,6 +138,8 @@ pub struct Metrics {
     embed_refresh_failed: AtomicU64,
     embed_resolve_ok: AtomicU64,
     embed_resolve_failed: AtomicU64,
+    gloss_width_rebuilds: AtomicU64,
+    passage_width_rebuilds: AtomicU64,
     errors_load: AtomicU64,
     errors_wal_refused: AtomicU64,
     errors_io: AtomicU64,
@@ -692,6 +694,20 @@ impl Metrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// One width-triggered sidecar wipe: the provider changed vector
+    /// width behind an unchanged model name, and the refresh discarded
+    /// and re-embedded the whole gloss store. Counted beside the warn
+    /// line so the rebuild (and its provider spend) is graphable, not
+    /// just greppable.
+    pub fn record_gloss_width_rebuild(&self) {
+        self.gloss_width_rebuilds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The passage-store twin of [`Self::record_gloss_width_rebuild`].
+    pub fn record_passage_width_rebuild(&self) {
+        self.passage_width_rebuilds.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_error(&self, kind: ErrorKind) {
         let counter = match kind {
             ErrorKind::Load => &self.errors_load,
@@ -1011,6 +1027,23 @@ impl Metrics {
             out.push_str(&format!(
                 "taguru_embedding_requests_total{{operation=\"{operation}\",outcome=\"failed\"}} {}\n",
                 failed.load(Ordering::Relaxed)
+            ));
+        }
+        push_header(
+            &mut out,
+            "taguru_embedding_width_rebuilds_total",
+            "counter",
+            "Sidecar wipes forced by the provider changing vector width \
+             behind an unchanged model name (each re-embeds the whole \
+             store), by store.",
+        );
+        for (store, counter) in [
+            ("gloss", &self.gloss_width_rebuilds),
+            ("passages", &self.passage_width_rebuilds),
+        ] {
+            out.push_str(&format!(
+                "taguru_embedding_width_rebuilds_total{{store=\"{store}\"}} {}\n",
+                counter.load(Ordering::Relaxed)
             ));
         }
         push_header(

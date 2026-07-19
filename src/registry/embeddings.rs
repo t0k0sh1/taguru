@@ -214,15 +214,30 @@ impl AppState {
         // diff buys nothing new.
         let was_pending = entry.vectors_save_pending.swap(false, Ordering::Relaxed);
         let mut fresh_model = existing.model != embedder.model();
+        // ONE width agreement across both tables: without it, a provider
+        // mid-migration could answer the concept call at one width and
+        // the label call at another, and the merged store would persist
+        // mixed — a file the loader now refuses outright (#133). The
+        // first vector either call lands settles it; disagreeing rows
+        // drop loudly and stay stale, exactly like a chunk disagreeing
+        // within one call.
+        let mut settled_width: Option<usize> = None;
         let (mut embedded_concepts, concept_failure) = self.embed_stale(
             &*embedder,
             &existing.concepts,
             &concepts,
             fresh_model,
+            &mut settled_width,
             deadline,
         );
-        let (mut embedded_labels, label_failure) =
-            self.embed_stale(&*embedder, &existing.labels, &labels, fresh_model, deadline);
+        let (mut embedded_labels, label_failure) = self.embed_stale(
+            &*embedder,
+            &existing.labels,
+            &labels,
+            fresh_model,
+            &mut settled_width,
+            deadline,
+        );
         // Persist whatever either table bought even when the other fails:
         // losing already-billed vectors to a sibling's provider error is
         // the bug this mirrors from the passage refresh. A partial failure
@@ -283,12 +298,29 @@ impl AppState {
                 fresh = fresh_width,
                 "embedding width changed under an unchanged model name; re-embedding every gloss"
             );
+            self.0.metrics.record_gloss_width_rebuild();
             fresh_model = true;
-            let (concepts_reembedded, concept_failure) =
-                self.embed_stale(&*embedder, &existing.concepts, &concepts, true, deadline);
+            // A fresh agreement for the redo: the old width was just
+            // declared dead, and the redo's own first vector settles
+            // the new one for both tables.
+            let mut settled_width: Option<usize> = None;
+            let (concepts_reembedded, concept_failure) = self.embed_stale(
+                &*embedder,
+                &existing.concepts,
+                &concepts,
+                true,
+                &mut settled_width,
+                deadline,
+            );
             embedded_concepts = concepts_reembedded;
-            let (labels_reembedded, label_failure) =
-                self.embed_stale(&*embedder, &existing.labels, &labels, true, deadline);
+            let (labels_reembedded, label_failure) = self.embed_stale(
+                &*embedder,
+                &existing.labels,
+                &labels,
+                true,
+                &mut settled_width,
+                deadline,
+            );
             embedded_labels = labels_reembedded;
             failure = concept_failure.or(label_failure);
         }
@@ -397,15 +429,19 @@ impl AppState {
     /// can answer two chunks of the very same call with different
     /// widths; unlike `PassageVectorStore::push`, `VectorTable` has no
     /// dimension of its own to enforce, so a vector that disagrees with
-    /// the width this batch already settled on is dropped here — loudly,
-    /// and left stale for the next refresh — rather than merged into a
-    /// table `similarity` would then silently stop matching against.
+    /// `settled_width` — the ONE width agreement the whole refresh
+    /// shares across its concept and label calls, claimed by the first
+    /// vector any of them lands — is dropped here — loudly, and left
+    /// stale for the next refresh — rather than merged into a store
+    /// that would persist mixed widths, which the loader refuses whole
+    /// and `similarity` would silently stop matching against.
     fn embed_stale(
         &self,
         embedder: &dyn EmbeddingProvider,
         stored: &VectorTable,
         entries: &[(String, String)],
         fresh_model: bool,
+        settled_width: &mut Option<usize>,
         deadline: Deadline,
     ) -> (VectorTable, Option<String>) {
         let stale: Vec<(String, String, u64)> = entries
@@ -427,21 +463,20 @@ impl AppState {
                 self.timed_embed_for_refresh(embedder, &texts, deadline)
             });
         let mut embedded = VectorTable::new();
-        let mut width: Option<usize> = None;
         let mut failure: Option<String> = None;
         for (chunk, outcome) in stale_chunks.iter().zip(outcomes) {
             match outcome {
                 Some(Ok(vectors)) => {
                     for ((name, _, hash), vector) in chunk.iter().zip(vectors) {
-                        let expected = *width.get_or_insert(vector.len());
+                        let expected = *settled_width.get_or_insert(vector.len());
                         if vector.len() != expected {
                             tracing::warn!(
                                 name = name.as_str(),
                                 expected,
                                 got = vector.len(),
-                                "dropping a gloss vector whose width disagrees with this \
-                                 refresh's other chunks — a provider mid-migration; it stays \
-                                 stale for the next refresh to retry"
+                                "dropping a gloss vector whose width disagrees with what \
+                                 this refresh already settled on — a provider mid-migration; \
+                                 it stays stale for the next refresh to retry"
                             );
                             continue;
                         }
@@ -681,6 +716,7 @@ impl AppState {
                     fresh = fresh_w,
                     "passage embedding width changed under an unchanged model name; re-embedding every passage"
                 );
+                self.0.metrics.record_passage_width_rebuild();
                 fresh_model = true;
                 continue;
             }
@@ -791,6 +827,17 @@ impl AppState {
             Ok(vector) => vector,
             Err(error) => return Some(Err(error)),
         };
+        // A width mismatch (a dimensions setting changed behind a
+        // stable model name, #133) folds to the same empty answer as a
+        // model change — this tier is deliberately best-effort — and
+        // explain tells the states apart (`GlossLaneReport`). Swept
+        // anyway, every cosine would be `similarity`'s silent 0.0.
+        if store
+            .width()
+            .is_some_and(|stored| stored != cue_vector.len())
+        {
+            return Some(Ok(Vec::new()));
+        }
         let mut scored: Vec<(String, f32)> = table
             .iter()
             .map(|(name, (_, vector))| (name.clone(), similarity(&cue_vector, vector)))
@@ -851,6 +898,18 @@ impl AppState {
             Ok(vector) => vector,
             Err(error) => return Some(GlossLaneReport::QueryEmbeddingFailed(error)),
         };
+        // Without this arm the sweep below would report a measured-
+        // looking cosine of 0.0 — `similarity`'s width-mismatch
+        // sentinel — and the verdict would prescribe lowering a floor
+        // that no value could satisfy.
+        if let Some(stored) = store.width()
+            && stored != cue_vector.len()
+        {
+            return Some(GlossLaneReport::WidthChanged {
+                stored,
+                current: cue_vector.len(),
+            });
+        }
         let cosine = table
             .get(expected)
             .map(|(_, vector)| similarity(&cue_vector, vector));

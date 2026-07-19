@@ -160,11 +160,16 @@ HTTPServer(("127.0.0.1", 8257), Handler).serve_forever()</code></pre>
 TAGURU_EMBED_MODEL=amazon.titan-embed-text-v2:0
 TAGURU_SEMANTIC_FLOOR=0.2   <span class="c"># calibrated below — do not skip this</span>
 TAGURU_EMBED_AUTO=1         <span class="c"># don't count on the agent calling refresh</span></code></pre>
-    <p class="note warn">
+    <p class="note">
       Taguru normalizes the vectors it receives, so Titan's raw (unnormalized) output is fine
-      as-is. But keep <code>dimensions: 512</code> fixed — vectors with different dimension
-      settings must never share a sidecar, and Taguru's vector cache is keyed by <b>model name
-      alone</b>. Pick a dimension once and never change it.
+      as-is. A changed <code>dimensions</code> setting behind the same model name is
+      <b>detected, not trusted</b>: each vector sidecar records the (model, width) it was built
+      with, mismatched vectors are never served — search and resolve name the mismatch in their
+      <code>plan</code>/<code>explain</code> output instead of returning silently empty results —
+      and the next <code>embeddings/refresh</code> discards and re-embeds the store
+      (<code>taguru_embedding_width_rebuilds_total</code> counts these). Still pick one width and
+      keep it: the rebuild is automatic, but it re-buys every vector at provider prices, and the
+      calibrated floor below is width-specific too.
     </p>
   </section>
 
