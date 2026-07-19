@@ -34,7 +34,7 @@
 //! payloads vary from a few hundred bytes to half a megabyte, where
 //! cue vectors are all the same size.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use serde_json::value::RawValue;
@@ -91,16 +91,30 @@ pub(crate) struct CachedRetrieval {
 }
 
 struct CacheSlot {
+    /// The same `Arc` the maps key on — carried here so a recency bump
+    /// can re-file the entry under its new tick without cloning any
+    /// key material.
+    key: Arc<RetrievalKey>,
     value: CachedRetrieval,
     cost: usize,
     tick: u64,
 }
 
 /// The map itself: byte-budgeted, recency-tracked by a tick counter
-/// exactly like `CueCache` (a dedicated counter, not `AppState::clock`,
-/// for the same separation-of-concerns reason).
+/// like `CueCache` (a dedicated counter, not `AppState::clock`, for
+/// the same separation-of-concerns reason). Unlike `CueCache`'s
+/// scan-for-the-oldest eviction — fine at a fixed 1024 entries — the
+/// budget here is operator-configurable, and revision churn parks
+/// unreachable entries as evictable dead weight, so eviction order is
+/// kept as a side index: `order` maps tick → key, the two maps move in
+/// lockstep, and evicting the stalest entry is a first-key pop instead
+/// of a scan. Ticks are unique (one per cache operation), so the
+/// `BTreeMap` never collides.
 pub(crate) struct RetrievalCache {
-    entries: HashMap<RetrievalKey, CacheSlot>,
+    entries: HashMap<Arc<RetrievalKey>, CacheSlot>,
+    /// tick → key, ascending = stalest first. Invariant: exactly one
+    /// row per resident slot, at that slot's current `tick`.
+    order: BTreeMap<u64, Arc<RetrievalKey>>,
     /// Sum of every resident slot's `cost`.
     bytes: usize,
     /// `0` = disabled: `lookup` and `insert` both no-op, and
@@ -114,6 +128,7 @@ impl RetrievalCache {
     pub(crate) fn new(budget: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            order: BTreeMap::new(),
             bytes: 0,
             budget,
             tick: 0,
@@ -136,7 +151,9 @@ impl RetrievalCache {
         self.tick += 1;
         let tick = self.tick;
         let slot = self.entries.get_mut(key)?;
+        self.order.remove(&slot.tick);
         slot.tick = tick;
+        self.order.insert(tick, Arc::clone(&slot.key));
         Some(slot.value.clone())
     }
 
@@ -151,29 +168,28 @@ impl RetrievalCache {
             return;
         }
         // Replacing (two identical misses racing) re-accounts the old
-        // slot's bytes; distinct keys evict oldest-first until the new
+        // slot's bytes; distinct keys evict stalest-first until the new
         // slot fits.
         if let Some(previous) = self.entries.remove(&key) {
             self.bytes -= previous.cost;
+            self.order.remove(&previous.tick);
         }
         while self.bytes + cost > self.budget {
-            let Some(oldest) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, slot)| slot.tick)
-                .map(|(key, _)| key.clone())
-            else {
+            let Some((_, stalest)) = self.order.pop_first() else {
                 break;
             };
-            if let Some(evicted) = self.entries.remove(&oldest) {
+            if let Some(evicted) = self.entries.remove(stalest.as_ref()) {
                 self.bytes -= evicted.cost;
             }
         }
         self.tick += 1;
         self.bytes += cost;
+        let key = Arc::new(key);
+        self.order.insert(self.tick, Arc::clone(&key));
         self.entries.insert(
-            key,
+            Arc::clone(&key),
             CacheSlot {
+                key,
                 value,
                 cost,
                 tick: self.tick,
@@ -322,6 +338,11 @@ mod tests {
             assert!(cache.lookup(&key(live)).is_some(), "'{live}' survives");
         }
         assert_eq!(cache.bytes(), cost * 4, "bytes track the survivors");
+        assert_eq!(
+            cache.order.len(),
+            cache.entries.len(),
+            "the eviction-order index stays in lockstep"
+        );
     }
 
     #[test]
@@ -333,12 +354,15 @@ mod tests {
     }
 
     #[test]
-    fn replacing_an_entry_reaccounts_its_bytes() {
+    fn replacing_an_entry_reaccounts_its_bytes_and_order_row() {
         let mut cache = RetrievalCache::new(10_000);
         cache.insert(key("a"), value(400));
         cache.insert(key("a"), value(100));
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.bytes(), slot_cost(&key("a"), &value(100)));
+        // A dangling order row would make a later eviction pop the
+        // LIVE slot in the stale row's place — the replace must drop it.
+        assert_eq!(cache.order.len(), 1, "exactly one order row survives");
     }
 
     #[test]
