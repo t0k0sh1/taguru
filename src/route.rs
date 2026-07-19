@@ -453,9 +453,13 @@ pub(crate) async fn run(config: Option<PathBuf>) {
                     } else {
                         Arc::new(String::new())
                     };
+                    // No key and no scope: the router authenticates
+                    // nobody — the bearer rides the reattached header
+                    // and the SHARDS judge it.
                     crate::remote_mcp::serve(
                         dispatch,
                         instructions,
+                        None,
                         None,
                         body,
                         mcp_max_result_bytes,

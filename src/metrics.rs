@@ -227,6 +227,15 @@ pub struct Metrics {
     /// tenant hammering a full context should read as its own signal,
     /// not as server trouble.
     storage_quota_refusals: AtomicU64,
+    /// Keyring hot reloads (issue #134): applied swaps (unchanged
+    /// no-ops included — the reload RAN) and refusals that kept the
+    /// previous table armed. The refusal counter is the alertable
+    /// half: a rotation the operator believes they performed but that
+    /// never took effect is invisible in request traffic — the old
+    /// keys keep working — so stderr's error line needs a
+    /// dashboard-visible twin.
+    keyring_reloads: AtomicU64,
+    keyring_reload_refusals: AtomicU64,
     /// Replication ("WAL shipping") counters. Uploads and errors are
     /// plain counters; `replication_fenced` LATCHES — unlike
     /// `flush_degraded` there is no retry loop behind it, because a
@@ -786,6 +795,17 @@ impl Metrics {
     /// it surfaces.
     pub fn record_storage_quota_refusal(&self) {
         self.storage_quota_refusals.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one keyring reload attempt (issue #134) by whether a
+    /// table (possibly identical) was armed or the previous one kept.
+    pub fn record_keyring_reload(&self, applied: bool) {
+        let counter = if applied {
+            &self.keyring_reloads
+        } else {
+            &self.keyring_reload_refusals
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_wal_append(&self, ok: bool) {
@@ -1595,6 +1615,20 @@ impl Metrics {
             "counter",
             "Growth writes refused at a declared per-context storage ceiling (TAGURU_CONTEXT_QUOTAS) — graph writes, passage stores, and the import loop's per-batch pre-check all count here.",
             self.storage_quota_refusals.load(Ordering::Relaxed),
+        );
+        push_value(
+            &mut out,
+            "taguru_keyring_reloads_total",
+            "counter",
+            "Keyring hot reloads that armed a table (SIGHUP or config-file change; no-change reloads included).",
+            self.keyring_reloads.load(Ordering::Relaxed),
+        );
+        push_value(
+            &mut out,
+            "taguru_keyring_reload_refusals_total",
+            "counter",
+            "Keyring reloads refused fail-closed (unreadable or malformed sources, or a reload that would disable authentication); the previous table stayed armed.",
+            self.keyring_reload_refusals.load(Ordering::Relaxed),
         );
         push_value(
             &mut out,
@@ -2729,6 +2763,8 @@ mod tests {
         assert!(rendered.contains(
             "taguru_embedding_requests_total{operation=\"resolve\",outcome=\"failed\"} 0"
         ));
+        assert!(rendered.contains("taguru_keyring_reloads_total 0"));
+        assert!(rendered.contains("taguru_keyring_reload_refusals_total 0"));
         assert!(rendered.contains("taguru_contexts_resident 1"));
         assert!(rendered.contains(&format!(
             "taguru_build_info{{version=\"{}\"}} 1",
