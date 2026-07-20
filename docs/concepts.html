@@ -107,6 +107,15 @@
       "A context nobody ever picks" and "a context that gets picked but never answers"
       can both be spotted there.
     </p>
+    <p>
+      <b>Splitting is a precision lever, not only disambiguation.</b> A search or query is
+      scoped to the contexts it names, and a context is the finest unit that scoping can
+      reach. Folding two unrelated frames into one context does not just mix noise into
+      every read — it removes the ability to exclude the irrelevant frame at all, because
+      nothing smaller than the context can be left out from within it. Split frames apart
+      at write time; <a href="#groups">groups</a> (below) bring them back together at
+      read time only when a cue should legitimately reach across.
+    </p>
   </section>
 
   <section id="groups">
