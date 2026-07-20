@@ -124,70 +124,93 @@ impl AppState {
         {
             return Some(Err(io::Error::other(DeadlineExceeded)));
         }
-        let lexical = {
-            let guard = entry.bm25.read();
-            let index = guard.as_ref().expect("index was just built");
-            index.search(&query_grams, pool, eligible)
-        };
+        // The two lanes touch disjoint locks — `entry.bm25` vs. the
+        // `passage_vectors` slot behind `passage_vector_gate` — and
+        // neither reads the other's output, so they run on their own
+        // scoped threads instead of back to back (same `thread::scope`
+        // shape `preload_pinned` uses, sized to exactly the two lanes
+        // there are).
+        let (lexical, (semantic, vector)) = std::thread::scope(|scope| {
+            let lexical_lane = scope.spawn(|| {
+                let guard = entry.bm25.read();
+                let index = guard.as_ref().expect("index was just built");
+                index.search(&query_grams, pool, eligible)
+            });
 
-        // Semantic lane: sweep the paragraph vectors with the
-        // pre-embedded query, then drop candidates below the same floor
-        // semantic_resolve applies to its own cosine matches — the
-        // caller's one-call override beats the context setting beats
-        // the server default (`fence` is already this entry's read
-        // lock, taken above). Every arm also names what it did: the
-        // status the handler serializes into the response's plan.
-        let (semantic, vector): (Vec<(String, u32, u64, f32)>, VectorLaneStatus) = match &cue {
-            Err(error) => (
-                Vec::new(),
-                VectorLaneStatus::QueryEmbeddingFailed(error.clone()),
-            ),
-            Ok(None) => (
-                Vec::new(),
-                VectorLaneStatus::Off {
-                    provider_configured: self.0.embedder.is_some(),
-                },
-            ),
-            Ok(Some(cue)) => match self.passage_vector_gate(&entry, &file_stem(name)) {
-                // The gate checks the model NAME; the width can still
-                // disagree (a dimensions setting changed behind a
-                // stable name, #133). Swept anyway, every row would be
-                // `similarity`'s silent 0.0 — an empty lane the plan
-                // would then call "ran" — so the mismatch is named
-                // instead, exactly like a model change.
-                PassageVectorGate::Ready(vectors) if cue.len() != vectors.dim() => (
-                    Vec::new(),
-                    VectorLaneStatus::WidthChanged {
-                        stored: vectors.dim(),
-                        current: cue.len(),
-                    },
-                ),
-                PassageVectorGate::Ready(vectors) => {
-                    let floor = self.effective_semantic_floor(floor_override, &fence.meta);
-                    (
-                        semantic_lane_hits(
-                            vectors.top_matches(cue, pool, deadline, eligible),
-                            floor,
+            // Semantic lane: sweep the paragraph vectors with the
+            // pre-embedded query, then drop candidates below the same
+            // floor semantic_resolve applies to its own cosine matches
+            // — the caller's one-call override beats the context
+            // setting beats the server default (`fence` is already
+            // this entry's read lock, taken above). Every arm also
+            // names what it did: the status the handler serializes
+            // into the response's plan.
+            let semantic_lane =
+                scope.spawn(|| -> (Vec<(String, u32, u64, f32)>, VectorLaneStatus) {
+                    match &cue {
+                        Err(error) => (
+                            Vec::new(),
+                            VectorLaneStatus::QueryEmbeddingFailed(error.clone()),
                         ),
-                        VectorLaneStatus::Ran { floor },
-                    )
-                }
-                // Unreachable in practice (a cue exists only when the
-                // lane is on), kept for the same defensiveness as
-                // explain's mapping.
-                PassageVectorGate::Disabled => (
-                    Vec::new(),
-                    VectorLaneStatus::Off {
-                        provider_configured: self.0.embedder.is_some(),
-                    },
-                ),
-                PassageVectorGate::Empty => (Vec::new(), VectorLaneStatus::NoVectors),
-                PassageVectorGate::ModelChanged { stored, current } => (
-                    Vec::new(),
-                    VectorLaneStatus::ModelChanged { stored, current },
-                ),
-            },
-        };
+                        Ok(None) => (
+                            Vec::new(),
+                            VectorLaneStatus::Off {
+                                provider_configured: self.0.embedder.is_some(),
+                            },
+                        ),
+                        Ok(Some(cue)) => match self.passage_vector_gate(&entry, &file_stem(name)) {
+                            // The gate checks the model NAME; the width can
+                            // still disagree (a dimensions setting changed
+                            // behind a stable name, #133). Swept anyway,
+                            // every row would be `similarity`'s silent 0.0 —
+                            // an empty lane the plan would then call "ran" —
+                            // so the mismatch is named instead, exactly like
+                            // a model change.
+                            PassageVectorGate::Ready(vectors) if cue.len() != vectors.dim() => (
+                                Vec::new(),
+                                VectorLaneStatus::WidthChanged {
+                                    stored: vectors.dim(),
+                                    current: cue.len(),
+                                },
+                            ),
+                            PassageVectorGate::Ready(vectors) => {
+                                let floor =
+                                    self.effective_semantic_floor(floor_override, &fence.meta);
+                                (
+                                    semantic_lane_hits(
+                                        vectors.top_matches(cue, pool, deadline, eligible),
+                                        floor,
+                                    ),
+                                    VectorLaneStatus::Ran { floor },
+                                )
+                            }
+                            // Unreachable in practice (a cue exists only
+                            // when the lane is on), kept for the same
+                            // defensiveness as explain's mapping.
+                            PassageVectorGate::Disabled => (
+                                Vec::new(),
+                                VectorLaneStatus::Off {
+                                    provider_configured: self.0.embedder.is_some(),
+                                },
+                            ),
+                            PassageVectorGate::Empty => (Vec::new(), VectorLaneStatus::NoVectors),
+                            PassageVectorGate::ModelChanged { stored, current } => (
+                                Vec::new(),
+                                VectorLaneStatus::ModelChanged { stored, current },
+                            ),
+                        },
+                    }
+                });
+
+            // A lane panic surfaces exactly like it would have before
+            // this ran on two threads — propagate, not degrade (unlike
+            // hydrate's ensure_context, nothing here waits on a condvar
+            // that a swallowed panic would otherwise strand forever).
+            (
+                lexical_lane.join().expect("lexical lane thread panicked"),
+                semantic_lane.join().expect("semantic lane thread panicked"),
+            )
+        });
 
         Some(Ok(PassageSearch {
             hits: fuse_passage_lanes(&store, lexical, semantic, limit),

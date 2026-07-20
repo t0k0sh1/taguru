@@ -295,55 +295,55 @@ impl Bm25Index {
         let total = self.live_count as f32;
         let average_length = (self.live_total_length / f64::from(self.live_count)).max(1.0) as f32;
 
-        let mut scores: Vec<f32> = vec![0.0; self.slots.len()];
-        // Separate from `scores`: a `contribution` can underflow to
-        // exactly 0.0 for a vanishingly small `idf` (a gram carried by
-        // nearly every live paragraph), and testing the score itself for
-        // "first hit" would then push the same slot onto `touched` again
-        // on its next matching gram, duplicating it in the result.
-        let mut visited: Vec<bool> = vec![false; self.slots.len()];
-        let mut touched: Vec<u32> = Vec::new();
+        // Keyed by touched slot only, so cost tracks how many paragraphs
+        // the query actually matches rather than the index's total slot
+        // count (which includes tombstones awaiting reclamation). `entry`
+        // establishes "first hit" by key presence, so — unlike a flat
+        // `scores` array — this stays correct even when a `contribution`
+        // underflows to exactly 0.0 (a gram carried by nearly every live
+        // paragraph): the slot is never double-added on a later gram.
+        let mut scores: HashMap<u32, f32> = HashMap::new();
+        // Reused across grams: each gram's alive postings, so idf's
+        // carrier count and the scoring pass both walk them without a
+        // second `.alive` lookup per posting.
+        let mut alive_postings: Vec<&Posting> = Vec::new();
         for gram in query_grams {
             let Some(postings) = self.postings.get(gram) else {
                 continue;
             };
-            let carriers = postings
-                .iter()
-                .filter(|posting| self.slots[posting.slot as usize].alive)
-                .count() as f32;
-            if carriers == 0.0 {
+            alive_postings.clear();
+            alive_postings.extend(
+                postings
+                    .iter()
+                    .filter(|posting| self.slots[posting.slot as usize].alive),
+            );
+            if alive_postings.is_empty() {
                 continue;
             }
+            let carriers = alive_postings.len() as f32;
             let idf = idf(total, carriers);
-            for posting in postings {
+            for &posting in &alive_postings {
                 let slot = &self.slots[posting.slot as usize];
-                if !slot.alive {
-                    continue;
-                }
                 if let Some(allowed) = &allowed
                     && !allowed[slot.source_id as usize]
                 {
                     continue;
                 }
-                if !visited[posting.slot as usize] {
-                    visited[posting.slot as usize] = true;
-                    touched.push(posting.slot);
-                }
-                scores[posting.slot as usize] +=
+                *scores.entry(posting.slot).or_insert(0.0) +=
                     contribution(idf, posting.tf, slot.length, average_length);
             }
         }
 
-        let mut hits: Vec<IndexHit> = touched
+        let mut hits: Vec<IndexHit> = scores
             .into_iter()
-            .filter(|&slot| scores[slot as usize] > 0.0)
-            .map(|slot_id| {
+            .filter(|&(_, score)| score > 0.0)
+            .map(|(slot_id, score)| {
                 let slot = &self.slots[slot_id as usize];
                 (
                     self.sources[slot.source_id as usize].clone(),
                     slot.index,
                     slot.hash,
-                    scores[slot_id as usize],
+                    score,
                 )
             })
             .collect();
