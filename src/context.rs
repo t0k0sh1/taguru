@@ -9,9 +9,13 @@ use serde::{Deserialize, Serialize};
 use crate::deadline::{Deadline, DeadlineExceeded};
 
 mod alias;
+mod community;
 mod entry_index;
 mod image;
 
+pub use community::{
+    COMMUNITY_ALGORITHM, Community, CommunityAnalysis, CommunityAssociation, CommunityMember,
+};
 use entry_index::EntryIndex;
 
 /// Dense id of an interned concept string within one `Context`.

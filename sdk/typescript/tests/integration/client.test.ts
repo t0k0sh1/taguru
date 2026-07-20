@@ -288,6 +288,58 @@ describe("sources and citations", () => {
     await client.contexts.delete(name);
   });
 
+  it("searchCommunities refuses without an artifact and verdicts staleness with one", async () => {
+    // The artifact is normally built by `taguru communities`; building
+    // the same shapes by hand through the API is exactly what makes it
+    // an ordinary context.
+    const name = fresh();
+    await seed(name);
+    const ctx = client.context(name);
+
+    await expect(ctx.searchCommunities("何がテーマか")).rejects.toBeInstanceOf(NotFoundError);
+
+    const derived = `${name}::communities`;
+    await client.contexts.create(derived);
+    const revision = (await client.contexts.get(name)).revision;
+    const manifest = {
+      taguru_communities: 1,
+      algorithm: "louvain-cc/1",
+      source_context: name,
+      revision,
+      levels: 1,
+      communities: [
+        { id: "L0-0", level: 0, fingerprint: "00aa00aa00aa00aa", concept_count: 3 },
+      ],
+    };
+    const dctx = client.context(derived);
+    await dctx.storePassages({
+      "community:L0-0": "青嶺酒造の造りと杜氏についての要約。",
+      "communities:manifest": JSON.stringify(manifest),
+    });
+    await dctx.addAssociations([
+      { subject: "community:L0-0", label: "contains", object: "青嶺酒造", weight: 3.0 },
+      { subject: "community:L0-0", label: "contains", object: "高瀬", weight: 2.0 },
+    ]);
+
+    let page = await ctx.searchCommunities("青嶺酒造");
+    expect(page.derived).toBe(derived);
+    expect(page.stale).toBe(false);
+    expect(page.hits[0]!.community).toBe("L0-0");
+    expect(page.hits[0]!.level).toBe(0);
+    expect(page.hits[0]!.members![0]!.name).toBe("青嶺酒造");
+
+    // A source-graph write flips the verdict immediately.
+    await ctx.addAssociations([
+      { subject: "青嶺酒造", label: "所在地", object: "山あい", weight: 1.0 },
+    ]);
+    page = await ctx.searchCommunities("青嶺酒造");
+    expect(page.stale).toBe(true);
+    expect(page.revision.current_graph).toBeGreaterThan(page.revision.recorded_graph);
+
+    await client.contexts.delete(derived);
+    await client.contexts.delete(name);
+  });
+
   it("answers 501 for embeddings refresh without a provider", async () => {
     const name = fresh();
     await client.contexts.create(name);

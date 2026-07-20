@@ -111,6 +111,8 @@ TAGURU_EXTRACT_PARALLEL  concurrent chunk completions per document (default 1)
       (Ollama, llama.cpp, vLLM). Bedrock and native Anthropic are bridged by any proxy that speaks
       <code>/chat/completions</code>, such as LiteLLM — the same bridge pattern the
       <a href="bedrock.html">Bedrock guide</a> shows for embeddings.
+      <code>taguru communities</code> reads the same <code>TAGURU_EXTRACT_*</code> variables for
+      its community summaries — one provider configuration for every LLM the toolchain talks to.
     </p>
   </section>
 

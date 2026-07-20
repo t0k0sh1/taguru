@@ -11,6 +11,7 @@ mod support;
 
 mod auth;
 mod calibrate;
+mod communities;
 mod directory;
 mod directory_labels_compact;
 mod errors;

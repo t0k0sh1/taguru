@@ -744,7 +744,8 @@ fn finish(
 /// The bearer the server would accept, read the way the server reads
 /// it: `TAGURU_API_TOKEN` outright, else the first `name:token` entry
 /// of `TAGURU_API_TOKENS`. `None` = an unauthenticated server.
-fn bearer_token() -> Option<String> {
+/// Crate-visible: `taguru communities` authenticates the same way.
+pub(crate) fn bearer_token() -> Option<String> {
     if let Ok(token) = std::env::var("TAGURU_API_TOKEN") {
         let token = token.trim();
         if !token.is_empty() {

@@ -223,8 +223,13 @@ fn op_lanes(op: RetrievalCacheOp, revision: ContextRevision) -> [u64; 2] {
         // Passage text and BM25 ride the passages lane; the vector
         // lane's published embeddings and the context's own
         // `semantic_floor` are both config — graph writes change
-        // neither.
-        RetrievalCacheOp::SearchPassages => [revision.passages, revision.config],
+        // neither. Community search reads the DERIVED context's
+        // summaries through the same two lanes; its dependence on the
+        // SOURCE context's graph is carried in the key params (the
+        // source's current graph revision), not in a lane.
+        RetrievalCacheOp::SearchPassages | RetrievalCacheOp::SearchCommunities => {
+            [revision.passages, revision.config]
+        }
     }
 }
 

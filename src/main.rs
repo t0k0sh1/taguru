@@ -3,6 +3,7 @@ mod auth;
 mod bm25;
 mod calibrate;
 mod cli;
+mod communities;
 mod compact;
 mod config;
 #[cfg(test)]
@@ -744,6 +745,12 @@ fn routes(
             "/contexts/{name}/vocabulary/audit",
             post(api::audit_vocabulary),
         )
+        // Community detection sweeps every edge of the graph — the
+        // same full-scan class as the vocabulary audit.
+        .route(
+            "/contexts/{name}/communities",
+            get(api::analyze_communities),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             heavy_ops_limiter.clone(),
             limits::enforce_heavy_ops,
@@ -837,6 +844,10 @@ fn routes(
         .route(
             "/contexts/{name}/sources/search/explain",
             post(api::explain_search_passages),
+        )
+        .route(
+            "/contexts/{name}/communities/search",
+            post(api::search_communities),
         )
         .route(
             "/contexts/{name}/sources/retract",

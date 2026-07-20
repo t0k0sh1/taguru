@@ -25,6 +25,7 @@ from .._models import (
     Association,
     BatchApplyResult,
     Citation,
+    CommunityPage,
     CompactOutcome,
     ConceptDescription,
     ContextMeta,
@@ -934,6 +935,35 @@ class Context:
         body = drop_none({"query": query, "limit": limit, "semantic_floor": semantic_floor})
         result = self._post("/sources/search", body)
         return decode(PassagePage, result)  # type: ignore[no-any-return]
+
+    def search_communities(
+        self,
+        query: str,
+        *,
+        limit: int | None = None,
+        semantic_floor: float | None = None,
+        derived: str | None = None,
+    ) -> CommunityPage:
+        """Global search over this context's community-summary artifact
+        (built offline by ``taguru communities``) — corpus-overview
+        questions passage search answers poorly. Hits are ranked LLM
+        summaries of densely connected concept clusters, each with its
+        hierarchy level, member concepts, and sizes; the page's ``stale``
+        flag means the source graph moved since derivation. ``derived``
+        names the artifact context when it was built with ``--into``
+        (default ``{name}::communities``). A missing artifact raises with
+        the build command in the message — it is not an empty result.
+        """
+        body = drop_none(
+            {
+                "query": query,
+                "limit": limit,
+                "semantic_floor": semantic_floor,
+                "derived": derived,
+            }
+        )
+        result = self._post("/communities/search", body)
+        return decode(CommunityPage, result)  # type: ignore[no-any-return]
 
     def explain_search_passages(
         self,

@@ -768,8 +768,10 @@ fn expand_documents(paths: &[String]) -> Result<Vec<PathBuf>, String> {
 
 /// OpenAI-compatible `/chat/completions` client — deliberately the
 /// same protocol choice as embeddings: one wire shape here, vendor
-/// APIs bridged outside (docs/bedrock.html shows how).
-struct ChatClient {
+/// APIs bridged outside (docs/bedrock.html shows how). Crate-visible
+/// because `taguru communities` reuses it (same env vars, same retry
+/// discipline) for its summary prompts.
+pub(crate) struct ChatClient {
     url: String,
     model: String,
     api_key: Option<String>,
@@ -777,7 +779,7 @@ struct ChatClient {
 }
 
 impl ChatClient {
-    fn from_env() -> Result<Self, String> {
+    pub(crate) fn from_env() -> Result<Self, String> {
         let url = std::env::var("TAGURU_EXTRACT_URL").map_err(|_| {
             "TAGURU_EXTRACT_URL is not set — extract needs an OpenAI-compatible \
              /chat/completions endpoint (docs/extract.html)"
@@ -806,7 +808,7 @@ impl ChatClient {
     /// between attempts; a 429 that carries `Retry-After` uses that
     /// delay instead, verbatim. Everything else is the caller's
     /// problem.
-    fn complete(&self, messages: &[serde_json::Value]) -> Result<String, String> {
+    pub(crate) fn complete(&self, messages: &[serde_json::Value]) -> Result<String, String> {
         let body = serde_json::json!({
             "model": self.model,
             "temperature": 0,

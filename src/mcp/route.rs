@@ -327,6 +327,18 @@ pub fn route_tool(
                 )),
             )
         }
+        "search_communities" => {
+            let path = format!("{}/communities/search", context_path("context")?);
+            need(arguments, "query")?;
+            (
+                "POST",
+                path,
+                Some(pick(
+                    arguments,
+                    &["query", "limit", "semantic_floor", "derived"],
+                )),
+            )
+        }
         "explain_search" => {
             let path = format!("{}/sources/search/explain", context_path("context")?);
             need(arguments, "query")?;

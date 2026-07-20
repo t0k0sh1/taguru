@@ -71,6 +71,15 @@ lanes ran there and why not when one was skipped, with the effective
 cosine floor. Deep dives (`activate`, `explore`) stay per-context:
 search across, then pull the thread where it answered.
 
+For corpus-overview questions ("what are the main themes here?") there
+is a third lane: `taguru communities` detects communities on the
+association graph server-side and derives an artifact of LLM summaries
+— an ordinary context, incremental by content fingerprint, so an
+unchanged graph re-runs without a single LLM call — and
+`POST /contexts/{name}/communities/search` (MCP: `search_communities`)
+ranks those summaries with an honest staleness verdict when the graph
+has moved on since.
+
 For the endpoint list and the ingest/retrieval discipline, ask the
 running server: `GET /protocol`. A guided tour is
 [Getting started](https://t0k0sh1.github.io/taguru/getting-started.html).

@@ -23,6 +23,9 @@ use crate::registry::{
 
 mod aliases;
 mod associations;
+// pub(crate): `taguru communities` (the CLI) shares the manifest
+// shape and the artifact naming/label constants with the verbs.
+pub(crate) mod communities;
 mod contexts;
 mod coverage;
 mod explore;
@@ -35,6 +38,7 @@ mod vocabulary;
 
 pub use aliases::{add_aliases, list_aliases, remove_aliases};
 pub use associations::{add_associations, retract_association};
+pub use communities::{analyze_communities, search_communities};
 pub use contexts::{
     create_context, delete_context, flush_all, get_context, list_contexts, maintenance_compact,
     protocol, protocol_text, protocol_trailer, rename_context, update_context,

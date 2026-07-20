@@ -15,6 +15,7 @@ import type {
   Association,
   BatchApplyResult,
   Citation,
+  CommunityPage,
   CompactOutcome,
   ConceptDescription,
   ContextMeta,
@@ -985,6 +986,33 @@ export class Context {
       dropUndefined({ query, limit: options.limit, semantic_floor: options.semantic_floor }),
     );
     return result as PassagePage;
+  }
+
+  /**
+   * Global search over this context's community-summary artifact (built
+   * offline by `taguru communities`) — corpus-overview questions passage
+   * search answers poorly. Hits are ranked LLM summaries of densely
+   * connected concept clusters, each with its hierarchy level, member
+   * concepts, and sizes; the page's `stale` flag means the source graph
+   * moved since derivation. `derived` names the artifact context when it
+   * was built with `--into` (default `{name}::communities`). A missing
+   * artifact throws with the build command in the message — it is not an
+   * empty result.
+   */
+  async searchCommunities(
+    query: string,
+    options: { limit?: number; semantic_floor?: number; derived?: string } = {},
+  ): Promise<CommunityPage> {
+    const result = await this.post(
+      "/communities/search",
+      dropUndefined({
+        query,
+        limit: options.limit,
+        semantic_floor: options.semantic_floor,
+        derived: options.derived,
+      }),
+    );
+    return result as CommunityPage;
   }
 
   /**

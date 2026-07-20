@@ -186,7 +186,7 @@ pub async fn list_sources(
 /// The passage store exists but could not be loaded — its snapshot and
 /// log hold acknowledged writes, so this is a 500 pointing at disk,
 /// never a silent empty answer.
-fn passages_unreadable(
+pub(crate) fn passages_unreadable(
     state: &AppState,
     io_error: std::io::Error,
     started_at: Instant,
@@ -402,7 +402,8 @@ impl SearchContextPlan {
     /// One context's plan entry from the registry's account of its
     /// search — the vector arm maps through the same reason strings
     /// explain emits, so the two surfaces cannot drift apart in prose.
-    fn of(context: &str, lanes: &crate::registry::PassageSearchLanes) -> Self {
+    /// Shared with `search_communities`, whose ranking IS this search.
+    pub(crate) fn of(context: &str, lanes: &crate::registry::PassageSearchLanes) -> Self {
         use crate::registry::{PassageSearchLanes, VectorLaneStatus};
 
         let both = |reason: &str| SearchLanesPlan {
