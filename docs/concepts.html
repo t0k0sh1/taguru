@@ -228,6 +228,16 @@
       how many of the context's sources were eligible, so a narrow filter and "nothing matched"
       stay distinguishable.
     </p>
+    <p>
+      At scale, the vector lane turns <b>approximate</b>: at 10,000 paragraph vectors and up in one
+      context, an IVF index trades the exact sweep for a probe over a handful of clusters, widening
+      until it has gathered a comfortable oversample before ranking. The response shape, the floor,
+      and every explain verdict stay exactly as they are below the threshold — but the probe can
+      trade a little recall for that speed, so the result set itself is not guaranteed bit-for-bit
+      identical to an exact sweep, only close to it in measured practice. The mechanics — cluster
+      count, build timing, the oversample target, and the measured recall — are in
+      <a href="architecture.html#search">Internal architecture</a>.
+    </p>
     <p class="note">
       <b>Search with the shape of the answer, not the question.</b> Most embedding models place a
       question ("Which plan includes SSO?") farther from its answer than the answering sentence
