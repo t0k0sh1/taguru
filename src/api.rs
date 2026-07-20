@@ -831,6 +831,16 @@ pub(crate) const MAX_QUESTIONS_PER_PARAGRAPH: usize = 8;
 /// there is no per-paragraph cap to match `MAX_QUESTIONS_PER_PARAGRAPH`.
 pub(crate) const MAX_SECTION_BYTES: usize = 512;
 
+/// Byte cap on one source tag (#167) — a label a filter selects on,
+/// not a description; anything longer is misuse of the field.
+pub(crate) const MAX_TAG_BYTES: usize = 128;
+
+/// How many tags one source may carry, and how many one search filter
+/// may name — tags are resident metadata riding every list_sources
+/// page and every filter's eligibility pass, so both sides share one
+/// small bound.
+pub(crate) const MAX_TAGS_PER_SOURCE: usize = 32;
+
 /// Per-request cap on the number of passage sources one store may
 /// carry. Each source is a whole document tokenized and folded into the
 /// resident index under the context's lock — heavier per item than an

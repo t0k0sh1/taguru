@@ -427,6 +427,12 @@ pub(crate) struct Batch {
     /// Section start markers, (paragraph index, label) — same
     /// structure-here/range-at-store-time split as `questions`.
     sections: Vec<(u32, String)>,
+    /// Source metadata (#167), riding the passage line. `stored_at`
+    /// present means an export being restored — the original stamp is
+    /// preserved; absent means the store stamps the import time.
+    stored_at: Option<u64>,
+    date: Option<u64>,
+    tags: Vec<String>,
     associations: Vec<AssocOp>,
     concepts: BTreeMap<String, String>,
     labels: BTreeMap<String, String>,
@@ -601,6 +607,15 @@ enum AliasKind {
 #[serde(deny_unknown_fields)]
 struct PassageLine {
     passage: String,
+    /// Source metadata (#167). All three default to absent, so every
+    /// pre-metadata export still parses; `deny_unknown_fields` above
+    /// still refuses fields this taguru does not know.
+    #[serde(default)]
+    stored_at: Option<u64>,
+    #[serde(default)]
+    date: Option<u64>,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -847,6 +862,9 @@ fn parse_header(value: serde_json::Value, number: usize) -> Result<Batch, String
         passage: None,
         questions: Vec::new(),
         sections: Vec::new(),
+        stored_at: None,
+        date: None,
+        tags: Vec::new(),
         associations: Vec::new(),
         concepts: BTreeMap::new(),
         labels: BTreeMap::new(),
@@ -918,12 +936,28 @@ fn parse_op(
                 op.passage.len()
             ));
         }
+        if op.tags.len() > crate::api::MAX_TAGS_PER_SOURCE {
+            return Err(format!(
+                "line {number}: {} tags where a source carries at most {}",
+                op.tags.len(),
+                crate::api::MAX_TAGS_PER_SOURCE
+            ));
+        }
+        for tag in &op.tags {
+            check_size(number, "tag", tag, crate::api::MAX_TAG_BYTES)?;
+            check_nonempty(number, "tag", tag)?;
+        }
         if batch.passage.replace(op.passage).is_some() {
             return Err(format!(
                 "line {number}: a second passage line — one batch file carries at most \
                  one passage (the header source's original text)"
             ));
         }
+        // Metadata rides the (single) passage line, so these can only
+        // land once — behind the replace check above.
+        batch.stored_at = op.stored_at;
+        batch.date = op.date;
+        batch.tags = op.tags;
     } else if object.contains_key("question") {
         let op: QuestionLine = serde_json::from_value(value)
             .map_err(|error| format!("line {number}: question: {error}"))?;
@@ -1239,6 +1273,11 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
                         text: text.clone(),
                         questions: batch.questions.clone(),
                         sections: batch.sections.clone(),
+                        meta: crate::passages::SourceMeta {
+                            stored_at: batch.stored_at,
+                            date: batch.date,
+                            tags: batch.tags.clone(),
+                        },
                     },
                 )]),
             )
@@ -1777,6 +1816,49 @@ mod tests {
         let giant = "x".repeat(MAX_LINE_BYTES + 1);
         let error = parse(&format!("{HEADER}\n{giant}")).unwrap_err();
         assert!(error.contains("line cap"), "{error}");
+    }
+
+    /// Source metadata (#167) rides the passage line; a pre-metadata
+    /// line still parses (all three fields default), and the tag
+    /// vocabulary is the same one the HTTP store enforces.
+    #[test]
+    fn passage_line_metadata_parses_validates_and_defaults() {
+        let batch = parse(&format!(
+            "{HEADER}\n\
+             {{\"passage\": \"本文。\", \"stored_at\": 1700000000, \"date\": 1000, \
+              \"tags\": [\"酒\", \"蔵\"]}}\n"
+        ))
+        .unwrap();
+        assert_eq!(batch.stored_at, Some(1_700_000_000));
+        assert_eq!(batch.date, Some(1_000));
+        assert_eq!(batch.tags, vec!["酒".to_string(), "蔵".to_string()]);
+
+        let bare = parse(&format!("{HEADER}\n{{\"passage\": \"本文。\"}}\n")).unwrap();
+        assert_eq!(
+            (bare.stored_at, bare.date, bare.tags.len()),
+            (None, None, 0)
+        );
+
+        let empty = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\", \"tags\": [\"\"]}}\n"
+        ))
+        .unwrap_err();
+        assert!(empty.contains("tag"), "{empty}");
+        let oversized = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\", \"tags\": [\"{}\"]}}\n",
+            "t".repeat(crate::api::MAX_TAG_BYTES + 1)
+        ))
+        .unwrap_err();
+        assert!(oversized.contains("exceeds"), "{oversized}");
+        let too_many = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\", \"tags\": [{}]}}\n",
+            (0..=crate::api::MAX_TAGS_PER_SOURCE)
+                .map(|i| format!("\"t{i}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+        .unwrap_err();
+        assert!(too_many.contains("at most"), "{too_many}");
     }
 
     #[test]

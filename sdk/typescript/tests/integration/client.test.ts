@@ -288,6 +288,54 @@ describe("sources and citations", () => {
     await client.contexts.delete(name);
   });
 
+  it("source metadata lists back under entries and pre-filters search (#167)", async () => {
+    const name = fresh();
+    await client.contexts.create(name, { description: "metadata" });
+    const ctx = client.context(name);
+    await ctx.storePassages(
+      {
+        "a.md": "共通語の資料。\n\n酒の由来について。",
+        "b.md": "共通語の資料。\n\n蔵開きの祭りについて。",
+      },
+      { tags: { "a.md": ["酒"] }, dates: { "a.md": 1000 } },
+    );
+
+    const listed = await ctx.listSources();
+    const entries = new Map(listed.entries.map((entry) => [entry.name, entry]));
+    expect(entries.get("a.md")!.tags).toEqual(["酒"]);
+    expect(entries.get("a.md")!.date).toBe(1000);
+    expect(entries.get("a.md")!.stored_at).toBeDefined();
+    expect(entries.get("b.md")!.tags).toBeUndefined();
+
+    const filtered = await ctx.searchPassages("共通語の資料", { tags: ["酒"] });
+    expect(new Set(filtered.hits.map((hit) => hit.source))).toEqual(new Set(["a.md"]));
+    expect(filtered.plan.contexts[0]!.filter).toEqual({
+      eligible_sources: 1,
+      total_sources: 2,
+    });
+
+    // The half-open window over date ?? stored_at: b.md's only
+    // timestamp is the stamp (now), far past the fixture date.
+    const dated = await ctx.searchPassages("共通語の資料", { until: 1500 });
+    expect(new Set(dated.hits.map((hit) => hit.source))).toEqual(new Set(["a.md"]));
+    const unfiltered = await ctx.searchPassages("共通語の資料");
+    expect(unfiltered.hits).toHaveLength(2);
+    expect(unfiltered.plan.contexts[0]!.filter).toBeUndefined();
+
+    const explained = await ctx.explainSearchPassages("共通語の資料", "b.md", {
+      tags: ["酒"],
+    });
+    expect(explained.verdict).toBe("filtered_out");
+
+    const cross = await client.searchPassages("共通語の資料", {
+      contexts: [name],
+      tags: ["酒"],
+    });
+    expect(new Set(cross.hits.map((hit) => hit.source))).toEqual(new Set(["a.md"]));
+    expect(cross.plan.contexts[0]!.filter?.eligible_sources).toBe(1);
+    await client.contexts.delete(name);
+  });
+
   it("searchCommunities refuses without an artifact and verdicts staleness with one", async () => {
     // The artifact is normally built by `taguru communities`; building
     // the same shapes by hand through the API is exactly what makes it

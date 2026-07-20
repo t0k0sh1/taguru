@@ -71,6 +71,15 @@ lanes ran there and why not when one was skipped, with the effective
 cosine floor. Deep dives (`activate`, `explore`) stay per-context:
 search across, then pull the thread where it answered.
 
+Sources carry **metadata**: a server-stamped `stored_at`, an optional
+user-supplied document `date`, and `tags` — accepted at store and
+import time, listed back by `GET /contexts/{name}/sources`, and
+filterable at search time: passage search takes `tags` (any-of) and a
+half-open `since`/`until` window (epoch seconds, over `date ??
+stored_at`), applied *before* the retrieval lanes run, so "only
+documents tagged X from the last year" is a server-side eligibility
+set, not client-side post-filtering that silently starves `limit`.
+
 For corpus-overview questions ("what are the main themes here?") there
 is a third lane: `taguru communities` detects communities on the
 association graph server-side and derives an artifact of LLM summaries

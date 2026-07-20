@@ -328,6 +328,9 @@ class Taguru:
         groups: Sequence[str] | None = None,
         limit: int | None = None,
         semantic_floor: float | None = None,
+        tags: Sequence[str] | None = None,
+        since: int | None = None,
+        until: int | None = None,
     ) -> CrossPassagePage:
         """Paragraph search across several contexts at once, hits tagged.
 
@@ -336,6 +339,10 @@ class Taguru:
         context's best hit first; ``score`` compares within one context only.
         ``semantic_floor`` overrides every target's vector-lane cosine floor
         for this call (it floors only that lane; BM25-only hits still return).
+        ``tags`` (any-of) and the half-open ``[since, until)`` epoch-second
+        window over each source's ``date ?? stored_at`` pre-filter which
+        sources may answer, before the lanes run and identically on every
+        target; a source without the respective metadata never matches.
         The page's ``plan`` names every context actually searched and each
         lane's verdict there — see :class:`SearchPlan`.
         """
@@ -346,6 +353,9 @@ class Taguru:
                 "query": query,
                 "limit": limit,
                 "semantic_floor": semantic_floor,
+                "tags": list(tags) if tags is not None else None,
+                "since": since,
+                "until": until,
             }
         )
         result = self._request_json("POST", "/sources/search", json_body=body)
@@ -895,18 +905,28 @@ class Context:
         *,
         questions: Mapping[str, Sequence[QuestionSpec]] | None = None,
         sections: Mapping[str, Sequence[SectionSpec]] | None = None,
+        tags: Mapping[str, Sequence[str]] | None = None,
+        dates: Mapping[str, int] | None = None,
     ) -> StoredPassages:
         """Register source-id → full-text passages (replaces per source).
 
         Store the document as-is: the server splits paragraphs on blank
         lines. ``questions``/``sections`` attach per-paragraph doc2query
-        questions and section labels.
+        questions and section labels. ``tags`` and ``dates`` (epoch
+        seconds, the document's own time) attach per-source metadata that
+        ``search_passages`` can then filter on; the server stamps
+        ``stored_at`` itself. Storage replaces per source wholesale,
+        metadata included.
         """
         body: dict[str, Any] = {"passages": dict(passages)}
         if questions is not None:
             body["questions"] = {key: list(value) for key, value in questions.items()}
         if sections is not None:
             body["sections"] = {key: list(value) for key, value in sections.items()}
+        if tags is not None:
+            body["tags"] = {key: list(value) for key, value in tags.items()}
+        if dates is not None:
+            body["dates"] = dict(dates)
         result = self._post("/sources", body)
         return decode(StoredPassages, result)  # type: ignore[no-any-return]
 
@@ -921,6 +941,9 @@ class Context:
         *,
         limit: int | None = None,
         semantic_floor: float | None = None,
+        tags: Sequence[str] | None = None,
+        since: int | None = None,
+        until: int | None = None,
     ) -> PassagePage:
         """Paragraph search (BM25 fused with embeddings where configured).
 
@@ -928,11 +951,25 @@ class Context:
         declarative sentence lands nearer the text you hope to find.
         ``semantic_floor`` overrides the vector lane's cosine floor for this
         call — over the context setting, over the server default (it floors
-        only that lane; BM25-only hits still return). The page's ``plan``
-        says whether the semantic lane actually ran — and why not, when it
-        did not — see :class:`SearchPlan`.
+        only that lane; BM25-only hits still return). ``tags`` (any-of) and
+        the half-open ``[since, until)`` epoch-second window over each
+        source's ``date ?? stored_at`` pre-filter which sources may answer,
+        before either lane runs — a source without the respective metadata
+        never matches, and the plan's ``filter`` block reports how many
+        sources were eligible. The page's ``plan`` says whether the
+        semantic lane actually ran — and why not, when it did not — see
+        :class:`SearchPlan`.
         """
-        body = drop_none({"query": query, "limit": limit, "semantic_floor": semantic_floor})
+        body = drop_none(
+            {
+                "query": query,
+                "limit": limit,
+                "semantic_floor": semantic_floor,
+                "tags": list(tags) if tags is not None else None,
+                "since": since,
+                "until": until,
+            }
+        )
         result = self._post("/sources/search", body)
         return decode(PassagePage, result)  # type: ignore[no-any-return]
 
@@ -973,12 +1010,17 @@ class Context:
         paragraph: int | None = None,
         limit: int | None = None,
         semantic_floor: float | None = None,
+        tags: Sequence[str] | None = None,
+        since: int | None = None,
+        until: int | None = None,
     ) -> SearchExplanation:
         """Why ``source`` did (or didn't) appear for ``query``. ``paragraph``
         (0-based) picks which of the source's paragraphs to account for;
-        omitted means its best showing. Pass the ``semantic_floor`` of the
-        search call being explained, or the explanation accounts for a call
-        nobody made. A diagnosed miss is a 200, not an error."""
+        omitted means its best showing. Pass the ``semantic_floor`` — and
+        the ``tags``/``since``/``until`` filter — of the search call being
+        explained, or the explanation accounts for a call nobody made (a
+        source the filter excludes verdicts ``filtered_out``). A diagnosed
+        miss is a 200, not an error."""
         body = drop_none(
             {
                 "query": query,
@@ -986,6 +1028,9 @@ class Context:
                 "paragraph": paragraph,
                 "limit": limit,
                 "semantic_floor": semantic_floor,
+                "tags": list(tags) if tags is not None else None,
+                "since": since,
+                "until": until,
             }
         )
         result = self._post("/sources/search/explain", body)

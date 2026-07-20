@@ -136,10 +136,27 @@ pub async fn citation(
 
 /// One page of registered source ids, keyset by id — the list grows
 /// with every ingested document, so it pages like the directory.
+/// `entries` carries each listed source's metadata (#167) over the
+/// same page window; `sources` stays the bare id list it always was,
+/// so existing consumers keep parsing.
 #[derive(Serialize)]
 pub struct SourcePage {
     pub total: usize,
     pub sources: Vec<String>,
+    pub entries: Vec<SourceEntry>,
+}
+
+/// One listed source with its metadata (#167). Absent metadata omits
+/// its key — a source stored before metadata existed lists as bare.
+#[derive(Serialize)]
+pub struct SourceEntry {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 pub async fn list_sources(
@@ -155,29 +172,46 @@ pub async fn list_sources(
     }
     // Same cold-load path as lookup_passages; keep it off the async
     // worker.
-    match tokio::task::block_in_place(|| state.passage_sources(&name)) {
+    match tokio::task::block_in_place(|| state.passage_source_entries(&name)) {
         None => not_found(&name, started_at),
-        // `passage_sources` already yields BTreeMap-key order — no sort.
-        Some(Ok(sources)) => {
-            let sources: Vec<String> = match query.prefix.as_deref() {
-                Some(prefix) => sources
+        // `passage_source_entries` already yields BTreeMap-key order —
+        // no sort. One read feeds both `sources` and `entries`, so the
+        // two views of the page can never disagree.
+        Some(Ok(entries)) => {
+            let entries: Vec<(String, crate::passages::SourceMeta)> = match query.prefix.as_deref()
+            {
+                Some(prefix) => entries
                     .into_iter()
-                    .filter(|source| source.starts_with(prefix))
+                    .filter(|(source, _)| source.starts_with(prefix))
                     .collect(),
-                None => sources,
+                None => entries,
             };
-            let total = sources.len();
-            let sources: Vec<String> = sources
+            let total = entries.len();
+            let entries: Vec<SourceEntry> = entries
                 .into_iter()
-                .filter(|source| {
+                .filter(|(source, _)| {
                     query
                         .after
                         .as_deref()
                         .is_none_or(|after| source.as_str() > after)
                 })
                 .take(limit)
+                .map(|(name, meta)| SourceEntry {
+                    name,
+                    stored_at: meta.stored_at,
+                    date: meta.date,
+                    tags: meta.tags,
+                })
                 .collect();
-            ok(SourcePage { total, sources }, started_at)
+            let sources = entries.iter().map(|entry| entry.name.clone()).collect();
+            ok(
+                SourcePage {
+                    total,
+                    sources,
+                    entries,
+                },
+                started_at,
+            )
         }
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
     }
@@ -282,6 +316,84 @@ pub struct SearchPassagesRequest {
     /// with absolute meaning here (the fused score is rank arithmetic,
     /// and raw BM25 is corpus-local).
     pub semantic_floor: Option<f32>,
+    /// Pre-lane source filter (#167): only sources carrying at least
+    /// one of these tags may answer. Empty constrains nothing.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Pre-lane time window (#167), epoch seconds, half-open
+    /// `[since, until)` over each source's `date ?? stored_at` —
+    /// sources with neither (stored before metadata existed) never
+    /// match a time filter.
+    pub since: Option<u64>,
+    pub until: Option<u64>,
+}
+
+/// Validates and normalizes one request's filter fields into the
+/// registry's [`SourceFilter`] — `Ok(None)` when nothing constrains
+/// (no tags, no window), so an unfiltered request stays on exactly the
+/// pre-#167 path. Tags are sorted and deduplicated HERE, before the
+/// filter reaches any cache key: two spellings of one filter must
+/// mint one key. Shared by search, cross search, and explain, so the
+/// three surfaces cannot drift on what a legal filter is.
+fn source_filter(
+    tags: &[String],
+    since: Option<u64>,
+    until: Option<u64>,
+    started_at: Instant,
+) -> Result<Option<crate::passages::SourceFilter>, Box<Response>> {
+    if tags.len() > super::MAX_TAGS_PER_SOURCE {
+        return Err(Box::new(error(
+            ErrorCode::InvalidArgument,
+            format!(
+                "{} filter tags where at most {} may be named",
+                tags.len(),
+                super::MAX_TAGS_PER_SOURCE
+            ),
+            started_at,
+        )));
+    }
+    for tag in tags {
+        if let Some(refusal) = empty("a filter tag", tag, started_at) {
+            return Err(Box::new(refusal));
+        }
+        if let Some(refusal) = oversized("a filter tag", tag, super::MAX_TAG_BYTES, started_at) {
+            return Err(Box::new(refusal));
+        }
+    }
+    if let (Some(since), Some(until)) = (since, until)
+        && since >= until
+    {
+        return Err(Box::new(error(
+            ErrorCode::InvalidArgument,
+            format!(
+                "since {since} is not before until {until} — the window is half-open \
+                 [since, until) and this one selects nothing"
+            ),
+            started_at,
+        )));
+    }
+    let mut tags = tags.to_vec();
+    tags.sort();
+    tags.dedup();
+    if tags.is_empty() && since.is_none() && until.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(crate::passages::SourceFilter { tags, since, until }))
+}
+
+/// The filter fields exactly as they enter a retrieval cache key —
+/// one value serialized into BOTH the main key and the sans-query
+/// semantic bucket of each search variant, so the two hand-built
+/// tuples can never disagree about the filter (the semantic tier
+/// compares query text only; a filter missing from its bucket params
+/// would pair filter-A registrations with filter-B lookups). `None`
+/// (no filter) serializes as `null`, distinct from every real filter.
+fn filter_key_params(
+    filter: &Option<crate::passages::SourceFilter>,
+) -> Option<(&Vec<String>, Option<u64>, Option<u64>)> {
+    filter
+        .as_ref()
+        .map(|filter| (&filter.tags, filter.since, filter.until))
 }
 
 /// One PARAGRAPH matched by passage search: the text lane, for
@@ -355,10 +467,32 @@ pub struct SearchPlan {
 }
 
 /// One searched context's account, mirroring the per-hit `lanes` shape.
+/// `filter` is present exactly when the request carried a source
+/// filter (#167): how many sources were eligible to answer, out of how
+/// many the context stores — so an empty page under a narrow filter is
+/// diagnosable from the response alone.
 #[derive(Serialize, Deserialize)]
 pub struct SearchContextPlan {
     pub context: String,
     pub lanes: SearchLanesPlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<FilterPlan>,
+}
+
+/// The source filter's account for one searched context (#167).
+#[derive(Serialize, Deserialize)]
+pub struct FilterPlan {
+    pub eligible_sources: usize,
+    pub total_sources: usize,
+}
+
+impl FilterPlan {
+    fn of(report: Option<crate::registry::SourceFilterReport>) -> Option<Self> {
+        report.map(|report| Self {
+            eligible_sources: report.eligible,
+            total_sources: report.total,
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -402,8 +536,14 @@ impl SearchContextPlan {
     /// One context's plan entry from the registry's account of its
     /// search — the vector arm maps through the same reason strings
     /// explain emits, so the two surfaces cannot drift apart in prose.
-    /// Shared with `search_communities`, whose ranking IS this search.
-    pub(crate) fn of(context: &str, lanes: &crate::registry::PassageSearchLanes) -> Self {
+    /// Shared with `search_communities`, whose ranking IS this search
+    /// (it passes no filter — its sources are synthetic `community:`
+    /// rows that carry no user metadata).
+    pub(crate) fn of(
+        context: &str,
+        lanes: &crate::registry::PassageSearchLanes,
+        filter: Option<FilterPlan>,
+    ) -> Self {
         use crate::registry::{PassageSearchLanes, VectorLaneStatus};
 
         let both = |reason: &str| SearchLanesPlan {
@@ -439,6 +579,7 @@ impl SearchContextPlan {
         Self {
             context: context.to_string(),
             lanes,
+            filter,
         }
     }
 }
@@ -505,6 +646,13 @@ pub async fn search_passages(
         return deadline_exceeded(started_at);
     }
     let limit = clamp(request.limit, 5, MAX_MATCH_LIMIT);
+    let filter = match source_filter(&request.tags, request.since, request.until, started_at) {
+        Ok(filter) => filter,
+        Err(refusal) => return *refusal,
+    };
+    // The one filter value BOTH key tuples below serialize — see
+    // `filter_key_params` for why sharing it is load-bearing.
+    let filter_params = filter_key_params(&filter);
     // Minted before the search — see `retrieval_key`. The raw
     // `semantic_floor` goes in unclamped: two spellings of one
     // effective floor just occupy two entries, which is only a hit-rate
@@ -517,6 +665,7 @@ pub async fn search_passages(
             &request.query,
             limit,
             request.semantic_floor,
+            &filter_params,
         ))
         .ok(),
     );
@@ -540,16 +689,18 @@ pub async fn search_passages(
         }
         // The semantic tier (see `semantic_retrieval`): the bucket is
         // the key params with the query stripped, so equivalence can
-        // only pair requests that agree on everything else. Blocking
-        // section — the probe may pay the query embedding the search
-        // below would otherwise pay (same cue cache, one provider
-        // call either way).
-        if let Ok(sans_query) =
-            serde_json::to_string(&("search_passages", limit, request.semantic_floor))
-            && let Some(probe) = tokio::task::block_in_place(|| {
-                state.semantic_retrieval(key, &sans_query, &request.query, deadline)
-            })
-        {
+        // only pair requests that agree on everything else — the
+        // filter included. Blocking section — the probe may pay the
+        // query embedding the search below would otherwise pay (same
+        // cue cache, one provider call either way).
+        if let Ok(sans_query) = serde_json::to_string(&(
+            "search_passages",
+            limit,
+            request.semantic_floor,
+            &filter_params,
+        )) && let Some(probe) = tokio::task::block_in_place(|| {
+            state.semantic_retrieval(key, &sans_query, &request.query, deadline)
+        }) {
             if let Some(served) = probe.served {
                 replay_cached_search(&state, key, &served.value);
                 if search_log_enabled() {
@@ -583,6 +734,7 @@ pub async fn search_passages(
             &request.query,
             limit,
             request.semantic_floor,
+            filter.as_ref(),
             deadline,
         )
     });
@@ -626,7 +778,11 @@ pub async fn search_passages(
             let key = key.filter(|_| !found.lanes.embedding_failed());
             let payload = PassagePage {
                 plan: SearchPlan {
-                    contexts: vec![SearchContextPlan::of(&name, &found.lanes)],
+                    contexts: vec![SearchContextPlan::of(
+                        &name,
+                        &found.lanes,
+                        FilterPlan::of(found.filter),
+                    )],
                 },
                 hits: found.hits.into_iter().map(PassageHit::from).collect(),
             };
@@ -664,6 +820,13 @@ pub struct ExplainSearchRequest {
     /// the same value, or the explanation accounts for a call nobody
     /// made.
     pub semantic_floor: Option<f32>,
+    /// The source filter of the search being explained (#167) — same
+    /// rule as the floor: pass the same values, or the explanation
+    /// accounts for a call nobody made.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub since: Option<u64>,
+    pub until: Option<u64>,
 }
 
 /// One verdict for "why didn't (or did) this source appear for this
@@ -673,10 +836,12 @@ pub struct ExplainSearchRequest {
 /// success, not its failure.
 #[derive(Serialize)]
 pub struct SearchExplanation {
-    /// `not_stored` | `paragraph_out_of_range` | `no_query_terms` |
-    /// `no_term_overlap` | `below_cutoff` | `served`, first match wins
-    /// in that order (a served paragraph is served, whatever else is
-    /// true of it).
+    /// `not_stored` | `paragraph_out_of_range` | `filtered_out` |
+    /// `no_query_terms` | `no_term_overlap` | `below_cutoff` |
+    /// `served`, first match wins in that order (a served paragraph is
+    /// served, whatever else is true of it). `filtered_out` (#167)
+    /// means the source exists but the request's source filter
+    /// excludes it — the search being explained never considered it.
     pub verdict: &'static str,
     pub summary: String,
     pub source: String,
@@ -815,6 +980,15 @@ impl SearchExplanation {
                 explanation.paragraphs = Some(paragraphs);
                 explanation
             }
+            PassageExplainLookup::FilteredOut => Self::shell(
+                "filtered_out",
+                format!(
+                    "source '{}' is excluded by the request's source filter (tags/since/until) \
+                     — the search being explained never considered it",
+                    request.source
+                ),
+                &request.source,
+            ),
             PassageExplainLookup::NoQueryTerms => Self::shell(
                 "no_query_terms",
                 "the query yields no searchable terms — a search of it answers the empty \
@@ -1006,6 +1180,10 @@ pub async fn explain_search_passages(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    let filter = match source_filter(&request.tags, request.since, request.until, started_at) {
+        Ok(filter) => filter,
+        Err(refusal) => return *refusal,
+    };
     // Off the async worker: a residency's first search tokenizes the
     // whole corpus into the index (the audit endpoints' rule).
     let outcome = tokio::task::block_in_place(|| {
@@ -1016,6 +1194,7 @@ pub async fn explain_search_passages(
             request.paragraph,
             clamp(request.limit, 5, MAX_MATCH_LIMIT),
             request.semantic_floor,
+            filter.as_ref(),
             deadline,
         )
     });
@@ -1055,6 +1234,14 @@ pub struct CrossSearchPassagesRequest {
     /// shares a scale across contexts (unlike BM25 and the fused
     /// number, which is why the merge interleaves by rank).
     pub semantic_floor: Option<f32>,
+    /// Pre-lane source filter (#167), one value for all targets —
+    /// same shape and semantics as the single-context search's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<u64>,
 }
 
 /// [`search_passages`] across several named contexts at once, every
@@ -1092,6 +1279,13 @@ pub async fn cross_search_passages(
         Err(refusal) => return *refusal,
     };
     let limit = clamp(request.limit, 5, MAX_MATCH_LIMIT);
+    let filter = match source_filter(&request.tags, request.since, request.until, started_at) {
+        Ok(filter) => filter,
+        Err(refusal) => return *refusal,
+    };
+    // The one filter value BOTH key tuples below serialize — see
+    // `filter_key_params` for why sharing it is load-bearing.
+    let filter_params = filter_key_params(&filter);
     // One rank cut for both sites below: inside the loop it holds the
     // memory bound (hits carry their full paragraph text) — firing at
     // twice the limit and coming back to the limit, so each firing
@@ -1122,6 +1316,7 @@ pub async fn cross_search_passages(
             &request.query,
             limit,
             request.semantic_floor,
+            &filter_params,
         ))
         .ok(),
     );
@@ -1148,12 +1343,14 @@ pub async fn cross_search_passages(
         // warms the cue cache before the fan-out, so a cold cross
         // search no longer has up to `permits` targets each paying
         // for the same query embedding.
-        if let Ok(sans_query) =
-            serde_json::to_string(&("cross_search_passages", limit, request.semantic_floor))
-            && let Some(probe) = tokio::task::block_in_place(|| {
-                state.semantic_retrieval(key, &sans_query, &request.query, deadline)
-            })
-        {
+        if let Ok(sans_query) = serde_json::to_string(&(
+            "cross_search_passages",
+            limit,
+            request.semantic_floor,
+            &filter_params,
+        )) && let Some(probe) = tokio::task::block_in_place(|| {
+            state.semantic_retrieval(key, &sans_query, &request.query, deadline)
+        }) {
             if let Some(served) = probe.served {
                 replay_cached_search(&state, key, &served.value);
                 if search_log_enabled() {
@@ -1189,6 +1386,7 @@ pub async fn cross_search_passages(
     let owned_targets = Arc::clone(&targets);
     let query = request.query.clone();
     let semantic_floor = request.semantic_floor;
+    let job_filter = filter.clone();
     let job_state = state.clone();
     let fetched = bounded_parallel_map(targets.len(), permits, move |index| {
         job_state.search_passages(
@@ -1196,6 +1394,7 @@ pub async fn cross_search_passages(
             &query,
             limit,
             semantic_floor,
+            job_filter.as_ref(),
             deadline,
         )
     })
@@ -1223,7 +1422,11 @@ pub async fn cross_search_passages(
             Some(Ok(found)) => {
                 state.note_search(SearchOp::SearchPassages, name, found.hits.is_empty());
                 target_empty.push(found.hits.is_empty());
-                plans.push(SearchContextPlan::of(name, &found.lanes));
+                plans.push(SearchContextPlan::of(
+                    name,
+                    &found.lanes,
+                    FilterPlan::of(found.filter),
+                ));
                 embedding_failed |= found.lanes.embedding_failed();
                 for hit in &found.hits {
                     state
@@ -1302,6 +1505,17 @@ pub struct StorePassagesRequest {
     pub questions: BTreeMap<String, Vec<QuestionSpec>>,
     #[serde(default)]
     pub sections: BTreeMap<String, Vec<SectionSpec>>,
+    /// Source tags (#167), per source in THIS request — the same
+    /// source-must-name-a-passage rule as questions/sections, and the
+    /// same wholesale-replace semantics: a re-store without tags
+    /// clears them.
+    #[serde(default)]
+    pub tags: BTreeMap<String, Vec<String>>,
+    /// User-supplied document dates (#167), epoch seconds per source
+    /// in THIS request — the document's own time, which time filters
+    /// prefer over the server's `stored_at` stamp.
+    #[serde(default)]
+    pub dates: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1412,6 +1626,44 @@ pub async fn store_passages(
             }
         }
     }
+    // Tag and date structure follows the same rule: sources must name
+    // passages in THIS request, sizes and counts stay under the shared
+    // caps (the same ones the batch format and the search filter
+    // enforce, one vocabulary end to end).
+    for (source, tags) in &request.tags {
+        if let Some(refusal) = orphaned_source("tags", source, &request.passages, started_at) {
+            return refusal;
+        }
+        if tags.len() > super::MAX_TAGS_PER_SOURCE {
+            return error(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "'{source}' carries {} tags where a source holds at most {}",
+                    tags.len(),
+                    super::MAX_TAGS_PER_SOURCE
+                ),
+                started_at,
+            );
+        }
+        for tag in tags {
+            if let Some(refusal) = empty(&format!("a tag for '{source}'"), tag, started_at) {
+                return refusal;
+            }
+            if let Some(refusal) = oversized(
+                &format!("a tag for '{source}'"),
+                tag,
+                super::MAX_TAG_BYTES,
+                started_at,
+            ) {
+                return refusal;
+            }
+        }
+    }
+    for source in request.dates.keys() {
+        if let Some(refusal) = orphaned_source("dates", source, &request.passages, started_at) {
+            return refusal;
+        }
+    }
     // Section structure follows questions' rule: sources must name
     // passages in THIS request, sizes stay under the shared cap.
     // (Whether a paragraph index exists in the text is settled at
@@ -1444,6 +1696,8 @@ pub async fn store_passages(
     }
     let mut questions = request.questions;
     let mut sections = request.sections;
+    let mut tags = request.tags;
+    let mut dates = request.dates;
     let passages: BTreeMap<String, crate::passages::PassageSubmission> = request
         .passages
         .into_iter()
@@ -1460,12 +1714,21 @@ pub async fn store_passages(
                 .into_iter()
                 .map(|spec| (spec.paragraph, spec.section))
                 .collect();
+            // `stored_at: None` on purpose: the HTTP path never
+            // supplies a stamp — the store takes it once, at the
+            // write (only import restores an existing one).
+            let meta = crate::passages::SourceMeta {
+                stored_at: None,
+                date: dates.remove(&source),
+                tags: tags.remove(&source).unwrap_or_default(),
+            };
             (
                 source,
                 crate::passages::PassageSubmission {
                     text,
                     questions,
                     sections,
+                    meta,
                 },
             )
         })

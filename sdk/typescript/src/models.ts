@@ -421,9 +421,26 @@ export interface AliasEntry {
 
 // -- passages / sources ------------------------------------------------------------
 
+/**
+ * One listed source with its metadata (#167). `stored_at` is the server's
+ * stamp (epoch seconds), `date` the user-supplied document time; a source
+ * stored before metadata existed lists as bare.
+ */
+export interface SourceEntry {
+  name: string;
+  stored_at?: number;
+  date?: number;
+  tags?: string[];
+}
+
+/**
+ * `sources` is the bare id list; `entries` carries the same page with each
+ * source's metadata beside it.
+ */
 export interface SourcePage {
   total: number;
   sources: string[];
+  entries: SourceEntry[];
 }
 
 /** A dropped question/section named a paragraph its passage's split lacks. */
@@ -486,10 +503,21 @@ export interface SearchLanesPlan {
   vector: LanePlan;
 }
 
+/**
+ * The source filter's account for one searched context (#167): how many
+ * sources were eligible to answer, out of how many the context stores —
+ * present exactly when the request carried a filter.
+ */
+export interface FilterPlan {
+  eligible_sources: number;
+  total_sources: number;
+}
+
 /** One searched context's account within a `SearchPlan`. */
 export interface SearchContextPlan {
   context: string;
   lanes: SearchLanesPlan;
+  filter?: FilterPlan;
 }
 
 /**

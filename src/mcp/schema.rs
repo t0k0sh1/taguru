@@ -214,7 +214,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "store_passages",
-            "Register the original text behind each source id. Always finish an ingest with this; answers ground in originals looked up from attributions. Optionally attach doc2query questions per source ({source: [{paragraph, question}]}, paragraph = 0-based blank-line-separated position in THAT text): questions a user might type whose answer is that paragraph, phrased away from its wording — they embed beside the paragraph and catch question-shaped queries the text's own vector misses. Optionally attach section markers per source ({source: [{paragraph, section}]}, same paragraph numbering): a marker names where its section starts and the section implicitly governs every paragraph after it until the next marker or the passage's end — citation and every association read label their paragraph with the section that governs it.",
+            "Register the original text behind each source id. Always finish an ingest with this; answers ground in originals looked up from attributions. Optionally attach doc2query questions per source ({source: [{paragraph, question}]}, paragraph = 0-based blank-line-separated position in THAT text): questions a user might type whose answer is that paragraph, phrased away from its wording — they embed beside the paragraph and catch question-shaped queries the text's own vector misses. Optionally attach section markers per source ({source: [{paragraph, section}]}, same paragraph numbering): a marker names where its section starts and the section implicitly governs every paragraph after it until the next marker or the passage's end — citation and every association read label their paragraph with the section that governs it. Optionally attach source metadata: tags ({source: [tag]}) and a document date ({source: epoch seconds} in dates) — search_passages can then pre-filter by tag and time; the server stamps stored_at itself. Storage replaces per source wholesale, metadata included.",
             object_schema(
                 json!({
                     "context": context,
@@ -246,6 +246,16 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                                 "required": ["paragraph", "section"]
                             }
                         }
+                    },
+                    "tags": {
+                        "type": "object",
+                        "additionalProperties": { "type": "array", "items": { "type": "string" } },
+                        "description": "source → tags (≤32 per source, ≤128 bytes each)"
+                    },
+                    "dates": {
+                        "type": "object",
+                        "additionalProperties": { "type": "integer" },
+                        "description": "source → the document's own date (epoch seconds) — time filters prefer it over the server's stored_at stamp"
                     }
                 }),
                 &["context", "passages"],
@@ -264,7 +274,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_sources",
-            "Source ids with registered passages — targets for retract_source / lookup_passages, inventory for diff sync. Keyset-paged by id; total above the returned count means more pages.",
+            "Source ids with registered passages — targets for retract_source / lookup_passages, inventory for diff sync. Keyset-paged by id; total above the returned count means more pages. Beside the bare `sources` list, `entries` carries each source's metadata: stored_at (server-stamped epoch seconds), date (user-supplied), tags — absent keys mean the source has none.",
             object_schema(
                 json!({
                     "context": context,
@@ -484,12 +494,15 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "search_passages",
-            "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. The result is {plan, hits}: each hit names its paragraph (source + paragraph) and reports per-lane rank/score in `lanes` (a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see), and `plan` says per searched context whether each lane actually ran — and why not when it did not (embeddings off, nothing embedded yet, model or vector width changed, provider refused) — plus the vector lane's effective cosine floor; check it before reading empty hits as \"not in the corpus\". Targets one context (context) or several at once (contexts and/or groups) — cross-context hits carry their context and interleave by per-context rank; scores compare within one context only.",
+            "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. Optional source filters run BEFORE the lanes: tags (any-of, on tags stored with the source) and a half-open time window [since, until) in epoch seconds over each source's date ?? stored_at — sources with neither timestamp, or no tags, never match the respective filter kind. The result is {plan, hits}: each hit names its paragraph (source + paragraph) and reports per-lane rank/score in `lanes` (a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see), and `plan` says per searched context whether each lane actually ran — and why not when it did not (embeddings off, nothing embedded yet, model or vector width changed, provider refused) — plus the vector lane's effective cosine floor and, under a filter, how many sources were eligible of how many stored; check it before reading empty hits as \"not in the corpus\". Targets one context (context) or several at once (contexts and/or groups) — cross-context hits carry their context and interleave by per-context rank; scores compare within one context only.",
             search_target_schema(
                 json!({
                     "query": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 0, "description": "default 5" },
-                    "semantic_floor": { "type": "number", "description": "one-call override of the vector lane's cosine floor (0-1); floors only the semantic lane — BM25-only hits still return" }
+                    "semantic_floor": { "type": "number", "description": "one-call override of the vector lane's cosine floor (0-1); floors only the semantic lane — BM25-only hits still return" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "only sources carrying at least one of these tags may answer" },
+                    "since": { "type": "integer", "description": "only sources whose date ?? stored_at is at or after this (epoch seconds)" },
+                    "until": { "type": "integer", "description": "only sources whose date ?? stored_at is strictly before this (epoch seconds)" }
                 }),
                 &["query"],
             ),

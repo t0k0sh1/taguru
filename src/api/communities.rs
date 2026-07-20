@@ -396,13 +396,16 @@ pub async fn search_communities(
 
     // The ranking IS search_passages against the artifact — one extra
     // slot absorbs the manifest source ranking for the query, which is
-    // filtered out below.
+    // filtered out below. No source filter: the artifact's sources are
+    // synthetic `community:{id}` rows that carry no user metadata, so
+    // a filter here could only ever exclude everything.
     let outcome = tokio::task::block_in_place(|| {
         state.search_passages(
             &derived,
             &request.query,
             limit + 1,
             request.semantic_floor,
+            None,
             deadline,
         )
     });
@@ -537,7 +540,7 @@ pub async fn search_communities(
         // The plan entry names the SOURCE context — the caller asked
         // about `{name}`; which artifact answered is `derived`'s job.
         plan: SearchPlan {
-            contexts: vec![SearchContextPlan::of(&name, &found.lanes)],
+            contexts: vec![SearchContextPlan::of(&name, &found.lanes, None)],
         },
         hits,
     };

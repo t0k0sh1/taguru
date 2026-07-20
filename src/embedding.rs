@@ -992,6 +992,14 @@ impl PassageVectorStore {
     /// (source, index) ascending for deterministic output; a query of
     /// the wrong dimension matches nothing.
     ///
+    /// `eligible` is the pre-lane source filter (#167): only rows
+    /// whose source is in the set are scored and served. Cluster
+    /// lists have no source locality, so the ANN path applies the
+    /// same row-level membership check the exact sweep does — it just
+    /// keeps pulling clusters until the oversample target is met among
+    /// ELIGIBLE rows (or every cluster is in), so a filter can starve
+    /// recall only when the corpus itself runs out of eligible rows.
+    ///
     /// A caller asking for every row (`limit >= len()`, as
     /// `explain_passage_search` always does) always gets an exact
     /// sweep — the only way to honestly return every row is to look at
@@ -1006,6 +1014,7 @@ impl PassageVectorStore {
         query: &[f32],
         limit: usize,
         deadline: Deadline,
+        eligible: Option<&std::collections::BTreeSet<String>>,
     ) -> Vec<(&PassageKey, f32)> {
         if self.dim == 0 || query.len() != self.dim {
             return Vec::new();
@@ -1014,18 +1023,24 @@ impl PassageVectorStore {
             && self.len() >= PASSAGE_ANN_THRESHOLD
             && let Some(index) = self.ensure_ann_index(deadline)
         {
-            return index.search(self, query, limit);
+            return index.search(self, query, limit, eligible);
         }
-        self.exact_top_matches(query, limit)
+        self.exact_top_matches(query, limit, eligible)
     }
 
     /// The linear cosine sweep [`Self::top_matches`] takes below
     /// [`PASSAGE_ANN_THRESHOLD`], and always for a `limit` covering the
     /// whole store — the flat layout alone IS a fine index at that
     /// scale or for that shape of query.
-    fn exact_top_matches(&self, query: &[f32], limit: usize) -> Vec<(&PassageKey, f32)> {
+    fn exact_top_matches(
+        &self,
+        query: &[f32],
+        limit: usize,
+        eligible: Option<&std::collections::BTreeSet<String>>,
+    ) -> Vec<(&PassageKey, f32)> {
         let mut scored: Vec<(&PassageKey, f32)> = self
             .iter()
+            .filter(|(key, _)| eligible.is_none_or(|set| set.contains(&key.source)))
             .map(|(key, row)| (key, similarity(query, row)))
             .collect();
         scored.sort_by(|a, b| {
@@ -1281,11 +1296,16 @@ impl PassageAnnIndex {
     /// candidates for `limit` to be a meaningful cutoff (or every
     /// cluster is in), then ranks exactly within just that candidate
     /// set — same tie-break as [`PassageVectorStore::exact_top_matches`].
+    /// With an `eligible` filter, ineligible rows never become
+    /// candidates, and the probe keeps widening until the target is
+    /// met among eligible rows — the filter narrows the answer, never
+    /// the effort spent finding it.
     fn search<'a>(
         &self,
         store: &'a PassageVectorStore,
         query: &[f32],
         limit: usize,
+        eligible: Option<&std::collections::BTreeSet<String>>,
     ) -> Vec<(&'a PassageKey, f32)> {
         let dim = store.dim.max(1);
         let mut order: Vec<(u32, f32)> = (0..self.lists.len())
@@ -1298,7 +1318,15 @@ impl PassageAnnIndex {
             .max(PASSAGE_ANN_MIN_CANDIDATES);
         let mut candidates: Vec<u32> = Vec::new();
         for (id, _) in order {
-            candidates.extend_from_slice(&self.lists[id as usize]);
+            match eligible {
+                None => candidates.extend_from_slice(&self.lists[id as usize]),
+                Some(set) => candidates.extend(
+                    self.lists[id as usize]
+                        .iter()
+                        .copied()
+                        .filter(|&row| set.contains(&store.keys[row as usize].source)),
+                ),
+            }
             if candidates.len() >= wanted {
                 break;
             }
@@ -2276,7 +2304,7 @@ mod tests {
         let store = synthetic_passage_store(2_000, 8);
         let index = PassageAnnIndex::build(&store, Deadline::unbounded());
         let query = deterministic_unit_vector(999_999, 8);
-        let hits = index.search(&store, &query, 15);
+        let hits = index.search(&store, &query, 15, None);
         assert_eq!(hits.len(), 15);
         for window in hits.windows(2) {
             assert!(window[0].1 >= window[1].1, "{hits:?}");
@@ -2290,7 +2318,7 @@ mod tests {
         let query = deterministic_unit_vector(777, dim);
 
         let expected = brute_force_top(&store, &query, 10);
-        let actual = store.top_matches(&query, 10, Deadline::unbounded());
+        let actual = store.top_matches(&query, 10, Deadline::unbounded(), None);
         assert_eq!(
             actual.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
             expected.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
@@ -2308,7 +2336,7 @@ mod tests {
         let query = deterministic_unit_vector(0x5EED, dim);
 
         let expected = brute_force_top(&store, &query, store.len());
-        let actual = store.top_matches(&query, usize::MAX, Deadline::unbounded());
+        let actual = store.top_matches(&query, usize::MAX, Deadline::unbounded(), None);
         assert_eq!(actual.len(), store.len());
         assert_eq!(
             actual.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
@@ -2331,7 +2359,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1));
         assert!(spent.expired());
 
-        let actual = store.top_matches(&query, 20, spent);
+        let actual = store.top_matches(&query, 20, spent, None);
         assert_eq!(
             actual.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
             expected.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
@@ -2364,7 +2392,7 @@ mod tests {
             planted.iter().map(|&row| &store.keys[row]).collect();
         expected_keys.sort_by(|a, b| a.source.cmp(&b.source).then_with(|| a.index.cmp(&b.index)));
 
-        let hits = store.top_matches(&query, planted.len(), Deadline::unbounded());
+        let hits = store.top_matches(&query, planted.len(), Deadline::unbounded(), None);
         assert!(
             store.ann.lock().is_some(),
             "a store this large, asked for far fewer rows than it has, must engage the index"
@@ -2376,6 +2404,77 @@ mod tests {
         );
         for &(_, score) in &hits {
             assert!(score > 0.999, "{score}");
+        }
+    }
+
+    /// The #167 source filter on both serve paths. Exact path: the
+    /// filtered sweep equals the unfiltered sweep with ineligible rows
+    /// removed (scoring is per-row, so filter-then-score and
+    /// score-then-filter agree). ANN path: planted exact matches split
+    /// across eligible and ineligible sources — every eligible plant
+    /// must surface, no ineligible source may, and the page still
+    /// fills because the probe widens until the oversample target is
+    /// met among eligible rows.
+    #[test]
+    fn filtered_top_matches_serve_only_eligible_rows_on_both_paths() {
+        let dim = 16;
+        let even_sources = |rows: usize| -> std::collections::BTreeSet<String> {
+            (0..rows).step_by(2).map(|i| format!("doc-{i}")).collect()
+        };
+
+        // Exact path (below the threshold).
+        let small = synthetic_passage_store(100, dim);
+        let query = deterministic_unit_vector(0xF117, dim);
+        let eligible = even_sources(100);
+        let filtered = small.top_matches(&query, 10, Deadline::unbounded(), Some(&eligible));
+        assert_eq!(filtered.len(), 10);
+        let expected: Vec<&PassageKey> = brute_force_top(&small, &query, usize::MAX)
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|key| eligible.contains(&key.source))
+            .take(10)
+            .collect();
+        assert_eq!(
+            filtered.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
+            expected,
+            "the filtered sweep is the unfiltered sweep minus ineligible rows"
+        );
+
+        // ANN path (at the threshold).
+        let mut store = synthetic_passage_store(PASSAGE_ANN_THRESHOLD, dim);
+        let eligible = even_sources(PASSAGE_ANN_THRESHOLD);
+        let planted: Vec<usize> = (0..10)
+            .map(|k| k * (PASSAGE_ANN_THRESHOLD - 1) / 9)
+            .collect();
+        for &row in &planted {
+            let start = row * dim;
+            store.data[start..start + dim].copy_from_slice(&query);
+        }
+        let eligible_plants: Vec<&PassageKey> = planted
+            .iter()
+            .filter(|&&row| row.is_multiple_of(2))
+            .map(|&row| &store.keys[row])
+            .collect();
+        assert!(
+            !eligible_plants.is_empty() && eligible_plants.len() < planted.len(),
+            "the fixture must split plants across both sides of the filter"
+        );
+
+        let hits = store.top_matches(&query, 10, Deadline::unbounded(), Some(&eligible));
+        assert!(
+            store.ann.lock().is_some(),
+            "the filtered search must still engage the index at this scale"
+        );
+        assert_eq!(hits.len(), 10, "the probe widens until the page fills");
+        assert!(
+            hits.iter().all(|(key, _)| eligible.contains(&key.source)),
+            "nothing outside the eligible set may be served"
+        );
+        for plant in eligible_plants {
+            assert!(
+                hits.iter().any(|&(key, _)| key == plant),
+                "every eligible planted match must surface"
+            );
         }
     }
 
@@ -2391,7 +2490,7 @@ mod tests {
                 .into_iter()
                 .map(|(k, _)| (k.source.clone(), k.index))
                 .collect();
-        let actual = store.top_matches(&query, top, Deadline::unbounded());
+        let actual = store.top_matches(&query, top, Deadline::unbounded(), None);
         assert_eq!(actual.len(), top);
         let overlap = actual
             .iter()
@@ -2415,14 +2514,14 @@ mod tests {
         let query = deterministic_unit_vector(0xBEEF, dim);
 
         let started = std::time::Instant::now();
-        let exact = store.exact_top_matches(&query, 50);
+        let exact = store.exact_top_matches(&query, 50, None);
         let exact_elapsed = started.elapsed();
 
         // Warm-up: the first call pays the one-time build cost, which
         // this benchmark is not measuring.
-        store.top_matches(&query, 50, Deadline::unbounded());
+        store.top_matches(&query, 50, Deadline::unbounded(), None);
         let started = std::time::Instant::now();
-        let approx = store.top_matches(&query, 50, Deadline::unbounded());
+        let approx = store.top_matches(&query, 50, Deadline::unbounded(), None);
         let approx_elapsed = started.elapsed();
 
         eprintln!(
@@ -2473,7 +2572,7 @@ mod tests {
                         .iter()
                         .map(|q| {
                             let at = std::time::Instant::now();
-                            let hits = store.exact_top_matches(q, SERVE_POOL);
+                            let hits = store.exact_top_matches(q, SERVE_POOL, None);
                             exact_total += at.elapsed();
                             hits
                         })
@@ -2488,7 +2587,7 @@ mod tests {
                     let mut hit50 = 0usize;
                     for (q, truth) in queries.iter().zip(&truths) {
                         let at = std::time::Instant::now();
-                        let hits = index.search(&store, q, SERVE_POOL);
+                        let hits = index.search(&store, q, SERVE_POOL, None);
                         ann_total += at.elapsed();
                         let id = |key: &PassageKey| (key.source.clone(), key.index);
                         let want10: std::collections::HashSet<_> =

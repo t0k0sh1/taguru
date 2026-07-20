@@ -279,6 +279,52 @@ def test_sources_and_citations(client: Taguru, fresh_name: str) -> None:
     client.contexts.delete(fresh_name)
 
 
+def test_source_metadata_lists_back_and_filters_search(client: Taguru, fresh_name: str) -> None:
+    """Source metadata (#167): tags/dates ride the store, list back
+    under ``entries`` beside the server's stamp, and pre-filter search
+    with an honest plan — including the ``filtered_out`` explain verdict."""
+    client.contexts.create(fresh_name, description="metadata")
+    ctx = client.context(fresh_name)
+    ctx.store_passages(
+        {
+            "a.md": "共通語の資料。\n\n酒の由来について。",
+            "b.md": "共通語の資料。\n\n蔵開きの祭りについて。",
+        },
+        tags={"a.md": ["酒"]},
+        dates={"a.md": 1000},
+    )
+
+    entries = {entry.name: entry for entry in ctx.list_sources().entries}
+    assert entries["a.md"].tags == ["酒"]
+    assert entries["a.md"].date == 1000
+    assert entries["a.md"].stored_at is not None
+    assert entries["b.md"].tags == [] and entries["b.md"].date is None
+
+    page = ctx.search_passages("共通語の資料", tags=["酒"])
+    assert {hit.source for hit in page.hits} == {"a.md"}
+    plan = page.plan.contexts[0].filter
+    assert plan is not None
+    assert (plan.eligible_sources, plan.total_sources) == (1, 2)
+    assert page.plan.contexts[0].lanes.bm25.ran is True
+
+    # The half-open window over date ?? stored_at: b.md's only
+    # timestamp is the stamp (now), far past the fixture date.
+    dated = ctx.search_passages("共通語の資料", until=1500)
+    assert {hit.source for hit in dated.hits} == {"a.md"}
+    unfiltered = ctx.search_passages("共通語の資料")
+    assert len(unfiltered.hits) == 2
+    assert unfiltered.plan.contexts[0].filter is None
+
+    explained = ctx.explain_search_passages("共通語の資料", "b.md", tags=["酒"])
+    assert explained.verdict == "filtered_out"
+
+    cross = client.search_passages("共通語の資料", contexts=[fresh_name], tags=["酒"])
+    assert {hit.source for hit in cross.hits} == {"a.md"}
+    cross_plan = cross.plan.contexts[0].filter
+    assert cross_plan is not None and cross_plan.eligible_sources == 1
+    client.contexts.delete(fresh_name)
+
+
 def test_embeddings_refresh_501_without_provider(client: Taguru, fresh_name: str) -> None:
     client.contexts.create(fresh_name)
     with pytest.raises(EmbeddingUnavailableError) as excinfo:

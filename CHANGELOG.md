@@ -8,6 +8,32 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Source metadata and pre-lane search filters (#167) — the two B-1
+  entries #148 deferred as a data-model change. Every stored source
+  now carries a server-stamped `stored_at` (epoch seconds, stamped
+  once as the WAL op is built so replay never re-stamps), an optional
+  user-supplied document `date`, and `tags` — accepted by
+  `POST /contexts/{name}/sources` (`tags`/`dates` per-source maps;
+  MCP: `store_passages`) and the import batch format (riding the
+  `passage` line; export writes them back, and import preserves an
+  exported `stored_at` so restores don't re-date the corpus), durable
+  through the passage WAL, a new S5 snapshot generation (S1–S4 read
+  forever), compaction, WAL shipping, and restore-on-start. Passage
+  search (`POST /contexts/{name}/sources/search`, `POST
+  /sources/search`; MCP: `search_passages`; SDKs:
+  `search_passages`/`searchPassages`) takes `tags` (any-of) and a
+  half-open `[since, until)` window over each source's `date ??
+  stored_at`, resolved to an eligibility set BEFORE the BM25/vector
+  lanes run — BM25 statistics stay corpus-global (the filter gates,
+  never re-weights), the ANN probe widens until its oversample target
+  is met among eligible rows, and absent metadata never matches a
+  filter (pinned by tests). The plan gains a per-context
+  `filter: {eligible_sources, total_sources}` block,
+  `search/explain` gains the same filter params and a `filtered_out`
+  verdict, `GET /contexts/{name}/sources` lists metadata back under
+  `entries`, and retrieval/semantic cache keys carry the filter on
+  both search variants (same query, different filter: never one
+  entry).
 - Community analysis as an offline derived index (#166) — the
   corpus-overview surface GraphRAG's global search answers and taguru
   had no verb for. `GET /contexts/{name}/communities` detects

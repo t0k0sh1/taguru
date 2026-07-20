@@ -1178,11 +1178,23 @@ pub struct PassageSearchHit {
 /// posture ([`PassageSearchHit`] carries the per-hit half). The handler
 /// serializes `lanes` into the response's `plan`, so a caller can tell
 /// "the semantic lane found nothing" from "the semantic lane never ran"
-/// without a separate explain call.
+/// without a separate explain call. `filter` is the source filter's
+/// account (#167), present exactly when the call carried one.
 #[derive(Debug)]
 pub struct PassageSearch {
     pub hits: Vec<PassageSearchHit>,
     pub lanes: PassageSearchLanes,
+    pub filter: Option<SourceFilterReport>,
+}
+
+/// What one search's source filter (#167) selected: how many sources
+/// were eligible to answer, out of how many the context stores — the
+/// numbers the response plan reports so an empty page under a narrow
+/// filter is diagnosable without a second call.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceFilterReport {
+    pub eligible: usize,
+    pub total: usize,
 }
 
 /// What the two lanes did for one search call, including the two early
@@ -1281,6 +1293,10 @@ pub(crate) enum PassageExplainLookup {
     IndexOutOfRange {
         paragraphs: usize,
     },
+    /// The source exists and is validly addressed, but the request's
+    /// source filter (#167) excludes it — the search being explained
+    /// never considered it, so no lane evidence could apply.
+    FilteredOut,
     /// The query yields no searchable terms; a search of it answers
     /// the empty list before either lane runs.
     NoQueryTerms,
@@ -7909,6 +7925,9 @@ mod tests {
                 text: "前世代の本文".to_string(),
                 questions: Vec::new(),
                 sections: Vec::new(),
+                stored_at: None,
+                date: None,
+                tags: Vec::new(),
             }],
         )
         .unwrap();
@@ -9955,6 +9974,7 @@ mod tests {
                 "精米歩合はどこまで磨く?",
                 3,
                 None,
+                None,
                 Deadline::unbounded(),
             )
             .unwrap()
@@ -9971,6 +9991,7 @@ mod tests {
                     "unrelated english words",
                     3,
                     None,
+                    None,
                     Deadline::unbounded()
                 )
                 .unwrap()
@@ -9980,7 +10001,7 @@ mod tests {
         );
         assert!(
             state
-                .search_passages("nope", "x", 3, None, Deadline::unbounded())
+                .search_passages("nope", "x", 3, None, None, Deadline::unbounded())
                 .is_none()
         );
 
@@ -10028,6 +10049,7 @@ mod tests {
                 "ambition must be made to counteract ambition",
                 2,
                 None,
+                None,
                 Deadline::unbounded(),
             )
             .unwrap()
@@ -10064,7 +10086,7 @@ mod tests {
 
         for query in ["state", "State", "app", "path"] {
             let hits = state
-                .search_passages("code", query, 3, None, Deadline::unbounded())
+                .search_passages("code", query, 3, None, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .hits;
@@ -10103,6 +10125,7 @@ mod tests {
                 "精米歩合はどこまで磨く?",
                 3,
                 None,
+                None,
                 Deadline::unbounded(),
             )
             .unwrap()
@@ -10139,7 +10162,7 @@ mod tests {
         // First search builds the resident index.
         assert!(
             !state
-                .search_passages("sake", "創業はいつ", 3, None, Deadline::unbounded())
+                .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .hits
@@ -10156,7 +10179,7 @@ mod tests {
         );
         state.store_passages("sake", plain(more)).unwrap().unwrap();
         let hits = state
-            .search_passages("sake", "杜氏の出身", 3, None, Deadline::unbounded())
+            .search_passages("sake", "杜氏の出身", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -10166,7 +10189,7 @@ mod tests {
         state.retract_source("sake", "第2章").unwrap();
         assert!(
             state
-                .search_passages("sake", "杜氏の出身", 3, None, Deadline::unbounded())
+                .search_passages("sake", "杜氏の出身", 3, None, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .hits
@@ -10195,7 +10218,7 @@ mod tests {
                 .unwrap();
             // First search builds and marks dirty; the tick persists.
             state
-                .search_passages("sake", "創業はいつ", 3, None, Deadline::unbounded())
+                .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -10204,7 +10227,7 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let hits = state
-            .search_passages("sake", "創業はいつ", 3, None, Deadline::unbounded())
+            .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -10235,7 +10258,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             state
-                .search_passages("sake", "杜氏", 3, None, Deadline::unbounded())
+                .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty(); // the sidecar now says 高瀬
@@ -10251,7 +10274,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let hits = state
-            .search_passages("sake", "杜氏は誰", 3, None, Deadline::unbounded())
+            .search_passages("sake", "杜氏は誰", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -10289,7 +10312,7 @@ mod tests {
         fs::write(bm25_path(&dir, &file_stem("sake")), b"not an index").unwrap();
 
         let hits = state
-            .search_passages("sake", "蔵開きの祭り", 3, None, Deadline::unbounded())
+            .search_passages("sake", "蔵開きの祭り", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -10321,7 +10344,7 @@ mod tests {
             .unwrap()
             .unwrap();
         state
-            .search_passages("sake", "麹室の湿度", 3, None, Deadline::unbounded())
+            .search_passages("sake", "麹室の湿度", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -10333,7 +10356,7 @@ mod tests {
         );
         // The next residency loads it clean instead of re-tokenizing.
         state
-            .search_passages("sake", "麹室の湿度", 3, None, Deadline::unbounded())
+            .search_passages("sake", "麹室の湿度", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
         let entry = state.lookup("sake").unwrap();
@@ -10361,7 +10384,7 @@ mod tests {
             .unwrap();
         assert!(
             !state
-                .search_passages("sake", "蔵開きの祭り", 3, None, Deadline::unbounded())
+                .search_passages("sake", "蔵開きの祭り", 3, None, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .hits
@@ -10376,7 +10399,7 @@ mod tests {
         );
         assert_eq!(
             state
-                .search_passages("sake", "蔵開きの祭り", 3, None, Deadline::unbounded())
+                .search_passages("sake", "蔵開きの祭り", 3, None, None, Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .hits[0]
@@ -10637,6 +10660,7 @@ mod tests {
                 None,
                 1,
                 None,
+                None,
                 Deadline::unbounded(),
             )
             .unwrap()
@@ -10660,7 +10684,7 @@ mod tests {
         );
 
         let hits = state
-            .search_passages("sake", "QUERYMARKER", 2, None, Deadline::unbounded())
+            .search_passages("sake", "QUERYMARKER", 2, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -10723,6 +10747,7 @@ mod tests {
                 text: "TARGETMARKER".to_string(),
                 questions: Vec::new(),
                 sections: Vec::new(),
+                meta: crate::passages::SourceMeta::default(),
             },
         );
         for i in 0..2 {
@@ -10735,6 +10760,7 @@ mod tests {
                     text: "DECOYMARKER".to_string(),
                     questions,
                     sections: Vec::new(),
+                    meta: crate::passages::SourceMeta::default(),
                 },
             );
         }
@@ -10751,6 +10777,7 @@ mod tests {
                 "target-doc",
                 None,
                 3,
+                None,
                 None,
                 Deadline::unbounded(),
             )
@@ -10781,6 +10808,7 @@ mod tests {
                 "sake",
                 "QUERYMARKER",
                 explanation.limit_to_reach.unwrap(),
+                None,
                 None,
                 Deadline::unbounded(),
             )
@@ -11169,6 +11197,7 @@ mod tests {
                 text: "りんごは真っ赤に実った。".to_string(),
                 questions: vec![(0, "アップルはどんな色?".to_string())],
                 sections: Vec::new(),
+                meta: crate::passages::SourceMeta::default(),
             },
         );
         state.store_passages("fruit", passages).unwrap().unwrap();
@@ -11186,7 +11215,7 @@ mod tests {
         // both rows point at the same paragraph, so the lane must fold
         // them into one hit at the question row's better rank.
         let hits = state
-            .search_passages("fruit", "アップル", 3, None, Deadline::unbounded())
+            .search_passages("fruit", "アップル", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -11221,6 +11250,7 @@ mod tests {
                     text: "りんごは真っ赤に実った。".to_string(),
                     questions: vec![(0, question.to_string())],
                     sections: Vec::new(),
+                    meta: crate::passages::SourceMeta::default(),
                 },
             );
             passages
@@ -11270,6 +11300,7 @@ mod tests {
                     (0, "みかんとの違いは?".to_string()),
                 ],
                 sections: Vec::new(),
+                meta: crate::passages::SourceMeta::default(),
             },
         );
         state.store_passages("fruit", passages).unwrap().unwrap();
@@ -11312,7 +11343,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "アップル", 3, None, Deadline::unbounded())
+            .search_passages("fruit", "アップル", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -11355,7 +11386,14 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんごは真っ赤", 3, None, Deadline::unbounded())
+            .search_passages(
+                "fruit",
+                "りんごは真っ赤",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -11411,7 +11449,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3, None, Deadline::unbounded())
+            .search_passages("fruit", "りんご", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -11484,7 +11522,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3, None, Deadline::unbounded())
+            .search_passages("fruit", "りんご", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -11518,7 +11556,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3, None, Deadline::unbounded())
+            .search_passages("fruit", "りんご", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -11557,7 +11595,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3, None, Deadline::unbounded())
+            .search_passages("fruit", "みかん", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -11600,7 +11638,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3, None, Deadline::unbounded())
+            .search_passages("fruit", "みかん", 3, None, None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -11641,7 +11679,7 @@ mod tests {
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3, Some(0.2), Deadline::unbounded())
+            .search_passages("fruit", "みかん", 3, Some(0.2), None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -11660,7 +11698,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let hits = state
-            .search_passages("fruit", "みかん", 3, Some(0.5), Deadline::unbounded())
+            .search_passages("fruit", "みかん", 3, Some(0.5), None, Deadline::unbounded())
             .unwrap()
             .unwrap()
             .hits;
@@ -11705,6 +11743,7 @@ mod tests {
                 None,
                 3,
                 Some(0.2),
+                None,
                 Deadline::unbounded(),
             )
             .unwrap()
