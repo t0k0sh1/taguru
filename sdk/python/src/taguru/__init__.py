@@ -109,7 +109,7 @@ from ._shared import citation_key
 from ._sync.client import Context, Contexts, Groups, Taguru
 from ._types import AssocOp, CrossMatchCursor, ExploreCursor, MatchCursor, QuestionSpec, SectionSpec
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "__version__",
