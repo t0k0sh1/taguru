@@ -359,4 +359,28 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
         page["stale"], false,
         "the refreshed artifact is current: {page}"
     );
+
+    // A torn artifact: the manifest promises a summary the store no
+    // longer holds. The graph is unchanged (zero fresh communities),
+    // so this is exactly the case where the chat client must still
+    // come up — the run repairs the hole with one LLM call.
+    let community = page["hits"][0]["community"].as_str().unwrap().to_string();
+    server.ok(
+        "POST",
+        "/contexts/corp::communities/sources/retract",
+        Some(json!({"source": format!("community:{community}")})),
+    );
+    let (code, stdout, _) = run_communities(&["--context", "corp", &server.base], &extract_env);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("1 generated, 1 reused"), "{stdout}");
+    assert_eq!(requests.lock().unwrap().len(), 4);
+    let page = server.ok(
+        "POST",
+        "/contexts/corp/communities/search",
+        Some(json!({"query": "共同体のテーマ"})),
+    );
+    assert!(
+        !page["hits"].as_array().unwrap().is_empty(),
+        "the repaired artifact serves again: {page}"
+    );
 }

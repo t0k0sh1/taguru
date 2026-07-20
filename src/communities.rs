@@ -286,14 +286,23 @@ fn derive(api: &Api, name: &str, derived: &str, dry_run: bool) -> Result<Report,
         return Ok(report);
     }
 
-    // Old summaries for the reused set, one round trip.
+    // Old summaries for the reused set, one round trip. A torn earlier
+    // run can leave the manifest promising summaries the store no
+    // longer holds — those re-summarize below, so they need the LLM
+    // exactly like fresh communities do.
     let mut old_texts: BTreeMap<String, String> = BTreeMap::new();
     if !reused_sources.is_empty() {
         old_texts = api.lookup_passages(derived, &reused_sources)?;
     }
+    let torn = reused_sources
+        .iter()
+        .filter(|source| !old_texts.contains_key(*source))
+        .count();
 
-    // Summaries, leaves first: parents quote their children.
-    let chat = if fresh > 0 {
+    // Summaries, leaves first: parents quote their children. The chat
+    // client exists exactly when something below will call it — a
+    // clean unchanged graph still re-runs with no extract env at all.
+    let chat = if fresh + torn > 0 {
         Some(
             crate::extract::ChatClient::from_env()
                 .map_err(|error| format!("{error} (only --dry-run works without it)"))?,
@@ -360,13 +369,14 @@ fn derive(api: &Api, name: &str, derived: &str, dry_run: bool) -> Result<Report,
 
 /// One community's summary: leaves from their members and strongest
 /// relations, parents from their children's summaries. `chat` is only
-/// `None` when nothing is fresh, and then this is never called.
+/// `None` when nothing needs the LLM — no fresh communities and no
+/// torn reuse — and then this is never called.
 fn summarize(
     chat: Option<&crate::extract::ChatClient>,
     community: &AnalysisCommunity,
     summaries: &BTreeMap<&str, String>,
 ) -> Result<String, String> {
-    let chat = chat.expect("fresh summaries counted before the loop");
+    let chat = chat.expect("fresh + torn counted before the loop");
     let system = "You are summarizing one cluster of a knowledge graph so it can be \
                   found and read later. Answer in the language most of the facts are \
                   written in. Prose only — no preamble, no headings, no lists.";
