@@ -25,6 +25,7 @@ mod observability;
 mod offline_import;
 mod passages;
 mod quotas;
+mod reload;
 mod replication;
 mod resolve_match;
 mod retrieval_cache;

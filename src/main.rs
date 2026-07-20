@@ -56,7 +56,12 @@ use tracing::{error, info, warn};
 
 /// Configuration comes from the environment — or from a KEY=VALUE file
 /// (`--config FILE` / `TAGURU_CONFIG=FILE`, the `docker --env-file`
-/// dialect; real environment variables win over the file):
+/// dialect; real environment variables win over the file). Everything
+/// is boot-time except the auth table — `TAGURU_API_TOKEN`,
+/// `TAGURU_API_TOKENS`, `TAGURU_KEY_SCOPES` — which hot-reloads on
+/// SIGHUP and when the `--config` file changes (see
+/// [`spawn_keyring_reload_tasks`]), so key rotation never costs the
+/// restart everything else legitimately does:
 /// - `TAGURU_DATA_DIR`: where context images and sidecars live (default
 ///   `data`). Disk is the source of truth; memory is a cache over it.
 /// - `TAGURU_CACHE_BYTES`: resident budget for unpinned loaded contexts
@@ -114,6 +119,11 @@ fn main() {
     // telemetry exists: `taguru version` and friends must never start
     // a server (`--help` used to).
     let command = cli::dispatch();
+    // Which auth variables the SHELL set is only observable before the
+    // config file is folded into the environment below — the keyring
+    // hot reload needs that distinction to mirror boot precedence
+    // (env wins over file) at every reload.
+    let auth_source = auth::AuthSource::capture(command.config().cloned());
     // The config file becomes environment variables HERE, while the
     // process is still single-threaded (set_var's soundness condition)
     // and before init_telemetry reads RUST_LOG/OTEL_* — file values
@@ -122,13 +132,13 @@ fn main() {
         config::load_config(path);
     }
     match command {
-        cli::Command::Serve(serve_args) => serve(serve_args),
+        cli::Command::Serve(serve_args) => serve(serve_args, auth_source),
         cli::Command::Route(route_args) => route::run(route_args.config),
     }
 }
 
 #[tokio::main]
-async fn serve(serve_args: cli::ServeArgs) {
+async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
     // The subscriber must exist before anything can log — the
     // env_number warnings just below would otherwise be dropped
     // silently (tracing has no default subscriber and no buffering).
@@ -202,7 +212,7 @@ async fn serve(serve_args: cli::ServeArgs) {
         keyring.apply_scopes(std::env::var("TAGURU_KEY_SCOPES").ok().as_deref())?;
         Ok(keyring)
     }) {
-        Ok(keyring) => Arc::new(keyring),
+        Ok(keyring) => keyring,
         Err(error) => {
             tracing::error!(%error, "refusing to start with broken credentials");
             std::process::exit(1);
@@ -221,6 +231,10 @@ async fn serve(serve_args: cli::ServeArgs) {
              (fine on localhost, never on an exposed address)"
         );
     }
+    // The swappable handle every auth surface reads through — SIGHUP
+    // and the config-file watch (armed after boot, below) rotate the
+    // table at runtime without a restart.
+    let keyring = auth::SharedKeyring::new(keyring);
 
     // Declared quotas share the credential story's failure posture: a
     // ceiling that silently failed to arm is an unbounded tenant.
@@ -425,6 +439,12 @@ async fn serve(serve_args: cli::ServeArgs) {
         hydrator.spawn_background_fill();
     }
 
+    // Key rotation without a restart (issue #134): SIGHUP and the
+    // config-file watch swap the auth table at runtime. Replicas
+    // included — they enforce the same credentials on their read
+    // surface and rotate on the same schedule as the writer.
+    spawn_keyring_reload_tasks(keyring.clone(), auth_source, state.clone());
+
     let shipper = match &replicate {
         Some((replicate, store, root)) if !replica_mode => {
             info!(
@@ -496,20 +516,19 @@ async fn serve(serve_args: cli::ServeArgs) {
     let mcp_dispatch = app
         .clone()
         .layer(axum::extract::DefaultBodyLimit::disable())
-        .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&keyring),
-            auth::enforce_authorization,
-        ));
+        .layer(axum::middleware::from_fn(auth::enforce_authorization));
     let app = app.route(
         "/mcp",
         post(
             move |deadline: axum::Extension<Deadline>,
                   key: Option<axum::Extension<auth::AuthKey>>,
+                  scope: Option<axum::Extension<auth::KeyScope>>,
                   body: axum::body::Bytes| {
                 remote_mcp::serve(
                     mcp_dispatch.clone(),
                     Arc::clone(&mcp_instructions),
                     key.map(|extension| extension.0),
+                    scope.map(|extension| extension.0),
                     body,
                     mcp_max_result_bytes,
                     deadline.0,
@@ -523,7 +542,7 @@ async fn serve(serve_args: cli::ServeArgs) {
     let app = match &oauth {
         Some(oauth) => app.merge(oauth_http::router(oauth_http::OauthState {
             oauth: Arc::clone(oauth),
-            keyring: Arc::clone(&keyring),
+            keyring: keyring.clone(),
             // The consent form shares the bearer gate's failed-auth
             // throttle: a wrong key there is a wrong credential too.
             fail_limiter: Arc::clone(&fail_limiter),
@@ -562,12 +581,12 @@ async fn serve(serve_args: cli::ServeArgs) {
     // merge above; layering it earlier (as this once did) silently
     // left both surfaces unchecked. Idempotent on auth-exempt routes:
     // enforce_authorization no-ops when no AuthKey extension is present.
-    let app = app.layer(axum::middleware::from_fn_with_state(
-        Arc::clone(&keyring),
-        auth::enforce_authorization,
-    ));
+    // Keyring-free: it judges the scope the bearer gate resolves and
+    // stamps, so both layers see one table per request even across a
+    // hot reload.
+    let app = app.layer(axum::middleware::from_fn(auth::enforce_authorization));
     let gate = Arc::new(auth::Gate {
-        keyring,
+        keyring: keyring.clone(),
         oauth: oauth.clone(),
         fail_limiter,
     });
@@ -860,6 +879,91 @@ fn routes(
             state,
             api::replica_gate,
         ))
+}
+
+/// How often the config-file watch stats its target. Well under the
+/// kubelet's own secret-sync cadence (about a minute), and one
+/// `metadata` call per tick — cheap enough to hardcode rather than
+/// grow another knob.
+const CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Arms the keyring hot-reload triggers (issue #134); the reload work
+/// itself — source re-read, fail-closed rules, the audit line — is
+/// [`auth::reload_keyring`]. Two triggers, same swap:
+///
+/// - **SIGHUP** (unix only, registered like [`TerminateSignals`] — a
+///   failed registration degrades to "no signal reload" with a
+///   warning, never a crash): the nginx convention, for an operator
+///   who wants the rotation NOW. Before this handler existed the
+///   default disposition made SIGHUP kill the process, so this is
+///   strictly an upgrade — but it does mean a foreground server now
+///   survives its terminal closing.
+/// - **The `--config` file watch** (every platform, only when a file
+///   was given): a poll of (mtime, len), so a Kubernetes
+///   secret-volume rotation — an atomic symlink swap the kubelet
+///   performs on its own cadence, with no way to signal the process —
+///   is picked up by itself, and so non-unix platforms, which have no
+///   SIGHUP at all, still rotate. Without `--config` nothing can
+///   change at runtime (a live process's environment is immutable
+///   from outside), so there is nothing to watch; SIGHUP then just
+///   logs its no-op.
+fn spawn_keyring_reload_tasks(
+    keyring: auth::SharedKeyring,
+    source: auth::AuthSource,
+    state: AppState,
+) {
+    let source = Arc::new(source);
+    #[cfg(unix)]
+    {
+        let keyring = keyring.clone();
+        let source = Arc::clone(&source);
+        let state = state.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut hangup = match signal(SignalKind::hangup()) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    warn!(%error, "could not register the SIGHUP keyring-reload handler");
+                    return;
+                }
+            };
+            while hangup.recv().await.is_some() {
+                let outcome = auth::reload_keyring(&keyring, &source, "sighup");
+                state
+                    .metrics()
+                    .record_keyring_reload(outcome != auth::ReloadOutcome::Refused);
+            }
+        });
+    }
+    let Some(path) = source.config_path().map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let stat = |path: &std::path::Path| {
+            std::fs::metadata(path)
+                .ok()
+                .and_then(|meta| meta.modified().ok().map(|mtime| (mtime, meta.len())))
+        };
+        let mut last = stat(&path);
+        let mut ticker = tokio::time::interval(CONFIG_WATCH_INTERVAL);
+        ticker.tick().await; // fires immediately; boot already read the file
+        loop {
+            ticker.tick().await;
+            // An unreadable stat is NOT a change: transient volume
+            // states must neither trigger a reload nor poison `last`.
+            let Some(current) = stat(&path) else { continue };
+            if last.as_ref() != Some(&current) {
+                // Remember the state we ATTEMPTED, refusal included:
+                // one loud line per change, not one per tick. A fixed
+                // file carries a fresh mtime and re-triggers.
+                last = Some(current);
+                let outcome = auth::reload_keyring(&keyring, &source, "config-watch");
+                state
+                    .metrics()
+                    .record_keyring_reload(outcome != auth::ReloadOutcome::Refused);
+            }
+        }
+    });
 }
 
 /// The periodic flusher: every `flush_secs`, persist what is dirty —

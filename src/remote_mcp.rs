@@ -34,9 +34,14 @@ use crate::mcp;
 /// `instructions` is the manual exactly as GET /protocol serves it;
 /// `key` is the OUTER request's authenticated identity, stamped onto
 /// each dispatched call so a scoped key's grant holds through the MCP
-/// surface exactly as over raw HTTP; `max_result_bytes` bounds how
-/// much of a dispatched tool's response this transport will buffer
-/// (see [`RESULT_TOO_BIG`]); `deadline` is the OUTER request's budget,
+/// surface exactly as over raw HTTP — and `scope` is the grant the
+/// bearer gate resolved alongside it, stamped the same way so every
+/// dispatched call is judged by the keyring snapshot that
+/// authenticated the outer request (a hot reload landing mid-batch
+/// must not re-grade later tool calls, let alone elevate a removed
+/// key to the unscoped default); `max_result_bytes` bounds how much
+/// of a dispatched tool's response this transport will buffer (see
+/// [`RESULT_TOO_BIG`]); `deadline` is the OUTER request's budget,
 /// stamped onto the dispatched call the same way — without this, a
 /// tool call would run past `enforce_timeout`'s race unchecked, since
 /// the dispatched request never passes back through that layer.
@@ -44,6 +49,7 @@ pub async fn serve(
     dispatch: Router,
     instructions: Arc<String>,
     key: Option<crate::auth::AuthKey>,
+    scope: Option<crate::auth::KeyScope>,
     body: Bytes,
     max_result_bytes: usize,
     deadline: Deadline,
@@ -128,6 +134,7 @@ pub async fn serve(
                                 &path,
                                 body,
                                 key.as_ref(),
+                                scope.as_ref(),
                                 max_result_bytes,
                                 deadline,
                             ))
@@ -165,6 +172,7 @@ pub async fn serve(
                         &path,
                         body,
                         key.as_ref(),
+                        scope.as_ref(),
                         max_result_bytes,
                         deadline,
                     )
@@ -184,12 +192,14 @@ pub async fn serve(
 /// One in-process round trip against the API routes — the transport
 /// twin of the stdio bridge's ureq call, down to the error text, so a
 /// tool failure reads identically on both transports.
+#[allow(clippy::too_many_arguments)] // the outer request's context, spread flat
 async fn call_inner(
     dispatch: Router,
     method: &str,
     path: &str,
     body: Option<Value>,
     key: Option<&crate::auth::AuthKey>,
+    scope: Option<&crate::auth::KeyScope>,
     max_result_bytes: usize,
     deadline: Deadline,
 ) -> Result<String, String> {
@@ -215,9 +225,15 @@ async fn call_inner(
     .map_err(|error| format!("could not build the in-process request: {error}"))?;
     // The outer request's identity travels with the dispatched call:
     // the authorization layer on the dispatch router judges each tool
-    // call by the same grant the raw API would.
+    // call by the same grant the raw API would. The scope goes with
+    // it — the grant the bearer gate resolved from the snapshot that
+    // authenticated this key, so a keyring reload landing mid-request
+    // cannot re-grade the dispatched calls.
     if let Some(key) = key {
         request.extensions_mut().insert(key.clone());
+    }
+    if let Some(scope) = scope {
+        request.extensions_mut().insert(scope.clone());
     }
     // Likewise the outer request's time budget: dispatched calls never
     // pass back through `enforce_timeout`, so this is the only way a
@@ -309,6 +325,7 @@ mod tests {
             Router::new(),
             Arc::new(String::new()),
             None,
+            None,
             Bytes::from(body.to_string()),
             usize::MAX,
             Deadline::unbounded(),
@@ -367,6 +384,7 @@ mod tests {
             huge,
             Arc::new(String::new()),
             None,
+            None,
             Bytes::from(body.to_string()),
             1024,
             Deadline::unbounded(),
@@ -408,6 +426,7 @@ mod tests {
         let response = serve(
             failing,
             Arc::new(String::new()),
+            None,
             None,
             Bytes::from(body.to_string()),
             1024,
@@ -474,6 +493,7 @@ mod tests {
         let response = serve(
             panicking,
             Arc::new(String::new()),
+            None,
             None,
             Bytes::from(body.to_string()),
             1024,
@@ -554,6 +574,7 @@ mod tests {
             router.clone(),
             Arc::new(String::new()),
             None,
+            None,
             Bytes::from(body.to_string()),
             1024,
             Deadline::unbounded(),
@@ -573,6 +594,7 @@ mod tests {
         let response = serve(
             router,
             Arc::new(String::new()),
+            None,
             None,
             Bytes::from(body.to_string()),
             usize::MAX,
@@ -613,6 +635,7 @@ mod tests {
             echo,
             Arc::new(String::new()),
             None,
+            None,
             Bytes::from(body.to_string()),
             usize::MAX,
             already_expired,
@@ -650,6 +673,7 @@ mod tests {
             Router::new(),
             Arc::new(String::new()),
             None,
+            None,
             Bytes::from(body.to_string()),
             usize::MAX,
             already_expired,
@@ -679,6 +703,7 @@ mod tests {
         let response = serve(
             Router::new(),
             Arc::new(String::new()),
+            None,
             None,
             Bytes::from(body.to_string()),
             usize::MAX,

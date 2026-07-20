@@ -711,7 +711,8 @@ mod tests {
     /// Retry-After header, and spends nothing on refused credentials.
     #[tokio::test]
     async fn the_rate_limited_answer_is_a_429_with_retry_after() {
-        let keyring = Arc::new(auth::Keyring::parse(Some("tok".to_string()), None).unwrap());
+        let keyring =
+            auth::SharedKeyring::new(auth::Keyring::parse(Some("tok".to_string()), None).unwrap());
         let gate = Arc::new(auth::Gate {
             keyring,
             oauth: None,

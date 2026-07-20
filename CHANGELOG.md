@@ -8,6 +8,45 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Hot-reload for the auth table (#134): `TAGURU_API_TOKEN`,
+  `TAGURU_API_TOKENS`, and `TAGURU_KEY_SCOPES` — and nothing else —
+  now reload on a running server, so key rotation no longer costs the
+  restart-outage a single-writer boot implies. Two triggers, one
+  swap: SIGHUP (unix; previously the unhandled default disposition
+  made SIGHUP *kill* the server), and a ~5s watch on the `--config`
+  file when one was given — which is what makes the Kubernetes
+  secret-volume flow hands-free (mount the Secret as a file, `kubectl
+  apply` a rotation, the kubelet's atomic symlink swap reaches the
+  watch; no exec, no signal) and gives non-unix platforms, which have
+  no SIGHUP, the same rotation. Reload sources mirror boot precedence
+  exactly — a shell-set variable keeps winning over the file at every
+  reload (which is also why an env-only deployment reloads as an
+  explicit no-op: a live process's environment cannot change).
+  Fail closed on every path: an unreadable or malformed source keeps
+  the previous table armed with a loud error line, and the one
+  transition a reload must never perform — "tokens configured" → "no
+  tokens", which would silently reopen the server unauthenticated —
+  is refused outright (arming keys on an open dev server stays
+  allowed; that direction closes). Every gate reads the ring through
+  one `SharedKeyring` handle and resolves authentication AND scope
+  from a single per-request snapshot (the bearer gate now stamps the
+  resolved `KeyScope` onto the request, `enforce_authorization`
+  judges from it keyring-free, and `/mcp` stamps it through to
+  dispatched tool calls), so in-flight requests see the old table or
+  the new one — never a torn one, and never a removed key falling
+  through `scope_of` to the unscoped admin default mid-request.
+  OAuth delegations minted from a removed key die with it (the
+  per-request `recognizes` check reads the swapped ring); per-key
+  rate-limit buckets need no hook (new names start at full capacity,
+  removed names' idle buckets fall to the existing prune). Each
+  reload leaves one `taguru::audit` line — keys added / removed /
+  rotated (same name, new bytes — the k8s case a name diff can't
+  see) / rescoped, names only, never token bytes, with an explicit
+  "no change" line so a SIGHUP is never silent — plus two counters:
+  `taguru_keyring_reloads_total` and the alertable
+  `taguru_keyring_reload_refusals_total` ("the rotation you think
+  you performed didn't take"). `taguru route` is untouched: the
+  router holds no keyring by design.
 - Per-context quotas (#136), declared as one JSON env in the
   `TAGURU_KEY_SCOPES` mold — `TAGURU_CONTEXT_QUOTAS='{"name":
   {"storage_bytes": …, "cache_bytes": …}}'`, each field optional but

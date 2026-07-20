@@ -53,6 +53,55 @@ impl Server {
         Self::spawn(tag, data_dir, extra_env)
     }
 
+    /// [`Server::start_with_env`] plus `--config FILE` and stderr
+    /// captured to a file — for the keyring-reload tests, which
+    /// rewrite the config at runtime and then assert on the audit
+    /// lines the reload leaves behind.
+    pub fn start_with_config(
+        tag: &str,
+        config: &std::path::Path,
+        stderr_to: &std::path::Path,
+        extra_env: &[(&str, &str)],
+    ) -> Self {
+        let data_dir =
+            std::env::temp_dir().join(format!("taguru-http-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+        command.arg("--config").arg(config);
+        common::scrub_taguru_env(&mut command)
+            .env("TAGURU_ADDR", "127.0.0.1:0")
+            .env("TAGURU_DATA_DIR", &data_dir)
+            .env("TAGURU_FLUSH_SECS", "1");
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let stderr =
+            std::fs::File::create(stderr_to).expect("stderr capture file must be creatable");
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("server binary must spawn");
+        let stdout = child.stdout.take().expect("stdout must be piped");
+        let addr = read_listen_line_and_drain(&format!("server '{tag}'"), stdout);
+        Self {
+            child,
+            base: format!("http://{addr}"),
+            data_dir,
+        }
+    }
+
+    /// Sends `signal` (e.g. "-HUP") to the running server without
+    /// stopping it — the keyring-reload trigger.
+    #[cfg(unix)]
+    pub fn signal(&self, signal: &str) {
+        let pid = self.child.id().to_string();
+        Command::new("kill")
+            .args([signal, &pid])
+            .status()
+            .expect("kill must run");
+    }
+
     /// Spawns `taguru route` over the given map contents (written to a
     /// scratch file). The returned handle's `data_dir` is that scratch
     /// directory — the router itself holds no data; the field only

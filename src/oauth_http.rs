@@ -16,13 +16,15 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::auth::Keyring;
+use crate::auth::SharedKeyring;
 use crate::oauth::{Oauth, escape_html, now_secs};
 
 #[derive(Clone)]
 pub struct OauthState {
     pub oauth: Arc<Oauth>,
-    pub keyring: Arc<Keyring>,
+    /// Loaded per consent POST, so a delegation minted after a hot
+    /// reload validates the key against the table as rotated.
+    pub keyring: SharedKeyring,
     /// Shared with the bearer gate. The consent POST runs the same
     /// constant-time keyring scan (`authenticate`) as the gate but
     /// unauthenticated, so a wrong key here has to spend the same
@@ -261,7 +263,7 @@ async fn approve(
     if let Some(error) = params_error(&state, &params) {
         return error_redirect(&params, error);
     }
-    let Some(key) = state.keyring.authenticate(&params.key) else {
+    let Some(key) = state.keyring.load().authenticate(&params.key) else {
         // Same throttle the bearer gate applies to a wrong token: this
         // path runs the identical constant-time keyring scan, so a wrong
         // key spends the per-source-IP failure budget and, once over it,
@@ -573,7 +575,7 @@ mod tests {
             .unwrap();
         let state = OauthState {
             oauth: Arc::new(oauth),
-            keyring: Arc::new(
+            keyring: SharedKeyring::new(
                 crate::auth::Keyring::parse(Some("tg_correct".to_string()), None).unwrap(),
             ),
             // One failed attempt per minute: the second wrong key in the

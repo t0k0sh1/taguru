@@ -11,8 +11,16 @@
 //! dispatch included — to that grant. A key the variable does not
 //! name keeps the historical full grant (admin over every context),
 //! so existing deployments change nothing by upgrading.
+//!
+//! The whole table hot-reloads ([`reload_keyring`], driven by SIGHUP
+//! and the `--config` file watch in main): rotation is a table swap,
+//! not a restart. Every gate reads the ring through [`SharedKeyring`]
+//! and holds ONE snapshot per request, so an in-flight request sees
+//! the old table or the new one — never a torn one, and never a
+//! removed key re-graded against a table it was not checked into.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -106,7 +114,7 @@ impl Role {
 /// every context). The default — and the grant of any key
 /// `TAGURU_KEY_SCOPES` does not name — is exactly what every key
 /// could do before scopes existed: admin, everywhere.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KeyScope {
     pub role: Role,
     pub contexts: Option<Arc<HashSet<String>>>,
@@ -320,6 +328,259 @@ impl Keyring {
         let is_configured = |name: &str| self.keys.iter().any(|(key, _)| key.as_ref() == name);
         is_configured(key_name) || is_configured(base_key(key_name))
     }
+
+    /// The name-level difference `next` introduces over `self` — the
+    /// reload audit line's payload. Token bytes never leave this
+    /// function: only which names appeared, vanished, changed bytes,
+    /// or changed grant. `rotated` is its own list (independent of
+    /// `rescoped`) because the common Kubernetes rotation changes
+    /// bytes under a stable name and would be invisible in a pure
+    /// name diff. `rescoped` compares the EFFECTIVE grant via
+    /// `scope_of`, so a scope entry dropped from `TAGURU_KEY_SCOPES`
+    /// counts too — that key falls back to the unscoped admin
+    /// default, a real change worth a line.
+    fn diff(&self, next: &Keyring) -> KeyringDiff {
+        let mut diff = KeyringDiff::default();
+        let old: HashMap<&str, &str> = self
+            .keys
+            .iter()
+            .map(|(name, token)| (name.as_ref(), token.as_str()))
+            .collect();
+        for (name, token) in &next.keys {
+            match old.get(name.as_ref()) {
+                None => diff.added.push(name.to_string()),
+                Some(previous) => {
+                    if *previous != token.as_str() {
+                        diff.rotated.push(name.to_string());
+                    }
+                    if self.scope_of(name) != next.scope_of(name) {
+                        diff.rescoped.push(name.to_string());
+                    }
+                }
+            }
+        }
+        for (name, _) in &self.keys {
+            if !next.keys.iter().any(|(new, _)| new == name) {
+                diff.removed.push(name.to_string());
+            }
+        }
+        for list in [
+            &mut diff.added,
+            &mut diff.removed,
+            &mut diff.rotated,
+            &mut diff.rescoped,
+        ] {
+            list.sort_unstable();
+        }
+        diff
+    }
+}
+
+/// What a reload changed, by key NAME only — never token bytes.
+#[derive(Debug, Default, PartialEq)]
+struct KeyringDiff {
+    added: Vec<String>,
+    removed: Vec<String>,
+    rotated: Vec<String>,
+    rescoped: Vec<String>,
+}
+
+impl KeyringDiff {
+    fn is_empty(&self) -> bool {
+        self.added.is_empty()
+            && self.removed.is_empty()
+            && self.rotated.is_empty()
+            && self.rescoped.is_empty()
+    }
+}
+
+/// The swappable handle every auth surface reads the keyring through:
+/// a hot reload (SIGHUP, or the `--config` file watch) replaces the
+/// inner `Arc` while requests in flight keep the snapshot they loaded
+/// — the old table or the new one, never a torn or empty one. A load
+/// is one uncontended read lock and an `Arc` clone; the write happens
+/// only when an operator rotates keys.
+#[derive(Clone)]
+pub struct SharedKeyring {
+    ring: Arc<parking_lot::RwLock<Arc<Keyring>>>,
+    /// Serializes whole reloads (source read → parse → judge → swap),
+    /// NOT request loads. Two triggers watch the same sources (SIGHUP
+    /// and the config watch), and without this their read-compute-
+    /// write cycles can interleave: the loser stores a table parsed
+    /// from a file state the winner already superseded, and — because
+    /// the config watch has by then recorded the newest (mtime, len)
+    /// as seen — nothing re-triggers until the file changes again.
+    /// The stale table would sit armed indefinitely. Held inside
+    /// [`reload_keyring`] so every trigger, future ones included, is
+    /// serialized by construction rather than by caller discipline.
+    reload_serial: Arc<parking_lot::Mutex<()>>,
+}
+
+impl SharedKeyring {
+    pub fn new(keyring: Keyring) -> Self {
+        Self {
+            ring: Arc::new(parking_lot::RwLock::new(Arc::new(keyring))),
+            reload_serial: Arc::new(parking_lot::Mutex::new(())),
+        }
+    }
+
+    /// The current table. Callers hold the snapshot for their whole
+    /// operation: the bearer gate resolves authentication, the OAuth
+    /// `recognizes` check, AND the scope from one load — re-loading
+    /// between them would let a key a reload just removed fall
+    /// through `scope_of` to the unscoped admin default.
+    pub fn load(&self) -> Arc<Keyring> {
+        Arc::clone(&self.ring.read())
+    }
+
+    fn store(&self, keyring: Arc<Keyring>) {
+        *self.ring.write() = keyring;
+    }
+}
+
+/// The variables the runtime reload re-reads — the whole auth table
+/// and nothing else. The single-token spelling belongs here too: it
+/// is the same table (key name "default"), and leaving it out would
+/// keep single-token deployments restarting to rotate.
+const AUTH_VARS: [&str; 3] = ["TAGURU_API_TOKEN", "TAGURU_API_TOKENS", "TAGURU_KEY_SCOPES"];
+
+/// Where each auth variable's CURRENT value comes from on a reload.
+/// Captured in `main` BEFORE `config::load_config` folds the file
+/// into the process environment — after that, file values and shell
+/// values are indistinguishable (`set_var`), and re-reading the
+/// environment would resurrect keys the operator already removed
+/// from the file. The rule mirrors boot exactly: a variable set in
+/// the real (shell) environment keeps winning — its value cannot
+/// change while the process lives — and everything else follows the
+/// file, absence included. Without a config file nothing can change
+/// at runtime, and a reload is an explicit no-op.
+pub struct AuthSource {
+    config: Option<PathBuf>,
+    from_shell: [bool; AUTH_VARS.len()],
+}
+
+impl AuthSource {
+    /// Must run before the config file is applied to the environment
+    /// — this is the only moment "set by the shell" is observable.
+    pub fn capture(config: Option<PathBuf>) -> Self {
+        Self {
+            config,
+            from_shell: AUTH_VARS.map(|var| std::env::var_os(var).is_some()),
+        }
+    }
+
+    pub fn config_path(&self) -> Option<&Path> {
+        self.config.as_deref()
+    }
+
+    /// The three auth values as they stand now, in [`AUTH_VARS`]
+    /// order. `Err` is a reload refusal: an unreadable or malformed
+    /// file must keep the previous table, unlike boot where the same
+    /// failure refuses to start.
+    fn read_current(&self) -> Result<[Option<String>; AUTH_VARS.len()], String> {
+        let file: HashMap<String, String> = match &self.config {
+            None => HashMap::new(),
+            Some(path) => {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|error| format!("cannot read config {}: {error}", path.display()))?;
+                // Collecting in file order makes later duplicates win,
+                // exactly as `load_config` applies them at boot.
+                crate::config::parse_config(&text)
+                    .map_err(|message| format!("config {}: {message}", path.display()))?
+                    .into_iter()
+                    .collect()
+            }
+        };
+        Ok(std::array::from_fn(|index| {
+            if self.from_shell[index] {
+                std::env::var(AUTH_VARS[index]).ok()
+            } else {
+                file.get(AUTH_VARS[index]).cloned()
+            }
+        }))
+    }
+}
+
+/// What a reload attempt did — the caller turns this into counters;
+/// the log lines are already written by the time it returns.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ReloadOutcome {
+    /// A new table is armed; the audit line carries the diff.
+    Applied,
+    /// The sources parse clean and match the armed table exactly.
+    Unchanged,
+    /// The previous table stays armed; the error line says why.
+    Refused,
+}
+
+/// Rebuilds the keyring from its current sources and swaps it in,
+/// fail closed on every path: an unreadable or malformed source, and
+/// the one transition that must be impossible — "tokens configured" →
+/// "no tokens", which would silently reopen the server as the
+/// unauthenticated localhost mode — all keep the previous table armed
+/// and say so loudly. Arming keys where none were configured stays
+/// allowed: that transition CLOSES the server. (It also preserves the
+/// boot invariant "OAuth enabled ⇒ keys configured" across reloads,
+/// since armed → empty is the only transition that could break it.)
+///
+/// Concurrent triggers (a SIGHUP racing the config watch) are
+/// serialized end-to-end on [`SharedKeyring::reload_serial`]: without
+/// that, two reloads straddling a file rewrite could finish in the
+/// wrong order and leave the SUPERSEDED table armed — permanently,
+/// since the watch has by then already recorded the newest file state
+/// as seen. Request loads never touch this lock.
+pub fn reload_keyring(
+    shared: &SharedKeyring,
+    source: &AuthSource,
+    trigger: &'static str,
+) -> ReloadOutcome {
+    let _serialized = shared.reload_serial.lock();
+    let refused = |error: String| {
+        tracing::error!(%error, trigger, "keyring reload refused; the previous table stays armed");
+        ReloadOutcome::Refused
+    };
+    let [single, named, scopes] = match source.read_current() {
+        Ok(values) => values,
+        Err(error) => return refused(error),
+    };
+    let mut next = match Keyring::parse(single, named) {
+        Ok(next) => next,
+        Err(error) => return refused(error),
+    };
+    if let Err(error) = next.apply_scopes(scopes.as_deref()) {
+        return refused(error);
+    }
+    let current = shared.load();
+    if next.is_disabled() && !current.is_disabled() {
+        return refused(
+            "the reloaded sources configure no key, but authentication is armed — refusing to \
+             open the server (unset tokens mean the UNAUTHENTICATED localhost mode); restart if \
+             that is really intended"
+                .to_string(),
+        );
+    }
+    let diff = current.diff(&next);
+    if diff.is_empty() {
+        // An operator who sent a SIGHUP deserves an answer either way:
+        // silence here would read as a reload that never ran.
+        tracing::info!(target: "taguru::audit", trigger, "keyring reload: no change");
+        return ReloadOutcome::Unchanged;
+    }
+    let keys = next.key_count();
+    let scoped = next.scoped_key_count();
+    shared.store(Arc::new(next));
+    tracing::info!(
+        target: "taguru::audit",
+        trigger,
+        added = ?diff.added,
+        removed = ?diff.removed,
+        rotated = ?diff.rotated,
+        rescoped = ?diff.rescoped,
+        keys,
+        scoped,
+        "keyring reloaded",
+    );
+    ReloadOutcome::Applied
 }
 
 /// Everything the bearer gate consults: the static keyring, the OAuth
@@ -328,7 +589,7 @@ impl Keyring {
 /// cannot be brute-forced — or used to burn CPU on the constant-time
 /// scan — for free.
 pub struct Gate {
-    pub keyring: Arc<Keyring>,
+    pub keyring: SharedKeyring,
     pub oauth: Option<Arc<crate::oauth::Oauth>>,
     pub fail_limiter: Arc<crate::limits::RateLimiter>,
 }
@@ -344,7 +605,14 @@ pub async fn require_bearer(
     request: Request,
     next: Next,
 ) -> Response {
-    if gate.keyring.is_disabled() {
+    // ONE snapshot for the whole request: authentication, the OAuth
+    // `recognizes` check, and the scope resolution below must agree
+    // on one table. Under a mid-request reload, a second load between
+    // them would let a key the reload just removed fall through
+    // `scope_of` to the unscoped admin default — an elevation, not
+    // just staleness.
+    let keyring = gate.keyring.load();
+    if keyring.is_disabled() {
         return next.run(request).await;
     }
     if is_auth_exempt(request.uri().path(), gate.oauth.is_some()) {
@@ -363,12 +631,12 @@ pub async fn require_bearer(
         _ => None,
     };
     let key = presented.and_then(|token| {
-        gate.keyring
+        keyring
             .authenticate(token)
             .or_else(|| match (&gate.oauth, request.uri().path()) {
                 (Some(oauth), "/mcp") => oauth
                     .authenticate(token, crate::oauth::now_secs())
-                    .filter(|key| gate.keyring.recognizes(key)),
+                    .filter(|key| keyring.recognizes(key)),
                 _ => None,
             })
     });
@@ -377,6 +645,13 @@ pub async fn require_bearer(
         // Inner layers (the rate limiter) key their work on WHO; the
         // response copy below feeds the access log on the way out.
         request.extensions_mut().insert(AuthKey(Arc::clone(&key)));
+        // The grant, resolved from the SAME snapshot that just
+        // authenticated the key, rides the request too:
+        // `enforce_authorization` judges from this extension instead
+        // of consulting a (possibly newer) keyring of its own, and
+        // `remote_mcp` stamps it onto every dispatched tool call
+        // alongside the key.
+        request.extensions_mut().insert(keyring.scope_of(&key));
         let mut response = next.run(request).await;
         response.extensions_mut().insert(AuthKey(key));
         return response;
@@ -480,16 +755,19 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
 /// Holds a request to its key's grant. Sits INSIDE the bearer gate on
 /// the HTTP surface (it needs WHO), and directly on the in-process
 /// `/mcp` dispatch router — `remote_mcp` stamps the outer request's
-/// key onto every dispatched tool call, so the two surfaces cannot
-/// drift. No key at all (auth off, or an exempt path) means no
-/// restriction, exactly as before scopes existed. The resolved
-/// [`KeyScope`] rides the request extensions for the handlers that
-/// FILTER rather than refuse (`GET /contexts`, the group listings)
-/// and for those judging context names that live in the body or the
-/// stored record (`/import`, the group writes, the cross-context
-/// searches).
+/// key AND scope onto every dispatched tool call, so the two surfaces
+/// cannot drift. No key at all (auth off, or an exempt path) means no
+/// restriction, exactly as before scopes existed. The [`KeyScope`]
+/// judged here is the one the bearer gate resolved from the same
+/// keyring snapshot that authenticated the key — this layer holds no
+/// keyring of its own, so a hot reload landing mid-request can never
+/// re-grade the request against a table its key was never checked
+/// into. The extension then stays on the request for the handlers
+/// that FILTER rather than refuse (`GET /contexts`, the group
+/// listings) and for those judging context names that live in the
+/// body or the stored record (`/import`, the group writes, the
+/// cross-context searches).
 pub async fn enforce_authorization(
-    State(keyring): State<Arc<Keyring>>,
     matched: Option<MatchedPath>,
     request: Request,
     next: Next,
@@ -497,7 +775,15 @@ pub async fn enforce_authorization(
     let Some(key) = request.extensions().get::<AuthKey>().cloned() else {
         return next.run(request).await;
     };
-    let scope = keyring.scope_of(&key.0);
+    // The gate is the only producer of `AuthKey` on a live server and
+    // always pairs it with the resolved scope; the default (the
+    // historical full grant) only catches a hand-built request in a
+    // test.
+    let scope = request
+        .extensions()
+        .get::<KeyScope>()
+        .cloned()
+        .unwrap_or_default();
     let started_at = Instant::now();
     let route = matched
         .as_ref()
@@ -546,9 +832,9 @@ pub async fn enforce_authorization(
             );
         }
     }
-    let mut request = Request::from_parts(parts, body);
-    request.extensions_mut().insert(scope);
-    next.run(request).await
+    // The scope extension came in on the request (the gate stamped
+    // it) and survives the parts round-trip — nothing to re-insert.
+    next.run(Request::from_parts(parts, body)).await
 }
 
 #[cfg(test)]
@@ -562,15 +848,17 @@ mod tests {
     use axum::routing::get;
     use tower::util::ServiceExt;
 
-    fn ring(single: Option<&str>, named: Option<&str>) -> Arc<Keyring> {
-        Arc::new(Keyring::parse(single.map(String::from), named.map(String::from)).unwrap())
+    fn ring(single: Option<&str>, named: Option<&str>) -> SharedKeyring {
+        SharedKeyring::new(
+            Keyring::parse(single.map(String::from), named.map(String::from)).unwrap(),
+        )
     }
 
-    fn app(keyring: Arc<Keyring>) -> Router {
+    fn app(keyring: SharedKeyring) -> Router {
         gate_app(keyring, None)
     }
 
-    fn gate_app(keyring: Arc<Keyring>, oauth: Option<Arc<crate::oauth::Oauth>>) -> Router {
+    fn gate_app(keyring: SharedKeyring, oauth: Option<Arc<crate::oauth::Oauth>>) -> Router {
         // Failed-auth throttle off by default here: these tests assert
         // the 401/200 verdicts, not the throttle. The throttle has its
         // own test with a ConnectInfo layer and a live budget.
@@ -623,7 +911,7 @@ mod tests {
         for scheme in ["Bearer", "bearer", "BEARER", "BeArEr"] {
             assert_eq!(
                 status_of(
-                    app(Arc::clone(&keyring)),
+                    app(keyring.clone()),
                     "/contexts",
                     Some(&format!("{scheme} s3cret"))
                 )
@@ -641,7 +929,7 @@ mod tests {
         let keyring = ring(Some("legacy"), Some("ci:tok-a, laptop:tok-b"));
         for (token, expected) in [("tok-a", "ci"), ("tok-b", "laptop"), ("legacy", "default")] {
             let response = respond(
-                app(Arc::clone(&keyring)),
+                app(keyring.clone()),
                 "/contexts",
                 Some(&format!("Bearer {token}")),
             )
@@ -769,7 +1057,7 @@ mod tests {
         // token inherits its recognition, not a free pass.
         let keyring = ring(Some("s3cret"), Some("laptop:tok-laptop"));
         let bearer = format!("Bearer {}", grant.access_token);
-        let app = || gate_app(Arc::clone(&keyring), Some(Arc::clone(&oauth)));
+        let app = || gate_app(keyring.clone(), Some(Arc::clone(&oauth)));
         assert_eq!(status_of(app(), "/mcp", Some(&bearer)).await, 200);
         assert_eq!(status_of(app(), "/contexts", Some(&bearer)).await, 401);
         // The static key keeps opening everything.
@@ -850,11 +1138,215 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The diff a reload logs: names only, sorted, with `rotated`
+    /// (same name, new bytes) and `rescoped` (same name, new grant)
+    /// tracked independently — and never a token byte in the output,
+    /// since the whole struct goes onto the audit line via `Debug`.
+    #[test]
+    fn a_reload_diff_names_keys_without_leaking_token_bytes() {
+        let mut old = Keyring::parse(
+            Some("sekrit-legacy".into()),
+            Some("ci:sekrit-a,laptop:sekrit-b,bot:sekrit-c".into()),
+        )
+        .unwrap();
+        old.apply_scopes(Some(r#"{"bot": "read"}"#)).unwrap();
+        let mut new = Keyring::parse(
+            Some("sekrit-legacy".into()),
+            Some("ci:sekrit-a2,bot:sekrit-c,fresh:sekrit-d".into()),
+        )
+        .unwrap();
+        new.apply_scopes(Some(r#"{"bot": "write"}"#)).unwrap();
+        let diff = old.diff(&new);
+        assert_eq!(diff.added, vec!["fresh"]);
+        assert_eq!(diff.removed, vec!["laptop"]);
+        assert_eq!(diff.rotated, vec!["ci"]);
+        assert_eq!(diff.rescoped, vec!["bot"]);
+        let printed = format!("{diff:?}");
+        assert!(!printed.contains("sekrit"), "{printed}");
+
+        // A scope entry DROPPED is a rescope too: the key falls back
+        // to the unscoped admin default, a real change worth a line.
+        let unscoped = Keyring::parse(None, Some("bot:sekrit-c".into())).unwrap();
+        let mut scoped = Keyring::parse(None, Some("bot:sekrit-c".into())).unwrap();
+        scoped.apply_scopes(Some(r#"{"bot": "read"}"#)).unwrap();
+        assert_eq!(scoped.diff(&unscoped).rescoped, vec!["bot"]);
+        assert!(scoped.diff(&scoped).is_empty());
+    }
+
+    /// One reload against a LIVE gate: the same `SharedKeyring` flips
+    /// to the new table for the next request — the rotated name
+    /// authenticates with its new bytes, the removed key dies, and so
+    /// does the OAuth token delegated from it, with no restart and no
+    /// rebuilt router.
+    #[tokio::test]
+    async fn a_reload_swaps_the_live_gate_and_retires_removed_keys_delegations() {
+        let dir = std::env::temp_dir().join(format!("taguru-authreload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let oauth = Arc::new(crate::oauth::Oauth::open("https://memory.example", &dir));
+        let client = oauth
+            .register_client("claude", vec!["https://claude.ai/cb".to_string()])
+            .unwrap();
+        let now = crate::oauth::now_secs();
+        let verifier = "0123456789012345678901234567890123456789012345";
+        let code = oauth.issue_code(
+            &client,
+            "https://claude.ai/cb",
+            &crate::oauth::s256_challenge(verifier),
+            "laptop",
+            now,
+        );
+        let grant = oauth
+            .exchange_code(
+                &client.client_id,
+                &code,
+                verifier,
+                "https://claude.ai/cb",
+                now,
+            )
+            .unwrap();
+        let delegated = format!("Bearer {}", grant.access_token);
+
+        let config = dir.join("taguru.env");
+        std::fs::write(&config, "TAGURU_API_TOKENS=ci:tok-old,laptop:tok-laptop\n").unwrap();
+        let source = AuthSource {
+            config: Some(config.clone()),
+            from_shell: [false; 3],
+        };
+        let keyring = ring(None, Some("ci:tok-old,laptop:tok-laptop"));
+        let app = || gate_app(keyring.clone(), Some(Arc::clone(&oauth)));
+
+        assert_eq!(status_of(app(), "/mcp", Some(&delegated)).await, 200);
+        assert_eq!(
+            status_of(app(), "/contexts", Some("Bearer tok-old")).await,
+            200
+        );
+
+        // Rotate ci, drop laptop, reload.
+        std::fs::write(&config, "TAGURU_API_TOKENS=ci:tok-new\n").unwrap();
+        assert_eq!(
+            reload_keyring(&keyring, &source, "test"),
+            ReloadOutcome::Applied
+        );
+
+        assert_eq!(
+            status_of(app(), "/contexts", Some("Bearer tok-new")).await,
+            200
+        );
+        assert_eq!(
+            status_of(app(), "/contexts", Some("Bearer tok-old")).await,
+            401
+        );
+        assert_eq!(
+            status_of(app(), "/contexts", Some("Bearer tok-laptop")).await,
+            401
+        );
+        // The delegation minted from "laptop" dies with its key — the
+        // per-request `recognizes` check reads the swapped table.
+        assert_eq!(status_of(app(), "/mcp", Some(&delegated)).await, 401);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Every refusal path keeps the previous table armed: an
+    /// unreadable file, a malformed entry, and the one transition that
+    /// must never happen by accident — armed → empty, which would
+    /// reopen the server unauthenticated. Arming a disabled gate stays
+    /// allowed (that transition CLOSES the server), an identical
+    /// source is an explicit no-op, and the file's last duplicate wins
+    /// exactly as `load_config` applies it at boot.
+    #[tokio::test]
+    async fn a_reload_fails_closed_and_never_disarms_authentication() {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-authfailclosed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("taguru.env");
+        let source = AuthSource {
+            config: Some(config.clone()),
+            from_shell: [false; 3],
+        };
+        let keyring = ring(None, Some("ci:tok-a"));
+        let gate = || app(keyring.clone());
+
+        // A malformed source: refused, the old token keeps working.
+        std::fs::write(&config, "TAGURU_API_TOKENS=token-pasted-alone\n").unwrap();
+        assert_eq!(
+            reload_keyring(&keyring, &source, "test"),
+            ReloadOutcome::Refused
+        );
+        assert_eq!(
+            status_of(gate(), "/contexts", Some("Bearer tok-a")).await,
+            200
+        );
+
+        // An unreadable source: the same refusal.
+        let missing = AuthSource {
+            config: Some(dir.join("gone.env")),
+            from_shell: [false; 3],
+        };
+        assert_eq!(
+            reload_keyring(&keyring, &missing, "test"),
+            ReloadOutcome::Refused
+        );
+
+        // Sources that arm NO key while the gate is armed: refused —
+        // a reload must never open the server.
+        std::fs::write(&config, "TAGURU_FLUSH_SECS=5\n").unwrap();
+        assert_eq!(
+            reload_keyring(&keyring, &source, "test"),
+            ReloadOutcome::Refused
+        );
+        assert_eq!(
+            status_of(gate(), "/contexts", Some("Bearer tok-a")).await,
+            200
+        );
+        assert_eq!(status_of(gate(), "/contexts", None).await, 401);
+
+        // The same table again — via the file's last duplicate, which
+        // wins like load_config's boot application: an explicit no-op.
+        std::fs::write(
+            &config,
+            "TAGURU_API_TOKENS=ci:tok-first\nTAGURU_API_TOKENS=ci:tok-a\n",
+        )
+        .unwrap();
+        assert_eq!(
+            reload_keyring(&keyring, &source, "test"),
+            ReloadOutcome::Unchanged
+        );
+
+        // A scope-only change still applies.
+        std::fs::write(
+            &config,
+            "TAGURU_API_TOKENS=ci:tok-a\nTAGURU_KEY_SCOPES={\"ci\": \"read\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            reload_keyring(&keyring, &source, "test"),
+            ReloadOutcome::Applied
+        );
+        assert_eq!(keyring.load().scope_of("ci").role, Role::Read);
+
+        // A disabled gate may ARM by reload — that transition closes.
+        let disabled = SharedKeyring::new(Keyring::parse(None, None).unwrap());
+        std::fs::write(&config, "TAGURU_API_TOKENS=ci:tok-a\n").unwrap();
+        assert_eq!(
+            reload_keyring(&disabled, &source, "test"),
+            ReloadOutcome::Applied
+        );
+        assert!(!disabled.load().is_disabled());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn auth_is_disabled_when_no_token_is_configured() {
-        let keyring = Arc::new(Keyring::parse(None, None).unwrap());
+        let keyring = Keyring::parse(None, None).unwrap();
         assert!(keyring.is_disabled());
-        assert_eq!(status_of(app(keyring), "/contexts", None).await, 200);
+        assert_eq!(
+            status_of(app(SharedKeyring::new(keyring)), "/contexts", None).await,
+            200
+        );
     }
 
     #[tokio::test]
@@ -862,7 +1354,7 @@ mod tests {
         let keyring = ring(Some("s3cret"), None);
         for probe in ["/health", "/live", "/metrics"] {
             assert_eq!(
-                status_of(app(Arc::clone(&keyring)), probe, None).await,
+                status_of(app(keyring.clone()), probe, None).await,
                 200,
                 "{probe} must answer unconfigured"
             );
@@ -1051,10 +1543,10 @@ mod tests {
                 r#"{"reader": "read", "bot": {"role": "write", "contexts": ["sake"]}}"#,
             ))
             .unwrap();
-        let keyring = Arc::new(keyring);
+        let keyring = SharedKeyring::new(keyring);
         let app = || {
             let gate = Arc::new(Gate {
-                keyring: Arc::clone(&keyring),
+                keyring: keyring.clone(),
                 oauth: None,
                 fail_limiter: Arc::new(crate::limits::RateLimiter::new(0)),
             });
@@ -1073,11 +1565,9 @@ mod tests {
                     axum::routing::delete(|| async { "gone" }),
                 )
                 // Authorization innermost, the bearer gate outside it —
-                // the same nesting main.rs builds.
-                .layer(axum::middleware::from_fn_with_state(
-                    Arc::clone(&keyring),
-                    enforce_authorization,
-                ))
+                // the same nesting main.rs builds. It judges from the
+                // scope extension the gate stamps, keyring-free.
+                .layer(axum::middleware::from_fn(enforce_authorization))
                 .layer(axum::middleware::from_fn_with_state(gate, require_bearer))
         };
         let send = |method: &'static str, path: &'static str, token: &'static str| {

@@ -148,8 +148,12 @@ pub(crate) fn load_config(path: &Path) {
 
 /// The `docker run --env-file` dialect: one KEY=VALUE per line, `#`
 /// comments and blank lines ignored, values taken verbatim (no quoting
-/// or expansion). Returned in file order.
-fn parse_config(text: &str) -> Result<Vec<(String, String)>, String> {
+/// or expansion). Returned in file order — later duplicates win when
+/// collected into a map, matching how [`load_config`] applies them.
+/// `pub(crate)` for the keyring hot reload, which re-reads the same
+/// file at runtime but must never touch the environment again
+/// (`set_var` is only sound single-threaded, see [`load_config`]).
+pub(crate) fn parse_config(text: &str) -> Result<Vec<(String, String)>, String> {
     // A leading BOM survives `str::trim` (U+FEFF is not `White_Space`),
     // so left in place it rides onto the first key of the file — e.g.
     // "\u{FEFF}TAGURU_ADDR" — which fails the `TAGURU_` typo check

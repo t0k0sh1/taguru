@@ -149,6 +149,12 @@ ENVIRONMENT (every knob; unset = the shown default):
                                \"bot\": {\"role\": \"write\", \"contexts\":
                                [\"sake\"]}} — roles read ⊂ write ⊂ admin;
                                unnamed keys keep the full historical grant
+                               These three (the auth table) hot-reload:
+                               SIGHUP, or an edited --config file (picked
+                               up within ~5s), swaps them live — fail
+                               closed, so a broken edit keeps the previous
+                               table and a reload can never disarm auth.
+                               Everything else stays boot-time.
   TAGURU_PUBLIC_URL            public base URL; enables OAuth key delegation
                                on /mcp (claude.ai custom connectors)
   TAGURU_MAX_BODY_BYTES        request body cap (8 MiB)
