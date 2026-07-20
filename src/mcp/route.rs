@@ -159,7 +159,10 @@ pub fn route_tool(
             (
                 "POST",
                 path,
-                Some(pick(arguments, &["passages", "questions", "sections"])),
+                Some(pick(
+                    arguments,
+                    &["passages", "questions", "sections", "tags", "dates"],
+                )),
             )
         }
         "lookup_passages" => {
@@ -323,7 +326,16 @@ pub fn route_tool(
                 path,
                 Some(pick(
                     arguments,
-                    &["contexts", "groups", "query", "limit", "semantic_floor"],
+                    &[
+                        "contexts",
+                        "groups",
+                        "query",
+                        "limit",
+                        "semantic_floor",
+                        "tags",
+                        "since",
+                        "until",
+                    ],
                 )),
             )
         }
@@ -348,7 +360,16 @@ pub fn route_tool(
                 path,
                 Some(pick(
                     arguments,
-                    &["query", "source", "paragraph", "limit", "semantic_floor"],
+                    &[
+                        "query",
+                        "source",
+                        "paragraph",
+                        "limit",
+                        "semantic_floor",
+                        "tags",
+                        "since",
+                        "until",
+                    ],
                 )),
             )
         }

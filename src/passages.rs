@@ -37,12 +37,17 @@ use crate::wal;
 /// producer (`taguru extract --questions`, the ingest batch format,
 /// or any client) attached so question-shaped queries can land on
 /// answer-shaped paragraphs, and paragraphs can carry a section
-/// label, from the index side too.
+/// label, from the index side too. `meta` is the source-level
+/// metadata (#167): a `meta.stored_at` of `None` asks the store to
+/// stamp the write time itself (the HTTP path); `Some` preserves a
+/// timestamp that already exists (the import path, so an
+/// export → import round trip is lossless).
 #[derive(Debug, Clone)]
 pub(crate) struct PassageSubmission {
     pub(crate) text: String,
     pub(crate) questions: Vec<(u32, String)>,
     pub(crate) sections: Vec<(u32, String)>,
+    pub(crate) meta: SourceMeta,
 }
 
 impl PassageSubmission {
@@ -53,7 +58,70 @@ impl PassageSubmission {
             text: text.into(),
             questions: Vec::new(),
             sections: Vec::new(),
+            meta: SourceMeta::default(),
         }
+    }
+}
+
+/// Source-level metadata riding beside one passage (#167): when the
+/// server stored it (`stored_at`, epoch seconds, stamped once on the
+/// live write and carried in the WAL so replay never re-stamps), an
+/// optional user-supplied document `date` (epoch seconds — the
+/// document's own time, for corpora whose ingestion time says nothing
+/// about them), and user tags. Wholesale-replaced with the passage on
+/// re-store, like everything else in a submission. Sources stored
+/// before this metadata existed have none of it — [`SourceFilter`]
+/// pins what that absence means under each filter kind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SourceMeta {
+    pub(crate) stored_at: Option<u64>,
+    pub(crate) date: Option<u64>,
+    /// Sorted and deduplicated by [`PassageRecord::new`] — the one
+    /// validation point the live path and replay share.
+    pub(crate) tags: Vec<String>,
+}
+
+/// The pre-lane source filter of `search_passages` (#167): a source is
+/// eligible when it carries at least one of `tags` (any-of; an empty
+/// list constrains nothing) AND its effective time — the user-supplied
+/// `date` when present, else `stored_at` — falls inside the half-open
+/// `[since, until)` window. Absent metadata is non-matching by
+/// definition: a source with no tags fails any tag filter, and a
+/// source with neither `date` nor `stored_at` (stored before metadata
+/// existed) fails any time filter. With no filter at all, every source
+/// is eligible and search behaves exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceFilter {
+    /// Sorted and deduplicated by the API boundary, so equal filters
+    /// serialize equally into cache keys.
+    pub(crate) tags: Vec<String>,
+    pub(crate) since: Option<u64>,
+    pub(crate) until: Option<u64>,
+}
+
+impl SourceFilter {
+    /// Whether one resident record passes this filter.
+    pub(crate) fn matches(&self, record: &PassageRecord) -> bool {
+        if self.since.is_some() || self.until.is_some() {
+            let Some(effective) = record.meta.date.or(record.meta.stored_at) else {
+                return false;
+            };
+            if self.since.is_some_and(|since| effective < since) {
+                return false;
+            }
+            if self.until.is_some_and(|until| effective >= until) {
+                return false;
+            }
+        }
+        if !self.tags.is_empty()
+            && !self
+                .tags
+                .iter()
+                .any(|tag| record.meta.tags.binary_search(tag).is_ok())
+        {
+            return false;
+        }
+        true
     }
 }
 
@@ -139,6 +207,9 @@ pub(crate) struct PassageRecord {
     /// [`filter_sections`] for how a paragraph claimed more than once
     /// is resolved before it ever reaches here.
     pub(crate) sections: Vec<(u32, String)>,
+    /// Source-level metadata (#167); tags sorted and deduplicated by
+    /// [`Self::new`], so [`SourceFilter::matches`] can binary-search.
+    pub(crate) meta: SourceMeta,
 }
 
 impl PassageRecord {
@@ -146,12 +217,14 @@ impl PassageRecord {
     /// whose paragraph exists in THIS text's split — the one
     /// validation point both the live path and replay go through, so
     /// they can never disagree. Sections are additionally collapsed to
-    /// one per paragraph (see [`filter_sections`]). Returns how many
-    /// questions and how many sections were dropped.
+    /// one per paragraph (see [`filter_sections`]); metadata tags are
+    /// sorted and deduplicated here for the same reason. Returns how
+    /// many questions and how many sections were dropped.
     pub(crate) fn new(
         text: Arc<str>,
         questions: Vec<(u32, String)>,
         sections: Vec<(u32, String)>,
+        mut meta: SourceMeta,
     ) -> (Arc<Self>, usize, usize) {
         let paragraphs = paragraph::split(&text);
         let questions_offered = questions.len();
@@ -162,12 +235,15 @@ impl PassageRecord {
         questions.sort_by_key(|&(paragraph, _)| paragraph);
         let questions_dropped = questions_offered - questions.len();
         let (sections, sections_dropped) = filter_sections(&sections, paragraphs.len());
+        meta.tags.sort();
+        meta.tags.dedup();
         (
             Arc::new(Self {
                 text,
                 paragraphs,
                 questions,
                 sections,
+                meta,
             }),
             questions_dropped,
             sections_dropped,
@@ -177,13 +253,25 @@ impl PassageRecord {
     /// Constructor for sibling modules' unit tests.
     #[cfg(test)]
     pub(crate) fn for_tests(text: &str) -> Arc<Self> {
-        Self::new(Arc::from(text), Vec::new(), Vec::new()).0
+        Self::new(
+            Arc::from(text),
+            Vec::new(),
+            Vec::new(),
+            SourceMeta::default(),
+        )
+        .0
     }
 
     /// [`Self::for_tests`] with doc2query questions attached.
     #[cfg(test)]
     pub(crate) fn for_tests_with_questions(text: &str, questions: Vec<(u32, String)>) -> Arc<Self> {
-        Self::new(Arc::from(text), questions, Vec::new()).0
+        Self::new(
+            Arc::from(text),
+            questions,
+            Vec::new(),
+            SourceMeta::default(),
+        )
+        .0
     }
 
     /// The paragraph texts behind the spans, in order.
@@ -228,10 +316,13 @@ impl PassageRecord {
 /// Both ops are last-write-wins, so a replay overlapping the snapshot
 /// re-applies harmlessly — the watermark still gates it, but a bug
 /// there degrades to wasted work, not corruption (unlike `associate`,
-/// which accumulates). `questions` and `sections` are both additive
-/// (older logs simply have none) and carry the submission AS OFFERED —
-/// validation happens in `PassageRecord::new`, identically on the live
-/// path and on replay.
+/// which accumulates). `questions`, `sections`, and the metadata trio
+/// (`stored_at`/`date`/`tags`, #167) are all additive (older logs
+/// simply have none) and carry the submission AS OFFERED — validation
+/// happens in `PassageRecord::new`, identically on the live path and
+/// on replay. `stored_at` is the exception that proves the rule: the
+/// live write stamps it ONCE while building this op, so replay reads
+/// the logged value and can never re-stamp.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum PassageOp {
@@ -242,10 +333,27 @@ pub(crate) enum PassageOp {
         questions: Vec<(u32, String)>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         sections: Vec<(u32, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stored_at: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        date: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
     },
     Retract {
         source: String,
     },
+}
+
+/// The wall clock as epoch seconds — the one place the passage store
+/// reads it, so `stored_at` stamping has exactly one origin. The
+/// pre-epoch fallback follows `ship.rs`'s fence stamping: a clock set
+/// before 1970 is an operator problem this store cannot repair.
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
 /// Per-source-id rough constant for the resident estimate, matching
@@ -259,7 +367,11 @@ const COMPACT_FLOOR_BYTES: u64 = 4 * 1024 * 1024;
 /// (see the module doc for why a ratio, never a fixed threshold).
 const COMPACT_RATIO: u64 = 1;
 
-const SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS4";
+const SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS5";
+/// The pre-metadata snapshot format: S5's layout minus the per-source
+/// stored_at/date/tags block (#167). Read forever, written never
+/// again.
+const S4_SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS4";
 /// The pre-checksum snapshot format: S4's layout minus the CRC-32C
 /// footer, so its bytes can only be parsed, never verified. Read
 /// forever, written never again.
@@ -383,7 +495,13 @@ impl PassageStore {
                     let text = bounded_text(&source, text, "the legacy sources file")?;
                     sources.insert(
                         source,
-                        PassageRecord::new(Arc::from(text), Vec::new(), Vec::new()).0,
+                        PassageRecord::new(
+                            Arc::from(text),
+                            Vec::new(),
+                            Vec::new(),
+                            SourceMeta::default(),
+                        )
+                        .0,
                     );
                 }
                 (sources, 0, 0)
@@ -409,11 +527,24 @@ impl PassageStore {
                     text,
                     questions,
                     sections,
+                    stored_at,
+                    date,
+                    tags,
                 } => {
                     let text = bounded_text(&source, text, "the passages WAL")?;
                     sources.insert(
                         source,
-                        PassageRecord::new(Arc::from(text), questions, sections).0,
+                        PassageRecord::new(
+                            Arc::from(text),
+                            questions,
+                            sections,
+                            SourceMeta {
+                                stored_at,
+                                date,
+                                tags,
+                            },
+                        )
+                        .0,
                     );
                 }
                 PassageOp::Retract { source } => {
@@ -478,6 +609,11 @@ impl PassageStore {
                 ),
             ));
         }
+        // `stored_at` is stamped here, exactly once, as the op is
+        // built: the WAL carries the stamped value, so replay (which
+        // rebuilds records from these same ops) can never re-stamp a
+        // write with a later clock. A submission arriving with its own
+        // `stored_at` (the import path restoring an export) keeps it.
         let ops: Vec<PassageOp> = passages
             .into_iter()
             .map(|(source, submission)| PassageOp::Store {
@@ -485,6 +621,9 @@ impl PassageStore {
                 text: submission.text,
                 questions: submission.questions,
                 sections: submission.sections,
+                stored_at: submission.meta.stored_at.or_else(|| Some(now_epoch_secs())),
+                date: submission.meta.date,
+                tags: submission.meta.tags,
             })
             .collect();
         let count = ops.len();
@@ -554,11 +693,19 @@ impl PassageStore {
                         text,
                         questions,
                         sections,
+                        stored_at,
+                        date,
+                        tags,
                     } => {
                         let (record, questions_dropped, sections_dropped) = PassageRecord::new(
                             Arc::from(text.as_str()),
                             questions.clone(),
                             sections.clone(),
+                            SourceMeta {
+                                stored_at: *stored_at,
+                                date: *date,
+                                tags: tags.clone(),
+                            },
                         );
                         counts.questions_stored += record.questions.len();
                         counts.questions_dropped += questions_dropped;
@@ -704,6 +851,39 @@ impl PassageStore {
         self.inner.read().unwrap().sources.keys().cloned().collect()
     }
 
+    /// [`Self::source_ids`] with each source's metadata beside it, same
+    /// ascending order — what `list_sources` renders its `entries`
+    /// from, so the names and the metadata can never come from two
+    /// different reads.
+    pub(crate) fn source_entries(&self) -> Vec<(String, SourceMeta)> {
+        self.inner
+            .read()
+            .unwrap()
+            .sources
+            .iter()
+            .map(|(source, record)| (source.clone(), record.meta.clone()))
+            .collect()
+    }
+
+    /// The pre-lane eligibility set of one filtered search (#167):
+    /// which sources pass `filter`, and how many sources there are in
+    /// total — the two numbers the search plan reports. One pass over
+    /// the resident map under the read lock; text rides as `Arc`
+    /// handles, so nothing is copied.
+    pub(crate) fn eligible_sources(
+        &self,
+        filter: &SourceFilter,
+    ) -> (std::collections::BTreeSet<String>, usize) {
+        let inner = self.inner.read().unwrap();
+        let eligible = inner
+            .sources
+            .iter()
+            .filter(|(_, record)| filter.matches(record))
+            .map(|(source, _)| source.clone())
+            .collect();
+        (eligible, inner.sources.len())
+    }
+
     /// Every passage as (source, record-handle) — the bulk reader's
     /// entrance. The lock is held for the clone only; text and spans
     /// ride out as `Arc` handles, never copies.
@@ -799,6 +979,13 @@ pub(crate) fn record_bytes(source: &str, record: &PassageRecord) -> usize {
             .iter()
             .map(|(_, label)| label.len() + 8)
             .sum::<usize>()
+        + record
+            .meta
+            .tags
+            .iter()
+            .map(|tag| tag.len() + 8)
+            .sum::<usize>()
+        + 16 // the two optional epoch-second stamps
         + SOURCE_OVERHEAD
 }
 
@@ -808,9 +995,10 @@ fn snapshot_to_bytes(sources: &BTreeMap<String, Arc<PassageRecord>>, watermark: 
     out.extend_from_slice(&watermark.to_le_bytes());
     out.extend_from_slice(&(sources.len() as u32).to_le_bytes());
     // BTreeMap iterates sorted (and a record's questions/sections are
-    // sorted by paragraph at construction): identical content is
-    // byte-identical. Text, questions, and sections land on disk —
-    // spans are recomputed on load.
+    // sorted by paragraph at construction, its tags sorted and deduped
+    // the same way): identical content is byte-identical. Text,
+    // questions, sections, and metadata land on disk — spans are
+    // recomputed on load.
     for (source, record) in sources {
         write_chunk(&mut out, source.as_bytes());
         write_chunk(&mut out, record.text.as_bytes());
@@ -823,6 +1011,12 @@ fn snapshot_to_bytes(sources: &BTreeMap<String, Arc<PassageRecord>>, watermark: 
         for (paragraph, label) in &record.sections {
             out.extend_from_slice(&paragraph.to_le_bytes());
             write_chunk(&mut out, label.as_bytes());
+        }
+        write_opt_u64(&mut out, record.meta.stored_at);
+        write_opt_u64(&mut out, record.meta.date);
+        out.extend_from_slice(&(record.meta.tags.len() as u32).to_le_bytes());
+        for tag in &record.meta.tags {
+            write_chunk(&mut out, tag.as_bytes());
         }
     }
     // The CRC-32C footer, same discipline as the context image: the
@@ -837,20 +1031,24 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
     let mut pos = 0usize;
     let magic = bytes.get(..8)?;
     // TAGURUS1 predates questions and sections; TAGURUS2 predates only
-    // sections; TAGURUS3 predates the checksum footer. Each older
-    // layout is the newest one minus its trailing pieces, so one
-    // parser reads all four.
-    let (questions_on_disk, sections_on_disk, checksummed) = if magic == SNAPSHOT_MAGIC {
-        (true, true, true)
-    } else if magic == S3_SNAPSHOT_MAGIC {
-        (true, true, false)
-    } else if magic == S2_SNAPSHOT_MAGIC {
-        (true, false, false)
-    } else if magic == LEGACY_SNAPSHOT_MAGIC {
-        (false, false, false)
-    } else {
-        return None;
-    };
+    // sections; TAGURUS3 predates the checksum footer; TAGURUS4
+    // predates the source metadata block. Each older layout is the
+    // newest one minus its trailing pieces, so one parser reads all
+    // five.
+    let (questions_on_disk, sections_on_disk, meta_on_disk, checksummed) =
+        if magic == SNAPSHOT_MAGIC {
+            (true, true, true, true)
+        } else if magic == S4_SNAPSHOT_MAGIC {
+            (true, true, false, true)
+        } else if magic == S3_SNAPSHOT_MAGIC {
+            (true, true, false, false)
+        } else if magic == S2_SNAPSHOT_MAGIC {
+            (true, false, false, false)
+        } else if magic == LEGACY_SNAPSHOT_MAGIC {
+            (false, false, false, false)
+        } else {
+            return None;
+        };
     // Verify before trusting anything past the magic: pre-checksum
     // generations can only be parsed, the current one is proven the
     // bytes that were written.
@@ -897,9 +1095,20 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
                 sections.push((paragraph, label));
             }
         }
+        let mut meta = SourceMeta::default();
+        if meta_on_disk {
+            meta.stored_at = read_opt_u64(bytes, &mut pos)?;
+            meta.date = read_opt_u64(bytes, &mut pos)?;
+            let tag_count = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
+            pos += 4;
+            for _ in 0..tag_count {
+                let tag = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
+                meta.tags.push(tag);
+            }
+        }
         sources.insert(
             source,
-            PassageRecord::new(Arc::from(text), questions, sections).0,
+            PassageRecord::new(Arc::from(text), questions, sections, meta).0,
         );
     }
     (pos == bytes.len()).then_some((sources, watermark))
@@ -908,6 +1117,33 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
 fn write_chunk(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(bytes);
+}
+
+/// One optional epoch stamp: a presence byte, then the value when
+/// present — 0 is a legal epoch second, so no sentinel could stand in
+/// for absence.
+fn write_opt_u64(out: &mut Vec<u8>, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
+fn read_opt_u64(bytes: &[u8], pos: &mut usize) -> Option<Option<u64>> {
+    let flag = *bytes.get(*pos)?;
+    *pos += 1;
+    match flag {
+        0 => Some(None),
+        1 => {
+            let value = u64::from_le_bytes(bytes.get(*pos..*pos + 8)?.try_into().ok()?);
+            *pos += 8;
+            Some(Some(value))
+        }
+        _ => None,
+    }
 }
 
 fn read_chunk<'b>(bytes: &'b [u8], pos: &mut usize) -> Option<&'b [u8]> {
@@ -1246,6 +1482,7 @@ mod tests {
                         (9, "存在しない段落への質問?".to_string()),
                     ],
                     sections: Vec::new(),
+                    meta: SourceMeta::default(),
                 },
             );
             let outcome = store.store(passages).unwrap();
@@ -1279,6 +1516,7 @@ mod tests {
                 (0, "前編".to_string()),
                 (9, "存在しない段落への見出し".to_string()),
             ],
+            SourceMeta::default(),
         );
         assert_eq!(
             record.sections,
@@ -1299,6 +1537,7 @@ mod tests {
             Arc::from("一つ目。\n\n二つ目。"),
             Vec::new(),
             sections.clone(),
+            SourceMeta::default(),
         );
         assert_eq!(
             record.sections,
@@ -1337,6 +1576,7 @@ mod tests {
                         (1, "本編".to_string()),
                         (9, "存在しない段落への見出し".to_string()),
                     ],
+                    meta: SourceMeta::default(),
                 },
             );
             let outcome = store.store(passages).unwrap();
@@ -1376,6 +1616,9 @@ mod tests {
                 text: "導入。\n\n本編。".to_string(),
                 questions: Vec::new(),
                 sections: vec![(1, "本編".to_string())],
+                stored_at: None,
+                date: None,
+                tags: Vec::new(),
             }],
         )
         .unwrap();
@@ -1391,6 +1634,183 @@ mod tests {
         assert_eq!(
             store.get("doc").unwrap().sections,
             vec![(1, "本編".to_string())]
+        );
+    }
+
+    /// The submission → WAL → replay → snapshot → reload chain for the
+    /// #167 metadata trio, with a caller-supplied `stored_at` (the
+    /// import path): every hop must hand it through untouched.
+    #[test]
+    fn source_metadata_round_trips_through_wal_replay_and_compaction() {
+        let dir = scratch_dir("meta-roundtrip");
+        let meta = SourceMeta {
+            stored_at: Some(1_700_000_000),
+            date: Some(1_500_000_000),
+            tags: vec!["蔵".to_string(), "酒".to_string()],
+        };
+        {
+            let store = open(&dir);
+            let mut passages = BTreeMap::new();
+            passages.insert(
+                "doc".to_string(),
+                PassageSubmission {
+                    text: "本文。".to_string(),
+                    questions: Vec::new(),
+                    sections: Vec::new(),
+                    meta: meta.clone(),
+                },
+            );
+            store.store(passages).unwrap();
+        }
+        // Crash shape: everything lives in the WAL alone.
+        let replayed = open(&dir);
+        assert_eq!(replayed.get("doc").unwrap().meta, meta);
+        replayed.compact().unwrap();
+        drop(replayed);
+        // And again from the snapshot alone.
+        let reborn = open(&dir);
+        assert_eq!(reborn.get("doc").unwrap().meta, meta);
+        assert_eq!(reborn.source_entries(), vec![("doc".to_string(), meta)]);
+    }
+
+    /// A submission with no `stored_at` is stamped once, at the write;
+    /// the stamp replays from the WAL rather than being re-taken.
+    #[test]
+    fn a_store_without_a_stored_at_stamps_the_write_time_once() {
+        let dir = scratch_dir("meta-stamp");
+        let before = now_epoch_secs();
+        let stamped = {
+            let store = open(&dir);
+            store.store(batch(&[("doc", "本文。")])).unwrap();
+            let stamped = store.get("doc").unwrap().meta.stored_at;
+            let after = now_epoch_secs();
+            let value = stamped.expect("the store stamps when the submission carries nothing");
+            assert!(
+                (before..=after).contains(&value),
+                "stamped {value} outside [{before}, {after}]"
+            );
+            stamped
+        };
+        let reborn = open(&dir);
+        assert_eq!(
+            reborn.get("doc").unwrap().meta.stored_at,
+            stamped,
+            "replay reads the logged stamp, never the clock"
+        );
+    }
+
+    /// Re-storing replaces metadata wholesale, like text and questions:
+    /// tags do not merge, and the stamp is re-taken.
+    #[test]
+    fn re_storing_a_source_wholesale_replaces_its_metadata() {
+        let dir = scratch_dir("meta-restore");
+        let store = open(&dir);
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc".to_string(),
+            PassageSubmission {
+                text: "旧版。".to_string(),
+                questions: Vec::new(),
+                sections: Vec::new(),
+                meta: SourceMeta {
+                    stored_at: Some(1_000),
+                    date: Some(2_000),
+                    tags: vec!["旧".to_string()],
+                },
+            },
+        );
+        store.store(passages).unwrap();
+        store.store(batch(&[("doc", "新版。")])).unwrap();
+        let meta = store.get("doc").unwrap().meta.clone();
+        assert!(meta.tags.is_empty(), "tags never merge across stores");
+        assert_eq!(meta.date, None);
+        assert!(
+            meta.stored_at.is_some_and(|at| at >= 1_000),
+            "the bare re-store is re-stamped, not left on the old stamp"
+        );
+    }
+
+    #[test]
+    fn source_filter_matches_pins_absent_metadata_semantics() {
+        let with = |meta: SourceMeta| {
+            PassageRecord::new(Arc::from("本文。"), Vec::new(), Vec::new(), meta).0
+        };
+        let bare = with(SourceMeta::default());
+        let tagged = with(SourceMeta {
+            stored_at: Some(100),
+            date: None,
+            tags: vec!["酒".to_string(), "蔵".to_string()],
+        });
+        let dated = with(SourceMeta {
+            stored_at: Some(100),
+            date: Some(50),
+            tags: Vec::new(),
+        });
+        let filter = |tags: &[&str], since: Option<u64>, until: Option<u64>| SourceFilter {
+            tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            since,
+            until,
+        };
+
+        // Absent metadata is non-matching under each filter kind.
+        assert!(!filter(&["酒"], None, None).matches(&bare));
+        assert!(!filter(&[], Some(0), None).matches(&bare));
+        assert!(!filter(&[], None, Some(u64::MAX)).matches(&bare));
+        // An unconstrained filter matches everything.
+        assert!(filter(&[], None, None).matches(&bare));
+
+        // Tags are any-of.
+        assert!(filter(&["酒", "無関係"], None, None).matches(&tagged));
+        assert!(!filter(&["無関係"], None, None).matches(&tagged));
+
+        // The window is half-open [since, until) over date ?? stored_at.
+        assert!(filter(&[], Some(100), None).matches(&tagged));
+        assert!(!filter(&[], Some(101), None).matches(&tagged));
+        assert!(filter(&[], None, Some(101)).matches(&tagged));
+        assert!(
+            !filter(&[], None, Some(100)).matches(&tagged),
+            "until is exclusive"
+        );
+
+        // A user-supplied date beats the stamp.
+        assert!(filter(&[], Some(40), Some(60)).matches(&dated));
+        assert!(!filter(&[], Some(90), Some(110)).matches(&dated));
+
+        // Tag and time constraints AND together.
+        assert!(filter(&["蔵"], Some(100), Some(101)).matches(&tagged));
+        assert!(!filter(&["蔵"], Some(101), None).matches(&tagged));
+    }
+
+    #[test]
+    fn eligible_sources_reports_the_filtered_set_and_the_total() {
+        let dir = scratch_dir("meta-eligible");
+        let store = open(&dir);
+        let mut passages = BTreeMap::new();
+        for (source, tags) in [("a", vec!["酒"]), ("b", vec!["蔵"]), ("c", vec![])] {
+            passages.insert(
+                source.to_string(),
+                PassageSubmission {
+                    text: "本文。".to_string(),
+                    questions: Vec::new(),
+                    sections: Vec::new(),
+                    meta: SourceMeta {
+                        stored_at: None,
+                        date: None,
+                        tags: tags.into_iter().map(str::to_string).collect(),
+                    },
+                },
+            );
+        }
+        store.store(passages).unwrap();
+        let (eligible, total) = store.eligible_sources(&SourceFilter {
+            tags: vec!["酒".to_string()],
+            since: None,
+            until: None,
+        });
+        assert_eq!(total, 3);
+        assert_eq!(
+            eligible.into_iter().collect::<Vec<_>>(),
+            vec!["a".to_string()]
         );
     }
 
@@ -1417,7 +1837,7 @@ mod tests {
         drop(store);
 
         let head = fs::read(dir.join("t.passages.bin")).unwrap();
-        assert_eq!(&head[..8], b"TAGURUS4", "the rewrite upgrades the format");
+        assert_eq!(&head[..8], b"TAGURUS5", "the rewrite upgrades the format");
         let reborn = open(&dir);
         assert_eq!(text(&reborn, "old-doc").as_deref(), Some("旧本文。"));
     }
@@ -1451,7 +1871,7 @@ mod tests {
         drop(store);
 
         let head = fs::read(dir.join("t.passages.bin")).unwrap();
-        assert_eq!(&head[..8], b"TAGURUS4", "the rewrite upgrades the format");
+        assert_eq!(&head[..8], b"TAGURUS5", "the rewrite upgrades the format");
         let reborn = open(&dir);
         assert_eq!(text(&reborn, "old-doc").as_deref(), Some("旧本文。"));
     }
@@ -1464,6 +1884,7 @@ mod tests {
                 Arc::from("text"),
                 vec![(0, "何のtext?".to_string())],
                 Vec::new(),
+                SourceMeta::default(),
             )
             .0,
         )]
@@ -1486,10 +1907,16 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_checksum_rejects_a_flipped_byte_and_s3_loads_unchecked() {
+    fn snapshot_checksum_rejects_a_flipped_byte_and_s3_s4_load_without_meta() {
         let sources: BTreeMap<String, Arc<PassageRecord>> = [(
             "doc".to_string(),
-            PassageRecord::new(Arc::from("第1段落。"), Vec::new(), Vec::new()).0,
+            PassageRecord::new(
+                Arc::from("第1段落。"),
+                Vec::new(),
+                Vec::new(),
+                SourceMeta::default(),
+            )
+            .0,
         )]
         .into_iter()
         .collect();
@@ -1507,10 +1934,24 @@ mod tests {
             "a parseable bitflip must fail the checksum"
         );
 
-        // The same bytes as an S3 snapshot — body without the footer,
-        // pre-checksum magic — load exactly as they did before the
-        // footer existed: parsed, unverifiable.
-        let mut s3 = bytes[..bytes.len() - 4].to_vec();
+        // The S4 layout is S5's minus the per-record metadata block —
+        // for this metadata-less single record, its trailing 6 bytes
+        // (two absent stamps, an empty tag table) before the footer.
+        // Stripped and resealed under the S4 magic, it must load with
+        // default metadata: the pre-#167 file, read forever.
+        let mut s4 = bytes[..bytes.len() - 4 - 6].to_vec();
+        s4[..8].copy_from_slice(S4_SNAPSHOT_MAGIC);
+        let crc = crate::crc32c::crc32c(&s4);
+        s4.extend_from_slice(&crc.to_le_bytes());
+        let (parsed, watermark) = snapshot_from_bytes(&s4).expect("S4 must keep loading");
+        assert_eq!(watermark, 7);
+        assert_eq!(parsed["doc"].text.as_ref(), "第1段落。");
+        assert_eq!(parsed["doc"].meta, SourceMeta::default());
+
+        // The same body as an S3 snapshot — no footer, pre-checksum
+        // magic — loads exactly as it did before the footer existed:
+        // parsed, unverifiable.
+        let mut s3 = bytes[..bytes.len() - 4 - 6].to_vec();
         s3[..8].copy_from_slice(S3_SNAPSHOT_MAGIC);
         let (parsed, watermark) = snapshot_from_bytes(&s3).expect("S3 must keep loading");
         assert_eq!(watermark, 7);
@@ -1525,6 +1966,7 @@ mod tests {
                 Arc::from("導入。\n\n本編。"),
                 Vec::new(),
                 vec![(1, "本編".to_string())],
+                SourceMeta::default(),
             )
             .0,
         )]
@@ -1534,6 +1976,38 @@ mod tests {
         let (parsed, watermark) = snapshot_from_bytes(&bytes).unwrap();
         assert_eq!(watermark, 3);
         assert_eq!(parsed["a"].sections, vec![(1, "本編".to_string())]);
+    }
+
+    #[test]
+    fn passage_snapshot_round_trips_populated_metadata() {
+        let sources: BTreeMap<String, Arc<PassageRecord>> = [(
+            "a".to_string(),
+            PassageRecord::new(
+                Arc::from("本文。"),
+                Vec::new(),
+                Vec::new(),
+                SourceMeta {
+                    stored_at: Some(1_752_000_000),
+                    date: Some(1_600_000_000),
+                    tags: vec!["酒".to_string(), "歴史".to_string()],
+                },
+            )
+            .0,
+        )]
+        .into_iter()
+        .collect();
+        let bytes = snapshot_to_bytes(&sources, 5);
+        let (parsed, watermark) = snapshot_from_bytes(&bytes).unwrap();
+        assert_eq!(watermark, 5);
+        assert_eq!(
+            parsed["a"].meta,
+            SourceMeta {
+                stored_at: Some(1_752_000_000),
+                date: Some(1_600_000_000),
+                tags: vec!["歴史".to_string(), "酒".to_string()],
+            },
+            "tags come back in their sorted, deduplicated form"
+        );
     }
 
     #[test]
@@ -1595,6 +2069,7 @@ mod tests {
             Arc::from("序。\n\n本編一。\n\n本編二。\n\n結び。"),
             Vec::new(),
             vec![(1, "本編".to_string()), (3, "結び".to_string())],
+            SourceMeta::default(),
         )
         .0;
         assert_eq!(record.section_for(0), None, "before the first marker");
@@ -1664,14 +2139,28 @@ mod tests {
             (0u32..10, word_strategy().prop_map(str::to_string))
         }
 
+        fn meta_strategy() -> impl Strategy<Value = SourceMeta> {
+            (
+                prop::option::of(0u64..2_000_000_000),
+                prop::option::of(0u64..2_000_000_000),
+                prop::collection::vec(word_strategy().prop_map(str::to_string), 0..4),
+            )
+                .prop_map(|(stored_at, date, tags)| SourceMeta {
+                    stored_at,
+                    date,
+                    tags,
+                })
+        }
+
         fn record_strategy() -> impl Strategy<Value = Arc<PassageRecord>> {
             (
                 text_strategy(),
                 prop::collection::vec(marker_strategy(), 0..4),
                 prop::collection::vec(marker_strategy(), 0..4),
+                meta_strategy(),
             )
-                .prop_map(|(text, questions, sections)| {
-                    PassageRecord::new(Arc::from(text), questions, sections).0
+                .prop_map(|(text, questions, sections, meta)| {
+                    PassageRecord::new(Arc::from(text), questions, sections, meta).0
                 })
         }
 
@@ -1712,6 +2201,7 @@ mod tests {
                     prop_assert_eq!(&record.paragraphs, &original.paragraphs);
                     prop_assert_eq!(&record.questions, &original.questions);
                     prop_assert_eq!(&record.sections, &original.sections);
+                    prop_assert_eq!(&record.meta, &original.meta);
                 }
             }
 

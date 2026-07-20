@@ -42,12 +42,22 @@ impl AppState {
     /// the only lane with an absolute scale; the fused score is rank
     /// arithmetic (raw BM25 in lexical-only deployments) and carries
     /// no floorable meaning.
+    ///
+    /// `filter` is the pre-lane source filter (#167): the eligible
+    /// source set is computed ONCE from the store's metadata, before
+    /// either lane runs, and both lanes serve only from it — BM25
+    /// skips ineligible slots, the vector sweep skips ineligible rows
+    /// (its ANN probe widening until the oversample target is met
+    /// among eligible rows). The returned `filter` report carries the
+    /// eligible/total counts the response plan surfaces. Collection
+    /// statistics stay corpus-global — see [`crate::bm25::Bm25Index::search`].
     pub fn search_passages(
         &self,
         name: &str,
         query: &str,
         limit: usize,
         floor_override: Option<f32>,
+        filter: Option<&crate::passages::SourceFilter>,
         deadline: Deadline,
     ) -> Option<io::Result<PassageSearch>> {
         let entry = self.lookup(name)?;
@@ -56,6 +66,7 @@ impl AppState {
                 Ok(PassageSearch {
                     hits: Vec::new(),
                     lanes: PassageSearchLanes::ZeroLimit,
+                    filter: None,
                 })
             });
         }
@@ -65,6 +76,7 @@ impl AppState {
                 Ok(PassageSearch {
                     hits: Vec::new(),
                     lanes: PassageSearchLanes::NoQueryTerms,
+                    filter: None,
                 })
             });
         }
@@ -94,6 +106,18 @@ impl AppState {
             Err(error) => return Some(Err(error)),
         };
 
+        // The eligibility set, decided once before either lane runs —
+        // both lanes then serve from exactly this set, so they cannot
+        // disagree about who was allowed to answer.
+        let eligibility = filter.map(|filter| store.eligible_sources(filter));
+        let eligible = eligibility.as_ref().map(|(set, _)| set);
+        let filter_report = eligibility
+            .as_ref()
+            .map(|(set, total)| super::SourceFilterReport {
+                eligible: set.len(),
+                total: *total,
+            });
+
         if self
             .ensure_bm25_index(&entry, &store, name, deadline)
             .is_err()
@@ -103,7 +127,7 @@ impl AppState {
         let lexical = {
             let guard = entry.bm25.read();
             let index = guard.as_ref().expect("index was just built");
-            index.search(&query_grams, pool)
+            index.search(&query_grams, pool, eligible)
         };
 
         // Semantic lane: sweep the paragraph vectors with the
@@ -141,7 +165,10 @@ impl AppState {
                 PassageVectorGate::Ready(vectors) => {
                     let floor = self.effective_semantic_floor(floor_override, &fence.meta);
                     (
-                        semantic_lane_hits(vectors.top_matches(cue, pool, deadline), floor),
+                        semantic_lane_hits(
+                            vectors.top_matches(cue, pool, deadline, eligible),
+                            floor,
+                        ),
                         VectorLaneStatus::Ran { floor },
                     )
                 }
@@ -165,6 +192,7 @@ impl AppState {
         Some(Ok(PassageSearch {
             hits: fuse_passage_lanes(&store, lexical, semantic, limit),
             lanes: PassageSearchLanes::Ran { vector },
+            filter: filter_report,
         }))
     }
 
@@ -180,6 +208,13 @@ impl AppState {
     /// a different floor would account for a call nobody made.
     /// Read-only, and bounded like one normal query plus one targeted
     /// scoring.
+    ///
+    /// `filter` is the source filter of the search being explained
+    /// (#167), applied exactly as `search_passages` applies it: an
+    /// ineligible TARGET verdicts `filtered_out` before any scoring,
+    /// and an eligible target is ranked against the eligible field
+    /// only — an explanation against the unfiltered field would
+    /// account for a call nobody made.
     // One parameter per field of the wire request being explained —
     // bundling them would just rename the same arity.
     #[allow(clippy::too_many_arguments)]
@@ -191,6 +226,7 @@ impl AppState {
         paragraph: Option<u32>,
         limit: usize,
         floor_override: Option<f32>,
+        filter: Option<&crate::passages::SourceFilter>,
         deadline: Deadline,
     ) -> Option<io::Result<PassageExplainLookup>> {
         let entry = self.lookup(name)?;
@@ -223,9 +259,20 @@ impl AppState {
         if paragraphs == 0 {
             return Some(Ok(PassageExplainLookup::IndexOutOfRange { paragraphs }));
         }
+        // The filter verdict sits between the target checks and the
+        // lane verdicts: the target exists and is validly addressed,
+        // but the search being explained never considered it.
+        if let Some(filter) = filter
+            && !filter.matches(&record)
+        {
+            return Some(Ok(PassageExplainLookup::FilteredOut));
+        }
         if query_grams.is_empty() {
             return Some(Ok(PassageExplainLookup::NoQueryTerms));
         }
+
+        let eligibility = filter.map(|filter| store.eligible_sources(filter));
+        let eligible = eligibility.as_ref().map(|(set, _)| set);
 
         if self
             .ensure_bm25_index(&entry, &store, name, deadline)
@@ -239,7 +286,7 @@ impl AppState {
         // Sweep both lanes whole, once: a lane's pool cap is a prefix
         // of the same deterministically ordered sweep, so every pool
         // size fusion needs below is a `take` away.
-        let lexical_full = index.search(&query_grams, usize::MAX);
+        let lexical_full = index.search(&query_grams, usize::MAX, eligible);
         let floor = self.effective_semantic_floor(floor_override, &fence.meta);
         let gate = match &cue {
             Ok(Some(_)) => Some(self.passage_vector_gate(&entry, &file_stem(name))),
@@ -247,7 +294,7 @@ impl AppState {
         };
         let vector_rows: Vec<(String, u32, u64, f32)> = match (&cue, &gate) {
             (Ok(Some(cue)), Some(PassageVectorGate::Ready(vectors))) => vectors
-                .top_matches(cue, usize::MAX, deadline)
+                .top_matches(cue, usize::MAX, deadline, eligible)
                 .into_iter()
                 .map(|(key, score)| (key.source.clone(), key.index, key.hash, score))
                 .collect(),

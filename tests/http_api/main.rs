@@ -37,4 +37,5 @@ mod search_plan;
 mod semantic_cache;
 mod server;
 mod server_ops;
+mod source_metadata;
 mod width_probe;

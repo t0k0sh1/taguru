@@ -78,12 +78,23 @@ fn seed(server: &Server) {
     // contexts (共通/例/概念 — the cursor's `context` field is what
     // keeps them apart), and a negative weight whose magnitude tops
     // the ranking.
+    // The passages ride the stream with a FIXED stored_at (which
+    // import preserves, #167) rather than a later HTTP store: the
+    // single instance and the router are seeded at different moments,
+    // and a store-time stamp straddling a second boundary would make
+    // the byte-for-byte export equivalence below flake. doc-a is
+    // tagged, so the filtered cross search can prove the router
+    // forwards the filter through its scatter-gather re-serialization;
+    // both texts share 麹 for the rank-interleaved passage merge.
     let stream = concat!(
         "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-a\"}\n",
+        "{\"passage\": \"麹と水で仕込む。\\n\\n辛口の酒は麹の使い方で決まる。\", \
+          \"stored_at\": 1700000000, \"tags\": [\"仕込み\"]}\n",
         "{\"subject\": \"青嶺\", \"label\": \"銘柄である\", \"object\": \"酒\", \"weight\": 2.0}\n",
         "{\"subject\": \"辛口\", \"label\": \"特徴\", \"object\": \"酒\", \"weight\": 1.0}\n",
         "{\"subject\": \"共通\", \"label\": \"例\", \"object\": \"概念\", \"weight\": 0.5}\n",
         "{\"taguru_batch\": 1, \"context\": \"glossary\", \"source\": \"doc-b\"}\n",
+        "{\"passage\": \"麹（こうじ）は蒸した米に麹菌を生やしたもの。\", \"stored_at\": 1700000001}\n",
         "{\"subject\": \"辛口\", \"label\": \"意味する\", \"object\": \"甘くない\", \"weight\": 2.0}\n",
         "{\"subject\": \"共通\", \"label\": \"例\", \"object\": \"概念\", \"weight\": 0.5}\n",
         "{\"taguru_batch\": 1, \"context\": \"breweries\", \"source\": \"doc-c\"}\n",
@@ -98,18 +109,6 @@ fn seed(server: &Server) {
         "PUT",
         "/groups/all",
         Some(json!({"description": "全部", "contexts": ["breweries"], "groups": ["jp"]})),
-    );
-    // Passages sharing a term across the shard split, for the
-    // rank-interleaved passage merge.
-    server.ok(
-        "POST",
-        "/contexts/sake/sources",
-        Some(json!({"passages": {"doc-a": "麹と水で仕込む。\n\n辛口の酒は麹の使い方で決まる。"}})),
-    );
-    server.ok(
-        "POST",
-        "/contexts/glossary/sources",
-        Some(json!({"passages": {"doc-b": "麹（こうじ）は蒸した米に麹菌を生やしたもの。"}})),
     );
 }
 
@@ -226,6 +225,28 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
             "the merged plan must match the single instance's byte for byte: {answer}"
         );
     }
+
+    // The source filter (#167) rides the router's own scatter-gather
+    // re-serialization: only the tagged shard answers, and each
+    // target's plan carries its eligibility counts — identically to
+    // the single instance.
+    let filtered = assert_equivalent(
+        &single,
+        &router,
+        "POST",
+        "/sources/search",
+        Some(json!({"contexts": ["sake", "glossary"], "query": "麹の使い方", "tags": ["仕込み"]})),
+    );
+    let hits = filtered["result"]["hits"].as_array().unwrap();
+    assert!(
+        !hits.is_empty() && hits.iter().all(|hit| hit["context"] == "sake"),
+        "only the tagged source's context may answer through the router: {filtered}"
+    );
+    assert_eq!(
+        filtered["result"]["plan"]["contexts"][1]["filter"],
+        json!({"eligible_sources": 0, "total_sources": 1}),
+        "the untagged target reports an empty eligible set: {filtered}"
+    );
 
     // The directories and the group surfaces: unions must equal the
     // single instance's own rows.

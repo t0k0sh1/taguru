@@ -168,7 +168,12 @@ fn full_retrieval_loop_over_http() {
         }})),
     );
     let sources = server.ok("GET", "/contexts/sake/sources", None);
-    assert_eq!(sources, json!({"total": 1, "sources": ["第2段落"]}));
+    assert_eq!(sources["total"], json!(1));
+    assert_eq!(sources["sources"], json!(["第2段落"]));
+    // The listing's metadata view (#167): same page, name plus the
+    // server's stored_at stamp (its value is the wall clock's).
+    assert_eq!(sources["entries"][0]["name"], "第2段落");
+    assert!(sources["entries"][0]["stored_at"].is_u64());
 
     // recall/query pages carry totals; query takes OR-sets per position.
     let page = server.ok(

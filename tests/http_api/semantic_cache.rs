@@ -68,7 +68,7 @@ fn vector_for(text: &str) -> Vec<f64> {
     }
 }
 
-fn spawn_paired_embeddings() -> String {
+pub(crate) fn spawn_paired_embeddings() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -122,7 +122,7 @@ fn spawn_paired_embeddings() -> String {
     format!("http://{addr}/v1/embeddings")
 }
 
-fn semantic_env(provider: &str) -> Vec<(&'static str, String)> {
+pub(crate) fn semantic_env(provider: &str) -> Vec<(&'static str, String)> {
     vec![
         ("TAGURU_EMBED_URL", provider.to_string()),
         ("TAGURU_EMBED_MODEL", "paired-model".to_string()),

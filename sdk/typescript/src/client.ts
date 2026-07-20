@@ -382,6 +382,9 @@ export class Taguru {
       groups?: string[];
       limit?: number;
       semantic_floor?: number;
+      tags?: string[];
+      since?: number;
+      until?: number;
     } = {},
   ): Promise<CrossPassagePage> {
     const result = await this.requestJson("POST", "/sources/search", {
@@ -391,6 +394,9 @@ export class Taguru {
         query,
         limit: options.limit,
         semantic_floor: options.semantic_floor,
+        tags: options.tags,
+        since: options.since,
+        until: options.until,
       }),
     });
     return result as CrossPassagePage;
@@ -949,6 +955,8 @@ export class Context {
     options: {
       questions?: Record<string, QuestionSpec[]>;
       sections?: Record<string, SectionSpec[]>;
+      tags?: Record<string, string[]>;
+      dates?: Record<string, number>;
     } = {},
   ): Promise<StoredPassages> {
     const body: Record<string, unknown> = { passages };
@@ -957,6 +965,12 @@ export class Context {
     }
     if (options.sections !== undefined) {
       body["sections"] = options.sections;
+    }
+    if (options.tags !== undefined) {
+      body["tags"] = options.tags;
+    }
+    if (options.dates !== undefined) {
+      body["dates"] = options.dates;
     }
     const result = await this.post("/sources", body);
     return result as StoredPassages;
@@ -974,16 +988,33 @@ export class Context {
    * lands nearer the text you hope to find. `semantic_floor` overrides the
    * vector lane's cosine floor for this call — over the context setting,
    * over the server default (it floors only that lane; BM25-only hits still
-   * return). The page's `plan` says whether the semantic lane actually ran —
-   * and why not, when it did not — see `SearchPlan`.
+   * return). `tags` (any-of) and the half-open `[since, until)` epoch-second
+   * window over each source's `date ?? stored_at` pre-filter which sources
+   * may answer, before either lane runs — a source without the respective
+   * metadata never matches, and the plan's `filter` block reports how many
+   * sources were eligible. The page's `plan` says whether the semantic lane
+   * actually ran — and why not, when it did not — see `SearchPlan`.
    */
   async searchPassages(
     query: string,
-    options: { limit?: number; semantic_floor?: number } = {},
+    options: {
+      limit?: number;
+      semantic_floor?: number;
+      tags?: string[];
+      since?: number;
+      until?: number;
+    } = {},
   ): Promise<PassagePage> {
     const result = await this.post(
       "/sources/search",
-      dropUndefined({ query, limit: options.limit, semantic_floor: options.semantic_floor }),
+      dropUndefined({
+        query,
+        limit: options.limit,
+        semantic_floor: options.semantic_floor,
+        tags: options.tags,
+        since: options.since,
+        until: options.until,
+      }),
     );
     return result as PassagePage;
   }
@@ -1018,14 +1049,22 @@ export class Context {
   /**
    * Why `source` did (or didn't) surface for `query`. Omit `paragraph` to
    * explain the source's best showing; name one (0-based) to interrogate it.
-   * Pass the `semantic_floor` of the search call being explained, or the
-   * explanation accounts for a call nobody made. A diagnosed miss is a 200 —
-   * read the `verdict`, then the lane evidence.
+   * Pass the `semantic_floor` — and the `tags`/`since`/`until` filter — of
+   * the search call being explained, or the explanation accounts for a call
+   * nobody made (a source the filter excludes verdicts `filtered_out`). A
+   * diagnosed miss is a 200 — read the `verdict`, then the lane evidence.
    */
   async explainSearchPassages(
     query: string,
     source: string,
-    options: { paragraph?: number; limit?: number; semantic_floor?: number } = {},
+    options: {
+      paragraph?: number;
+      limit?: number;
+      semantic_floor?: number;
+      tags?: string[];
+      since?: number;
+      until?: number;
+    } = {},
   ): Promise<SearchExplanation> {
     const result = await this.post(
       "/sources/search/explain",
@@ -1035,6 +1074,9 @@ export class Context {
         paragraph: options.paragraph,
         limit: options.limit,
         semantic_floor: options.semantic_floor,
+        tags: options.tags,
+        since: options.since,
+        until: options.until,
       }),
     );
     return result as SearchExplanation;

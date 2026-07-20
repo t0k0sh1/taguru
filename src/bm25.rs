@@ -266,10 +266,32 @@ impl Bm25Index {
     /// Top `limit` live paragraphs by BM25, ties broken by (source
     /// name, paragraph index) for deterministic output. `query_grams`
     /// must already be deduplicated.
-    pub(crate) fn search(&self, query_grams: &[u64], limit: usize) -> Vec<IndexHit> {
+    ///
+    /// `eligible` is the pre-lane source filter (#167): only slots
+    /// whose source is in the set are scored and served. The corpus
+    /// statistics — idf's carrier counts and the average length —
+    /// deliberately stay CORPUS-GLOBAL: the filter gates which
+    /// paragraphs may answer, it does not re-weight the collection
+    /// they are scored against (an eligible paragraph scores exactly
+    /// what it scores unfiltered, so explain's evidence stays true
+    /// under any filter).
+    pub(crate) fn search(
+        &self,
+        query_grams: &[u64],
+        limit: usize,
+        eligible: Option<&std::collections::BTreeSet<String>>,
+    ) -> Vec<IndexHit> {
         if self.live_count == 0 || query_grams.is_empty() {
             return Vec::new();
         }
+        // One membership bit per interned source, so the posting loop
+        // pays an index, never a string hash.
+        let allowed: Option<Vec<bool>> = eligible.map(|set| {
+            self.sources
+                .iter()
+                .map(|source| set.contains(source))
+                .collect()
+        });
         let total = self.live_count as f32;
         let average_length = (self.live_total_length / f64::from(self.live_count)).max(1.0) as f32;
 
@@ -296,6 +318,11 @@ impl Bm25Index {
             for posting in postings {
                 let slot = &self.slots[posting.slot as usize];
                 if !slot.alive {
+                    continue;
+                }
+                if let Some(allowed) = &allowed
+                    && !allowed[slot.source_id as usize]
+                {
                     continue;
                 }
                 if !visited[posting.slot as usize] {
@@ -766,7 +793,7 @@ mod tests {
         ] {
             let query_grams = grams(query);
             let expected = full_rescan(&records, &query_grams, 10);
-            let got = index.search(&query_grams, 10);
+            let got = index.search(&query_grams, 10, None);
             assert_eq!(
                 got.iter()
                     .map(|(source, index, _, _)| (source.as_str(), *index))
@@ -832,7 +859,7 @@ mod tests {
             .or_default()
             .push(Posting { slot: 0, tf: 1.0 });
 
-        let hits = index.search(&[underflowing_gram, normal_gram], 10);
+        let hits = index.search(&[underflowing_gram, normal_gram], 10, None);
         assert_eq!(
             hits.len(),
             1,
@@ -849,7 +876,7 @@ mod tests {
 
         // Every hit's score is reproduced exactly: same addends, same
         // order, bit for bit — explain and search share the formula.
-        let hits = index.search(&query, 10);
+        let hits = index.search(&query, 10, None);
         assert!(!hits.is_empty());
         for (source, paragraph, hash, score) in &hits {
             let evidence = index.explain(&query, source, *paragraph).unwrap();
@@ -908,17 +935,63 @@ mod tests {
         let query = grams("杜氏の経験");
         assert!(
             index
-                .search(&query, 5)
+                .search(&query, 5, None)
                 .iter()
                 .any(|(source, ..)| source == "docs/takase.md")
         );
         index.remove_source("docs/takase.md");
         assert!(
             index
-                .search(&query, 5)
+                .search(&query, 5, None)
                 .iter()
                 .all(|(source, ..)| source != "docs/takase.md"),
             "a tombstoned source must not resurface"
+        );
+    }
+
+    /// The #167 pre-lane filter: only eligible sources are served, and
+    /// an eligible paragraph's score is EXACTLY its unfiltered score —
+    /// the filter gates eligibility, it never re-weights (idf and the
+    /// average length stay corpus-global).
+    #[test]
+    fn an_eligible_set_gates_hits_without_reweighting_their_scores() {
+        let records = corpus();
+        let index = Bm25Index::build(&records);
+        // Terms straddle two sources (霧沢町 in aomine, 杜氏 in
+        // takase), so the unfiltered ranking has real competition.
+        let query = grams("霧沢町の杜氏");
+        let unfiltered = index.search(&query, 10, None);
+        assert!(
+            unfiltered
+                .iter()
+                .any(|(source, ..)| source == "docs/takase.md")
+        );
+        assert!(unfiltered.len() > 1, "the corpus must offer competition");
+
+        let only_takase: std::collections::BTreeSet<String> =
+            ["docs/takase.md".to_string()].into_iter().collect();
+        let filtered = index.search(&query, 10, Some(&only_takase));
+        assert!(
+            filtered
+                .iter()
+                .all(|(source, ..)| source == "docs/takase.md"),
+            "nothing outside the eligible set may be served"
+        );
+        for (source, paragraph, _, score) in &filtered {
+            let (.., unfiltered_score) = unfiltered
+                .iter()
+                .find(|(s, p, ..)| s == source && p == paragraph)
+                .expect("an eligible hit also ranks unfiltered");
+            assert_eq!(
+                score, unfiltered_score,
+                "the filter must not change an eligible paragraph's score"
+            );
+        }
+
+        let nobody = std::collections::BTreeSet::new();
+        assert!(
+            index.search(&query, 10, Some(&nobody)).is_empty(),
+            "an empty eligible set serves nothing"
         );
     }
 
@@ -929,11 +1002,11 @@ mod tests {
         let updated = record("高瀬は引退し、後任の杜氏は佐伯となった。");
         index.upsert_source("docs/takase.md", &updated);
 
-        let hits = index.search(&grams("後任の杜氏"), 5);
+        let hits = index.search(&grams("後任の杜氏"), 5, None);
         assert_eq!(hits[0].0, "docs/takase.md");
         assert!(
             index
-                .search(&grams("経験は30年"), 5)
+                .search(&grams("経験は30年"), 5, None)
                 .iter()
                 .all(|(source, ..)| source != "docs/takase.md"),
             "the old paragraph is gone with the upsert"
@@ -953,7 +1026,7 @@ mod tests {
 
         let survivors = vec![records[0].clone()];
         let oracle = full_rescan(&survivors, &grams("霧沢町"), 5);
-        let got = index.search(&grams("霧沢町"), 5);
+        let got = index.search(&grams("霧沢町"), 5, None);
         assert_eq!(got.len(), 1);
         assert!(
             (got[0].3 - oracle[0].2).abs() <= 1e-4,
@@ -989,8 +1062,8 @@ mod tests {
         for query in ["精米歩合はどこまで磨く?", "state", "杜氏の経験"] {
             let grams = grams(query);
             assert_eq!(
-                reborn.search(&grams, 10),
-                index.search(&grams, 10),
+                reborn.search(&grams, 10, None),
+                index.search(&grams, 10, None),
                 "the reborn index must answer exactly like the live one (query {query:?})"
             );
         }
@@ -1087,11 +1160,11 @@ mod tests {
         let without = Bm25Index::build(&[("doc".to_string(), bare)]);
         let with = Bm25Index::build(&[("doc".to_string(), questioned.clone())]);
         let baseline: f32 = without
-            .search(&query, 5)
+            .search(&query, 5, None)
             .first()
             .map(|hit| hit.3)
             .unwrap_or(0.0);
-        let hits = with.search(&query, 5);
+        let hits = with.search(&query, 5, None);
         assert_eq!(hits.len(), 1, "the question's terms must land the hit");
         assert_eq!((hits[0].0.as_str(), hits[0].1), ("doc", 0));
         assert!(
@@ -1148,7 +1221,7 @@ mod tests {
             ("a-doc".to_string(), record("同じ本文。")),
         ];
         let index = Bm25Index::build(&records);
-        let hits = index.search(&grams("同じ本文"), 5);
+        let hits = index.search(&grams("同じ本文"), 5, None);
         assert_eq!(hits[0].0, "a-doc");
         assert_eq!(hits[1].0, "b-doc");
         assert_eq!(hits[0].3, hits[1].3);

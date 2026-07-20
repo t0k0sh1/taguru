@@ -200,4 +200,19 @@ impl AppState {
                 .map(|store| store.source_ids()),
         )
     }
+
+    /// [`Self::passage_sources`] with each source's metadata (#167)
+    /// beside it — what `list_sources` renders its `entries` from.
+    #[allow(clippy::type_complexity)]
+    pub fn passage_source_entries(
+        &self,
+        name: &str,
+    ) -> Option<io::Result<Vec<(String, crate::passages::SourceMeta)>>> {
+        let entry = self.lookup(name)?;
+        let _fence = entry.read_unless_deleted()?;
+        Some(
+            self.entry_passages(&entry, &file_stem(name))
+                .map(|store| store.source_entries()),
+        )
+    }
 }

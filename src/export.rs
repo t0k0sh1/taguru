@@ -142,6 +142,17 @@ fn is_false(flag: &bool) -> bool {
 #[derive(Serialize)]
 struct PassageLine<'a> {
     passage: &'a str,
+    /// Source metadata (#167), omitted when absent so pre-metadata
+    /// consumers keep parsing and the stream stays a fixed point.
+    /// `stored_at` is exported so a restore preserves when the source
+    /// was ORIGINALLY stored — import re-stamps only when this is
+    /// absent (a pre-metadata export).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stored_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    date: Option<u64>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    tags: &'a [String],
 }
 
 #[derive(Serialize)]
@@ -392,6 +403,9 @@ pub(crate) fn render(
                     &mut stream,
                     &PassageLine {
                         passage: &record.text,
+                        stored_at: record.meta.stored_at,
+                        date: record.meta.date,
+                        tags: &record.meta.tags,
                     },
                 );
                 for (paragraph, question) in &record.questions {
@@ -808,6 +822,15 @@ mod tests {
                             text: "青嶺酒造は1907年創業。\n\n代表銘柄は青嶺。".to_string(),
                             questions: vec![(0, "いつ創業した?".to_string())],
                             sections: vec![(0, "沿革".to_string())],
+                            // Populated metadata (#167): the round trip
+                            // below must preserve it — stored_at
+                            // included, or a backup would silently
+                            // re-date every source to its restore time.
+                            meta: crate::passages::SourceMeta {
+                                stored_at: Some(1_700_000_000),
+                                date: Some(1_181_600_000),
+                                tags: vec!["蔵".to_string(), "酒".to_string()],
+                            },
                         },
                     ),
                     (
@@ -816,6 +839,7 @@ mod tests {
                             text: "杜氏の紹介。\n\n代表銘柄の解説。".to_string(),
                             questions: Vec::new(),
                             sections: Vec::new(),
+                            meta: crate::passages::SourceMeta::default(),
                         },
                     ),
                 ]),
@@ -942,6 +966,30 @@ mod tests {
             )
         );
         assert_eq!(passages_b["b.md"].1, Vec::new());
+        // The metadata trio (#167) survives the trip intact —
+        // stored_at especially: import must preserve the ORIGINAL
+        // stamp, not re-date the source to its restore time.
+        let meta = |snapshot: &ExportSnapshot, source: &str| {
+            snapshot
+                .passages
+                .iter()
+                .find(|(name, _)| name == source)
+                .map(|(_, record)| record.meta.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            meta(&snapshot_b, "a.md"),
+            crate::passages::SourceMeta {
+                stored_at: Some(1_700_000_000),
+                date: Some(1_181_600_000),
+                tags: vec!["蔵".to_string(), "酒".to_string()],
+            }
+        );
+        assert_eq!(
+            meta(&snapshot_b, "b.md").stored_at,
+            meta(&snapshot_a, "b.md").stored_at,
+            "a store-stamped source keeps its stamp through the trip"
+        );
     }
 
     fn snapshot(associations: Vec<Association>) -> ExportSnapshot {

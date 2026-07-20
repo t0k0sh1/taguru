@@ -405,9 +405,25 @@ class AliasEntry:
 
 
 @dataclass(slots=True, frozen=True)
+class SourceEntry:
+    """One listed source with its metadata (#167). ``stored_at`` is the
+    server's stamp (epoch seconds), ``date`` the user-supplied document
+    time; a source stored before metadata existed lists as bare."""
+
+    name: str
+    stored_at: int | None = None
+    date: int | None = None
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True, frozen=True)
 class SourcePage:
+    """``sources`` is the bare id list; ``entries`` carries the same page
+    with each source's metadata beside it."""
+
     total: int
     sources: list[str]
+    entries: list[SourceEntry] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -481,11 +497,22 @@ class SearchLanesPlan:
 
 
 @dataclass(slots=True, frozen=True)
+class FilterPlan:
+    """The source filter's account for one searched context (#167): how
+    many sources were eligible to answer, out of how many the context
+    stores — present exactly when the request carried a filter."""
+
+    eligible_sources: int
+    total_sources: int
+
+
+@dataclass(slots=True, frozen=True)
 class SearchContextPlan:
     """One searched context's account within a :class:`SearchPlan`."""
 
     context: str
     lanes: SearchLanesPlan
+    filter: FilterPlan | None = None
 
 
 @dataclass(slots=True, frozen=True)
