@@ -449,7 +449,9 @@ pub async fn search_communities(
     }
     ranked.truncate(limit);
     for summary in &ranked {
-        state.metrics().record_passage_hit(summary.bm25, summary.vector);
+        state
+            .metrics()
+            .record_passage_hit(summary.bm25, summary.vector);
         match (summary.bm25, summary.vector) {
             (true, false) => lane_hits[0] += 1,
             (true, true) => lane_hits[1] += 1,
