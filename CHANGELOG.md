@@ -8,6 +8,30 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Community analysis as an offline derived index (#166) — the
+  corpus-overview surface GraphRAG's global search answers and taguru
+  had no verb for. `GET /contexts/{name}/communities` detects
+  communities on the concept graph server-side (hand-rolled
+  deterministic Louvain with a component-split pass, `louvain-cc/1`;
+  hierarchical via aggregation; heavy-ops gated) and streams them with
+  the revision snapshot the analysis was cut at. `taguru communities`
+  — an HTTP client to a running server, like calibrate — turns that
+  into an artifact: an ordinary context (default `{name}::communities`)
+  holding one summary passage per community, membership and hierarchy
+  as associations, and a manifest recording the source revision.
+  Summaries come from the extract provider and are incremental by
+  content fingerprint: an unchanged graph re-runs with zero LLM calls,
+  and only changed communities re-summarize.
+  `POST /contexts/{name}/communities/search` (MCP: `search_communities`;
+  SDKs: `search_communities`/`searchCommunities`) ranks the summaries
+  with the same two-lane passage search — plan, floors and all — and
+  answers with an honest staleness verdict (`stale: true` = the source
+  graph moved since derivation); a missing artifact is a refusal
+  naming the build command, never an empty result. Because the
+  artifact is an ordinary context, quotas, retrieval caching (a new
+  cache op keyed on the artifact AND the source's current graph
+  revision), export/import, groups, and router-mode routing all apply
+  unchanged.
 - Image supply chain, made verifiable end to end (#138). The release
   pipeline already signed the multi-arch manifest (Sigstore keyless)
   and attached BuildKit SBOM + SLSA provenance since 0.2.0 — but the

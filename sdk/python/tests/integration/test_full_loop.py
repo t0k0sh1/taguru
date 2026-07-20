@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from taguru import (
@@ -354,6 +356,71 @@ def test_flush_names_dirty_contexts(client: Taguru, fresh_name: str) -> None:
     seed(client, fresh_name)
     flushed = client.flush()
     assert fresh_name in flushed
+    client.contexts.delete(fresh_name)
+
+
+def test_search_communities_verdicts_staleness_over_an_artifact(
+    client: Taguru, fresh_name: str
+) -> None:
+    """The artifact is normally built by `taguru communities`; this builds
+    the same shapes by hand through the API, which is exactly what makes
+    them an ordinary context."""
+    seed(client, fresh_name)
+    ctx = client.context(fresh_name)
+
+    # No artifact: a refusal naming the build command, not an empty page.
+    with pytest.raises(NotFoundError) as refused:
+        ctx.search_communities("何がテーマか")
+    assert "taguru communities" in str(refused.value)
+
+    derived = f"{fresh_name}::communities"
+    client.contexts.create(derived)
+    revision = client.contexts.get(fresh_name).revision
+    manifest = {
+        "taguru_communities": 1,
+        "algorithm": "louvain-cc/1",
+        "source_context": fresh_name,
+        "revision": {
+            "graph": revision.graph,
+            "passages": revision.passages,
+            "config": revision.config,
+        },
+        "levels": 1,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 3},
+        ],
+    }
+    dctx = client.context(derived)
+    dctx.store_passages(
+        {
+            "community:L0-0": "青嶺酒造の造りと杜氏についての要約。",
+            "communities:manifest": json.dumps(manifest),
+        }
+    )
+    dctx.add_associations(
+        [
+            {"subject": "community:L0-0", "label": "contains", "object": "青嶺酒造", "weight": 3.0},
+            {"subject": "community:L0-0", "label": "contains", "object": "高瀬", "weight": 2.0},
+        ]
+    )
+
+    page = ctx.search_communities("青嶺酒造")
+    assert page.derived == derived
+    assert page.stale is False
+    hit = page.hits[0]
+    assert hit.community == "L0-0"
+    assert hit.level == 0
+    assert hit.members[0].name == "青嶺酒造"
+
+    # A source-graph write flips the verdict immediately.
+    ctx.add_associations(
+        [{"subject": "青嶺酒造", "label": "所在地", "object": "山あい", "weight": 1.0}]
+    )
+    page = ctx.search_communities("青嶺酒造")
+    assert page.stale is True
+    assert page.revision.current_graph > page.revision.recorded_graph
+
+    client.contexts.delete(derived)
     client.contexts.delete(fresh_name)
 
 

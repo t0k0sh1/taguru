@@ -518,6 +518,56 @@ class CrossPassagePage:
 
 
 @dataclass(slots=True, frozen=True)
+class CommunityHitMember:
+    """One member concept of a ranked community, with its intra-community
+    strength (the membership edge's weight on the artifact)."""
+
+    name: str
+    strength: float
+
+
+@dataclass(slots=True, frozen=True)
+class CommunityHit:
+    """One ranked community from ``search_communities``: the matched summary
+    paragraph plus the community's manifest facts. The manifest fields are
+    ``None`` when the artifact is mid-rewrite and this summary landed before
+    its manifest line — served honestly rather than dropped."""
+
+    community: str
+    score: float
+    text: str
+    paragraph: int
+    level: int | None = None
+    parent: str | None = None
+    concept_count: int | None = None
+    members: list[CommunityHitMember] = field(default_factory=list)
+    members_truncated: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class CommunityRevisions:
+    """The two source-graph revisions the staleness verdict compares."""
+
+    recorded_graph: int
+    current_graph: int
+
+
+@dataclass(slots=True, frozen=True)
+class CommunityPage:
+    """``search_communities``' response: ranked community summaries and the
+    verdict that qualifies them — ``stale`` means the source graph moved
+    since the artifact was derived (the summaries describe an older graph;
+    re-run ``taguru communities`` to refresh)."""
+
+    derived: str
+    algorithm: str
+    stale: bool
+    revision: CommunityRevisions
+    plan: SearchPlan
+    hits: list[CommunityHit]
+
+
+@dataclass(slots=True, frozen=True)
 class TermContribution:
     """One query term against the target paragraph: ``df`` paragraphs carry
     it corpus-wide (its ``idf`` follows), the target carries it ``tf`` times,

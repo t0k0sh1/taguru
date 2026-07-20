@@ -126,6 +126,10 @@ classes:
       route: "POST /contexts/{name}/sources/search"
       args: [query]
       options: [limit, semantic_floor]
+    search_communities:
+      route: "POST /contexts/{name}/communities/search"
+      args: [query]
+      options: [limit, semantic_floor, derived]
     explain_search_passages:
       route: "POST /contexts/{name}/sources/search/explain"
       args: [query, source]

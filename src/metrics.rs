@@ -323,17 +323,19 @@ pub enum SearchOp {
     Query,
     Activate,
     SearchPassages,
+    SearchCommunities,
     Explore,
 }
 
 impl SearchOp {
-    const ALL: [SearchOp; 7] = [
+    const ALL: [SearchOp; 8] = [
         SearchOp::Resolve,
         SearchOp::ResolveLabel,
         SearchOp::Recall,
         SearchOp::Query,
         SearchOp::Activate,
         SearchOp::SearchPassages,
+        SearchOp::SearchCommunities,
         SearchOp::Explore,
     ];
 
@@ -345,6 +347,7 @@ impl SearchOp {
             SearchOp::Query => "query",
             SearchOp::Activate => "activate",
             SearchOp::SearchPassages => "search_passages",
+            SearchOp::SearchCommunities => "search_communities",
             SearchOp::Explore => "explore",
         }
     }
@@ -362,13 +365,15 @@ pub enum RetrievalCacheOp {
     Recall,
     Query,
     SearchPassages,
+    SearchCommunities,
 }
 
 impl RetrievalCacheOp {
-    const ALL: [RetrievalCacheOp; 3] = [
+    const ALL: [RetrievalCacheOp; 4] = [
         RetrievalCacheOp::Recall,
         RetrievalCacheOp::Query,
         RetrievalCacheOp::SearchPassages,
+        RetrievalCacheOp::SearchCommunities,
     ];
 
     fn as_str(self) -> &'static str {
@@ -376,6 +381,7 @@ impl RetrievalCacheOp {
             RetrievalCacheOp::Recall => "recall",
             RetrievalCacheOp::Query => "query",
             RetrievalCacheOp::SearchPassages => "search_passages",
+            RetrievalCacheOp::SearchCommunities => "search_communities",
         }
     }
 
@@ -386,6 +392,7 @@ impl RetrievalCacheOp {
             RetrievalCacheOp::Recall => SearchOp::Recall,
             RetrievalCacheOp::Query => SearchOp::Query,
             RetrievalCacheOp::SearchPassages => SearchOp::SearchPassages,
+            RetrievalCacheOp::SearchCommunities => SearchOp::SearchCommunities,
         }
     }
 }

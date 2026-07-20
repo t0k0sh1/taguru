@@ -495,6 +495,20 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "search_communities",
+            "Global search over a context's community-summary artifact (built offline by `taguru communities`): ranked LLM summaries of densely connected concept clusters — for corpus-overview questions (\"what are the main themes?\") that passage and graph search answer poorly. Each hit names its community, the matched summary paragraph, hierarchy level (0 = finest), member concepts with strengths, and concept_count; the response's `stale` flag means the source graph moved since derivation — the summaries describe an older graph, served honestly rather than withheld. The artifact is an ordinary context (default '{context}::communities'; `derived` overrides, for artifacts built with --into); a missing artifact is a refusal naming the build command, never an empty result. One context per call.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 5" },
+                    "semantic_floor": { "type": "number", "description": "one-call override of the artifact's vector-lane cosine floor (0-1)" },
+                    "derived": { "type": "string", "description": "the artifact context to search; omitted means '{context}::communities'" }
+                }),
+                &["context", "query"],
+            ),
+        ),
+        (
             "explain_search",
             "Why didn't (or did) a source appear in search_passages — one call instead of orchestrating search, citations, and lowered limits by hand. Name the query AND the source (optionally which paragraph) you expected; the answer is the first verdict that applies: not_stored (never ingested here, or retracted), no_term_overlap (the query's terms and the paragraph's terms side by side, as strings — the spelling-mismatch case: stored under 酒蔵, you searched 酒造 — register an alias or reword), below_cutoff (its actual rank, the score cutoff at your limit, and a verified limit that reaches it), or served (its rank — it WAS there). Evidence carries per-term tf/df/BM25 contributions and the vector lane's cosine or the reason that lane never ran. One context per call.",
             object_schema(

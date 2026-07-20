@@ -99,6 +99,17 @@ USAGE:
                                         a property of the model, remeasured
                                         per switch (see: taguru calibrate
                                         --help); URL defaults to TAGURU_ADDR
+  taguru communities --context NAME [--dry-run] [--json] [URL]
+                                        derive (or refresh) a community-
+                                        summaries artifact from a running
+                                        server's context: server-side
+                                        detection, LLM summaries of what
+                                        changed only, written back as an
+                                        ordinary context that
+                                        POST /contexts/{name}/communities/search
+                                        serves with a staleness verdict
+                                        (see: taguru communities --help);
+                                        URL defaults to TAGURU_ADDR
   taguru --help                         this text
 
 CONFIGURATION FILE (--config FILE, or TAGURU_CONFIG=FILE):
@@ -301,6 +312,7 @@ pub fn dispatch() -> Command {
         Some("restore") => exit(crate::ship::run(&args[1..])),
         Some("extract") => exit(crate::extract::run(&args[1..])),
         Some("calibrate") => exit(crate::calibrate::run(&args[1..])),
+        Some("communities") => exit(crate::communities::run(&args[1..])),
         Some(other) => {
             eprintln!("taguru: unknown argument '{other}' — try 'taguru --help'");
             exit(2)

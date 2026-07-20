@@ -733,6 +733,8 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         | (&Method::POST, "/contexts/{name}/unreachable_from")
         | (&Method::POST, "/contexts/{name}/vocabulary/audit")
         | (&Method::POST, "/contexts/{name}/drift/audit")
+        | (&Method::GET, "/contexts/{name}/communities")
+        | (&Method::POST, "/contexts/{name}/communities/search")
         | (&Method::POST, "/mcp") => Role::Read,
         // The ingest loop — everything the documented agent discipline
         // drives, context creation and per-source re-sync included.

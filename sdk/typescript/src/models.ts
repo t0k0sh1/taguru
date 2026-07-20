@@ -515,6 +515,54 @@ export interface CrossPassagePage {
   hits: CrossPassageHit[];
 }
 
+/**
+ * One member concept of a ranked community, with its intra-community
+ * strength (the membership edge's weight on the artifact).
+ */
+export interface CommunityHitMember {
+  name: string;
+  strength: number;
+}
+
+/**
+ * One ranked community from `searchCommunities`: the matched summary
+ * paragraph plus the community's manifest facts. The manifest fields are
+ * absent when the artifact is mid-rewrite and this summary landed before its
+ * manifest line — served honestly rather than dropped.
+ */
+export interface CommunityHit {
+  community: string;
+  score: number;
+  text: string;
+  paragraph: number;
+  level?: number;
+  parent?: string;
+  concept_count?: number;
+  members?: CommunityHitMember[];
+  members_truncated?: boolean;
+}
+
+/** The two source-graph revisions the staleness verdict compares. */
+export interface CommunityRevisions {
+  recorded_graph: number;
+  current_graph: number;
+}
+
+/**
+ * `searchCommunities`' response: ranked community summaries and the verdict
+ * that qualifies them — `stale` means the source graph moved since the
+ * artifact was derived (the summaries describe an older graph; re-run
+ * `taguru communities` to refresh).
+ */
+export interface CommunityPage {
+  derived: string;
+  algorithm: string;
+  stale: boolean;
+  revision: CommunityRevisions;
+  plan: SearchPlan;
+  hits: CommunityHit[];
+}
+
 // -- search explain ------------------------------------------------------------
 
 /**
