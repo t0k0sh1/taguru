@@ -3,7 +3,7 @@
 # stage be `scratch`. No OpenSSL and no CA bundle are needed: TLS is
 # rustls with the webpki roots compiled into the binary.
 FROM rust:1.96-alpine AS build
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev cargo-auditable
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -11,7 +11,11 @@ COPY src ./src
 # Cargo.toml's [[bench]] target still makes manifest parsing itself
 # fail without the file present.
 COPY benches ./benches
-RUN cargo build --release --locked --bin taguru \
+# `cargo auditable` embeds the Cargo.lock crate list in the binary:
+# scratch has no package database, so that section is the only thing
+# the release SBOM scan — and `cargo audit bin`, outside any
+# container — can read.
+RUN cargo auditable build --release --locked --bin taguru \
     && mkdir /data-skeleton
 
 # Runtime stage: the binary is the image — no shell, no libc, no

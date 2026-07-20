@@ -224,6 +224,14 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   gracefully (flush + usage sweep), and health-checks itself
   (`taguru health` — there is no curl on scratch).
   `docker build -t taguru .` builds the same image locally.
+- **Verify what you pull.** Releases are signed (Sigstore keyless)
+  and carry a real SBOM — the binary is built with `cargo auditable`,
+  so every crate version rides in the executable itself — plus SLSA
+  provenance naming the exact CI run; CI re-verifies all three from a
+  clean runner on every release. The commands, and why the signing
+  identity must be pinned exactly, are in
+  [SECURITY.md](SECURITY.md#verifying-a-release); prefer a digest pin
+  in deploys ([deploy/README.md](deploy/README.md)).
 - **Linux is what's tested.** CI runs on `ubuntu-latest` and
   `ubuntu-24.04-arm` only, matching what's released — crates.io source
   and the Linux container image above, no Windows binaries. A few call

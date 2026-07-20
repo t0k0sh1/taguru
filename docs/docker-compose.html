@@ -99,7 +99,7 @@
       <li>It runs with a read-only root filesystem — /data is the only write target. The compose file turns that on.</li>
       <li>The HEALTHCHECK is <code>taguru health</code> — the binary probes itself; there is no curl on scratch.</li>
       <li><code>docker stop</code> is a graceful shutdown (flush + usage-stats sweep).</li>
-      <li><b>Pin the image version</b>: <code>latest</code> moves, and a surprise binary bump on a restart is exactly what a format-sensitive data directory doesn't want.</li>
+      <li><b>Pin the image version</b>: <code>latest</code> moves, and a surprise binary bump on a restart is exactly what a format-sensitive data directory doesn't want. A digest pin (<code>0.3.0@sha256:…</code>) is stronger still — releases are signed and carry an SBOM and build provenance, and <a href="https://github.com/t0k0sh1/taguru/blob/main/SECURITY.md#verifying-a-release">SECURITY.md</a> has the <code>cosign verify</code> command whose output names the digest.</li>
     </ul>
   </section>
 
@@ -109,7 +109,7 @@
     <pre><code>TAGURU_API_TOKENS='ops:CHANGE-ME' docker compose up -d</code></pre>
     <pre><code>services:
   taguru:
-    image: ghcr.io/t0k0sh1/taguru:0.1.0 <span class="c"># pin; `latest` moves</span>
+    image: ghcr.io/t0k0sh1/taguru:0.3.0 <span class="c"># pin; `latest` moves</span>
     ports:
       - "127.0.0.1:8248:8248"
     environment:
