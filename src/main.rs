@@ -1063,10 +1063,13 @@ fn run_flush_tick(
         // Each context refreshes under its own `entry.vectors_refresh`
         // lock, so the provider round trips for different contexts
         // never contend with each other — `parallel_map` pays for them
-        // in parallel the same way it does for the boot scan.
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
+        // in parallel the same way it does for the boot scan. Capped
+        // at `embed_parallel`, not the core count: that many contexts
+        // can each still fan out that many chunks internally, but the
+        // ceiling stays the one knob an operator already sized to the
+        // provider's rate limit, and 1 (the default) reproduces the
+        // old strictly-sequential tick exactly.
+        let workers = state.embed_parallel();
         tokio::task::block_in_place(|| {
             parallel_map(flushed, workers, |name| {
                 match state.refresh_embeddings(&name, Deadline::unbounded()) {
@@ -1087,11 +1090,10 @@ fn run_flush_tick(
     if auto_embed && state.passage_embedding_enabled() {
         let stale = state.passage_embed_dirty_names();
         if !stale.is_empty() {
-            // Same independence as the gloss refresh above, under
+            // Same independence — and the same `embed_parallel` cap,
+            // for the same reason — as the gloss refresh above, under
             // `entry.passage_refresh` instead.
-            let workers = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1);
+            let workers = state.embed_parallel();
             tokio::task::block_in_place(|| {
                 parallel_map(stale, workers, |name| {
                     match state.refresh_passage_embeddings(&name, Deadline::unbounded()) {

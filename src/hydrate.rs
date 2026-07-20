@@ -760,6 +760,19 @@ impl Hydrator {
                 report.vanished.push(stem.clone());
             }
         }
+        // Every cached name came from some manifest's `files`/`lanes`
+        // map (FamilySig::of and hydrate_shared draw from nowhere
+        // else), so a name missing from THIS one is a stale entry —
+        // a renamed or superseded file that will never be looked up
+        // again — and would otherwise sit in these maps forever.
+        self.lane_cache
+            .lock()
+            .unwrap()
+            .retain(|name, _| manifest.lanes.contains_key(name));
+        self.file_cache
+            .lock()
+            .unwrap()
+            .retain(|name, _| manifest.files.contains_key(name));
         inner.target = Some(Target {
             generation,
             root,
@@ -1033,6 +1046,15 @@ impl Hydrator {
             match ship::verify_file_bytes(name, &bytes, expect) {
                 Ok(()) => {
                     ship::write_restored_file(&self.data_dir, name, &bytes)?;
+                    // Post-write stat, not the pre-fetch one above: the
+                    // atomic rename just gave this file a new mtime/ino.
+                    if let Some(sig) = std::fs::metadata(&path).ok().map(|meta| FileSig::of(&meta))
+                    {
+                        self.file_cache
+                            .lock()
+                            .unwrap()
+                            .insert(name.to_string(), (expect, sig));
+                    }
                     return Ok(true);
                 }
                 Err(error) => {
@@ -1215,6 +1237,15 @@ impl Hydrator {
             match attempt {
                 Ok(assembled) => {
                     crate::storage::write_atomic(&path, &assembled)?;
+                    // Post-write stat, not the pre-read one above: the
+                    // atomic rename just gave this file a new mtime/ino.
+                    if let Some(sig) = std::fs::metadata(&path).ok().map(|meta| FileSig::of(&meta))
+                    {
+                        self.lane_cache
+                            .lock()
+                            .unwrap()
+                            .insert(name.to_string(), (lane, sig));
+                    }
                     return Ok(true);
                 }
                 Err(error)
