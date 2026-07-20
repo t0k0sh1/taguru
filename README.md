@@ -389,15 +389,16 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   for two canonicals that already diverged before the alias was
   caught — unify them the way `compact` itself rebuilds a context:
   export both sides and re-import everything under the one you keep.
-- **Passage search stays fast past 10,000 rows without any
+- **Passage search stays fast at 10,000 rows and up, without any
   configuration.** The semantic lane switches from an exact cosine
   sweep to a small hand-rolled IVF index the moment one context's
-  paragraph vectors cross that count — a compiled-in threshold, not a
-  knob. Measured at the threshold: ~6–14ms of exact-sweep CPU per
-  query against under a millisecond indexed, at ~100% recall@10. The
-  response shape, the floor, and every explain verdict are unaffected
-  either way — approximation is a latency optimization, not something
-  callers design around.
+  paragraph vectors reach that count — a compiled-in threshold, not a
+  knob. The response shape, the floor, and every explain verdict never
+  change; what can differ is the result set itself, since a true
+  top-match can land in the wrong cluster and get missed. Measured at
+  the threshold: ~6–14ms of exact-sweep CPU per query against under a
+  millisecond indexed; benchmarked recall@10 is ~100%, though the only
+  enforced regression guard is recall@50 at 80%.
 - **A flaky embedding provider degrades instead of stalling every
   request.** Three consecutive failed provider calls open a circuit
   breaker; while it's open, every embedding attempt fails fast instead
