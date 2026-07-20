@@ -7,6 +7,8 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-20
+
 ### Added
 - Source metadata and pre-lane search filters (#167) — the two B-1
   entries #148 deferred as a data-model change. Every stored source
@@ -1167,7 +1169,8 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/t0k0sh1/taguru/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/t0k0sh1/taguru/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/t0k0sh1/taguru/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/t0k0sh1/taguru/releases/tag/v0.1.0
