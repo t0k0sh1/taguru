@@ -360,7 +360,16 @@ pub fn route_tool(
                 path,
                 Some(pick(
                     arguments,
-                    &["query", "source", "paragraph", "limit", "semantic_floor"],
+                    &[
+                        "query",
+                        "source",
+                        "paragraph",
+                        "limit",
+                        "semantic_floor",
+                        "tags",
+                        "since",
+                        "until",
+                    ],
                 )),
             )
         }

@@ -520,4 +520,16 @@ fn the_mcp_tools_route_metadata_and_filters() {
     let page = &envelope["result"];
     assert_eq!(page["entries"][0]["tags"], json!(["酒"]), "{page}");
     assert_eq!(page["entries"][0]["date"], 1000, "{page}");
+
+    // explain_search forwards the same filter — an excluded source
+    // verdicts filtered_out through MCP exactly as over HTTP.
+    let explained = server.call_tool(
+        4,
+        "explain_search",
+        json!({"context": "sake", "query": "共通語の資料", "source": "b.md", "tags": ["酒"]}),
+    );
+    assert_ne!(explained["isError"], json!(true), "{explained}");
+    let envelope: Value =
+        serde_json::from_str(explained["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(envelope["result"]["verdict"], "filtered_out", "{envelope}");
 }

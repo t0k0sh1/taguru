@@ -523,7 +523,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "explain_search",
-            "Why didn't (or did) a source appear in search_passages — one call instead of orchestrating search, citations, and lowered limits by hand. Name the query AND the source (optionally which paragraph) you expected; the answer is the first verdict that applies: not_stored (never ingested here, or retracted), no_term_overlap (the query's terms and the paragraph's terms side by side, as strings — the spelling-mismatch case: stored under 酒蔵, you searched 酒造 — register an alias or reword), below_cutoff (its actual rank, the score cutoff at your limit, and a verified limit that reaches it), or served (its rank — it WAS there). Evidence carries per-term tf/df/BM25 contributions and the vector lane's cosine or the reason that lane never ran. One context per call.",
+            "Why didn't (or did) a source appear in search_passages — one call instead of orchestrating search, citations, and lowered limits by hand. Name the query AND the source (optionally which paragraph) you expected; the answer is the first verdict that applies: not_stored (never ingested here, or retracted), filtered_out (the request's tags/since/until filter excludes the source — the search never considered it), no_term_overlap (the query's terms and the paragraph's terms side by side, as strings — the spelling-mismatch case: stored under 酒蔵, you searched 酒造 — register an alias or reword), below_cutoff (its actual rank, the score cutoff at your limit, and a verified limit that reaches it), or served (its rank — it WAS there). Evidence carries per-term tf/df/BM25 contributions and the vector lane's cosine or the reason that lane never ran. Pass the SAME tags/since/until as the search being explained, or the explanation accounts for a call nobody made. One context per call.",
             object_schema(
                 json!({
                     "context": context,
@@ -531,7 +531,10 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "source": { "type": "string", "description": "the source you expected among the hits" },
                     "paragraph": { "type": "integer", "description": "zero-based paragraph position; omitted picks the source's best showing" },
                     "limit": { "type": "integer", "minimum": 0, "description": "the search call being explained (default 5)" },
-                    "semantic_floor": { "type": "number", "description": "the floor override of the search call being explained — pass the same value" }
+                    "semantic_floor": { "type": "number", "description": "the floor override of the search call being explained — pass the same value" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "the tag filter of the search call being explained — pass the same values" },
+                    "since": { "type": "integer", "description": "the time window's inclusive start (epoch seconds) of the search call being explained" },
+                    "until": { "type": "integer", "description": "the time window's exclusive end (epoch seconds) of the search call being explained" }
                 }),
                 &["context", "query", "source"],
             ),
