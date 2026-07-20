@@ -216,6 +216,18 @@
       floor when the vector lane swept — so an empty result under a skipped semantic lane
       never masquerades as "nothing matched".
     </p>
+    <p>
+      Every stored source also carries <b>metadata</b>: a server-stamped <code>stored_at</code>
+      (when it was ingested) and, optionally, a document-supplied <code>date</code> and a set of
+      <code>tags</code>. <code>sources/search</code> takes <code>tags</code> (any-of) and a
+      half-open <code>since</code>/<code>until</code> window over each source's
+      <code>date ?? stored_at</code>, and resolves them to an <b>eligibility set before either
+      lane runs</b> — a filter narrows which sources may answer; it never re-weights BM25's
+      corpus-global statistics or the vector lane's scoring, and a source with no matching
+      metadata never matches a filter. The plan's per-context <code>filter</code> block reports
+      how many of the context's sources were eligible, so a narrow filter and "nothing matched"
+      stay distinguishable.
+    </p>
     <p class="note">
       <b>Search with the shape of the answer, not the question.</b> Most embedding models place a
       question ("Which plan includes SSO?") farther from its answer than the answering sentence
