@@ -54,6 +54,19 @@ credentials out of the manifest, and leave TLS to the layer in front —
 a bearer token is the whole credential, so nothing here publishes the
 port beyond loopback or the cluster.
 
+A tag pin is a convention; a digest pin is a guarantee — a tag can be
+re-pushed, a digest names one immutable manifest. Take the digest from
+`cosign verify` (see [Verifying a
+release](../SECURITY.md#verifying-a-release), which also checks the
+signature and reads the SBOM/provenance) and append it to the image
+line of any manifest here:
+
+    image: ghcr.io/t0k0sh1/taguru:0.3.0@sha256:2c26153bdda52a52a4fb8f8ac9472428d75e70b7f6636459526108c66327071c
+
+The tag stays for humans; the digest is what the runtime resolves.
+With kustomize, the `images:` stanza takes `digest:` alongside
+`newTag:` — see [kustomize/README.md](kustomize/README.md).
+
 Backups and restores are the same everywhere: set
 `TAGURU_REPLICATE_URL` for continuous shipping to object storage
 (recover with `taguru restore` — or just start a server on an empty

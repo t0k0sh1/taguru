@@ -3,9 +3,11 @@ name: Docker
 # Publishes ghcr.io/t0k0sh1/taguru. Version tags (v*) produce the
 # semver tags plus `latest`; a manual run from main produces `edge`.
 # Two native jobs — a QEMU-emulated Rust release build is ~10× slower
-# than the free arm64 runner — each push by digest, and a final job
-# stitches the digests into one multi-arch manifest. Auth is the
-# workflow's own GITHUB_TOKEN (packages: write); no secrets exist.
+# than the free arm64 runner — each push by digest; a publish job
+# stitches the digests into one multi-arch manifest and signs it; and
+# a verify job re-checks the published result from a consumer's seat.
+# Auth is the workflow's own GITHUB_TOKEN (packages: write); no
+# secrets exist.
 
 on:
   push:
@@ -73,6 +75,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     permissions:
       packages: write
       # Keyless signing: the OIDC token IS the identity cosign binds
@@ -106,14 +110,49 @@ jobs:
             $(printf "$IMAGE@sha256:%s " *)
       - name: Verify the published manifest
         run: docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
-      # Sign the manifest-list digest keylessly (Sigstore): consumers
-      # verify with
-      #   cosign verify ghcr.io/t0k0sh1/taguru:TAG \
-      #     --certificate-identity-regexp 'github.com/t0k0sh1/taguru' \
-      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      # Sign the manifest-list digest keylessly (Sigstore). The
+      # consumer command lives in SECURITY.md ("Verifying a release")
+      # and pins the exact workflow identity — an unanchored
+      # 'github.com/t0k0sh1/taguru' regexp would also match a
+      # look-alike repo named t0k0sh1/taguru-anything.
       - uses: sigstore/cosign-installer@v3
       - name: Sign the published manifest
         run: |
           digest="$(docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}" \
             --format '{{json .Manifest}}' | jq -r .digest)"
           cosign sign --yes "$IMAGE@$digest"
+
+  # The publisher inspecting what it just pushed proves nothing — this
+  # job is the release dry-run from a clean machine: a blank runner, no
+  # registry login, no OIDC token, exactly the consumer's seat. The
+  # SBOM floor guards the failure mode that actually shipped twice:
+  # a formally attached SPDX document cataloguing zero crates (a
+  # scratch image gives the scanner nothing unless the binary itself
+  # carries its dependency list — that is what `cargo auditable` in
+  # the Dockerfile is for; the runtime crate list is ~200 strong).
+  verify:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    env:
+      TAG: ${{ needs.publish.outputs.version }}
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: sigstore/cosign-installer@v3
+      - name: The signature must bind this workflow's exact identity
+        run: |
+          cosign verify "$IMAGE:$TAG" \
+            --certificate-identity "${{ github.server_url }}/${{ github.repository }}/.github/workflows/docker.yml@${{ github.ref }}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - name: The SBOM must carry the crate list, per architecture
+        run: |
+          docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .SBOM}}' \
+            | jq -e '(keys | length) >= 2 and all(.[]; (.SPDX.packages | length) >= 100)' \
+            || { echo "SBOM missing or vacuous — is the binary still built with cargo auditable?" >&2; exit 1; }
+      - name: The provenance must name this repository's build
+        run: |
+          docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Provenance}}' \
+            | jq -e --arg prefix "${{ github.server_url }}/${{ github.repository }}/actions/runs/" \
+                '(keys | length) >= 2 and all(.[]; .SLSA.runDetails.builder.id | startswith($prefix))' \
+            || { echo "provenance missing, or its builder is not this repository's Actions run" >&2; exit 1; }

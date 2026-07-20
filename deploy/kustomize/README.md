@@ -67,6 +67,9 @@ resources:
 images:
   - name: ghcr.io/t0k0sh1/taguru
     newTag: "0.4.0"                 # releases move the in-repo pin; you can too
+    # digest: "sha256:…"           # from `cosign verify` — a digest pin is a
+    #                              # guarantee where a tag pin is a convention
+    #                              # (../README.md has the how and the why)
 patches:
   - target: { kind: PersistentVolumeClaim, name: taguru-data }
     patch: |-

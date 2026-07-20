@@ -8,6 +8,25 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Image supply chain, made verifiable end to end (#138). The release
+  pipeline already signed the multi-arch manifest (Sigstore keyless)
+  and attached BuildKit SBOM + SLSA provenance since 0.2.0 — but the
+  SBOM was vacuous: a scratch image gives the scanner nothing, so two
+  releases shipped an SPDX document cataloguing zero crates. The
+  binary is now built with `cargo auditable`, which embeds the
+  Cargo.lock crate list in the executable — the same attached SBOM
+  now carries every crate with its version, and a bare binary is
+  auditable outside any container (`cargo audit bin`). A new `verify`
+  job gates every release from a consumer's seat — blank runner, no
+  registry login, no OIDC — on three checks: the signature binds this
+  repository's exact workflow identity (unanchored identity patterns
+  match look-alike repos; the docs pin it), the SBOM actually lists
+  crates (a ≥100 floor, against the vacuous-SBOM failure that shipped
+  silently), and the provenance names this repository's CI run.
+  Verification is documented for consumers in SECURITY.md ("Verifying
+  a release"), and deploy/README.md now spells out digest pinning —
+  a tag pin is a convention, `tag@sha256:…` is a guarantee — with the
+  kustomize `digest:` override alongside.
 - Hot-reload for the auth table (#134): `TAGURU_API_TOKEN`,
   `TAGURU_API_TOKENS`, and `TAGURU_KEY_SCOPES` — and nothing else —
   now reload on a running server, so key rotation no longer costs the
