@@ -173,6 +173,19 @@ TAGURU_EMBED_AUTO=1         <span class="c"># don't count on the agent calling r
       keep it: the rebuild is automatic, but it re-buys every vector at provider prices, and the
       calibrated floor below is width-specific too.
     </p>
+    <p class="note">
+      The bridge proxy is one more thing that can go down — SigV4 expiring, the Titan/Cohere
+      quota throttling, the process above simply crashing. Taguru doesn't let a stuck bridge
+      stall every caller on the full provider timeout: three consecutive failed calls open a
+      circuit breaker, and while it's open every embedding attempt fails fast instead of waiting
+      — <code>sources/search</code> falls back to its lexical lane and <code>resolve</code>
+      answers from lexical candidates or <code>embeddings_failed</code>, exactly as they do with
+      no <code>TAGURU_EMBED_URL</code> configured at all. A single probe call after a 30s cooldown
+      decides whether to close it again. Watch <code>taguru_embedding_breaker_state</code> (and
+      <code>_consecutive_failures</code> / <code>_opened_total</code> / <code>_short_circuits_total</code>)
+      on <code>/metrics</code> to tell "the bridge is down" apart from "every query happens to be
+      below the floor."
+    </p>
   </section>
 
   <section id="floor">

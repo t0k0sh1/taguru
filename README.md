@@ -223,6 +223,7 @@ load-bearing ones:
 | `TAGURU_PUBLIC_URL` | — | Public base URL; enables OAuth on `/mcp` for claude.ai custom connectors |
 | `TAGURU_RATE_LIMIT_PER_MIN` | 0 (off) | Per-key request budget — turn on whenever the server leaves localhost |
 | `TAGURU_REQUEST_TIMEOUT_SECS` | 30 | Per-request budget; raise it when an embedding provider is configured |
+| `TAGURU_EMBED_TIMEOUT_SECS` | 60 | Per-attempt ceiling for one embedding provider round trip; a request's remaining budget bounds an attempt further, and transient failures (transport, 429, 5xx) retry twice with backoff |
 | `TAGURU_MAX_CONCURRENT_HEAVY_OPS` | 2 | Shared ceiling for vocabulary audits and context compactions; excess calls get 503 + `Retry-After` (`0` disables) |
 | `TAGURU_AUTO_COMPACT` | on | Ratio-triggered auto-compaction: each flush tick rebuilds at most the one worst context whose dead ratio exceeds `TAGURU_AUTO_COMPACT_RATIO` (0.5 — dead weight outgrew live content), behind the heavy-ops ceiling; `0` keeps compaction manual-only |
 | `TAGURU_CONTEXT_QUOTAS` | — | Per-context ceilings as one JSON object (`{"sake": {"storage_bytes": …, "cache_bytes": …}}`): `storage_bytes` refuses growth writes at the ceiling with 507 `storage_full` (retract/compact/delete stay open), `cache_bytes` bounds the context's resident share — under cache pressure the over-share context is evicted first, so one hot tenant cannot evict the rest beyond its ceiling. A broken declaration refuses boot, like broken credentials |
@@ -388,6 +389,23 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   for two canonicals that already diverged before the alias was
   caught — unify them the way `compact` itself rebuilds a context:
   export both sides and re-import everything under the one you keep.
+- **A flaky embedding provider degrades instead of stalling every
+  request.** Three consecutive failed provider calls open a circuit
+  breaker; while it's open, every embedding attempt fails fast instead
+  of paying the provider's full timeout, and the lanes behind it
+  degrade exactly as they do when no provider is configured
+  (`sources/search` serves its lexical lane, `resolve` serves lexical
+  candidates or answers the existing `embeddings_failed`). After a 30s
+  cooldown a single probe decides whether to close it again. State,
+  opens, and short-circuit counts are on `/metrics` as
+  `taguru_embedding_breaker_state`, `_consecutive_failures`,
+  `_opened_total`, and `_short_circuits_total` (present only once a
+  provider is configured). Independently, each provider call's own
+  deadline is the smaller of `TAGURU_EMBED_TIMEOUT_SECS` and the
+  request's remaining budget, and SIGTERM/SIGINT abandons an in-flight
+  provider wait outright — a graceful stop no longer waits out the full
+  timeout ladder (up to 180s at the defaults, measured down to under a
+  second).
 
 Worked deployments, probe wiring, and the reasoning behind them:
 [Docker Compose](https://t0k0sh1.github.io/taguru/docker-compose.html) ·
