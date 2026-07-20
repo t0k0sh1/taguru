@@ -1065,10 +1065,12 @@ fn run_flush_tick(
         // never contend with each other — `parallel_map` pays for them
         // in parallel the same way it does for the boot scan. Capped
         // at `embed_parallel`, not the core count: that many contexts
-        // can each still fan out that many chunks internally, but the
-        // ceiling stays the one knob an operator already sized to the
-        // provider's rate limit, and 1 (the default) reproduces the
-        // old strictly-sequential tick exactly.
+        // can each still fan out that many chunks internally, but
+        // `embed_provider_slots` (registry.rs) is the actual global
+        // ceiling behind both pools, so the two never multiply past
+        // the one knob an operator sized to the provider's rate limit
+        // — and 1 (the default) reproduces the old strictly-sequential
+        // tick exactly.
         let workers = state.embed_parallel();
         tokio::task::block_in_place(|| {
             parallel_map(flushed, workers, |name| {
