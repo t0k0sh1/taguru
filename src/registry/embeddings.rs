@@ -541,6 +541,19 @@ impl AppState {
         self.0.embed_passages && self.0.embedder.is_some()
     }
 
+    /// The worker-pool size (`TAGURU_EMBED_PARALLEL`) each refresh
+    /// dispatches its stale chunks under — see the field's own doc for
+    /// why this is sized to the provider's rate limit, not the
+    /// machine's core count. A caller fanning out ACROSS contexts, not
+    /// just within one, sizes its pool by this same number too: with
+    /// `embed_provider_slots` as the actual global ceiling, threads
+    /// beyond it in either pool just queue for a permit rather than
+    /// pushing real concurrency past what the provider was configured
+    /// to take.
+    pub fn embed_parallel(&self) -> usize {
+        self.0.embed_parallel
+    }
+
     /// Contexts whose passages changed since their last embedding
     /// refresh — the auto-refresh ticker's work list. Claiming is the
     /// caller's job via [`AppState::refresh_passage_embeddings`].

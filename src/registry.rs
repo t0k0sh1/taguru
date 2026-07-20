@@ -76,7 +76,7 @@ mod terms;
 
 pub use passages::PassagesWriteError;
 
-pub(crate) use concurrency::{dispatch_chunks_concurrently, parallel_map};
+pub(crate) use concurrency::{Semaphore, dispatch_chunks_concurrently, parallel_map};
 pub(crate) use paths::{
     IMPORT_MARKER_EXTENSION, ImportMarker, ResumedRenames, bm25_path, deleted_marker_path,
     image_path, import_marker_path, import_marker_paths, meta_path, passages_path,
@@ -1793,8 +1793,23 @@ struct StateInner {
     /// old strictly-sequential behavior). Raise to match the provider's
     /// rate limit, not the machine's core count — ureq's calls are
     /// synchronous, so this is the only lever for provider-side
-    /// concurrency.
+    /// concurrency. Sizes both the outer per-context worker pool (the
+    /// flush tick's `parallel_map`) and the inner per-chunk one
+    /// (`dispatch_chunks_concurrently`); `embed_provider_slots` below is
+    /// what keeps those two from multiplying past it.
     embed_parallel: usize,
+    /// The actual global ceiling on concurrent provider calls from a
+    /// refresh — sized to `embed_parallel`, acquired around every
+    /// `timed_embed_for_refresh` call. Refresh dispatch is nested (the
+    /// flush tick's per-context pool fans out into each context's own
+    /// per-chunk pool), so without this a busy tick could reach
+    /// `embed_parallel²` concurrent calls; this permit is what makes
+    /// `embed_parallel` the true process-wide bound the field above
+    /// documents. Query-time embedding (`cue_vector`) does not draw
+    /// from this pool — a single ad hoc call per search request was
+    /// never part of the multiplication this bounds, and gating it here
+    /// would queue interactive searches behind bulk refresh work.
+    embed_provider_slots: Semaphore,
     /// Whether (and how much of) the per-context gauge families the
     /// scrape carries (`TAGURU_METRICS_PER_CONTEXT`, issue #137). Read
     /// twice: [`AppState::refresh_disk_usage`] skips its stat sweep on
@@ -2059,6 +2074,7 @@ impl AppState {
             embed_passages: options.embed_passages,
             passage_vector_limit: options.passage_vector_limit,
             embed_parallel: options.embed_parallel,
+            embed_provider_slots: Semaphore::new(options.embed_parallel),
             per_context_metrics: options.per_context_metrics,
             auto_compact: options.auto_compact,
             context_quotas: options.context_quotas,
@@ -3247,6 +3263,12 @@ impl AppState {
         texts: &[&str],
         deadline: Deadline,
     ) -> Result<Vec<Vec<f32>>, String> {
+        // Held across the call, not just the dispatch: this is the one
+        // choke point every refresh chunk funnels through regardless of
+        // which context or which dispatch layer it came from, so it is
+        // where the outer and inner worker pools' ceilings actually
+        // become one global ceiling instead of two that multiply.
+        let _permit = self.0.embed_provider_slots.acquire();
         match self.timed_embed(embedder, texts, EmbedPurpose::Index, deadline) {
             Ok(vectors) => {
                 self.0.metrics.record_embed_refresh(true);
@@ -12605,6 +12627,74 @@ mod tests {
             peak.load(Ordering::SeqCst) > 1,
             "129 stale concepts split into two chunks; with embed_parallel=2 both \
              should reach the provider at once"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Two contexts refreshing at once (what the flush tick's outer
+    /// `parallel_map` does) each also split into two chunks internally
+    /// (what `dispatch_chunks_concurrently` does within one refresh) —
+    /// nested, `embed_parallel=2` on both axes could reach 4 concurrent
+    /// provider calls without a shared ceiling. `embed_provider_slots`
+    /// must hold the true peak at `embed_parallel`, not its square.
+    #[test]
+    fn embed_provider_slots_cap_concurrency_across_contexts_and_chunks() {
+        let dir = scratch_dir("embed-global-ceiling");
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let embedder = Some(Arc::new(SlowEmbeddings {
+            in_flight: Arc::clone(&in_flight),
+            peak: Arc::clone(&peak),
+        }) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            embedder,
+            BootOptions {
+                embed_parallel: 2,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        for name in ["fruit", "veg"] {
+            state
+                .create(name, ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context(name, |context| {
+                    // 129 stale concepts per context, same as the
+                    // single-context test above: a 128-item chunk and a
+                    // 1-item chunk, so each context's own refresh fans
+                    // out to two inner threads.
+                    for i in 0..129 {
+                        context
+                            .associate(format!("c{i}"), "属性", "値", 1.0)
+                            .unwrap();
+                    }
+                })
+                .map_err(|_| "write")
+                .unwrap();
+        }
+
+        std::thread::scope(|scope| {
+            for name in ["fruit", "veg"] {
+                scope.spawn(|| {
+                    state
+                        .refresh_embeddings(name, Deadline::unbounded())
+                        .unwrap()
+                        .unwrap();
+                });
+            }
+        });
+
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            2,
+            "two contexts each fanning out two chunks must still cap at \
+             embed_parallel=2 concurrent provider calls process-wide, not \
+             the 4 a per-pool-only ceiling would allow"
         );
 
         let _ = fs::remove_dir_all(dir);

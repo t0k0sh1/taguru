@@ -326,14 +326,14 @@ impl ShipProgress {
 /// inode reuse could otherwise alias two versions within one mtime
 /// granule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileSig {
+pub(crate) struct FileSig {
     len: u64,
     mtime: Option<SystemTime>,
     ino: u64,
 }
 
 impl FileSig {
-    fn of(metadata: &std::fs::Metadata) -> Self {
+    pub(crate) fn of(metadata: &std::fs::Metadata) -> Self {
         #[cfg(unix)]
         let ino = std::os::unix::fs::MetadataExt::ino(metadata);
         #[cfg(not(unix))]
@@ -371,6 +371,15 @@ struct LaneState {
     /// When un-shipped local records were first observed, for the lag
     /// age metric; cleared when the lane catches up.
     pending_since: Option<Instant>,
+    /// The file's signature as of the last full read. Unchanged since
+    /// then means that read already found everything the file
+    /// currently has, so [`Shipper::ship_lane`] can skip straight to
+    /// the lag metric instead of re-reading the file and re-hashing
+    /// the whole shipped prefix.
+    last_seen_sig: Option<FileSig>,
+    /// `newest_seq` as of that same read, cached for the lag metric on
+    /// a cycle the signature check above short-circuits.
+    local_seq: u64,
 }
 
 impl LaneState {
@@ -382,6 +391,8 @@ impl LaneState {
             shipped_crc: 0,
             shipped_seq: 0,
             pending_since: None,
+            last_seen_sig: None,
+            local_seq: 0,
         }
     }
 }
@@ -977,99 +988,125 @@ impl Shipper {
     /// since the name encodes the position.
     async fn ship_lane(&mut self, name: &str) -> Result<bool, ShipError> {
         let path = self.data_dir.join(name);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
+        let stat = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
             // Vanished mid-cycle: the next scan retires it.
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(ShipError::Io(error)),
         };
+        let sig = FileSig::of(&stat);
         let mut lane = self
             .lanes
             .get(name)
             .cloned()
             .unwrap_or_else(|| LaneState::fresh(0));
 
-        // Is the shipped prefix still literally the file's prefix?
-        let prefix_intact = bytes.len() as u64 >= lane.shipped_offset
-            && crate::crc32c::crc32c(&bytes[..lane.shipped_offset as usize]) == lane.shipped_crc;
+        // An unchanged signature means the last full read already saw
+        // everything this file currently has — no bytes to append, no
+        // divergence — so re-reading now and re-hashing the whole
+        // shipped prefix could only reproduce that same answer. Only
+        // the lag metric below still needs a beat every cycle
+        // (`age_secs` is elapsed time, not file content), and the
+        // cached `local_seq` answers that without touching the file.
+        let shipped = if lane.last_seen_sig == Some(sig) {
+            false
+        } else {
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                // Vanished between the stat above and this read: the
+                // next scan retires it.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(ShipError::Io(error)),
+            };
 
-        if !prefix_intact {
-            // Divergence: reset, rollback, or delete + re-create. The
-            // parent snapshot covers everything the divergence
-            // discarded, and it must be IN THE BUCKET before the new
-            // series exists there, or a restore in the window between
-            // the two could see a series whose first record is beyond
-            // the restored snapshot's watermark.
-            let parent = parent_snapshot_of(name).expect("lane names always carry a wal suffix");
-            let parent_path = self.data_dir.join(&parent);
-            match std::fs::metadata(&parent_path) {
-                Ok(metadata) => {
-                    // Skip the upload when this cycle (or an earlier
-                    // one) already shipped exactly this version — the
-                    // common case, since the reset that diverged the
-                    // lane follows the very flush that published it.
-                    if self.files.get(&parent).map(|file| file.sig) != Some(FileSig::of(&metadata))
-                    {
-                        let file = self.ship_published(&parent).await?;
-                        self.files.insert(parent, file);
+            // Is the shipped prefix still literally the file's prefix?
+            let prefix_intact = bytes.len() as u64 >= lane.shipped_offset
+                && crate::crc32c::crc32c(&bytes[..lane.shipped_offset as usize])
+                    == lane.shipped_crc;
+
+            if !prefix_intact {
+                // Divergence: reset, rollback, or delete + re-create. The
+                // parent snapshot covers everything the divergence
+                // discarded, and it must be IN THE BUCKET before the new
+                // series exists there, or a restore in the window between
+                // the two could see a series whose first record is beyond
+                // the restored snapshot's watermark.
+                let parent =
+                    parent_snapshot_of(name).expect("lane names always carry a wal suffix");
+                let parent_path = self.data_dir.join(&parent);
+                match std::fs::metadata(&parent_path) {
+                    Ok(metadata) => {
+                        // Skip the upload when this cycle (or an earlier
+                        // one) already shipped exactly this version — the
+                        // common case, since the reset that diverged the
+                        // lane follows the very flush that published it.
+                        if self.files.get(&parent).map(|file| file.sig)
+                            != Some(FileSig::of(&metadata))
+                        {
+                            let file = self.ship_published(&parent).await?;
+                            self.files.insert(parent, file);
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        // No local snapshot (a re-created context that has
+                        // not flushed yet): the REMOTE snapshot, if any, is
+                        // the old incarnation's and its watermark would
+                        // swallow the new lane's low seqs on restore.
+                        // Retire it first.
+                        self.retire_file(&parent).await?;
+                    }
+                    Err(error) => return Err(ShipError::Io(error)),
+                }
+                lane = LaneState::fresh(lane.series + 1);
+            }
+
+            // Ship only complete lines: a torn tail (crash or mid-write
+            // race) becomes shippable one heal or one append later.
+            let new = &bytes[lane.shipped_offset as usize..];
+            let complete_end = new.iter().rposition(|&b| b == b'\n').map(|at| at + 1);
+            let shipped = match complete_end {
+                None => false,
+                Some(complete_end) => {
+                    let complete = &new[..complete_end];
+                    let records = crate::wal::shippable_records(complete).map_err(|error| {
+                        // Interior corruption in bytes replay would also
+                        // refuse — shipping it would spread the rot to
+                        // every restore. Leave the lane where it is and
+                        // surface the error; the server's own next load of
+                        // this context hits the same wall.
+                        ShipError::Io(io::Error::new(
+                            error.kind(),
+                            format!("{}: {error}", path.display()),
+                        ))
+                    })?;
+                    if records.is_empty() {
+                        false
+                    } else {
+                        let key = gen_root(&self.root, self.generation)
+                            .join("wal")
+                            .join(name)
+                            .join(segment_name(lane.series, lane.next_seg));
+                        let last_seq = records.last().expect("checked non-empty").seq;
+                        self.put(&key, complete.to_vec()).await?;
+                        lane.shipped_offset += complete_end as u64;
+                        lane.shipped_crc =
+                            crate::crc32c::crc32c(&bytes[..lane.shipped_offset as usize]);
+                        lane.shipped_seq = last_seq;
+                        lane.next_seg += 1;
+                        self.progress.note_shipped(&path, last_seq);
+                        true
                     }
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    // No local snapshot (a re-created context that has
-                    // not flushed yet): the REMOTE snapshot, if any, is
-                    // the old incarnation's and its watermark would
-                    // swallow the new lane's low seqs on restore.
-                    // Retire it first.
-                    self.retire_file(&parent).await?;
-                }
-                Err(error) => return Err(ShipError::Io(error)),
-            }
-            lane = LaneState::fresh(lane.series + 1);
-        }
+            };
 
-        // Ship only complete lines: a torn tail (crash or mid-write
-        // race) becomes shippable one heal or one append later.
-        let new = &bytes[lane.shipped_offset as usize..];
-        let complete_end = new.iter().rposition(|&b| b == b'\n').map(|at| at + 1);
-        let shipped = match complete_end {
-            None => false,
-            Some(complete_end) => {
-                let complete = &new[..complete_end];
-                let records = crate::wal::shippable_records(complete).map_err(|error| {
-                    // Interior corruption in bytes replay would also
-                    // refuse — shipping it would spread the rot to
-                    // every restore. Leave the lane where it is and
-                    // surface the error; the server's own next load of
-                    // this context hits the same wall.
-                    ShipError::Io(io::Error::new(
-                        error.kind(),
-                        format!("{}: {error}", path.display()),
-                    ))
-                })?;
-                if records.is_empty() {
-                    false
-                } else {
-                    let key = gen_root(&self.root, self.generation)
-                        .join("wal")
-                        .join(name)
-                        .join(segment_name(lane.series, lane.next_seg));
-                    let last_seq = records.last().expect("checked non-empty").seq;
-                    self.put(&key, complete.to_vec()).await?;
-                    lane.shipped_offset += complete_end as u64;
-                    lane.shipped_crc =
-                        crate::crc32c::crc32c(&bytes[..lane.shipped_offset as usize]);
-                    lane.shipped_seq = last_seq;
-                    lane.next_seg += 1;
-                    self.progress.note_shipped(&path, last_seq);
-                    true
-                }
-            }
+            lane.local_seq = newest_seq(&bytes).unwrap_or(lane.shipped_seq);
+            lane.last_seen_sig = Some(sig);
+            shipped
         };
 
         // Lag bookkeeping, shipped or not: how far the local log's
         // newest record is beyond the shipped one, and for how long.
-        let local_seq = newest_seq(&bytes).unwrap_or(lane.shipped_seq);
-        if local_seq > lane.shipped_seq {
+        if lane.local_seq > lane.shipped_seq {
             lane.pending_since.get_or_insert_with(Instant::now);
         } else {
             lane.pending_since = None;
@@ -1082,7 +1119,7 @@ impl Shipper {
         self.state.metrics().note_replication_lane(
             &context,
             lane_kind,
-            local_seq.saturating_sub(lane.shipped_seq),
+            lane.local_seq.saturating_sub(lane.shipped_seq),
             age_secs,
         );
         self.lanes.insert(name.to_string(), lane);

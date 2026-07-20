@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 
 /// Runs `f` over `items` on up to `workers` threads pulling from one
 /// shared queue — the same divide-the-queue-not-the-slice shape
@@ -95,4 +95,50 @@ pub(crate) fn dispatch_chunks_concurrently<C: Sync, R: Send + Sync>(
         }
     });
     results.into_iter().map(OnceLock::into_inner).collect()
+}
+
+/// A counting semaphore bounding actual concurrent work below however
+/// many independent dispatch layers each think they alone own the
+/// ceiling. `embed_parallel` sizes both the outer per-context
+/// `parallel_map` in the flush tick AND the inner
+/// `dispatch_chunks_concurrently` fan-out inside one context's own
+/// refresh — nested, those two ceilings would multiply into P × P
+/// concurrent provider calls. Every refresh chunk instead acquires a
+/// permit here around its provider call, so no matter how many
+/// threads across how many contexts attempt one at once, at most
+/// `embed_parallel` are ever in flight process-wide.
+pub(crate) struct Semaphore {
+    permits: Mutex<usize>,
+    available: Condvar,
+}
+
+impl Semaphore {
+    pub(crate) fn new(permits: usize) -> Self {
+        Self {
+            permits: Mutex::new(permits.max(1)),
+            available: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn acquire(&self) -> SemaphorePermit<'_> {
+        let mut permits = self.permits.lock();
+        while *permits == 0 {
+            self.available.wait(&mut permits);
+        }
+        *permits -= 1;
+        SemaphorePermit { semaphore: self }
+    }
+}
+
+/// Returns its permit to [`Semaphore`] on drop — held across exactly
+/// the provider call, never longer, so a panic mid-call still frees it.
+pub(crate) struct SemaphorePermit<'a> {
+    semaphore: &'a Semaphore,
+}
+
+impl Drop for SemaphorePermit<'_> {
+    fn drop(&mut self) {
+        *self.semaphore.permits.lock() += 1;
+        self.semaphore.available.notify_one();
+    }
 }

@@ -49,7 +49,7 @@ use env::{
     needs_off_loopback_warning, resolve_body_bytes, resolve_flush_secs, resolve_heavy_ops,
     resolve_mcp_max_result_bytes, resolve_per_minute, resolve_timeout_secs,
 };
-use registry::{AccessError, AppState};
+use registry::{AccessError, AppState, parallel_map};
 use taguru::deadline::Deadline;
 use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -1060,9 +1060,21 @@ fn run_flush_tick(
     // Opt-in: a flushed context just changed on disk, so its
     // glosses may have changed too — re-embed the difference.
     if auto_embed && !flushed.is_empty() {
+        // Each context refreshes under its own `entry.vectors_refresh`
+        // lock, so the provider round trips for different contexts
+        // never contend with each other — `parallel_map` pays for them
+        // in parallel the same way it does for the boot scan. Capped
+        // at `embed_parallel`, not the core count: that many contexts
+        // can each still fan out that many chunks internally, but
+        // `embed_provider_slots` (registry.rs) is the actual global
+        // ceiling behind both pools, so the two never multiply past
+        // the one knob an operator sized to the provider's rate limit
+        // — and 1 (the default) reproduces the old strictly-sequential
+        // tick exactly.
+        let workers = state.embed_parallel();
         tokio::task::block_in_place(|| {
-            for name in &flushed {
-                match state.refresh_embeddings(name, Deadline::unbounded()) {
+            parallel_map(flushed, workers, |name| {
+                match state.refresh_embeddings(&name, Deadline::unbounded()) {
                     None | Some(Ok((0, _))) => {}
                     Some(Ok((embedded, _))) => {
                         info!(context = %name, embedded, "auto-embedded glosses");
@@ -1071,7 +1083,7 @@ fn run_flush_tick(
                         warn!(context = %name, error, "auto embedding refresh failed");
                     }
                 }
-            }
+            });
         });
     }
     // Passages ride their own dirty flag: storing text never
@@ -1080,9 +1092,13 @@ fn run_flush_tick(
     if auto_embed && state.passage_embedding_enabled() {
         let stale = state.passage_embed_dirty_names();
         if !stale.is_empty() {
+            // Same independence — and the same `embed_parallel` cap,
+            // for the same reason — as the gloss refresh above, under
+            // `entry.passage_refresh` instead.
+            let workers = state.embed_parallel();
             tokio::task::block_in_place(|| {
-                for name in &stale {
-                    match state.refresh_passage_embeddings(name, Deadline::unbounded()) {
+                parallel_map(stale, workers, |name| {
+                    match state.refresh_passage_embeddings(&name, Deadline::unbounded()) {
                         None => {}
                         Some(Ok(outcome)) if outcome.embedded == 0 => {}
                         Some(Ok(outcome)) => {
@@ -1100,7 +1116,7 @@ fn run_flush_tick(
                             );
                         }
                     }
-                }
+                });
             });
         }
     }

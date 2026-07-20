@@ -57,7 +57,7 @@
 //! reusing the very same volume in cache mode keeps a tail whose
 //! shipped prefix still matches, and discards one that diverged.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -66,7 +66,7 @@ use std::time::{Duration, Instant, SystemTime};
 use object_store::ObjectStore;
 use object_store::path::Path as StorePath;
 
-use crate::ship::{self, Manifest, ManifestFile, ManifestLane};
+use crate::ship::{self, FileSig, Manifest, ManifestFile, ManifestLane};
 
 /// How many manifest re-reads a fetch spends arbitrating a
 /// verification mismatch before calling it rot, and the pause between
@@ -601,6 +601,20 @@ pub(crate) struct Hydrator {
     lane_policy: LanePolicy,
     inner: Mutex<HydratorInner>,
     settled: Condvar,
+    /// Lanes last confirmed to match the manifest, by name — a
+    /// [`FileSig`] that still matches the local file means the bytes
+    /// this cached [`ManifestLane`] verified are still on disk, so a
+    /// repeat call (a sibling file in the same family changed and
+    /// re-queued the whole stem) can skip the read-and-CRC entirely.
+    /// Only ever populated from a stat taken before that verification
+    /// ran, so a miss costs at most one redundant check — never a
+    /// false hit.
+    lane_cache: Mutex<HashMap<String, (ManifestLane, FileSig)>>,
+    /// [`Self::fetch_published_if_stale`]'s analog of `lane_cache`,
+    /// same safety argument: the whole bucket shares one manifest, so
+    /// any family's shipping activity re-triggers `hydrate_shared`
+    /// over every shared file, most of which did not change.
+    file_cache: Mutex<HashMap<String, (ManifestFile, FileSig)>>,
 }
 
 impl Hydrator {
@@ -631,6 +645,8 @@ impl Hydrator {
                 states,
             }),
             settled: Condvar::new(),
+            lane_cache: Mutex::new(HashMap::new()),
+            file_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -654,6 +670,8 @@ impl Hydrator {
                 states: BTreeMap::new(),
             }),
             settled: Condvar::new(),
+            lane_cache: Mutex::new(HashMap::new()),
+            file_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -742,6 +760,19 @@ impl Hydrator {
                 report.vanished.push(stem.clone());
             }
         }
+        // Every cached name came from some manifest's `files`/`lanes`
+        // map (FamilySig::of and hydrate_shared draw from nowhere
+        // else), so a name missing from THIS one is a stale entry —
+        // a renamed or superseded file that will never be looked up
+        // again — and would otherwise sit in these maps forever.
+        self.lane_cache
+            .lock()
+            .unwrap()
+            .retain(|name, _| manifest.lanes.contains_key(name));
+        self.file_cache
+            .lock()
+            .unwrap()
+            .retain(|name, _| manifest.files.contains_key(name));
         inner.target = Some(Target {
             generation,
             root,
@@ -979,6 +1010,16 @@ impl Hydrator {
         expect: ManifestFile,
     ) -> io::Result<bool> {
         let path = self.data_dir.join(name);
+        // Pre-read stat, same reasoning as fetch_lane_if_stale's: a
+        // miss just falls through to the read-and-CRC check already
+        // below, so it costs at most one redundant pass.
+        let pre_stat = std::fs::metadata(&path).ok().map(|meta| FileSig::of(&meta));
+        if let Some(sig) = pre_stat {
+            let cached = self.file_cache.lock().unwrap().get(name).copied();
+            if cached == Some((expect, sig)) {
+                return Ok(false);
+            }
+        }
         let mut expect = expect;
         let mut round = 0usize;
         loop {
@@ -986,6 +1027,18 @@ impl Hydrator {
                 && local.len() as u64 == expect.len
                 && crate::crc32c::crc32c(&local) == expect.crc
             {
+                // This branch only ever reads, so the pre-read stat
+                // still describes what is on disk: cache it against
+                // this target so the next hydrate_shared pass (any
+                // OTHER family's shipping activity re-triggers one,
+                // since the whole bucket shares a manifest) can skip
+                // straight past an unrelated, unchanged file.
+                if let Some(sig) = pre_stat {
+                    self.file_cache
+                        .lock()
+                        .unwrap()
+                        .insert(name.to_string(), (expect, sig));
+                }
                 return Ok(false);
             }
             let key = root.clone().join("files").join(name);
@@ -993,6 +1046,15 @@ impl Hydrator {
             match ship::verify_file_bytes(name, &bytes, expect) {
                 Ok(()) => {
                     ship::write_restored_file(&self.data_dir, name, &bytes)?;
+                    // Post-write stat, not the pre-fetch one above: the
+                    // atomic rename just gave this file a new mtime/ino.
+                    if let Some(sig) = std::fs::metadata(&path).ok().map(|meta| FileSig::of(&meta))
+                    {
+                        self.file_cache
+                            .lock()
+                            .unwrap()
+                            .insert(name.to_string(), (expect, sig));
+                    }
                     return Ok(true);
                 }
                 Err(error) => {
@@ -1079,6 +1141,18 @@ impl Hydrator {
         lane: ManifestLane,
     ) -> io::Result<bool> {
         let path = self.data_dir.join(name);
+        // Taken before the read below, exactly like ship_lane's
+        // pre-read stat: a miss (file touched since, or first sight of
+        // this lane) just falls through to the read-and-CRC check that
+        // already ran unconditionally, so it can only cost one
+        // redundant pass, never a false "already matches".
+        let pre_stat = std::fs::metadata(&path).ok().map(|meta| FileSig::of(&meta));
+        if let Some(sig) = pre_stat {
+            let cached = self.lane_cache.lock().unwrap().get(name).copied();
+            if cached == Some((lane, sig)) {
+                return Ok(false);
+            }
+        }
         let mut lane = lane;
         let mut round = 0usize;
         loop {
@@ -1088,9 +1162,9 @@ impl Hydrator {
                     if local.len() >= shipped
                         && crate::crc32c::crc32c(&local[..shipped]) == lane.crc
                     {
-                        if local.len() > shipped
-                            && matches!(self.lane_policy, LanePolicy::ShippedExact)
-                        {
+                        let truncated = local.len() > shipped
+                            && matches!(self.lane_policy, LanePolicy::ShippedExact);
+                        if truncated {
                             tracing::info!(
                                 lane = %name,
                                 kept = shipped,
@@ -1101,6 +1175,17 @@ impl Hydrator {
                             let file = std::fs::OpenOptions::new().write(true).open(&path)?;
                             file.set_len(lane.len)?;
                             file.sync_all()?;
+                        } else if let Some(sig) = pre_stat {
+                            // Unmodified by this call, so the pre-read
+                            // stat still describes it: cache it against
+                            // this lane target so a sibling file's
+                            // change elsewhere in the family doesn't
+                            // force this unrelated, unchanged lane
+                            // through another read-and-CRC pass.
+                            self.lane_cache
+                                .lock()
+                                .unwrap()
+                                .insert(name.to_string(), (lane, sig));
                         }
                         return Ok(false);
                     }
@@ -1152,6 +1237,15 @@ impl Hydrator {
             match attempt {
                 Ok(assembled) => {
                     crate::storage::write_atomic(&path, &assembled)?;
+                    // Post-write stat, not the pre-read one above: the
+                    // atomic rename just gave this file a new mtime/ino.
+                    if let Some(sig) = std::fs::metadata(&path).ok().map(|meta| FileSig::of(&meta))
+                    {
+                        self.lane_cache
+                            .lock()
+                            .unwrap()
+                            .insert(name.to_string(), (lane, sig));
+                    }
                     return Ok(true);
                 }
                 Err(error)
