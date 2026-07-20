@@ -154,4 +154,5 @@ jobs:
         run: |
           docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Provenance}}' \
             | jq -e --arg prefix "${{ github.server_url }}/${{ github.repository }}/actions/runs/" \
-                '(keys | length) >= 2 and all(.[]; .SLSA.runDetails.builder.id | startswith($prefix))'
+                '(keys | length) >= 2 and all(.[]; .SLSA.runDetails.builder.id | startswith($prefix))' \
+            || { echo "provenance missing, or its builder is not this repository's Actions run" >&2; exit 1; }
