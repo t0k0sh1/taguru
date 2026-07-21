@@ -1819,19 +1819,19 @@ mod tests {
         context.associate("私", "好き", "りんご", 1.0).unwrap();
         let image = context.to_bytes();
 
-        // The first edge record sits right after the 16-byte header and
+        // The first edge record sits right after the 24-byte header and
         // the edge table's u64 count; its first field is `subject`.
         // Pointing it at a nonexistent concept must be caught.
         let mut dangling_subject = image.clone();
-        dangling_subject[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+        dangling_subject[32..36].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(Context::from_bytes(&resealed(dangling_subject)).is_err());
 
-        // 私's `outgoing_count` sits at offset 96: header 16, edge table
-        // 8 + 40, empty attribution table 8, concept count 8, then the
+        // 私's `outgoing_count` sits at offset 112: header 24, edge table
+        // 8 + 48, empty attribution table 8, concept count 8, then the
         // fifth u32 field of the first concept record. A count that
         // disagrees with the actual chain must be caught.
         let mut wrong_count = image.clone();
-        wrong_count[96..100].copy_from_slice(&5u32.to_le_bytes());
+        wrong_count[112..116].copy_from_slice(&5u32.to_le_bytes());
         assert!(Context::from_bytes(&resealed(wrong_count)).is_err());
     }
 }
