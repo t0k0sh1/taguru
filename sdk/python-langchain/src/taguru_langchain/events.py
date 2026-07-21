@@ -61,6 +61,12 @@ class AttemptFailed:
     parse_error: str
     elapsed_seconds: float
     provider_metadata: ProviderMetadata | None
+    length_limited: bool
+    """Whether ``provider_metadata.finish_reason`` says this answer was cut
+    off at the provider's output cap (see
+    :func:`taguru_langchain._extract.indicates_length_limit`) — the next
+    attempt's corrective turn asks for a shorter answer instead of
+    repeating the same ask verbatim when this is true."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)

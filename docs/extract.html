@@ -81,12 +81,21 @@ TAGURU_EXTRACT_MODEL    model name (required)
 TAGURU_EXTRACT_API_KEY  Bearer credential (optional)
 TAGURU_EXTRACT_TIMEOUT_SECS  time budget per completion; 0 = unlimited (default 300)
 TAGURU_EXTRACT_PARALLEL  concurrent chunk completions per document (default 1)
+TAGURU_EXTRACT_FACT_BUDGET  default for --fact-budget (default 0, off)
+TAGURU_EXTRACT_MAX_ATTEMPTS  total attempts at valid JSON per chunk, 1-10 (default 2)
+TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
+                    the model's own prior bad answer to this many bytes;
+                    0 omits it entirely (default: unset, replay in full)
 
 --dry-run           list what would extract or skip; calls nothing
 --force             re-extract documents the manifest says are unchanged
 --no-passage        omit the document body from the batch (facts only)
 --questions N       doc2query: also propose up to N retrieval questions
                     per paragraph (1..=8; incompatible with --no-passage)
+--fact-budget N     ask the model to keep each chunk's answer to at most N
+                    associations total (default 0, off); a soft instruction,
+                    never enforced after the fact — overrides
+                    TAGURU_EXTRACT_FACT_BUDGET when both are set
 --parallel N        chunk completions to run concurrently within one
                     document (default 1, sequential); overrides
                     TAGURU_EXTRACT_PARALLEL when both are set
@@ -117,13 +126,14 @@ TAGURU_EXTRACT_PARALLEL  concurrent chunk completions per document (default 1)
   </section>
 
   <section id="local-models">
-    <h2>Local models: four field notes</h2>
+    <h2>Local models: five field notes</h2>
     <p class="section-sub">All of the following was learned by actually running the pipeline against Ollama on a laptop.</p>
     <ul>
       <li><b>Turn thinking mode OFF.</b> A model in reasoning mode spends the whole time budget on invisible thinking tokens before the first byte of JSON: the same 10 KB document that extracted in ~30 s with thinking off blew through a 300 s timeout with it on. The extractor speaks plain OpenAI-compatible chat and does not toggle vendor-specific thinking flags — pick a non-thinking model, or disable thinking on the serving side. The symptom: a busy GPU and <code>timed out reading response</code> — or, with no timeout set, an <i>empty</i> response after minutes of thinking (reported as exactly that). Thinking exhausted the generation budget.</li>
       <li><b>Give the server a real context window.</b> A 24 KiB chunk is roughly 6k tokens. A serving default of 4k truncates the request <b>silently</b> — no error, just quietly degraded output. On Ollama, bake the window into a derived model: <code>FROM &lt;base&gt;</code> + <code>PARAMETER num_ctx 16384</code> → <code>ollama create</code>.</li>
       <li><b>Match the timeout to the hardware.</b> <code>TAGURU_EXTRACT_TIMEOUT_SECS</code> bounds each chat completion (default 300; <code>0</code> = unlimited). Every attempt gets the full budget, and a transient failure is retried up to 4 attempts total, so a provider that stalls instead of erroring can cost several multiples of the timeout per chunk before the retries exhaust — worth remembering before dropping the timeout to something tight.</li>
       <li><b>The manifest trusts the model's name.</b> Re-point a serving alias at a different base (overwrite <code>ollama create my-extractor</code> with another base) and nothing the manifest can see changes — documents stay "unchanged" under what is actually a new model. Name models honestly, or <code>--force</code> after re-pointing. The same caveat as the embedding vector cache (also keyed by model name).</li>
+      <li><b>A wall of a malformed answer near the output cap can stall a chunk for minutes.</b> A small local model that runs its output budget out mid-answer produces one huge invalid response; replaying that whole response back verbatim and then asking for the same length again just reproduces the same cutoff — one chunk of a few hundred bytes measured at 4-5 minutes this way. <code>--fact-budget N</code> asks for fewer associations per chunk up front, and the extractor's own truncation-aware correction (see <a href="#prompt">below</a>) already asks for a shorter answer on its own once the provider's <code>finish_reason</code> says the prior one was cut off. <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES=0</code> is the blunter fallback: never replay the bad answer at all.</li>
     </ul>
   </section>
 
@@ -151,15 +161,32 @@ TAGURU_EXTRACT_PARALLEL  concurrent chunk completions per document (default 1)
       <li>Every file written is re-parsed with the import parser before it is written — <b>extract cannot produce a file import would reject</b>.</li>
     </ul>
     <p>
-      A model that answers with anything but a JSON object gets one corrective turn. A transient
-      provider failure (429, 5xx, transport) is retried up to 4 attempts total, waiting a
-      full-jitter exponential backoff between them — 1 s doubling toward a 30 s ceiling, randomized
-      so concurrent chunks under <code>--parallel</code> don't all wake up and retry in lockstep.
-      A 429 that carries <code>Retry-After</code> as delta-seconds uses that delay instead,
-      verbatim (clamped to the same 30 s ceiling), since the server's own instruction beats a
-      guess; HTTP-date values are not recognized and fall back to the computed backoff. A
-      non-retryable 4xx
-      fails immediately, spending none of the retry budget. Beyond the last attempt the document
+      A model that answers with anything but the JSON object gets a corrective turn: its own bad
+      answer goes back to it, followed by a request to try again. By default that happens once —
+      2 total attempts per chunk, todays fixed behavior — and
+      <code>TAGURU_EXTRACT_MAX_ATTEMPTS</code> raises the ceiling to anywhere from 1 (no
+      corrective turn at all) to 10. Every corrective turn rebuilds the conversation from the
+      system/user base plus only the single most recent bad answer, never the accumulated
+      history, so <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code> bounds the replay the same
+      way on attempt 5 as on attempt 2: left unset the bad answer is replayed back in full
+      (todays behavior), a byte count truncates the replay to that size, and <code>0</code> omits
+      it behind a placeholder entirely. When the provider's own <code>finish_reason</code> says
+      the bad answer was cut off at its output-length cap, the corrective ask itself changes:
+      instead of repeating the request that just produced a too-long answer, it asks for a
+      <i>shorter</i> one, naming <code>--fact-budget</code> when the run has one — repeating the
+      identical ask just reproduces the identical cutoff, which is the stall field-noted
+      <a href="#local-models">above</a>.
+    </p>
+    <p>
+      This corrective-turn policy is a separate layer from transport retries: a transient
+      provider failure (429, 5xx, transport) is retried up to 4 attempts total regardless of
+      <code>TAGURU_EXTRACT_MAX_ATTEMPTS</code>, waiting a full-jitter exponential backoff between
+      them — 1 s doubling toward a 30 s ceiling, randomized so concurrent chunks under
+      <code>--parallel</code> don't all wake up and retry in lockstep. A 429 that carries
+      <code>Retry-After</code> as delta-seconds uses that delay instead, verbatim (clamped to the
+      same 30 s ceiling), since the server's own instruction beats a guess; HTTP-date values are
+      not recognized and fall back to the computed backoff. A non-retryable 4xx fails immediately,
+      spending none of the retry budget. Beyond the last attempt, of either kind, the document
       fails, the remaining documents continue, and the run exits 1 — a re-run re-extracts only the
       failures, because the manifest records only successes.
     </p>

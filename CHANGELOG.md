@@ -8,6 +8,21 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru extract` and `TaguruIngester` gain bounded structured-output
+  controls and a configurable retry strategy (#178) — `--fact-budget N` /
+  `fact_budget` asks the model to keep a chunk's answer to at most N
+  associations, folded into the system prompt; `TAGURU_EXTRACT_MAX_ATTEMPTS`
+  / `max_attempts` raises the total attempts at valid JSON per chunk from
+  the default of 2 up to 10 (or down to 1, skipping the corrective turn
+  entirely); `TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES` /
+  `corrective_context_bytes` caps how much of a malformed answer gets
+  replayed back on the next attempt (`0` omits it behind a placeholder),
+  default unchanged at replaying it in full; and once a provider's own
+  `finish_reason` says a bad answer was cut off at its output-length cap,
+  the corrective ask itself switches from "try again" to "try again
+  shorter," naming the fact budget when one is set — the fix for a local
+  model stalling for minutes replaying and re-requesting the same
+  oversized malformed answer. Defaults are unchanged in every case.
 - `TaguruIngester` gains an optional `on_event` progress callback (#177) —
   synchronous, typed events (`document_started`, `chunk_started`,
   `attempt_started`, `attempt_failed`, `chunk_completed`, `import_started`,

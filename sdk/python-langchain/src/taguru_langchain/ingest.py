@@ -37,6 +37,9 @@ from ._extract import (
     VOCABULARY_CAP,
     ModelOutput,
     chunk,
+    corrective_assistant_turn_content,
+    corrective_message,
+    indicates_length_limit,
     labeled_document,
     merge,
     parse_model_output,
@@ -62,7 +65,12 @@ from .events import (
     ProviderMetadata,
 )
 
-MAX_ATTEMPTS = 2
+DEFAULT_MAX_ATTEMPTS = 2
+
+# Hard ceiling on max_attempts: a misconfigured value must not be able to
+# turn one stubborn chunk into an unbounded number of model calls. Kept in
+# sync with src/extract.rs's MAX_EXTRACT_ATTEMPTS.
+MAX_ATTEMPTS_CEILING = 10
 
 
 @dataclass
@@ -96,8 +104,9 @@ class TaguruIngester:
 
     Args:
         context: Target context name.
-        llm: Any LangChain chat model; asked for a single JSON object (one
-            corrective turn on a malformed answer, mirroring taguru extract).
+        llm: Any LangChain chat model; asked for a single JSON object, with
+            corrective turns on a malformed answer (see ``max_attempts``),
+            mirroring taguru extract.
         client / async_client: Core-SDK clients; built from
             ``base_url``/``api_key`` (or env) when neither is given.
         create_context: Stamp a create block on each batch so the context is
@@ -108,6 +117,22 @@ class TaguruIngester:
             a new source on every edit, orphaning the old one forever.
         questions: doc2query questions per paragraph (None/0 = don't ask;
             capped at 8, the server's own per-paragraph cap).
+        fact_budget: Soft cap on associations per chunk, folded into the
+            prompt as an instruction (None/0 = off, the default — unbounded).
+            Never enforced post-hoc: a model that ignores it just returns
+            everything it produced.
+        max_attempts: Total attempts (1 initial + corrections) at getting the
+            model to answer with the JSON object asked for, from 1 to
+            ``MAX_ATTEMPTS_CEILING`` (default ``DEFAULT_MAX_ATTEMPTS`` = 2,
+            today's fixed behavior). Each retry rebuilds the conversation
+            from the system/user base and appends only the most recent bad
+            turn, so ``corrective_context_bytes`` bounds every retry alike,
+            not just the first.
+        corrective_context_bytes: How much of the model's own prior bad
+            answer gets replayed back to it in the next attempt's corrective
+            turn: ``None`` replays it in full (the default, today's
+            behavior), ``0`` omits it behind a placeholder, and any other
+            value truncates it to that many bytes.
         include_passage: Store the verbatim document as the batch's passage
             (paragraph locators are stripped when off, matching extract).
         chunk_bytes: Prompt-input chunk cap; the stored passage is never
@@ -138,6 +163,9 @@ class TaguruIngester:
         context_description: str | None = None,
         source_key: str = "source",
         questions: int | None = None,
+        fact_budget: int | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        corrective_context_bytes: int | None = None,
         include_passage: bool = True,
         chunk_bytes: int = CHUNK_BYTES,
         vocabulary_cap: int = VOCABULARY_CAP,
@@ -149,6 +177,17 @@ class TaguruIngester:
             raise ValueError("create_context=True requires context_description")
         if questions is not None and not 0 <= questions <= MAX_QUESTIONS_PER_PARAGRAPH:
             raise ValueError(f"questions must be between 0 and {MAX_QUESTIONS_PER_PARAGRAPH}")
+        if fact_budget is not None and fact_budget < 1:
+            raise ValueError(
+                "fact_budget must be a positive integer, or None to leave it unbounded"
+            )
+        if not 1 <= max_attempts <= MAX_ATTEMPTS_CEILING:
+            raise ValueError(f"max_attempts must be between 1 and {MAX_ATTEMPTS_CEILING}")
+        if corrective_context_bytes is not None and corrective_context_bytes < 0:
+            raise ValueError(
+                "corrective_context_bytes must be a non-negative integer, or None to replay "
+                "the prior bad answer in full"
+            )
         self.context = context
         self.llm = llm
         self._owns_clients = client is None and async_client is None
@@ -161,6 +200,9 @@ class TaguruIngester:
         self.context_description = context_description
         self.source_key = source_key
         self.questions = questions or 0
+        self.fact_budget = fact_budget or 0
+        self.max_attempts = max_attempts
+        self.corrective_context_bytes = corrective_context_bytes
         self.include_passage = include_passage
         self.chunk_bytes = chunk_bytes
         self.vocabulary_cap = vocabulary_cap
@@ -180,17 +222,28 @@ class TaguruIngester:
         return source
 
     def _corrective_turn(
-        self, messages: list[BaseMessage], content: str, error: ValueError
+        self,
+        base_messages: list[BaseMessage],
+        content: str,
+        error: ValueError,
+        length_limited: bool,
     ) -> list[BaseMessage]:
+        """Rebuilds from the system/user base plus only the most recent bad
+        turn — never the whole history — so ``corrective_context_bytes``
+        bounds every retry alike, not just the first. ``length_limited``
+        (the provider's own ``finish_reason`` saying the prior answer was
+        cut off at its output cap) swaps the ask from "try again" to "try
+        again shorter" (see ``corrective_message``) — repeating the
+        same-length ask just reproduces the same cutoff, the stall Issue
+        #178 reported. At the all-defaults policy, with a normal
+        (non-length-limited) answer, this reproduces the previous fixed
+        implementation's request bodies exactly."""
         return [
-            *messages,
-            AIMessage(content=content),
-            HumanMessage(
-                content=(
-                    f"That was not the single JSON object asked for ({error}). "
-                    "Answer again with only the JSON object."
-                )
+            *base_messages,
+            AIMessage(
+                content=corrective_assistant_turn_content(content, self.corrective_context_bytes)
             ),
+            HumanMessage(content=corrective_message(str(error), length_limited, self.fact_budget)),
         ]
 
     def _build_batch(
@@ -278,7 +331,7 @@ class TaguruIngester:
         self._emit(DocumentStarted(source=source, text_bytes=len(text.encode("utf-8"))))
 
         vocabulary = self._fetch_vocabulary()
-        system = system_prompt(vocabulary, self.questions)
+        system = system_prompt(vocabulary, self.questions, self.fact_budget)
         chunks = chunk(labeled_document(text, self.chunk_bytes), self.chunk_bytes)
         outcome.chunks = len(chunks)
 
@@ -287,20 +340,25 @@ class TaguruIngester:
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
             user = user_message(source, index, len(chunks), piece)
-            messages: list[BaseMessage] = [
+            base_messages: list[BaseMessage] = [
                 SystemMessage(content=system),
                 HumanMessage(content=user),
             ]
             output = None
-            last_error: ValueError | None = None
+            prior_bad_turn: tuple[str, ValueError, bool] | None = None
             chunk_llm_calls = 0
-            for attempt in range(1, MAX_ATTEMPTS + 1):
+            for attempt in range(1, self.max_attempts + 1):
+                messages = (
+                    base_messages
+                    if prior_bad_turn is None
+                    else self._corrective_turn(base_messages, *prior_bad_turn)
+                )
                 self._emit(
                     AttemptStarted(
                         source=source,
                         chunk_index=index,
                         attempt=attempt,
-                        max_attempts=MAX_ATTEMPTS,
+                        max_attempts=self.max_attempts,
                     )
                 )
                 attempt_started_at = time.monotonic()
@@ -312,21 +370,28 @@ class TaguruIngester:
                     output = parse_model_output(content)
                     break
                 except ValueError as error:
-                    last_error = error
+                    metadata = self._provider_metadata(response)
+                    length_limited = indicates_length_limit(
+                        metadata.finish_reason if metadata else None
+                    )
                     self._emit(
                         AttemptFailed(
                             source=source,
                             chunk_index=index,
                             attempt=attempt,
-                            max_attempts=MAX_ATTEMPTS,
+                            max_attempts=self.max_attempts,
                             parse_error=str(error),
                             elapsed_seconds=time.monotonic() - attempt_started_at,
-                            provider_metadata=self._provider_metadata(response),
+                            provider_metadata=metadata,
+                            length_limited=length_limited,
                         )
                     )
-                    messages = self._corrective_turn(messages, content, error)
+                    prior_bad_turn = (content, error, length_limited)
             if output is None:
-                raise ValueError(f"the model would not produce the JSON object: {last_error}")
+                assert prior_bad_turn is not None
+                raise ValueError(
+                    f"the model would not produce the JSON object: {prior_bad_turn[1]}"
+                )
             outputs.append(output)
             self._emit(
                 ChunkCompleted(
@@ -426,7 +491,7 @@ class TaguruIngester:
         self._emit(DocumentStarted(source=source, text_bytes=len(text.encode("utf-8"))))
 
         vocabulary = await self._afetch_vocabulary()
-        system = system_prompt(vocabulary, self.questions)
+        system = system_prompt(vocabulary, self.questions, self.fact_budget)
         chunks = chunk(labeled_document(text, self.chunk_bytes), self.chunk_bytes)
         outcome.chunks = len(chunks)
 
@@ -435,20 +500,25 @@ class TaguruIngester:
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
             user = user_message(source, index, len(chunks), piece)
-            messages: list[BaseMessage] = [
+            base_messages: list[BaseMessage] = [
                 SystemMessage(content=system),
                 HumanMessage(content=user),
             ]
             output = None
-            last_error: ValueError | None = None
+            prior_bad_turn: tuple[str, ValueError, bool] | None = None
             chunk_llm_calls = 0
-            for attempt in range(1, MAX_ATTEMPTS + 1):
+            for attempt in range(1, self.max_attempts + 1):
+                messages = (
+                    base_messages
+                    if prior_bad_turn is None
+                    else self._corrective_turn(base_messages, *prior_bad_turn)
+                )
                 self._emit(
                     AttemptStarted(
                         source=source,
                         chunk_index=index,
                         attempt=attempt,
-                        max_attempts=MAX_ATTEMPTS,
+                        max_attempts=self.max_attempts,
                     )
                 )
                 attempt_started_at = time.monotonic()
@@ -460,21 +530,28 @@ class TaguruIngester:
                     output = parse_model_output(content)
                     break
                 except ValueError as error:
-                    last_error = error
+                    metadata = self._provider_metadata(response)
+                    length_limited = indicates_length_limit(
+                        metadata.finish_reason if metadata else None
+                    )
                     self._emit(
                         AttemptFailed(
                             source=source,
                             chunk_index=index,
                             attempt=attempt,
-                            max_attempts=MAX_ATTEMPTS,
+                            max_attempts=self.max_attempts,
                             parse_error=str(error),
                             elapsed_seconds=time.monotonic() - attempt_started_at,
-                            provider_metadata=self._provider_metadata(response),
+                            provider_metadata=metadata,
+                            length_limited=length_limited,
                         )
                     )
-                    messages = self._corrective_turn(messages, content, error)
+                    prior_bad_turn = (content, error, length_limited)
             if output is None:
-                raise ValueError(f"the model would not produce the JSON object: {last_error}")
+                assert prior_bad_turn is not None
+                raise ValueError(
+                    f"the model would not produce the JSON object: {prior_bad_turn[1]}"
+                )
             outputs.append(output)
             self._emit(
                 ChunkCompleted(

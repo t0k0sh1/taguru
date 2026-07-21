@@ -177,6 +177,24 @@ fn chat_ok(content: &str) -> String {
     )
 }
 
+/// Same wire shape as [`chat_ok`], but the choice also carries
+/// `finish_reason` — drives extract.rs's `ChatClient::complete`
+/// `finish_reason` plumbing (truncation-aware correction).
+fn chat_ok_with_finish_reason(content: &str, finish_reason: &str) -> String {
+    let payload = json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": finish_reason,
+        }]
+    })
+    .to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    )
+}
+
 /// An error chat-completion response — any status, an optional extra
 /// header line (e.g. `"Retry-After: 1\r\n"`), and a plain-text body.
 fn chat_error(status: u16, reason: &str, extra_header: &str, body: &str) -> String {
@@ -231,6 +249,9 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_API_KEY")
         .env_remove("TAGURU_EXTRACT_TIMEOUT_SECS")
         .env_remove("TAGURU_EXTRACT_PARALLEL")
+        .env_remove("TAGURU_EXTRACT_FACT_BUDGET")
+        .env_remove("TAGURU_EXTRACT_MAX_ATTEMPTS")
+        .env_remove("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES")
         .env_remove("TAGURU_CONFIG")
 }
 
@@ -995,6 +1016,298 @@ fn extract_persists_the_manifest_after_each_document_not_only_at_the_end() {
     assert!(
         saved.contains(&fast_src),
         "manifest never recorded the completed document before the run was killed: {saved:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn extract_fact_budget_flag_is_folded_into_the_system_prompt() {
+    let docs = batch_dir("extract-factbudget-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-factbudget-out");
+
+    let (url, requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--fact-budget",
+            "3",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].contains("Keep this answer to at most 3 association(s) total"),
+        "{}",
+        requests[0]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `TAGURU_EXTRACT_MAX_ATTEMPTS` raised past the default lets a chunk
+/// survive more than one corrective turn — two bad answers followed by
+/// a good one, which the default policy (2 total attempts) would never
+/// reach.
+#[test]
+fn extract_max_attempts_env_var_extends_corrective_retries_past_the_default() {
+    let docs = batch_dir("extract-maxattempts-extend-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-maxattempts-extend-out");
+
+    let (url, requests) = stub_chat_server(vec![
+        "still not json".to_string(),
+        "nope, still not".to_string(),
+        json!({"associations": []}).to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_MAX_ATTEMPTS", "3"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 written"), "{stdout}");
+    assert_eq!(requests.join().unwrap().len(), 3);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `TAGURU_EXTRACT_MAX_ATTEMPTS=1` means one attempt total — no
+/// corrective turn at all, unlike the default of 2.
+#[test]
+fn extract_max_attempts_of_one_skips_the_corrective_turn() {
+    let docs = batch_dir("extract-maxattempts-one-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-maxattempts-one-out");
+
+    let (url, requests) = stub_chat_server(vec!["not json at all".to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_MAX_ATTEMPTS", "1"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("chunk 1/1"), "{stderr}");
+    assert!(
+        stderr.contains("the model would not produce the JSON object"),
+        "{stderr}"
+    );
+    assert_eq!(
+        requests.join().unwrap().len(),
+        1,
+        "max_attempts=1 must not send a corrective turn"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn extract_rejects_a_max_attempts_env_var_outside_its_range() {
+    let docs = batch_dir("extract-maxattempts-range-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "content").unwrap();
+    let out = batch_dir("extract-maxattempts-range-out");
+
+    for bad in ["0", "11", "nope"] {
+        let provider = [
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_MAX_ATTEMPTS", bad),
+        ];
+        let (code, _, stderr) =
+            run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+        assert_eq!(code, 2, "{bad}: {stderr}");
+        assert!(
+            stderr.contains("TAGURU_EXTRACT_MAX_ATTEMPTS needs an integer between 1 and 10"),
+            "{bad}: {stderr}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A byte cap truncates the corrective turn's replay of the model's own
+/// prior bad answer instead of resending it in full.
+#[test]
+fn extract_corrective_context_bytes_caps_the_replayed_bad_answer() {
+    let docs = batch_dir("extract-correctivecap-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-correctivecap-out");
+
+    let bad_answer = "not json at all, definitely not a JSON object";
+    let (url, requests) = stub_chat_server(vec![
+        bad_answer.to_string(),
+        json!({"associations": []}).to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES", "10"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].contains("[truncated to 10 bytes]"),
+        "{}",
+        requests[1]
+    );
+    assert!(
+        !requests[1].contains(bad_answer),
+        "the full bad answer must not be replayed under a cap: {}",
+        requests[1]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A zero byte cap omits the replay entirely, behind a placeholder —
+/// distinct from an unset cap (full replay, the default).
+#[test]
+fn extract_corrective_context_bytes_of_zero_omits_the_bad_answer() {
+    let docs = batch_dir("extract-correctivezero-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-correctivezero-out");
+
+    let bad_answer = "not json at all, definitely not a JSON object";
+    let (url, requests) = stub_chat_server(vec![
+        bad_answer.to_string(),
+        json!({"associations": []}).to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES", "0"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].contains("[omitted: not the requested JSON object]"),
+        "{}",
+        requests[1]
+    );
+    assert!(!requests[1].contains(bad_answer), "{}", requests[1]);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn extract_rejects_a_corrective_context_bytes_env_var_that_is_not_a_number() {
+    let docs = batch_dir("extract-correctivebad-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "content").unwrap();
+    let out = batch_dir("extract-correctivebad-out");
+
+    for bad in ["nope", "-5"] {
+        let provider = [
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES", bad),
+        ];
+        let (code, _, stderr) =
+            run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+        assert_eq!(code, 2, "{bad}: {stderr}");
+        assert!(
+            stderr.contains("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES needs an integer"),
+            "{bad}: {stderr}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A `finish_reason: "length"` on the bad answer swaps the corrective
+/// ask from "try again" to "try again shorter" and names the run's
+/// `--fact-budget` — the fix for Issue #178's stall (a huge truncated
+/// answer, replayed in full, re-asked for the very length it just
+/// proved it couldn't fit in).
+#[test]
+fn extract_a_length_limited_bad_answer_asks_for_shorter_and_names_the_fact_budget() {
+    let docs = batch_dir("extract-lengthlimited-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-lengthlimited-out");
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, attempt| {
+        if attempt == 0 {
+            chat_ok_with_finish_reason("not json, and huge", "length")
+        } else {
+            chat_ok(&json!({"associations": []}).to_string())
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--fact-budget",
+            "4",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let corrective = &requests[1];
+    assert!(corrective.contains("SHORTER"), "{corrective}");
+    assert!(
+        corrective.contains("cut off at the output limit"),
+        "{corrective}"
+    );
+    assert!(
+        corrective.contains("Keep it to at most 4 association(s) total."),
+        "{corrective}"
+    );
+    assert!(
+        !corrective.contains("Answer again with only the JSON object."),
+        "a length-limited correction must not repeat the plain ask verbatim: {corrective}"
     );
 
     let _ = std::fs::remove_dir_all(&docs);

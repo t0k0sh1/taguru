@@ -14,11 +14,15 @@ from taguru_langchain._extract import (
     ModelOutput,
     ModelQuestion,
     chunk,
+    corrective_assistant_turn_content,
+    corrective_message,
+    indicates_length_limit,
     labeled_document,
     merge,
     parse_model_output,
     render_batch,
     split_paragraphs,
+    system_prompt,
 )
 
 
@@ -298,3 +302,76 @@ def test_render_strips_paragraph_locators_without_a_passage() -> None:
     lines = [json.loads(line) for line in body.strip().split("\n")]
     assert len(lines) == 2  # header + fact; no passage line
     assert "paragraph" not in lines[1]
+
+
+def test_the_system_prompt_omits_the_fact_budget_clause_by_default() -> None:
+    """Port of extract.rs the_system_prompt_omits_the_fact_budget_clause_by_default."""
+    assert "association(s) total" not in system_prompt([], 0, 0)
+
+
+def test_the_system_prompt_states_the_fact_budget_when_set() -> None:
+    """Port of extract.rs the_system_prompt_states_the_fact_budget_when_set."""
+    prompt = system_prompt([], 0, 5)
+    assert "at most 5 association(s) total" in prompt
+
+
+def test_corrective_assistant_turn_content_replays_in_full_by_default() -> None:
+    """Port of extract.rs corrective_assistant_turn_replays_in_full_by_default."""
+    assert corrective_assistant_turn_content("not json at all", None) == "not json at all"
+
+
+def test_corrective_assistant_turn_content_omits_at_a_zero_cap() -> None:
+    """Port of extract.rs corrective_assistant_turn_omits_at_a_zero_cap."""
+    assert (
+        corrective_assistant_turn_content("not json at all", 0)
+        == "[omitted: not the requested JSON object]"
+    )
+
+
+def test_corrective_assistant_turn_content_truncates_at_a_char_boundary_under_a_cap() -> None:
+    """Port of extract.rs corrective_assistant_turn_truncates_at_a_char_boundary_under_a_cap.
+
+    The cap (3) lands one byte inside "…" (a 3-byte character starting at
+    byte 2); truncation must back off to the char boundary instead of
+    splitting it or raising.
+    """
+    assert corrective_assistant_turn_content("ab…cd", 3) == "ab… [truncated to 3 bytes]"
+
+
+def test_corrective_assistant_turn_content_leaves_content_under_the_cap_untouched() -> None:
+    """Port of extract.rs corrective_assistant_turn_leaves_content_under_the_cap_untouched."""
+    assert corrective_assistant_turn_content("short", 1000) == "short"
+
+
+def test_indicates_length_limit_is_true_only_for_length() -> None:
+    """Port of extract.rs indicates_length_limit_is_true_only_for_length."""
+    assert indicates_length_limit("length")
+    assert not indicates_length_limit("stop")
+    assert not indicates_length_limit("content_filter")
+    assert not indicates_length_limit(None)
+
+
+def test_corrective_message_matches_todays_fixed_text_when_not_length_limited() -> None:
+    """Port of extract.rs corrective_message_matches_todays_fixed_text_when_not_length_limited."""
+    message = corrective_message("bad json", False, 0)
+    assert message == (
+        "That was not the single JSON object asked for (bad json). "
+        "Answer again with only the JSON object."
+    )
+    # A fact budget is irrelevant to the ordinary ask — the model wasn't cut
+    # off, so there's nothing to shorten.
+    assert message == corrective_message("bad json", False, 5)
+
+
+def test_corrective_message_asks_for_shorter_when_length_limited() -> None:
+    """Port of extract.rs corrective_message_asks_for_shorter_when_length_limited."""
+    message = corrective_message("bad json", True, 0)
+    assert "SHORTER" in message
+    assert "bad json" in message
+    assert "association(s) total" not in message
+
+
+def test_corrective_message_names_the_fact_budget_when_length_limited_and_set() -> None:
+    """Port of extract.rs corrective_message_names_the_fact_budget_when_length_limited_and_set."""
+    message = corrective_message("bad json", True, 5)
+    assert "Keep it to at most 5 association(s) total." in message
