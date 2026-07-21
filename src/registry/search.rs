@@ -798,3 +798,1223 @@ fn fuse_passage_lanes(
     hits.truncate(limit);
     hits
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    use super::*;
+    use crate::embedding::{EmbedPurpose, EmbeddingProvider};
+    use crate::registry::test_support::{
+        MockEmbeddings, boot_for_passage_embedding, plain, scratch_dir,
+    };
+
+    #[test]
+    fn passage_search_ranks_the_answering_text_first() {
+        let dir = scratch_dir("bm25");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第2段落".to_string(),
+            "原料米には主に山田錦を使い、精米歩合は50パーセントまで磨く。".to_string(),
+        );
+        passages.insert(
+            "第3段落".to_string(),
+            "杜氏の高瀬は南部杜氏の出身で、経験は30年を超える。".to_string(),
+        );
+        passages.insert(
+            "第5段落".to_string(),
+            "蔵開きの祭りでは、雲居山の伏流水で仕込んだ新酒がふるまわれる。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        // The procedural question never became a triple; the text lane
+        // must still hand back the passage that answers it, first.
+        let hits = state
+            .search_passages(
+                "sake",
+                "精米歩合はどこまで磨く?",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].source, "第2段落");
+        assert!(hits[0].score > 0.0);
+
+        // No shared bigrams at all → nothing, not noise.
+        assert!(
+            state
+                .search_passages(
+                    "sake",
+                    "unrelated english words",
+                    3,
+                    None,
+                    None,
+                    Deadline::unbounded()
+                )
+                .unwrap()
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+        assert!(
+            state
+                .search_passages("nope", "x", 3, None, None, Deadline::unbounded())
+                .is_none()
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn passage_search_discriminates_english_by_words() {
+        let dir = scratch_dir("bm25-english");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("papers", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // English prose shares nearly every character pair across
+        // documents; only word terms can tell these two apart. The
+        // real-world case: a famous quote had to be found in the essay
+        // that contains it, not in whichever essay mentions the topic.
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第51篇".to_string(),
+            "The great security against a gradual concentration of the several powers \
+             in the same department consists in giving to those who administer each \
+             department the necessary constitutional means and personal motives to \
+             resist encroachments of the others. Ambition must be made to counteract \
+             ambition."
+                .to_string(),
+        );
+        passages.insert(
+            "第70篇".to_string(),
+            "Energy in the executive is a leading character in the definition of good \
+             government. It is essential to the protection of the community against \
+             foreign attacks and to the security of liberty against the enterprises \
+             and assaults of ambition, of faction, and of anarchy."
+                .to_string(),
+        );
+        state
+            .store_passages("papers", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages(
+                "papers",
+                "ambition must be made to counteract ambition",
+                2,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].source, "第51篇");
+        assert!(
+            hits.len() < 2 || hits[0].score > hits[1].score,
+            "the containing passage must win decisively, not by tie-break"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_camel_case_piece_finds_the_passage() {
+        let dir = scratch_dir("camel");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("code", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // "AppState" and "PathBuf" occur only as camelCase tokens here —
+        // none of their pieces appears as a standalone word.
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "src/registry.rs:AppState".to_string(),
+            "impl AppState { pub fn boot_with(dir: PathBuf) -> Self { todo!() } }".to_string(),
+        );
+        state
+            .store_passages("code", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        for query in ["state", "State", "app", "path"] {
+            let hits = state
+                .search_passages("code", query, 3, None, None, Deadline::unbounded())
+                .unwrap()
+                .unwrap()
+                .hits;
+            assert_eq!(
+                hits.first().map(|hit| hit.source.as_str()),
+                Some("src/registry.rs:AppState"),
+                "a piece of a camelCase identifier must reach its passage (query {query:?})"
+            );
+        }
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn passage_search_returns_the_answering_paragraph_not_the_whole_document() {
+        let dir = scratch_dir("bm25-paragraph");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // One document, three paragraphs; only the middle one answers.
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "docs/aomine.md".to_string(),
+            "青嶺酒造は雲居県霧沢町の蔵元である。\n\n原料米には山田錦を使い、精米歩合は50パーセントまで磨く。\n\n蔵開きの祭りでは新酒がふるまわれる。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages(
+                "sake",
+                "精米歩合はどこまで磨く?",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(
+            (hits[0].source.as_str(), hits[0].index),
+            ("docs/aomine.md", 1),
+            "the hit names the paragraph, not just the document"
+        );
+        assert_eq!(
+            hits[0].text, "原料米には山田錦を使い、精米歩合は50パーセントまで磨く。",
+            "the text is the answering paragraph alone"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_store_after_the_first_search_updates_the_index_in_place() {
+        let dir = scratch_dir("bm25-incremental");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("第1章".to_string(), "青嶺酒造の創業は1907年。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        // First search builds the resident index.
+        assert!(
+            !state
+                .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
+                .unwrap()
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+
+        // A later store must reach searches through the in-place
+        // update — no reclaim is due, so a rebuild cannot be the
+        // reason this passes.
+        let mut more = BTreeMap::new();
+        more.insert(
+            "第2章".to_string(),
+            "杜氏の高瀬は南部杜氏の出身。".to_string(),
+        );
+        state.store_passages("sake", plain(more)).unwrap().unwrap();
+        let hits = state
+            .search_passages("sake", "杜氏の出身", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].source, "第2章");
+
+        // And a retraction disappears the same way.
+        state.retract_source("sake", "第2章").unwrap();
+        assert!(
+            state
+                .search_passages("sake", "杜氏の出身", 3, None, None, Deadline::unbounded())
+                .unwrap()
+                .unwrap()
+                .hits
+                .iter()
+                .all(|hit| hit.source != "第2章"),
+            "a retracted source must leave the index too"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn passage_search_survives_a_restart_without_retokenizing() {
+        let dir = scratch_dir("bm25-persist");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert("第1章".to_string(), "青嶺酒造の創業は1907年。".to_string());
+            state
+                .store_passages("sake", plain(passages))
+                .unwrap()
+                .unwrap();
+            // First search builds and marks dirty; the tick persists.
+            state
+                .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+            assert!(bm25_path(&dir, &file_stem("sake")).exists());
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let hits = state
+            .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].source, "第1章");
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            !entry.bm25_dirty.load(Ordering::Relaxed),
+            "a clean sidecar loads as-is — nothing drifted, nothing re-tokenized"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_stale_index_sidecar_is_repaired_by_the_source_digest_mismatch() {
+        let dir = scratch_dir("bm25-stale");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
+            passages.insert("第2章".to_string(), "仕込み水は伏流水。".to_string());
+            state
+                .store_passages("sake", plain(passages))
+                .unwrap()
+                .unwrap();
+            state
+                .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            state.flush_dirty(); // the sidecar now says 高瀬
+        }
+
+        // A new run edits 第1章 and searches BEFORE any flush: the
+        // sidecar on disk still carries the old paragraph.
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let mut edited = BTreeMap::new();
+        edited.insert("第1章".to_string(), "杜氏は佐伯に交代した。".to_string());
+        state
+            .store_passages("sake", plain(edited))
+            .unwrap()
+            .unwrap();
+        let hits = state
+            .search_passages("sake", "杜氏は誰", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert!(
+            hits[0].text.contains("佐伯"),
+            "the digest mismatch must repair 第1章 from the store, got {:?}",
+            hits[0].text
+        );
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            entry.bm25_dirty.load(Ordering::Relaxed),
+            "a repair leaves the sidecar stale until the next tick"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_corrupt_index_sidecar_falls_back_to_a_full_rebuild_not_an_outage() {
+        let dir = scratch_dir("bm25-corrupt");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1章".to_string(),
+            "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        fs::write(bm25_path(&dir, &file_stem("sake")), b"not an index").unwrap();
+
+        let hits = state
+            .search_passages("sake", "蔵開きの祭り", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].source, "第1章");
+        state.flush_dirty();
+        assert!(
+            crate::bm25::Bm25Index::load(&bm25_path(&dir, &file_stem("sake"))).is_some(),
+            "the tick replaces the corpse with a valid sidecar"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn eviction_drops_the_resident_index_and_a_later_search_rebuilds_it() {
+        let dir = scratch_dir("bm25-evict");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1章".to_string(),
+            "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        assert!(
+            !state
+                .search_passages("sake", "蔵開きの祭り", 3, None, None, Deadline::unbounded())
+                .unwrap()
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        assert!(
+            entry.bm25.read().is_none(),
+            "eviction must drop the resident index"
+        );
+        assert_eq!(
+            state
+                .search_passages("sake", "蔵開きの祭り", 3, None, None, Deadline::unbounded())
+                .unwrap()
+                .unwrap()
+                .hits[0]
+                .source,
+            "第1章",
+            "the next search rebuilds and still answers"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A regression for a false-negative `limit_to_reach`: a raw semantic
+    /// lane rank counts every row the vector store holds for a source,
+    /// stale ones included, so it can run far ahead of `full.len()` (the
+    /// count that actually survives the staleness filter). `lane_need`
+    /// derives from that raw rank; before the fix it sized the starting
+    /// candidate past `full.len()` and the search bailed out with "no
+    /// limit reaches it" without ever trying `full.len()` itself — which,
+    /// being the target's own rank in `full`, always would have.
+    #[test]
+    fn limit_to_reach_is_not_a_false_negative_when_stale_rows_inflate_the_raw_lane_rank() {
+        struct MarkerEmbeddings;
+        impl EmbeddingProvider for MarkerEmbeddings {
+            fn model(&self) -> &str {
+                "marker"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                Ok(texts
+                    .iter()
+                    .map(|text| {
+                        if text.starts_with("TARGETMARKER") {
+                            vec![0.5, 0.8660254]
+                        } else {
+                            vec![1.0, 0.0]
+                        }
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("limit-to-reach-stale");
+        let state = boot_for_passage_embedding(&dir, Arc::new(MarkerEmbeddings), 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        let mut passages = BTreeMap::new();
+        passages.insert("fresh-doc".to_string(), "FRESHMARKER".to_string());
+        passages.insert("target-doc".to_string(), "TARGETMARKER".to_string());
+        for i in 0..15 {
+            passages.insert(format!("decoy-{i:02}"), "DECOYMARKER".to_string());
+        }
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        // Edit every decoy without re-embedding: their vector rows stay
+        // in the store at the old hash, tied with `fresh-doc` at the top
+        // of the raw cosine sweep, but staleness drops all 15 out of
+        // `full` — so they inflate the target's raw rank without ever
+        // occupying a `full` slot themselves.
+        let mut edited = BTreeMap::new();
+        for i in 0..15 {
+            edited.insert(format!("decoy-{i:02}"), "DECOYMARKER-EDITED".to_string());
+        }
+        state
+            .store_passages("sake", plain(edited))
+            .unwrap()
+            .unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "sake",
+                "QUERYMARKER",
+                "target-doc",
+                None,
+                1,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert!(
+            !explanation.served,
+            "fresh-doc alone fills the one requested seat"
+        );
+        assert_eq!(
+            explanation.ranked, 2,
+            "only fresh-doc and target-doc survive the staleness filter"
+        );
+        assert_eq!(
+            explanation.limit_to_reach,
+            Some(2),
+            "full.len() (2) is itself a valid, untried candidate — it must not \
+             be skipped as unreachable just because lane_need overshoots it"
+        );
+
+        let hits = state
+            .search_passages("sake", "QUERYMARKER", 2, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert!(
+            hits.iter().any(|hit| hit.source == "target-doc"),
+            "limit_to_reach must actually reach it: {hits:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A false-negative twin of the regression above, this time from a
+    /// healthy cause: doc2query gives one paragraph several vector rows
+    /// (its text plus each stored question), so a raw semantic-lane rank
+    /// can run far past `full.len()` even when every row is current. The
+    /// fix above clamps the starting candidate to `full.len()`, but
+    /// `full.len()` is only a valid candidate when ITS OWN lane pool
+    /// (`full.len() * 4`, floored at 50) actually reaches the target's
+    /// raw row — here two decoys carrying 30 questions each plant 62
+    /// perfect-cosine rows ahead of the target's one, past that 50-row
+    /// floor, so clamping to `full.len()` (3) still bails out on a limit
+    /// that would have served it.
+    #[test]
+    fn limit_to_reach_is_not_a_false_negative_when_doc2query_questions_inflate_the_raw_lane_rank() {
+        struct MarkerEmbeddings;
+        impl EmbeddingProvider for MarkerEmbeddings {
+            fn model(&self) -> &str {
+                "marker"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                Ok(texts
+                    .iter()
+                    .map(|text| {
+                        if text.starts_with("TARGETMARKER") {
+                            vec![0.5, 0.8660254]
+                        } else {
+                            vec![1.0, 0.0]
+                        }
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("limit-to-reach-doc2query");
+        let state = boot_for_passage_embedding(&dir, Arc::new(MarkerEmbeddings), 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "target-doc".to_string(),
+            crate::passages::PassageSubmission {
+                text: "TARGETMARKER".to_string(),
+                questions: Vec::new(),
+                sections: Vec::new(),
+                meta: crate::passages::SourceMeta::default(),
+            },
+        );
+        for i in 0..2 {
+            let questions = (0..30)
+                .map(|q| (0, format!("DECOYQUESTION{i}X{q}")))
+                .collect();
+            passages.insert(
+                format!("decoy-{i:02}"),
+                crate::passages::PassageSubmission {
+                    text: "DECOYMARKER".to_string(),
+                    questions,
+                    sections: Vec::new(),
+                    meta: crate::passages::SourceMeta::default(),
+                },
+            );
+        }
+        state.store_passages("sake", passages).unwrap().unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "sake",
+                "QUERYMARKER",
+                "target-doc",
+                None,
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert!(
+            !explanation.served,
+            "the two decoys alone fill all three requested seats"
+        );
+        assert_eq!(
+            explanation.ranked, 3,
+            "target-doc and both decoys all survive — nothing here is stale"
+        );
+        assert_eq!(
+            explanation.limit_to_reach,
+            Some(16),
+            "target-doc's raw vector-lane rank is 63rd (62 decoy rows \
+             ahead of it); lane_pool(16) = 64 is the smallest pool that \
+             reaches it, and full.len() (3) must widen to it rather than \
+             give up once its own 50-row pool comes up short"
+        );
+
+        let hits = state
+            .search_passages(
+                "sake",
+                "QUERYMARKER",
+                explanation.limit_to_reach.unwrap(),
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert!(
+            hits.iter().any(|hit| hit.source == "target-doc"),
+            "limit_to_reach must actually reach it: {hits:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_stored_question_row_answers_a_question_shaped_query_at_its_paragraph() {
+        let dir = scratch_dir("doc2query-hit");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc".to_string(),
+            crate::passages::PassageSubmission {
+                text: "りんごは真っ赤に実った。".to_string(),
+                questions: vec![(0, "アップルはどんな色?".to_string())],
+                sections: Vec::new(),
+                meta: crate::passages::SourceMeta::default(),
+            },
+        );
+        state.store_passages("fruit", passages).unwrap().unwrap();
+        let outcome = state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (outcome.embedded, outcome.total),
+            (2, 2),
+            "the paragraph row and its question row both embed"
+        );
+
+        // The query matches the QUESTION row's wording, not the text's;
+        // both rows point at the same paragraph, so the lane must fold
+        // them into one hit at the question row's better rank.
+        let hits = state
+            .search_passages("fruit", "アップル", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(hits.len(), 1, "one paragraph, one hit — never a dup");
+        assert_eq!((hits[0].source.as_str(), hits[0].index), ("doc", 0));
+        assert!(
+            hits[0].text.contains("りんご"),
+            "the text served is the PARAGRAPH"
+        );
+        let (rank, cosine) = hits[0].vector.expect("found via the question row");
+        assert_eq!(rank, 1);
+        assert!(cosine > 0.99, "{cosine}");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hybrid_search_surfaces_a_vector_only_hit_that_shares_no_letters() {
+        // The Q→A gap in miniature: the query shares no bigrams with
+        // the stored paragraph, so the lexical lane alone returns
+        // nothing — the vector lane is what finds it, and the response
+        // says so.
+        let dir = scratch_dir("hybrid-vector-only");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages("fruit", "アップル", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].source, "doc-a");
+        assert!(
+            hits[0].bm25.is_none(),
+            "no shared bigram — the lexical lane must not have seen this"
+        );
+        let (rank, cosine) = hits[0].vector.expect("the vector lane found it");
+        assert_eq!(rank, 1);
+        assert!(cosine > 0.9, "{cosine}");
+        assert!(
+            (hits[0].score - 1.0 / 61.0).abs() < 1e-6,
+            "one lane at rank 1 fuses to 1/(60+1), got {}",
+            hits[0].score
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hybrid_search_reports_both_lanes_when_both_agree() {
+        let dir = scratch_dir("hybrid-both");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages(
+                "fruit",
+                "りんごは真っ赤",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].source, "doc-a");
+        let (bm25_rank, bm25_score) = hits[0].bm25.expect("shared bigrams");
+        let (vector_rank, _) = hits[0].vector.expect("same fruit, same axis");
+        assert_eq!((bm25_rank, vector_rank), (1, 1));
+        assert!(bm25_score > 0.0);
+        assert!(
+            (hits[0].score - 2.0 / 61.0).abs() < 1e-6,
+            "two lanes at rank 1 fuse to 2/(60+1), got {}",
+            hits[0].score
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_lane_that_scored_outdated_text_loses_its_evidence_not_the_hit() {
+        // Vectors refresh on their own cadence and routinely lag the
+        // text. After an edit, the in-place-updated BM25 lane must
+        // keep answering while the vector lane's stale evidence is
+        // dropped — never attached to text it did not score, and never
+        // vetoing the fresh lexical match.
+        let dir = scratch_dir("hybrid-stale-lane");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        // The text changes; the vector sidecar is NOT refreshed.
+        let mut edited = BTreeMap::new();
+        edited.insert(
+            "doc-a".to_string(),
+            "りんごは青森の名産である。".to_string(),
+        );
+        state
+            .store_passages("fruit", plain(edited))
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages("fruit", "りんご", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].source, "doc-a");
+        assert!(hits[0].text.contains("青森"), "the CURRENT text is served");
+        assert!(
+            hits[0].bm25.is_some(),
+            "the lexical lane scored the fresh text and survives"
+        );
+        assert!(
+            hits[0].vector.is_none(),
+            "the vector lane scored the OLD text; its evidence must drop"
+        );
+        let (bm25_rank, _) = hits[0].bm25.unwrap();
+        assert!(
+            (hits[0].score - 1.0 / (60.0 + bm25_rank as f32)).abs() < 1e-6,
+            "the fused score counts surviving lanes only, got {}",
+            hits[0].score
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hybrid_search_degrades_to_bm25_when_the_query_embedding_fails() {
+        struct FlakyEmbeddings {
+            calls: std::sync::atomic::AtomicUsize,
+            fail_on: usize,
+        }
+        impl EmbeddingProvider for FlakyEmbeddings {
+            fn model(&self) -> &str {
+                "flaky"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let call = self.calls.fetch_add(1, Ordering::Relaxed);
+                if call == self.fail_on {
+                    return Err("provider hiccup".to_string());
+                }
+                Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            }
+        }
+
+        let dir = scratch_dir("hybrid-degrade");
+        let state = boot_for_passage_embedding(
+            &dir,
+            Arc::new(FlakyEmbeddings {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                fail_on: 1, // the refresh succeeds; the QUERY embed fails
+            }),
+            20_000,
+        );
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages("fruit", "りんご", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(
+            hits[0].source, "doc-a",
+            "a broken decoration must not break the answer"
+        );
+        assert!(hits[0].vector.is_none());
+        let (_, bm25_score) = hits[0].bm25.unwrap();
+        assert_eq!(
+            hits[0].score, bm25_score,
+            "with no semantic lane the score stays the raw BM25 number"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lexical_only_deployments_keep_raw_bm25_scores() {
+        let dir = scratch_dir("hybrid-lexical-only");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages("fruit", "りんご", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert!(hits[0].vector.is_none());
+        let (rank, bm25_score) = hits[0].bm25.unwrap();
+        assert_eq!(rank, 1);
+        assert_eq!(hits[0].score, bm25_score);
+        assert!(hits[0].score > 0.1, "raw BM25, not a tiny RRF quotient");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_passages_vector_lane_drops_candidates_below_the_default_semantic_floor() {
+        // みかん×りんご sits at cosine 0.28 — under the 0.35 default
+        // floor — and the query shares no bigram with the stored text,
+        // so a fusion that ignored the floor would surface a
+        // near-irrelevant paragraph on the vector lane alone.
+        let dir = scratch_dir("passages-floor-default");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages("fruit", "みかん", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert!(
+            hits.is_empty(),
+            "cosine 0.28 sits under the default floor: {hits:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_passages_vector_lane_honors_a_lowered_context_semantic_floor() {
+        // Same 0.28 cosine as the default-floor test, but the context's
+        // floor is lowered under it: the candidate must now clear the
+        // vector lane and contribute its RRF term, same as
+        // semantic_resolve honors the context setting over the server
+        // default.
+        let dir = scratch_dir("passages-floor-context");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        state
+            .update_meta("fruit", None, None, None, Some(0.2))
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages("fruit", "みかん", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].source, "doc-a");
+        let (rank, cosine) = hits[0].vector.expect("cleared the lowered floor");
+        assert_eq!(rank, 1);
+        assert!((cosine - 0.28).abs() < 1e-6, "{cosine}");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_passages_request_floor_override_beats_the_context_and_server_floors() {
+        // The same 0.28 cosine as the two floor tests above, pushed
+        // through the third rung of the chain: a request override of
+        // 0.2 admits it past the untouched 0.35 server default, and a
+        // request override of 0.5 then drops it even though the
+        // context's own floor was lowered under it — the caller's word
+        // beats both, exactly as resolve's semantic_floor override.
+        let dir = scratch_dir("passages-floor-override");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let hits = state
+            .search_passages("fruit", "みかん", 3, Some(0.2), None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(
+            hits.len(),
+            1,
+            "an override under the cosine admits it past the server default: {hits:?}"
+        );
+        assert_eq!(hits[0].source, "doc-a");
+        let (rank, cosine) = hits[0].vector.expect("cleared the request floor");
+        assert_eq!(rank, 1);
+        assert!((cosine - 0.28).abs() < 1e-6, "{cosine}");
+
+        state
+            .update_meta("fruit", None, None, None, Some(0.2))
+            .unwrap()
+            .unwrap();
+        let hits = state
+            .search_passages("fruit", "みかん", 3, Some(0.5), None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert!(
+            hits.is_empty(),
+            "an override above the cosine drops it even under a context floor lowered below it: {hits:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn explain_passage_search_reports_the_request_floor_override_it_ran_under() {
+        // The explanation accounts for the call actually made: under
+        // the override the vector report carries the overridden floor,
+        // and the 0.28 cosine the default floor would have filtered is
+        // scored and shown.
+        let dir = scratch_dir("passages-explain-floor-override");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "fruit",
+                "みかん",
+                "doc-a",
+                None,
+                3,
+                Some(0.2),
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        let VectorLaneReport::Ran { floor, cosine } = explanation.vector else {
+            panic!("expected the vector lane to have run");
+        };
+        assert!((floor - 0.2).abs() < 1e-6, "{floor}");
+        let cosine = cosine.expect("the target's cosine is scored, not filtered");
+        assert!((cosine - 0.28).abs() < 1e-6, "{cosine}");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn eviction_persists_a_dirty_index_for_the_next_residency() {
+        let dir = scratch_dir("bm25-evict-save");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1章".to_string(),
+            "麹室の湿度は五十パーセント。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .search_passages("sake", "麹室の湿度", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        assert!(
+            bm25_path(&dir, &file_stem("sake")).exists(),
+            "a dirty index rides out with the eviction"
+        );
+        // The next residency loads it clean instead of re-tokenizing.
+        state
+            .search_passages("sake", "麹室の湿度", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        assert!(!entry.bm25_dirty.load(Ordering::Relaxed));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+}

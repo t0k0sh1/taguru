@@ -1119,3 +1119,719 @@ impl<'a> Reader<'a> {
         self.bytes.len() - self.pos
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::Attribution;
+    use crate::context::test_support::{associate_examples, weight_between};
+    use crate::deadline::Deadline;
+
+    /// Recomputes the checksum footer after a test tampers with an
+    /// image's body. The structural validators those tests pin sit
+    /// BEHIND the checksum — without resealing, every mutation would
+    /// stop at "checksum mismatch" and the validators would go
+    /// unexercised (they still matter: pre-v6 images skip the checksum,
+    /// and a hand-built image can carry any footer it likes).
+    fn resealed(mut image: Vec<u8>) -> Vec<u8> {
+        let body = image.len() - 4;
+        let crc = crate::crc32c::crc32c(&image[..body]);
+        image[body..].copy_from_slice(&crc.to_le_bytes());
+        image
+    }
+
+    #[test]
+    fn extreme_weight_sums_saturate_and_the_image_still_round_trips() {
+        // Two individually-finite weights can sum past f64's range. The
+        // sum must saturate rather than reach infinity: a non-finite sum
+        // would make `from_bytes` refuse the very image `to_bytes` just
+        // produced — a context that can be saved but never loaded again.
+        let mut context = Context::default();
+        context.associate("a", "r", "b", f64::MAX).unwrap();
+        context.associate("a", "r", "b", f64::MAX).unwrap();
+        // The sourced path accumulates a second sum in the attribution
+        // record; push it past the range too.
+        context
+            .associate_from("a", "r", "c", f64::MAX, "源", None)
+            .unwrap();
+        context
+            .associate_from("a", "r", "c", f64::MAX, "源", None)
+            .unwrap();
+        // And the negative direction saturates symmetrically.
+        context.associate("a", "r", "d", -f64::MAX).unwrap();
+        context.associate("a", "r", "d", -f64::MAX).unwrap();
+
+        assert!(weight_between(&context, "a", "r", "b").is_finite());
+        assert!(weight_between(&context, "a", "r", "c").is_finite());
+        assert!(weight_between(&context, "a", "r", "d") < 0.0);
+
+        let restored = Context::from_bytes(&context.to_bytes())
+            .expect("a context built from finite weights must round-trip");
+        assert_eq!(
+            weight_between(&restored, "a", "r", "b"),
+            weight_between(&context, "a", "r", "b"),
+        );
+    }
+
+    #[test]
+    fn aliases_survive_the_image_roundtrip_and_v1_images_still_load() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "創業年", "1907年", 1.0)
+            .unwrap();
+        context.add_concept_alias("Aomine", "青嶺酒造").unwrap();
+        context.add_label_alias("設立年", "創業年").unwrap();
+
+        let restored = Context::from_bytes(&context.to_bytes()).expect("v2 image must load");
+        assert_eq!(restored.concept_aliases(), context.concept_aliases());
+        assert_eq!(restored.label_aliases(), context.label_aliases());
+        assert_eq!(
+            restored.query(Some("Aomine"), Some("設立年"), None),
+            context.query(Some("Aomine"), Some("設立年"), None)
+        );
+
+        // A version-1 image predates the watermark, both alias tables,
+        // and the attribution-locator table; it must still load with no
+        // aliases. `to_bytes_as_version` writes the genuine pre-v5,
+        // weight-only edge/attribution shape a v1 reader expects —
+        // slicing `to_bytes`'s (always-current) output no longer works
+        // now that those records are wider than they were pre-v5.
+        let mut aliasless = Context::default();
+        aliasless.associate("私", "好き", "りんご", 1.0).unwrap();
+        let v1 = aliasless.to_bytes_as_version(1);
+        let loaded = Context::from_bytes(&v1).expect("v1 image must still load");
+        assert_eq!(loaded.recall("私").len(), 1);
+        assert!(loaded.concept_aliases().is_empty());
+
+        // An alias record pointing at a nonexistent concept is caught.
+        // Section math for this (current-version) context (1 unsourced
+        // edge, no attributions, 1 concept alias, no label aliases, no
+        // locators): header 24, edges 8+48, attributions 8, concepts
+        // 8+64, labels 8+20, sources 8 → the concept-alias count sits at
+        // 196..204, its one 12-byte record (name_offset, name_len,
+        // target) follows at 204..216, so target is 212..216.
+        let mut with_alias = Context::default();
+        with_alias.associate("私", "好き", "りんご", 1.0).unwrap();
+        with_alias.add_concept_alias("わたし", "私").unwrap();
+        let mut corrupt = with_alias.to_bytes();
+        corrupt[212..216].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Context::from_bytes(&resealed(corrupt)).is_err());
+    }
+
+    #[test]
+    fn applied_seq_round_trips_through_the_image() {
+        let mut context = Context::default();
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        assert_eq!(context.applied_seq(), 0, "fresh contexts start at 0");
+        context.set_applied_seq(42);
+
+        let restored = Context::from_bytes(&context.to_bytes()).unwrap();
+        assert_eq!(restored.applied_seq(), 42);
+        assert_eq!(restored.recall("私").len(), 1);
+    }
+
+    #[test]
+    fn v2_images_load_with_a_zero_watermark() {
+        // A v2 image predates the watermark and the attribution-locator
+        // table — this pins BOTH the backward-compat read and the
+        // version RANGE check (a two-value check like `!=1 && !=current`
+        // would reject exactly this). `to_bytes_as_version` also proves
+        // the watermark never round-trips into a version that predates
+        // it: `applied_seq` is set here but must load back as 0.
+        let mut context = Context::default();
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        context.add_concept_alias("わたし", "私").unwrap();
+        context.set_applied_seq(7); // must NOT survive into the v2 bytes
+        let v2 = context.to_bytes_as_version(2);
+
+        let loaded = Context::from_bytes(&v2).expect("v2 image must load");
+        assert_eq!(loaded.applied_seq(), 0);
+        assert_eq!(loaded.concept_aliases(), vec![("わたし", "私")]);
+    }
+
+    #[test]
+    fn v3_images_load_with_no_locators() {
+        // A v3 image already has the watermark and both alias tables —
+        // it just predates the attribution-locator table, so every
+        // attribution's paragraph must resolve to `None` regardless of
+        // what locator this context recorded.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        let v3 = context.to_bytes_as_version(3);
+
+        let loaded = Context::from_bytes(&v3).expect("v3 image must load");
+        assert_eq!(
+            loaded.recall("私")[0].attributions,
+            vec![Attribution {
+                source: "文書1".to_string(),
+                weight: 1.0,
+                count: 1,
+                paragraph: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn v4_images_synthesize_count_from_the_attribution_chain() {
+        // A v4 image predates the count/sum split entirely — its edge
+        // and attribution records carry only a flat cumulative
+        // `weight`. Two independent sources each asserting once must
+        // synthesize `count` as the attribution chain length (2), not
+        // as a flat 1, so the migrated weight is the corroborated
+        // average (1.5) rather than the old flat sum (3.0).
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 2.0, "文書2", None)
+            .unwrap();
+        let v4 = context.to_bytes_as_version(4);
+
+        let loaded = Context::from_bytes(&v4).expect("v4 image must load");
+        let assoc = &loaded.recall("私")[0];
+        assert_eq!(assoc.count, 2);
+        assert_eq!(assoc.weight, 1.5);
+    }
+
+    #[test]
+    fn migrating_a_pre_v5_image_does_not_revive_a_fully_retracted_edge() {
+        // A pre-v5 image predates `count`; migration synthesizes it from
+        // the attribution chain length, floored at 1 for edges that were
+        // always sourceless (first_attribution == NIL but weight != 0).
+        // An edge that instead died via retract_source ends up with the
+        // very same on-disk shape: first_attribution == NIL. Migration
+        // must tell the two apart by weight — retraction always zeroes
+        // it — so the synthesized `count` must come back 0 (dead), not
+        // 1 (revived).
+        let mut context = Context::default();
+        context
+            .associate_from("a", "r", "b", 1.0, "旧版", None)
+            .unwrap();
+        assert_eq!(context.retract_source("旧版"), Some(1));
+        assert_eq!(context.dead_edges(), 1);
+
+        let v4 = context.to_bytes_as_version(4);
+        let loaded = Context::from_bytes(&v4).expect("v4 image must load");
+
+        assert_eq!(
+            loaded.dead_edges(),
+            1,
+            "a fully retracted edge must not come back alive after migrating a pre-v5 image"
+        );
+        assert!(
+            loaded.query(Some("a"), None, Some("b"))[0]
+                .attributions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn migrating_a_pre_v5_image_cannot_tell_a_sourceless_zero_weight_edge_from_a_retracted_one() {
+        // The flip side of the test above, and a known limitation
+        // rather than a bug: `associate` (no source) never rejects
+        // weight 0.0 — only NaN/±inf are refused — so a live,
+        // always-sourceless edge can legitimately sit at
+        // first_attribution == NIL, weight == 0.0. On disk that is
+        // bit-for-bit the same shape a fully retracted edge settles
+        // into, and a pre-v5 attribution record carries no back-
+        // pointer to its edge, so no amount of scanning the legacy
+        // image recovers which case this was — migration cannot tell
+        // them apart from the bytes alone. Reviving every empty-chain
+        // edge would undo the fix above, so migration accepts this
+        // false negative in exchange for never reviving a retraction:
+        // retractions happen constantly in normal operation, a live
+        // edge asserted at weight 0.0 essentially never does.
+        let mut context = Context::default();
+        context.associate("a", "r", "b", 0.0).unwrap();
+        assert_eq!(context.dead_edges(), 0);
+
+        let v4 = context.to_bytes_as_version(4);
+        let loaded = Context::from_bytes(&v4).expect("v4 image must load");
+
+        assert_eq!(
+            loaded.dead_edges(),
+            1,
+            "known limitation: a sourceless zero-weight edge is indistinguishable on \
+             disk from a fully retracted one, and migration resolves the ambiguity \
+             toward the far more common case (retraction) — if this starts failing, \
+             the ambiguity became resolvable and this test's premise should be revisited"
+        );
+    }
+
+    /// The `(edge, source)` index the write path consults is derived, so
+    /// it must be rebuilt from the chains on load — and rebuilt to match
+    /// what retraction left behind: a source's unlinked record is dead
+    /// space and must NOT be indexed, while every live record must be. A
+    /// write after the reload proves both directions at once.
+    #[test]
+    fn the_attribution_index_is_rebuilt_correctly_after_a_reload() {
+        let mut context = Context::default();
+        context
+            .associate_from("x", "r", "y", 2.0, "A", None)
+            .unwrap();
+        context
+            .associate_from("x", "r", "y", 4.0, "B", None)
+            .unwrap();
+        // Retract A: its record leaves the chain as dead space. The edge
+        // keeps only B's 4.0 (count 1).
+        assert_eq!(context.retract_source("A"), Some(1));
+        assert_eq!(weight_between(&context, "x", "r", "y"), 4.0);
+
+        // Round-trip: the reloaded context rebuilds the index from the
+        // live chain alone — B in, A's dead record out.
+        let mut restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
+
+        // Re-assert B: the rebuilt index finds its live record, so this
+        // folds in (count 2) rather than appending a duplicate.
+        restored
+            .associate_from("x", "r", "y", 2.0, "B", None)
+            .unwrap();
+        // Re-assert A: A is absent from the rebuilt index (its old record
+        // is dead), so this appends a FRESH record (count 1) instead of
+        // resurrecting the retracted 2.0.
+        restored
+            .associate_from("x", "r", "y", 6.0, "A", None)
+            .unwrap();
+
+        // Edge: B's 4.0+2.0 plus A's fresh 6.0 = sum 12.0 over count 3 —
+        // an average of 4.0. A resurrected A record would have folded into
+        // dead space and left the edge at 3.0; a duplicated B would show B
+        // twice below.
+        assert_eq!(weight_between(&restored, "x", "r", "y"), 4.0);
+        assert_eq!(
+            restored.query(Some("x"), None, Some("y"))[0].attributions,
+            vec![
+                Attribution {
+                    source: "B".to_string(),
+                    weight: 6.0,
+                    count: 2,
+                    paragraph: None,
+                },
+                Attribution {
+                    source: "A".to_string(),
+                    weight: 6.0,
+                    count: 1,
+                    paragraph: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn migrating_a_pre_v5_image_credits_an_undetected_sourceless_call_so_retraction_cannot_revive_it_as_dead()
+     {
+        // `upsert` folds every assertion — sourced or not — into the
+        // edge's cumulative weight, but only a sourced one ever links
+        // into the attribution chain (see `Context::associate` vs
+        // `associate_from`). A pre-v5 image that mixes both on the same
+        // edge therefore has a chain shorter than the edge's true call
+        // count: migration must notice the gap between the edge's total
+        // weight and what the chain accounts for, or the sourceless
+        // call vanishes from `count` entirely and retracting the last
+        // known source wrongly declares the edge dead.
+        let mut context = Context::default();
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 2.0, "文書1", None)
+            .unwrap();
+        let native = &context.recall("私")[0];
+        assert_eq!(native.count, 2);
+        assert_eq!(native.weight, 1.5);
+
+        let v4 = context.to_bytes_as_version(4);
+        let mut restored = Context::from_bytes(&v4).expect("v4 image must load");
+
+        assert_eq!(restored.retract_source("文書1"), Some(1));
+
+        assert_eq!(
+            restored.dead_edges(),
+            0,
+            "a sourceless contribution must keep the edge alive after its only \
+             source retracts"
+        );
+        let after = &restored.recall("私")[0];
+        assert_eq!(after.count, 1);
+        assert_eq!(after.weight, 1.0);
+        assert!(after.attributions.is_empty());
+    }
+
+    #[test]
+    fn image_roundtrip_preserves_every_read_path() {
+        let mut context = Context::default();
+        associate_examples(&mut context);
+        context.associate("りんご", "分類", "果物", 1.5).unwrap();
+        context
+            .associate_from("決定", "手段", "投票", 1.0, "IPA公式", None)
+            .unwrap();
+        context
+            .associate_from("決定", "手段", "投票", 0.5, "解説記事", None)
+            .unwrap();
+        context.associate("犬", "好き", "骨", 1.0).unwrap(); // separate component
+
+        let restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
+
+        assert_eq!(restored.recall("私"), context.recall("私"));
+        assert_eq!(restored.recall("投票"), context.recall("投票"));
+        assert_eq!(
+            restored.query(None, None, None),
+            context.query(None, None, None)
+        );
+        assert_eq!(
+            restored.query(Some("私"), Some("好き"), None),
+            context.query(Some("私"), Some("好き"), None)
+        );
+        assert_eq!(
+            restored.explore(&["私"], Context::UNBOUNDED),
+            context.explore(&["私"], Context::UNBOUNDED)
+        );
+        assert_eq!(
+            restored.activate(&["私"], 0.5, 10),
+            context.activate(&["私"], 0.5, 10)
+        );
+        assert_eq!(restored.resolve("りんご"), context.resolve("りんご"));
+        assert_eq!(restored.labels(), context.labels());
+        assert_eq!(
+            restored
+                .unreachable_from(&["私"], Deadline::unbounded())
+                .unwrap(),
+            context
+                .unreachable_from(&["私"], Deadline::unbounded())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn image_roundtrip_keeps_accepting_writes() {
+        let mut context = Context::default();
+        context
+            .associate_from("a", "r", "b", 1.0, "文書1", None)
+            .unwrap();
+
+        let mut restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
+
+        // Accumulation must land on the restored edge and its restored
+        // attribution — the rebuilt indexes and chain tails must all point
+        // at the right records.
+        restored
+            .associate_from("a", "r", "b", 0.5, "文書1", None)
+            .unwrap();
+        assert_eq!(weight_between(&restored, "a", "r", "b"), 0.75);
+        assert_eq!(
+            restored.recall("a")[0].attributions,
+            vec![Attribution {
+                source: "文書1".to_string(),
+                weight: 1.5,
+                count: 2,
+                paragraph: None,
+            }]
+        );
+
+        // And chains must keep extending in insertion order.
+        restored.associate("a", "r", "c", 1.0).unwrap();
+        restored.associate("d", "r2", "a", 1.0).unwrap();
+        assert_eq!(restored.recall("a").len(), 3);
+        assert_eq!(restored.labels(), vec!["r", "r2"]);
+    }
+
+    #[test]
+    fn attribution_locators_survive_the_image_roundtrip() {
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", Some(3))
+            .unwrap();
+        // A second, unlocated source on the same edge must round-trip
+        // as `None` alongside the first source's `Some`.
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書2", None)
+            .unwrap();
+
+        let restored = Context::from_bytes(&context.to_bytes()).expect("image must load");
+        assert_eq!(restored.recall("私"), context.recall("私"));
+        assert_eq!(
+            restored.recall("私")[0].attributions,
+            vec![
+                Attribution {
+                    source: "文書1".to_string(),
+                    weight: 1.0,
+                    count: 1,
+                    paragraph: Some(3),
+                },
+                Attribution {
+                    source: "文書2".to_string(),
+                    weight: 1.0,
+                    count: 1,
+                    paragraph: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn from_bytes_rejects_corrupt_locators() {
+        // One sourced, located attribution: header 24, edges 8+48,
+        // attributions 8+24, concepts 8+64, labels 8+20, sources 8+8,
+        // concept_aliases 8, label_aliases 8 → the locator table starts
+        // at 244 (its count, 8 bytes), and the lone record's
+        // `attribution` field sits at 252..256. Pointing it at a
+        // nonexistent attribution must be caught.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", Some(3))
+            .unwrap();
+        let mut dangling = context.to_bytes();
+        dangling[252..256].copy_from_slice(&u32::MAX.to_le_bytes());
+        let error = Context::from_bytes(&resealed(dangling)).unwrap_err();
+        assert!(error.to_string().contains("unknown attribution"), "{error}");
+
+        // Two sourced, located attributions from two distinct sources on
+        // the same edge (two attribution records, two locator records):
+        // the extra 8-byte source and 24-byte attribution record shift
+        // the locator table to 276..300, putting the second record's
+        // `attribution` field at 292..296. Setting it to 0 — equal to
+        // the first record's — breaks the strictly-increasing invariant
+        // without pointing outside the attribution table.
+        let mut two_sources = Context::default();
+        two_sources
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", Some(3))
+            .unwrap();
+        two_sources
+            .associate_from("私", "好き", "りんご", 1.0, "文書2", Some(5))
+            .unwrap();
+        let mut unsorted = two_sources.to_bytes();
+        unsorted[292..296].copy_from_slice(&0u32.to_le_bytes());
+        let error = Context::from_bytes(&resealed(unsorted)).unwrap_err();
+        assert!(error.to_string().contains("not sorted"), "{error}");
+    }
+
+    #[test]
+    fn from_bytes_rejects_an_arena_length_past_the_u32_offset_space() {
+        // An empty Context: header 24, eight zero-count tables (8 bytes
+        // each) → the arena-length u64 sits at 88..96, followed by zero
+        // arena bytes and the checksum footer. name_offset/name_len
+        // record fields are u32 (intern_name asserts this same bound on
+        // the write side), so a declared length past that space must be
+        // caught here rather than surfacing as a panic the first time
+        // some later write tries to intern a name.
+        let context = Context::default();
+        let mut oversized = context.to_bytes();
+        oversized[88..96].copy_from_slice(&(u32::MAX as u64 + 1).to_le_bytes());
+        let error = Context::from_bytes(&resealed(oversized)).unwrap_err();
+        assert!(error.to_string().contains("4 GiB"), "{error}");
+    }
+
+    #[test]
+    fn from_bytes_rejects_an_edge_count_below_its_attribution_chain() {
+        // header 24, edge-table count 8 → the lone edge record starts
+        // at 32; `count` is its ninth field, after 8 × u32 (32 bytes),
+        // so it sits at 32+32=64..72 as a u64. Setting it below the
+        // one attribution record's own count (1) must be caught, or a
+        // hand-crafted or corrupted image could desynchronize the
+        // derived `weight` from the attributions actually backing it.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        let mut corrupt = context.to_bytes();
+        corrupt[64..72].copy_from_slice(&0u64.to_le_bytes());
+        let error = Context::from_bytes(&resealed(corrupt)).unwrap_err();
+        assert!(error.to_string().contains("combined count"), "{error}");
+    }
+
+    #[test]
+    fn from_bytes_rejects_non_finite_weights_and_count_overflow() {
+        // Same single-edge layout as the test above: the edge's `sum`
+        // (its tenth field, an f64) follows `count` at 72..80. A tampered
+        // non-finite sum sorts as the maximum under `total_cmp` and would
+        // permanently occupy every ranked result, so it must be rejected.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        let mut nan_edge = context.to_bytes();
+        nan_edge[72..80].copy_from_slice(&f64::NAN.to_le_bytes());
+        let error = Context::from_bytes(&resealed(nan_edge)).unwrap_err();
+        assert!(
+            error.to_string().contains("edge weight sum is not finite"),
+            "{error}"
+        );
+
+        // The lone attribution record follows the edge table (table count
+        // at 80..88, record 0 at 88..112); its `sum` — after source u32,
+        // next u32, count u64 — sits at 104..112.
+        let mut inf_record = context.to_bytes();
+        inf_record[104..112].copy_from_slice(&f64::INFINITY.to_le_bytes());
+        let error = Context::from_bytes(&resealed(inf_record)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("attribution weight sum is not finite"),
+            "{error}"
+        );
+
+        // Two sources on one edge give two attribution records (record 0
+        // at 88..112, record 1 at 112..136); their `count` u64s sit at
+        // 96..104 and 120..128. Two maxed counts overflow the running
+        // chain total, which must fail rather than wrap past the floor the
+        // `combined count` check downstream relies on.
+        let mut two_sources = Context::default();
+        two_sources
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        two_sources
+            .associate_from("私", "好き", "りんご", 1.0, "文書2", None)
+            .unwrap();
+        let mut overflow = two_sources.to_bytes();
+        overflow[96..104].copy_from_slice(&u64::MAX.to_le_bytes());
+        overflow[120..128].copy_from_slice(&u64::MAX.to_le_bytes());
+        let error = Context::from_bytes(&resealed(overflow)).unwrap_err();
+        assert!(error.to_string().contains("overflows u64"), "{error}");
+    }
+
+    #[test]
+    fn from_bytes_rejects_one_edge_attributing_a_source_twice() {
+        // The write path keeps one attribution record per source per edge,
+        // so the derived (edge, source) index built during load can assume
+        // it. A tampered chain that links one source twice would collapse
+        // silently in that index; catch it instead. Same two-source layout
+        // as the overflow test: record 1's `source` u32 sits at 112..116;
+        // set it to record 0's source (0) so both claim the same one.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書2", None)
+            .unwrap();
+        let mut duplicate = context.to_bytes();
+        duplicate[112..116].copy_from_slice(&0u32.to_le_bytes());
+        let error = Context::from_bytes(&resealed(duplicate)).unwrap_err();
+        assert!(
+            error.to_string().contains("attributes a source twice"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn from_bytes_rejects_a_zero_count_attribution_record() {
+        // Same single-edge, single-attribution layout as the tests above:
+        // record 0 sits at 88..112, its `count` u64 at 96..104 (after the
+        // source and next u32s). The write path unlinks a record the
+        // instant retraction drains it to zero, so a live chained record
+        // always carries a positive count. A zero here is a crafted or
+        // corrupted image: it must be refused, or the `edge.count == 0`
+        // dead-edge shortcut — which assumes a dead edge's chain is empty —
+        // would over-count a chain that still threads a zero-count record.
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        let mut corrupt = context.to_bytes();
+        corrupt[96..104].copy_from_slice(&0u64.to_le_bytes());
+        let error = Context::from_bytes(&resealed(corrupt)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("attribution record carries a zero count"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn empty_context_roundtrips() {
+        let restored =
+            Context::from_bytes(&Context::default().to_bytes()).expect("image must load");
+        assert!(restored.query(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn from_bytes_rejects_malformed_images() {
+        assert!(Context::from_bytes(b"").is_err());
+        assert!(Context::from_bytes(b"not an image at all").is_err());
+
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 1.0, "文書1", None)
+            .unwrap();
+        let image = context.to_bytes();
+
+        // Truncation anywhere must be caught by section bounds.
+        for len in [image.len() - 1, image.len() / 2, 9] {
+            assert!(Context::from_bytes(&image[..len]).is_err());
+        }
+        // Trailing garbage is not silently ignored.
+        let mut padded = image.clone();
+        padded.push(0);
+        assert!(Context::from_bytes(&padded).is_err());
+        // A wrong magic or version is refused outright.
+        let mut wrong_magic = image.clone();
+        wrong_magic[0] ^= 0xFF;
+        assert!(Context::from_bytes(&wrong_magic).is_err());
+        let mut wrong_version = image.clone();
+        wrong_version[8] = 0xFF;
+        assert!(Context::from_bytes(&wrong_version).is_err());
+    }
+
+    #[test]
+    fn the_checksum_catches_silent_corruption_and_legacy_images_skip_it() {
+        let mut context = Context::default();
+        context.associate("i", "likes", "apple", 1.0).unwrap();
+        let image = context.to_bytes();
+        assert_eq!(Context::image_generation(&image), Some((6, true)));
+
+        // Flip the arena's last byte: one character of a stored name.
+        // The image stays structurally perfect — ids in range, chains
+        // intact, UTF-8 valid — it just says something else. This is
+        // the silent-bit-rot shape, and the reseal below proves the
+        // structural validators genuinely cannot see it: only the
+        // checksum stands between it and being served (and flushed
+        // back) as truth.
+        let mut flipped = image.clone();
+        let last_arena_byte = flipped.len() - 5; // 4-byte footer after it
+        flipped[last_arena_byte] ^= 0x01; // the name's final letter shifts
+        let error = Context::from_bytes(&flipped).unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"), "{error}");
+        let laundered = Context::from_bytes(&resealed(flipped))
+            .expect("structural validation alone accepts the corrupted name");
+        let assoc = &laundered.recall("i")[0];
+        assert_ne!(
+            (assoc.label.as_str(), assoc.object.as_str()),
+            ("likes", "apple"),
+            "the flipped byte changed what the image says, and it loaded anyway"
+        );
+
+        // A v5 image is the same section layout minus the footer: it
+        // loads, as unverifiable as it always was.
+        let v5 = context.to_bytes_as_version(5);
+        assert_eq!(Context::image_generation(&v5), Some((5, false)));
+        let loaded = Context::from_bytes(&v5).expect("v5 image must load");
+        assert_eq!(loaded.recall("i").len(), 1);
+
+        // Bytes that never were an image have no version to report.
+        assert_eq!(Context::image_generation(b"junk"), None);
+    }
+
+    #[test]
+    fn from_bytes_rejects_inconsistent_records() {
+        let mut context = Context::default();
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        let image = context.to_bytes();
+
+        // The first edge record sits right after the 16-byte header and
+        // the edge table's u64 count; its first field is `subject`.
+        // Pointing it at a nonexistent concept must be caught.
+        let mut dangling_subject = image.clone();
+        dangling_subject[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Context::from_bytes(&resealed(dangling_subject)).is_err());
+
+        // 私's `outgoing_count` sits at offset 96: header 16, edge table
+        // 8 + 40, empty attribution table 8, concept count 8, then the
+        // fifth u32 field of the first concept record. A count that
+        // disagrees with the actual chain must be caught.
+        let mut wrong_count = image.clone();
+        wrong_count[96..100].copy_from_slice(&5u32.to_le_bytes());
+        assert!(Context::from_bytes(&resealed(wrong_count)).is_err());
+    }
+}

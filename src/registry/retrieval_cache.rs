@@ -307,6 +307,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::CueCache;
 
     fn key(params: &str) -> RetrievalKey {
         RetrievalKey {
@@ -386,5 +387,37 @@ mod tests {
         cache.insert(key("a"), value(10));
         assert!(cache.lookup(&key("a")).is_none());
         assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn cue_cache_get_promotes_recency_so_eviction_spares_the_touched_entry() {
+        let mut cache = CueCache::default();
+        for i in 0..CueCache::CAP {
+            cache.insert(format!("cue{i}"), Arc::new(vec![i as f32]));
+        }
+        // Touching cue0 makes it the most recently used entry, even
+        // though it was the first one inserted.
+        assert!(cache.get("cue0").is_some());
+        // The cache is at capacity, so this eviction must reach for the
+        // least recently used entry — cue1, never touched again after
+        // its insert — not the oldest insertion, which is cue0.
+        cache.insert("fresh-cue".to_string(), Arc::new(vec![-1.0]));
+        assert!(
+            cache.get("cue0").is_some(),
+            "a touched entry must survive the next eviction"
+        );
+        assert!(
+            cache.get("cue1").is_none(),
+            "the least recently used entry must be the one evicted"
+        );
+        assert!(cache.get("fresh-cue").is_some());
+    }
+
+    #[test]
+    fn cue_cache_insert_does_not_overwrite_an_existing_key() {
+        let mut cache = CueCache::default();
+        cache.insert("cue".to_string(), Arc::new(vec![1.0]));
+        cache.insert("cue".to_string(), Arc::new(vec![2.0]));
+        assert_eq!(*cache.get("cue").unwrap(), vec![1.0]);
     }
 }

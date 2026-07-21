@@ -256,3 +256,72 @@ pub(super) fn rename_markers_targeting(dir: &Path, context: &str, extension: &st
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::test_support::scratch_dir;
+
+    /// The half-done-move contract `boot_with` leans on. `landed` and
+    /// `complete` must move independently: a failed move is never
+    /// complete (so the marker stays for the next boot to retry), and
+    /// membership may only be rewritten once the destination pivot has
+    /// landed. Deleting the marker on a failed move was the bug — the
+    /// retry vanished and the group association was lost with no way
+    /// back.
+    #[test]
+    fn a_failed_resume_keeps_the_marker_and_defers_membership() {
+        let dir = scratch_dir("resume-failure");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            renaming_marker_path(&dir, &file_stem("sake")),
+            serde_json::to_vec(&RenameMarker {
+                from: "sake".to_string(),
+                to: "shochu".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Move fails and no pivot appears at the destination: neither
+        // bit set — boot_with rewrites no membership and keeps the
+        // marker. resume_rename_markers itself never removes a marker.
+        let resumed = resume_rename_markers(
+            &dir,
+            "renaming",
+            "context",
+            |_, _| Err(io::Error::other("file still held")),
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].from, "sake");
+        assert_eq!(resumed[0].to, "shochu");
+        assert!(!resumed[0].complete, "a failed move is not complete");
+        assert!(!resumed[0].landed, "no pivot at the destination");
+        assert!(
+            renaming_marker_path(&dir, &file_stem("sake")).exists(),
+            "the marker must survive a failed resume so the next boot retries"
+        );
+
+        // Pivot landed but a straggler stuck: landed (rewrite
+        // membership) yet not complete (keep the marker to finish).
+        let resumed = resume_rename_markers(
+            &dir,
+            "renaming",
+            "context",
+            |_, _| Err(io::Error::other("sidecar still held")),
+            |_| true,
+        )
+        .unwrap();
+        assert!(resumed[0].landed, "the pivot is at the destination");
+        assert!(!resumed[0].complete, "a stuck straggler is not complete");
+
+        // Everything moved: both bits set — rewrite membership, drop marker.
+        let resumed =
+            resume_rename_markers(&dir, "renaming", "context", |_, _| Ok(()), |_| true).unwrap();
+        assert!(resumed[0].landed && resumed[0].complete);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+}

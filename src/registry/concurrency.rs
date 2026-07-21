@@ -142,3 +142,125 @@ impl Drop for SemaphorePermit<'_> {
         self.semaphore.available.notify_one();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use std::fs;
+
+    use crate::registry::test_support::{assoc_op, scratch_dir};
+    use crate::registry::{AppState, ContextMeta};
+    use taguru::deadline::Deadline;
+
+    /// Pins down the early-stop half of `dispatch_chunks_concurrently`'s
+    /// contract on the schedule where it bites: when the failure is
+    /// recorded PROMPTLY (here the failing chunk returns instantly while
+    /// every success sleeps), no worker claims a new index past it once
+    /// the record lands, so only the `workers` chunks already in flight
+    /// at that moment can spill past the failure. A failure slow to
+    /// surface would let the other workers run far ahead first — which is
+    /// why callers fold on the guaranteed prefix (asserted below), never
+    /// on a count of what landed past the failure.
+    #[test]
+    fn dispatch_chunks_concurrently_bounds_spillover_past_a_promptly_recorded_failure() {
+        use std::time::Duration;
+
+        const FAILING_INDEX: usize = 20;
+        const WORKERS: usize = 4;
+        let chunks: Vec<usize> = (0..50).collect();
+        let calls: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let outcomes = dispatch_chunks_concurrently(&chunks, WORKERS, |&index| {
+            calls.lock().push(index);
+            if index == FAILING_INDEX {
+                return Err("boom".to_string());
+            }
+            // Slow enough that a chunk claimed after the failure lands
+            // would have ample time to observe it before finishing and
+            // going to claim another — if the gate were broken, this
+            // sleep is what would let the assertions below catch it.
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(index)
+        });
+
+        let called = calls.lock().clone();
+        assert!(
+            called.len() < chunks.len(),
+            "the gate must stop dispatch well short of all {} chunks; saw {called:?}",
+            chunks.len()
+        );
+        let past_failure = called
+            .iter()
+            .filter(|&&index| index > FAILING_INDEX)
+            .count();
+        assert!(
+            past_failure <= WORKERS,
+            "at most `workers` chunks can already be in flight when the failure \
+             lands; saw {past_failure} claimed past index {FAILING_INDEX}: {called:?}"
+        );
+        for (index, outcome) in outcomes.iter().enumerate().take(FAILING_INDEX) {
+            assert!(
+                matches!(outcome, Some(Ok(value)) if *value == index),
+                "every index below the true minimum failing index must succeed"
+            );
+        }
+        assert!(matches!(&outcomes[FAILING_INDEX], Some(Err(message)) if message == "boom"));
+    }
+
+    #[test]
+    fn concurrent_reads_of_one_hot_context_do_not_serialize() {
+        use std::sync::atomic::AtomicUsize;
+        use std::thread;
+        use std::time::Duration;
+
+        let dir = scratch_dir("read-parallel");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let in_read = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut readers = Vec::new();
+        for _ in 0..2 {
+            let state = state.clone();
+            let in_read = Arc::clone(&in_read);
+            let peak = Arc::clone(&peak);
+            readers.push(thread::spawn(move || {
+                state
+                    .read_context("sake", |context| {
+                        let now = in_read.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        // Long enough that the two readers MUST overlap
+                        // unless one lock is excluding the other.
+                        thread::sleep(Duration::from_millis(150));
+                        in_read.fetch_sub(1, Ordering::SeqCst);
+                        context.association_count()
+                    })
+                    .map_err(|_| "read")
+                    .unwrap();
+            }));
+        }
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            2,
+            "two readers must be inside one hot context at the same time"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+}
