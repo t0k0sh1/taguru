@@ -332,3 +332,172 @@ impl AppState {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::registry::ContextMeta;
+    use crate::registry::paths::import_marker_paths;
+    use crate::registry::test_support::{assoc_op, plain, scratch_dir};
+    use crate::storage::{clear_persistence_fault, fail_persistence_ops_after};
+
+    /// Standalone `retract_source` — the only path the HTTP endpoint and
+    /// the MCP tool ever call — used to bracket its two independently
+    /// durable writes (the graph's WAL, then the passage store's) with
+    /// nothing: a crash between them left the graph durably retracted
+    /// while the passage text survived on disk, invisible to boot or
+    /// `taguru inspect`. Every fault point must now leave either a
+    /// completed, marker-free retraction, or a surviving marker naming
+    /// the tear — never a silent gap between the two stores.
+    #[test]
+    fn every_standalone_retract_persistence_failure_is_detected_or_completes() {
+        let mut exhausted = false;
+        for failure in 0..24 {
+            let dir = scratch_dir(&format!("retract-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert("doc".to_string(), "杜氏は高瀬。".to_string());
+            state
+                .store_passages("sake", plain(passages))
+                .unwrap()
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let first = state.retract_source("sake", "doc");
+            let past_end = clear_persistence_fault();
+            let marker = import_marker_path(&dir, "sake", "doc");
+
+            if past_end {
+                assert!(
+                    first.is_ok(),
+                    "the past-end attempt must complete: {first:?}"
+                );
+                assert!(!marker.exists());
+            } else {
+                match &first {
+                    // A witness must survive whenever the graph side may
+                    // already be durably retracted while the passage side
+                    // never ran: any refusal other than the marker write
+                    // itself failing (which leaves nothing behind to
+                    // witness, since nothing happened yet).
+                    Err(AccessError::Unpersisted(message)) => {
+                        let before_marker = message.contains("import marker");
+                        assert_eq!(
+                            marker.exists(),
+                            !before_marker,
+                            "a stopped retraction at step {failure} lost its tear witness: {first:?}"
+                        );
+                    }
+                    // The graph write itself never swallows a failure —
+                    // the only way this call can succeed while a fault
+                    // fired somewhere is a passage-side failure folded
+                    // into an honest `passage_removed: false`. The
+                    // witness must survive exactly that swallow, or the
+                    // half-applied state it names (graph retracted,
+                    // passage still on disk) becomes permanently
+                    // invisible to boot and `taguru inspect`.
+                    Ok(_) => {
+                        assert!(
+                            marker.exists(),
+                            "a swallowed passage failure at step {failure} still cleared \
+                             the tear witness: {first:?}"
+                        );
+                    }
+                    Err(_) => {}
+                }
+                // Retracting again is the documented repair, and
+                // retract_source is idempotent per-source, so it is
+                // exact even when the injected failure was swallowed
+                // internally or only prevented marker cleanup.
+                state.retract_source("sake", "doc").unwrap();
+                assert!(
+                    !marker.exists(),
+                    "repair did not clear failure step {failure}"
+                );
+            }
+
+            // A fully retracted edge stays (storage is append-only) but
+            // nets to zero attributions — the same end-state
+            // `retract_source_withdraws_its_contributions` checks.
+            let attributions_gone = state
+                .read_context("sake", |context| {
+                    context.query(Some("蔵"), None, Some("高瀬"))[0]
+                        .attributions
+                        .is_empty()
+                })
+                .unwrap();
+            assert!(
+                attributions_gone,
+                "retry at step {failure} did not retract the association"
+            );
+            let (found, missing) = state
+                .lookup_passages("sake", &["doc".to_string()])
+                .unwrap()
+                .unwrap();
+            assert!(
+                !found.contains_key("doc") && missing == vec!["doc".to_string()],
+                "retry at step {failure} did not retract the passage"
+            );
+
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+
+            if past_end {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "standalone retraction exceeded the sweep bound");
+    }
+
+    /// The import batch-open marker: opened before a batch's first
+    /// mutation, cleared only after its last — while it exists, boot
+    /// and inspect can name a half-applied source nothing else sees.
+    #[test]
+    fn import_markers_open_clear_and_sweep_with_their_context() {
+        let dir = scratch_dir("import-markers");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        state.open_import_marker("sake", "doc-1").unwrap();
+        let marker = import_marker_path(&dir, "sake", "doc-1");
+        assert!(marker.exists(), "open writes the marker");
+        // Distinct sources get distinct files — concurrent imports of
+        // one context never race on a shared marker.
+        state.open_import_marker("sake", "doc-2").unwrap();
+        assert_eq!(import_marker_paths(&dir, "sake").len(), 2);
+        // The content names the pair, so reports never decode filenames.
+        let parsed: ImportMarker = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(
+            (parsed.context.as_str(), parsed.source.as_str()),
+            ("sake", "doc-1")
+        );
+
+        state.clear_import_marker("sake", "doc-1");
+        assert!(!marker.exists(), "clear removes exactly its own marker");
+        assert_eq!(import_marker_paths(&dir, "sake").len(), 1);
+
+        // Deletion takes the survivors with the family: a marker must
+        // not have boot report a tear in a context that is gone.
+        state.delete("sake").unwrap().unwrap();
+        assert!(
+            import_marker_paths(&dir, "sake").is_empty(),
+            "delete sweeps markers"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

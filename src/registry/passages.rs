@@ -216,3 +216,195 @@ impl AppState {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::registry::ContextMeta;
+    use crate::registry::LOAD_FAILURE_RETRY;
+    use crate::registry::paths::{passages_path, passages_wal_path, sources_path};
+    use crate::registry::test_support::{plain, scratch_dir};
+
+    #[test]
+    fn passages_store_lookup_and_survive_restart() {
+        let dir = scratch_dir("passages");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert(
+                "第1段落".to_string(),
+                "青嶺酒造は、雲居県霧沢町にある日本酒の蔵元である。".to_string(),
+            );
+            assert_eq!(
+                state
+                    .store_passages("sake", plain(passages))
+                    .unwrap()
+                    .unwrap()
+                    .stored,
+                1
+            );
+        }
+
+        // A fresh boot serves the registered passage; unknown sources
+        // come back as missing rather than erroring.
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let (passages, missing) = state
+            .lookup_passages("sake", &["第1段落".to_string(), "第9段落".to_string()])
+            .unwrap()
+            .unwrap();
+        assert!(passages["第1段落"].starts_with("青嶺酒造は"));
+        assert_eq!(missing, vec!["第9段落".to_string()]);
+        assert_eq!(
+            state.passage_sources("sake").unwrap().unwrap(),
+            vec!["第1段落"]
+        );
+        assert!(state.lookup_passages("nope", &[]).is_none());
+
+        // Deleting the context removes the whole passage file family:
+        // the log the store just wrote, any snapshot, and a legacy
+        // sources file left over from before the migration.
+        fs::write(
+            sources_path(&dir, &file_stem("sake")),
+            br#"{"legacy":"remnant"}"#,
+        )
+        .unwrap();
+        state.delete("sake").unwrap().unwrap();
+        assert!(!sources_path(&dir, &file_stem("sake")).exists());
+        assert!(!passages_path(&dir, &file_stem("sake")).exists());
+        assert!(!passages_wal_path(&dir, &file_stem("sake")).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_passage_write_racing_a_delete_backs_off_at_the_tombstone() {
+        let dir = scratch_dir("passage-delete-race");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("第1段落".to_string(), "本文。".to_string());
+        state
+            .store_passages("sake", plain(passages.clone()))
+            .unwrap()
+            .unwrap();
+
+        // The racing writer's handle predates the delete — exactly the
+        // window the read fence exists for.
+        let entry = state.lookup("sake").unwrap();
+        state.delete("sake").unwrap().unwrap();
+        assert!(
+            entry.read_unless_deleted().is_none(),
+            "a handle from before the delete must see the tombstone"
+        );
+        assert!(
+            state.store_passages("sake", plain(passages)).is_none(),
+            "the name is gone; nothing may recreate it"
+        );
+        assert!(
+            !passages_wal_path(&dir, &file_stem("sake")).exists(),
+            "no passage file rose from the dead"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The passage store gets the same quarantine as the graph image:
+    /// a broken snapshot or log answers its remembered refusal instead
+    /// of being re-read on every passage request.
+    #[test]
+    fn a_failed_passage_load_is_quarantined_like_the_image() {
+        let dir = scratch_dir("passage-quarantine");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .store_passages(
+                    "sake",
+                    BTreeMap::from([(
+                        "a.md".to_string(),
+                        crate::passages::PassageSubmission::plain("本文。"),
+                    )]),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+        let log = dir.join("sake.passages.wal.jsonl");
+        let healthy = fs::read(&log).unwrap();
+        let mut corrupt = healthy.clone();
+        corrupt.splice(0..0, *b"not json\n"); // a corrupt INTERIOR line
+        fs::write(&log, &corrupt).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let sources = ["a.md".to_string()];
+        let first = state
+            .lookup_passages("sake", &sources)
+            .expect("registered")
+            .unwrap_err();
+        assert!(!first.to_string().contains("quarantined"), "{first}");
+
+        fs::write(&log, &healthy).unwrap();
+        let second = state
+            .lookup_passages("sake", &sources)
+            .expect("registered")
+            .unwrap_err();
+        assert!(second.to_string().contains("quarantined"), "{second}");
+
+        state.age_load_failures("sake", LOAD_FAILURE_RETRY);
+        let (passages, missing) = state
+            .lookup_passages("sake", &sources)
+            .expect("registered")
+            .unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(passages["a.md"], "本文。");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn eviction_drops_resident_passages_and_a_later_lookup_still_answers() {
+        let dir = scratch_dir("passage-evict");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1段落".to_string(),
+            "仕込み水は雲居山の伏流水。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        assert!(
+            entry.passages.lock().is_none(),
+            "eviction must drop the resident passage store"
+        );
+        // Durability never depended on residency: the next access
+        // reloads from the log (or the snapshot the eviction wrote).
+        let (found, missing) = state
+            .lookup_passages("sake", &["第1段落".to_string()])
+            .unwrap()
+            .unwrap();
+        assert!(found["第1段落"].starts_with("仕込み水"));
+        assert!(missing.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+}

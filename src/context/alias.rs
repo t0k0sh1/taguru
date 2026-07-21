@@ -351,3 +351,281 @@ impl Context {
         self.label_alias_index.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::test_support::{assoc, weight_between};
+
+    #[test]
+    fn aliases_resolve_at_every_entry_point() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "創業年", "1907年", 1.0)
+            .unwrap();
+        context
+            .add_concept_alias("Aomine Brewery", "青嶺酒造")
+            .unwrap();
+        context.add_label_alias("設立年", "創業年").unwrap();
+
+        // Reads through the alias land on canonical knowledge, and the
+        // results carry the canonical spelling.
+        assert_eq!(
+            context.query(Some("Aomine Brewery"), Some("設立年"), None),
+            vec![assoc("青嶺酒造", "創業年", "1907年", 1.0)]
+        );
+        assert_eq!(context.recall("Aomine Brewery").len(), 1);
+        assert_eq!(
+            context.describe("Aomine Brewery").unwrap().concept,
+            "青嶺酒造"
+        );
+        assert_eq!(context.explore(&["Aomine Brewery"], 1).len(), 1);
+
+        // resolve surfaces the canonical name for an alias hit.
+        assert_eq!(context.resolve("aomine")[0].name, "青嶺酒造");
+        assert_eq!(context.resolve_label("設立")[0].name, "創業年");
+
+        // Writes through the alias accumulate into the canonical concept
+        // instead of forking a new one — two assertions of 1.0 average
+        // to 1.0, not sum to 2.0.
+        context
+            .associate("Aomine Brewery", "設立年", "1907年", 1.0)
+            .unwrap();
+        assert_eq!(context.concept_count(), 2);
+        assert_eq!(
+            weight_between(&context, "青嶺酒造", "創業年", "1907年"),
+            1.0
+        );
+
+        // Vocabulary views stay canonical-only; aliases live in their
+        // own exportable tables.
+        assert_eq!(context.labels(), vec!["創業年"]);
+        assert_eq!(
+            context.concept_aliases(),
+            vec![("Aomine Brewery", "青嶺酒造")]
+        );
+        assert_eq!(context.label_aliases(), vec![("設立年", "創業年")]);
+    }
+
+    #[test]
+    fn alias_conflicts_and_unknowns_are_rejected() {
+        let mut context = Context::default();
+        context
+            .associate("IPA", "公開する", "10大脅威", 1.0)
+            .unwrap();
+        context
+            .associate("情報処理推進機構", "所在地", "東京", 1.0)
+            .unwrap();
+
+        assert_eq!(
+            context.add_concept_alias("独法", "存在しない概念"),
+            Err(AliasError::UnknownCanonical)
+        );
+        // Two spellings that both already exist as concepts cannot be
+        // aliased together — that would be a merge.
+        assert_eq!(
+            context.add_concept_alias("IPA", "情報処理推進機構"),
+            Err(AliasError::Conflict)
+        );
+        // Re-registering the same mapping is idempotent; re-pointing the
+        // alias elsewhere is a conflict.
+        assert_eq!(
+            context.add_concept_alias("機構", "情報処理推進機構"),
+            Ok(())
+        );
+        assert_eq!(
+            context.add_concept_alias("機構", "情報処理推進機構"),
+            Ok(())
+        );
+        assert_eq!(
+            context.add_concept_alias("機構", "IPA"),
+            Err(AliasError::Conflict)
+        );
+        // Aliasing to an alias resolves to the true canonical record.
+        assert_eq!(context.add_concept_alias("kikou", "機構"), Ok(()));
+        assert_eq!(
+            context.concept_aliases(),
+            vec![("機構", "情報処理推進機構"), ("kikou", "情報処理推進機構")]
+        );
+    }
+
+    #[test]
+    fn a_removed_alias_stops_resolving_and_frees_its_spelling() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "創業年", "1907年", 1.0)
+            .unwrap();
+        context.associate("高瀬", "役職", "杜氏", 1.0).unwrap();
+        context.add_concept_alias("Aomine", "青嶺酒造").unwrap();
+        context.add_label_alias("設立年", "創業年").unwrap();
+
+        // Withdrawal names what the alias pointed at; the spelling
+        // stops resolving while the canonical keeps its knowledge.
+        assert_eq!(
+            context.remove_concept_alias("Aomine").as_deref(),
+            Some("青嶺酒造")
+        );
+        assert!(context.query(Some("Aomine"), None, None).is_empty());
+        assert!(context.resolve("aomine").is_empty());
+        assert!(context.concept_aliases().is_empty());
+        assert_eq!(context.recall("青嶺酒造").len(), 1);
+        // The freed spelling's bytes stay behind in the arena as slack.
+        assert_eq!(context.arena_slack(), "Aomine".len());
+
+        // Not-an-alias refusals: unknown spellings, and canonical
+        // names — removal must never be able to unname a record. Being
+        // no-ops, neither adds further slack.
+        assert_eq!(context.remove_concept_alias("Aomine"), None);
+        assert_eq!(context.remove_concept_alias("青嶺酒造"), None);
+        assert_eq!(context.arena_slack(), "Aomine".len());
+
+        // The spelling is free again, pointing elsewhere this time —
+        // the un-wedging move a mis-registration needs. This interns a
+        // FRESH "Aomine" (append-only arena, no reuse of the freed
+        // range), so slack holds at the first registration's bytes —
+        // it does not grow just because the spelling was reused, and
+        // it does not shrink because the new record is live.
+        context.add_concept_alias("Aomine", "高瀬").unwrap();
+        assert_eq!(context.describe("Aomine").unwrap().concept, "高瀬");
+        assert_eq!(context.arena_slack(), "Aomine".len());
+
+        // Labels mirror, and the removal survives an image roundtrip
+        // (the rebuilt entry indexes included).
+        assert_eq!(
+            context.remove_label_alias("設立年").as_deref(),
+            Some("創業年")
+        );
+        assert_eq!(context.arena_slack(), "Aomine".len() + "設立年".len());
+        let reborn = Context::from_bytes(&context.to_bytes()).unwrap();
+        assert_eq!(reborn.describe("Aomine").unwrap().concept, "高瀬");
+        assert!(reborn.label_aliases().is_empty());
+        assert_eq!(reborn.resolve("青嶺")[0].name, "青嶺酒造");
+        assert_eq!(reborn.arena_slack(), context.arena_slack());
+    }
+
+    #[test]
+    fn label_alias_conflicts_and_unknowns_are_rejected() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "創業年", "1907年", 1.0)
+            .unwrap();
+        context
+            .associate("青嶺酒造", "設立地", "霧沢町", 1.0)
+            .unwrap();
+
+        assert_eq!(
+            context.add_label_alias("操業開始", "存在しないラベル"),
+            Err(AliasError::UnknownCanonical)
+        );
+        // Two spellings that both already exist as labels cannot be
+        // aliased together — that would be a merge.
+        assert_eq!(
+            context.add_label_alias("創業年", "設立地"),
+            Err(AliasError::Conflict)
+        );
+        // Re-registering the same mapping is idempotent; re-pointing the
+        // alias elsewhere is a conflict.
+        assert_eq!(context.add_label_alias("設立年", "創業年"), Ok(()));
+        assert_eq!(context.add_label_alias("設立年", "創業年"), Ok(()));
+        assert_eq!(
+            context.add_label_alias("設立年", "設立地"),
+            Err(AliasError::Conflict)
+        );
+        // Aliasing to an alias resolves to the true canonical record.
+        assert_eq!(context.add_label_alias("founded", "設立年"), Ok(()));
+        assert_eq!(
+            context.label_aliases(),
+            vec![("設立年", "創業年"), ("founded", "創業年")]
+        );
+        // The namespaces stay separate: a label spelling is not a
+        // concept spelling, so it cannot anchor a concept alias.
+        assert_eq!(
+            context.add_concept_alias("蔵の誕生", "創業年"),
+            Err(AliasError::UnknownCanonical)
+        );
+    }
+
+    #[test]
+    fn alias_pages_seek_each_namespace_independently() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "創業年", "1907年", 1.0)
+            .unwrap();
+        context.associate("高瀬", "役職", "杜氏", 1.0).unwrap();
+
+        // Registered out of alphabetical order in both namespaces.
+        context.add_concept_alias("zeta", "青嶺酒造").unwrap();
+        context.add_concept_alias("alpha", "高瀬").unwrap();
+        context.add_label_alias("yankee", "創業年").unwrap();
+        context.add_label_alias("bravo", "役職").unwrap();
+
+        assert_eq!(context.concept_alias_count(), 2);
+        assert_eq!(context.label_alias_count(), 2);
+
+        let (total, page) = context.concept_alias_page(None, 1);
+        assert_eq!(total, 2);
+        assert_eq!(page, vec![("alpha".to_string(), "高瀬".to_string())]);
+        let (_, page) = context.concept_alias_page(Some("alpha"), 10);
+        assert_eq!(page, vec![("zeta".to_string(), "青嶺酒造".to_string())]);
+
+        let (total, page) = context.label_alias_page(None, 1);
+        assert_eq!(total, 2);
+        assert_eq!(page, vec![("bravo".to_string(), "役職".to_string())]);
+        let (_, page) = context.label_alias_page(Some("bravo"), 10);
+        assert_eq!(page, vec![("yankee".to_string(), "創業年".to_string())]);
+    }
+
+    #[test]
+    fn dead_canonical_aliases_reports_aliases_whose_canonical_has_no_live_edges() {
+        let mut context = Context::default();
+        context.associate("蔵", "銘柄", "青嶺", 1.0).unwrap();
+        context.add_concept_alias("あおね", "青嶺").unwrap();
+        context.add_label_alias("ブランド", "銘柄").unwrap();
+
+        // Both canonicals are still live: nothing is reported.
+        let (dead_concepts, dead_labels) = context
+            .dead_canonical_aliases(Deadline::unbounded())
+            .unwrap();
+        assert!(dead_concepts.is_empty());
+        assert!(dead_labels.is_empty());
+
+        // Retracting the only edge kills both canonicals at once.
+        context.retract_association("蔵", "銘柄", "青嶺");
+        let (dead_concepts, dead_labels) = context
+            .dead_canonical_aliases(Deadline::unbounded())
+            .unwrap();
+        assert_eq!(
+            dead_concepts.get("あおね").map(String::as_str),
+            Some("青嶺")
+        );
+        assert_eq!(
+            dead_labels.get("ブランド").map(String::as_str),
+            Some("銘柄")
+        );
+    }
+
+    #[test]
+    fn dead_canonical_aliases_matches_what_compaction_would_drop() {
+        let mut context = Context::default();
+        context.associate("蔵", "銘柄", "青嶺", 1.0).unwrap();
+        context.associate("蔵", "杜氏", "高瀬", 1.0).unwrap();
+        context.add_concept_alias("あおね", "青嶺").unwrap();
+        context.add_label_alias("ブランド", "銘柄").unwrap();
+        // 杜氏/高瀬 stay live throughout, so this alias must never be
+        // reported dead — a control against a predicate that's too broad.
+        context.add_label_alias("肩書", "杜氏").unwrap();
+        context.retract_association("蔵", "銘柄", "青嶺");
+
+        let (dead_concepts, dead_labels) = context
+            .dead_canonical_aliases(Deadline::unbounded())
+            .unwrap();
+        assert!(!dead_labels.contains_key("肩書"));
+
+        let (_, stats) = context.compacted(Deadline::unbounded()).unwrap();
+        assert_eq!(
+            dead_concepts.len() + dead_labels.len(),
+            stats.aliases_dropped,
+            "dead_canonical_aliases must name exactly what compaction would silently drop"
+        );
+    }
+}

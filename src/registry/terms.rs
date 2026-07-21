@@ -207,3 +207,100 @@ fn walk_text_terms(text: &str, sink: &mut impl TermSink) {
     }
     flush_run(sink, &mut run, &mut run_len);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_terms_mix_ascii_words_with_bigram_runs() {
+        let pair = |a: char, b: char| ((a as u64) << 32) | b as u64;
+
+        // An ASCII run is one whole-word term; extra separators change
+        // nothing, and different words hash apart.
+        assert_eq!(text_terms("word").len(), 1);
+        assert_eq!(text_terms("ambition must"), text_terms("ambition  must"));
+        assert_ne!(text_terms("word"), text_terms("words"));
+
+        // Undelimited text contributes adjacent pairs per run; a run of
+        // one contributes the lone character.
+        assert_eq!(
+            text_terms("仕込み"),
+            vec![pair('仕', '込'), pair('込', 'み')]
+        );
+        assert_eq!(text_terms("水"), vec!['水' as u64]);
+
+        // Punctuation breaks the run: no pair straddles the comma.
+        assert_eq!(text_terms("水、源"), vec!['水' as u64, '源' as u64]);
+
+        // A script switch breaks the run too: 第10篇 is 第 + word "10"
+        // + 篇, never a pair that straddles the digits.
+        let mixed = text_terms("第10篇");
+        assert_eq!(mixed.len(), 3);
+        assert!(mixed.contains(&('第' as u64)));
+        assert!(mixed.contains(&('篇' as u64)));
+        assert!(mixed.iter().any(|term| term & (1 << 63) != 0));
+    }
+
+    #[test]
+    fn camel_pieces_join_the_passage_term_stream() {
+        let word = |text: &str| text_terms(text)[0];
+
+        // A camelCase run carries its whole-word term AND its pieces,
+        // hashed exactly like standalone words.
+        let terms = passage_terms("AppState");
+        assert!(terms.contains(&word("appstate")));
+        assert!(terms.contains(&word("app")));
+        assert!(terms.contains(&word("state")));
+
+        // An acronym ends before its last capital.
+        let terms = passage_terms("HTTPServer");
+        assert!(terms.contains(&word("http")));
+        assert!(terms.contains(&word("server")));
+
+        // Digits stick to their piece; the boundary is the case change.
+        let terms = passage_terms("U64Max");
+        assert!(terms.contains(&word("u64")));
+        assert!(terms.contains(&word("max")));
+
+        // A full-width letter folds to ASCII and stays IN the run, so its
+        // camelCase pieces match the plain-ASCII words. Before the NFKC
+        // fold the full-width 'Ａ' broke the run, the piece read "pple",
+        // and a plain "apple" cue never matched.
+        let terms = passage_terms("ＡpplePie");
+        assert!(terms.contains(&word("apple")));
+        assert!(terms.contains(&word("pie")));
+
+        // Runs with no case boundary add nothing: snake_case already
+        // splits at the underscore, ALLCAPS and lowercase stay whole.
+        assert_eq!(passage_terms("flush_dirty"), text_terms("flush_dirty"));
+        assert_eq!(passage_terms("WAL replay"), text_terms("wal replay"));
+    }
+
+    #[test]
+    fn spelled_terms_are_the_hashed_terms_with_their_spellings() {
+        for text in [
+            "精米歩合は50%まで磨く。",
+            "AppState boot 水、源 第10篇 ＡpplePie",
+            "HTTPServer U64Max flush_dirty",
+        ] {
+            let spelled = spelled_passage_terms(text);
+            // Same walker, only the sink differs: the hash stream is
+            // passage_terms verbatim.
+            assert_eq!(
+                spelled.iter().map(|(_, term)| *term).collect::<Vec<_>>(),
+                passage_terms(text),
+                "spelled and bare terms diverged ({text})"
+            );
+            // Every spelling is exactly what was hashed, so hashing the
+            // spelling alone finds the same term again.
+            for (spelling, term) in &spelled {
+                assert_eq!(
+                    passage_terms(spelling).first(),
+                    Some(term),
+                    "a spelling must hash back to its own term ({spelling:?} in {text:?})"
+                );
+            }
+        }
+    }
+}
