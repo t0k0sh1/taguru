@@ -146,6 +146,14 @@ fn import_refusal(
             };
             error(code, format!("{note}{message}"), started_at)
         }
+        // Predicted before anything mutated — no create, no marker,
+        // no retraction, so unlike `Partial` above there is no write
+        // to note.
+        refusal @ crate::ingest::ApplyRefusal::Rejected(_) => error(
+            ErrorCode::Conflict,
+            format!("{note}{}", refusal.text()),
+            started_at,
+        ),
     }
 }
 

@@ -467,8 +467,14 @@ fn reimporting_a_source_replaces_it_instead_of_doubling() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// A predicted alias rejection is caught before the first mutation, so
+/// a batch that pairs a valid association with a conflicting alias
+/// must not touch the context at all — not the association, not the
+/// alias, and the run's summary (which the embeddings-refresh pass
+/// mirrors) must not claim the context needs a tick either, since
+/// nothing new landed for it to embed.
 #[test]
-fn a_partially_applied_import_still_counts_the_context_for_the_refresh_pass() {
+fn a_predicted_alias_rejection_touches_no_context_for_the_refresh_pass() {
     let batches = batch_dir("import-partial-touch");
     let setup = batches.join("setup.jsonl");
     std::fs::write(
@@ -487,9 +493,10 @@ fn a_partially_applied_import_still_counts_the_context_for_the_refresh_pass() {
     let (code, stdout, stderr) = run_import(&data_dir, &[setup.to_str().unwrap()]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
-    // BTreeMap order: "aomine" applies, then "kyo" conflicts by
-    // re-pointing an existing alias — the batch refuses AFTER its
-    // association and first alias landed durably.
+    // BTreeMap order: "aomine" would resolve fine, but "kyo" would
+    // conflict by re-pointing an existing alias — predicted before
+    // either the association or "aomine" ever lands, so the whole
+    // batch is refused up front.
     let partial = batches.join("partial.jsonl");
     std::fs::write(
         &partial,
@@ -502,24 +509,65 @@ fn a_partially_applied_import_still_counts_the_context_for_the_refresh_pass() {
     .unwrap();
     let (code, stdout, stderr) = run_import(&data_dir, &[partial.to_str().unwrap()]);
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(stderr.contains("applied 1 alias(es)"), "{stderr}");
-    // The context took durable writes, so the run's summary (and the
-    // embeddings-refresh pass it mirrors) must cover it — a one-shot
-    // import has no later tick to pick those glosses up.
+    assert!(stderr.contains("nothing was applied"), "{stderr}");
     assert!(
-        stdout.contains("across 1 context(s)"),
-        "a partially applied batch still touched the context: {stdout}"
+        stdout.contains("across 0 context(s)"),
+        "a predicted rejection touches nothing: {stdout}"
     );
 
-    // And the writes the summary counts are really there.
+    // And the association the rejected batch carried really is
+    // nowhere to be found.
     let server = Server::start_on("import-partial-touch", data_dir);
     let edge = server.ok(
         "POST",
         "/contexts/sake/query",
         Some(json!({"subject": "新蔵", "label": "特徴"})),
     );
-    assert_eq!(edge["matches"][0]["object"], json!("辛口"));
+    assert_eq!(
+        edge["matches"],
+        json!([]),
+        "the rejected batch's association must not have landed"
+    );
     let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// The CLI-facing test above confirms nothing NEW landed; this
+/// confirms the same thing from the alias catalog's own side — the
+/// "valid" alias must not register just because it sorts before the
+/// conflicting one in the batch's `BTreeMap`. Predicting one bad entry
+/// refuses the whole alias step, valid entries included.
+#[test]
+fn a_batch_with_one_valid_and_one_conflicting_alias_registers_neither() {
+    let server = Server::start("http-import-mixed-aliases");
+    let (status, _) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"青嶺酒造\", \"label\": \"所在地\", \"object\": \"京都酒造\", \"weight\": 1.0}\n\
+         {\"alias\": \"kyo\", \"canonical\": \"京都酒造\", \"kind\": \"concept\"}\n",
+        None,
+    );
+    assert_eq!(status, 200);
+
+    // BTreeMap order: "avalid" sorts first and would register cleanly
+    // on its own; "kyo" sorts after it and conflicts by re-pointing
+    // the alias set up above. Predicting the second entry's rejection
+    // must refuse the first entry too.
+    let (status, body) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
+         {\"alias\": \"avalid\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n\
+         {\"alias\": \"kyo\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n",
+        None,
+    );
+    assert_eq!(status, 409, "{body}");
+
+    let listing = server.ok("GET", "/contexts/sake/aliases", None);
+    assert_eq!(
+        listing["concepts"],
+        json!({"kyo": "京都酒造"}),
+        "the valid alias must not register just because it sorts first: {listing}"
+    );
 }
 
 #[test]
@@ -669,6 +717,37 @@ fn import_dry_run_previews_without_writing_anything() {
     );
 }
 
+/// A predicted alias rejection reaches the identical decision whether
+/// or not the caller is previewing — `dry_run=true` must not let a
+/// batch through that a real import would refuse, nor invent a
+/// refusal a real import would not hit. Builds on the happy-path
+/// parity above, this time down the refusal path.
+#[test]
+fn dry_run_and_a_real_import_reach_the_same_predicted_alias_rejection() {
+    let server = Server::start("http-import-dry-run-parity");
+    let (status, _) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"青嶺酒造\", \"label\": \"所在地\", \"object\": \"京都酒造\", \"weight\": 1.0}\n\
+         {\"alias\": \"kyo\", \"canonical\": \"京都酒造\", \"kind\": \"concept\"}\n",
+        None,
+    );
+    assert_eq!(status, 200);
+
+    let conflicting = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
+                        {\"alias\": \"kyo\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n";
+    let (dry_status, dry_body) = post_import_dry_run(&server, conflicting, None);
+    assert_eq!(dry_status, 409, "{dry_body}");
+    let (real_status, real_body) = post_import(&server, conflicting, None);
+    assert_eq!(real_status, 409, "{real_body}");
+    assert_eq!(
+        dry_body["error"], real_body["error"],
+        "a preview must reach the exact same refusal text as the real import"
+    );
+    assert_eq!(dry_body["code"], real_body["code"]);
+}
+
 /// A stream that mixes batches with a `taguru_group` record previews
 /// the batches but skips the group record entirely — the response
 /// omits `groups`, and no group is created.
@@ -695,21 +774,27 @@ fn import_dry_run_skips_group_records() {
     assert_eq!(status, 404, "dry_run must not create the context either");
 }
 
-/// A live import that stops partway leaves its batch-open marker on
-/// disk — the tear detection #59 adds; boot and `taguru inspect`
-/// report it — and the operator-facing repair verb (retract the
-/// source) clears it. The other repair, re-importing the corrected
-/// batch, is covered beside `apply_batch` itself.
+/// A live import whose alias step is predicted to fail is refused
+/// before the first mutation — no context created, no batch-open
+/// marker written, so #59's tear detection has nothing to name.
+/// Marker survival across a genuine mid-batch tear (one prediction
+/// cannot catch, e.g. a disk fault) and its repairs — re-importing the
+/// corrected batch, or retracting the source — are covered beside
+/// `apply_batch` itself, since this endpoint and the CLI import share
+/// that one function.
 #[test]
-fn a_torn_live_import_leaves_its_marker_until_the_source_is_retracted() {
+fn a_predicted_alias_rejection_leaves_no_marker_on_a_live_import() {
     let server = Server::start("http-import-marker");
-    // An alias whose canonical nothing interned fails AFTER the
-    // retraction step — a genuinely half-applied source.
+    // An alias whose canonical nothing interned is caught by
+    // predicting the alias step's outcome before anything runs.
     let torn = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-torn\", \
                  \"create\": {\"description\": \"d\"}}\n\
                  {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
     let (status, body) = post_import(&server, torn, None);
-    assert_ne!(status, 200, "the batch must be refused: {body}");
+    assert_eq!(
+        status, 409,
+        "the batch must be refused as a conflict: {body}"
+    );
 
     let markers = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
         std::fs::read_dir(dir)
@@ -719,22 +804,88 @@ fn a_torn_live_import_leaves_its_marker_until_the_source_is_retracted() {
             .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("importing"))
             .collect()
     };
-    let surviving = markers(&server.data_dir);
-    assert_eq!(surviving.len(), 1, "the refused batch keeps its marker");
-    let content: Value = serde_json::from_slice(&std::fs::read(&surviving[0]).unwrap()).unwrap();
-    assert_eq!(content["context"], json!("sake"));
-    assert_eq!(content["source"], json!("doc-torn"));
-
-    // Retracting the source makes its truth consistently absent — the
-    // marker stops describing a tear and the verb removes it.
-    server.ok(
-        "POST",
-        "/contexts/sake/sources/retract",
-        Some(json!({"source": "doc-torn"})),
-    );
     assert!(
         markers(&server.data_dir).is_empty(),
-        "retraction clears the marker"
+        "a predicted rejection opens no marker"
+    );
+    let (status, _) = server.call("GET", "/contexts/sake", None);
+    assert_eq!(
+        status, 404,
+        "a predicted rejection must not create the context"
+    );
+}
+
+/// The issue #187 regression check: an import batch for a brand-new
+/// source, refused because its own alias step is predicted to
+/// conflict, must leave that source entirely absent from `GET
+/// /contexts/{name}/sources` — not applied-with-an-error, not
+/// partially there, not there at all.
+#[test]
+fn a_rejected_new_source_import_never_appears_in_list_sources() {
+    let server = Server::start("http-import-reject-list-sources");
+    let (status, _) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-old\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"passage\": \"蔵の杜氏は高瀬。\"}\n",
+        None,
+    );
+    assert_eq!(status, 200);
+
+    let (status, body) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-new\"}\n\
+         {\"subject\": \"新蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+         {\"passage\": \"新しい文章。\"}\n\
+         {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
+        None,
+    );
+    assert_eq!(status, 409, "{body}");
+
+    let sources = server.ok("GET", "/contexts/sake/sources", None);
+    assert_eq!(
+        sources["sources"],
+        json!(["doc-old"]),
+        "the rejected batch's new source must never appear: {sources}"
+    );
+}
+
+/// The multi-batch "durable prefix" guarantee is a different axis from
+/// this batch's own atomicity, and the fix must not blur the two:
+/// batch 1 landing durably and batch 2 being refused before its first
+/// mutation are both true of the same stream at once.
+#[test]
+fn a_rejected_batch_in_a_stream_leaves_the_earlier_batch_durable_and_its_own_source_absent() {
+    let server = Server::start("http-import-stream-prefix");
+    let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \
+                   \"create\": {\"description\": \"d\"}}\n\
+                  {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+                  {\"passage\": \"青嶺酒造の杜氏は高瀬。\"}\n\
+                  {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
+                  {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
+    let (status, body) = post_import(&server, stream, None);
+    assert_eq!(status, 409, "{body}");
+    let message = body["error"].as_str().unwrap();
+    assert!(message.contains("batch 2 of 2"), "{message}");
+    assert!(
+        message.contains("landed durably"),
+        "the note must credit the earlier batch as durable: {message}"
+    );
+
+    // Batch 1's write stands...
+    let edge = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "青嶺酒造", "label": "杜氏"})),
+    );
+    assert_eq!(edge["matches"][0]["object"], json!("高瀬"));
+
+    // ...but batch 2's own source never appears at all.
+    let sources = server.ok("GET", "/contexts/sake/sources", None);
+    assert_eq!(
+        sources["sources"],
+        json!(["doc-1"]),
+        "batch 2's own source must never appear: {sources}"
     );
 }
 
@@ -1298,7 +1449,9 @@ fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
         "{refusal}"
     );
 
-    // Re-pointing an existing alias is the API's usual conflict: 409.
+    // Re-pointing an existing alias is the API's usual conflict: 409,
+    // predicted before anything in the batch runs — its association
+    // never lands either.
     let (status, _) = post_import(
         &server,
         "{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s1\", \"create\": {}}\n\
@@ -1316,7 +1469,10 @@ fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
     );
     assert_eq!(status, 409, "{refusal}");
     assert!(
-        refusal["error"].as_str().unwrap().contains("applied"),
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("nothing was applied"),
         "{refusal}"
     );
 }
@@ -1404,6 +1560,70 @@ fn an_import_alias_conflict_heals_with_a_withdrawal_then_reimport() {
     assert_eq!(status, 200, "{body}");
     let listing = server.ok("GET", "/contexts/c/aliases", None);
     assert_eq!(listing["concepts"]["A"], json!("Y"));
+}
+
+/// A REPLACEMENT batch (same source name as one already on file) that
+/// is refused by a predicted alias conflict must not even reach the
+/// retraction step — the old passage, its association, and the
+/// context's aliases (which live independently of any one source) all
+/// stay exactly as they were.
+#[test]
+fn a_rejected_replacement_batch_leaves_the_old_version_of_its_source_untouched() {
+    let server = Server::start("http-import-reject-replacement");
+    let (status, _) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+         {\"passage\": \"元の文章。\"}\n\
+         {\"alias\": \"kyo\", \"canonical\": \"蔵\", \"kind\": \"concept\"}\n",
+        None,
+    );
+    assert_eq!(status, 200);
+
+    // Same source, a revised truth — but its alias step re-points
+    // "kyo" from the existing 蔵 to a name this very batch freshly
+    // interns, a predicted conflict that must refuse before the
+    // retraction that would otherwise clear the old passage/association.
+    let (status, body) = post_import(
+        &server,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
+         {\"subject\": \"新蔵\", \"label\": \"特徴\", \"object\": \"辛口\", \"weight\": 1.0}\n\
+         {\"passage\": \"新しい文章。\"}\n\
+         {\"alias\": \"kyo\", \"canonical\": \"新蔵\", \"kind\": \"concept\"}\n",
+        None,
+    );
+    assert_eq!(status, 409, "{body}");
+
+    // The old passage is exactly as it was — never retracted, never
+    // overwritten.
+    let passages = server.ok(
+        "POST",
+        "/contexts/sake/sources/lookup",
+        Some(json!({"sources": ["doc-1"]})),
+    );
+    assert_eq!(passages["passages"]["doc-1"], json!("元の文章。"));
+
+    // The old association still stands...
+    let old = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "蔵", "label": "杜氏"})),
+    );
+    assert_eq!(old["matches"][0]["object"], json!("高瀬"));
+
+    // ...and the replacement's own association never landed.
+    let new = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "新蔵", "label": "特徴"})),
+    );
+    assert_eq!(new["matches"], json!([]));
+
+    // The alias, which lives independently of any one source, is
+    // untouched too.
+    let aliases = server.ok("GET", "/contexts/sake/aliases", None);
+    assert_eq!(aliases["concepts"]["kyo"], json!("蔵"));
 }
 
 #[test]
