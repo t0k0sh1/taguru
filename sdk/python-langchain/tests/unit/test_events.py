@@ -98,6 +98,7 @@ def test_corrective_success_emits_attempt_failed_with_provider_metadata(
     assert failed[0].attempt == 1
     assert failed[0].max_attempts == 2
     assert failed[0].parse_error != ""
+    assert failed[0].length_limited is True
     metadata = failed[0].provider_metadata
     assert metadata is not None
     assert metadata.finish_reason == "length"
@@ -139,6 +140,9 @@ def test_terminal_parse_failure_emits_two_attempt_failed(
 
     failed = [event for event in events if isinstance(event, AttemptFailed)]
     assert [event.attempt for event in failed] == [1, 2]
+    # No response_metadata on either bad answer, so neither reads as cut
+    # off at the provider's output cap.
+    assert not any(event.length_limited for event in failed)
     # The chunk never completed, so no import/refresh events followed.
     assert not any(event.kind == "chunk_completed" for event in events)
     assert not any(event.kind == "import_started" for event in events)

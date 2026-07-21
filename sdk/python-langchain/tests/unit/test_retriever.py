@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 from taguru import AsyncTaguru, Taguru
@@ -12,7 +14,7 @@ from .conftest import FakeServer
 
 
 def make_retriever(
-    sync_client: Taguru, async_client: AsyncTaguru, **kwargs: object
+    sync_client: Taguru, async_client: AsyncTaguru, **kwargs: Any
 ) -> TaguruRetriever:
     return TaguruRetriever(context="sake", client=sync_client, async_client=async_client, **kwargs)
 

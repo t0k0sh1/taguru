@@ -11,7 +11,7 @@ from langchain_core.language_models.fake_chat_models import (
     FakeListChatModel,
     FakeMessagesListChatModel,
 )
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from taguru import AsyncTaguru, Taguru
 
 from taguru_langchain import TaguruIngester
@@ -328,6 +328,113 @@ def test_validation_rejects_bad_construction(
         TaguruIngester(context="c", llm=llm, client=sync_client, create_context=True)
     with pytest.raises(ValueError, match="questions"):
         TaguruIngester(context="c", llm=llm, client=sync_client, questions=99)
+
+
+def test_validation_rejects_bad_fact_budget_max_attempts_and_corrective_context_bytes(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    llm = FakeListChatModel(responses=["{}"])
+    with pytest.raises(ValueError, match="fact_budget"):
+        TaguruIngester(context="c", llm=llm, client=sync_client, fact_budget=0)
+    with pytest.raises(ValueError, match="max_attempts must be between 1 and 10"):
+        TaguruIngester(context="c", llm=llm, client=sync_client, max_attempts=0)
+    with pytest.raises(ValueError, match="max_attempts must be between 1 and 10"):
+        TaguruIngester(context="c", llm=llm, client=sync_client, max_attempts=11)
+    with pytest.raises(ValueError, match="corrective_context_bytes"):
+        TaguruIngester(context="c", llm=llm, client=sync_client, corrective_context_bytes=-1)
+
+
+def test_fact_budget_is_folded_into_the_system_prompt(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    ingester, llm = make_ingester(sync_client, async_client, [MODEL_ANSWER], fact_budget=3)
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    system = llm.seen_prompts[0][0].content
+    assert "Keep this answer to at most 3 association(s) total" in system
+
+
+def test_max_attempts_env_extends_corrective_retries_past_the_default(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """Two bad answers followed by a good one survive under max_attempts=3 —
+    past the default policy (2 total attempts), which would never reach the
+    third call."""
+    ingester, llm = make_ingester(
+        sync_client,
+        async_client,
+        ["still not json", "nope, still not", MODEL_ANSWER],
+        max_attempts=3,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 3
+    assert len(llm.seen_prompts) == 3
+    # Every corrective turn rebuilds from the base — never accumulates the
+    # first bad answer once the second corrective turn is built.
+    assert len(llm.seen_prompts[2]) == 4
+
+
+def test_max_attempts_of_one_skips_the_corrective_turn(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    ingester, llm = make_ingester(sync_client, async_client, ["not json at all"], max_attempts=1)
+    with pytest.raises(ValueError, match="would not produce the JSON object"):
+        ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert len(llm.seen_prompts) == 1
+
+
+def test_corrective_context_bytes_caps_the_replayed_bad_answer(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    bad_answer = "not json at all, definitely not a JSON object"
+    ingester, llm = make_ingester(
+        sync_client, async_client, [bad_answer, MODEL_ANSWER], corrective_context_bytes=10
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    corrective = llm.seen_prompts[1]
+    replayed = corrective[-2].content
+    assert "[truncated to 10 bytes]" in replayed
+    assert bad_answer not in replayed
+
+
+def test_corrective_context_bytes_of_zero_omits_the_bad_answer(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    bad_answer = "not json at all, definitely not a JSON object"
+    ingester, llm = make_ingester(
+        sync_client, async_client, [bad_answer, MODEL_ANSWER], corrective_context_bytes=0
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    corrective = llm.seen_prompts[1]
+    replayed = corrective[-2].content
+    assert replayed == "[omitted: not the requested JSON object]"
+    assert bad_answer not in replayed
+
+
+def test_a_length_limited_bad_answer_asks_for_shorter_and_names_the_fact_budget(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """The fix for Issue #178's stall: a `finish_reason` saying the prior
+    answer was cut off at the output cap swaps the corrective ask from "try
+    again" to "try again shorter" and names the run's fact_budget."""
+    malformed = AIMessage(content="not json, and huge", response_metadata={"done_reason": "length"})
+    ingester, llm = make_ingester_with_messages(
+        sync_client,
+        async_client,
+        [malformed, AIMessage(content=MODEL_ANSWER)],
+        fact_budget=4,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+
+    corrective = llm.seen_prompts[1][-1].content
+    assert "SHORTER" in corrective
+    assert "cut off at the output limit" in corrective
+    assert "Keep it to at most 4 association(s) total." in corrective
+    assert "Answer again with only the JSON object." not in corrective
 
 
 def test_close_leaves_a_caller_supplied_client_open(

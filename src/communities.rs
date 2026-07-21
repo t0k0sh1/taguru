@@ -431,11 +431,11 @@ fn summarize(
             children.join("\n"),
         )
     };
-    let text = chat.complete(&[
+    let response = chat.complete(&[
         json!({"role": "system", "content": system}),
         json!({"role": "user", "content": user}),
     ])?;
-    let text = text.trim();
+    let text = response.content.trim();
     if text.is_empty() {
         return Err(format!(
             "the model answered an empty summary for community {}",
