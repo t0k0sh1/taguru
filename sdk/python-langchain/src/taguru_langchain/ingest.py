@@ -118,9 +118,9 @@ class TaguruIngester:
         questions: doc2query questions per paragraph (None/0 = don't ask;
             capped at 8, the server's own per-paragraph cap).
         fact_budget: Soft cap on associations per chunk, folded into the
-            prompt as an instruction (None/0 = off, the default — unbounded).
-            Never enforced post-hoc: a model that ignores it just returns
-            everything it produced.
+            prompt as an instruction (None = off, the default — unbounded;
+            0 is rejected, use None instead). Never enforced post-hoc: a
+            model that ignores it just returns everything it produced.
         max_attempts: Total attempts (1 initial + corrections) at getting the
             model to answer with the JSON object asked for, from 1 to
             ``MAX_ATTEMPTS_CEILING`` (default ``DEFAULT_MAX_ATTEMPTS`` = 2,

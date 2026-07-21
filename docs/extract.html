@@ -163,13 +163,13 @@ TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
     <p>
       A model that answers with anything but the JSON object gets a corrective turn: its own bad
       answer goes back to it, followed by a request to try again. By default that happens once —
-      2 total attempts per chunk, todays fixed behavior — and
+      2 total attempts per chunk, today's fixed behavior — and
       <code>TAGURU_EXTRACT_MAX_ATTEMPTS</code> raises the ceiling to anywhere from 1 (no
       corrective turn at all) to 10. Every corrective turn rebuilds the conversation from the
       system/user base plus only the single most recent bad answer, never the accumulated
       history, so <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code> bounds the replay the same
       way on attempt 5 as on attempt 2: left unset the bad answer is replayed back in full
-      (todays behavior), a byte count truncates the replay to that size, and <code>0</code> omits
+      (today's behavior), a byte count truncates the replay to that size, and <code>0</code> omits
       it behind a placeholder entirely. When the provider's own <code>finish_reason</code> says
       the bad answer was cut off at its output-length cap, the corrective ask itself changes:
       instead of repeating the request that just produced a too-long answer, it asks for a
