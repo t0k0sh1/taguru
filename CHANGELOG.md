@@ -7,6 +7,17 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+- `TaguruIngester` gains an optional `on_event` progress callback (#177) —
+  synchronous, typed events (`document_started`, `chunk_started`,
+  `attempt_started`, `attempt_failed`, `chunk_completed`, `import_started`,
+  `import_completed`, `embedding_refresh_started`/`completed`/`warning`)
+  fire from both `ingest_text` and `aingest_text`, so a caller can show
+  live progress and see *why* a corrective attempt fired (parse error,
+  provider finish reason, token usage when the model reports them)
+  without copying the private extraction helpers. Callback exceptions are
+  caught and reported via `warnings.warn` rather than failing the ingest.
+
 ## [0.4.0] - 2026-07-20
 
 ### Added

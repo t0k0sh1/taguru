@@ -7,7 +7,11 @@ from typing import Any
 
 import pytest
 from langchain_core.documents import Document
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.language_models.fake_chat_models import (
+    FakeListChatModel,
+    FakeMessagesListChatModel,
+)
+from langchain_core.messages import BaseMessage
 from taguru import AsyncTaguru, Taguru
 
 from taguru_langchain import TaguruIngester
@@ -54,6 +58,22 @@ class RecordingFakeChatModel(FakeListChatModel):
         return super()._generate(messages, *args, **kwargs)
 
 
+class RecordingFakeMessagesListChatModel(FakeMessagesListChatModel):
+    """FakeMessagesListChatModel that also records every prompt it was given.
+
+    Unlike RecordingFakeChatModel (string-only responses), responses here
+    are full AIMessage objects, so response_metadata/usage_metadata can be
+    injected — needed to assert on TaguruIngester's provider-metadata
+    normalization.
+    """
+
+    seen_prompts: list[list[Any]] = []
+
+    def _generate(self, messages: list[Any], *args: Any, **kwargs: Any) -> Any:
+        self.seen_prompts.append(messages)
+        return super()._generate(messages, *args, **kwargs)
+
+
 class ThrowingChatModel(FakeListChatModel):
     """Raises a genuine (non-TaguruError, non-ValueError) provider error —
     e.g. what an ``openai.RateLimitError`` looks like from the caller's side.
@@ -68,6 +88,21 @@ def make_ingester(
     sync_client: Taguru, async_client: AsyncTaguru, responses: list[str], **kwargs: Any
 ) -> tuple[TaguruIngester, RecordingFakeChatModel]:
     llm = RecordingFakeChatModel(responses=responses, seen_prompts=[])
+    ingester = TaguruIngester(
+        context="sake",
+        llm=llm,
+        client=sync_client,
+        async_client=async_client,
+        questions=2,
+        **kwargs,
+    )
+    return ingester, llm
+
+
+def make_ingester_with_messages(
+    sync_client: Taguru, async_client: AsyncTaguru, responses: list[BaseMessage], **kwargs: Any
+) -> tuple[TaguruIngester, RecordingFakeMessagesListChatModel]:
+    llm = RecordingFakeMessagesListChatModel(responses=responses, seen_prompts=[])
     ingester = TaguruIngester(
         context="sake",
         llm=llm,

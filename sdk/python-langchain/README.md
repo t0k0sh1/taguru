@@ -33,6 +33,15 @@ conversational long-term memory — each mirrored in TypeScript) live in
 [examples/langchain](https://github.com/t0k0sh1/taguru/tree/main/examples/langchain);
 they work offline, no API key needed.
 
+`TaguruIngester` takes an optional `on_event` callback for live progress —
+document/chunk/attempt/import/embedding-refresh events, including *why* a
+corrective attempt fired. Useful with slow local models, where a single
+`ingest_text()` call can otherwise look like one long silent block:
+
+```python
+ingester = TaguruIngester(..., on_event=lambda event: print(event.kind))
+```
+
 Not provided, deliberately: a VectorStore facade (Taguru's retrieval is
 structural-first — `similarity_search` would misrepresent it), a Memory class
 (deprecated upstream in favor of LangGraph state), and agent Tools (the MCP
