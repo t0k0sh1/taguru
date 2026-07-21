@@ -14,6 +14,8 @@ over synonym-coining), and embeddings refresh best-effort after each run.
 from __future__ import annotations
 
 import asyncio
+import time
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -44,6 +46,23 @@ from ._extract import (
     system_prompt,
     user_message,
 )
+from .events import (
+    AttemptFailed,
+    AttemptStarted,
+    ChunkCompleted,
+    ChunkStarted,
+    DocumentStarted,
+    EmbeddingRefreshCompleted,
+    EmbeddingRefreshStarted,
+    EmbeddingRefreshWarning,
+    ImportCompleted,
+    ImportStarted,
+    IngestEvent,
+    IngestEventCallback,
+    ProviderMetadata,
+)
+
+MAX_ATTEMPTS = 2
 
 
 @dataclass
@@ -98,6 +117,12 @@ class TaguruIngester:
             call (501 = not configured is ignored; 502 lands as a warning).
         raise_on_error: ``ingest_documents`` raises on the first failed
             document instead of reporting it in its outcome.
+        on_event: Optional callback invoked synchronously for each stage of
+            an ingest run — document/chunk/attempt/import/embedding-refresh
+            progress (see :mod:`taguru_langchain.events`). Must not block:
+            ``aingest_text`` calls it directly too, with no thread hop or
+            await. Exceptions it raises are caught and reported via
+            ``warnings.warn`` rather than failing the ingest.
     """
 
     def __init__(
@@ -118,6 +143,7 @@ class TaguruIngester:
         vocabulary_cap: int = VOCABULARY_CAP,
         refresh_embeddings: bool = True,
         raise_on_error: bool = False,
+        on_event: IngestEventCallback | None = None,
     ) -> None:
         if create_context and context_description is None:
             raise ValueError("create_context=True requires context_description")
@@ -140,6 +166,7 @@ class TaguruIngester:
         self.vocabulary_cap = vocabulary_cap
         self.refresh_embeddings = refresh_embeddings
         self.raise_on_error = raise_on_error
+        self.on_event = on_event
 
     # -- shared, transport-free pieces ------------------------------------
 
@@ -207,6 +234,37 @@ class TaguruIngester:
             )
         return str(content)
 
+    def _emit(self, event: IngestEvent) -> None:
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(event)
+        except Exception as error:
+            warnings.warn(
+                f"TaguruIngester on_event callback raised {error!r}; ingest continues",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
+    @staticmethod
+    def _provider_metadata(response: AIMessage) -> ProviderMetadata | None:
+        response_metadata = response.response_metadata or {}
+        finish_reason: str | None = None
+        for key in ("done_reason", "finish_reason", "stop_reason"):
+            value = response_metadata.get(key)
+            if value is not None:
+                finish_reason = str(value)
+                break
+        usage = response.usage_metadata
+        if finish_reason is None and usage is None:
+            return None
+        return ProviderMetadata(
+            finish_reason=finish_reason,
+            input_tokens=usage["input_tokens"] if usage else None,
+            output_tokens=usage["output_tokens"] if usage else None,
+            total_tokens=usage["total_tokens"] if usage else None,
+        )
+
     # -- sync ----------------------------------------------------------------
 
     def ingest_text(self, text: str, *, source: str, dry_run: bool = False) -> IngestOutcome:
@@ -217,6 +275,7 @@ class TaguruIngester:
         outcome = IngestOutcome(source=source, ok=False)
         if self.include_passage and len(text.encode("utf-8")) > MAX_PASSAGE_BYTES:
             raise ValueError(f"document exceeds the {MAX_PASSAGE_BYTES}-byte passage cap")
+        self._emit(DocumentStarted(source=source, text_bytes=len(text.encode("utf-8"))))
 
         vocabulary = self._fetch_vocabulary()
         system = system_prompt(vocabulary, self.questions)
@@ -225,6 +284,8 @@ class TaguruIngester:
 
         outputs: list[ModelOutput] = []
         for index, piece in enumerate(chunks):
+            chunk_started_at = time.monotonic()
+            self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
             user = user_message(source, index, len(chunks), piece)
             messages: list[BaseMessage] = [
                 SystemMessage(content=system),
@@ -232,19 +293,53 @@ class TaguruIngester:
             ]
             output = None
             last_error: ValueError | None = None
-            for _attempt in range(2):
+            chunk_llm_calls = 0
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                self._emit(
+                    AttemptStarted(
+                        source=source,
+                        chunk_index=index,
+                        attempt=attempt,
+                        max_attempts=MAX_ATTEMPTS,
+                    )
+                )
+                attempt_started_at = time.monotonic()
                 response = self.llm.invoke(messages)
                 outcome.llm_calls += 1
+                chunk_llm_calls += 1
                 content = self._content_text(response)
                 try:
                     output = parse_model_output(content)
                     break
                 except ValueError as error:
                     last_error = error
+                    self._emit(
+                        AttemptFailed(
+                            source=source,
+                            chunk_index=index,
+                            attempt=attempt,
+                            max_attempts=MAX_ATTEMPTS,
+                            parse_error=str(error),
+                            elapsed_seconds=time.monotonic() - attempt_started_at,
+                            provider_metadata=self._provider_metadata(response),
+                        )
+                    )
                     messages = self._corrective_turn(messages, content, error)
             if output is None:
                 raise ValueError(f"the model would not produce the JSON object: {last_error}")
             outputs.append(output)
+            self._emit(
+                ChunkCompleted(
+                    source=source,
+                    index=index,
+                    total=len(chunks),
+                    associations_proposed=len(output.associations),
+                    aliases_proposed=len(output.aliases),
+                    questions_proposed=len(output.questions),
+                    llm_calls=chunk_llm_calls,
+                    elapsed_seconds=time.monotonic() - chunk_started_at,
+                )
+            )
 
         ndjson = self._build_batch(source, text, outputs, outcome)
         outcome.ndjson = ndjson
@@ -252,16 +347,37 @@ class TaguruIngester:
             outcome.ok = True
             return outcome
 
+        self._emit(ImportStarted(source=source))
+        import_started_at = time.monotonic()
         applied = self.client.import_batches(ndjson)
+        self._emit(
+            ImportCompleted(source=source, elapsed_seconds=time.monotonic() - import_started_at)
+        )
         self._record(outcome, applied.batches[0])
         outcome.ok = True
 
         if self.refresh_embeddings:
+            self._emit(EmbeddingRefreshStarted(source=source))
             try:
-                self.client.context(self.context).refresh_embeddings()
+                result = self.client.context(self.context).refresh_embeddings()
+                self._emit(
+                    EmbeddingRefreshCompleted(
+                        source=source,
+                        configured=True,
+                        embedded=result.embedded,
+                        total=result.total,
+                    )
+                )
             except EmbeddingUnavailableError as error:
                 if error.reason == "provider_error":
                     outcome.embeddings_refresh_warning = error.message
+                    self._emit(EmbeddingRefreshWarning(source=source, message=error.message))
+                else:
+                    self._emit(
+                        EmbeddingRefreshCompleted(
+                            source=source, configured=False, embedded=0, total=0
+                        )
+                    )
         return outcome
 
     def ingest_documents(
@@ -307,6 +423,7 @@ class TaguruIngester:
         outcome = IngestOutcome(source=source, ok=False)
         if self.include_passage and len(text.encode("utf-8")) > MAX_PASSAGE_BYTES:
             raise ValueError(f"document exceeds the {MAX_PASSAGE_BYTES}-byte passage cap")
+        self._emit(DocumentStarted(source=source, text_bytes=len(text.encode("utf-8"))))
 
         vocabulary = await self._afetch_vocabulary()
         system = system_prompt(vocabulary, self.questions)
@@ -315,6 +432,8 @@ class TaguruIngester:
 
         outputs: list[ModelOutput] = []
         for index, piece in enumerate(chunks):
+            chunk_started_at = time.monotonic()
+            self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
             user = user_message(source, index, len(chunks), piece)
             messages: list[BaseMessage] = [
                 SystemMessage(content=system),
@@ -322,19 +441,53 @@ class TaguruIngester:
             ]
             output = None
             last_error: ValueError | None = None
-            for _attempt in range(2):
+            chunk_llm_calls = 0
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                self._emit(
+                    AttemptStarted(
+                        source=source,
+                        chunk_index=index,
+                        attempt=attempt,
+                        max_attempts=MAX_ATTEMPTS,
+                    )
+                )
+                attempt_started_at = time.monotonic()
                 response = await self.llm.ainvoke(messages)
                 outcome.llm_calls += 1
+                chunk_llm_calls += 1
                 content = self._content_text(response)
                 try:
                     output = parse_model_output(content)
                     break
                 except ValueError as error:
                     last_error = error
+                    self._emit(
+                        AttemptFailed(
+                            source=source,
+                            chunk_index=index,
+                            attempt=attempt,
+                            max_attempts=MAX_ATTEMPTS,
+                            parse_error=str(error),
+                            elapsed_seconds=time.monotonic() - attempt_started_at,
+                            provider_metadata=self._provider_metadata(response),
+                        )
+                    )
                     messages = self._corrective_turn(messages, content, error)
             if output is None:
                 raise ValueError(f"the model would not produce the JSON object: {last_error}")
             outputs.append(output)
+            self._emit(
+                ChunkCompleted(
+                    source=source,
+                    index=index,
+                    total=len(chunks),
+                    associations_proposed=len(output.associations),
+                    aliases_proposed=len(output.aliases),
+                    questions_proposed=len(output.questions),
+                    llm_calls=chunk_llm_calls,
+                    elapsed_seconds=time.monotonic() - chunk_started_at,
+                )
+            )
 
         ndjson = self._build_batch(source, text, outputs, outcome)
         outcome.ndjson = ndjson
@@ -342,16 +495,37 @@ class TaguruIngester:
             outcome.ok = True
             return outcome
 
+        self._emit(ImportStarted(source=source))
+        import_started_at = time.monotonic()
         applied = await self.async_client.import_batches(ndjson)
+        self._emit(
+            ImportCompleted(source=source, elapsed_seconds=time.monotonic() - import_started_at)
+        )
         self._record(outcome, applied.batches[0])
         outcome.ok = True
 
         if self.refresh_embeddings:
+            self._emit(EmbeddingRefreshStarted(source=source))
             try:
-                await self.async_client.context(self.context).refresh_embeddings()
+                result = await self.async_client.context(self.context).refresh_embeddings()
+                self._emit(
+                    EmbeddingRefreshCompleted(
+                        source=source,
+                        configured=True,
+                        embedded=result.embedded,
+                        total=result.total,
+                    )
+                )
             except EmbeddingUnavailableError as error:
                 if error.reason == "provider_error":
                     outcome.embeddings_refresh_warning = error.message
+                    self._emit(EmbeddingRefreshWarning(source=source, message=error.message))
+                else:
+                    self._emit(
+                        EmbeddingRefreshCompleted(
+                            source=source, configured=False, embedded=0, total=0
+                        )
+                    )
         return outcome
 
     async def aingest_documents(

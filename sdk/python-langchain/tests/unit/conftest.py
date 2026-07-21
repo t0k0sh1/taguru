@@ -60,6 +60,11 @@ class FakeServer:
         # When set, the cross-context /sources/search call (the text
         # lane) fails with a 500, to exercise text/graph lane isolation.
         self.fail_text_search = False
+        # 200 = refreshed; 501 = no embedding provider configured (default);
+        # 502 = the provider itself failed. The 501/502 pair both map to
+        # EmbeddingUnavailableError, distinguished by its `reason`.
+        self.embeddings_refresh_status = 501
+        self.embeddings_refresh_result: dict[str, Any] = {"embedded": 0, "total": 0}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -222,8 +227,12 @@ class FakeServer:
                 }
             )
         if path.endswith("/embeddings/refresh"):
+            if self.embeddings_refresh_status == 200:
+                return ok(self.embeddings_refresh_result)
+            message = "no provider" if self.embeddings_refresh_status == 501 else "provider failed"
             return httpx.Response(
-                501, json={"status": "error", "error": "no provider", "time": 0.001}
+                self.embeddings_refresh_status,
+                json={"status": "error", "error": message, "time": 0.001},
             )
         raise AssertionError(f"unrouted path: {path}")
 

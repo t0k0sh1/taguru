@@ -17,9 +17,42 @@ serves the identical tool vocabulary — pair it with ``langchain-mcp-adapters``
 
 from __future__ import annotations
 
+from .events import (
+    AttemptFailed,
+    AttemptStarted,
+    ChunkCompleted,
+    ChunkStarted,
+    DocumentStarted,
+    EmbeddingRefreshCompleted,
+    EmbeddingRefreshStarted,
+    EmbeddingRefreshWarning,
+    ImportCompleted,
+    ImportStarted,
+    IngestEvent,
+    IngestEventCallback,
+    ProviderMetadata,
+)
 from .ingest import IngestOutcome, TaguruIngester
 from .retrievers import TaguruRetriever
 
 __version__ = "0.4.0"
 
-__all__ = ["TaguruRetriever", "TaguruIngester", "IngestOutcome", "__version__"]
+__all__ = [
+    "TaguruRetriever",
+    "TaguruIngester",
+    "IngestOutcome",
+    "IngestEvent",
+    "IngestEventCallback",
+    "ProviderMetadata",
+    "DocumentStarted",
+    "ChunkStarted",
+    "AttemptStarted",
+    "AttemptFailed",
+    "ChunkCompleted",
+    "ImportStarted",
+    "ImportCompleted",
+    "EmbeddingRefreshStarted",
+    "EmbeddingRefreshCompleted",
+    "EmbeddingRefreshWarning",
+    "__version__",
+]
