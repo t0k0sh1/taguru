@@ -99,6 +99,7 @@ class ImportCompleted:
 @dataclass(slots=True, frozen=True, kw_only=True)
 class EmbeddingRefreshStarted:
     kind: Literal["embedding_refresh_started"] = "embedding_refresh_started"
+    source: str
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -110,6 +111,7 @@ class EmbeddingRefreshCompleted:
     """
 
     kind: Literal["embedding_refresh_completed"] = "embedding_refresh_completed"
+    source: str
     configured: bool
     embedded: int
     total: int
@@ -118,6 +120,7 @@ class EmbeddingRefreshCompleted:
 @dataclass(slots=True, frozen=True, kw_only=True)
 class EmbeddingRefreshWarning:
     kind: Literal["embedding_refresh_warning"] = "embedding_refresh_warning"
+    source: str
     message: str
 
 

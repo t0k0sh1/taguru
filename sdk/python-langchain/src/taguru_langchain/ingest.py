@@ -357,20 +357,27 @@ class TaguruIngester:
         outcome.ok = True
 
         if self.refresh_embeddings:
-            self._emit(EmbeddingRefreshStarted())
+            self._emit(EmbeddingRefreshStarted(source=source))
             try:
                 result = self.client.context(self.context).refresh_embeddings()
                 self._emit(
                     EmbeddingRefreshCompleted(
-                        configured=True, embedded=result.embedded, total=result.total
+                        source=source,
+                        configured=True,
+                        embedded=result.embedded,
+                        total=result.total,
                     )
                 )
             except EmbeddingUnavailableError as error:
                 if error.reason == "provider_error":
                     outcome.embeddings_refresh_warning = error.message
-                    self._emit(EmbeddingRefreshWarning(message=error.message))
+                    self._emit(EmbeddingRefreshWarning(source=source, message=error.message))
                 else:
-                    self._emit(EmbeddingRefreshCompleted(configured=False, embedded=0, total=0))
+                    self._emit(
+                        EmbeddingRefreshCompleted(
+                            source=source, configured=False, embedded=0, total=0
+                        )
+                    )
         return outcome
 
     def ingest_documents(
@@ -498,20 +505,27 @@ class TaguruIngester:
         outcome.ok = True
 
         if self.refresh_embeddings:
-            self._emit(EmbeddingRefreshStarted())
+            self._emit(EmbeddingRefreshStarted(source=source))
             try:
                 result = await self.async_client.context(self.context).refresh_embeddings()
                 self._emit(
                     EmbeddingRefreshCompleted(
-                        configured=True, embedded=result.embedded, total=result.total
+                        source=source,
+                        configured=True,
+                        embedded=result.embedded,
+                        total=result.total,
                     )
                 )
             except EmbeddingUnavailableError as error:
                 if error.reason == "provider_error":
                     outcome.embeddings_refresh_warning = error.message
-                    self._emit(EmbeddingRefreshWarning(message=error.message))
+                    self._emit(EmbeddingRefreshWarning(source=source, message=error.message))
                 else:
-                    self._emit(EmbeddingRefreshCompleted(configured=False, embedded=0, total=0))
+                    self._emit(
+                        EmbeddingRefreshCompleted(
+                            source=source, configured=False, embedded=0, total=0
+                        )
+                    )
         return outcome
 
     async def aingest_documents(

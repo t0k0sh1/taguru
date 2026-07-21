@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from langchain_core.documents import Document
 from langchain_core.messages import AIMessage
 from taguru import AsyncTaguru, Taguru
 
@@ -58,6 +59,7 @@ def test_successful_first_attempt_emits_no_attempt_failed(
 
     refresh_completed = next(e for e in events if isinstance(e, EmbeddingRefreshCompleted))
     assert refresh_completed.configured is False  # FakeServer defaults to 501
+    assert refresh_completed.source == "docs/aomine.md"
 
 
 async def test_successful_first_attempt_async_matches_sync(
@@ -157,6 +159,7 @@ def test_embedding_refresh_provider_error_emits_warning(
     warned = [event for event in events if isinstance(event, EmbeddingRefreshWarning)]
     assert len(warned) == 1
     assert warned[0].message == outcome.embeddings_refresh_warning
+    assert warned[0].source == "docs/aomine.md"
     assert not any(event.kind == "embedding_refresh_completed" for event in events)
 
 
@@ -191,6 +194,32 @@ def test_embedding_refresh_success_reports_counts(
     assert completed[0].configured is True
     assert completed[0].embedded == 3
     assert completed[0].total == 5
+    assert completed[0].source == "docs/aomine.md"
+
+
+def test_ingest_documents_refresh_events_carry_the_right_source(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """The regression this field exists for: ingest_documents() ingests
+    multiple documents through the same ingester, so without a source on
+    the refresh events a caller can't tell which document just finished."""
+    events: list[IngestEvent] = []
+    ingester, _llm = make_ingester_with_messages(
+        sync_client,
+        async_client,
+        [AIMessage(content=MODEL_ANSWER), AIMessage(content=MODEL_ANSWER)],
+        on_event=events.append,
+    )
+    outcomes = ingester.ingest_documents(
+        [
+            Document(page_content=DOC_TEXT, metadata={"source": "docs/aomine.md"}),
+            Document(page_content=DOC_TEXT, metadata={"source": "docs/other.md"}),
+        ]
+    )
+    assert [outcome.ok for outcome in outcomes] == [True, True]
+
+    completed = [event for event in events if isinstance(event, EmbeddingRefreshCompleted)]
+    assert [event.source for event in completed] == ["docs/aomine.md", "docs/other.md"]
 
 
 def test_on_event_exception_warns_but_does_not_break_ingest(
