@@ -1,11 +1,17 @@
 /** Ports of src/extract.rs's golden tests — same as the Python twin's suite. */
 
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 
 import {
   chunk,
   labeledDocument,
   merge,
+  MODEL_OUTPUT_JSON_SCHEMA,
   parseModelOutput,
   renderBatch,
   splitParagraphs,
@@ -333,5 +339,41 @@ describe("batch rendering", () => {
     expect(lines).toHaveLength(3);
     expect(lines[1]).toEqual({ alias: "a", canonical: "b,c", kind: "concept" });
     expect(lines[2]).toEqual({ alias: "a,b", canonical: "c", kind: "concept" });
+  });
+});
+
+describe("JSON Schema", () => {
+  // tests/unit/extract.test.ts -> repo root: same depth as the Rust twin's
+  // CARGO_MANIFEST_DIR-relative path and the Python twin's parents[4].
+  const fixturesRoot = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../../tests/fixtures/model_output",
+  );
+  const listFixtures = (kind: "accepted" | "rejected"): string[] =>
+    readdirSync(join(fixturesRoot, kind))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => join(fixturesRoot, kind, name));
+  const acceptedFixtures = listFixtures("accepted");
+  const rejectedFixtures = listFixtures("rejected");
+
+  const ajv = new Ajv2020({ allErrors: true });
+  const validate = ajv.compile(MODEL_OUTPUT_JSON_SCHEMA);
+
+  it("has a non-empty shared fixture corpus", () => {
+    expect(acceptedFixtures.length).toBeGreaterThan(0);
+    expect(rejectedFixtures.length).toBeGreaterThan(0);
+  });
+
+  // MODEL_OUTPUT_JSON_SCHEMA against tests/fixtures/model_output — the same
+  // corpus the Rust and Python copies validate against, so the three
+  // mirrored schemas cannot silently drift apart.
+  it.each(acceptedFixtures)("accepts %s", (path) => {
+    const text = readFileSync(path, "utf-8");
+    expect(validate(JSON.parse(text))).toBe(true);
+    expect(() => parseModelOutput(text)).not.toThrow();
+  });
+
+  it.each(rejectedFixtures)("rejects %s", (path) => {
+    expect(validate(JSON.parse(readFileSync(path, "utf-8")))).toBe(false);
   });
 });

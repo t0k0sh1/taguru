@@ -1,0 +1,14 @@
+{
+  "associations": [
+    {"subject": "a", "label": "rel1", "object": "b", "weight": 2.0, "paragraph": 0},
+    {"subject": "b", "label": "rel2", "object": "c", "weight": 0.5}
+  ],
+  "aliases": [
+    {"alias": "x", "canonical": "a", "kind": "concept"},
+    {"alias": "y", "canonical": "rel1", "kind": "label"}
+  ],
+  "questions": [
+    {"paragraph": 0, "question": "最初の質問?"},
+    {"paragraph": 1, "question": "二番目の質問?"}
+  ]
+}

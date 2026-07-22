@@ -1,0 +1,13 @@
+{
+  "associations": [
+    {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "paragraph": 0},
+    {"subject": "蔵", "label": "所在地", "object": "広島県", "weight": -1.0, "paragraph": 1}
+  ],
+  "aliases": [
+    {"alias": "Aomine", "canonical": "青嶺酒造", "kind": "concept"},
+    {"alias": "醸造責任者", "canonical": "杜氏", "kind": "label"}
+  ],
+  "questions": [
+    {"paragraph": 0, "question": "杜氏は誰?"}
+  ]
+}

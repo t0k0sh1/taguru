@@ -1,0 +1,6 @@
+{
+  "associations": [],
+  "aliases": [
+    {"alias": "x", "canonical": "y", "kind": "synonym"}
+  ]
+}

@@ -1,6 +1,9 @@
 /** TaguruIngester with a deterministic fake chat model — mirrors the Python suite. */
 
-import { FakeListChatModel } from "@langchain/core/utils/testing";
+import { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import { AIMessageChunk } from "@langchain/core/messages";
+import type { ChatResult } from "@langchain/core/outputs";
+import { FakeChatModel, FakeListChatModel } from "@langchain/core/utils/testing";
 import { describe, expect, it } from "vitest";
 
 import { MAX_PASSAGE_BYTES } from "../../src/extract.js";
@@ -28,6 +31,47 @@ const make = (server: FakeServer, responses: string[], fields: Record<string, un
     questions: 2,
     ...fields,
   });
+
+/**
+ * Exercises the structured_output: true path end to end: unlike
+ * FakeListChatModel (which implements bindTools() but ignores it — its own
+ * _generate() only ever formats plain text, never tool_calls, and its
+ * withStructuredOutput() override ignores includeRaw entirely), this fake
+ * echoes pre-programmed tool_calls back through a real BaseChatModel, so
+ * TaguruIngester's withStructuredOutput({ includeRaw: true }) pipeline runs
+ * for real. _generate() must return an AIMessageChunk, not an AIMessage:
+ * withStructuredOutput()'s default extraction step checks
+ * AIMessageChunk.isInstance() on the model's output and silently falls back
+ * to `parsed: null` otherwise (confirmed by direct probing — a plain
+ * AIMessage fails that check even though it is otherwise identical).
+ */
+class ToolCallingFakeChatModel extends BaseChatModel {
+  toolCallArgs: Record<string, unknown>[];
+  calls = 0;
+
+  constructor(fields: { toolCallArgs: Record<string, unknown>[] }) {
+    super({});
+    this.toolCallArgs = fields.toolCallArgs;
+  }
+
+  _llmType(): string {
+    return "tool-calling-fake";
+  }
+
+  bindTools(): this {
+    return this;
+  }
+
+  async _generate(): Promise<ChatResult> {
+    const args = this.toolCallArgs[this.calls]!;
+    this.calls += 1;
+    const message = new AIMessageChunk({
+      content: "",
+      tool_calls: [{ name: "ModelOutput", args, id: `call_${this.calls}` }],
+    });
+    return { generations: [{ text: "", message }] };
+  }
+}
 
 describe("TaguruIngester", () => {
   it("builds the batch and imports it", async () => {
@@ -168,5 +212,43 @@ describe("TaguruIngester", () => {
     expect(() => new TaguruIngester({ context: "c", llm, client, questions: 99 })).toThrow(
       /questions/,
     );
+  });
+
+  it("defaults structured_output to false, so a model without bindTools still constructs", () => {
+    const llm = new FakeChatModel({});
+    const ingester = new TaguruIngester({ context: "c", llm, client: new FakeServer().client() });
+    expect(ingester.structured_output).toBe(false);
+  });
+
+  it("structured_output: true raises at construction when the model cannot bind tools", () => {
+    const llm = new FakeChatModel({});
+    expect(
+      () =>
+        new TaguruIngester({
+          context: "c",
+          llm,
+          client: new FakeServer().client(),
+          structured_output: true,
+        }),
+    ).toThrow(/bindTools/);
+  });
+
+  it("structured_output: true drives ingestText through withStructuredOutput", async () => {
+    const server = new FakeServer();
+    const llm = new ToolCallingFakeChatModel({ toolCallArgs: [JSON.parse(MODEL_ANSWER)] });
+    const outcome = await new TaguruIngester({
+      context: "sake",
+      llm,
+      client: server.client(),
+      questions: 2,
+      structured_output: true,
+    }).ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.llm_calls).toBe(1);
+    expect(outcome.duplicates_dropped).toBe(1);
+    expect(outcome.invalid_dropped).toBe(1);
+    expect(outcome.associations).toBe(2);
+    expect(outcome.aliases).toBe(1);
   });
 });

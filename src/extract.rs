@@ -1408,6 +1408,99 @@ fn parse_model_output(content: &str) -> Result<ModelOutput, String> {
     }
 }
 
+/// The canonical JSON Schema for the shape [`parse_model_output`] accepts —
+/// mirrored by hand (never derived from `ModelOutput`'s own `Deserialize`
+/// impl) into the Python and TypeScript LangChain SDKs as
+/// `MODEL_OUTPUT_JSON_SCHEMA`, the same discipline [`PROMPT_VERSION`] and
+/// [`system_prompt`]'s wording already follow. A `BaseChatModel` that
+/// supports schema-constrained generation can be pointed at this to shape
+/// what the model answers with, instead of only checking it afterward.
+///
+/// Deliberately stricter than `ModelOutput`'s own lenient `Deserialize`:
+/// - `additionalProperties: false` everywhere, and every field this schema
+///   marks required is one [`merge`] always drops the item over anyway
+///   (`subject`/`label`/`object` on an association; `alias`/`canonical`/
+///   `kind` on an alias; `paragraph`/`question` on a question) — a
+///   schema-constrained model structurally cannot produce the
+///   wrong-typed-scalar or extra-property cases [`lenient_string`] and
+///   friends exist to tolerate, so there is nothing to be lenient about.
+/// - `weight` and an association's `paragraph` stay optional: [`merge`]
+///   defaults a missing weight to `1.0` and untags (never drops) a
+///   missing or out-of-range paragraph, so omitting either is a valid,
+///   intentional shape rather than something merely tolerated.
+///
+/// What this schema does NOT encode — [`merge`]'s later business-rule
+/// validation, applied identically however the answer was produced:
+/// - Byte-length caps (`MAX_NAME_BYTES`, `MAX_QUESTION_BYTES`): JSON
+///   Schema's `maxLength` counts UTF-16 code units, not UTF-8 bytes, so it
+///   cannot mirror these precisely.
+/// - An association's weight must be finite, non-zero, and within
+///   `MAX_ASSOCIATION_WEIGHT` — a magnitude/business check, not a shape.
+/// - A paragraph index must be less than the document's paragraph count —
+///   known only per-document at merge time, never at schema-authoring
+///   time; this schema only enforces the universal `>= 0` half.
+/// - Cross-item rules: deduplication, and an alias's `canonical` naming a
+///   subject/object/label the associations actually contain.
+///
+/// `title` is required content, not decoration: LangChain's Python
+/// `with_structured_output()` derives the tool/function name a bare JSON
+/// Schema is bound under from this key, and raises before ever calling the
+/// model when it is absent — confirmed against `langchain_core`'s
+/// `convert_to_openai_function`, which every provider's tool-calling
+/// integration funnels through.
+#[allow(dead_code)] // read by tests only — wiring taguru extract's own request body to this is out of scope (issue #185)
+pub(crate) fn model_output_json_schema() -> serde_json::Value {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ModelOutput",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["associations", "aliases"],
+        "properties": {
+            "associations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["subject", "label", "object"],
+                    "properties": {
+                        "subject": {"type": "string", "minLength": 1},
+                        "label": {"type": "string", "minLength": 1},
+                        "object": {"type": "string", "minLength": 1},
+                        "weight": {"type": "number"},
+                        "paragraph": {"type": "integer", "minimum": 0}
+                    }
+                }
+            },
+            "aliases": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["alias", "canonical", "kind"],
+                    "properties": {
+                        "alias": {"type": "string", "minLength": 1},
+                        "canonical": {"type": "string", "minLength": 1},
+                        "kind": {"type": "string", "enum": ["concept", "label"]}
+                    }
+                }
+            },
+            "questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["paragraph", "question"],
+                    "properties": {
+                        "paragraph": {"type": "integer", "minimum": 0},
+                        "question": {"type": "string", "minLength": 1}
+                    }
+                }
+            }
+        }
+    })
+}
+
 fn strip_fences(text: &str) -> &str {
     let Some(rest) = text.strip_prefix("```") else {
         return text;
@@ -2014,6 +2107,68 @@ mod tests {
         ]}"#;
         let output = parse_model_output(mixed).expect("a malformed item must still parse");
         assert_eq!(output.associations.len(), 2);
+    }
+
+    #[test]
+    fn json_schema_accepts_and_rejects_the_shared_fixtures() {
+        // The same corpus tests/fixtures/model_output validates against in
+        // the Python and TypeScript SDKs — one shared source of truth for
+        // what the mirrored schemas must accept or refuse, so the three
+        // copies cannot silently drift apart.
+        let schema_value = model_output_json_schema();
+        let validator =
+            jsonschema::validator_for(&schema_value).expect("the schema itself must compile");
+        let fixtures_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model_output");
+
+        let mut accepted_count = 0;
+        for entry in fs::read_dir(fixtures_root.join("accepted")).expect("accepted fixtures dir") {
+            let path = entry.expect("dir entry").path();
+            let text = fs::read_to_string(&path).expect("read fixture");
+            let value: serde_json::Value =
+                serde_json::from_str(&text).expect("fixture is valid JSON");
+            let errors: Vec<String> = validator
+                .iter_errors(&value)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "{} should validate against the schema: {errors:?}",
+                path.display()
+            );
+            // The schema's accepted set is meant to sit inside
+            // parse_model_output's — every fixture the schema takes must
+            // also be a real model answer.
+            parse_model_output(&text).unwrap_or_else(|error| {
+                panic!(
+                    "{} is schema-accepted but parse_model_output rejected it: {error}",
+                    path.display()
+                )
+            });
+            accepted_count += 1;
+        }
+        assert!(
+            accepted_count > 0,
+            "the accepted fixture directory must not be empty"
+        );
+
+        let mut rejected_count = 0;
+        for entry in fs::read_dir(fixtures_root.join("rejected")).expect("rejected fixtures dir") {
+            let path = entry.expect("dir entry").path();
+            let text = fs::read_to_string(&path).expect("read fixture");
+            let value: serde_json::Value =
+                serde_json::from_str(&text).expect("fixture is valid JSON");
+            assert!(
+                !validator.is_valid(&value),
+                "{} should NOT validate against the schema",
+                path.display()
+            );
+            rejected_count += 1;
+        }
+        assert!(
+            rejected_count > 0,
+            "the rejected fixture directory must not be empty"
+        );
     }
 
     fn association(subject: &str, label: &str, object: &str, weight: f64) -> ModelAssociation {

@@ -18,10 +18,13 @@ import time
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from langchain_core.documents import Document
-from langchain_core.language_models import BaseChatModel
+from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import Runnable
+from pydantic import BaseModel, ValidationError
 from taguru import (
     AsyncTaguru,
     EmbeddingUnavailableError,
@@ -34,6 +37,7 @@ from ._extract import (
     CHUNK_BYTES,
     MAX_PASSAGE_BYTES,
     MAX_QUESTIONS_PER_PARAGRAPH,
+    MODEL_OUTPUT_JSON_SCHEMA,
     VOCABULARY_CAP,
     ModelOutput,
     chunk,
@@ -133,6 +137,19 @@ class TaguruIngester:
             turn: ``None`` replays it in full (the default, today's
             behavior), ``0`` omits it behind a placeholder, and any other
             value truncates it to that many bytes.
+        structured_output: Ask ``llm`` for JSON-schema-constrained generation
+            — ``llm.with_structured_output(MODEL_OUTPUT_JSON_SCHEMA,
+            include_raw=True)`` — instead of a free-text answer parsed
+            afterward (default ``False``; strictly opt-in, matching the
+            Rust and TypeScript producers — see issue #185). Provider/model
+            dependent: a chat model that cannot bind tools raises out of
+            this constructor immediately, before any document is ingested,
+            rather than surfacing later as a per-attempt failure. Either
+            way the result still goes through ``ModelOutput.model_validate()``
+            and merge()'s business-rule checks (byte caps, weight bounds, an
+            in-range paragraph index, ...) — a schema only narrows what
+            shape a well-behaved provider can return, it does not replace
+            validation.
         include_passage: Store the verbatim document as the batch's passage
             (paragraph locators are stripped when off, matching extract).
         chunk_bytes: Prompt-input chunk cap; the stored passage is never
@@ -166,6 +183,7 @@ class TaguruIngester:
         fact_budget: int | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         corrective_context_bytes: int | None = None,
+        structured_output: bool = False,
         include_passage: bool = True,
         chunk_bytes: int = CHUNK_BYTES,
         vocabulary_cap: int = VOCABULARY_CAP,
@@ -203,6 +221,12 @@ class TaguruIngester:
         self.fact_budget = fact_budget or 0
         self.max_attempts = max_attempts
         self.corrective_context_bytes = corrective_context_bytes
+        self.structured_output = structured_output
+        self._structured_llm: Runnable[LanguageModelInput, dict[str, Any] | BaseModel] | None = (
+            llm.with_structured_output(MODEL_OUTPUT_JSON_SCHEMA, include_raw=True)
+            if structured_output
+            else None
+        )
         self.include_passage = include_passage
         self.chunk_bytes = chunk_bytes
         self.vocabulary_cap = vocabulary_cap
@@ -362,31 +386,27 @@ class TaguruIngester:
                     )
                 )
                 attempt_started_at = time.monotonic()
-                response = self.llm.invoke(messages)
+                content, output, error, metadata = self._invoke_for_output(messages)
                 outcome.llm_calls += 1
                 chunk_llm_calls += 1
-                content = self._content_text(response)
-                try:
-                    output = parse_model_output(content)
+                if error is None:
                     break
-                except ValueError as error:
-                    metadata = self._provider_metadata(response)
-                    length_limited = indicates_length_limit(
-                        metadata.finish_reason if metadata else None
+                length_limited = indicates_length_limit(
+                    metadata.finish_reason if metadata else None
+                )
+                self._emit(
+                    AttemptFailed(
+                        source=source,
+                        chunk_index=index,
+                        attempt=attempt,
+                        max_attempts=self.max_attempts,
+                        parse_error=str(error),
+                        elapsed_seconds=time.monotonic() - attempt_started_at,
+                        provider_metadata=metadata,
+                        length_limited=length_limited,
                     )
-                    self._emit(
-                        AttemptFailed(
-                            source=source,
-                            chunk_index=index,
-                            attempt=attempt,
-                            max_attempts=self.max_attempts,
-                            parse_error=str(error),
-                            elapsed_seconds=time.monotonic() - attempt_started_at,
-                            provider_metadata=metadata,
-                            length_limited=length_limited,
-                        )
-                    )
-                    prior_bad_turn = (content, error, length_limited)
+                )
+                prior_bad_turn = (content, error, length_limited)
             if output is None:
                 assert prior_bad_turn is not None
                 raise ValueError(
@@ -479,6 +499,44 @@ class TaguruIngester:
             return []
         return page.labels
 
+    def _invoke_for_output(
+        self, messages: list[BaseMessage]
+    ) -> tuple[str, ModelOutput | None, ValueError | None, ProviderMetadata | None]:
+        """Runs one model call for one attempt, returning ``(content, output,
+        error, metadata)`` with ``output is None`` iff ``error is not
+        None``. Goes through the ``with_structured_output()`` pipeline built
+        in ``__init__`` when ``structured_output`` is on, else today's plain
+        ``invoke()`` + ``parse_model_output()``. Either path lands in a
+        ``ModelOutput`` the same way — ``model_validate()`` — so
+        schema-constrained generation narrows the model's answer without
+        skipping validation."""
+        if self._structured_llm is not None:
+            result = self._structured_llm.invoke(messages)
+            assert isinstance(result, dict)
+            raw = result["raw"]
+            content = self._content_text(raw)
+            metadata = self._provider_metadata(raw)
+            parsed = result["parsed"]
+            if parsed is None:
+                parsing_error = result["parsing_error"]
+                error = (
+                    parsing_error
+                    if isinstance(parsing_error, ValueError)
+                    else ValueError(str(parsing_error))
+                )
+                return content, None, error, metadata
+            try:
+                return content, ModelOutput.model_validate(parsed), None, metadata
+            except ValidationError as error:
+                return content, None, ValueError(str(error)), metadata
+        response = self.llm.invoke(messages)
+        content = self._content_text(response)
+        metadata = self._provider_metadata(response)
+        try:
+            return content, parse_model_output(content), None, metadata
+        except ValueError as error:
+            return content, None, error, metadata
+
     # -- async ------------------------------------------------------------------
 
     async def aingest_text(self, text: str, *, source: str, dry_run: bool = False) -> IngestOutcome:
@@ -522,31 +580,27 @@ class TaguruIngester:
                     )
                 )
                 attempt_started_at = time.monotonic()
-                response = await self.llm.ainvoke(messages)
+                content, output, error, metadata = await self._ainvoke_for_output(messages)
                 outcome.llm_calls += 1
                 chunk_llm_calls += 1
-                content = self._content_text(response)
-                try:
-                    output = parse_model_output(content)
+                if error is None:
                     break
-                except ValueError as error:
-                    metadata = self._provider_metadata(response)
-                    length_limited = indicates_length_limit(
-                        metadata.finish_reason if metadata else None
+                length_limited = indicates_length_limit(
+                    metadata.finish_reason if metadata else None
+                )
+                self._emit(
+                    AttemptFailed(
+                        source=source,
+                        chunk_index=index,
+                        attempt=attempt,
+                        max_attempts=self.max_attempts,
+                        parse_error=str(error),
+                        elapsed_seconds=time.monotonic() - attempt_started_at,
+                        provider_metadata=metadata,
+                        length_limited=length_limited,
                     )
-                    self._emit(
-                        AttemptFailed(
-                            source=source,
-                            chunk_index=index,
-                            attempt=attempt,
-                            max_attempts=self.max_attempts,
-                            parse_error=str(error),
-                            elapsed_seconds=time.monotonic() - attempt_started_at,
-                            provider_metadata=metadata,
-                            length_limited=length_limited,
-                        )
-                    )
-                    prior_bad_turn = (content, error, length_limited)
+                )
+                prior_bad_turn = (content, error, length_limited)
             if output is None:
                 assert prior_bad_turn is not None
                 raise ValueError(
@@ -637,6 +691,37 @@ class TaguruIngester:
         except NotFoundError:
             return []
         return page.labels
+
+    async def _ainvoke_for_output(
+        self, messages: list[BaseMessage]
+    ) -> tuple[str, ModelOutput | None, ValueError | None, ProviderMetadata | None]:
+        """Async twin of ``_invoke_for_output``."""
+        if self._structured_llm is not None:
+            result = await self._structured_llm.ainvoke(messages)
+            assert isinstance(result, dict)
+            raw = result["raw"]
+            content = self._content_text(raw)
+            metadata = self._provider_metadata(raw)
+            parsed = result["parsed"]
+            if parsed is None:
+                parsing_error = result["parsing_error"]
+                error = (
+                    parsing_error
+                    if isinstance(parsing_error, ValueError)
+                    else ValueError(str(parsing_error))
+                )
+                return content, None, error, metadata
+            try:
+                return content, ModelOutput.model_validate(parsed), None, metadata
+            except ValidationError as error:
+                return content, None, ValueError(str(error)), metadata
+        response = await self.llm.ainvoke(messages)
+        content = self._content_text(response)
+        metadata = self._provider_metadata(response)
+        try:
+            return content, parse_model_output(content), None, metadata
+        except ValueError as error:
+            return content, None, error, metadata
 
     # -- lifecycle -------------------------------------------------------------
 

@@ -7,11 +7,13 @@ from typing import Any
 
 import pytest
 from langchain_core.documents import Document
+from langchain_core.language_models import BaseChatModel
 from langchain_core.language_models.fake_chat_models import (
     FakeListChatModel,
     FakeMessagesListChatModel,
 )
 from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from taguru import AsyncTaguru, Taguru
 
 from taguru_langchain import TaguruIngester
@@ -84,6 +86,40 @@ class ThrowingChatModel(FakeListChatModel):
         raise RuntimeError("rate limited")
 
 
+class ToolCallingFakeChatModel(BaseChatModel):
+    """Minimal fake that implements ``bind_tools()`` — unlike the
+    ``FakeListChatModel`` family above, whose inherited ``bind_tools()``
+    raises ``NotImplementedError`` — needed to exercise
+    ``TaguruIngester(structured_output=True)`` end to end.
+    ``_agenerate`` is inherited from ``BaseChatModel``, which (like
+    ``SimpleChatModel``) runs ``_generate`` in an executor, so one override
+    covers both paths.
+    """
+
+    tool_call_args: list[dict[str, Any]]
+    calls: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "tool-calling-fake"
+
+    def bind_tools(self, tools: Any, *, tool_choice: Any = None, **kwargs: Any) -> Any:
+        return self
+
+    def _generate(self, messages: list[Any], *args: Any, **kwargs: Any) -> ChatResult:
+        args_for_call = self.tool_call_args[self.calls]
+        self.calls += 1
+        # The name a schema with `"title": "ModelOutput"` resolves to via
+        # with_structured_output()'s convert_to_openai_tool() — a real
+        # provider fills this in from the bound tool spec; this fake just
+        # hardcodes the one name that schema will ever produce.
+        message = AIMessage(
+            content="",
+            tool_calls=[{"name": "ModelOutput", "args": args_for_call, "id": f"call_{self.calls}"}],
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
 def make_ingester(
     sync_client: Taguru, async_client: AsyncTaguru, responses: list[str], **kwargs: Any
 ) -> tuple[TaguruIngester, RecordingFakeChatModel]:
@@ -147,6 +183,52 @@ def test_ingest_text_builds_the_batch_and_imports(
     system = llm.seen_prompts[0][0].content
     assert "代表銘柄" in system
     assert "[0] 青嶺酒造は1907年創業。" in llm.seen_prompts[0][1].content
+
+
+def test_structured_output_true_uses_with_structured_output(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """The opt-in path: the tool call's args arrive already
+    MODEL_OUTPUT_JSON_SCHEMA-shaped — no free-text JSON to parse — yet the
+    batch comes out the same as the free-text path fed the same content."""
+    llm = ToolCallingFakeChatModel(tool_call_args=[json.loads(MODEL_ANSWER)])
+    ingester = TaguruIngester(
+        context="sake",
+        llm=llm,
+        client=sync_client,
+        async_client=async_client,
+        questions=2,
+        structured_output=True,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+
+    assert outcome.ok
+    assert outcome.llm_calls == 1
+    assert outcome.duplicates_dropped == 1
+    assert outcome.invalid_dropped == 1
+    assert outcome.associations == 2
+    assert outcome.aliases == 1
+
+
+async def test_astructured_output_true_uses_with_structured_output(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """Async twin: the structured path goes through ainvoke(), not invoke()."""
+    llm = ToolCallingFakeChatModel(tool_call_args=[json.loads(MODEL_ANSWER)])
+    ingester = TaguruIngester(
+        context="sake",
+        llm=llm,
+        client=sync_client,
+        async_client=async_client,
+        questions=2,
+        structured_output=True,
+    )
+    outcome = await ingester.aingest_text(DOC_TEXT, source="docs/aomine.md")
+
+    assert outcome.ok
+    assert outcome.llm_calls == 1
+    assert outcome.associations == 2
+    assert outcome.aliases == 1
 
 
 def test_dry_run_renders_but_never_sends(
@@ -342,6 +424,30 @@ def test_validation_rejects_bad_fact_budget_max_attempts_and_corrective_context_
         TaguruIngester(context="c", llm=llm, client=sync_client, max_attempts=11)
     with pytest.raises(ValueError, match="corrective_context_bytes"):
         TaguruIngester(context="c", llm=llm, client=sync_client, corrective_context_bytes=-1)
+
+
+def test_structured_output_is_off_by_default(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """Building against a model that cannot bind tools succeeds as long as
+    structured_output stays at its default (False) — with_structured_output()
+    is only ever called once the caller opts in."""
+    llm = FakeListChatModel(responses=["{}"])
+    ingester = TaguruIngester(context="c", llm=llm, client=sync_client)
+    assert ingester.structured_output is False
+    assert ingester._structured_llm is None
+
+
+def test_structured_output_true_raises_when_the_model_cannot_bind_tools(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """Provider/model dependent, and fails fast: opting in against a chat
+    model that doesn't implement bind_tools() — most of the Fake* models
+    used elsewhere in this file, matching plenty of real integrations —
+    raises out of the constructor, before any document is ingested."""
+    llm = FakeListChatModel(responses=["{}"])
+    with pytest.raises(NotImplementedError):
+        TaguruIngester(context="c", llm=llm, client=sync_client, structured_output=True)
 
 
 def test_fact_budget_is_folded_into_the_system_prompt(
