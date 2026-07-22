@@ -74,7 +74,102 @@ fn add_alias(
     Ok(())
 }
 
+/// A predicted alias-resolution target during pre-flight conflict
+/// checking: either a name already interned in the context, or the
+/// Nth distinct name this same batch's own associations would freshly
+/// intern once applied. The two variants can never compare equal to
+/// each other regardless of payload, so a placeholder index can never
+/// be mistaken for a real id.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SimTarget {
+    Existing(u32),
+    Fresh(usize),
+}
+
+/// Predicts whether applying `aliases` in key order against `ids` (a
+/// namespace's real `concept_ids`/`label_ids` — canonicals and
+/// registered aliases share one lookup, exactly as [`add_alias`]
+/// consults it) would hit [`AliasError::UnknownCanonical`] or
+/// [`AliasError::Conflict`], without writing anything. `fresh` names
+/// this same batch's own associations would newly intern once they
+/// actually apply; a canonical or an alias may resolve through one of
+/// those exactly as it would once the associations land, and an
+/// existing name always wins over a same-named fresh one, mirroring
+/// `Context::intern_concept`/`intern_label`. An alias that resolves
+/// earlier in the same call is visible to later ones, so a same-batch
+/// chain (`"aipa"` aliasing `"IPA"`, itself aliased two lines above)
+/// predicts correctly instead of a spurious `UnknownCanonical`. Stops
+/// at the first predicted rejection, matching the write path's
+/// stop-at-first-rejection replay. Capacity (`AliasError::Full`) is
+/// never predicted here — it depends on the live table's current
+/// size, which a read-only check would have to duplicate for no
+/// benefit; the real write path still catches it.
+fn check_aliases<'a>(
+    ids: &HashMap<String, u32>,
+    aliases: &'a BTreeMap<String, String>,
+    fresh: impl IntoIterator<Item = &'a str>,
+) -> Result<(), (&'a str, &'a str, AliasError)> {
+    let mut overlay: HashMap<&'a str, SimTarget> = HashMap::new();
+    let mut next_fresh = 0usize;
+    for name in fresh {
+        if !ids.contains_key(name) && !overlay.contains_key(name) {
+            overlay.insert(name, SimTarget::Fresh(next_fresh));
+            next_fresh += 1;
+        }
+    }
+    let resolve = |overlay: &HashMap<&'a str, SimTarget>, name: &str| -> Option<SimTarget> {
+        overlay
+            .get(name)
+            .copied()
+            .or_else(|| ids.get(name).map(|&id| SimTarget::Existing(id)))
+    };
+    for (alias, canonical) in aliases {
+        let Some(target) = resolve(&overlay, canonical) else {
+            return Err((
+                alias.as_str(),
+                canonical.as_str(),
+                AliasError::UnknownCanonical,
+            ));
+        };
+        match resolve(&overlay, alias) {
+            Some(existing) if existing != target => {
+                return Err((alias.as_str(), canonical.as_str(), AliasError::Conflict));
+            }
+            Some(_) => {}
+            None => {
+                overlay.insert(alias.as_str(), target);
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Context {
+    /// Predicts whether [`Context::add_concept_alias`] would reject
+    /// any of `aliases` (applied in key order, matching how the
+    /// registry's write path applies them) once `fresh` — names this
+    /// same batch's own associations have not yet interned — are
+    /// accounted for. Lets an import batch be refused before any of
+    /// its steps mutate the context, instead of discovering the same
+    /// rejection after earlier steps already landed. See
+    /// [`check_aliases`] for the prediction rules.
+    pub fn check_concept_aliases<'a>(
+        &self,
+        aliases: &'a BTreeMap<String, String>,
+        fresh: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), (&'a str, &'a str, AliasError)> {
+        check_aliases(&self.concept_ids, aliases, fresh)
+    }
+
+    /// [`Context::check_concept_aliases`] for the label namespace.
+    pub fn check_label_aliases<'a>(
+        &self,
+        aliases: &'a BTreeMap<String, String>,
+        fresh: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), (&'a str, &'a str, AliasError)> {
+        check_aliases(&self.label_ids, aliases, fresh)
+    }
+
     /// Registers an alternative spelling for an existing concept. Aliases
     /// are entry-only: every lookup — `query`, `recall`, `describe`,
     /// walk origins, `resolve` candidates, and interning on the write

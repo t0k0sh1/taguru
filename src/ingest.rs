@@ -52,6 +52,7 @@ use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use taguru::context::Context;
 use taguru::deadline::Deadline;
 
 use crate::api::{
@@ -1083,21 +1084,31 @@ pub(crate) enum ApplyRefusal {
         message: String,
         full: bool,
     },
+    /// Predicted before anything mutated: this batch's own alias
+    /// operations would resolve to `AliasError::UnknownCanonical` or
+    /// `Conflict` once actually applied, so the whole batch is
+    /// refused up front (409) — no context created, no marker opened,
+    /// no retraction, nothing. Distinct from `Partial { applied: 0,
+    /// .. }`, which can only follow the retraction (itself a write)
+    /// already landing.
+    Rejected(String),
 }
 
 impl ApplyRefusal {
     /// Whether the batch may have durably written anything before the
-    /// refusal. Only [`ApplyRefusal::NoContext`] provably precedes the
-    /// first write — everything past that point starts with the source
-    /// retraction, itself a durable write, so a later refusal (a
-    /// passage that would not persist, a partial prefix of
+    /// refusal. Only [`ApplyRefusal::NoContext`] and
+    /// [`ApplyRefusal::Rejected`] provably precede the first write —
+    /// the latter is a predicted alias rejection, checked before the
+    /// context is even created. Everything past that point starts
+    /// with the source retraction, itself a durable write, so a later
+    /// refusal (a passage that would not persist, a partial prefix of
     /// associations or aliases) leaves real changes behind. `Io` from
     /// a failed create or a failed batch-marker write is the
     /// over-approximation (both precede the first graph write); the
     /// refresh pass answers an absent context with its no-op `None`
     /// arm anyway.
     pub(crate) fn wrote_anything(&self) -> bool {
-        !matches!(self, Self::NoContext(_))
+        !matches!(self, Self::NoContext(_) | Self::Rejected(_))
     }
 
     /// How many ops this refusal's batch durably wrote before failing.
@@ -1110,7 +1121,7 @@ impl ApplyRefusal {
     pub(crate) fn ops_written(&self) -> usize {
         match self {
             Self::Partial { applied, .. } => *applied,
-            Self::NoContext(_) | Self::Io(_) | Self::Access(_) => 0,
+            Self::NoContext(_) | Self::Io(_) | Self::Access(_) | Self::Rejected(_) => 0,
         }
     }
 
@@ -1141,6 +1152,7 @@ impl ApplyRefusal {
             // Access.
             Self::Access(AccessError::QuotaExceeded(message)) => message.clone(),
             Self::Partial { message, .. } => message.clone(),
+            Self::Rejected(message) => message.clone(),
         }
     }
 }
@@ -1176,23 +1188,87 @@ fn corrected_associations(batch: &Batch, paragraph_count: Option<usize>) -> (Vec
     (corrected, dropped)
 }
 
+/// Predicts, without writing anything, whether this batch's own alias
+/// operations would resolve to `AliasError::UnknownCanonical` or
+/// `Conflict` once actually applied — the only purely content-driven
+/// (non-capacity) rejections anywhere in the four-step apply pipeline.
+/// Shared between [`apply_batch`] and [`preview_batch`] so a dry run
+/// can never disagree with the real import about this call.
+///
+/// Checks concepts before labels, mirroring the WAL op order
+/// `add_aliases` actually writes in, so a predicted message names the
+/// same operation that would be the first to fail for real.
+///
+/// A context that does not exist yet has no aliases and no
+/// associations to seed fresh names with, so a batch with a `create`
+/// block is checked against an empty [`Context::default`] — exactly
+/// the value `AppState::create` seeds a new context with. A context
+/// that does not exist and brings no `create` block is left to the
+/// ordinary `NoContext` refusal that follows this check.
+fn predicted_alias_rejection(state: &AppState, batch: &Batch) -> Option<String> {
+    if batch.concepts.is_empty() && batch.labels.is_empty() {
+        return None;
+    }
+    let concepts = batch
+        .associations
+        .iter()
+        .flat_map(|op| [op.subject.as_str(), op.object.as_str()]);
+    let labels = batch.associations.iter().map(|op| op.label.as_str());
+    let check = move |context: &Context| -> Option<String> {
+        if let Err((alias, canonical, error)) =
+            context.check_concept_aliases(&batch.concepts, concepts)
+        {
+            return Some(format!(
+                "concept alias '{alias}' → '{canonical}': {error}; nothing was applied"
+            ));
+        }
+        if let Err((alias, canonical, error)) = context.check_label_aliases(&batch.labels, labels) {
+            return Some(format!(
+                "label alias '{alias}' → '{canonical}': {error}; nothing was applied"
+            ));
+        }
+        None
+    };
+
+    if state.directory_entry(&batch.context).is_none() {
+        return if batch.create.is_some() {
+            check(&Context::default())
+        } else {
+            None
+        };
+    }
+    state.read_context(&batch.context, check).ok().flatten()
+}
+
 /// Applies one validated batch: ensure the context, retract the
 /// source, then land passage → associations → aliases. Aliases go
 /// last on purpose — an alias needs its canonical interned, and the
-/// associations just before are what intern it.
+/// associations just before are what intern it. Before any of that,
+/// [`predicted_alias_rejection`] checks whether this batch's own alias
+/// operations would resolve to a conflict; a predicted rejection
+/// refuses the whole batch with [`ApplyRefusal::Rejected`] up front,
+/// so a bad alias no longer surfaces only after the associations (or
+/// the retraction) have already landed.
 ///
-/// The four mutations are separately durable, so a crash between them
-/// leaves the source half-applied with every store individually
-/// consistent — undetectable after the fact. A batch-open marker
-/// brackets them: written before the retraction, removed only after
-/// the aliases, so boot and `taguru inspect` can name any batch that
-/// never finished. A REFUSED batch keeps its marker too — the refusal
-/// is reported once, the marker keeps saying so until the documented
-/// repair (re-import, or retract the source) actually runs.
-/// Cross-store atomicity is deliberately not attempted: per-source
+/// Past that point, the four mutations are separately durable, so a
+/// crash between them leaves the source half-applied with every store
+/// individually consistent — undetectable after the fact. A
+/// batch-open marker brackets them: written before the retraction,
+/// removed only after the aliases, so boot and `taguru inspect` can
+/// name any batch that never finished. A batch refused after the
+/// marker opens (capacity, disk trouble) keeps its marker too — the
+/// refusal is reported once, the marker keeps saying so until the
+/// documented repair (re-import, or retract the source) actually
+/// runs. A predicted rejection opens no marker at all: nothing ran
+/// yet for it to bracket. Cross-store atomicity is deliberately not
+/// attempted for what prediction cannot catch: per-source
 /// retract-then-apply idempotency already makes the repair exact, so
-/// detection is the whole remaining gap.
+/// detection is the remaining gap.
 pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, ApplyRefusal> {
+    if let Some(message) = predicted_alias_rejection(state, batch) {
+        return Err(ApplyRefusal::Rejected(message));
+    }
+
     let mut created = false;
     if state.directory_entry(&batch.context).is_none() {
         let Some(meta) = &batch.create else {
@@ -1380,16 +1456,24 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
 /// The read-only twin of [`apply_batch`], for `POST
 /// /import?dry_run=true`: reports what a batch WOULD do without
 /// writing anything — no context created, no marker opened, no source
-/// retracted. Every write step in `apply_batch` has a cheap read-only
-/// counterpart here, except two: `associations` and `aliases` are
-/// OPTIMISTIC counts (every op this batch carries, corrected the same
-/// way `apply_batch` corrects them). A capacity cap (507) or a
-/// conflicting concurrent write (409) can only surface by actually
-/// applying the op, so on those two counts a dry run is advisory —
-/// the real import can still apply fewer than previewed. Every other
-/// field (`retracted`, the drop counts) reads through to the same
-/// state a real batch would query, so it matches exactly.
+/// retracted. Runs the same [`predicted_alias_rejection`] check first,
+/// so a batch whose aliases would conflict is refused here exactly as
+/// it would be by `apply_batch` — the two entrances can never
+/// disagree on that call. Every other write step in `apply_batch` has
+/// a cheap read-only counterpart here, except the `associations` and
+/// `aliases` counts, which stay OPTIMISTIC (every op this batch
+/// carries, corrected the same way `apply_batch` corrects them): a
+/// capacity cap (507) can only surface by actually applying the op,
+/// so those two COUNTS remain advisory even though an alias CONFLICT
+/// no longer is — the real import can still apply fewer associations
+/// or aliases than previewed. Every other field (`retracted`, the
+/// drop counts) reads through to the same state a real batch would
+/// query, so it matches exactly.
 pub(crate) fn preview_batch(state: &AppState, batch: &Batch) -> Result<Applied, ApplyRefusal> {
+    if let Some(message) = predicted_alias_rejection(state, batch) {
+        return Err(ApplyRefusal::Rejected(message));
+    }
+
     let created = state.directory_entry(&batch.context).is_none();
     if created && batch.create.is_none() {
         return Err(ApplyRefusal::NoContext(batch.context.clone()));
@@ -2124,9 +2208,13 @@ mod tests {
     }
 
     /// The batch-open marker around `apply_batch`'s four mutations:
-    /// absent after success, present after a mid-batch refusal (the
-    /// crash-shaped tear shares the same signature), gone again once
-    /// the documented repair — re-importing the source — completes.
+    /// absent after success, never opened at all for a batch whose
+    /// alias step is predicted to fail before anything runs, gone
+    /// again once the documented repair — re-importing the source —
+    /// completes. A marker surviving a genuine mid-batch refusal (one
+    /// prediction cannot catch, e.g. a disk fault) is covered
+    /// separately by
+    /// [`apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted`].
     #[test]
     fn apply_batch_brackets_its_steps_with_the_import_marker() {
         let dir = std::env::temp_dir().join(format!("taguru-ingest-marker-{}", std::process::id()));
@@ -2145,25 +2233,26 @@ mod tests {
             "a completed batch clears its marker"
         );
 
-        // A batch refused partway keeps it: the refusal is reported
-        // once, the marker keeps saying so until the repair runs. (An
-        // alias to a canonical nothing interned fails AFTER the
-        // retraction — a genuinely half-applied source.)
+        // A batch whose alias step is predicted to fail is refused
+        // before anything runs: no marker opens for it to keep. (An
+        // alias to a canonical nothing interned — the same rejection
+        // `add_alias` would raise for real, just caught here first.)
         let torn = parse(
             "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
              {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
         )
         .unwrap();
         let refusal = apply_batch(&state, &torn).unwrap_err();
-        assert!(matches!(refusal, ApplyRefusal::Partial { .. }));
+        assert!(matches!(refusal, ApplyRefusal::Rejected(_)));
         assert_eq!(
             crate::registry::import_marker_paths(&dir, "sake").len(),
-            1,
-            "a refused batch keeps its marker"
+            0,
+            "a predicted rejection opens no marker"
         );
 
-        // The documented repair — re-import a corrected file for the
-        // same source — completes and clears the tear.
+        // A corrected batch for the same source applies cleanly —
+        // there was never a tear to repair, just a rejected batch
+        // that nothing depended on.
         let fixed = parse(
             "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
              {\"subject\": \"青嶺酒造\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n\
@@ -2173,7 +2262,7 @@ mod tests {
         apply_batch(&state, &fixed).unwrap();
         assert!(
             crate::registry::import_marker_paths(&dir, "sake").is_empty(),
-            "re-import completes and clears the tear"
+            "a normal import leaves no marker"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -2298,16 +2387,17 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A batch whose associations land before its alias step trips a
-    /// refusal must report the running total, not just the alias
-    /// count — otherwise a batch that durably wrote several
-    /// associations and zero aliases reports `applied: 0`, which both
-    /// undercounts the CLI's `ops_since_flush` and (over HTTP) skips
-    /// `note_write` for a context that did change.
+    /// A batch that pairs a valid association with a conflicting
+    /// alias, aimed at a context that does not exist yet, is refused
+    /// before the association ever lands: predicting the alias step's
+    /// outcome up front means a batch that would otherwise write the
+    /// association and only then fail on its alias no longer gets to
+    /// write anything at all — not even the context it would have
+    /// created.
     #[test]
-    fn a_partial_alias_refusal_reports_associations_already_applied() {
+    fn a_predicted_alias_rejection_creates_nothing_and_applies_nothing() {
         let dir = std::env::temp_dir().join(format!(
-            "taguru-ingest-partial-alias-{}",
+            "taguru-ingest-predicted-rejection-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
@@ -2320,14 +2410,16 @@ mod tests {
         )
         .unwrap();
         let refusal = apply_batch(&state, &torn).unwrap_err();
-        let ApplyRefusal::Partial { applied, .. } = &refusal else {
-            panic!("expected a partial refusal, got {refusal:?}");
-        };
-        assert_eq!(
-            *applied, 1,
-            "the association landed before the alias step failed"
+        assert!(
+            matches!(refusal, ApplyRefusal::Rejected(_)),
+            "expected a predicted rejection, got {refusal:?}"
         );
-        assert_eq!(refusal.ops_written(), 1);
+        assert!(!refusal.wrote_anything());
+        assert_eq!(refusal.ops_written(), 0);
+        assert!(
+            state.directory_entry("sake").is_none(),
+            "a predicted rejection must not create the context the batch named"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2346,6 +2438,7 @@ mod tests {
             .ops_written(),
             5
         );
+        assert_eq!(ApplyRefusal::Rejected("boom".to_string()).ops_written(), 0);
     }
 
     /// Move one deterministic filesystem failure through the complete
@@ -2391,6 +2484,14 @@ mod tests {
                         !before_marker,
                         "a stopped batch at step {failure} lost its tear witness: {refusal:?}"
                     );
+                    if let ApplyRefusal::Partial { applied, .. } = refusal {
+                        assert_eq!(
+                            refusal.ops_written(),
+                            *applied,
+                            "step {failure}: ops_written must mirror the partial \
+                             refusal's own running total"
+                        );
+                    }
                 }
                 // Re-import is the documented repair and is exact even
                 // when the injected error was swallowed after a fully
