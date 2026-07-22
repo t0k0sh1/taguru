@@ -54,6 +54,17 @@ left unset, the default, replays it in full). Worth raising
 local models, where a large malformed answer near the output cap can
 otherwise stall a chunk for minutes.
 
+`TaguruIngester` also takes an optional `structured_output` flag (default
+`False`) that asks the chat model for JSON-schema-constrained generation —
+`llm.with_structured_output(MODEL_OUTPUT_JSON_SCHEMA, include_raw=True)` —
+instead of parsing a free-text answer. Strictly opt-in and provider/model
+dependent: a chat model that cannot bind tools raises out of the
+constructor immediately, before any document is ingested, rather than
+surfacing later as a per-attempt failure. Either way the answer still goes
+through the same `ModelOutput` revalidation and business-rule checks a
+free-text answer gets — a schema only narrows what shape a well-behaved
+provider can return.
+
 Not provided, deliberately: a VectorStore facade (Taguru's retrieval is
 structural-first — `similarity_search` would misrepresent it), a Memory class
 (deprecated upstream in favor of LangGraph state), and agent Tools (the MCP

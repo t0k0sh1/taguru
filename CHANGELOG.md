@@ -8,6 +8,21 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- The extractors gain a canonical `ModelOutput` JSON Schema (#185) — the
+  `{associations, aliases, questions}` shape `taguru extract`'s parser, the
+  Python SDK's pydantic model, and the TypeScript SDK's `parseModelOutput()`
+  already all accept, hand-written once (never derived from the parser
+  types) and exported as `model_output_json_schema()` (Rust, the source of
+  truth) and `MODEL_OUTPUT_JSON_SCHEMA` (Python and TypeScript, hand-
+  mirrored). All three copies are tested against the same shared
+  accept/reject payload fixtures. `TaguruIngester` (Python and TypeScript)
+  gains an opt-in `structured_output` flag, default `False`/`false`, that
+  asks the chat model for schema-constrained generation via
+  `with_structured_output()` / `withStructuredOutput()` instead of parsing
+  free text — provider/model dependent, so a chat model that cannot bind
+  tools raises immediately at construction rather than per attempt; either
+  way the result still goes through the same `ModelOutput` revalidation and
+  merge()'s business-rule checks.
 - `taguru extract` and `TaguruIngester` gain bounded structured-output
   controls and a configurable retry strategy (#178) — `--fact-budget N` /
   `fact_budget` asks the model to keep a chunk's answer to at most N

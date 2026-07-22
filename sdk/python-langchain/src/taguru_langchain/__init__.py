@@ -17,6 +17,7 @@ serves the identical tool vocabulary — pair it with ``langchain-mcp-adapters``
 
 from __future__ import annotations
 
+from ._extract import MODEL_OUTPUT_JSON_SCHEMA
 from .events import (
     AttemptFailed,
     AttemptStarted,
@@ -41,6 +42,7 @@ __all__ = [
     "TaguruRetriever",
     "TaguruIngester",
     "IngestOutcome",
+    "MODEL_OUTPUT_JSON_SCHEMA",
     "IngestEvent",
     "IngestEventCallback",
     "ProviderMetadata",

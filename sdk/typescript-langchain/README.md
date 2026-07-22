@@ -34,6 +34,17 @@ conversational long-term memory — each mirrored in Python) live in
 [examples/langchain](https://github.com/t0k0sh1/taguru/tree/main/examples/langchain);
 they work offline, no API key needed.
 
+`TaguruIngester` also takes an optional `structured_output` flag (default
+`false`) that asks the chat model for JSON-schema-constrained generation —
+`llm.withStructuredOutput(MODEL_OUTPUT_JSON_SCHEMA, { includeRaw: true })`
+— instead of parsing a free-text answer. Strictly opt-in and provider/model
+dependent: a chat model that cannot bind tools raises out of the
+constructor immediately, before any document is ingested, rather than
+surfacing later as a per-attempt failure. Either way the answer still goes
+through the same `ModelOutput` revalidation and business-rule checks a
+free-text answer gets — a schema only narrows what shape a well-behaved
+provider can return.
+
 Not provided, deliberately: a VectorStore facade (Taguru's retrieval is
 structural-first — `similaritySearch` would misrepresent it), a Memory class
 (deprecated upstream in favor of LangGraph state), and agent Tools (the MCP

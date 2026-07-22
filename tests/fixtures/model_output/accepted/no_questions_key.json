@@ -1,0 +1,8 @@
+{
+  "associations": [
+    {"subject": "a", "label": "b", "object": "c", "weight": 1.0, "paragraph": 0}
+  ],
+  "aliases": [
+    {"alias": "x", "canonical": "a", "kind": "concept"}
+  ]
+}

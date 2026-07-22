@@ -46,6 +46,100 @@ export interface ModelOutput {
   questions: ModelQuestion[];
 }
 
+/**
+ * The canonical JSON Schema for the shape parseModelOutput() accepts —
+ * hand-mirrored from src/extract.rs's model_output_json_schema() (never
+ * derived from the ModelOutput interface itself), the same discipline
+ * PROMPT_VERSION and systemPrompt()'s wording already follow. Pass this to a
+ * BaseChatModel.withStructuredOutput() call that supports JSON-schema-
+ * constrained generation to shape what the model answers with, instead of
+ * only checking it afterward — TaguruIngester's structuredOutput flag does
+ * exactly that (off by default; see ingest.ts).
+ *
+ * Deliberately stricter than parseModelOutput()'s own lenient coercion:
+ * - additionalProperties: false everywhere, and every field required here
+ *   is one merge() always drops the item over anyway (subject/label/object
+ *   on an association; alias/canonical/kind on an alias; paragraph/question
+ *   on a question) — a schema-constrained model structurally cannot produce
+ *   the wrong-typed or extra-property shapes coerceOutput exists to tolerate
+ *   from free-text answers.
+ * - weight and an association's paragraph stay optional: merge() defaults
+ *   a missing weight to 1.0 and untags (never drops) a missing or
+ *   out-of-range paragraph, so omitting either is a valid, intentional
+ *   shape, not just something tolerated.
+ *
+ * What this schema does NOT encode — merge()'s later business-rule
+ * validation, applied identically however the answer was produced:
+ * - Byte-length caps (MAX_NAME_BYTES, MAX_QUESTION_BYTES): JSON Schema's
+ *   maxLength counts UTF-16 code units, not UTF-8 bytes, so it cannot
+ *   mirror these precisely.
+ * - An association's weight must be finite, non-zero, and within
+ *   MAX_ASSOCIATION_WEIGHT — a magnitude/business check, not a shape.
+ * - A paragraph index must be less than the document's paragraph count —
+ *   known only per-document at merge time, never at schema-authoring time;
+ *   this schema only enforces the universal >= 0 half.
+ * - Cross-item rules: deduplication, and an alias's canonical naming a
+ *   subject/object/label the associations actually contain.
+ *
+ * `title` is carried for parity with the Rust and Python copies, not because
+ * LangChain.js requires it: BaseChatModel.withStructuredOutput() here reads
+ * config.name, falling back to a plain schema's own `name` property (not
+ * `title`), and finally to the generic "extract" — it never throws over a
+ * missing title the way Python's with_structured_output() does (confirmed
+ * against @langchain/core's chat_models.js). Keeping the key anyway means
+ * the three mirrored schemas stay structurally identical rather than
+ * diverging on a platform quirk.
+ */
+export const MODEL_OUTPUT_JSON_SCHEMA = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  title: "ModelOutput",
+  type: "object",
+  additionalProperties: false,
+  required: ["associations", "aliases"],
+  properties: {
+    associations: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["subject", "label", "object"],
+        properties: {
+          subject: { type: "string", minLength: 1 },
+          label: { type: "string", minLength: 1 },
+          object: { type: "string", minLength: 1 },
+          weight: { type: "number" },
+          paragraph: { type: "integer", minimum: 0 },
+        },
+      },
+    },
+    aliases: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["alias", "canonical", "kind"],
+        properties: {
+          alias: { type: "string", minLength: 1 },
+          canonical: { type: "string", minLength: 1 },
+          kind: { type: "string", enum: ["concept", "label"] },
+        },
+      },
+    },
+    questions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["paragraph", "question"],
+        properties: {
+          paragraph: { type: "integer", minimum: 0 },
+          question: { type: "string", minLength: 1 },
+        },
+      },
+    },
+  },
+};
+
 // -- paragraph split (mirrors src/paragraph.rs exactly) --------------------------
 
 /**
@@ -310,7 +404,17 @@ function coerceInt(value: unknown, where: string): number | null {
   throw new Error(`${where} is not an integer`);
 }
 
-function coerceOutput(parsed: unknown): ModelOutput {
+/**
+ * Reshapes a parsed JSON value into ModelOutput, coercing scalar types
+ * leniently (see coerceString/coerceFloat/coerceInt) the way parseModelOutput()
+ * does for a free-text answer. Exported so a structured-output caller — one
+ * that already has a `parsed` value shaped by MODEL_OUTPUT_JSON_SCHEMA — can
+ * run it through the same revalidation: LangChain.js's withStructuredOutput()
+ * does not itself validate `parsed` against a plain JSON Schema object (only
+ * a Zod schema gets that), so a provider that "supports" schema-constrained
+ * generation but drifts from it needs the same net a free-text answer gets.
+ */
+export function coerceOutput(parsed: unknown): ModelOutput {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("the answer is not a JSON object");
   }

@@ -7,8 +7,12 @@ two producers can never silently diverge on the batch contract.
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import jsonschema
 
 from taguru_langchain._extract import (
+    MODEL_OUTPUT_JSON_SCHEMA,
     ModelAlias,
     ModelAssociation,
     ModelOutput,
@@ -24,6 +28,11 @@ from taguru_langchain._extract import (
     split_paragraphs,
     system_prompt,
 )
+
+# sdk/python-langchain/tests/unit/test_extract.py -> repo root: same depth
+# tests/integration/conftest.py's REPO_ROOT climbs (unit, tests,
+# python-langchain, sdk).
+FIXTURES_ROOT = Path(__file__).resolve().parents[4] / "tests" / "fixtures" / "model_output"
 
 
 def association(subject: str, label: str, object_: str, weight: float) -> ModelAssociation:
@@ -375,3 +384,29 @@ def test_corrective_message_names_the_fact_budget_when_length_limited_and_set() 
     """Port of extract.rs corrective_message_names_the_fact_budget_when_length_limited_and_set."""
     message = corrective_message("bad json", True, 5)
     assert "Keep it to at most 5 association(s) total." in message
+
+
+def test_json_schema_accepts_and_rejects_the_shared_fixtures() -> None:
+    """MODEL_OUTPUT_JSON_SCHEMA against tests/fixtures/model_output — the same
+    corpus the Rust and TypeScript copies validate against, so the three
+    mirrored schemas cannot silently drift apart."""
+    validator = jsonschema.Draft202012Validator(MODEL_OUTPUT_JSON_SCHEMA)
+
+    accepted_paths = sorted((FIXTURES_ROOT / "accepted").glob("*.json"))
+    assert accepted_paths, "the accepted fixture directory must not be empty"
+    for path in accepted_paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        errors = list(validator.iter_errors(payload))
+        assert not errors, f"{path.name} should validate against the schema: {errors}"
+        # The schema's accepted set is meant to sit inside
+        # parse_model_output's — every fixture the schema takes must also be
+        # a real model answer.
+        parse_model_output(json.dumps(payload))
+
+    rejected_paths = sorted((FIXTURES_ROOT / "rejected").glob("*.json"))
+    assert rejected_paths, "the rejected fixture directory must not be empty"
+    for path in rejected_paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert not validator.is_valid(payload), (
+            f"{path.name} should NOT validate against the schema"
+        )

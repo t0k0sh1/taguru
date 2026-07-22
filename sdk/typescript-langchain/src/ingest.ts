@@ -6,8 +6,10 @@
  */
 
 import type { DocumentInterface } from "@langchain/core/documents";
+import type { BaseLanguageModelInput } from "@langchain/core/language_models/base";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { AIMessage, HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages";
+import type { Runnable } from "@langchain/core/runnables";
 import {
   EmbeddingUnavailableError,
   NotFoundError,
@@ -19,8 +21,10 @@ import {
   CHUNK_BYTES,
   MAX_PASSAGE_BYTES,
   MAX_QUESTIONS_PER_PARAGRAPH,
+  MODEL_OUTPUT_JSON_SCHEMA,
   VOCABULARY_CAP,
   chunk,
+  coerceOutput,
   labeledDocument,
   merge,
   parseModelOutput,
@@ -84,7 +88,18 @@ export interface TaguruIngesterFields {
   vocabulary_cap?: number;
   refresh_embeddings?: boolean;
   raise_on_error?: boolean;
+  structured_output?: boolean;
 }
+
+/**
+ * The shape withStructuredOutput(schema, { includeRaw: true }) resolves to
+ * for a plain (non-Zod) JSON Schema like MODEL_OUTPUT_JSON_SCHEMA: RunOutput
+ * stays at its Record<string, any> default. The .d.ts types `parsed` as
+ * always-present, but the implementation's own includeRaw:true fallback
+ * (@langchain/core's assembleStructuredOutputPipeline) can still resolve it
+ * to null on a failed extraction — invokeForOutput() below checks for that.
+ */
+type StructuredOutputResult = { raw: BaseMessage; parsed: Record<string, unknown> };
 
 /**
  * Decompose LangChain Documents into one Taguru context via a chat model.
@@ -100,11 +115,13 @@ export class TaguruIngester {
   readonly vocabulary_cap: number;
   readonly refresh_embeddings: boolean;
   readonly raise_on_error: boolean;
+  readonly structured_output: boolean;
 
   private readonly llm: BaseChatModel;
   private readonly client: Taguru;
   private readonly create_context: boolean;
   private readonly context_description: string | undefined;
+  private readonly structuredLlm: Runnable<BaseLanguageModelInput, StructuredOutputResult> | null;
 
   constructor(fields: TaguruIngesterFields) {
     if (fields.create_context && fields.context_description === undefined) {
@@ -127,6 +144,63 @@ export class TaguruIngester {
     this.vocabulary_cap = fields.vocabulary_cap ?? VOCABULARY_CAP;
     this.refresh_embeddings = fields.refresh_embeddings ?? true;
     this.raise_on_error = fields.raise_on_error ?? false;
+    this.structured_output = fields.structured_output ?? false;
+    // Opt-in only (see the Python twin's docstring for the full rationale):
+    // built once here so a chat model that cannot bind tools fails fast, at
+    // construction, rather than surfacing later as a per-attempt failure.
+    // name: "ModelOutput" keeps the bound tool's name aligned with the Rust
+    // and Python producers instead of withStructuredOutput()'s "extract"
+    // default (see MODEL_OUTPUT_JSON_SCHEMA's doc comment in extract.ts).
+    this.structuredLlm = this.structured_output
+      ? fields.llm.withStructuredOutput(MODEL_OUTPUT_JSON_SCHEMA, {
+          includeRaw: true,
+          name: "ModelOutput",
+        })
+      : null;
+  }
+
+  /**
+   * One model call for one attempt, returning `{ content, output, error }`
+   * with `output === null` iff `error !== null`. Goes through the
+   * withStructuredOutput() pipeline built in the constructor when
+   * structured_output is on, else today's plain invoke() + parseModelOutput().
+   * Either path lands in a ModelOutput the same way — coerceOutput() — so
+   * schema-constrained generation narrows the model's answer without
+   * skipping revalidation.
+   */
+  private async invokeForOutput(
+    messages: BaseMessage[],
+  ): Promise<{ content: string; output: ModelOutput | null; error: Error | null }> {
+    if (this.structuredLlm !== null) {
+      const result = await this.structuredLlm.invoke(messages);
+      const content = contentText(result.raw);
+      // Narrow through unknown first — see StructuredOutputResult's comment
+      // on why `parsed` can be null here despite its declared type.
+      const parsed: unknown = result.parsed;
+      if (parsed === undefined || parsed === null) {
+        return {
+          content,
+          output: null,
+          error: new Error(
+            "the model's structured-output call produced no parsed result " +
+              "(LangChain.js surfaces no further detail here — see " +
+              "assembleStructuredOutputPipeline's includeRaw:true fallback)",
+          ),
+        };
+      }
+      try {
+        return { content, output: coerceOutput(parsed), error: null };
+      } catch (error) {
+        return { content, output: null, error: error as Error };
+      }
+    }
+    const response = await this.llm.invoke(messages);
+    const content = contentText(response);
+    try {
+      return { content, output: parseModelOutput(content), error: null };
+    } catch (error) {
+      return { content, output: null, error: error as Error };
+    }
   }
 
   /**
@@ -157,13 +231,12 @@ export class TaguruIngester {
       let output: ModelOutput | null = null;
       let lastError: Error | null = null;
       for (let attempt = 0; attempt < 2 && output === null; attempt += 1) {
-        const response = await this.llm.invoke(messages);
+        const { content, output: parsed, error } = await this.invokeForOutput(messages);
         outcome.llm_calls += 1;
-        const content = contentText(response);
-        try {
-          output = parseModelOutput(content);
-        } catch (error) {
-          lastError = error as Error;
+        if (error === null) {
+          output = parsed;
+        } else {
+          lastError = error;
           messages = [
             ...messages,
             new AIMessage(content),

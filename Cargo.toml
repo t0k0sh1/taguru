@@ -86,6 +86,13 @@ proptest = "1.11.0"
 # at 0.16.1 with no further security fixes, so this targets the
 # maintained successor under its new name.
 gungraun = "0.19.4"
+# Validates model_output_json_schema() against the shared accepted/rejected
+# fixture corpus (tests/fixtures/model_output). Dev-only: the schema is a
+# plain serde_json::Value the crate never validates against at runtime.
+# Default features off — they pull in reqwest/resolve-file/resolve-http/
+# tls-aws-lc-rs for remote $ref resolution the self-contained schema never
+# needs.
+jsonschema = { version = "0.48.2", default-features = false }
 
 [[bench]]
 name = "context"
