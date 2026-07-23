@@ -293,6 +293,21 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("2 generated, 0 reused"), "{stdout}");
     assert_eq!(requests.lock().unwrap().len(), 2);
+    // The chat body carries exactly the base keys: communities rides
+    // extract's ChatClient without ever engaging its structured-output
+    // or output-budget options, and a defaulted request must not grow.
+    let first: serde_json::Value =
+        serde_json::from_str(&requests.lock().unwrap()[0]).expect("a JSON chat body");
+    assert_eq!(
+        first
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["messages", "model", "temperature"],
+        "{first}"
+    );
     let prompts = requests.lock().unwrap().join("\n");
     assert!(
         prompts.contains("近い"),

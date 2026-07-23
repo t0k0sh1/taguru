@@ -1,6 +1,6 @@
 # 0001. Guaranteed structured extraction and truncation strategy
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-07-23
 - **Issue**: #188
 - **Related**: #178, #179, #180, #181, #182, #185, #187

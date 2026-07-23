@@ -8,6 +8,29 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru extract` puts structured output on the wire and gains an explicit
+  output budget with deterministic length escalation (#198, implementing
+  ADR 0001 §4.1/§4.2/§7) — `--structured-output` /
+  `TAGURU_EXTRACT_STRUCTURED_OUTPUT` selects a rung of the capability
+  ladder (`json-schema` sends the canonical `ModelOutput` schema as
+  `response_format` with `strict` requested, `json-object` sends JSON
+  mode, `auto` probes the endpoint once at startup and keeps the
+  strongest rung the answer verifies, falling back to today's bare
+  prompted JSON); `--max-output-tokens` /
+  `TAGURU_EXTRACT_MAX_OUTPUT_TOKENS` sends `max_tokens` explicitly, and a
+  completion that still ends `finish_reason: length` is never re-asked
+  under the same limit — the budget escalates once (a neutral resend,
+  the truncated answer discarded, its valid-looking prefix never
+  imported), then the chunk splits with paragraph labels preserved, then
+  the source fails with a named diagnosis. Engaging either control also
+  makes policy refusals (`content_filter`) terminal instead of burning a
+  corrective turn, and reports a schema-constrained answer that fails
+  validation as provider non-conformance on stderr. Both controls are
+  manifest compute inputs (changing them re-extracts; old manifests
+  still match all-defaults runs). Defaults are unchanged: with neither
+  control set, the request body and the whole retry behavior — including
+  the truncation-aware "answer SHORTER" correction, now the
+  no-budget-control fallback — are byte-for-byte today's.
 - The extractors gain a canonical `ModelOutput` JSON Schema (#185) — the
   `{associations, aliases, questions}` shape `taguru extract`'s parser, the
   Python SDK's pydantic model, and the TypeScript SDK's `parseModelOutput()`
