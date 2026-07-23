@@ -45,6 +45,26 @@ through the same `ModelOutput` revalidation and business-rule checks a
 free-text answer gets — a schema only narrows what shape a well-behaved
 provider can return.
 
+`TaguruIngester` also takes the same bounded structured-output controls as
+`taguru extract` and the Python SDK, all defaulting to today's unbounded,
+2-attempt, full-replay behavior:
+
+- `fact_budget` — ask the model to keep each chunk's answer to at most N
+  associations, folded into the system prompt (default: unbounded).
+- `max_attempts` — total attempts (1 initial + corrections) at getting the
+  model to answer with the JSON object asked for, `1..=10` (default `2`;
+  `1` skips the corrective turn entirely).
+- `corrective_context_bytes` — how much of the model's own prior bad
+  answer is replayed back to it in the next attempt's corrective turn:
+  unset replays it in full (default), `0` omits it behind a placeholder,
+  any other value truncates it to that many bytes.
+
+When the provider's `AIMessage.response_metadata` says a malformed answer
+was cut off at its output-length cap (`finish_reason`/`done_reason`
+`"length"`, or Anthropic's `stop_reason: "max_tokens"`), the corrective
+ask switches from "try again" to "try again shorter," naming
+`fact_budget` when one is set.
+
 Not provided, deliberately: a VectorStore facade (Taguru's retrieval is
 structural-first — `similaritySearch` would misrepresent it), a Memory class
 (deprecated upstream in favor of LangGraph state), and agent Tools (the MCP

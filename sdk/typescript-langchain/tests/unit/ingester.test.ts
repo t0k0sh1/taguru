@@ -1,7 +1,7 @@
 /** TaguruIngester with a deterministic fake chat model — mirrors the Python suite. */
 
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import { AIMessageChunk } from "@langchain/core/messages";
+import { AIMessage, AIMessageChunk, type BaseMessage } from "@langchain/core/messages";
 import type { ChatResult } from "@langchain/core/outputs";
 import { FakeChatModel, FakeListChatModel } from "@langchain/core/utils/testing";
 import { describe, expect, it } from "vitest";
@@ -72,6 +72,51 @@ class ToolCallingFakeChatModel extends BaseChatModel {
     return { generations: [{ text: "", message }] };
   }
 }
+
+/**
+ * Returns pre-scripted AIMessage responses — so a test can attach
+ * response_metadata, which FakeListChatModel's plain-string responses
+ * cannot carry — and records every message array it was invoked with.
+ * The twin of the Python suite's RecordingFakeMessagesListChatModel.
+ */
+class RecordingFakeMessagesChatModel extends BaseChatModel {
+  responses: AIMessage[];
+  calls = 0;
+  seenPrompts: BaseMessage[][] = [];
+
+  constructor(fields: { responses: AIMessage[] }) {
+    super({});
+    this.responses = fields.responses;
+  }
+
+  _llmType(): string {
+    return "recording-fake-messages";
+  }
+
+  async _generate(messages: BaseMessage[]): Promise<ChatResult> {
+    this.seenPrompts.push(messages);
+    const message = this.responses[this.calls]!;
+    this.calls += 1;
+    const text = typeof message.content === "string" ? message.content : "";
+    return { generations: [{ text, message }] };
+  }
+}
+
+const makeWithMessages = (
+  server: FakeServer,
+  responses: AIMessage[],
+  fields: Record<string, unknown> = {},
+): { ingester: TaguruIngester; llm: RecordingFakeMessagesChatModel } => {
+  const llm = new RecordingFakeMessagesChatModel({ responses });
+  const ingester = new TaguruIngester({
+    context: "sake",
+    llm,
+    client: server.client(),
+    questions: 2,
+    ...fields,
+  });
+  return { ingester, llm };
+};
 
 describe("TaguruIngester", () => {
   it("builds the batch and imports it", async () => {
@@ -212,6 +257,111 @@ describe("TaguruIngester", () => {
     expect(() => new TaguruIngester({ context: "c", llm, client, questions: 99 })).toThrow(
       /questions/,
     );
+  });
+
+  it("rejects bad fact_budget, max_attempts, and corrective_context_bytes", () => {
+    const llm = new FakeListChatModel({ responses: ["{}"] });
+    const client = new FakeServer().client();
+    expect(() => new TaguruIngester({ context: "c", llm, client, fact_budget: 0 })).toThrow(
+      /fact_budget/,
+    );
+    expect(() => new TaguruIngester({ context: "c", llm, client, max_attempts: 0 })).toThrow(
+      /max_attempts must be between 1 and 10/,
+    );
+    expect(() => new TaguruIngester({ context: "c", llm, client, max_attempts: 11 })).toThrow(
+      /max_attempts must be between 1 and 10/,
+    );
+    expect(
+      () => new TaguruIngester({ context: "c", llm, client, corrective_context_bytes: -1 }),
+    ).toThrow(/corrective_context_bytes/);
+  });
+
+  it("folds fact_budget into the system prompt", async () => {
+    const { ingester, llm } = makeWithMessages(new FakeServer(), [new AIMessage(MODEL_ANSWER)], {
+      fact_budget: 3,
+    });
+    const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    const system = llm.seenPrompts[0]![0]!.content as string;
+    expect(system).toContain("Keep this answer to at most 3 association(s) total");
+  });
+
+  it("max_attempts extends corrective retries past the default, rebuilding not accumulating", async () => {
+    const { ingester, llm } = makeWithMessages(
+      new FakeServer(),
+      [
+        new AIMessage("still not json"),
+        new AIMessage("nope, still not"),
+        new AIMessage(MODEL_ANSWER),
+      ],
+      { max_attempts: 3 },
+    );
+    const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.llm_calls).toBe(3);
+    expect(llm.seenPrompts).toHaveLength(3);
+    // Every corrective turn rebuilds from the base: the third request must
+    // still be 4 messages (system, user, latest bad answer, corrective) —
+    // not 6 — proving the first bad answer was dropped, not accumulated.
+    expect(llm.seenPrompts[2]).toHaveLength(4);
+  });
+
+  it("max_attempts of 1 skips the corrective turn", async () => {
+    const { ingester, llm } = makeWithMessages(
+      new FakeServer(),
+      [new AIMessage("not json at all")],
+      { max_attempts: 1 },
+    );
+    await expect(ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" })).rejects.toThrow(
+      /would not produce the JSON object/,
+    );
+    expect(llm.seenPrompts).toHaveLength(1);
+  });
+
+  it("corrective_context_bytes caps the replayed bad answer", async () => {
+    const badAnswer = "not json at all, definitely not a JSON object";
+    const { ingester, llm } = makeWithMessages(
+      new FakeServer(),
+      [new AIMessage(badAnswer), new AIMessage(MODEL_ANSWER)],
+      { corrective_context_bytes: 10 },
+    );
+    const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    const replayed = llm.seenPrompts[1]!.at(-2)!.content as string;
+    expect(replayed).toContain("[truncated to 10 bytes]");
+    expect(replayed).not.toContain(badAnswer);
+  });
+
+  it("corrective_context_bytes of 0 omits the bad answer", async () => {
+    const badAnswer = "not json at all, definitely not a JSON object";
+    const { ingester, llm } = makeWithMessages(
+      new FakeServer(),
+      [new AIMessage(badAnswer), new AIMessage(MODEL_ANSWER)],
+      { corrective_context_bytes: 0 },
+    );
+    const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    const replayed = llm.seenPrompts[1]!.at(-2)!.content as string;
+    expect(replayed).toBe("[omitted: not the requested JSON object]");
+  });
+
+  it("a length-limited bad answer asks for SHORTER and names the fact budget", async () => {
+    const malformed = new AIMessage({
+      content: "not json, and huge",
+      response_metadata: { done_reason: "length" },
+    });
+    const { ingester, llm } = makeWithMessages(
+      new FakeServer(),
+      [malformed, new AIMessage(MODEL_ANSWER)],
+      { fact_budget: 4 },
+    );
+    const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    const corrective = llm.seenPrompts[1]!.at(-1)!.content as string;
+    expect(corrective).toContain("SHORTER");
+    expect(corrective).toContain("cut off at the output limit");
+    expect(corrective).toContain("Keep it to at most 4 association(s) total.");
+    expect(corrective).not.toContain("Answer again with only the JSON object.");
   });
 
   it("defaults structured_output to false, so a model without bindTools still constructs", () => {
