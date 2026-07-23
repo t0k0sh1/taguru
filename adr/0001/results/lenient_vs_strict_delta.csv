@@ -61,7 +61,7 @@ taguru-extract-12b,B,native,negation,3,100.0,100.0,0.0
 taguru-extract-12b,B,native,output_limit,8,75.0,75.0,0.0
 taguru-extract-12b,B,native,short,3,100.0,100.0,0.0
 taguru-extract-12b,B,native,table_noisy,3,100.0,100.0,0.0
-taguru-extract-12b,B,v1,aliases,2,0.0,0.0,0.0
+taguru-extract-12b,B,v1,aliases,1,0.0,0.0,0.0
 taguru-extract-12b,B,v1,negation,1,0.0,0.0,0.0
 taguru-extract-12b,B,v1,short,1,0.0,0.0,0.0
 taguru-extract-12b,C,native,aliases,3,100.0,100.0,0.0

@@ -61,7 +61,7 @@ taguru-extract-12b,B,native,negation,3,31507,34855,300,300
 taguru-extract-12b,B,native,output_limit,8,55374,151031,512,1464
 taguru-extract-12b,B,native,short,3,17247,20512,163,163
 taguru-extract-12b,B,native,table_noisy,3,44284,44333,422,422
-taguru-extract-12b,B,v1,aliases,2,110222,179041,2048,2048
+taguru-extract-12b,B,v1,aliases,1,110222,110222,2048,2048
 taguru-extract-12b,B,v1,negation,1,178313,178313,2048,2048
 taguru-extract-12b,B,v1,short,1,179186,179186,2048,2048
 taguru-extract-12b,C,native,aliases,3,42105,47465,416,416

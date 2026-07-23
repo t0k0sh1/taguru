@@ -25,7 +25,7 @@ taguru-extract-12b,B,native,2048,stop,True,16
 taguru-extract-12b,B,native,512,length,False,6
 taguru-extract-12b,B,native,512,stop,True,2
 taguru-extract-12b,B,native,unbounded,stop,True,4
-taguru-extract-12b,B,v1,2048,length,False,4
+taguru-extract-12b,B,v1,2048,length,False,3
 taguru-extract-12b,C,native,2048,stop,True,16
 taguru-extract-12b,C,native,512,length,False,6
 taguru-extract-12b,C,native,512,stop,True,2

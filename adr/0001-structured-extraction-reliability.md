@@ -29,9 +29,10 @@ source failures after both LangChain attempts ended in malformed JSON
 approximately the run's configured 2048 output-token ceiling, but the
 artifacts of the time retained no per-attempt finish/usage metadata, so
 truncation could not be distinguished from model syntax error. The
-instrumentation gaps are since closed (#177/#183 per-attempt diagnostics,
-#178/#184 finish-reason capture in all three producers); this ADR decides the
-strategy those instruments were built to inform.
+instrumentation gaps are since closed — #177/#183 added per-attempt
+diagnostics and #178/#184 added finish-reason capture in all three
+producers — and this ADR decides the strategy those instruments were built
+to inform.
 
 ### 2.2 Guarantee taxonomy
 
