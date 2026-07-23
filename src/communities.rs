@@ -431,10 +431,13 @@ fn summarize(
             children.join("\n"),
         )
     };
-    let response = chat.complete(&[
-        json!({"role": "system", "content": system}),
-        json!({"role": "user", "content": user}),
-    ])?;
+    let response = chat.complete(
+        &[
+            json!({"role": "system", "content": system}),
+            json!({"role": "user", "content": user}),
+        ],
+        &crate::extract::RequestOptions::default(),
+    )?;
     let text = response.content.trim();
     if text.is_empty() {
         return Err(format!(

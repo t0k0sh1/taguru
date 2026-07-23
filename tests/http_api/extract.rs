@@ -228,6 +228,27 @@ fn chunk_count_from_dry_run(stdout: &str) -> usize {
         .unwrap_or_else(|_| panic!("no chunk count in: {stdout}"))
 }
 
+/// The JSON body of one captured request. [`stub_chat_server`] stores
+/// `"{headers}\n{body}"` while the concurrent stub stores the body
+/// alone; chat bodies are single-line JSON, so the body is always the
+/// text after the last newline either way.
+fn json_body_of(request: &str) -> Value {
+    let body = request.rsplit_once('\n').map_or(request, |(_, body)| body);
+    serde_json::from_str(body).unwrap_or_else(|_| panic!("no JSON body in: {request}"))
+}
+
+/// The top-level keys of one captured request's JSON body, in wire
+/// order — the "defaults add nothing" assertions compare against
+/// exactly `["messages", "model", "temperature"]`.
+fn top_level_keys(request: &str) -> Vec<String> {
+    json_body_of(request)
+        .as_object()
+        .expect("a JSON object body")
+        .keys()
+        .cloned()
+        .collect()
+}
+
 /// Every file in `dir` other than the extract manifest — a failed
 /// document must leave none.
 fn stray_batch_files(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
@@ -1309,6 +1330,948 @@ fn extract_a_length_limited_bad_answer_asks_for_shorter_and_names_the_fact_budge
         !corrective.contains("Answer again with only the JSON object."),
         "a length-limited correction must not repeat the plain ask verbatim: {corrective}"
     );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// With no new control engaged, the request body carries exactly the
+/// pre-ladder keys and the run resolves no structured-output rung —
+/// the wire half of "defaults byte-for-byte unchanged" (the byte half
+/// is extract.rs's own `request_options_default_adds_no_keys_to_the_body`).
+#[test]
+fn extract_default_request_body_carries_exactly_the_base_keys() {
+    let docs = batch_dir("extract-defaultbody-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-defaultbody-out");
+
+    let (url, requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stderr.contains("structured output:"),
+        "no rung resolution may run at defaults: {stderr}"
+    );
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        top_level_keys(&requests[0]),
+        ["messages", "model", "temperature"]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A pinned `--structured-output json-schema` sends the canonical
+/// schema as `response_format` on the one extraction request — no
+/// probe call before it, `strict` requested, the binding name from the
+/// schema's own title.
+#[test]
+fn structured_output_json_schema_sends_the_canonical_schema_without_probing() {
+    let docs = batch_dir("extract-jsonschema-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-jsonschema-out");
+
+    let (url, requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--structured-output",
+            "json-schema",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("structured output: json_schema (pinned)"),
+        "{stderr}"
+    );
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 1, "a pinned mode must not probe");
+    let body = json_body_of(&requests[0]);
+    assert_eq!(body["response_format"]["type"], "json_schema");
+    assert_eq!(
+        body["response_format"]["json_schema"]["name"],
+        "ModelOutput"
+    );
+    assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+    let schema = &body["response_format"]["json_schema"]["schema"];
+    assert_eq!(schema["title"], "ModelOutput");
+    assert_eq!(
+        schema["required"],
+        json!(["associations", "aliases"]),
+        "{schema}"
+    );
+    assert!(
+        body.get("max_tokens").is_none(),
+        "no budget was configured: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn structured_output_json_object_sends_json_mode_without_probing() {
+    let docs = batch_dir("extract-jsonobject-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-jsonobject-out");
+
+    let (url, requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--structured-output",
+            "json-object",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("structured output: json_object (pinned)"),
+        "{stderr}"
+    );
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        json_body_of(&requests[0])["response_format"],
+        json!({"type": "json_object"})
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `--max-output-tokens` alone engages the budget without any
+/// `response_format`: the two controls are orthogonal, and the mode's
+/// default stays off even when the budget is set.
+#[test]
+fn structured_output_off_with_a_budget_sends_max_tokens_and_no_response_format() {
+    let docs = batch_dir("extract-budgetonly-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-budgetonly-out");
+
+    let (url, requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stderr.contains("structured output:"), "{stderr}");
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    let body = json_body_of(&requests[0]);
+    assert_eq!(body["max_tokens"], 512);
+    assert!(body.get("response_format").is_none(), "{body}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn extract_rejects_a_bad_structured_output_value() {
+    let docs = batch_dir("extract-badmode-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "content").unwrap();
+    let out = batch_dir("extract-badmode-out");
+
+    // The flag and the env var reject the same closed vocabulary the
+    // same way — including near-misses in the wrong spelling.
+    for bad in ["json_schema", "schema", "on", ""] {
+        let (code, _, stderr) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ],
+            &[
+                "--context",
+                "c",
+                "--structured-output",
+                bad,
+                doc.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(code, 2, "{bad}: {stderr}");
+        assert!(
+            stderr.contains("--structured-output takes auto, json-schema, json-object, or off"),
+            "{bad}: {stderr}"
+        );
+    }
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_STRUCTURED_OUTPUT", "json_schema"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("TAGURU_EXTRACT_STRUCTURED_OUTPUT takes auto, json-schema"),
+        "{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn extract_rejects_a_bad_max_output_tokens_value() {
+    let docs = batch_dir("extract-badbudget-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "content").unwrap();
+    let out = batch_dir("extract-badbudget-out");
+
+    for bad in ["0", "-1", "nope"] {
+        let (code, _, stderr) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ],
+            &[
+                "--context",
+                "c",
+                "--max-output-tokens",
+                bad,
+                doc.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(code, 2, "{bad}: {stderr}");
+        assert!(
+            stderr.contains("--max-output-tokens needs an integer of at least 1"),
+            "{bad}: {stderr}"
+        );
+    }
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS", "0"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS needs an integer of at least 1"),
+        "{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// With a budget engaged, a `length`-terminated answer escalates
+/// exactly once: the next request drops `max_tokens` and resends the
+/// base ask NEUTRALLY — no corrective turn, no replay of the truncated
+/// answer, none of the legacy SHORTER wording (which asks for less
+/// than the budget could now hold).
+#[test]
+fn length_limited_escalates_once_with_a_neutral_resend_when_a_budget_is_set() {
+    let docs = batch_dir("extract-escalate-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-escalate-out");
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, attempt| {
+        if attempt == 0 {
+            chat_ok_with_finish_reason("truncated garbage", "length")
+        } else {
+            chat_ok(&json!({"associations": []}).to_string())
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 written"), "{stdout}");
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(json_body_of(&requests[0])["max_tokens"], 512);
+    let escalated = json_body_of(&requests[1]);
+    assert!(
+        escalated.get("max_tokens").is_none(),
+        "escalation must drop the budget, never re-ask under it: {escalated}"
+    );
+    assert_eq!(
+        escalated["messages"].as_array().unwrap().len(),
+        2,
+        "escalation is a neutral resend of the base ask: {escalated}"
+    );
+    assert!(
+        !requests[1].contains("truncated garbage"),
+        "{}",
+        requests[1]
+    );
+    assert!(!requests[1].contains("SHORTER"), "{}", requests[1]);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The core regression from ADR 0001: `finish_reason: "length"` on an
+/// answer whose prefix happens to parse is still truncation. The valid
+/// prefix must never be imported — the piece regenerates at the
+/// escalated budget and only THAT answer lands.
+#[test]
+fn a_length_terminated_answer_that_happens_to_parse_is_never_treated_as_success() {
+    let docs = batch_dir("extract-validprefix-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-validprefix-out");
+
+    let prefix = json!({"associations":
+        [{"subject": "half_answer", "label": "l", "object": "x", "weight": 1.0}]});
+    let complete = json!({"associations":
+        [{"subject": "whole_answer", "label": "l", "object": "x", "weight": 1.0}]});
+    let (url, captured) = stub_chat_server_concurrent(move |_index, attempt| {
+        if attempt == 0 {
+            chat_ok_with_finish_reason(&prefix.to_string(), "length")
+        } else {
+            chat_ok(&complete.to_string())
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(captured.lock().unwrap().len(), 2);
+
+    let batches = stray_batch_files(&out);
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let batch = std::fs::read_to_string(out.join(&batches[0])).unwrap();
+    assert!(batch.contains("whole_answer"), "{batch}");
+    assert!(
+        !batch.contains("half_answer"),
+        "a truncated answer's valid prefix must never import: {batch}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Without a configured budget there is nothing to escalate: `length`
+/// goes straight to the split rung, and each sub-piece runs its own
+/// ladder from the top.
+#[test]
+fn length_limited_without_a_configured_budget_splits_instead_of_escalating() {
+    let docs = batch_dir("extract-splitnobudget-docs");
+    let doc = docs.join("a.md");
+    // Two paragraphs, comfortably splittable at the halved cap.
+    std::fs::write(&doc, format!("{}\n\n{}", "a".repeat(600), "b".repeat(600))).unwrap();
+    let out = batch_dir("extract-splitnobudget-out");
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, attempt| {
+        if attempt == 0 {
+            chat_ok_with_finish_reason("truncated garbage", "length")
+        } else {
+            chat_ok(&json!({"associations": []}).to_string())
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--structured-output",
+            "json-object",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 written"), "{stdout}");
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "one length-limited ask, then one per split half"
+    );
+    for request in requests.iter() {
+        let body = json_body_of(request);
+        assert!(body.get("max_tokens").is_none(), "{body}");
+        assert_eq!(body["response_format"], json!({"type": "json_object"}));
+    }
+    assert!(requests[1].contains("[0] a"), "{}", requests[1]);
+    assert!(!requests[1].contains("[1] b"), "{}", requests[1]);
+    assert!(requests[2].contains("[1] b"), "{}", requests[2]);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Budget set, escalation exhausted: the piece splits, and each
+/// sub-piece's ladder starts back at the CONFIGURED budget — the
+/// halved input is expected to fit it, and an uncapped first ask would
+/// give away the budget the operator set.
+#[test]
+fn length_limited_after_escalation_splits_the_piece_and_sub_pieces_restart_at_the_budget() {
+    let docs = batch_dir("extract-escalatesplit-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, format!("{}\n\n{}", "a".repeat(600), "b".repeat(600))).unwrap();
+    let out = batch_dir("extract-escalatesplit-out");
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, attempt| {
+        if attempt <= 1 {
+            chat_ok_with_finish_reason("truncated garbage", "length")
+        } else {
+            chat_ok(&json!({"associations": []}).to_string())
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        4,
+        "budgeted ask, escalated ask, then one per split half"
+    );
+    assert_eq!(json_body_of(&requests[0])["max_tokens"], 512);
+    assert!(json_body_of(&requests[1]).get("max_tokens").is_none());
+    assert_eq!(json_body_of(&requests[2])["max_tokens"], 512);
+    assert_eq!(json_body_of(&requests[3])["max_tokens"], 512);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A piece too small to split that still overruns the escalated
+/// budget fails the source with the named diagnosis — never a partial
+/// import, never a prefix salvage, never an unbounded loop.
+#[test]
+fn a_minimum_unit_that_still_hits_length_after_escalation_fails_the_source() {
+    let docs = batch_dir("extract-minunit-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-minunit-out");
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, _attempt| {
+        chat_ok_with_finish_reason("truncated garbage", "length")
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("cannot split further"), "{stderr}");
+    assert_eq!(
+        captured.lock().unwrap().len(),
+        2,
+        "the budgeted ask and one escalation — then fail, no loop"
+    );
+    assert!(stray_batch_files(&out).is_empty());
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `finish_reason: "content_filter"` is terminal: no corrective turn
+/// can argue with a policy refusal, so exactly one request goes out
+/// and the source fails with the named class.
+#[test]
+fn refusal_is_terminal_with_no_corrective_turn() {
+    let docs = batch_dir("extract-refusal-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-refusal-out");
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, _attempt| {
+        chat_ok_with_finish_reason("", "content_filter")
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("the provider refused this content"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("content_filter"), "{stderr}");
+    assert_eq!(captured.lock().unwrap().len(), 1);
+    assert!(stray_batch_files(&out).is_empty());
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Under the ladder an empty answer gets exactly one corrective —
+/// however high TAGURU_EXTRACT_MAX_ATTEMPTS is — then the named
+/// diagnosis: a model that answers nothing twice will not answer on
+/// the fifth try either.
+#[test]
+fn an_empty_answer_gets_exactly_one_corrective_however_high_max_attempts_is() {
+    let docs = batch_dir("extract-emptycap-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-emptycap-out");
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, _attempt| chat_ok(""));
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_MAX_ATTEMPTS", "5"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("the answer was empty"), "{stderr}");
+    assert_eq!(captured.lock().unwrap().len(), 2);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A malformed `stop` answer under the ladder still gets the ordinary
+/// corrective loop — with the plain ask, never the legacy SHORTER
+/// wording — and a constrained answer that failed validation is
+/// called out as provider non-conformance.
+#[test]
+fn stop_malformed_still_runs_the_ordinary_corrective_loop_under_ladder_mode() {
+    let docs = batch_dir("extract-laddermalformed-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-laddermalformed-out");
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, attempt| {
+        if attempt == 0 {
+            chat_ok("not json at all")
+        } else {
+            chat_ok(&json!({"associations": []}).to_string())
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--structured-output",
+            "json-object",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("provider non-conformance"),
+        "a constrained answer that fails validation earns the named line: {stderr}"
+    );
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let corrective = &requests[1];
+    assert!(
+        corrective.contains("Answer again with only the JSON object."),
+        "{corrective}"
+    );
+    assert!(!corrective.contains("SHORTER"), "{corrective}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `auto` sends one startup probe carrying EXACTLY the extraction
+/// `response_format`; an answer in the canonical shape verifies the
+/// json_schema rung and every extraction request keeps that format.
+/// The probe ask must not say "json" — a prompted model answers it
+/// with prose, which is precisely what tells the rungs apart.
+#[test]
+fn auto_probe_resolves_to_json_schema_when_the_backend_honors_it() {
+    let docs = batch_dir("extract-probeschema-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-probeschema-out");
+
+    let (url, requests) = stub_chat_server(vec![
+        json!({"associations": [], "aliases": []}).to_string(),
+        json!({"associations": []}).to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--structured-output",
+            "auto",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("structured output: json_schema (probe verified)"),
+        "{stderr}"
+    );
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 2, "one probe, one extraction");
+    let probe = json_body_of(&requests[0]);
+    assert_eq!(probe["response_format"]["type"], "json_schema");
+    assert_eq!(probe["max_tokens"], 256);
+    let probe_ask = probe["messages"][1]["content"].as_str().unwrap();
+    assert!(
+        !probe_ask.to_ascii_lowercase().contains("json"),
+        "the json_schema probe must invite prose: {probe_ask}"
+    );
+    let extraction = json_body_of(&requests[1]);
+    assert_eq!(extraction["response_format"]["type"], "json_schema");
+    assert!(extraction.get("max_tokens").is_none(), "{extraction}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A prose answer to the json_schema probe fails that rung; JSON of
+/// any shape to the second probe verifies json_object, and extraction
+/// proceeds under it.
+#[test]
+fn auto_probe_falls_back_to_json_object_when_json_schema_is_not_honored() {
+    let docs = batch_dir("extract-probeobject-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-probeobject-out");
+
+    let (url, requests) = stub_chat_server(vec![
+        "The sky is blue.".to_string(),
+        json!({"color": "blue"}).to_string(),
+        json!({"associations": []}).to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--structured-output",
+            "auto",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("structured output: json_object"),
+        "{stderr}"
+    );
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 3, "two probes, one extraction");
+    let object_probe = json_body_of(&requests[1]);
+    assert_eq!(
+        object_probe["response_format"],
+        json!({"type": "json_object"})
+    );
+    // OpenAI's json_object mode refuses requests that never say
+    // "json", so this probe's ask must.
+    assert!(
+        object_probe["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("json"),
+        "{object_probe}"
+    );
+    assert_eq!(
+        json_body_of(&requests[2])["response_format"],
+        json!({"type": "json_object"})
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Neither probe verified: extraction runs exactly as it always has —
+/// bare prompted JSON, no response_format at all — and says so.
+#[test]
+fn auto_probe_falls_back_to_prompted_json_when_neither_probe_succeeds() {
+    let docs = batch_dir("extract-probebare-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-probebare-out");
+
+    let (url, requests) = stub_chat_server(vec![
+        "The sky is blue.".to_string(),
+        "Sure! The sky is blue.".to_string(),
+        json!({"associations": []}).to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--structured-output",
+            "auto",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("structured output: prompted JSON only"),
+        "{stderr}"
+    );
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        top_level_keys(&requests[2]),
+        ["messages", "model", "temperature"],
+        "an unverified endpoint gets exactly the request it always got"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `--dry-run` calls nothing, so it probes nothing — `auto` resolves
+/// no rung and reports none.
+#[test]
+fn auto_probe_is_skipped_under_dry_run() {
+    let docs = batch_dir("extract-probedryrun-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-probedryrun-out");
+
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[],
+        &[
+            "--dry-run",
+            "--context",
+            "c",
+            "--structured-output",
+            "auto",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("would extract"), "{stdout}");
+    assert!(!stderr.contains("structured output:"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The requested mode is a manifest computation input: changing it
+/// re-extracts once, keeping it skips — exactly the --context /
+/// --fact-budget discipline.
+#[test]
+fn changing_structured_output_mode_forces_a_re_extraction() {
+    let docs = batch_dir("extract-modemanifest-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-modemanifest-out");
+
+    let (url, requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, _) =
+        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("1 written"), "{stdout}");
+    assert_eq!(requests.join().unwrap().len(), 1);
+
+    let (url, requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let mode_args = [
+        "--context",
+        "c",
+        "--structured-output",
+        "json-object",
+        doc.to_str().unwrap(),
+    ];
+    let (code, stdout, _) = run_extract(&out, &provider, &mode_args);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("1 written"),
+        "a changed mode must re-extract: {stdout}"
+    );
+    assert_eq!(requests.join().unwrap().len(), 1);
+
+    // Same mode again: the manifest matches, nothing is called — the
+    // dead endpoint would fail loudly if anything were.
+    let provider = [
+        ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, _) = run_extract(&out, &provider, &mode_args);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("1 unchanged"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn changing_max_output_tokens_forces_a_re_extraction() {
+    let docs = batch_dir("extract-budgetmanifest-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-budgetmanifest-out");
+
+    let (url, requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, _) =
+        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(requests.join().unwrap().len(), 1);
+
+    let (url, requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let budget_args = [
+        "--context",
+        "c",
+        "--max-output-tokens",
+        "512",
+        doc.to_str().unwrap(),
+    ];
+    let (code, stdout, _) = run_extract(&out, &provider, &budget_args);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("1 written"),
+        "a changed budget must re-extract: {stdout}"
+    );
+    assert_eq!(requests.join().unwrap().len(), 1);
+
+    let provider = [
+        ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, _) = run_extract(&out, &provider, &budget_args);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("1 unchanged"), "{stdout}");
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

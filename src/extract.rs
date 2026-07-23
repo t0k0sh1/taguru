@@ -40,6 +40,7 @@ use crate::ingest::MAX_PASSAGE_BYTES;
 const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--fact-budget N] [--config FILE] [--parallel N]
+                      [--structured-output MODE] [--max-output-tokens N]
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
 Reads documents (.md/.txt; a directory expands to its files, sorted by
@@ -57,6 +58,8 @@ chat endpoint:
   TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
                       the model's own prior bad answer to this many bytes;
                       0 omits it entirely (unset: replay it in full)
+  TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (off)
+  TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (unset)
 
   --dry-run           list what would extract or skip; call nothing
   --force             re-extract documents the manifest says are unchanged
@@ -67,6 +70,18 @@ chat endpoint:
   --fact-budget N     ask the model to keep each chunk's answer to at most N
                       associations (0, off); a soft instruction, never
                       enforced after the fact
+  --structured-output MODE  constrain the answer's shape on the wire:
+                      'auto' probes the endpoint once at startup and keeps
+                      the strongest rung it verifies (json_schema
+                      constrained decoding, then json_object mode, then
+                      prompted JSON); 'json-schema'/'json-object' pin a
+                      rung without probing; 'off' (default) sends today's
+                      plain request
+  --max-output-tokens N  explicit output budget per completion, sent as
+                      max_tokens (default: none sent). An answer cut off
+                      at the budget escalates once without it, then splits
+                      the chunk — never re-asked under the limit it just
+                      hit
   --config F          read KEY=VALUE environment from F (same dialect as serve)
   --parallel N        chunk completions to run concurrently within one
                       document (1, sequential); documents themselves stay
@@ -122,6 +137,19 @@ const DEFAULT_MAX_ATTEMPTS: usize = 2;
 /// must not be able to turn one stubborn chunk into an unbounded
 /// number of model calls.
 const MAX_EXTRACT_ATTEMPTS: usize = 10;
+
+/// The ladder's split rung halves a length-limited piece's cap, but
+/// never below this floor: a pathological single-line document (a
+/// base64 blob, minified markup) would otherwise degrade toward
+/// per-character pieces. A piece at the floor that still overruns the
+/// escalated budget fails the source instead.
+const MIN_SPLIT_CAP: usize = 512;
+
+/// Output budget for the startup capability probes — small enough to
+/// bound what a rambling endpoint can spend, large enough that a
+/// compliant answer to the tiny probe ask is never cut off (a
+/// `length`-terminated probe reads as "rung not verified").
+const PROBE_MAX_TOKENS: usize = 256;
 
 /// Chat completion response cap. ureq's own `read_to_string`/`read_json`
 /// already cap at 10 MiB, but that ceiling is undocumented at the call
@@ -249,6 +277,54 @@ pub fn run(args: &[String]) -> i32 {
         },
         Err(_) => None,
     };
+    // Same flag-over-env resolution as --fact-budget above. The mode
+    // vocabulary is closed, so an unknown value is a hard usage error,
+    // never a silent "off".
+    let structured_output = match args.structured_output {
+        Some(mode) => mode,
+        None => match std::env::var("TAGURU_EXTRACT_STRUCTURED_OUTPUT") {
+            Ok(value) => match StructuredOutputMode::parse(&value) {
+                Some(mode) => mode,
+                None => {
+                    return crate::config::subcommand_usage_error(
+                        "extract",
+                        "TAGURU_EXTRACT_STRUCTURED_OUTPUT takes auto, json-schema, \
+                         json-object, or off",
+                    );
+                }
+            },
+            Err(_) => StructuredOutputMode::Off,
+        },
+    };
+    let max_output_tokens = match args.max_output_tokens {
+        Some(n) => Some(n),
+        None => match std::env::var("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS") {
+            Ok(value) => match value.parse::<usize>() {
+                Ok(n) if n >= 1 => Some(n),
+                _ => {
+                    return crate::config::subcommand_usage_error(
+                        "extract",
+                        "TAGURU_EXTRACT_MAX_OUTPUT_TOKENS needs an integer of at least 1",
+                    );
+                }
+            },
+            Err(_) => None,
+        },
+    };
+    // ADR 0001 §4/§6: the structured-output rung is resolved once per
+    // run — probed when asked to, never assumed, never re-derived per
+    // chunk. Any engaged control (a mechanism, or an output budget)
+    // switches the run from the legacy corrective loop onto the §7
+    // ladder; with neither, requests and retries stay byte-for-byte
+    // today's. --dry-run calls nothing, so it also probes nothing.
+    let ladder = match (&client, structured_output, max_output_tokens) {
+        (_, StructuredOutputMode::Off, None) => None,
+        (None, _, _) => None,
+        (Some(client), mode, budget) => Some(LadderConfig {
+            response_format: resolve_response_format(client, mode),
+            max_output_tokens: budget,
+        }),
+    };
     let mut run = Run {
         context: args.context,
         description: args.description,
@@ -261,6 +337,9 @@ pub fn run(args: &[String]) -> i32 {
             max_attempts,
             corrective_context_cap,
         },
+        structured_output,
+        max_output_tokens,
+        ladder,
         out: args.out,
         client,
         model_name,
@@ -351,6 +430,14 @@ struct Args {
     /// sequential behavior) — resolved in [`run`], not here, since the
     /// flag must win over the environment variable.
     parallel: Option<usize>,
+    /// `None` defers to TAGURU_EXTRACT_STRUCTURED_OUTPUT, and then to
+    /// `Off` (today's plain request) — resolved in [`run`], same
+    /// pattern as `fact_budget`.
+    structured_output: Option<StructuredOutputMode>,
+    /// `None` defers to TAGURU_EXTRACT_MAX_OUTPUT_TOKENS, and then to
+    /// sending no output-token parameter at all (today's request) —
+    /// resolved in [`run`].
+    max_output_tokens: Option<usize>,
     context: String,
     description: Option<String>,
     out: PathBuf,
@@ -366,6 +453,8 @@ impl Args {
         let mut fact_budget: Option<usize> = None;
         let mut config: Option<PathBuf> = None;
         let mut parallel: Option<usize> = None;
+        let mut structured_output: Option<StructuredOutputMode> = None;
+        let mut max_output_tokens: Option<usize> = None;
         let mut context: Option<String> = None;
         let mut description: Option<String> = None;
         let mut out: Option<PathBuf> = None;
@@ -424,6 +513,29 @@ impl Args {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
                             "--parallel needs an integer of at least 1",
+                        ));
+                    }
+                },
+                "--structured-output" => {
+                    match rest
+                        .next()
+                        .and_then(|mode| StructuredOutputMode::parse(mode))
+                    {
+                        Some(mode) => structured_output = Some(mode),
+                        None => {
+                            return Err(crate::config::subcommand_usage_error(
+                                "extract",
+                                "--structured-output takes auto, json-schema, json-object, or off",
+                            ));
+                        }
+                    }
+                }
+                "--max-output-tokens" => match rest.next().map(|value| value.parse::<usize>()) {
+                    Some(Ok(n)) if n >= 1 => max_output_tokens = Some(n),
+                    _ => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--max-output-tokens needs an integer of at least 1",
                         ));
                     }
                 },
@@ -514,6 +626,8 @@ impl Args {
             fact_budget,
             config,
             parallel,
+            structured_output,
+            max_output_tokens,
             context,
             description,
             out,
@@ -551,6 +665,62 @@ struct CorrectionPolicy {
     corrective_context_cap: Option<usize>,
 }
 
+/// `--structured-output`'s closed vocabulary: which rung of ADR 0001
+/// §6's fallback ladder the run may put on the wire. `Off` — the
+/// default — sends today's plain request and keeps the legacy
+/// corrective loop.
+#[derive(Clone, Copy)]
+enum StructuredOutputMode {
+    /// Probe the endpoint once at startup and keep the strongest rung
+    /// it verifies: json_schema, then json_object, then bare prompted
+    /// JSON.
+    Auto,
+    /// Pin schema-constrained decoding without probing; a backend that
+    /// rejects the parameter surfaces its 400 on the first document
+    /// rather than being silently downgraded.
+    JsonSchema,
+    /// Pin JSON mode (syntax forced, shape not) without probing.
+    JsonObject,
+    Off,
+}
+
+impl StructuredOutputMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "json-schema" => Some(Self::JsonSchema),
+            "json-object" => Some(Self::JsonObject),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// The manifest spelling: the REQUESTED mode, never the probe's
+    /// resolution — which rung carried a run depends on the backend,
+    /// but the computation input is what the operator asked for. `Off`
+    /// is the empty string so entries written before this field
+    /// existed keep matching all-defaults runs instead of forcing a
+    /// spurious re-extraction of everything.
+    fn manifest_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::JsonSchema => "json-schema",
+            Self::JsonObject => "json-object",
+            Self::Off => "",
+        }
+    }
+}
+
+/// The §7 ladder's per-run inputs, settled once at startup: the
+/// verified (or pinned) `response_format` for every extraction
+/// request, and the operator's output budget. Present exactly when
+/// some new control is engaged; `None` keeps the legacy loop
+/// byte-for-byte.
+struct LadderConfig {
+    response_format: Option<serde_json::Value>,
+    max_output_tokens: Option<usize>,
+}
+
 /// One extract run: the settled flags, the provider, and everything
 /// that accumulates across documents — the manifest, the label
 /// vocabulary offered to later prompts, and the output names already
@@ -568,6 +738,21 @@ struct Run {
     /// Resolved from TAGURU_EXTRACT_MAX_ATTEMPTS/
     /// TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES.
     correction: CorrectionPolicy,
+    /// Resolved from `--structured-output`/
+    /// TAGURU_EXTRACT_STRUCTURED_OUTPUT (`Off`, the default). Kept
+    /// beside `ladder` because the manifest records the REQUESTED mode
+    /// as a computation input even under `--dry-run`, which resolves
+    /// no ladder.
+    structured_output: StructuredOutputMode,
+    /// Resolved from `--max-output-tokens`/
+    /// TAGURU_EXTRACT_MAX_OUTPUT_TOKENS (`None` = no output-token
+    /// parameter is ever sent, today's request).
+    max_output_tokens: Option<usize>,
+    /// `Some` exactly when a mechanism or an output budget is engaged
+    /// on a live run: the §7 ladder replaces the legacy corrective
+    /// loop. `None` under all-defaults — byte-for-byte today's
+    /// behavior — and under `--dry-run`.
+    ladder: Option<LadderConfig>,
     out: PathBuf,
     /// `None` exactly under `--dry-run`, which must call nothing.
     client: Option<ChatClient>,
@@ -614,6 +799,8 @@ impl Run {
                 self.no_passage,
                 self.description.as_deref().unwrap_or(""),
                 self.fact_budget,
+                self.structured_output.manifest_value(),
+                self.max_output_tokens.unwrap_or(0),
             )
             && out_path.is_file()
         {
@@ -668,6 +855,8 @@ impl Run {
             self.no_passage,
             self.description.as_deref().unwrap_or(""),
             self.fact_budget,
+            self.structured_output.manifest_value(),
+            self.max_output_tokens.unwrap_or(0),
             &file_name,
         );
         self.vocabulary.extend(extraction.label_vocabulary());
@@ -694,9 +883,18 @@ impl Run {
         let system = system_prompt(&self.vocabulary, self.questions, self.fact_budget);
         let mut outputs = Vec::new();
         for (index, piece) in chunks.iter().enumerate() {
-            let user = user_message(source, index, chunks.len(), piece);
-            match extract_chunk(client, &system, &user, &self.correction, self.fact_budget) {
-                Ok(output) => outputs.push(output),
+            match extract_chunk_or_ladder(
+                client,
+                &system,
+                source,
+                index,
+                chunks.len(),
+                piece,
+                &self.correction,
+                self.fact_budget,
+                self.ladder.as_ref(),
+            ) {
+                Ok(piece_outputs) => outputs.extend(piece_outputs),
                 Err(message) => {
                     return Err(format!("chunk {}/{}: {message}", index + 1, chunks.len()));
                 }
@@ -730,8 +928,17 @@ impl Run {
             &indexed,
             self.parallel,
             |&(index, piece)| {
-                let user = user_message(source, index, chunks.len(), piece);
-                extract_chunk(client, &system, &user, &self.correction, self.fact_budget)
+                extract_chunk_or_ladder(
+                    client,
+                    &system,
+                    source,
+                    index,
+                    chunks.len(),
+                    piece,
+                    &self.correction,
+                    self.fact_budget,
+                    self.ladder.as_ref(),
+                )
             },
         );
 
@@ -739,7 +946,7 @@ impl Run {
         for (index, outcome) in outcomes.into_iter().enumerate() {
             let outcome = outcome.expect("every index up to the first failure was dispatched");
             match outcome {
-                Ok(output) => outputs.push(output),
+                Ok(piece_outputs) => outputs.extend(piece_outputs),
                 Err(message) => {
                     return Err(format!("chunk {}/{}: {message}", index + 1, chunks.len()));
                 }
@@ -908,6 +1115,42 @@ pub(crate) struct ChatCompletion {
     pub(crate) finish_reason: Option<String>,
 }
 
+/// The optional OpenAI-compatible parameters one completion carries
+/// beyond the fixed `{model, temperature, messages}` base. Per-call
+/// rather than per-client: the extraction ladder changes `max_tokens`
+/// between attempts of one piece, and `--parallel` shares one client
+/// across workers. The default adds nothing — [`build_chat_body`]'s
+/// output is then byte-for-byte the pre-ladder body, which `taguru
+/// communities` (the other caller) relies on.
+#[derive(Default, Clone)]
+pub(crate) struct RequestOptions {
+    pub(crate) response_format: Option<serde_json::Value>,
+    pub(crate) max_tokens: Option<usize>,
+}
+
+/// The request body [`ChatClient::complete`] sends. serde_json's maps
+/// order keys alphabetically (this crate does not enable
+/// `preserve_order`), so the base three keys serialize exactly as they
+/// always have and the optional keys slot in only when set.
+fn build_chat_body(
+    model: &str,
+    messages: &[serde_json::Value],
+    options: &RequestOptions,
+) -> String {
+    let mut body = serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "messages": messages,
+    });
+    if let Some(format) = &options.response_format {
+        body["response_format"] = format.clone();
+    }
+    if let Some(max_tokens) = options.max_tokens {
+        body["max_tokens"] = serde_json::json!(max_tokens);
+    }
+    body.to_string()
+}
+
 impl ChatClient {
     pub(crate) fn from_env() -> Result<Self, String> {
         let url = std::env::var("TAGURU_EXTRACT_URL").map_err(|_| {
@@ -942,13 +1185,9 @@ impl ChatClient {
     pub(crate) fn complete(
         &self,
         messages: &[serde_json::Value],
+        options: &RequestOptions,
     ) -> Result<ChatCompletion, String> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "temperature": 0,
-            "messages": messages,
-        })
-        .to_string();
+        let body = build_chat_body(&self.model, messages, options);
         let mut last = String::new();
         for attempt in 0..RETRY_ATTEMPTS {
             let mut request = self
@@ -1014,6 +1253,134 @@ impl ChatClient {
         }
         Err(format!("after {RETRY_ATTEMPTS} attempts: {last}"))
     }
+}
+
+/// What the run's structured-output rung resolved to, reported once on
+/// stderr so a log shows which rung actually carried the run. Pinned
+/// modes trust the operator (a backend that rejects the parameter
+/// surfaces its 400 on the first document); `auto` verifies against
+/// the live endpoint before relying on anything, because a backend may
+/// accept a parameter without honoring it (ADR 0001 §6).
+fn resolve_response_format(
+    client: &ChatClient,
+    mode: StructuredOutputMode,
+) -> Option<serde_json::Value> {
+    match mode {
+        StructuredOutputMode::Off => None,
+        StructuredOutputMode::JsonSchema => {
+            eprintln!("taguru: extract: structured output: json_schema (pinned)");
+            Some(json_schema_response_format())
+        }
+        StructuredOutputMode::JsonObject => {
+            eprintln!("taguru: extract: structured output: json_object (pinned)");
+            Some(json_object_response_format())
+        }
+        StructuredOutputMode::Auto => match probe_structured_output(client) {
+            ProbeVerdict::JsonSchema => {
+                eprintln!("taguru: extract: structured output: json_schema (probe verified)");
+                Some(json_schema_response_format())
+            }
+            ProbeVerdict::JsonObject => {
+                eprintln!(
+                    "taguru: extract: structured output: json_object \
+                     (the json_schema probe failed)"
+                );
+                Some(json_object_response_format())
+            }
+            ProbeVerdict::Prompted => {
+                eprintln!(
+                    "taguru: extract: structured output: prompted JSON only \
+                     (both probes failed)"
+                );
+                None
+            }
+        },
+    }
+}
+
+enum ProbeVerdict {
+    JsonSchema,
+    JsonObject,
+    Prompted,
+}
+
+/// One startup probe per rung, sending EXACTLY the `response_format`
+/// extraction will send — a probe that passes proves the real request
+/// shape is both accepted and honored, not a lookalike. The
+/// json_schema ask invites prose and never says "JSON": only an
+/// endpoint that actually constrains decoding answers it with the
+/// canonical `{associations, aliases}` object. The json_object ask
+/// names json (OpenAI's json_object mode refuses requests that
+/// don't), so it only verifies that the answer is JSON at all — which
+/// is all that rung promises. Transport errors, 400s, truncation, and
+/// wrong-shaped answers all read the same way: rung not verified,
+/// fall one down.
+fn probe_structured_output(client: &ChatClient) -> ProbeVerdict {
+    let ask = |content: &str| {
+        [
+            serde_json::json!({"role": "system", "content": "You answer questions."}),
+            serde_json::json!({"role": "user", "content": content}),
+        ]
+    };
+    let schema_options = RequestOptions {
+        response_format: Some(json_schema_response_format()),
+        max_tokens: Some(PROBE_MAX_TOKENS),
+    };
+    let schema_probe = ask("In one short sentence, name the color of a clear daytime sky.");
+    if let Ok(response) = client.complete(&schema_probe, &schema_options)
+        && !indicates_length_limit(response.finish_reason.as_deref())
+        && conforms_to_model_output_shape(&response.content)
+    {
+        return ProbeVerdict::JsonSchema;
+    }
+    let object_options = RequestOptions {
+        response_format: Some(json_object_response_format()),
+        max_tokens: Some(PROBE_MAX_TOKENS),
+    };
+    let object_probe = ask("Reply with a json object naming the color of a clear daytime sky.");
+    if let Ok(response) = client.complete(&object_probe, &object_options)
+        && !indicates_length_limit(response.finish_reason.as_deref())
+        && serde_json::from_str::<serde_json::Value>(strip_fences(response.content.trim()))
+            .map(|value| value.is_object())
+            .unwrap_or(false)
+    {
+        return ProbeVerdict::JsonObject;
+    }
+    ProbeVerdict::Prompted
+}
+
+/// Whether a probe answer proves schema-constrained decoding: the
+/// canonical schema requires `associations` and `aliases`, so a
+/// constrained endpoint cannot answer the prose-inviting probe with
+/// anything else. JSON of some other shape (what a json_object-only
+/// endpoint would send) and prose both fail.
+fn conforms_to_model_output_shape(content: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(strip_fences(content.trim()))
+        .map(|value| value["associations"].is_array() && value["aliases"].is_array())
+        .unwrap_or(false)
+}
+
+/// The OpenAI-compatible `response_format` carrying the canonical
+/// schema — ADR 0001's mechanism B in the exact shape its experiment
+/// measured against Ollama's `/v1` wire. `strict` is requested
+/// honestly: a strictly-validating backend that cannot express the
+/// canonical schema's optional `weight`/`paragraph` answers 400
+/// instead of silently weakening the constraint, and `auto` then
+/// falls one rung (docs/extract.html notes this for OpenAI's strict
+/// mode).
+fn json_schema_response_format() -> serde_json::Value {
+    serde_json::json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "ModelOutput",
+            "strict": true,
+            "schema": model_output_json_schema(),
+        }
+    })
+}
+
+fn json_object_response_format() -> serde_json::Value {
+    serde_json::json!({"type": "json_object"})
 }
 
 /// Full-jitter exponential backoff for the n-th retry (n ≥ 1):
@@ -1123,7 +1490,7 @@ fn extract_chunk(
                 "content": corrective_message(&last, length_limited, fact_budget),
             }));
         }
-        let response = client.complete(&messages)?;
+        let response = client.complete(&messages, &RequestOptions::default())?;
         match parse_model_output(&response.content) {
             Ok(output) => return Ok(output),
             Err(error) => {
@@ -1136,6 +1503,231 @@ fn extract_chunk(
     Err(format!(
         "the model would not produce the JSON object: {last}"
     ))
+}
+
+/// The one legacy/ladder fork. `None` is the pre-ladder loop
+/// untouched — one chunk, one output, the SHORTER corrective on
+/// `length` — reproducing today's requests and retries byte for byte.
+/// `Some` runs the ADR 0001 §7 ladder, where one piece may fan out
+/// into several outputs through the split rung.
+#[allow(clippy::too_many_arguments)]
+fn extract_chunk_or_ladder(
+    client: &ChatClient,
+    system: &str,
+    source: &str,
+    chunk_index: usize,
+    chunk_total: usize,
+    piece: &str,
+    policy: &CorrectionPolicy,
+    fact_budget: usize,
+    ladder: Option<&LadderConfig>,
+) -> Result<Vec<ModelOutput>, String> {
+    match ladder {
+        None => {
+            let user = user_message(source, chunk_index, chunk_total, piece);
+            extract_chunk(client, system, &user, policy, fact_budget).map(|output| vec![output])
+        }
+        Some(ladder) => {
+            let context = PieceContext {
+                client,
+                system,
+                source,
+                chunk_index,
+                chunk_total,
+                ladder,
+                policy,
+                fact_budget,
+            };
+            extract_piece(&context, piece)
+        }
+    }
+}
+
+/// Everything one piece's ladder needs, bundled so the split
+/// recursion doesn't thread eight arguments through every level.
+/// `chunk_index`/`chunk_total` stay the ORIGINAL chunk's coordinates
+/// all the way down: a split sub-piece is still "part K of N" of the
+/// same document as far as the model is told.
+struct PieceContext<'a> {
+    client: &'a ChatClient,
+    system: &'a str,
+    source: &'a str,
+    chunk_index: usize,
+    chunk_total: usize,
+    ladder: &'a LadderConfig,
+    policy: &'a CorrectionPolicy,
+    fact_budget: usize,
+}
+
+/// ADR 0001 §7 for one piece: a round at the configured budget; on
+/// `length`, one budget escalation — drop `max_tokens` and resend the
+/// base ask NEUTRALLY, the truncated answer discarded, never replayed,
+/// never salvaged as a prefix; on `length` again, split the piece and
+/// run each sub-piece's ladder from the top; a piece too small to
+/// split fails the source. Escalation happens at most once per piece
+/// and each split halves the cap down to [`MIN_SPLIT_CAP`], so the
+/// call count is bounded by piece size and `max_attempts`.
+fn extract_piece(context: &PieceContext, piece: &str) -> Result<Vec<ModelOutput>, String> {
+    let user = user_message(
+        context.source,
+        context.chunk_index,
+        context.chunk_total,
+        piece,
+    );
+    let mut outcome = extract_round(context, &user, context.ladder.max_output_tokens);
+    if matches!(outcome, RoundOutcome::LengthLimited) && context.ladder.max_output_tokens.is_some()
+    {
+        outcome = extract_round(context, &user, None);
+    }
+    match outcome {
+        RoundOutcome::Valid(output) => Ok(vec![output]),
+        RoundOutcome::Failed(message) => Err(message),
+        RoundOutcome::Refusal(reason) => Err(format!(
+            "the provider refused this content (finish_reason {reason}) — a policy \
+             refusal is terminal; no corrective turn can change it"
+        )),
+        RoundOutcome::LengthLimited => {
+            let cap = (piece.len() / 2).max(MIN_SPLIT_CAP);
+            let sub_pieces = split_labeled_piece(piece, cap);
+            if sub_pieces.len() <= 1 {
+                return Err(format!(
+                    "the answer still ended at the output cap for a {}-byte piece that \
+                     cannot split further — failing the source rather than importing a \
+                     truncated extraction",
+                    piece.len()
+                ));
+            }
+            let mut outputs = Vec::new();
+            for sub_piece in &sub_pieces {
+                outputs.extend(extract_piece(context, sub_piece)?);
+            }
+            Ok(outputs)
+        }
+    }
+}
+
+/// How one [`extract_round`] ended, seen from the ladder.
+enum RoundOutcome {
+    Valid(ModelOutput),
+    /// The provider's metadata says this round's answer ended at the
+    /// output cap — the ladder decides what changes; the round itself
+    /// never re-asks under the limit it just hit.
+    LengthLimited,
+    /// A policy refusal, carrying the provider's spelling.
+    Refusal(String),
+    Failed(String),
+}
+
+/// One trip through the corrective loop at one FIXED output budget —
+/// the ladder's unit. Malformed-`stop` answers get the ordinary
+/// corrective turns; the legacy SHORTER ask never fires here because
+/// `length` exits the round instead of becoming a prompt. An empty
+/// answer gets at most one corrective in the whole round — however
+/// high `max_attempts` is — then the named diagnosis.
+fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) -> RoundOutcome {
+    let options = RequestOptions {
+        response_format: context.ladder.response_format.clone(),
+        max_tokens,
+    };
+    let base = [
+        serde_json::json!({"role": "system", "content": context.system}),
+        serde_json::json!({"role": "user", "content": user}),
+    ];
+    let mut last = String::new();
+    let mut prior_bad_answer: Option<String> = None;
+    let mut empty_corrected = false;
+    for _ in 0..context.policy.max_attempts {
+        let mut messages = base.to_vec();
+        if let Some(bad_answer) = &prior_bad_answer {
+            messages.push(corrective_assistant_turn(
+                bad_answer,
+                context.policy.corrective_context_cap,
+            ));
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": corrective_message(&last, false, context.fact_budget),
+            }));
+        }
+        let response = match context.client.complete(&messages, &options) {
+            Ok(response) => response,
+            Err(error) => return RoundOutcome::Failed(error),
+        };
+        match classify_attempt(&response) {
+            AttemptOutcome::Valid(output) => return RoundOutcome::Valid(output),
+            AttemptOutcome::LengthLimited => return RoundOutcome::LengthLimited,
+            AttemptOutcome::Refusal(reason) => return RoundOutcome::Refusal(reason),
+            AttemptOutcome::Empty => {
+                if empty_corrected {
+                    return RoundOutcome::Failed(empty_answer_diagnosis());
+                }
+                empty_corrected = true;
+                last = empty_answer_diagnosis();
+                prior_bad_answer = Some(response.content);
+            }
+            AttemptOutcome::Malformed(error) => {
+                if options.response_format.is_some() {
+                    // A constrained answer that still fails validation
+                    // is the provider not honoring its own contract —
+                    // worth one visible line per occurrence; the
+                    // structured diagnostics sink is issue #200's.
+                    eprintln!(
+                        "taguru: extract: {}: provider non-conformance: the answer \
+                         violated the requested response_format ({error})",
+                        context.source
+                    );
+                }
+                last = error;
+                prior_bad_answer = Some(response.content);
+            }
+        }
+    }
+    RoundOutcome::Failed(format!(
+        "the model would not produce the JSON object: {last}"
+    ))
+}
+
+/// One attempt's §7 state, classified from provider metadata BEFORE
+/// any parse-level interpretation.
+enum AttemptOutcome {
+    Valid(ModelOutput),
+    Malformed(String),
+    LengthLimited,
+    Refusal(String),
+    Empty,
+}
+
+/// A `length`-terminated answer is length-limited even when its
+/// prefix happens to parse — a valid prefix of a cut-off extraction
+/// is exactly the "deleted-subset called complete" ADR 0001 forbids.
+/// Refusals are terminal before any parsing; an empty answer is named
+/// before serde ever sees it.
+fn classify_attempt(response: &ChatCompletion) -> AttemptOutcome {
+    let finish_reason = response.finish_reason.as_deref();
+    if indicates_length_limit(finish_reason) {
+        return AttemptOutcome::LengthLimited;
+    }
+    if let Some(reason) = finish_reason
+        && indicates_refusal(reason)
+    {
+        return AttemptOutcome::Refusal(reason.to_string());
+    }
+    if is_empty_answer(&response.content) {
+        return AttemptOutcome::Empty;
+    }
+    match parse_model_output(&response.content) {
+        Ok(output) => AttemptOutcome::Valid(output),
+        Err(error) => AttemptOutcome::Malformed(error),
+    }
+}
+
+/// Whether `finish_reason` says the provider refused to answer on
+/// policy grounds: `content_filter` is the OpenAI-compatible
+/// spelling; `refusal` is Anthropic's `stop_reason`, met through
+/// pass-through bridges exactly like `max_tokens` in
+/// [`indicates_length_limit`]. Terminal — a corrective turn cannot
+/// argue with a policy.
+fn indicates_refusal(finish_reason: &str) -> bool {
+    matches!(finish_reason, "content_filter" | "refusal")
 }
 
 /// Whether a chat completion's `finish_reason` means the provider cut
@@ -1392,11 +1984,7 @@ fn parse_model_output(content: &str) -> Result<ModelOutput, String> {
     // budget on reasoning and answer with no text at all, and "EOF at
     // line 1 column 0" diagnoses nothing.
     if unfenced.is_empty() {
-        return Err(
-            "the answer was empty — thinking-mode models can burn their whole budget on \
-             reasoning before any text (docs/extract.html: turn thinking off)"
-                .to_string(),
-        );
+        return Err(empty_answer_diagnosis());
     }
     match serde_json::from_str(unfenced) {
         Ok(output) => Ok(output),
@@ -1452,7 +2040,9 @@ fn parse_model_output(content: &str) -> Result<ModelOutput, String> {
 /// model when it is absent — confirmed against `langchain_core`'s
 /// `convert_to_openai_function`, which every provider's tool-calling
 /// integration funnels through.
-#[allow(dead_code)] // read by tests only — wiring taguru extract's own request body to this is out of scope (issue #185)
+///
+/// [`json_schema_response_format`] puts this schema on this producer's own
+/// OpenAI-compatible wire (`--structured-output`, ADR 0001 §4.1).
 pub(crate) fn model_output_json_schema() -> serde_json::Value {
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1503,6 +2093,21 @@ pub(crate) fn model_output_json_schema() -> serde_json::Value {
             }
         }
     })
+}
+
+/// An answer with no content once fences are stripped — the
+/// thinking-budget-burn shape [`parse_model_output`] diagnoses. The
+/// ladder's EMPTY state shares this exact definition so a
+/// fenced-but-empty answer ("```json\n```") classifies identically on
+/// both paths.
+fn is_empty_answer(content: &str) -> bool {
+    strip_fences(content.trim()).is_empty()
+}
+
+fn empty_answer_diagnosis() -> String {
+    "the answer was empty — thinking-mode models can burn their whole budget on \
+     reasoning before any text (docs/extract.html: turn thinking off)"
+        .to_string()
 }
 
 fn strip_fences(text: &str) -> &str {
@@ -1790,6 +2395,33 @@ fn chunk(text: &str, cap: usize) -> Vec<String> {
     chunks
 }
 
+/// Re-chunks one already-labeled piece to a smaller cap for the
+/// ladder's split rung. [`chunk`] alone would carry an oversized
+/// block's continuation to the model unlabeled — exactly what
+/// [`labeled_document`] exists to prevent — so oversized blocks are
+/// pre-split here with their `[N] ` label repeated on every piece:
+/// the same discipline, at a smaller cap.
+fn split_labeled_piece(piece: &str, cap: usize) -> Vec<String> {
+    let mut blocks = Vec::new();
+    for block in piece.split("\n\n") {
+        if block.len() <= cap {
+            blocks.push(block.to_string());
+            continue;
+        }
+        let label_length = block
+            .starts_with('[')
+            .then(|| block.find("] ").map(|index| index + 2))
+            .flatten()
+            .unwrap_or(0);
+        let (label, content) = block.split_at(label_length);
+        let piece_cap = cap.saturating_sub(label.len()).max(1);
+        for sub in split_oversized(content, piece_cap) {
+            blocks.push(format!("{label}{}", sub.trim_end_matches('\n')));
+        }
+    }
+    chunk(&blocks.join("\n\n"), cap)
+}
+
 fn split_oversized(paragraph: &str, cap: usize) -> Vec<&str> {
     if paragraph.len() <= cap {
         return vec![paragraph];
@@ -1872,6 +2504,20 @@ struct ManifestEntry {
     /// input change like any other and re-extracts.
     #[serde(default)]
     fact_budget: usize,
+    /// --structured-output of the run that wrote this batch — the
+    /// REQUESTED mode, never the probe's resolution: which rung
+    /// carried a run depends on the backend, but the computation input
+    /// is what the operator asked for. Empty = off, so entries written
+    /// before this field existed keep matching all-defaults runs
+    /// instead of forcing a spurious re-extraction of everything.
+    #[serde(default)]
+    structured_output: String,
+    /// --max-output-tokens of the run that wrote this batch (0 = none
+    /// sent): an explicit output budget changes what the model can
+    /// answer, so changing it is a computation-input change like any
+    /// other and re-extracts.
+    #[serde(default)]
+    max_output_tokens: usize,
     output: String,
 }
 
@@ -1903,6 +2549,8 @@ impl Manifest {
         no_passage: bool,
         description: &str,
         fact_budget: usize,
+        structured_output: &str,
+        max_output_tokens: usize,
     ) -> bool {
         self.documents.get(source).is_some_and(|entry| {
             entry.sha256 == sha256
@@ -1913,6 +2561,8 @@ impl Manifest {
                 && entry.no_passage == no_passage
                 && entry.description == description
                 && entry.fact_budget == fact_budget
+                && entry.structured_output == structured_output
+                && entry.max_output_tokens == max_output_tokens
         })
     }
 
@@ -1927,6 +2577,8 @@ impl Manifest {
         no_passage: bool,
         description: &str,
         fact_budget: usize,
+        structured_output: &str,
+        max_output_tokens: usize,
         output: &str,
     ) {
         self.documents.insert(
@@ -1940,6 +2592,8 @@ impl Manifest {
                 no_passage,
                 description: description.to_string(),
                 fact_budget,
+                structured_output: structured_output.to_string(),
+                max_output_tokens,
                 output: output.to_string(),
             },
         );
@@ -2416,24 +3070,36 @@ mod tests {
             false,
             "",
             0,
+            "",
+            0,
             "a.md.jsonl",
         );
-        assert!(manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0));
-        assert!(!manifest.matches("a.md", "hash-2", "model-1", "sake", 0, false, "", 0));
-        assert!(!manifest.matches("a.md", "hash-1", "model-2", "sake", 0, false, "", 0));
-        assert!(!manifest.matches("b.md", "hash-1", "model-1", "sake", 0, false, "", 0));
+        assert!(manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0));
+        assert!(!manifest.matches("a.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0));
+        assert!(!manifest.matches("a.md", "hash-1", "model-2", "sake", 0, false, "", 0, "", 0));
+        assert!(!manifest.matches("b.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0));
         // A re-pointed --context must re-extract, not keep files whose
         // headers still name the old target.
-        assert!(!manifest.matches("a.md", "hash-1", "model-1", "vats", 0, false, "", 0));
+        assert!(!manifest.matches("a.md", "hash-1", "model-1", "vats", 0, false, "", 0, "", 0));
         // Toggling --no-passage changes whether the batch carries the
         // source passage at all — a skip would keep the stale shape.
-        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, true, "", 0));
+        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, true, "", 0, "", 0));
         // A changed --description is baked into the batch header, so it
         // must re-extract too rather than skip with the old one.
-        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, "new desc", 0));
+        assert!(!manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "new desc", 0, "", 0
+        ));
         // A changed --fact-budget is folded into the system prompt like
         // --questions, so it must re-extract too rather than skip.
-        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 5));
+        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 5, "", 0));
+        // A changed --structured-output or --max-output-tokens changes
+        // what the model can answer — computation inputs like the rest.
+        assert!(!manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "auto", 0
+        ));
+        assert!(!manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 2048
+        ));
 
         // A prompt bump invalidates entries recorded under the old one.
         manifest
@@ -2441,7 +3107,7 @@ mod tests {
             .get_mut("a.md")
             .expect("just recorded")
             .prompt_version = PROMPT_VERSION + 1;
-        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0));
+        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0));
 
         let dir = std::env::temp_dir().join(format!("taguru-manifest-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -2458,11 +3124,14 @@ mod tests {
             false,
             "",
             0,
+            "",
+            0,
             "a.md.jsonl",
         );
         manifest.save(&path).unwrap();
         assert!(
-            Manifest::load(&path).matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0)
+            Manifest::load(&path)
+                .matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0)
         );
         fs::write(&path, "not json").unwrap();
         assert!(Manifest::load(&path).documents.is_empty());
@@ -2478,8 +3147,203 @@ mod tests {
         .unwrap();
         let legacy = Manifest::load(&path);
         assert_eq!(legacy.documents.len(), 1);
-        assert!(!legacy.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0));
+        assert!(!legacy.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0));
+
+        // An entry written before the structured_output/
+        // max_output_tokens fields existed (all other fields current)
+        // must keep matching an all-defaults run — the new controls
+        // default to their zero values precisely so old manifests
+        // don't force a spurious re-extraction of everything.
+        fs::write(
+            &path,
+            format!(
+                r#"{{"documents": {{"a.md": {{"sha256": "hash-1", "model": "model-1",
+                    "prompt_version": {PROMPT_VERSION}, "context": "sake",
+                    "output": "a.md.jsonl"}}}}}}"#
+            ),
+        )
+        .unwrap();
+        let pre_ladder = Manifest::load(&path);
+        assert!(pre_ladder.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0));
+        assert!(!pre_ladder.matches(
+            "a.md",
+            "hash-1",
+            "model-1",
+            "sake",
+            0,
+            false,
+            "",
+            0,
+            "json-schema",
+            0
+        ));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn request_options_default_adds_no_keys_to_the_body() {
+        let messages = [serde_json::json!({"role": "user", "content": "hi"})];
+        // The pre-ladder body, byte for byte: serde_json orders keys
+        // alphabetically, so nothing about the base three moves when
+        // the optional keys are absent.
+        assert_eq!(
+            build_chat_body("m", &messages, &RequestOptions::default()),
+            r#"{"messages":[{"content":"hi","role":"user"}],"model":"m","temperature":0}"#
+        );
+        let with_options = build_chat_body(
+            "m",
+            &messages,
+            &RequestOptions {
+                response_format: Some(json_object_response_format()),
+                max_tokens: Some(512),
+            },
+        );
+        assert_eq!(
+            with_options,
+            r#"{"max_tokens":512,"messages":[{"content":"hi","role":"user"}],"model":"m","response_format":{"type":"json_object"},"temperature":0}"#
+        );
+    }
+
+    #[test]
+    fn classify_attempt_reads_provider_metadata_before_the_parse() {
+        let valid = r#"{"associations": [], "aliases": []}"#;
+        // A length-terminated answer whose prefix happens to parse is
+        // still LENGTH — a valid prefix of a cut-off extraction is the
+        // "deleted-subset called complete" the ladder exists to refuse.
+        let completion = ChatCompletion {
+            content: valid.to_string(),
+            finish_reason: Some("length".to_string()),
+        };
+        assert!(matches!(
+            classify_attempt(&completion),
+            AttemptOutcome::LengthLimited
+        ));
+        // Length also outranks emptiness: a thinking model that burned
+        // its budget to nothing at the cap is a budget problem, not an
+        // empty-answer problem.
+        let empty_at_cap = ChatCompletion {
+            content: String::new(),
+            finish_reason: Some("max_tokens".to_string()),
+        };
+        assert!(matches!(
+            classify_attempt(&empty_at_cap),
+            AttemptOutcome::LengthLimited
+        ));
+        let refused = ChatCompletion {
+            content: valid.to_string(),
+            finish_reason: Some("content_filter".to_string()),
+        };
+        assert!(matches!(
+            classify_attempt(&refused),
+            AttemptOutcome::Refusal(reason) if reason == "content_filter"
+        ));
+        let empty = ChatCompletion {
+            content: "```json\n```".to_string(),
+            finish_reason: Some("stop".to_string()),
+        };
+        assert!(matches!(classify_attempt(&empty), AttemptOutcome::Empty));
+        let ok = ChatCompletion {
+            content: valid.to_string(),
+            finish_reason: Some("stop".to_string()),
+        };
+        assert!(matches!(classify_attempt(&ok), AttemptOutcome::Valid(_)));
+        let malformed = ChatCompletion {
+            content: "not json".to_string(),
+            finish_reason: None,
+        };
+        assert!(matches!(
+            classify_attempt(&malformed),
+            AttemptOutcome::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn indicates_refusal_is_true_only_for_refusal_reasons() {
+        assert!(indicates_refusal("content_filter"));
+        assert!(indicates_refusal("refusal"));
+        assert!(!indicates_refusal("stop"));
+        assert!(!indicates_refusal("length"));
+        assert!(!indicates_refusal("tool_calls"));
+    }
+
+    #[test]
+    fn structured_output_mode_parses_the_four_values_and_rejects_anything_else() {
+        assert!(matches!(
+            StructuredOutputMode::parse("auto"),
+            Some(StructuredOutputMode::Auto)
+        ));
+        assert!(matches!(
+            StructuredOutputMode::parse("json-schema"),
+            Some(StructuredOutputMode::JsonSchema)
+        ));
+        assert!(matches!(
+            StructuredOutputMode::parse("json-object"),
+            Some(StructuredOutputMode::JsonObject)
+        ));
+        assert!(matches!(
+            StructuredOutputMode::parse("off"),
+            Some(StructuredOutputMode::Off)
+        ));
+        assert!(StructuredOutputMode::parse("json_schema").is_none());
+        assert!(StructuredOutputMode::parse("AUTO").is_none());
+        assert!(StructuredOutputMode::parse("").is_none());
+        assert_eq!(StructuredOutputMode::Off.manifest_value(), "");
+        assert_eq!(StructuredOutputMode::Auto.manifest_value(), "auto");
+    }
+
+    #[test]
+    fn the_json_schema_response_format_carries_the_canonical_schema() {
+        let format = json_schema_response_format();
+        assert_eq!(format["type"], "json_schema");
+        // LangChain's convention and OpenAI's requirement agree: the
+        // binding name comes from the schema's own title.
+        assert_eq!(format["json_schema"]["name"], "ModelOutput");
+        assert_eq!(format["json_schema"]["strict"], true);
+        assert_eq!(format["json_schema"]["schema"], model_output_json_schema());
+    }
+
+    #[test]
+    fn probe_shape_conformance_requires_the_canonical_keys() {
+        assert!(conforms_to_model_output_shape(
+            r#"{"associations": [], "aliases": []}"#
+        ));
+        assert!(conforms_to_model_output_shape(
+            "```json\n{\"associations\": [], \"aliases\": [], \"questions\": []}\n```"
+        ));
+        // Any other JSON — what a json_object-only endpoint answers —
+        // must NOT read as schema support.
+        assert!(!conforms_to_model_output_shape(r#"{"color": "blue"}"#));
+        assert!(!conforms_to_model_output_shape(r#"{"associations": []}"#));
+        assert!(!conforms_to_model_output_shape("The sky is blue."));
+        assert!(!conforms_to_model_output_shape(""));
+    }
+
+    #[test]
+    fn split_labeled_piece_halves_blocks_with_their_labels_repeated() {
+        // Two labeled paragraphs, the second far over the new cap: the
+        // oversized one must split into pieces that EACH carry "[1] ",
+        // exactly like labeled_document does at build time — an
+        // unlabeled continuation would turn its paragraph references
+        // into guesses.
+        let piece = format!("[0] short one\n\n[1] {}", "line\n".repeat(80));
+        let sub_pieces = split_labeled_piece(&piece, 256);
+        assert!(sub_pieces.len() > 1, "{}", sub_pieces.len());
+        let continuations = sub_pieces
+            .iter()
+            .flat_map(|sub| sub.split("\n\n"))
+            .filter(|block| block.starts_with("[1] "))
+            .count();
+        assert!(continuations > 1, "{sub_pieces:?}");
+        assert!(
+            sub_pieces
+                .iter()
+                .flat_map(|sub| sub.split("\n\n"))
+                .all(|block| block.starts_with("[0] ") || block.starts_with("[1] ")),
+            "{sub_pieces:?}"
+        );
+        // A piece already under the cap does not split at all — the
+        // ladder reads that as "minimum unit".
+        assert_eq!(split_labeled_piece("[0] tiny", 256).len(), 1);
     }
 
     #[test]
