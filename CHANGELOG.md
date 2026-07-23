@@ -10,7 +10,7 @@ Entries that change an on-disk format or a response shape say so.
 ### Added
 - `taguru extract` puts structured output on the wire and gains an explicit
   output budget with deterministic length escalation (#198, implementing
-  ADR 0001 §4/§6/§7) — `--structured-output` /
+  ADR 0001 §4.1/§4.2/§7) — `--structured-output` /
   `TAGURU_EXTRACT_STRUCTURED_OUTPUT` selects a rung of the capability
   ladder (`json-schema` sends the canonical `ModelOutput` schema as
   `response_format` with `strict` requested, `json-object` sends JSON
