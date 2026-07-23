@@ -306,11 +306,13 @@ export function correctiveAssistantTurnContent(content: string, cap: number | un
 
 /**
  * Whether a completion's finish reason means the provider cut the answer
- * off at its own output-length cap. Any other reason ("stop", a
+ * off at its own output-length cap: "length" is the OpenAI-compatible
+ * (and Ollama done_reason) spelling, "max_tokens" is Anthropic's
+ * stop_reason for the same cutoff. Any other reason ("stop", a
  * provider-specific value, none at all) gets the ordinary corrective text.
  */
 export function indicatesLengthLimit(finishReason: string | undefined | null): boolean {
-  return finishReason === "length";
+  return finishReason === "length" || finishReason === "max_tokens";
 }
 
 /**

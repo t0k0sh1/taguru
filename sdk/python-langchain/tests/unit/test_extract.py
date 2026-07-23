@@ -352,9 +352,10 @@ def test_corrective_assistant_turn_content_leaves_content_under_the_cap_untouche
     assert corrective_assistant_turn_content("short", 1000) == "short"
 
 
-def test_indicates_length_limit_is_true_only_for_length() -> None:
-    """Port of extract.rs indicates_length_limit_is_true_only_for_length."""
+def test_indicates_length_limit_is_true_only_for_output_cap_reasons() -> None:
+    """Port of extract.rs indicates_length_limit_is_true_only_for_output_cap_reasons."""
     assert indicates_length_limit("length")
+    assert indicates_length_limit("max_tokens")
     assert not indicates_length_limit("stop")
     assert not indicates_length_limit("content_filter")
     assert not indicates_length_limit(None)

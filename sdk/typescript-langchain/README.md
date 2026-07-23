@@ -60,9 +60,10 @@ provider can return.
   any other value truncates it to that many bytes.
 
 When the provider's `AIMessage.response_metadata` says a malformed answer
-was cut off at its output-length cap (`finish_reason: "length"` and
-equivalents), the corrective ask switches from "try again" to "try again
-shorter," naming `fact_budget` when one is set.
+was cut off at its output-length cap (`finish_reason`/`done_reason`
+`"length"`, or Anthropic's `stop_reason: "max_tokens"`), the corrective
+ask switches from "try again" to "try again shorter," naming
+`fact_budget` when one is set.
 
 Not provided, deliberately: a VectorStore facade (Taguru's retrieval is
 structural-first — `similaritySearch` would misrepresent it), a Memory class

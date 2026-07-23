@@ -260,8 +260,9 @@ describe("corrective-turn replay", () => {
 });
 
 describe("indicatesLengthLimit", () => {
-  it('is true only for "length"', () => {
+  it("is true only for output-cap finish reasons", () => {
     expect(indicatesLengthLimit("length")).toBe(true);
+    expect(indicatesLengthLimit("max_tokens")).toBe(true);
     expect(indicatesLengthLimit("stop")).toBe(false);
     expect(indicatesLengthLimit("content_filter")).toBe(false);
     expect(indicatesLengthLimit(undefined)).toBe(false);

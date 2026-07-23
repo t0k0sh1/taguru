@@ -1142,10 +1142,14 @@ fn extract_chunk(
 /// the answer off at its own output-length cap — the pattern behind
 /// Issue #178's stalls: one huge truncated answer, replayed back in
 /// full, then re-asked for the very length the model just proved it
-/// couldn't fit in. Any other reason (`"stop"`, `None`, a
-/// provider-specific value) is left to the ordinary corrective text.
+/// couldn't fit in. `"length"` is the OpenAI-compatible (and Ollama
+/// `done_reason`) spelling; `"max_tokens"` is Anthropic's `stop_reason`
+/// for the same cutoff, which the SDK twins meet through LangChain
+/// metadata and this producer can meet through pass-through bridges.
+/// Any other reason (`"stop"`, `None`, a provider-specific value) is
+/// left to the ordinary corrective text.
 fn indicates_length_limit(finish_reason: Option<&str>) -> bool {
-    finish_reason == Some("length")
+    matches!(finish_reason, Some("length" | "max_tokens"))
 }
 
 /// The corrective turn's user-facing ask, addressed to `parse_error`.
@@ -2770,8 +2774,9 @@ mod tests {
     }
 
     #[test]
-    fn indicates_length_limit_is_true_only_for_length() {
+    fn indicates_length_limit_is_true_only_for_output_cap_reasons() {
         assert!(indicates_length_limit(Some("length")));
+        assert!(indicates_length_limit(Some("max_tokens")));
         assert!(!indicates_length_limit(Some("stop")));
         assert!(!indicates_length_limit(Some("content_filter")));
         assert!(!indicates_length_limit(None));

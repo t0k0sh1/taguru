@@ -33,12 +33,13 @@ Entries that change an on-disk format or a response shape say so.
   `TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES` / `corrective_context_bytes`
   caps how much of a malformed answer gets replayed back on the next
   attempt (`0` omits it behind a placeholder), default unchanged at
-  replaying it in full; and once a provider's own `finish_reason` (read
-  from `AIMessage.response_metadata` in the SDKs) says a bad answer was
-  cut off at its output-length cap, the corrective ask itself switches
-  from "try again" to "try again shorter," naming the fact budget when
-  one is set — the fix for a local model stalling for minutes replaying
-  and re-requesting the same oversized malformed answer. Defaults are
+  replaying it in full; and once a provider's own finish reason
+  (`"length"`, or Anthropic's `"max_tokens"`; read from
+  `AIMessage.response_metadata` in the SDKs) says a bad answer was cut
+  off at its output-length cap, the corrective ask itself switches from
+  "try again" to "try again shorter," naming the fact budget when one is
+  set — the fix for a local model stalling for minutes replaying and
+  re-requesting the same oversized malformed answer. Defaults are
   unchanged in every case.
 - `TaguruIngester` gains an optional `on_event` progress callback (#177) —
   synchronous, typed events (`document_started`, `chunk_started`,

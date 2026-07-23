@@ -294,9 +294,11 @@ def indicates_length_limit(finish_reason: str | None) -> bool:
     answer off at its own output-length cap — the pattern behind Issue
     #178's stalls: one huge truncated answer, replayed back in full, then
     re-asked for the very length the model just proved it couldn't fit in.
-    Any other reason ("stop", ``None``, a provider-specific value) is left
-    to the ordinary corrective text."""
-    return finish_reason == "length"
+    ``"length"`` is the OpenAI-compatible (and Ollama ``done_reason``)
+    spelling; ``"max_tokens"`` is Anthropic's ``stop_reason`` for the same
+    cutoff. Any other reason ("stop", ``None``, a provider-specific value)
+    is left to the ordinary corrective text."""
+    return finish_reason in ("length", "max_tokens")
 
 
 def corrective_message(parse_error: str, length_limited: bool, fact_budget: int) -> str:
