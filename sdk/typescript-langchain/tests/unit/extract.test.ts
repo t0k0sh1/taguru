@@ -9,12 +9,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   chunk,
+  correctiveAssistantTurnContent,
+  correctiveMessage,
+  indicatesLengthLimit,
   labeledDocument,
   merge,
   MODEL_OUTPUT_JSON_SCHEMA,
   parseModelOutput,
   renderBatch,
   splitParagraphs,
+  systemPrompt,
   labelVocabulary,
   type Extraction,
   type ModelAlias,
@@ -220,6 +224,72 @@ describe("chunking and paragraph split", () => {
     expect(
       chunks.flatMap((piece) => piece.split("\n\n")).every((block) => block.startsWith("[0] ")),
     ).toBe(true);
+  });
+});
+
+describe("the system prompt's fact budget", () => {
+  it("omits the fact-budget clause by default", () => {
+    expect(systemPrompt([], 0)).not.toContain("association(s) total");
+  });
+
+  it("states the fact budget when set", () => {
+    expect(systemPrompt([], 0, 5)).toContain("at most 5 association(s) total");
+  });
+});
+
+describe("corrective-turn replay", () => {
+  it("replays the prior answer in full by default", () => {
+    expect(correctiveAssistantTurnContent("not json at all", undefined)).toBe("not json at all");
+  });
+
+  it("omits the prior answer at a zero cap", () => {
+    expect(correctiveAssistantTurnContent("not json at all", 0)).toBe(
+      "[omitted: not the requested JSON object]",
+    );
+  });
+
+  it("truncates at a char boundary under a cap", () => {
+    // The cap (3) lands one byte into the 3-byte "…" that starts at byte
+    // 2; the cut must back off to the boundary, not split the character.
+    expect(correctiveAssistantTurnContent("ab…cd", 3)).toBe("ab… [truncated to 3 bytes]");
+  });
+
+  it("leaves content under the cap untouched", () => {
+    expect(correctiveAssistantTurnContent("short", 1000)).toBe("short");
+  });
+});
+
+describe("indicatesLengthLimit", () => {
+  it('is true only for "length"', () => {
+    expect(indicatesLengthLimit("length")).toBe(true);
+    expect(indicatesLengthLimit("stop")).toBe(false);
+    expect(indicatesLengthLimit("content_filter")).toBe(false);
+    expect(indicatesLengthLimit(undefined)).toBe(false);
+  });
+});
+
+describe("correctiveMessage", () => {
+  it("matches today's fixed text when not length-limited", () => {
+    const expected =
+      "That was not the single JSON object asked for (bad json). " +
+      "Answer again with only the JSON object.";
+    expect(correctiveMessage("bad json", false, 0)).toBe(expected);
+    // A set fact budget changes nothing here — nothing was cut off, so
+    // there is nothing to shorten.
+    expect(correctiveMessage("bad json", false, 5)).toBe(expected);
+  });
+
+  it("asks for SHORTER when length-limited", () => {
+    const message = correctiveMessage("bad json", true, 0);
+    expect(message).toContain("SHORTER");
+    expect(message).toContain("bad json");
+    expect(message).not.toContain("association(s) total");
+  });
+
+  it("names the fact budget when length-limited and set", () => {
+    expect(correctiveMessage("bad json", true, 5)).toContain(
+      "Keep it to at most 5 association(s) total.",
+    );
   });
 });
 
