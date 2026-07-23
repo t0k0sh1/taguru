@@ -1,0 +1,10 @@
+{
+  "match": "alias_group_recall",
+  "groups": [
+    {
+      "canonical_any": ["高瀬正一", "高瀬", "高瀬杜氏"],
+      "surface_forms": ["親方", "高瀬杜氏", "Takase"]
+    }
+  ],
+  "decoy_names": ["高橋", "高橋商店"]
+}

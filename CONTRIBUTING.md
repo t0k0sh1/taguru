@@ -49,6 +49,12 @@ for the LLM, so it still runs offline). CI runs every one of them
 after the SDK test suites; see the `python`/`typescript` jobs in
 `sdk.yml` for the exact invocation.
 
+## Design decisions
+
+Cross-cutting design decisions are recorded as numbered ADRs in
+[adr/](adr/), alongside the evidence (fixtures, harness, results) each
+decision was made on.
+
 ## Changelog
 
 [CHANGELOG.md](CHANGELOG.md) follows [Keep a

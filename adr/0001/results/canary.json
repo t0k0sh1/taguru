@@ -1,0 +1,173 @@
+{
+  "base_url": "http://localhost:11434",
+  "models": {
+    "taguru-extract-12b": {
+      "capabilities": [
+        "completion",
+        "vision",
+        "audio",
+        "tools",
+        "thinking"
+      ],
+      "parameters": "top_k                          64\ntop_p                          0.95\nnum_ctx                        16384\ntemperature                    1",
+      "details": {
+        "parent_model": "gemma4:12b",
+        "format": "gguf",
+        "family": "gemma4",
+        "families": [
+          "gemma4"
+        ],
+        "parameter_size": "11.9B",
+        "quantization_level": "Q4_K_M"
+      }
+    },
+    "qwen2.5:7b": {
+      "capabilities": [
+        "completion",
+        "tools"
+      ],
+      "parameters": "",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "qwen2",
+        "families": [
+          "qwen2"
+        ],
+        "parameter_size": "7.6B",
+        "quantization_level": "Q4_K_M"
+      }
+    }
+  },
+  "probes": [
+    {
+      "model": "taguru-extract-12b",
+      "wire": "native",
+      "mechanism": "A0",
+      "evidence": "Here are three colors I like:\n\n1. **Deep Blue:** I like it because it evokes a sense of calm, stability, and the vastness of the ocean and night sky.\n2. **Forest Green:** I love it because it feels grounding and reminds me of nature, growth, and renewal.\n3. **Amber:** I like it because it feels warm",
+      "finish_reason": "stop",
+      "verdict": "baseline-prose"
+    },
+    {
+      "model": "taguru-extract-12b",
+      "wire": "native",
+      "mechanism": "A1",
+      "evidence": "{\n  \"colors\": [\n    {\n      \"color\": \"Deep Forest Green\",\n      \"reason\": \"It evokes a sense of tranquility and reminds me of the grounding presence of nature.\"\n    },\n    {\n      \"color\": \"Midnight Blue\",\n      \"reason\": \"I love its depth and mystery; it feels both sophisticated and calming, like t",
+      "finish_reason": "stop",
+      "verdict": "yes"
+    },
+    {
+      "model": "taguru-extract-12b",
+      "wire": "native",
+      "mechanism": "B",
+      "evidence": "{\n  \"colors\": [\n    \"Deep Forest Green\",\n    \"Midnight Blue\",\n    \"Terracotta\"\n  ]\n}",
+      "finish_reason": "stop",
+      "verdict": "yes"
+    },
+    {
+      "model": "taguru-extract-12b",
+      "wire": "native",
+      "mechanism": "C",
+      "evidence": "{\"colors\": [\"Emerald Green (it feels refreshing and reminds me of nature)\", \"Midnight Blue (it evokes a sense of calm and mystery)\", \"Sunset Orange (it is vibrant and full of energy)\"]}",
+      "finish_reason": "stop",
+      "verdict": "yes"
+    },
+    {
+      "model": "taguru-extract-12b",
+      "wire": "v1",
+      "mechanism": "A0",
+      "evidence": "Here are three colors I like:\n\n1. **Deep Blue:** It evokes a sense of tranquility and reminds me of the vastness of the ocean.\n2. **Emerald Green:** I love it because it represents growth and the vibrant life found in nature.\n3. **Golden Yellow:** It feels warm and optimistic, much like a burst of s",
+      "finish_reason": "stop",
+      "verdict": "baseline-prose"
+    },
+    {
+      "model": "taguru-extract-12b",
+      "wire": "v1",
+      "mechanism": "A1",
+      "evidence": "{\"thought\": \"The user wants me to name three colors and provide a brief reason for each. I should choose three distinct colors and give a short, evocative description for each.\"}<|tool_response>",
+      "finish_reason": "stop",
+      "verdict": "no"
+    },
+    {
+      "model": "taguru-extract-12b",
+      "wire": "v1",
+      "mechanism": "B",
+      "evidence": "{\"colors\": [\"blue\", \"green\", \"gold\", \"yellow\"]}",
+      "finish_reason": "stop",
+      "verdict": "yes"
+    },
+    {
+      "model": "taguru-extract-12b",
+      "wire": "v1",
+      "mechanism": "C",
+      "evidence": "",
+      "finish_reason": "length",
+      "verdict": "no"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "wire": "native",
+      "mechanism": "A0",
+      "evidence": "Sure, here are three colors I enjoy:\n\n1. **Blue**: Blue is one of my favorite colors because it often evokes feelings of calmness and tranquility. It reminds me of the vastness of the sky and the ocean, which can be both peaceful and awe-inspiring.\n\n2. **Green**: Green represents nature and growth t",
+      "finish_reason": "stop",
+      "verdict": "baseline-prose"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "wire": "native",
+      "mechanism": "A1",
+      "evidence": "{\n    \"colors\": [\n        {\n            \"color\": \"Blue\",\n            \"reason\": \"I enjoy the color blue because it often evokes feelings of calmness, tranquility, and serenity. It reminds me of clear skies and vast oceans, which can be very soothing.\"\n        },\n        {\n            \"color\": \"Green\"",
+      "finish_reason": "stop",
+      "verdict": "yes"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "wire": "native",
+      "mechanism": "B",
+      "evidence": "{\n    \"colors\": [\n        \"Blue\",\n        \"Green\",\n        \"Yellow\"\n    ]\n}",
+      "finish_reason": "stop",
+      "verdict": "yes"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "wire": "native",
+      "mechanism": "C",
+      "evidence": "{\"colors\": [\"blue\", \"green\", \"yellow\"]}",
+      "finish_reason": "stop",
+      "verdict": "yes"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "wire": "v1",
+      "mechanism": "A0",
+      "evidence": "Sure, here are three colors I enjoy:\n\n1. **Blue**: Blue is one of my favorite colors because it often evokes feelings of calmness and tranquility. It reminds me of the vastness of the sky and the ocean, which can be both peaceful and awe-inspiring.\n\n2. **Green**: Green represents nature and growth t",
+      "finish_reason": "stop",
+      "verdict": "baseline-prose"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "wire": "v1",
+      "mechanism": "A1",
+      "evidence": "{\n    \"colors\": [\n        {\n            \"color\": \"Blue\",\n            \"reason\": \"I enjoy the color blue because it often evokes feelings of calmness, tranquility, and serenity. It reminds me of clear skies and vast oceans, which can be very soothing.\"\n        },\n        {\n            \"color\": \"Green\"",
+      "finish_reason": "stop",
+      "verdict": "yes"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "wire": "v1",
+      "mechanism": "B",
+      "evidence": "{\n    \"colors\": [\n        \"Blue\",\n        \"Green\",\n        \"Yellow\"\n    ]\n}",
+      "finish_reason": "stop",
+      "verdict": "yes"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "wire": "v1",
+      "mechanism": "C",
+      "evidence": "{\"colors\":[\"blue\",\"green\",\"yellow\"]}",
+      "finish_reason": "tool_calls",
+      "verdict": "yes"
+    }
+  ],
+  "ollama_version": "0.32.0"
+}

@@ -1,0 +1,14 @@
+{
+  "match": "exact_triple",
+  "triples": [
+    { "subject": "青嶺酒造", "label": "行う", "object": "大量生産", "polarity": "negative", "paragraph": 0 },
+    { "subject": "高瀬", "label": "監督する", "object": "麹造り", "polarity": "positive", "paragraph": 0 },
+    { "subject": "蔵人", "label": "手作業で行う", "object": "麹造り", "polarity": "positive", "paragraph": 0 },
+    { "subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "polarity": "positive", "paragraph": 0 },
+    { "subject": "六代目当主", "label": "担う", "object": "経営", "polarity": "positive", "paragraph": 1 },
+    { "subject": "六代目当主", "label": "担う", "object": "販売", "polarity": "positive", "paragraph": 1 },
+    { "subject": "六代目当主", "label": "口を出す", "object": "造り", "polarity": "negative", "paragraph": 1 },
+    { "subject": "蔵人", "label": "住み込む場所", "object": "蔵", "polarity": "positive", "paragraph": 1 },
+    { "subject": "蔵人", "label": "住み込む期間", "object": "冬の仕込み期間", "polarity": "positive", "paragraph": 1 }
+  ]
+}

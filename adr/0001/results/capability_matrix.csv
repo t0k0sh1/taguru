@@ -1,0 +1,17 @@
+model,wire,mechanism,verdict,finish_reason,evidence
+taguru-extract-12b,native,A0,baseline-prose,stop,"Here are three colors I like:\n\n1. **Deep Blue:** I like it because it evokes a sense of calm, stability, and the vastness of the ocean and night sky.\n2. **Forest Green:** I love it because it feels"
+taguru-extract-12b,native,A1,yes,stop,"{\n  ""colors"": [\n    {\n      ""color"": ""Deep Forest Green"",\n      ""reason"": ""It evokes a sense of tranquility and reminds me of the grounding presence of nature.""\n    },\n    {\n      ""color"": ""Mid"
+taguru-extract-12b,native,B,yes,stop,"{\n  ""colors"": [\n    ""Deep Forest Green"",\n    ""Midnight Blue"",\n    ""Terracotta""\n  ]\n}"
+taguru-extract-12b,native,C,yes,stop,"{""colors"": [""Emerald Green (it feels refreshing and reminds me of nature)"", ""Midnight Blue (it evokes a sense of calm and mystery)"", ""Sunset Orange (it is vibrant and full of energy)""]}"
+taguru-extract-12b,v1,A0,baseline-prose,stop,Here are three colors I like:\n\n1. **Deep Blue:** It evokes a sense of tranquility and reminds me of the vastness of the ocean.\n2. **Emerald Green:** I love it because it represents growth and the v
+taguru-extract-12b,v1,A1,no,stop,"{""thought"": ""The user wants me to name three colors and provide a brief reason for each. I should choose three distinct colors and give a short, evocative description for each.""}<|tool_response>"
+taguru-extract-12b,v1,B,yes,stop,"{""colors"": [""blue"", ""green"", ""gold"", ""yellow""]}"
+taguru-extract-12b,v1,C,no,length,
+qwen2.5:7b,native,A0,baseline-prose,stop,"Sure, here are three colors I enjoy:\n\n1. **Blue**: Blue is one of my favorite colors because it often evokes feelings of calmness and tranquility. It reminds me of the vastness of the sky and the oc"
+qwen2.5:7b,native,A1,yes,stop,"{\n    ""colors"": [\n        {\n            ""color"": ""Blue"",\n            ""reason"": ""I enjoy the color blue because it often evokes feelings of calmness, tranquility, and serenity. It reminds me of cle"
+qwen2.5:7b,native,B,yes,stop,"{\n    ""colors"": [\n        ""Blue"",\n        ""Green"",\n        ""Yellow""\n    ]\n}"
+qwen2.5:7b,native,C,yes,stop,"{""colors"": [""blue"", ""green"", ""yellow""]}"
+qwen2.5:7b,v1,A0,baseline-prose,stop,"Sure, here are three colors I enjoy:\n\n1. **Blue**: Blue is one of my favorite colors because it often evokes feelings of calmness and tranquility. It reminds me of the vastness of the sky and the oc"
+qwen2.5:7b,v1,A1,yes,stop,"{\n    ""colors"": [\n        {\n            ""color"": ""Blue"",\n            ""reason"": ""I enjoy the color blue because it often evokes feelings of calmness, tranquility, and serenity. It reminds me of cle"
+qwen2.5:7b,v1,B,yes,stop,"{\n    ""colors"": [\n        ""Blue"",\n        ""Green"",\n        ""Yellow""\n    ]\n}"
+qwen2.5:7b,v1,C,yes,tool_calls,"{""colors"":[""blue"",""green"",""yellow""]}"

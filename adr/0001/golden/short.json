@@ -1,0 +1,10 @@
+{
+  "match": "exact_triple",
+  "triples": [
+    { "subject": "青嶺酒造", "label": "業種", "object": "日本酒の蔵元", "polarity": "positive", "paragraph": 0 },
+    { "subject": "青嶺酒造", "label": "所在地", "object": "霧沢町", "polarity": "positive", "paragraph": 0 },
+    { "subject": "霧沢町", "label": "所在する県", "object": "雲居県", "polarity": "positive", "paragraph": 0 },
+    { "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "polarity": "positive", "paragraph": 0 },
+    { "subject": "青嶺", "label": "出荷先", "object": "全国", "polarity": "positive", "paragraph": 0 }
+  ]
+}

@@ -4,6 +4,11 @@
 /node_modules
 .DS_Store
 
+# ADR evidence harnesses: full raw model responses are regenerable bulk
+# output (the journaled 2 KiB excerpts in results/ are what gets committed)
+adr/*/raw/
+adr/*/__pycache__/
+
 # SDK build/dev artifacts
 sdk/**/node_modules/
 sdk/**/dist/
