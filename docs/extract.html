@@ -351,6 +351,66 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     </p>
   </section>
 
+  <section id="checkpoints">
+    <h2>Chunk checkpoints: surviving an interruption mid-document</h2>
+    <p>
+      The manifest above protects a whole <i>document</i> that hasn't changed — but a document is
+      not the smallest unit of work. A long document can take many chunk completions, and until
+      the last one lands, an interruption (Ctrl+C, a preemptible instance reclaimed, a later
+      document's panic) threw away every chunk already extracted for it. <code>--out</code> also
+      carries a <code>.extract-checkpoints/</code> directory, one JSON file per document, holding
+      every chunk unit successfully extracted so far. A rerun over the same <code>--out</code>
+      picks up mid-document: chunks already checkpointed are never re-sent to the model.
+    </p>
+    <p>
+      Each checkpointed unit is keyed by the <b>hash of its own text</b>, not by chunk index. This
+      matters because the <a
+      href="https://github.com/t0k0sh1/taguru/blob/main/adr/0001-structured-extraction-reliability.md">ADR
+      0001 §7</a> length ladder can split an oversized chunk into smaller sub-pieces on its own
+      recursive re-attempt — a resumed run's split points are not guaranteed to line up with a
+      prior run's. Keying on content hash instead of position means a completed sub-piece is
+      recognized as done regardless of how either run divided the chunk around it, and a
+      not-yet-completed sub-piece is correctly treated as new work.
+    </p>
+    <p>
+      A checkpoint file also carries the same compute-input fingerprint the manifest checks
+      (content hash, model, prompt version, context, <code>--questions</code>,
+      <code>--fact-budget</code>, <code>--structured-output</code>, and so on). Any mismatch — the
+      source edited, a setting changed — invalidates the whole file, the same "unreadable or
+      incompatible degrades to re-extraction, never to a false reuse" posture the manifest takes.
+      <code>--force</code> discards a document's existing checkpoints outright, one level deeper
+      than bypassing the manifest skip. A document whose batch lands successfully has its
+      checkpoint file deleted; a document that ultimately fails (Stage 2 correction, merge,
+      self-validation) keeps it — the chunks it did complete are still good work worth keeping for
+      the next attempt.
+    </p>
+    <p>
+      <code>--dry-run</code> reads checkpoints too (never writes or calls anything) and folds a
+      "reusable" count into its existing per-document line, e.g. <code>"3 chunk(s), 1 reusable
+      from checkpoint"</code>. The count is top-level-chunk granularity only — dry-run resolves no
+      ladder, so a chunk that would end up split on a real run is honestly reported as pending
+      rather than guessed at.
+    </p>
+    <p>
+      Ctrl+C (or a <code>SIGTERM</code>) during a run is cooperative: the first signal finishes
+      the chunk in flight, checkpoints it, and stops before starting the next one — between chunks
+      within a document under the default sequential mode, and between documents under
+      <code>--parallel</code> (its concurrent chunk dispatch is not interrupted mid-flight, so stop
+      takes effect at the next document boundary rather than the next chunk). The process exits
+      with code <code>130</code> and prints a line naming how many documents were reached before
+      stopping; rerunning the same command resumes from the checkpoints just as after any other
+      interruption. A second signal forces an immediate exit, also with code <code>130</code>, for
+      when the graceful path is itself stuck (a hung connection, a provider that never returns).
+    </p>
+    <p>
+      Operationally, this is what makes a long extraction job viable on a spot/preemptible
+      instance: schedule it to run against a persistent <code>--out</code>, let the scheduler kill
+      it whenever the instance is reclaimed, and requeue the same command — the manifest skips
+      finished documents, checkpoints skip finished chunks within the document that was
+      in flight, and nothing already paid for is ever paid for twice.
+    </p>
+  </section>
+
   <section id="diagnostics">
     <h2>Diagnostics sidecar</h2>
     <p>

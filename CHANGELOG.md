@@ -227,6 +227,35 @@ Entries that change an on-disk format or a response shape say so.
   `console.warn` rather than failing the ingest. `events.ts` and its ten
   event shapes are exported from the package index like the Python
   package exports its events.
+- `taguru extract` gains durable per-chunk checkpoints, cooperative
+  stop, and resume (#179) — a long document no longer loses every chunk
+  already extracted when a run is interrupted (Ctrl+C, a preemptible
+  instance reclaimed, a later document's panic). `--out` gains a
+  `.extract-checkpoints/` directory, one JSON file per document, holding
+  every chunk unit landed so far; a rerun over the same `--out` skips
+  re-sending them to the model. Each unit is keyed by the hash of its
+  own text rather than by chunk index, so the ADR 0001 §7 length
+  ladder's split rung — which can divide an oversized chunk differently
+  across two runs — still resumes correctly: a completed sub-piece is
+  recognized regardless of how either run split around it. Checkpoint
+  files carry the same compute-input fingerprint the manifest checks;
+  any mismatch invalidates the whole file rather than risking a false
+  reuse, and `--force` now discards existing checkpoints too. A
+  document's checkpoint file is deleted once its batch lands and kept
+  when the document ultimately fails, since the chunks it did complete
+  are still good work. `--dry-run` folds a "reusable" count from
+  checkpoints into its existing per-document line. Ctrl+C/`SIGTERM` is
+  cooperative: the first signal finishes the in-flight chunk, lets it
+  checkpoint, and stops before the next chunk (sequential mode) or the
+  next document (`--parallel`, whose concurrent dispatch is not
+  interrupted mid-flight); the process exits `130` and a rerun resumes
+  from the checkpoints. A second signal forces an immediate exit, also
+  `130`, for when the graceful path itself is stuck. No new Cargo
+  dependency — cooperative stop reuses the `tokio` `signal` feature
+  already in the workspace for the server's own shutdown handling.
+  Python and TypeScript `TaguruIngester` checkpoint/resume ports are
+  tracked as separate follow-up issues; #179 stays open until they
+  land.
 
 ### Changed
 - **Behavior change** (#199, ADR 0001 §12.2 — approved by the ADR

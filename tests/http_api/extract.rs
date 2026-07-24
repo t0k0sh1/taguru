@@ -276,7 +276,16 @@ fn stray_batch_files(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
         .unwrap()
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name())
-        .filter(|name| name.to_str() != Some(".extract-manifest.json"))
+        .filter(|name| {
+            // Both are expected, permanent siblings of the batch
+            // files under `--out`, not stray output: the manifest
+            // (skip-index of successes) and, since issue #179, the
+            // chunk checkpoint directory (one file per document,
+            // cleared but never removed itself once a document's
+            // batch lands).
+            name.to_str() != Some(".extract-manifest.json")
+                && name.to_str() != Some(".extract-checkpoints")
+        })
         .collect()
 }
 
@@ -3567,6 +3576,621 @@ fn extract_lossy_flag_overrides_the_environment_variable() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("(--lossy)"), "{stdout}");
     assert_eq!(requests.join().unwrap().len(), 1);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+// -- issue #179: durable chunk checkpoints, cooperative stop, and resume ------------------
+
+/// The on-disk path of one document's chunk checkpoint file — the
+/// flatten-then-`.json` naming scheme `extract.rs`'s private
+/// `checkpoint_file_name` uses, replicated here since an integration
+/// test only ever sees the compiled binary's filesystem effects.
+fn checkpoint_file_path(out: &std::path::Path, source: &str) -> std::path::PathBuf {
+    let name = source.replace(['/', '\\', ':'], "__");
+    out.join(".extract-checkpoints")
+        .join(format!("{name}.json"))
+}
+
+/// The number of units recorded in one document's checkpoint file, or
+/// 0 if it doesn't exist (never created yet, or already cleared once
+/// that document's batch landed).
+fn checkpoint_units_count(out: &std::path::Path, source: &str) -> usize {
+    let Ok(text) = std::fs::read_to_string(checkpoint_file_path(out, source)) else {
+        return 0;
+    };
+    let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    value["units"].as_object().map_or(0, |units| units.len())
+}
+
+/// Runs one 2-top-level-chunk document (`multi_chunk_document(9)`, see
+/// its chunk math note) where chunk 0 always succeeds and chunk 1 never
+/// produces valid JSON — the document fails after chunk 1 exhausts its
+/// corrective attempts, but only after chunk 0 already landed
+/// durably in the checkpoint file. Confirms the 2-chunk shape via
+/// `--dry-run` first rather than assuming it. Returns the document path
+/// and its freshly created `--out` directory for the caller's own
+/// follow-up run(s).
+fn setup_one_checkpointed_chunk_and_one_failure(
+    tag: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let docs = batch_dir(&format!("{tag}-docs"));
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, multi_chunk_document(9)).unwrap();
+    let doc_src = doc.to_str().unwrap().to_string();
+    let out = batch_dir(&format!("{tag}-out"));
+
+    let (code, dry_stdout, stderr) =
+        run_extract(&out, &[], &["--dry-run", "--context", "c", &doc_src]);
+    assert_eq!(code, 0, "stdout: {dry_stdout}\nstderr: {stderr}");
+    assert_eq!(
+        chunk_count_from_dry_run(&dry_stdout),
+        2,
+        "multi_chunk_document(9) must pack into exactly 2 top-level chunks: {dry_stdout}"
+    );
+
+    // Sequential (parallel=1, the default) request order: chunk 0's one
+    // successful call, then chunk 1's two corrective attempts (default
+    // max_attempts=2), both malformed — never valid JSON, so chunk 1
+    // exhausts its attempts and the document fails, but only after
+    // chunk 0 already landed in the checkpoint file. `stub_chat_server`
+    // (connection-order-keyed) is used deliberately instead of
+    // `stub_chat_server_concurrent` (content-parsed "part K of N"
+    // index): a corrective retry's last user turn is the corrective ask
+    // text, not the original part tag, so the latter can't tell chunk
+    // 1's retries apart from chunk 0.
+    let chunk0_reply = json!({"associations": [
+        {"subject": "S", "label": "l", "object": "chunk0", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![
+        chunk0_reply,
+        "not json".to_string(),
+        "not json".to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", &doc_src],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        requests.join().unwrap().len(),
+        3,
+        "chunk 0's one call plus chunk 1's two corrective attempts"
+    );
+    assert!(
+        stray_batch_files(&out).is_empty(),
+        "a failed document must not leave a batch file behind"
+    );
+    assert_eq!(
+        checkpoint_units_count(&out, &doc_src),
+        1,
+        "chunk 0's checkpoint must survive chunk 1's failure"
+    );
+
+    (doc, out)
+}
+
+/// The checkpoint's whole point: a chunk that already succeeded is
+/// reused by the very next attempt, even though the two attempts are
+/// entirely separate process invocations (no kill involved — the first
+/// one just fails outright on chunk 1, the ordinary way).
+#[test]
+fn checkpoint_reuses_a_completed_chunk_after_a_failed_document_without_recalling_the_model() {
+    let (doc, out) = setup_one_checkpointed_chunk_and_one_failure("extract-checkpoint-reuse");
+    let doc_src = doc.to_str().unwrap();
+
+    // Only chunk 1 should ever connect — chunk 0 comes from its
+    // checkpoint. One reply, so the server thread's join (implicitly,
+    // via requests.join() below) proves exactly one connection arrived.
+    let reply = json!({"associations": [
+        {"subject": "S", "label": "l", "object": "chunk1", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 written"), "{stdout}");
+    assert_eq!(
+        requests.join().unwrap().len(),
+        1,
+        "chunk 0 must be served from its checkpoint, not re-requested"
+    );
+    assert_eq!(
+        checkpoint_units_count(&out, doc_src),
+        0,
+        "the checkpoint file must be cleared once the batch lands"
+    );
+
+    let _ = std::fs::remove_dir_all(doc.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `--dry-run` (issue #179's requirement) reports a nonzero reusable
+/// count from a prior incomplete run's checkpoint, without calling the
+/// model.
+#[test]
+fn dry_run_reports_a_reusable_count_from_a_prior_incomplete_run() {
+    let (doc, out) = setup_one_checkpointed_chunk_and_one_failure("extract-checkpoint-dryrun");
+    let doc_src = doc.to_str().unwrap();
+
+    // The checkpoint's fingerprint recorded "stub-model" (the setup
+    // run's TAGURU_EXTRACT_MODEL) — matching it here is required for
+    // the checkpoint to be considered compatible at all, exactly like
+    // the existing manifest skip-check.
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[("TAGURU_EXTRACT_MODEL", "stub-model")],
+        &["--dry-run", "--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("2 chunk(s), 1 reusable from checkpoint"),
+        "{stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(doc.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `--force` extends its existing "redo this document" meaning one
+/// level deeper: every chunk is re-asked, even one whose checkpoint
+/// would otherwise be perfectly reusable.
+#[test]
+fn force_ignores_existing_checkpoints_and_recalls_every_chunk() {
+    let (doc, out) = setup_one_checkpointed_chunk_and_one_failure("extract-checkpoint-force");
+    let doc_src = doc.to_str().unwrap();
+
+    // Both chunks must connect this time, in order — --force discards
+    // chunk 0's checkpoint too.
+    let (url, requests) = stub_chat_server(vec![
+        json!({"associations": [
+            {"subject": "S", "label": "l", "object": "chunk0", "weight": 1.0}
+        ]})
+        .to_string(),
+        json!({"associations": [
+            {"subject": "S", "label": "l", "object": "chunk1", "weight": 1.0}
+        ]})
+        .to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--force", "--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        requests.join().unwrap().len(),
+        2,
+        "--force must re-call every chunk despite an existing, fingerprint-compatible checkpoint"
+    );
+
+    let _ = std::fs::remove_dir_all(doc.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Changing a compute-shaping setting (here `--fact-budget`) between
+/// attempts must invalidate chunk 0's checkpoint even though the
+/// document's own content is byte-for-byte unchanged — never a silent
+/// reuse of an output computed under different rules.
+#[test]
+fn a_changed_fact_budget_invalidates_checkpoints_even_though_content_is_unchanged() {
+    let (doc, out) = setup_one_checkpointed_chunk_and_one_failure("extract-checkpoint-factbudget");
+    let doc_src = doc.to_str().unwrap();
+
+    // Both chunks must connect this time, in order — the changed
+    // --fact-budget invalidates chunk 0's checkpoint too.
+    let (url, requests) = stub_chat_server(vec![
+        json!({"associations": [
+            {"subject": "S", "label": "l", "object": "chunk0", "weight": 1.0}
+        ]})
+        .to_string(),
+        json!({"associations": [
+            {"subject": "S", "label": "l", "object": "chunk1", "weight": 1.0}
+        ]})
+        .to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--fact-budget", "3", "--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        requests.join().unwrap().len(),
+        2,
+        "a changed --fact-budget must invalidate chunk 0's checkpoint, not silently reuse it"
+    );
+
+    let _ = std::fs::remove_dir_all(doc.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Issue #179's core durability claim, the hard way: a chunk that
+/// already landed in the checkpoint file survives the process being
+/// killed outright (SIGKILL — no cooperative stop involved, unlike the
+/// SIGINT test below), and a rerun does not re-ask the model for it.
+#[test]
+fn checkpoint_resumes_a_killed_multi_chunk_document_without_recalling_completed_chunks() {
+    let docs = batch_dir("extract-checkpoint-kill-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, multi_chunk_document(9)).unwrap();
+    let doc_src = doc.to_str().unwrap().to_string();
+    let out = batch_dir("extract-checkpoint-kill-out");
+
+    let response0 = chat_ok(
+        &json!({"associations": [
+            {"subject": "S", "label": "l", "object": "chunk0", "weight": 1.0}
+        ]})
+        .to_string(),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::Write;
+        let mut held = Vec::new();
+        for (index, stream) in listener.incoming().enumerate() {
+            let Ok(mut stream) = stream else { continue };
+            if index == 0 {
+                let _ = read_http_request(&mut stream);
+                let _ = stream.write_all(response0.as_bytes());
+            } else {
+                held.push(stream);
+            }
+        }
+    });
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    scrub_extract_env(&mut command)
+        .arg("extract")
+        .env("TAGURU_EXTRACT_URL", &url)
+        .env("TAGURU_EXTRACT_MODEL", "stub-model")
+        .args(["--out", out.to_str().unwrap(), "--context", "c"])
+        .arg(&doc)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().expect("extract must spawn");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut landed = false;
+    while std::time::Instant::now() < deadline {
+        if checkpoint_units_count(&out, &doc_src) >= 1 {
+            landed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(landed, "chunk 0's checkpoint never landed before the kill");
+
+    let (url, captured) = stub_chat_server_concurrent(|index, _attempt| {
+        chat_ok(
+            &json!({"associations": [
+                {"subject": "S", "label": "l", "object": format!("chunk{index}"), "weight": 1.0}
+            ]})
+            .to_string(),
+        )
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", &doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 written"), "{stdout}");
+    assert_eq!(
+        captured.lock().unwrap().len(),
+        1,
+        "chunk 0 must not be re-requested after resuming from a killed run's checkpoint"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Issue #179's amendment: ADR 0001 §7's split rung (Option D) can
+/// change a chunk's boundaries mid-run. A sub-piece that already
+/// succeeded must be reused on resume even though the ORIGINAL
+/// (pre-split) piece never itself succeeds and so is never itself
+/// cacheable — only a per-unit content hash, never `chunk_index` alone,
+/// can tell the two apart correctly.
+#[test]
+fn checkpoint_resumes_the_not_yet_completed_sub_piece_after_a_kill_mid_split() {
+    let docs = batch_dir("extract-checkpoint-split-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, format!("{}\n\n{}", "a".repeat(600), "b".repeat(600))).unwrap();
+    let doc_src = doc.to_str().unwrap().to_string();
+    let out = batch_dir("extract-checkpoint-split-out");
+
+    let length_reply = chat_ok_with_finish_reason("truncated garbage", "length");
+    let sub_a_reply = chat_ok(&json!({"associations": []}).to_string());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::Write;
+        let mut held = Vec::new();
+        for (index, stream) in listener.incoming().enumerate() {
+            let Ok(mut stream) = stream else { continue };
+            match index {
+                0 | 1 => {
+                    let _ = read_http_request(&mut stream);
+                    let _ = stream.write_all(length_reply.as_bytes());
+                }
+                2 => {
+                    let _ = read_http_request(&mut stream);
+                    let _ = stream.write_all(sub_a_reply.as_bytes());
+                }
+                _ => held.push(stream),
+            }
+        }
+    });
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    scrub_extract_env(&mut command)
+        .arg("extract")
+        .env("TAGURU_EXTRACT_URL", &url)
+        .env("TAGURU_EXTRACT_MODEL", "stub-model")
+        .args([
+            "--out",
+            out.to_str().unwrap(),
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+        ])
+        .arg(&doc)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().expect("extract must spawn");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut landed = false;
+    while std::time::Instant::now() < deadline {
+        if checkpoint_units_count(&out, &doc_src) >= 1 {
+            landed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        landed,
+        "the completed sub-piece's checkpoint never landed before the kill"
+    );
+    assert_eq!(
+        checkpoint_units_count(&out, &doc_src),
+        1,
+        "only the completed sub-piece, never the pre-split piece, should be checkpointed"
+    );
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, attempt| {
+        if attempt <= 1 {
+            chat_ok_with_finish_reason("truncated garbage", "length")
+        } else {
+            chat_ok(&json!({"associations": []}).to_string())
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", "--max-output-tokens", "512", &doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        captured.lock().unwrap().len(),
+        3,
+        "budgeted ask, escalation, and only the not-yet-completed sub-piece — never the \
+         already-checkpointed one"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Issue #179's cooperative stop: SIGINT lets an in-flight chunk finish
+/// (and get checkpointed) before the process exits with code 130 —
+/// distinct from a hard failure — and a rerun resumes without
+/// re-asking the model for what already landed. Chunk 0's response is
+/// deliberately delayed server-side so SIGINT can be sent any time in a
+/// full second's window without racing the process's own startup —
+/// no matter when it lands within that window, chunk 0 still completes
+/// and gets checkpointed before the next iteration notices the flag.
+#[test]
+fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
+    use std::time::Duration;
+
+    let docs = batch_dir("extract-checkpoint-sigint-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, multi_chunk_document(9)).unwrap();
+    let doc_src = doc.to_str().unwrap().to_string();
+    let out = batch_dir("extract-checkpoint-sigint-out");
+
+    let response0 = chat_ok(
+        &json!({"associations": [
+            {"subject": "S", "label": "l", "object": "chunk0", "weight": 1.0}
+        ]})
+        .to_string(),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::Write;
+        let mut held = Vec::new();
+        for (index, stream) in listener.incoming().enumerate() {
+            let Ok(mut stream) = stream else { continue };
+            if index == 0 {
+                let _ = read_http_request(&mut stream);
+                std::thread::sleep(Duration::from_millis(4000));
+                let _ = stream.write_all(response0.as_bytes());
+            } else {
+                held.push(stream);
+            }
+        }
+    });
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    scrub_extract_env(&mut command)
+        .arg("extract")
+        .env("TAGURU_EXTRACT_URL", &url)
+        .env("TAGURU_EXTRACT_MODEL", "stub-model")
+        .args(["--out", out.to_str().unwrap(), "--context", "c"])
+        .arg(&doc)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().expect("extract must spawn");
+
+    // Sent well past however long StopSignal's background thread takes
+    // to register its signal handlers on startup (a spawned-child
+    // signal handler needs empirically ~2s of headroom to register
+    // reliably under this test binary's process — likely OS/runtime
+    // scheduling overhead specific to being one of many concurrently
+    // spawned child processes, not a production concern: a real
+    // operator's Ctrl+C arrives well after that on human reaction
+    // time alone) — and still comfortably before chunk 0's
+    // several-second server-side delay elapses.
+    std::thread::sleep(Duration::from_millis(2500));
+    let pid = child.id().to_string();
+    Command::new("kill")
+        .args(["-INT", &pid])
+        .status()
+        .expect("kill must run");
+
+    let output = child
+        .wait_with_output()
+        .expect("extract must exit after SIGINT");
+    assert_eq!(output.status.code(), Some(130), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("stopped early"), "{stdout}");
+    assert!(
+        stray_batch_files(&out).is_empty(),
+        "an interrupted document must not leave a batch file behind"
+    );
+    assert_eq!(
+        checkpoint_units_count(&out, &doc_src),
+        1,
+        "chunk 0 must be checkpointed before the stop takes effect"
+    );
+
+    let (url, captured) = stub_chat_server_concurrent(|index, _attempt| {
+        chat_ok(
+            &json!({"associations": [
+                {"subject": "S", "label": "l", "object": format!("chunk{index}"), "weight": 1.0}
+            ]})
+            .to_string(),
+        )
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", &doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        captured.lock().unwrap().len(),
+        1,
+        "chunk 0 must not be re-requested on resume after the cooperative stop"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The escape hatch: a SECOND SIGINT forces an immediate exit even
+/// while the process is permanently blocked inside a chunk's request
+/// (a stub that never answers at all) — mirroring the server's own
+/// `shutdown_signal` two-stage semantics exactly.
+#[test]
+fn a_second_sigint_forces_an_immediate_exit_even_while_permanently_blocked() {
+    use std::time::Duration;
+
+    let docs = batch_dir("extract-checkpoint-doublesigint-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let doc_src = doc.to_str().unwrap().to_string();
+    let out = batch_dir("extract-checkpoint-doublesigint-out");
+
+    // Accepts every connection and never answers any of them — the
+    // one (and only) chunk's request blocks forever.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            held.push(stream);
+        }
+    });
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    scrub_extract_env(&mut command)
+        .arg("extract")
+        .env("TAGURU_EXTRACT_URL", &url)
+        .env("TAGURU_EXTRACT_MODEL", "stub-model")
+        .args(["--out", out.to_str().unwrap(), "--context", "c"])
+        .arg(&doc)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("extract must spawn");
+
+    // Generous startup margin — see the comment in the SIGINT-resume
+    // test above on why this needs headroom under concurrent test load.
+    std::thread::sleep(Duration::from_millis(2500));
+    let pid = child.id().to_string();
+    // The first signal only sets the cooperative flag — the process
+    // stays blocked inside the one chunk's never-answered request, so
+    // it must still be running here.
+    Command::new("kill")
+        .args(["-INT", &pid])
+        .status()
+        .expect("kill must run");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the first SIGINT must not exit the process while a chunk is still in flight"
+    );
+
+    Command::new("kill")
+        .args(["-INT", &pid])
+        .status()
+        .expect("kill must run");
+    let output = child
+        .wait_with_output()
+        .expect("extract must exit after the second SIGINT");
+    assert_eq!(output.status.code(), Some(130), "{output:?}");
+    assert_eq!(
+        checkpoint_units_count(&out, &doc_src),
+        0,
+        "the one chunk never completed, so nothing should be checkpointed"
+    );
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
