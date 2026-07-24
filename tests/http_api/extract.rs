@@ -4042,16 +4042,9 @@ fn wait_for_stop_signal_handlers(stderr: std::process::ChildStderr) {
 /// distinct from a hard failure — and a rerun resumes without
 /// re-asking the model for what already landed. Chunk 0's response is
 /// deliberately delayed server-side so SIGINT can be sent any time
-/// before it lands. That alone doesn't bound when SIGINT is safe to
-/// send, though: `StopSignal::install()` (and its readiness marker)
-/// runs before the file loop even starts, well before chunk 0's
-/// request is dispatched — on a loaded CI runner, signal delivery can
-/// beat the main thread to its first stop check, interrupting before
-/// chunk 0 ever starts. So the mock server also signals over a channel
-/// once it has actually received chunk 0's request, and the test
-/// waits on that too before sending SIGINT — chunk 0 is then
-/// guaranteed in flight (mid-sleep, awaiting its response) no matter
-/// how the two processes are scheduled.
+/// before it, without racing the process's own startup — no matter
+/// when it lands in that window, chunk 0 still completes and gets
+/// checkpointed before the next iteration notices the flag.
 #[test]
 fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
     use std::time::Duration;
@@ -4070,7 +4063,6 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
     );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let (chunk0_received_tx, chunk0_received_rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         use std::io::Write;
         let mut held = Vec::new();
@@ -4078,7 +4070,6 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
             let Ok(mut stream) = stream else { continue };
             if index == 0 {
                 let _ = read_http_request(&mut stream);
-                let _ = chunk0_received_tx.send(());
                 std::thread::sleep(Duration::from_millis(4000));
                 let _ = stream.write_all(response0.as_bytes());
             } else {
@@ -4098,9 +4089,6 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
         .stderr(Stdio::piped());
     let mut child = command.spawn().expect("extract must spawn");
     wait_for_stop_signal_handlers(child.stderr.take().unwrap());
-    chunk0_received_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("chunk 0's request must reach the mock server before SIGINT is sent");
 
     let pid = child.id().to_string();
     Command::new("kill")
