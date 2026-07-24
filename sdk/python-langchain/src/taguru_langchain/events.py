@@ -49,6 +49,12 @@ class AttemptStarted:
     chunk_index: int
     attempt: int
     max_attempts: int
+    stage: Literal["item", "cross_chunk"] = "item"
+    """Which corrective loop this attempt belongs to: ``"item"`` is the
+    per-chunk Stage 1 loop (syntax/validity), ``"cross_chunk"`` is the
+    single targeted Stage 2 correction ``cross_output_issues`` can trigger
+    once every chunk's output is known (issue #180's ADR 0001 §8 bucket 2,
+    ported from the Rust twin's ``cross_output_issues``)."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -67,6 +73,16 @@ class AttemptFailed:
     :func:`taguru_langchain._extract.indicates_length_limit`) — the next
     attempt's corrective turn asks for a shorter answer instead of
     repeating the same ask verbatim when this is true."""
+    stage: Literal["item", "cross_chunk"] = "item"
+    """See :attr:`AttemptStarted.stage`."""
+    validation_issues: list[str] | None = None
+    """The path-addressed issues (e.g. ``"associations[1].weight: expected
+    finite non-zero number, got string \\"strong\\""``) that failed this
+    attempt, when it was syntactically valid JSON but not a valid
+    extraction (:class:`taguru_langchain._extract.InvalidFault`) or a
+    Stage 2 cross-chunk alias problem. ``None`` for every other failure
+    kind — ``parse_error`` already carries a human-readable diagnosis for
+    all of them."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
