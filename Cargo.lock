@@ -2400,6 +2400,7 @@ dependencies = [
  "gungraun",
  "http-body-util",
  "jsonschema",
+ "libc",
  "mutants",
  "object_store",
  "opentelemetry",
