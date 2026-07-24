@@ -195,6 +195,26 @@ fn chat_ok_with_finish_reason(content: &str, finish_reason: &str) -> String {
     )
 }
 
+/// Same wire shape as [`chat_ok`], but the response also carries a
+/// top-level `usage` object — drives `ChatClient::complete`'s token
+/// capture for the `--diagnostics-out` sidecar (issue #200).
+fn chat_ok_with_usage(content: &str, prompt_tokens: u64, completion_tokens: u64) -> String {
+    let payload = json!({
+        "choices": [{"message": {"role": "assistant", "content": content}}],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+    })
+    .to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    )
+}
+
 /// An error chat-completion response — any status, an optional extra
 /// header line (e.g. `"Retry-After: 1\r\n"`), and a plain-text body.
 fn chat_error(status: u16, reason: &str, extra_header: &str, body: &str) -> String {
@@ -260,6 +280,20 @@ fn stray_batch_files(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
         .collect()
 }
 
+/// Parses a `--diagnostics-out` sidecar into its records, in file
+/// order — one JSON object per line (issue #200).
+fn read_diagnostics(path: &std::path::Path) -> Vec<Value> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("reading diagnostics file {}: {error}", path.display()));
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("bad diagnostics JSONL line {line:?}: {error}"))
+        })
+        .collect()
+}
+
 /// Scrubs a developer shell's TAGURU_EXTRACT_*/TAGURU_CONFIG vars —
 /// shared by [`run_extract`] and the one test that spawns its own child
 /// to inspect mid-run state instead of going through it.
@@ -276,6 +310,8 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_STRUCTURED_OUTPUT")
         .env_remove("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS")
         .env_remove("TAGURU_EXTRACT_LOSSY")
+        .env_remove("TAGURU_EXTRACT_DIAGNOSTICS")
+        .env_remove("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES")
         .env_remove("TAGURU_CONFIG")
 }
 
@@ -2745,6 +2781,761 @@ fn extract_lossy_env_var_enables_lossy_mode_without_the_flag() {
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
+}
+
+// ---------------------------------------------------------------------
+// Issue #200: `--diagnostics-out` / TAGURU_EXTRACT_DIAGNOSTICS
+// ---------------------------------------------------------------------
+
+/// One JSONL record per attempt, sharing the ADR 0001 §7 state
+/// vocabulary and the Python event field names (issue #200).
+#[test]
+fn diagnostics_out_writes_one_record_per_attempt_with_the_shared_state_vocabulary() {
+    let docs = batch_dir("extract-diag-basic-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-basic-out");
+    let diag_dir = batch_dir("extract-diag-basic-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (url, _requests) = stub_chat_server(vec![
+        "not json".to_string(),
+        json!({"associations": []}).to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 written"), "{stdout}");
+
+    let records = read_diagnostics(&diag);
+    assert_eq!(records.len(), 2, "{records:?}");
+
+    assert_eq!(records[0]["kind"], "attempt");
+    assert_eq!(records[0]["source"], doc.to_str().unwrap());
+    assert_eq!(records[0]["stage"], "item");
+    assert_eq!(records[0]["chunk_index"], 0);
+    assert_eq!(records[0]["attempt"], 1);
+    assert_eq!(records[0]["max_attempts"], 2);
+    assert_eq!(records[0]["state"], "stop_malformed");
+    assert_eq!(records[0]["length_limited"], false);
+    assert!(records[0]["elapsed_seconds"].as_f64().unwrap() >= 0.0);
+    assert!(!records[0]["parse_error"].is_null(), "{:?}", records[0]);
+    assert!(records[0]["validation_issues"].is_null());
+    assert!(!records[0]["provider_metadata"].is_null());
+    assert!(
+        records[0].get("piece_bytes").is_none(),
+        "the legacy (non-ladder) path never sends piece_bytes: {:?}",
+        records[0]
+    );
+    assert!(
+        records[0].get("requested_max_tokens").is_none(),
+        "{:?}",
+        records[0]
+    );
+    assert!(
+        records[0].get("response_text").is_none(),
+        "metadata only by default: {:?}",
+        records[0]
+    );
+
+    assert_eq!(records[1]["attempt"], 2);
+    assert_eq!(records[1]["state"], "stop_valid");
+    assert!(records[1]["parse_error"].is_null());
+    assert!(records[1]["validation_issues"].is_null());
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// `--diagnostics-out` wins over a conflicting TAGURU_EXTRACT_DIAGNOSTICS
+/// path — the same flag-over-environment precedence every other control
+/// follows.
+#[test]
+fn diagnostics_out_flag_wins_over_the_environment_variable() {
+    let docs = batch_dir("extract-diag-precedence-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-precedence-out");
+    let env_dir = batch_dir("extract-diag-precedence-env");
+    let env_path = env_dir.join("env.jsonl");
+    let flag_dir = batch_dir("extract-diag-precedence-flag");
+    let flag_path = flag_dir.join("flag.jsonl");
+
+    let (url, _requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_DIAGNOSTICS", env_path.to_str().unwrap()),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            flag_path.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(flag_path.is_file(), "the flag must win: {flag_path:?}");
+    assert!(
+        !env_path.exists(),
+        "the env var's path must be ignored once the flag is given: {env_path:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&env_dir);
+    let _ = std::fs::remove_dir_all(&flag_dir);
+}
+
+/// TAGURU_EXTRACT_DIAGNOSTICS alone (no flag) also opens the sidecar.
+#[test]
+fn diagnostics_env_var_alone_opens_the_sidecar() {
+    let docs = batch_dir("extract-diag-envonly-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-envonly-out");
+    let diag_dir = batch_dir("extract-diag-envonly-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (url, _requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_DIAGNOSTICS", diag.to_str().unwrap()),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let records = read_diagnostics(&diag);
+    assert_eq!(records.len(), 1, "{records:?}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// A non-numeric TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES is a hard usage
+/// error, not a silently ignored knob — the same discipline every other
+/// TAGURU_EXTRACT_* env var follows.
+#[test]
+fn diagnostics_raw_bytes_env_var_rejects_a_non_integer() {
+    let docs = batch_dir("extract-diag-rawbad-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-rawbad-out");
+
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:1"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES", "not-a-number"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 2, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES"),
+        "{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The #188 acceptance criterion: a length-terminated attempt, an
+/// empty answer, and a policy refusal — all reached through the ADR
+/// 0001 §7 ladder — each earn a distinct `state`, not the same generic
+/// failure.
+#[test]
+fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
+    let docs = batch_dir("extract-diag-states-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+
+    {
+        // length_limited: the ladder escalates once, so two requests go
+        // out — the first cut off at the budget, the second accepted.
+        let out = batch_dir("extract-diag-states-length-out");
+        let diag_dir = batch_dir("extract-diag-states-length-diag");
+        let diag = diag_dir.join("diag.jsonl");
+        let (url, _captured) = stub_chat_server_concurrent(|_index, attempt| {
+            if attempt == 0 {
+                chat_ok_with_finish_reason("truncated garbage", "length")
+            } else {
+                chat_ok(&json!({"associations": []}).to_string())
+            }
+        });
+        let (code, stdout, stderr) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", url.as_str()),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ],
+            &[
+                "--context",
+                "c",
+                "--max-output-tokens",
+                "512",
+                "--diagnostics-out",
+                diag.to_str().unwrap(),
+                doc.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+        let records = read_diagnostics(&diag);
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert_eq!(records[0]["state"], "length_limited");
+        assert_eq!(records[0]["length_limited"], true);
+        assert_eq!(records[0]["requested_max_tokens"], 512);
+        assert!(!records[0]["parse_error"].is_null());
+        assert_eq!(records[1]["state"], "stop_valid");
+        assert!(
+            records[1].get("requested_max_tokens").is_none(),
+            "escalation drops the budget: {:?}",
+            records[1]
+        );
+
+        let _ = std::fs::remove_dir_all(&out);
+        let _ = std::fs::remove_dir_all(&diag_dir);
+    }
+
+    {
+        // empty: exactly one corrective under the ladder — two
+        // attempts, both diagnosed "empty".
+        let out = batch_dir("extract-diag-states-empty-out");
+        let diag_dir = batch_dir("extract-diag-states-empty-diag");
+        let diag = diag_dir.join("diag.jsonl");
+        let (url, _captured) = stub_chat_server_concurrent(|_index, _attempt| chat_ok(""));
+        let (code, stdout, stderr) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", url.as_str()),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ],
+            &[
+                "--context",
+                "c",
+                "--max-output-tokens",
+                "512",
+                "--diagnostics-out",
+                diag.to_str().unwrap(),
+                doc.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+        let records = read_diagnostics(&diag);
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert_eq!(records[0]["state"], "empty");
+        assert_eq!(records[1]["state"], "empty");
+
+        let _ = std::fs::remove_dir_all(&out);
+        let _ = std::fs::remove_dir_all(&diag_dir);
+    }
+
+    {
+        // refusal: terminal on the first attempt, no corrective turn.
+        let out = batch_dir("extract-diag-states-refusal-out");
+        let diag_dir = batch_dir("extract-diag-states-refusal-diag");
+        let diag = diag_dir.join("diag.jsonl");
+        let (url, _captured) = stub_chat_server_concurrent(|_index, _attempt| {
+            chat_ok_with_finish_reason("", "content_filter")
+        });
+        let (code, stdout, stderr) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", url.as_str()),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ],
+            &[
+                "--context",
+                "c",
+                "--max-output-tokens",
+                "512",
+                "--diagnostics-out",
+                diag.to_str().unwrap(),
+                doc.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+        let records = read_diagnostics(&diag);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0]["state"], "refusal");
+        assert!(!records[0]["parse_error"].is_null());
+
+        let _ = std::fs::remove_dir_all(&out);
+        let _ = std::fs::remove_dir_all(&diag_dir);
+    }
+
+    let _ = std::fs::remove_dir_all(&docs);
+}
+
+/// A timeout is one attempt, not one per transport retry — the four
+/// `RETRY_ATTEMPTS` inside `ChatClient::complete` are a single
+/// extraction-level attempt from the diagnostics sink's point of view.
+#[test]
+fn diagnostics_records_a_timeout_as_a_single_attempt_with_no_provider_metadata() {
+    let docs = batch_dir("extract-diag-timeout-docs");
+    let doc = docs.join("slow.md");
+    std::fs::write(&doc, "content").unwrap();
+    let out = batch_dir("extract-diag-timeout-out");
+    let diag_dir = batch_dir("extract-diag-timeout-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    // Same stalled-provider shape as the_extract_timeout_knob_bounds_a_
+    // stalled_provider: every retry's connection is accepted and held
+    // open, unanswered, well past the client's worst-case retry budget.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            if let Ok((stream, _)) = listener.accept() {
+                held.push(stream);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    });
+
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_TIMEOUT_SECS", "1"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+
+    let records = read_diagnostics(&diag);
+    assert_eq!(
+        records.len(),
+        1,
+        "transport retries must not each earn their own record: {records:?}"
+    );
+    assert_eq!(records[0]["state"], "timeout");
+    assert!(records[0]["provider_metadata"].is_null());
+    assert!(!records[0]["parse_error"].is_null());
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// A non-retryable 4xx is TRANSPORT, not TIMEOUT — the provider
+/// answered, it just refused the request outright.
+#[test]
+fn diagnostics_records_a_non_retryable_http_error_as_transport() {
+    let docs = batch_dir("extract-diag-transport-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-transport-out");
+    let diag_dir = batch_dir("extract-diag-transport-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (url, _captured) =
+        stub_chat_server_concurrent(|_index, _attempt| chat_error(400, "Bad Request", "", "nope"));
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+
+    let records = read_diagnostics(&diag);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["state"], "transport");
+    assert!(records[0]["provider_metadata"].is_null());
+    assert!(
+        records[0]["parse_error"].as_str().unwrap().contains("400"),
+        "{:?}",
+        records[0]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// Token counts the provider reports land in `provider_metadata`,
+/// translated to the shared (Python `ProviderMetadata`) field names.
+#[test]
+fn diagnostics_reports_provider_token_usage_when_present() {
+    let docs = batch_dir("extract-diag-usage-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-usage-out");
+    let diag_dir = batch_dir("extract-diag-usage-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (url, _captured) = stub_chat_server_concurrent(|_index, _attempt| {
+        chat_ok_with_usage(&json!({"associations": []}).to_string(), 123, 45)
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let records = read_diagnostics(&diag);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let metadata = &records[0]["provider_metadata"];
+    assert_eq!(metadata["input_tokens"], 123);
+    assert_eq!(metadata["output_tokens"], 45);
+    assert_eq!(metadata["total_tokens"], 168);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES opts into a byte-capped raw
+/// answer, truncated at capture exactly like `corrective_context_bytes`.
+#[test]
+fn diagnostics_raw_bytes_attaches_a_capped_response_text() {
+    let docs = batch_dir("extract-diag-raw-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-raw-out");
+    let diag_dir = batch_dir("extract-diag-raw-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (url, _requests) = stub_chat_server(vec![
+        "this reply is definitely longer than eight bytes".to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_MAX_ATTEMPTS", "1"),
+            ("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES", "8"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+
+    let records = read_diagnostics(&diag);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let text = records[0]["response_text"]
+        .as_str()
+        .expect("response_text must be present when RAW_BYTES is set");
+    assert!(text.starts_with("this rep"), "{text:?}");
+    assert!(text.contains("[truncated to 8 bytes]"), "{text:?}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// Without TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES, `response_text` never
+/// appears — metadata only by default (ADR 0001 §10).
+#[test]
+fn diagnostics_omits_response_text_when_raw_bytes_is_unset() {
+    let docs = batch_dir("extract-diag-noraw-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-noraw-out");
+    let diag_dir = batch_dir("extract-diag-noraw-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (url, _requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let records = read_diagnostics(&diag);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(
+        records[0].get("response_text").is_none(),
+        "metadata-only by default: {:?}",
+        records[0]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// A killed run keeps every diagnostics record already written — the
+/// same incremental-persistence contract as the manifest
+/// (`extract_persists_the_manifest_after_each_document_not_only_at_the_end`),
+/// applied to the sidecar.
+#[test]
+fn diagnostics_is_written_incrementally_and_survives_a_kill() {
+    let docs = batch_dir("extract-diag-kill-docs");
+    let fast = docs.join("fast.md");
+    let slow = docs.join("slow.md");
+    std::fs::write(&fast, "青嶺酒造は1907年に創業した。").unwrap();
+    std::fs::write(&slow, "高瀬は青嶺酒造の杜氏。").unwrap();
+    let fast_src = fast.to_str().unwrap().to_string();
+
+    let reply = chat_ok(&json!({"associations": []}).to_string());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::Write;
+        let mut held = Vec::new();
+        for (index, stream) in listener.incoming().enumerate() {
+            let Ok(mut stream) = stream else { continue };
+            if index == 0 {
+                let _ = read_http_request(&mut stream);
+                let _ = stream.write_all(reply.as_bytes());
+            } else {
+                held.push(stream);
+            }
+        }
+    });
+
+    let out = batch_dir("extract-diag-kill-out");
+    let diag_dir = batch_dir("extract-diag-kill-diag");
+    let diag = diag_dir.join("diag.jsonl");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    scrub_extract_env(&mut command)
+        .arg("extract")
+        .env("TAGURU_EXTRACT_URL", &url)
+        .env("TAGURU_EXTRACT_MODEL", "stub-model")
+        .args([
+            "--out",
+            out.to_str().unwrap(),
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+        ])
+        .arg(&fast)
+        .arg(&slow)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().expect("extract must spawn");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut saved = String::new();
+    while std::time::Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(&diag)
+            && !text.trim().is_empty()
+        {
+            saved = text;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        !saved.trim().is_empty(),
+        "no diagnostics record landed before the run was killed"
+    );
+    let record: Value = serde_json::from_str(saved.lines().next().unwrap())
+        .unwrap_or_else(|error| panic!("the surviving line must parse: {error}\n{saved}"));
+    assert_eq!(record["state"], "stop_valid");
+    assert_eq!(record["source"], fast_src.as_str());
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// Without `--diagnostics-out`/TAGURU_EXTRACT_DIAGNOSTICS, extract
+/// never writes a sidecar — off by default (requirement 4).
+#[test]
+fn extract_without_diagnostics_out_writes_no_sidecar() {
+    let docs = batch_dir("extract-diag-off-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-off-out");
+    let diag_dir = batch_dir("extract-diag-off-diag");
+    let phantom = diag_dir.join("would-be.jsonl");
+
+    let (url, _requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 written"), "{stdout}");
+    assert!(
+        !phantom.exists(),
+        "extract must never write a diagnostics sidecar without \
+         --diagnostics-out/TAGURU_EXTRACT_DIAGNOSTICS"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// Stage 2's cross-chunk alias correction earns its own diagnostics
+/// record, `stage: "cross_chunk"` — distinct from the item-stage
+/// records the same run also emits.
+#[test]
+fn diagnostics_records_the_stage_two_cross_chunk_correction() {
+    let docs = batch_dir("extract-diag-stage2-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-stage2-out");
+    let diag_dir = batch_dir("extract-diag-stage2-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "x", "canonical": "存在しない", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let good_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "x", "canonical": "a", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![bad_reply, good_reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let records = read_diagnostics(&diag);
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records[0]["stage"], "item");
+    assert_eq!(records[0]["state"], "stop_valid");
+    assert_eq!(records[1]["stage"], "cross_chunk");
+    assert_eq!(records[1]["state"], "stop_valid");
+    assert_eq!(records[1]["attempt"], 1);
+    assert_eq!(records[1]["max_attempts"], 1);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// `--parallel` dispatches chunk workers concurrently onto the same
+/// sidecar — every attempt still earns exactly one well-formed line.
+#[test]
+fn diagnostics_records_every_chunk_attempt_under_parallel() {
+    let docs = batch_dir("extract-diag-parallel-docs");
+    let doc = docs.join("big.md");
+    std::fs::write(&doc, multi_chunk_document(20)).unwrap();
+    let out = batch_dir("extract-diag-parallel-out");
+    let diag_dir = batch_dir("extract-diag-parallel-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, _attempt| {
+        chat_ok(&json!({"associations": []}).to_string())
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--parallel",
+            "2",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let request_count = captured.lock().unwrap().len();
+    let records = read_diagnostics(&diag);
+    assert_eq!(records.len(), request_count, "{records:?}");
+    assert!(
+        records.len() > 1,
+        "the document must actually split into multiple chunks"
+    );
+    for record in &records {
+        assert_eq!(record["state"], "stop_valid");
+        assert_eq!(record["stage"], "item");
+    }
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
 }
 
 /// `--lossy` wins over a conflicting TAGURU_EXTRACT_LOSSY=false, the
