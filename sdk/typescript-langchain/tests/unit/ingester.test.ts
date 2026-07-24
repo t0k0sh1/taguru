@@ -15,13 +15,41 @@ const MODEL_ANSWER = JSON.stringify({
     { subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0, paragraph: 1 },
     { subject: "青嶺酒造", label: "創業年", object: "1907年", weight: 1.0, paragraph: 0 },
     { subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0 }, // duplicate
-    { subject: "", label: "壊", object: "れ", weight: 1.0 }, // invalid
   ],
   aliases: [{ alias: "Aomine", canonical: "青嶺酒造", kind: "concept" }],
   questions: [{ paragraph: 1, question: "杜氏は誰?" }],
 });
 
+// The business-rule-invalid item issue #181's strict default now rejects on
+// sight (empty subject) rather than letting merge() silently drop it — split
+// out of MODEL_ANSWER so most fixtures stay a clean one-call success; reused
+// by the lossy-mode and corrective-turn tests below.
+const INVALID_ASSOCIATION = { subject: "", label: "壊", object: "れ", weight: 1.0 };
+
 const DOC_TEXT = "青嶺酒造は1907年創業。\n\n杜氏は高瀬である。";
+
+// chunk_bytes: 40 splits DOC_TEXT into exactly its two paragraphs (one chunk
+// each) — the minimum needed to exercise cross-chunk alias validation (issue
+// #181 Stage 2), which only ever fires with more than one chunk.
+const CROSS_CHUNK_BYTES = 40;
+
+// Chunk 1 (paragraph 0) introduces the concept name "1907年" as an
+// association object.
+const CHUNK1_ANSWER = JSON.stringify({
+  associations: [{ subject: "青嶺酒造", label: "創業年", object: "1907年", weight: 1.0 }],
+  aliases: [],
+});
+// Chunk 2 (paragraph 1) passes Stage 1 alone (every alias field present, not
+// a self-alias) — the shadowing is only visible once chunk 1's "1907年" is
+// in the merged name set, so only Stage 2's crossOutputIssues catches it.
+const CHUNK2_SHADOWING_ANSWER = JSON.stringify({
+  associations: [{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0 }],
+  aliases: [{ alias: "1907年", canonical: "青嶺酒造", kind: "concept" }],
+});
+const CHUNK2_CORRECTED_ANSWER = JSON.stringify({
+  associations: [{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0 }],
+  aliases: [{ alias: "Sake", canonical: "青嶺酒造", kind: "concept" }],
+});
 
 const make = (server: FakeServer, responses: string[], fields: Record<string, unknown> = {}) =>
   new TaguruIngester({
@@ -129,7 +157,7 @@ describe("TaguruIngester", () => {
     expect(outcome.llm_calls).toBe(1);
     expect(outcome.chunks).toBe(1);
     expect(outcome.duplicates_dropped).toBe(1);
-    expect(outcome.invalid_dropped).toBe(1);
+    expect(outcome.invalid_dropped).toBe(0);
     expect(outcome.associations).toBe(2);
     expect(outcome.aliases).toBe(1);
     expect(outcome.passage_stored).toBe(true);
@@ -397,8 +425,240 @@ describe("TaguruIngester", () => {
     expect(outcome.ok).toBe(true);
     expect(outcome.llm_calls).toBe(1);
     expect(outcome.duplicates_dropped).toBe(1);
-    expect(outcome.invalid_dropped).toBe(1);
+    expect(outcome.invalid_dropped).toBe(0);
     expect(outcome.associations).toBe(2);
     expect(outcome.aliases).toBe(1);
+  });
+});
+
+describe("TaguruIngester (issue #181: lossless JSON repair and path-specific corrective retry)", () => {
+  it("repairs a trailing-comma answer without an extra LLM call or item change", async () => {
+    const answer =
+      '{"associations": [{"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", ' +
+      '"weight": 1.0},], "aliases": [], "questions": []}';
+    const outcome = await make(new FakeServer(), [answer]).ingestText(DOC_TEXT, {
+      source: "docs/aomine.md",
+    });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.llm_calls).toBe(1);
+    expect(outcome.correction_attempts).toBe(0);
+    expect(outcome.lossless_repairs).toEqual(["trailing_comma"]);
+    // fake_server's /import stub echoes fixed counts — check the actual
+    // rendered batch instead of outcome.associations.
+    const facts = outcome
+      .ndjson!.trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((line) => "subject" in line);
+    expect(facts).toEqual([{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0 }]);
+  });
+
+  it("gives a wrong-typed field a path-specific corrective turn", async () => {
+    const badWeightAnswer = JSON.stringify({
+      associations: [{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: "strong" }],
+      aliases: [],
+    });
+    const { ingester, llm } = makeWithMessages(new FakeServer(), [
+      new AIMessage(badWeightAnswer),
+      new AIMessage(MODEL_ANSWER),
+    ]);
+    const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.llm_calls).toBe(2);
+    expect(outcome.correction_attempts).toBe(1);
+
+    const corrective = llm.seenPrompts[1]!.at(-1)!.content as string;
+    expect(corrective).toContain("That was valid JSON but not a valid extraction (1 issue(s)):");
+    expect(corrective).toContain("associations[0].weight: expected finite non-zero number");
+    expect(corrective).toContain("keep every item");
+  });
+
+  it("fails the source without import when a second answer is still invalid", async () => {
+    const badAnswer = JSON.stringify({ associations: [INVALID_ASSOCIATION], aliases: [] });
+    const server = new FakeServer();
+    await expect(make(server, [badAnswer, badAnswer]).ingestText(DOC_TEXT, {
+      source: "docs/aomine.md",
+    })).rejects.toThrow(/invalid item/);
+    expect(server.imported).toEqual([]);
+  });
+
+  it("never imports a length-limited answer even when its content happens to parse", async () => {
+    // ADR 0001: a `length`-terminated answer is length-limited even when
+    // its own content happens to parse cleanly — a valid prefix of a
+    // cut-off extraction must never be imported as if complete.
+    const truncatedButParseable = new AIMessage({
+      content: MODEL_ANSWER,
+      response_metadata: { done_reason: "length" },
+    });
+    const { ingester, llm } = makeWithMessages(new FakeServer(), [
+      truncatedButParseable,
+      new AIMessage(MODEL_ANSWER),
+    ]);
+    const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.llm_calls).toBe(2);
+    const corrective = llm.seenPrompts[1]!.at(-1)!.content as string;
+    expect(corrective).toContain("SHORTER");
+
+    const server = new FakeServer();
+    await expect(
+      makeWithMessages(server, [truncatedButParseable], { max_attempts: 1 }).ingester.ingestText(
+        DOC_TEXT,
+        { source: "docs/aomine.md" },
+      ),
+    ).rejects.toThrow(/would not produce the JSON object/);
+    expect(server.imported).toEqual([]);
+  });
+
+  it("gives an empty answer one corrective then the named diagnosis", async () => {
+    const server = new FakeServer();
+    const { ingester, llm } = makeWithMessages(
+      server,
+      [new AIMessage(""), new AIMessage("")],
+      { max_attempts: 5 },
+    );
+    await expect(ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" })).rejects.toThrow(
+      /the answer was empty/,
+    );
+    // Bounded to exactly one corrective regardless of how high max_attempts is.
+    expect(llm.seenPrompts).toHaveLength(2);
+
+    const { ingester: recovers } = makeWithMessages(
+      new FakeServer(),
+      [new AIMessage(""), new AIMessage(MODEL_ANSWER)],
+      { max_attempts: 5 },
+    );
+    const outcome = await recovers.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.llm_calls).toBe(2);
+  });
+
+  it("treats a refusal finish reason as terminal, without a corrective turn", async () => {
+    const refused = new AIMessage({
+      content: "",
+      response_metadata: { done_reason: "content_filter" },
+    });
+    const { ingester, llm } = makeWithMessages(new FakeServer(), [
+      refused,
+      new AIMessage(MODEL_ANSWER),
+    ]);
+    await expect(ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" })).rejects.toThrow(
+      /policy refusal is terminal/,
+    );
+    expect(llm.seenPrompts).toHaveLength(1);
+  });
+
+  it("gives cross-chunk alias issues one targeted corrective turn", async () => {
+    const server = new FakeServer();
+    const { ingester, llm } = makeWithMessages(
+      server,
+      [
+        new AIMessage(CHUNK1_ANSWER),
+        new AIMessage(CHUNK2_SHADOWING_ANSWER),
+        new AIMessage(CHUNK2_CORRECTED_ANSWER),
+      ],
+      { chunk_bytes: CROSS_CHUNK_BYTES },
+    );
+    const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.chunks).toBe(2);
+    expect(outcome.llm_calls).toBe(3);
+    expect(outcome.correction_attempts).toBe(1);
+
+    const correctivePrompt = llm.seenPrompts.at(-1)!;
+    expect(correctivePrompt[1]!.content as string).toContain("杜氏は高瀬"); // chunk 2's OWN user turn, replayed
+    expect(correctivePrompt.at(-1)!.content as string).toContain(
+      "names something the associations already contain",
+    );
+  });
+
+  it("fails without import when a cross-chunk correction still leaves the issue (bounded re-check)", async () => {
+    // The "corrective" answer repeats the exact same shadowing alias — it
+    // still passes Stage 1 alone, so only the bounded re-check (not a
+    // second round) catches that the correction never actually fixed it.
+    const server = new FakeServer();
+    await expect(
+      makeWithMessages(
+        server,
+        [
+          new AIMessage(CHUNK1_ANSWER),
+          new AIMessage(CHUNK2_SHADOWING_ANSWER),
+          new AIMessage(CHUNK2_SHADOWING_ANSWER),
+        ],
+        { chunk_bytes: CROSS_CHUNK_BYTES },
+      ).ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" }),
+    ).rejects.toThrow(/still has 1 cross-chunk alias issue\(s\) after correction/);
+    expect(server.imported).toEqual([]);
+  });
+
+  it("fails without import when Stage 2's own corrective reply is structurally invalid", async () => {
+    const chunk2InvalidCorrection = JSON.stringify({
+      associations: [{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: "strong" }],
+      aliases: [{ alias: "Sake", canonical: "青嶺酒造", kind: "concept" }],
+    });
+    const server = new FakeServer();
+    await expect(
+      makeWithMessages(
+        server,
+        [
+          new AIMessage(CHUNK1_ANSWER),
+          new AIMessage(CHUNK2_SHADOWING_ANSWER),
+          new AIMessage(chunk2InvalidCorrection),
+        ],
+        { chunk_bytes: CROSS_CHUNK_BYTES },
+      ).ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" }),
+    ).rejects.toThrow(/cross-chunk alias correction still left/);
+    expect(server.imported).toEqual([]);
+  });
+
+  it("lossy: true restores drop-and-proceed", async () => {
+    const answer = JSON.stringify({ associations: [INVALID_ASSOCIATION], aliases: [] });
+
+    const lossyOutcome = await make(new FakeServer(), [answer], { lossy: true }).ingestText(
+      DOC_TEXT,
+      { source: "docs/aomine.md" },
+    );
+    expect(lossyOutcome.ok).toBe(true);
+    expect(lossyOutcome.llm_calls).toBe(1);
+    expect(lossyOutcome.invalid_dropped).toBe(1);
+
+    await expect(
+      make(new FakeServer(), [answer, answer]).ingestText(DOC_TEXT, { source: "docs/aomine.md" }),
+    ).rejects.toThrow(/invalid item/);
+  });
+
+  it("leaves the existing source untouched after a failed re-ingest", async () => {
+    const server = new FakeServer();
+    const outcome = await make(server, [MODEL_ANSWER]).ingestText(DOC_TEXT, {
+      source: "docs/aomine.md",
+    });
+    expect(outcome.ok).toBe(true);
+    expect(server.imported).toHaveLength(1);
+
+    const badAnswer = JSON.stringify({ associations: [INVALID_ASSOCIATION], aliases: [] });
+    await expect(
+      make(server, [badAnswer, badAnswer]).ingestText(DOC_TEXT, { source: "docs/aomine.md" }),
+    ).rejects.toThrow(/invalid item/);
+    // The failed re-ingest never called /import — the prior batch stands.
+    expect(server.imported).toHaveLength(1);
+  });
+
+  it("gives structured-output invalid args a validation corrective turn", async () => {
+    const badArgs = {
+      associations: [{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: "strong" }],
+      aliases: [],
+    };
+    const goodArgs = JSON.parse(MODEL_ANSWER) as Record<string, unknown>;
+    const llm = new ToolCallingFakeChatModel({ toolCallArgs: [badArgs, goodArgs] });
+    const outcome = await new TaguruIngester({
+      context: "sake",
+      llm,
+      client: new FakeServer().client(),
+      questions: 2,
+      structured_output: true,
+    }).ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.llm_calls).toBe(2);
+    expect(outcome.correction_attempts).toBe(1);
   });
 });
