@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage
@@ -15,6 +17,7 @@ from taguru_langchain.events import (
     EmbeddingRefreshCompleted,
     EmbeddingRefreshWarning,
     IngestEvent,
+    ProviderMetadata,
 )
 
 from .conftest import FakeServer
@@ -266,3 +269,51 @@ def test_no_callback_means_no_overhead_surprises(
     )
     outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     assert outcome.ok
+
+
+def test_attempt_failed_shares_the_rust_diagnostics_key_set() -> None:
+    """Port of extract.rs attempt_record_serializes_the_shared_key_set.
+
+    Issue #200's Rust `--diagnostics-out` JSONL sidecar shares field names
+    with this module's `AttemptFailed`/`ProviderMetadata` wherever the
+    concept matches (ADR 0001 §10) — this is the parity anchor on the
+    Python side. `AttemptFailed` covers only the failure case, so its own
+    `kind` discriminator is excluded here: it shares the FIELD NAME "kind"
+    with the Rust record but not its value scheme (Rust's `kind` is always
+    the literal "attempt"; Python's is one of ten event-type strings).
+    Rust-only extras with no Python counterpart — the ADR §7 `state`
+    string itself, the ladder-only `piece_bytes`/`requested_max_tokens`,
+    and the opt-in `response_text` — are deliberately not asserted here;
+    see the Rust test this ports for the full Rust-side shape.
+    """
+    shared_concept_fields = {
+        "source",
+        "chunk_index",
+        "attempt",
+        "max_attempts",
+        "parse_error",
+        "elapsed_seconds",
+        "provider_metadata",
+        "length_limited",
+        "stage",
+        "validation_issues",
+    }
+    attempt_failed_fields = {
+        field.name for field in dataclasses.fields(AttemptFailed) if field.name != "kind"
+    }
+    assert attempt_failed_fields == shared_concept_fields, (
+        "AttemptFailed's fields (minus its own 'kind' discriminator) must match the "
+        "shared-concept keys the Rust extract.rs AttemptRecord/DiagnosticsAttempt "
+        "carry — see attempt_record_serializes_the_shared_key_set in src/extract.rs."
+    )
+
+    provider_metadata_fields = {field.name for field in dataclasses.fields(ProviderMetadata)}
+    assert provider_metadata_fields == {
+        "finish_reason",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+    }, (
+        "ProviderMetadata's fields must match the Rust record's nested "
+        "provider_metadata object — see the same Rust test."
+    )

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Document extraction (extract) — Taguru</title>
-  <meta name="description" content="The complete reference for taguru extract: the credential boundary, field notes on local models, prompt and enforcement, chunking, doc2query, the manifest, trust and quality.">
+  <meta name="description" content="The complete reference for taguru extract: the credential boundary, field notes on local models, prompt and enforcement, chunking, doc2query, the manifest, the diagnostics sidecar, trust and quality.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -89,6 +89,10 @@ TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
 TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (default off)
 TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (default unset)
 TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
+TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (default unset, off)
+TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
+                    each diagnostics record, capped to this many bytes;
+                    default unset/0 = never attach it (metadata only)
 
 --dry-run           list what would extract or skip; calls nothing
 --force             re-extract documents the manifest says are unchanged
@@ -112,6 +116,10 @@ TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
 --lossy             restore the pre-#199 behavior: drop a business-rule-invalid
                     item (bad weight, dangling alias, out-of-range question, …)
                     and count it instead of correcting or failing (see below)
+--diagnostics-out FILE  write one JSONL record per LLM attempt — source,
+                    chunk, attempt, terminal state, finish_reason, token
+                    usage, latency, parse/validation issues (see below);
+                    off by default, ignored under --dry-run
 --context NAME      the context every batch file targets
 --description TEXT  attach a create block (used only when the context is absent)
 --config F          read KEY=VALUE environment from F (same dialect as serve)</code></pre>
@@ -340,6 +348,57 @@ TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
       earlier's. Batches from several out directories can be applied together in one import
       (<code>taguru import sake/ code/</code>) — every file's header names its own context, so
       "extract once per context, import everything at once" is the intended shape.
+    </p>
+  </section>
+
+  <section id="diagnostics">
+    <h2>Diagnostics sidecar</h2>
+    <p>
+      By default a failed document earns one stderr line and nothing else — enough to know
+      <i>that</i> a document failed, not enough to tell a truncated answer apart from a model
+      syntax error or an empty-answer thinking burn. <code>--diagnostics-out FILE</code> (or
+      <code>TAGURU_EXTRACT_DIAGNOSTICS</code>; the flag wins when both are set) opts into a JSONL
+      sidecar, one record per LLM attempt, written incrementally — a killed run keeps every
+      record already flushed. It is off by default, and without it stdout/stderr are unchanged
+      byte for byte: the sidecar is purely additive.
+    </p>
+    <p>
+      Every record carries: <code>source</code>, <code>chunk_index</code>, <code>attempt</code>
+      (one-based), <code>max_attempts</code>, <code>stage</code> (<code>item</code> for the
+      per-chunk loop, <code>cross_chunk</code> for the Stage 2 alias correction above),
+      <code>state</code> — the
+      <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0001-structured-extraction-reliability.md">ADR
+      0001 §7</a> vocabulary this producer classifies every attempt into before any parsing
+      happens: <code>stop_valid</code>, <code>stop_malformed</code>, <code>length_limited</code>,
+      <code>empty</code>, <code>refusal</code>, <code>timeout</code>, <code>transport</code> —
+      <code>length_limited</code>, <code>parse_error</code> (the diagnosis, present for every
+      state but <code>stop_valid</code>), <code>validation_issues</code> (path-addressed, when
+      the answer parsed but failed the contract), <code>elapsed_seconds</code>, and a nested
+      <code>provider_metadata</code> (<code>finish_reason</code> as received,
+      <code>input_tokens</code>/<code>output_tokens</code>/<code>total_tokens</code> when the
+      backend reports usage — <code>null</code> for <code>timeout</code>/<code>transport</code>,
+      where no response ever arrived). Four transport-layer retries inside one attempt (see
+      above) are one record, not four: the sidecar reports at the extraction level, matching
+      what a chunk actually experienced. Field names mirror the Python LangChain SDK's event
+      stream (<code>ProviderMetadata</code>, <code>AttemptFailed</code>) wherever the concept
+      matches, so tooling built against one producer's diagnostics reads the other's.
+    </p>
+    <p>
+      Raw model text is <b>never</b> captured by default — metadata only. Chain-of-thought is
+      never captured at all, under any setting. <code>TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES</code>
+      opts into the model's final answer text on each record, byte-capped <b>at capture</b>
+      (the same treatment <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code> gives a replayed
+      bad answer above) — because a raw response can embed the source document's own content, an
+      uncapped default would leak document text into a file meant for troubleshooting model
+      behavior.
+    </p>
+    <p>
+      The sidecar is truncated fresh on every run — it describes <i>this</i> run, never a log
+      appended across runs — so a rerun the manifest skips entirely leaves it empty, and a path
+      inside <code>--out</code> risks collision with a batch file or the manifest itself. Keep it
+      outside <code>--out</code>. It is a diagnostic aid, never a source of truth: the manifest
+      stays exactly what it has always been, a skip-index of successes, with no diagnostics
+      mixed in.
     </p>
   </section>
 

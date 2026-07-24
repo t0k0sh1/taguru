@@ -8,6 +8,33 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru extract` gains an opt-in `--diagnostics-out FILE` /
+  `TAGURU_EXTRACT_DIAGNOSTICS` JSONL sidecar (#200, implementing ADR
+  0001 §10) — the follow-up to #188's motivating failure, where a
+  malformed-JSON source could not be diagnosed as truncation versus a
+  genuine model syntax error versus a thinking-mode empty answer
+  because no per-attempt finish/usage metadata survived the run. One
+  record per LLM attempt (written incrementally — a killed run keeps
+  every record already flushed) carries `source`, `chunk_index`,
+  `attempt`, `max_attempts`, `stage` (`"item"` vs the Stage 2
+  `"cross_chunk"` correction), the ADR §7 terminal state
+  (`stop_valid`/`stop_malformed`/`length_limited`/`empty`/`refusal`/
+  `timeout`/`transport`, classified from provider metadata before any
+  parsing), `length_limited`, `parse_error`, `validation_issues`,
+  `elapsed_seconds`, and a nested `provider_metadata`
+  (`finish_reason` as received, `input_tokens`/`output_tokens`/
+  `total_tokens` when the backend reports usage) — field names mirror
+  `langchain-taguru`'s `AttemptFailed`/`ProviderMetadata` events
+  wherever the concept matches, parity-tested against the serialized
+  shape on both sides. Four transport-layer retries inside one
+  attempt are reported as the single attempt they are, not four.
+  Metadata only by default; `TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES`
+  opts into the model's raw answer text per record, byte-capped at
+  capture like `TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES` — chain-of-
+  thought is never captured under any setting. The manifest stays
+  exactly what it has always been, a skip-index of successes, with no
+  diagnostics mixed in. Off by default: without the flag, stdout/
+  stderr are unchanged byte for byte.
 - `langchain-taguru` (Python) replaces `TaguruIngester`'s silent
   merge-level item drop with lossless JSON repair and path-specific
   corrective retry (#180, implementing ADR 0001 §8 — the Python twin of

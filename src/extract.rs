@@ -25,8 +25,10 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -40,7 +42,7 @@ const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--fact-budget N] [--config FILE] [--parallel N]
                       [--structured-output MODE] [--max-output-tokens N]
-                      [--lossy]
+                      [--lossy] [--diagnostics-out FILE]
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
 Reads documents (.md/.txt; a directory expands to its files, sorted by
@@ -61,6 +63,10 @@ chat endpoint:
   TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (off)
   TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (unset)
   TAGURU_EXTRACT_LOSSY  default for --lossy (0/false)
+  TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (unset, off)
+  TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
+                      each diagnostics record, capped to this many bytes;
+                      unset or 0 = never attach it (metadata only)
 
   --dry-run           list what would extract or skip; call nothing
   --force             re-extract documents the manifest says are unchanged
@@ -95,6 +101,15 @@ chat endpoint:
                       Default (off): an invalid item earns one targeted
                       corrective turn; if it is still invalid afterward,
                       the source fails and nothing is written.
+  --diagnostics-out FILE  write one JSONL record per LLM attempt (source,
+                      chunk, attempt, ADR 0001 §7 state, finish_reason,
+                      token usage, latency, parse/validation issues) —
+                      metadata only; TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES
+                      opts into a byte-capped raw answer per record.
+                      Truncated fresh at open: FILE describes this run,
+                      not a log appended across runs. Default (unset):
+                      no sidecar, stdout/stderr unchanged. Ignored under
+                      --dry-run, which calls nothing to record.
   --context NAME      the context every batch file targets
   --description TEXT  add a create block (used only if the context is absent)
 
@@ -351,6 +366,49 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => false,
         },
     };
+    // Flag-over-env, same pattern as --parallel above. Unlike a parsed
+    // knob, any nonempty path is a valid value, so there is no "bad env
+    // value" usage error here.
+    let diagnostics_path = args.diagnostics_out.or_else(|| {
+        std::env::var("TAGURU_EXTRACT_DIAGNOSTICS")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    // Same "hard usage error, not a silent warning" reasoning as
+    // --parallel/--fact-budget above. Validated even when
+    // `diagnostics_path` ends up `None`, so a typo'd cap is never a
+    // silent no-op just because --diagnostics-out was left off too.
+    let diagnostics_raw_bytes = match std::env::var("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES") {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                return crate::config::subcommand_usage_error(
+                    "extract",
+                    "TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES needs an integer",
+                );
+            }
+        },
+        Err(_) => None,
+    };
+    // --dry-run calls nothing, so it opens no sidecar either (the
+    // --diagnostics-out usage text says so) — same reasoning as the
+    // client-construction skip above.
+    let diagnostics = match &diagnostics_path {
+        Some(path) if !args.dry_run => {
+            match DiagnosticsSink::open(path.clone(), diagnostics_raw_bytes) {
+                Ok(sink) => Some(sink),
+                Err(error) => {
+                    eprintln!(
+                        "taguru: extract: opening diagnostics file {}: {error}",
+                        path.display()
+                    );
+                    return 1;
+                }
+            }
+        }
+        _ => None,
+    };
     let mut run = Run {
         context: args.context,
         description: args.description,
@@ -374,6 +432,7 @@ pub fn run(args: &[String]) -> i32 {
         claimed: BTreeMap::new(),
         parallel,
         lossy,
+        diagnostics,
     };
 
     let mut written = 0usize;
@@ -470,6 +529,11 @@ struct Args {
     /// never a silent drop) — resolved in [`run`], same pattern as
     /// `structured_output`.
     lossy: Option<bool>,
+    /// `None` defers to TAGURU_EXTRACT_DIAGNOSTICS, and then to no
+    /// sidecar at all (today's behavior: one stderr line per failed
+    /// document, nothing else) — resolved in [`run`], same pattern as
+    /// `parallel`. Issue #200.
+    diagnostics_out: Option<PathBuf>,
     context: String,
     description: Option<String>,
     out: PathBuf,
@@ -488,6 +552,7 @@ impl Args {
         let mut structured_output: Option<StructuredOutputMode> = None;
         let mut max_output_tokens: Option<usize> = None;
         let mut lossy: Option<bool> = None;
+        let mut diagnostics_out: Option<PathBuf> = None;
         let mut context: Option<String> = None;
         let mut description: Option<String> = None;
         let mut out: Option<PathBuf> = None;
@@ -570,6 +635,15 @@ impl Args {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
                             "--max-output-tokens needs an integer of at least 1",
+                        ));
+                    }
+                },
+                "--diagnostics-out" => match rest.next() {
+                    Some(path) => diagnostics_out = Some(PathBuf::from(path)),
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--diagnostics-out needs a file path",
                         ));
                     }
                 },
@@ -663,6 +737,7 @@ impl Args {
             structured_output,
             max_output_tokens,
             lossy,
+            diagnostics_out,
             context,
             description,
             out,
@@ -805,6 +880,10 @@ struct Run {
     /// validation, no corrective turn spent on a business-rule
     /// violation, `report()` marks every drop explicitly as `--lossy`.
     lossy: bool,
+    /// Resolved from `--diagnostics-out`/TAGURU_EXTRACT_DIAGNOSTICS
+    /// (`None`, the default: no sidecar, stdout/stderr byte-for-byte
+    /// today's). Issue #200.
+    diagnostics: Option<DiagnosticsSink>,
 }
 
 impl Run {
@@ -888,6 +967,7 @@ impl Run {
             let cross_issues = cross_output_issues(&outputs);
             if !cross_issues.is_empty() {
                 self.correct_cross_output_issues(
+                    source,
                     &mut outputs,
                     cross_issues,
                     chunks.len(),
@@ -971,6 +1051,7 @@ impl Run {
                 self.fact_budget,
                 self.ladder.as_ref(),
                 rules.as_ref(),
+                self.diagnostics.as_ref(),
             ) {
                 Ok(piece_outputs) => outputs.extend(piece_outputs),
                 Err(message) => {
@@ -1019,6 +1100,7 @@ impl Run {
                     self.fact_budget,
                     self.ladder.as_ref(),
                     rules.as_ref(),
+                    self.diagnostics.as_ref(),
                 )
             },
         );
@@ -1048,6 +1130,7 @@ impl Run {
     /// never splits and never loops a second round.
     fn correct_cross_output_issues(
         &self,
+        source: &str,
         outputs: &mut [ChunkOutput],
         cross_issues: Vec<(usize, Vec<String>)>,
         chunk_total: usize,
@@ -1069,6 +1152,7 @@ impl Run {
                 .and_then(|ladder| ladder.max_output_tokens),
         };
         let rules = self.item_rules(paragraph_count);
+        let sink = self.diagnostics.as_ref();
         for (output_index, issues) in cross_issues {
             let (chunk_index, user, answer) = {
                 let chunk = &outputs[output_index];
@@ -1084,10 +1168,56 @@ impl Run {
                     "content": corrective_validation_message(&issues),
                 }),
             ];
-            let response = client
-                .complete(&messages, &options)
-                .map_err(|error| format!("{label}: {error}"))?;
+            let started = std::time::Instant::now();
+            let response = match client.complete(&messages, &options) {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Some(sink) = sink {
+                        let message = error.to_string();
+                        sink.emit(DiagnosticsAttempt {
+                            source,
+                            stage: "cross_chunk",
+                            chunk_index,
+                            attempt: 1,
+                            max_attempts: 1,
+                            state: match error.kind {
+                                ChatFailure::Timeout => "timeout",
+                                ChatFailure::Transport => "transport",
+                            },
+                            length_limited: false,
+                            elapsed: started.elapsed(),
+                            response: None,
+                            parse_error: Some(&message),
+                            validation_issues: None,
+                            piece_bytes: None,
+                            requested_max_tokens: options.max_tokens,
+                        });
+                    }
+                    return Err(format!("{label}: {error}"));
+                }
+            };
+            let elapsed = started.elapsed();
             if indicates_length_limit(response.finish_reason.as_deref()) {
+                if let Some(sink) = sink {
+                    let message =
+                        "the cross-chunk alias correction was cut off at the output limit"
+                            .to_string();
+                    sink.emit(DiagnosticsAttempt {
+                        source,
+                        stage: "cross_chunk",
+                        chunk_index,
+                        attempt: 1,
+                        max_attempts: 1,
+                        state: "length_limited",
+                        length_limited: true,
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: Some(&message),
+                        validation_issues: None,
+                        piece_bytes: None,
+                        requested_max_tokens: options.max_tokens,
+                    });
+                }
                 return Err(format!(
                     "{label}: the cross-chunk alias correction was cut off at the output \
                      limit — failing the source rather than importing a truncated correction"
@@ -1096,16 +1226,72 @@ impl Run {
             if let Some(reason) = response.finish_reason.as_deref()
                 && indicates_refusal(reason)
             {
+                if let Some(sink) = sink {
+                    let message = format!(
+                        "the provider refused the cross-chunk alias correction \
+                         (finish_reason {reason})"
+                    );
+                    sink.emit(DiagnosticsAttempt {
+                        source,
+                        stage: "cross_chunk",
+                        chunk_index,
+                        attempt: 1,
+                        max_attempts: 1,
+                        state: "refusal",
+                        length_limited: false,
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: Some(&message),
+                        validation_issues: None,
+                        piece_bytes: None,
+                        requested_max_tokens: options.max_tokens,
+                    });
+                }
                 return Err(format!(
                     "{label}: the provider refused the cross-chunk alias correction \
                      (finish_reason {reason})"
                 ));
             }
             if is_empty_answer(&response.content) {
+                if let Some(sink) = sink {
+                    let message = empty_answer_diagnosis();
+                    sink.emit(DiagnosticsAttempt {
+                        source,
+                        stage: "cross_chunk",
+                        chunk_index,
+                        attempt: 1,
+                        max_attempts: 1,
+                        state: "empty",
+                        length_limited: false,
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: Some(&message),
+                        validation_issues: None,
+                        piece_bytes: None,
+                        requested_max_tokens: options.max_tokens,
+                    });
+                }
                 return Err(format!("{label}: {}", empty_answer_diagnosis()));
             }
             match evaluate_answer(&response.content, rules.as_ref()) {
                 Ok(output) => {
+                    if let Some(sink) = sink {
+                        sink.emit(DiagnosticsAttempt {
+                            source,
+                            stage: "cross_chunk",
+                            chunk_index,
+                            attempt: 1,
+                            max_attempts: 1,
+                            state: "stop_valid",
+                            length_limited: false,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: None,
+                            validation_issues: None,
+                            piece_bytes: None,
+                            requested_max_tokens: options.max_tokens,
+                        });
+                    }
                     outputs[output_index] = ChunkOutput {
                         output,
                         chunk_index,
@@ -1114,12 +1300,52 @@ impl Run {
                     };
                 }
                 Err(AnswerFault::Syntax(error)) => {
+                    if let Some(sink) = sink {
+                        sink.emit(DiagnosticsAttempt {
+                            source,
+                            stage: "cross_chunk",
+                            chunk_index,
+                            attempt: 1,
+                            max_attempts: 1,
+                            state: "stop_malformed",
+                            length_limited: false,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: Some(&error),
+                            validation_issues: None,
+                            piece_bytes: None,
+                            requested_max_tokens: options.max_tokens,
+                        });
+                    }
                     return Err(format!(
                         "{label}: the cross-chunk alias correction was not the JSON object \
                          asked for ({error})"
                     ));
                 }
                 Err(AnswerFault::Invalid(issues)) => {
+                    if let Some(sink) = sink {
+                        let message = format!(
+                            "the cross-chunk alias correction still left {} invalid item(s) \
+                             uncorrected: {}",
+                            issues.len(),
+                            issues.join("; ")
+                        );
+                        sink.emit(DiagnosticsAttempt {
+                            source,
+                            stage: "cross_chunk",
+                            chunk_index,
+                            attempt: 1,
+                            max_attempts: 1,
+                            state: "stop_malformed",
+                            length_limited: false,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: Some(&message),
+                            validation_issues: Some(&issues),
+                            piece_bytes: None,
+                            requested_max_tokens: options.max_tokens,
+                        });
+                    }
                     return Err(format!(
                         "{label}: the cross-chunk alias correction still left {} invalid \
                          item(s) uncorrected: {}",
@@ -1307,13 +1533,95 @@ pub(crate) struct ChatClient {
     agent: ureq::Agent,
 }
 
+/// Whether [`ChatClient::complete`] gave up before the provider ever
+/// answered (`Timeout`) or after some other transport-level trouble —
+/// connection refused, a malformed/oversized body, an HTTP error status
+/// that exhausted its retries (`Transport`). ADR 0001 §7 draws exactly
+/// this line between its `TIMEOUT` and `TRANSPORT` terminal states; the
+/// diagnostics sink (issue #200) is the only reader — every existing
+/// caller still just formats [`ChatError`] with `{error}`, unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChatFailure {
+    Timeout,
+    Transport,
+}
+
+/// [`ChatClient::complete`]'s error: the same message every caller has
+/// always surfaced via `Display`, plus the [`ChatFailure`]
+/// classification issue #200's diagnostics sink needs. `From<ChatError>
+/// for String` keeps every `?`-based caller compiling exactly as it did
+/// when `complete` returned `Result<ChatCompletion, String>`.
+#[derive(Debug)]
+pub(crate) struct ChatError {
+    pub(crate) kind: ChatFailure,
+    message: String,
+}
+
+impl ChatError {
+    fn new(kind: ChatFailure, message: String) -> Self {
+        Self { kind, message }
+    }
+}
+
+impl std::fmt::Display for ChatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<ChatError> for String {
+    fn from(error: ChatError) -> Self {
+        error.message
+    }
+}
+
+/// Classifies the error `ureq::Agent::send`/`call` itself raised (never
+/// reaching an HTTP response) as TIMEOUT or TRANSPORT. ureq surfaces a
+/// deadline both as its own `Timeout` variant and, for some transports,
+/// as an `Io` error carrying `ErrorKind::TimedOut` — both read as the
+/// same ADR 0001 §7 state.
+fn classify_send_error(error: &ureq::Error) -> ChatFailure {
+    match error {
+        ureq::Error::Timeout(_) => ChatFailure::Timeout,
+        ureq::Error::Io(io_error) if io_error.kind() == std::io::ErrorKind::TimedOut => {
+            ChatFailure::Timeout
+        }
+        _ => ChatFailure::Transport,
+    }
+}
+
+/// Same classification as [`classify_send_error`], for an `io::Error`
+/// hit while reading an already-established response body.
+fn classify_io_error(error: &std::io::Error) -> ChatFailure {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        ChatFailure::Timeout
+    } else {
+        ChatFailure::Transport
+    }
+}
+
+/// Token counts a provider reported for one completion, translated from
+/// the OpenAI-compatible wire names (`prompt_tokens`/`completion_tokens`/
+/// `total_tokens`) to the vocabulary `taguru-langchain`'s
+/// `ProviderMetadata` already uses (`input_tokens`/`output_tokens`/
+/// `total_tokens`) — the one place that translation happens. `None`
+/// fields mean the response's `usage` object omitted them.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TokenUsage {
+    pub(crate) input_tokens: Option<u64>,
+    pub(crate) output_tokens: Option<u64>,
+    pub(crate) total_tokens: Option<u64>,
+}
+
 /// One chat completion's assistant text plus the provider's own account
 /// of why it stopped — `finish_reason` straight from the response body
 /// (`"length"` means the output hit the token cap mid-answer; `None`
-/// covers providers that omit the field).
+/// covers providers that omit the field). `usage` is `None` when the
+/// response carries no `usage` object at all (see [`TokenUsage`]).
 pub(crate) struct ChatCompletion {
     pub(crate) content: String,
     pub(crate) finish_reason: Option<String>,
+    pub(crate) usage: Option<TokenUsage>,
 }
 
 /// The optional OpenAI-compatible parameters one completion carries
@@ -1387,9 +1695,9 @@ impl ChatClient {
         &self,
         messages: &[serde_json::Value],
         options: &RequestOptions,
-    ) -> Result<ChatCompletion, String> {
+    ) -> Result<ChatCompletion, ChatError> {
         let body = build_chat_body(&self.model, messages, options);
-        let mut last = String::new();
+        let mut last: Option<ChatError> = None;
         for attempt in 0..RETRY_ATTEMPTS {
             let mut request = self
                 .agent
@@ -1405,18 +1713,38 @@ impl ChatClient {
             let retry_after = match request.send(&body) {
                 Ok(response) if response.status().as_u16() < 400 => {
                     let body = read_capped_chat_body(response.into_body())?;
-                    let parsed: serde_json::Value = serde_json::from_slice(&body)
-                        .map_err(|error| format!("chat response unreadable: {error}"))?;
+                    let parsed: serde_json::Value =
+                        serde_json::from_slice(&body).map_err(|error| {
+                            ChatError::new(
+                                ChatFailure::Transport,
+                                format!("chat response unreadable: {error}"),
+                            )
+                        })?;
                     let content = parsed["choices"][0]["message"]["content"]
                         .as_str()
                         .map(str::to_string)
-                        .ok_or_else(|| "chat response carries no assistant text".to_string())?;
+                        .ok_or_else(|| {
+                            ChatError::new(
+                                ChatFailure::Transport,
+                                "chat response carries no assistant text".to_string(),
+                            )
+                        })?;
                     let finish_reason = parsed["choices"][0]["finish_reason"]
                         .as_str()
                         .map(str::to_string);
+                    let usage =
+                        parsed
+                            .get("usage")
+                            .filter(|value| value.is_object())
+                            .map(|usage| TokenUsage {
+                                input_tokens: usage["prompt_tokens"].as_u64(),
+                                output_tokens: usage["completion_tokens"].as_u64(),
+                                total_tokens: usage["total_tokens"].as_u64(),
+                            });
                     return Ok(ChatCompletion {
                         content,
                         finish_reason,
+                        usage,
                     });
                 }
                 Ok(response) => {
@@ -1432,17 +1760,24 @@ impl ChatClient {
                         .flatten();
                     let error_body =
                         read_capped_chat_body(response.into_body()).unwrap_or_default();
-                    last = format!(
-                        "chat endpoint answered {code}: {}",
-                        snippet(&String::from_utf8_lossy(&error_body))
+                    let error = ChatError::new(
+                        ChatFailure::Transport,
+                        format!(
+                            "chat endpoint answered {code}: {}",
+                            snippet(&String::from_utf8_lossy(&error_body))
+                        ),
                     );
                     if code != 429 && code < 500 {
-                        return Err(last);
+                        return Err(error);
                     }
+                    last = Some(error);
                     retry_after
                 }
                 Err(error) => {
-                    last = format!("chat request failed: {error}");
+                    last = Some(ChatError::new(
+                        classify_send_error(&error),
+                        format!("chat request failed: {error}"),
+                    ));
                     None
                 }
             };
@@ -1452,8 +1787,192 @@ impl ChatClient {
                 );
             }
         }
-        Err(format!("after {RETRY_ATTEMPTS} attempts: {last}"))
+        let last = last.expect("RETRY_ATTEMPTS >= 1, so the loop set this at least once");
+        Err(ChatError::new(
+            last.kind,
+            format!("after {RETRY_ATTEMPTS} attempts: {}", last.message),
+        ))
     }
+}
+
+/// The `--diagnostics-out`/`TAGURU_EXTRACT_DIAGNOSTICS` JSONL sidecar
+/// (issue #200, ADR 0001 §10): one line per LLM attempt, opt-in,
+/// metadata-only by default. `File::create` truncates on open — the
+/// sidecar describes THIS run, never a prior one appended to, so a
+/// skipped-everything rerun leaves it empty rather than stale
+/// (docs/extract.html says so). `Mutex`-guarded because `--parallel`
+/// dispatches chunk workers concurrently onto the same file
+/// (`crate::registry::dispatch_chunks_concurrently`); each `emit` call
+/// is one `write_all` + `flush` so a killed run keeps every completed
+/// line — no fsync, unlike `wal.rs`'s crash-durable records: this
+/// sidecar is advisory, and a document's own batch file and the
+/// manifest are what "written" actually means.
+struct DiagnosticsSink {
+    writer: Mutex<std::io::BufWriter<fs::File>>,
+    /// `None`: never attach `response_text`. `Some(n)`, always `n > 0`
+    /// ([`DiagnosticsSink::open`] folds `Some(0)` to `None`): cap raw
+    /// text at `n` bytes, [`corrective_assistant_turn`]'s treatment.
+    raw_cap: Option<usize>,
+    path: PathBuf,
+    /// Set on the first write failure so the one warning line prints
+    /// once for the run, not once per dropped record.
+    warned: AtomicBool,
+}
+
+impl DiagnosticsSink {
+    fn open(path: PathBuf, raw_cap: Option<usize>) -> std::io::Result<Self> {
+        let file = fs::File::create(&path)?;
+        Ok(Self {
+            writer: Mutex::new(std::io::BufWriter::new(file)),
+            raw_cap: raw_cap.filter(|&n| n > 0),
+            path,
+            warned: AtomicBool::new(false),
+        })
+    }
+
+    /// Assembles and writes one record. A diagnostics write never fails
+    /// extraction itself (requirement 4 only binds stdout/stderr when
+    /// the FLAG is absent) — an I/O error here earns one stderr warning
+    /// and every later record on this sink is silently dropped.
+    fn emit(&self, attempt: DiagnosticsAttempt) {
+        let provider_metadata = attempt.response.map(|response| ProviderMetadataRecord {
+            finish_reason: response.finish_reason.clone(),
+            input_tokens: response.usage.and_then(|usage| usage.input_tokens),
+            output_tokens: response.usage.and_then(|usage| usage.output_tokens),
+            total_tokens: response.usage.and_then(|usage| usage.total_tokens),
+        });
+        let response_text = attempt
+            .response
+            .and_then(|response| self.capture_raw(&response.content));
+        let record = AttemptRecord {
+            kind: "attempt",
+            source: attempt.source.to_string(),
+            stage: attempt.stage,
+            chunk_index: attempt.chunk_index,
+            attempt: attempt.attempt,
+            max_attempts: attempt.max_attempts,
+            state: attempt.state,
+            length_limited: attempt.length_limited,
+            elapsed_seconds: attempt.elapsed.as_secs_f64(),
+            provider_metadata,
+            parse_error: attempt.parse_error.map(str::to_string),
+            validation_issues: attempt.validation_issues.map(<[String]>::to_vec),
+            piece_bytes: attempt.piece_bytes,
+            requested_max_tokens: attempt.requested_max_tokens,
+            response_text,
+        };
+        let mut line = match serde_json::to_string(&record) {
+            Ok(line) => line,
+            // AttemptRecord's fields are all plain, always-serializable
+            // types — this would be a taguru bug, not a runtime
+            // condition; never seen in practice, worth 0 diagnostics
+            // rather than a panic mid-extraction.
+            Err(_) => return,
+        };
+        line.push('\n');
+        let mut writer = match self.writer.lock() {
+            Ok(writer) => writer,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let wrote = writer
+            .write_all(line.as_bytes())
+            .and_then(|()| writer.flush());
+        if let Err(error) = wrote
+            && !self.warned.swap(true, Ordering::Relaxed)
+        {
+            eprintln!(
+                "taguru: extract: diagnostics: writing {}: {error} — further records are \
+                 dropped",
+                self.path.display()
+            );
+        }
+    }
+
+    /// The raw-text opt-in's byte cap, applied at capture time — exactly
+    /// [`corrective_assistant_turn`]'s treatment of a prior bad answer.
+    fn capture_raw(&self, content: &str) -> Option<String> {
+        let cap = self.raw_cap?;
+        Some(if cap >= content.len() {
+            content.to_string()
+        } else {
+            format!(
+                "{}… [truncated to {cap} bytes]",
+                &content[..floor_char_boundary(content, cap)]
+            )
+        })
+    }
+}
+
+/// One attempt's diagnostics, gathered at the call site — legacy
+/// `extract_chunk`, ladder `extract_round`, and Stage 2
+/// `correct_cross_output_issues` each classify an attempt differently
+/// (ADR 0001 §7), so each builds this itself rather than
+/// [`DiagnosticsSink::emit`] trying to re-derive it from a shared
+/// shape.
+struct DiagnosticsAttempt<'a> {
+    source: &'a str,
+    stage: &'static str,
+    chunk_index: usize,
+    attempt: usize,
+    max_attempts: usize,
+    /// ADR 0001 §7's vocabulary: `stop_valid`, `stop_malformed`,
+    /// `length_limited`, `empty`, `refusal`, `timeout`, `transport`.
+    state: &'static str,
+    length_limited: bool,
+    elapsed: Duration,
+    /// `None` exactly for `timeout`/`transport` — no response exists.
+    response: Option<&'a ChatCompletion>,
+    parse_error: Option<&'a str>,
+    validation_issues: Option<&'a [String]>,
+    /// Ladder-only: the byte length of the piece this round asked
+    /// about, distinguishing split sub-pieces that share one
+    /// `chunk_index`.
+    piece_bytes: Option<usize>,
+    /// Ladder-only: this round's `max_tokens`, when one was sent.
+    requested_max_tokens: Option<usize>,
+}
+
+/// One JSONL line of the `--diagnostics-out` sidecar. Field names
+/// mirror `taguru-langchain`'s `AttemptFailed`/`ProviderMetadata`
+/// events (sdk/python-langchain/src/taguru_langchain/events.py)
+/// wherever the concept matches, so a parity test can compare the two
+/// shapes structurally instead of through a name-mapping table — see
+/// this module's `attempt_record_serializes_the_shared_key_set` test
+/// and its Python twin in `tests/unit/test_events.py`. Metadata only:
+/// `response_text` exists exactly when
+/// TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES opted in, byte-capped at
+/// capture — never chain-of-thought, only the assistant's final text
+/// (ADR 0001 §10).
+#[derive(serde::Serialize)]
+struct AttemptRecord {
+    kind: &'static str,
+    source: String,
+    stage: &'static str,
+    chunk_index: usize,
+    attempt: usize,
+    max_attempts: usize,
+    state: &'static str,
+    length_limited: bool,
+    elapsed_seconds: f64,
+    provider_metadata: Option<ProviderMetadataRecord>,
+    parse_error: Option<String>,
+    validation_issues: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    piece_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_max_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_text: Option<String>,
+}
+
+/// [`ChatCompletion`]'s `finish_reason` and [`TokenUsage`], nested to
+/// match `ProviderMetadata`'s serialized shape on the Python side.
+#[derive(serde::Serialize)]
+struct ProviderMetadataRecord {
+    finish_reason: Option<String>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
 }
 
 /// What the run's structured-output rung resolved to, reported once on
@@ -1624,16 +2143,25 @@ fn parse_retry_after(value: &str) -> Option<Duration> {
 /// [`MAX_CHAT_RESPONSE_BYTES`], so a misbehaving or misaddressed
 /// endpoint cannot hand `complete` an unbounded buffer on either the
 /// success or the error-diagnostic path.
-fn read_capped_chat_body(body: ureq::Body) -> Result<Vec<u8>, String> {
+fn read_capped_chat_body(body: ureq::Body) -> Result<Vec<u8>, ChatError> {
     use std::io::Read;
     let mut buffer = Vec::new();
     body.into_reader()
         .take(MAX_CHAT_RESPONSE_BYTES + 1)
         .read_to_end(&mut buffer)
-        .map_err(|error| format!("chat response unreadable: {error}"))?;
+        .map_err(|error| {
+            ChatError::new(
+                classify_io_error(&error),
+                format!("chat response unreadable: {error}"),
+            )
+        })?;
     if buffer.len() as u64 > MAX_CHAT_RESPONSE_BYTES {
-        return Err(format!(
-            "chat response is larger than {MAX_CHAT_RESPONSE_BYTES} bytes; refusing to buffer it"
+        return Err(ChatError::new(
+            ChatFailure::Transport,
+            format!(
+                "chat response is larger than {MAX_CHAT_RESPONSE_BYTES} bytes; refusing to \
+                 buffer it"
+            ),
         ));
     }
     Ok(buffer)
@@ -1715,14 +2243,17 @@ impl CorrectiveAsk {
 /// lossy) this reproduces the previous fixed implementation's request
 /// bodies exactly: 1st call is base only, 2nd (if needed) is base + the
 /// 1st answer + the same corrective text as before.
+#[allow(clippy::too_many_arguments)]
 fn extract_chunk(
     client: &ChatClient,
     system: &str,
     user: &str,
+    source: &str,
     chunk_index: usize,
     policy: &CorrectionPolicy,
     fact_budget: usize,
     rules: Option<&ItemRules>,
+    sink: Option<&DiagnosticsSink>,
 ) -> Result<ChunkOutput, String> {
     let base = [
         serde_json::json!({"role": "system", "content": system}),
@@ -1731,7 +2262,7 @@ fn extract_chunk(
     let mut last_diagnosis = String::new();
     let mut prior_bad_answer: Option<String> = None;
     let mut pending: Option<CorrectiveAsk> = None;
-    for _ in 0..policy.max_attempts {
+    for attempt in 1..=policy.max_attempts {
         let mut messages = base.to_vec();
         if let Some(bad_answer) = &prior_bad_answer {
             messages.push(corrective_assistant_turn(
@@ -1746,9 +2277,59 @@ fn extract_chunk(
                     .user_message(fact_budget),
             }));
         }
-        let response = client.complete(&messages, &RequestOptions::default())?;
+        let started = std::time::Instant::now();
+        let response = match client.complete(&messages, &RequestOptions::default()) {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(sink) = sink {
+                    let message = error.to_string();
+                    sink.emit(DiagnosticsAttempt {
+                        source,
+                        stage: "item",
+                        chunk_index,
+                        attempt,
+                        max_attempts: policy.max_attempts,
+                        state: match error.kind {
+                            ChatFailure::Timeout => "timeout",
+                            ChatFailure::Transport => "transport",
+                        },
+                        length_limited: false,
+                        elapsed: started.elapsed(),
+                        response: None,
+                        parse_error: Some(&message),
+                        validation_issues: None,
+                        piece_bytes: None,
+                        requested_max_tokens: None,
+                    });
+                }
+                return Err(error.into());
+            }
+        };
+        let elapsed = started.elapsed();
         match evaluate_answer(&response.content, rules) {
             Ok(output) => {
+                if let Some(sink) = sink {
+                    sink.emit(DiagnosticsAttempt {
+                        source,
+                        stage: "item",
+                        chunk_index,
+                        attempt,
+                        max_attempts: policy.max_attempts,
+                        state: "stop_valid",
+                        // Legacy accepts a length-terminated answer that
+                        // still parses (today's behavior, unchanged) —
+                        // this flag alone keeps that truncation visible
+                        // in diagnostics without turning it into a
+                        // failure the run never treated as one.
+                        length_limited: indicates_length_limit(response.finish_reason.as_deref()),
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: None,
+                        validation_issues: None,
+                        piece_bytes: None,
+                        requested_max_tokens: None,
+                    });
+                }
                 return Ok(ChunkOutput {
                     output,
                     chunk_index,
@@ -1758,6 +2339,31 @@ fn extract_chunk(
             }
             Err(AnswerFault::Syntax(error)) => {
                 let length_limited = indicates_length_limit(response.finish_reason.as_deref());
+                if let Some(sink) = sink {
+                    // Diagnostics-only classification — is_empty_answer
+                    // has no bearing on the corrective text below, which
+                    // stays the ordinary Syntax path exactly as before.
+                    let state = if is_empty_answer(&response.content) {
+                        "empty"
+                    } else {
+                        "stop_malformed"
+                    };
+                    sink.emit(DiagnosticsAttempt {
+                        source,
+                        stage: "item",
+                        chunk_index,
+                        attempt,
+                        max_attempts: policy.max_attempts,
+                        state,
+                        length_limited,
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: Some(&error),
+                        validation_issues: None,
+                        piece_bytes: None,
+                        requested_max_tokens: None,
+                    });
+                }
                 last_diagnosis = format!("the model would not produce the JSON object: {error}");
                 pending = Some(CorrectiveAsk::Syntax {
                     parse_error: error,
@@ -1766,11 +2372,29 @@ fn extract_chunk(
                 prior_bad_answer = Some(response.content);
             }
             Err(AnswerFault::Invalid(issues)) => {
-                last_diagnosis = format!(
+                let diagnosis = format!(
                     "the answer left {} invalid item(s) uncorrected: {}",
                     issues.len(),
                     issues.join("; ")
                 );
+                if let Some(sink) = sink {
+                    sink.emit(DiagnosticsAttempt {
+                        source,
+                        stage: "item",
+                        chunk_index,
+                        attempt,
+                        max_attempts: policy.max_attempts,
+                        state: "stop_malformed",
+                        length_limited: false,
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: Some(&diagnosis),
+                        validation_issues: Some(&issues),
+                        piece_bytes: None,
+                        requested_max_tokens: None,
+                    });
+                }
+                last_diagnosis = diagnosis;
                 pending = Some(CorrectiveAsk::Invalid { issues });
                 prior_bad_answer = Some(response.content);
             }
@@ -1796,6 +2420,7 @@ fn extract_chunk_or_ladder(
     fact_budget: usize,
     ladder: Option<&LadderConfig>,
     rules: Option<&ItemRules>,
+    sink: Option<&DiagnosticsSink>,
 ) -> Result<Vec<ChunkOutput>, String> {
     match ladder {
         None => {
@@ -1804,10 +2429,12 @@ fn extract_chunk_or_ladder(
                 client,
                 system,
                 &user,
+                source,
                 chunk_index,
                 policy,
                 fact_budget,
                 rules,
+                sink,
             )
             .map(|output| vec![output])
         }
@@ -1822,6 +2449,7 @@ fn extract_chunk_or_ladder(
                 policy,
                 fact_budget,
                 rules,
+                sink,
             };
             extract_piece(&context, piece)
         }
@@ -1843,6 +2471,7 @@ struct PieceContext<'a> {
     policy: &'a CorrectionPolicy,
     fact_budget: usize,
     rules: Option<&'a ItemRules>,
+    sink: Option<&'a DiagnosticsSink>,
 }
 
 /// ADR 0001 §7 for one piece: a round at the configured budget; on
@@ -1860,10 +2489,15 @@ fn extract_piece(context: &PieceContext, piece: &str) -> Result<Vec<ChunkOutput>
         context.chunk_total,
         piece,
     );
-    let mut outcome = extract_round(context, &user, context.ladder.max_output_tokens);
+    let mut outcome = extract_round(
+        context,
+        &user,
+        piece.len(),
+        context.ladder.max_output_tokens,
+    );
     if matches!(outcome, RoundOutcome::LengthLimited) && context.ladder.max_output_tokens.is_some()
     {
-        outcome = extract_round(context, &user, None);
+        outcome = extract_round(context, &user, piece.len(), None);
     }
     match outcome {
         RoundOutcome::Valid(chunk_output) => Ok(vec![chunk_output]),
@@ -1911,7 +2545,12 @@ enum RoundOutcome {
 /// instead of becoming a prompt. An empty answer gets at most one
 /// corrective in the whole round — however high `max_attempts` is —
 /// then the named diagnosis.
-fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) -> RoundOutcome {
+fn extract_round(
+    context: &PieceContext,
+    user: &str,
+    piece_bytes: usize,
+    max_tokens: Option<usize>,
+) -> RoundOutcome {
     let options = RequestOptions {
         response_format: context.ladder.response_format.clone(),
         max_tokens,
@@ -1924,7 +2563,7 @@ fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) 
     let mut prior_bad_answer: Option<String> = None;
     let mut pending: Option<CorrectiveAsk> = None;
     let mut empty_corrected = false;
-    for _ in 0..context.policy.max_attempts {
+    for attempt in 1..=context.policy.max_attempts {
         let mut messages = base.to_vec();
         if let Some(bad_answer) = &prior_bad_answer {
             messages.push(corrective_assistant_turn(
@@ -1939,12 +2578,54 @@ fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) 
                     .user_message(context.fact_budget),
             }));
         }
+        let started = std::time::Instant::now();
         let response = match context.client.complete(&messages, &options) {
             Ok(response) => response,
-            Err(error) => return RoundOutcome::Failed(error),
+            Err(error) => {
+                if let Some(sink) = context.sink {
+                    let message = error.to_string();
+                    sink.emit(DiagnosticsAttempt {
+                        source: context.source,
+                        stage: "item",
+                        chunk_index: context.chunk_index,
+                        attempt,
+                        max_attempts: context.policy.max_attempts,
+                        state: match error.kind {
+                            ChatFailure::Timeout => "timeout",
+                            ChatFailure::Transport => "transport",
+                        },
+                        length_limited: false,
+                        elapsed: started.elapsed(),
+                        response: None,
+                        parse_error: Some(&message),
+                        validation_issues: None,
+                        piece_bytes: Some(piece_bytes),
+                        requested_max_tokens: max_tokens,
+                    });
+                }
+                return RoundOutcome::Failed(error.into());
+            }
         };
+        let elapsed = started.elapsed();
         match classify_attempt(&response, context.rules) {
             AttemptOutcome::Valid(output) => {
+                if let Some(sink) = context.sink {
+                    sink.emit(DiagnosticsAttempt {
+                        source: context.source,
+                        stage: "item",
+                        chunk_index: context.chunk_index,
+                        attempt,
+                        max_attempts: context.policy.max_attempts,
+                        state: "stop_valid",
+                        length_limited: false,
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: None,
+                        validation_issues: None,
+                        piece_bytes: Some(piece_bytes),
+                        requested_max_tokens: max_tokens,
+                    });
+                }
                 return RoundOutcome::Valid(ChunkOutput {
                     output,
                     chunk_index: context.chunk_index,
@@ -1952,16 +2633,78 @@ fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) 
                     answer: response.content,
                 });
             }
-            AttemptOutcome::LengthLimited => return RoundOutcome::LengthLimited,
-            AttemptOutcome::Refusal(reason) => return RoundOutcome::Refusal(reason),
+            AttemptOutcome::LengthLimited => {
+                if let Some(sink) = context.sink {
+                    let reason = response.finish_reason.as_deref().unwrap_or("length");
+                    let message = format!(
+                        "the answer was cut off at the output limit (finish_reason {reason})"
+                    );
+                    sink.emit(DiagnosticsAttempt {
+                        source: context.source,
+                        stage: "item",
+                        chunk_index: context.chunk_index,
+                        attempt,
+                        max_attempts: context.policy.max_attempts,
+                        state: "length_limited",
+                        length_limited: true,
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: Some(&message),
+                        validation_issues: None,
+                        piece_bytes: Some(piece_bytes),
+                        requested_max_tokens: max_tokens,
+                    });
+                }
+                return RoundOutcome::LengthLimited;
+            }
+            AttemptOutcome::Refusal(reason) => {
+                if let Some(sink) = context.sink {
+                    let message =
+                        format!("the provider refused this content (finish_reason {reason})");
+                    sink.emit(DiagnosticsAttempt {
+                        source: context.source,
+                        stage: "item",
+                        chunk_index: context.chunk_index,
+                        attempt,
+                        max_attempts: context.policy.max_attempts,
+                        state: "refusal",
+                        length_limited: false,
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: Some(&message),
+                        validation_issues: None,
+                        piece_bytes: Some(piece_bytes),
+                        requested_max_tokens: max_tokens,
+                    });
+                }
+                return RoundOutcome::Refusal(reason);
+            }
             AttemptOutcome::Empty => {
+                let diagnosis = empty_answer_diagnosis();
+                if let Some(sink) = context.sink {
+                    sink.emit(DiagnosticsAttempt {
+                        source: context.source,
+                        stage: "item",
+                        chunk_index: context.chunk_index,
+                        attempt,
+                        max_attempts: context.policy.max_attempts,
+                        state: "empty",
+                        length_limited: false,
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: Some(&diagnosis),
+                        validation_issues: None,
+                        piece_bytes: Some(piece_bytes),
+                        requested_max_tokens: max_tokens,
+                    });
+                }
                 if empty_corrected {
-                    return RoundOutcome::Failed(empty_answer_diagnosis());
+                    return RoundOutcome::Failed(diagnosis);
                 }
                 empty_corrected = true;
-                last_diagnosis = empty_answer_diagnosis();
+                last_diagnosis = diagnosis.clone();
                 pending = Some(CorrectiveAsk::Syntax {
-                    parse_error: empty_answer_diagnosis(),
+                    parse_error: diagnosis,
                     length_limited: false,
                 });
                 prior_bad_answer = Some(response.content);
@@ -1970,13 +2713,30 @@ fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) 
                 if options.response_format.is_some() {
                     // A constrained answer that still fails validation
                     // is the provider not honoring its own contract —
-                    // worth one visible line per occurrence; the
-                    // structured diagnostics sink is issue #200's.
+                    // worth one visible line per occurrence, plus the
+                    // diagnostics record below (issue #200).
                     eprintln!(
                         "taguru: extract: {}: provider non-conformance: the answer \
                          violated the requested response_format ({error})",
                         context.source
                     );
+                }
+                if let Some(sink) = context.sink {
+                    sink.emit(DiagnosticsAttempt {
+                        source: context.source,
+                        stage: "item",
+                        chunk_index: context.chunk_index,
+                        attempt,
+                        max_attempts: context.policy.max_attempts,
+                        state: "stop_malformed",
+                        length_limited: false,
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: Some(&error),
+                        validation_issues: None,
+                        piece_bytes: Some(piece_bytes),
+                        requested_max_tokens: max_tokens,
+                    });
                 }
                 last_diagnosis = format!("the model would not produce the JSON object: {error}");
                 pending = Some(CorrectiveAsk::Syntax {
@@ -1992,11 +2752,29 @@ fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) 
                 // schema never encodes, so a schema-constrained answer
                 // can carry these without the provider having broken
                 // its response_format contract.
-                last_diagnosis = format!(
+                let diagnosis = format!(
                     "the answer left {} invalid item(s) uncorrected: {}",
                     issues.len(),
                     issues.join("; ")
                 );
+                if let Some(sink) = context.sink {
+                    sink.emit(DiagnosticsAttempt {
+                        source: context.source,
+                        stage: "item",
+                        chunk_index: context.chunk_index,
+                        attempt,
+                        max_attempts: context.policy.max_attempts,
+                        state: "stop_malformed",
+                        length_limited: false,
+                        elapsed,
+                        response: Some(&response),
+                        parse_error: Some(&diagnosis),
+                        validation_issues: Some(&issues),
+                        piece_bytes: Some(piece_bytes),
+                        requested_max_tokens: max_tokens,
+                    });
+                }
+                last_diagnosis = diagnosis;
                 pending = Some(CorrectiveAsk::Invalid { issues });
                 prior_bad_answer = Some(response.content);
             }
@@ -3576,6 +4354,138 @@ fn batch_file_name(source: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The exact serialized key set of one `--diagnostics-out` JSONL
+    /// line (issue #200) — top-level and the nested `provider_metadata`
+    /// object. Ported to Python as
+    /// `attempt_failed_shares_the_rust_diagnostics_key_set` in
+    /// `sdk/python-langchain/tests/unit/test_events.py`, which asserts
+    /// the same shared-concept keys on `AttemptFailed`/
+    /// `ProviderMetadata` — this test is that parity anchor's Rust
+    /// half.
+    #[test]
+    fn attempt_record_serializes_the_shared_key_set() {
+        let full = AttemptRecord {
+            kind: "attempt",
+            source: "doc.md".to_string(),
+            stage: "item",
+            chunk_index: 0,
+            attempt: 1,
+            max_attempts: 2,
+            state: "stop_malformed",
+            length_limited: false,
+            elapsed_seconds: 0.5,
+            provider_metadata: Some(ProviderMetadataRecord {
+                finish_reason: Some("stop".to_string()),
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
+            }),
+            parse_error: Some("bad json".to_string()),
+            validation_issues: None,
+            piece_bytes: Some(1024),
+            requested_max_tokens: Some(512),
+            response_text: Some("raw answer".to_string()),
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "attempt",
+                "chunk_index",
+                "elapsed_seconds",
+                "kind",
+                "length_limited",
+                "max_attempts",
+                "parse_error",
+                "piece_bytes",
+                "provider_metadata",
+                "requested_max_tokens",
+                "response_text",
+                "source",
+                "stage",
+                "state",
+                "validation_issues",
+            ]
+        );
+        let mut metadata_keys: Vec<&str> = value["provider_metadata"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        metadata_keys.sort_unstable();
+        assert_eq!(
+            metadata_keys,
+            vec![
+                "finish_reason",
+                "input_tokens",
+                "output_tokens",
+                "total_tokens"
+            ]
+        );
+
+        // Minimal record (metadata-only default, no raw opt-in, legacy
+        // path): the three Rust-only fields disappear entirely rather
+        // than serializing as null — the shape a flagless-metadata run
+        // actually writes, and the shape the Python side has no
+        // counterpart for at all.
+        let minimal = AttemptRecord {
+            kind: "attempt",
+            source: "doc.md".to_string(),
+            stage: "item",
+            chunk_index: 0,
+            attempt: 1,
+            max_attempts: 2,
+            state: "stop_valid",
+            length_limited: false,
+            elapsed_seconds: 0.1,
+            provider_metadata: None,
+            parse_error: None,
+            validation_issues: None,
+            piece_bytes: None,
+            requested_max_tokens: None,
+            response_text: None,
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&minimal).unwrap()).unwrap();
+        let keys: BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for absent in ["piece_bytes", "requested_max_tokens", "response_text"] {
+            assert!(!keys.contains(absent), "{absent} must be omitted: {value}");
+        }
+        for present in [
+            "kind",
+            "source",
+            "stage",
+            "chunk_index",
+            "attempt",
+            "max_attempts",
+            "state",
+            "length_limited",
+            "elapsed_seconds",
+            "provider_metadata",
+            "parse_error",
+            "validation_issues",
+        ] {
+            assert!(
+                keys.contains(present),
+                "{present} must always be present: {value}"
+            );
+        }
+    }
+
     #[test]
     fn model_answers_parse_through_fences_and_prose() {
         let plain =
@@ -4600,6 +5510,7 @@ mod tests {
         let completion = ChatCompletion {
             content: valid.to_string(),
             finish_reason: Some("length".to_string()),
+            usage: None,
         };
         assert!(matches!(
             classify_attempt(&completion, None),
@@ -4611,6 +5522,7 @@ mod tests {
         let empty_at_cap = ChatCompletion {
             content: String::new(),
             finish_reason: Some("max_tokens".to_string()),
+            usage: None,
         };
         assert!(matches!(
             classify_attempt(&empty_at_cap, None),
@@ -4619,6 +5531,7 @@ mod tests {
         let refused = ChatCompletion {
             content: valid.to_string(),
             finish_reason: Some("content_filter".to_string()),
+            usage: None,
         };
         assert!(matches!(
             classify_attempt(&refused, None),
@@ -4627,6 +5540,7 @@ mod tests {
         let empty = ChatCompletion {
             content: "```json\n```".to_string(),
             finish_reason: Some("stop".to_string()),
+            usage: None,
         };
         assert!(matches!(
             classify_attempt(&empty, None),
@@ -4635,6 +5549,7 @@ mod tests {
         let ok = ChatCompletion {
             content: valid.to_string(),
             finish_reason: Some("stop".to_string()),
+            usage: None,
         };
         assert!(matches!(
             classify_attempt(&ok, None),
@@ -4643,6 +5558,7 @@ mod tests {
         let malformed = ChatCompletion {
             content: "not json".to_string(),
             finish_reason: None,
+            usage: None,
         };
         assert!(matches!(
             classify_attempt(&malformed, None),
@@ -4661,6 +5577,7 @@ mod tests {
                 r#"{"associations": [{"subject": "a", "label": "l", "object": "b", "weight": 0}]}"#
                     .to_string(),
             finish_reason: Some("stop".to_string()),
+            usage: None,
         };
         assert!(matches!(
             classify_attempt(&invalid, Some(&strict_rules)),
