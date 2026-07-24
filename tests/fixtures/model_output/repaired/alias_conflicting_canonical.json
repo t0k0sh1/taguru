@@ -1,0 +1,61 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "answer": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      },
+      {
+        "subject": "蔵元本店",
+        "label": "支店",
+        "object": "青嶺酒造"
+      }
+    ],
+    "aliases": [
+      {
+        "alias": "Aomine",
+        "canonical": "青嶺酒造",
+        "kind": "concept"
+      },
+      {
+        "alias": "Aomine",
+        "canonical": "蔵元本店",
+        "kind": "concept"
+      }
+    ]
+  },
+  "issues": [
+    "aliases[1]: conflicts with an earlier alias mapping \"Aomine\" to \"青嶺酒造\""
+  ],
+  "corrected": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      },
+      {
+        "subject": "蔵元本店",
+        "label": "支店",
+        "object": "青嶺酒造"
+      }
+    ],
+    "aliases": [
+      {
+        "alias": "Aomine",
+        "canonical": "青嶺酒造",
+        "kind": "concept"
+      },
+      {
+        "alias": "Honten",
+        "canonical": "蔵元本店",
+        "kind": "concept"
+      }
+    ]
+  }
+}

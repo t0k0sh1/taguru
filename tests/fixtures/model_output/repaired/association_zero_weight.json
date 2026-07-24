@@ -1,0 +1,31 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "answer": {
+    "associations": [
+      {
+        "subject": "蔵",
+        "label": "無",
+        "object": "石",
+        "weight": 0
+      }
+    ],
+    "aliases": []
+  },
+  "issues": [
+    "associations[0].weight: expected finite non-zero number, got 0"
+  ],
+  "corrected": {
+    "associations": [
+      {
+        "subject": "蔵",
+        "label": "無",
+        "object": "石",
+        "weight": 1.0
+      }
+    ],
+    "aliases": []
+  }
+}

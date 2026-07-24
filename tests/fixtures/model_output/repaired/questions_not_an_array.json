@@ -1,0 +1,36 @@
+{
+  "rules": {
+    "paragraph_count": 2,
+    "questions_cap": 1
+  },
+  "answer": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      }
+    ],
+    "aliases": [],
+    "questions": "none"
+  },
+  "issues": [
+    "questions: expected an array, got string \"none\""
+  ],
+  "corrected": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      }
+    ],
+    "aliases": [],
+    "questions": [
+      {
+        "paragraph": 1,
+        "question": "杜氏は誰?"
+      }
+    ]
+  }
+}

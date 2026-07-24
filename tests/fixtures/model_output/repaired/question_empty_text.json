@@ -1,0 +1,29 @@
+{
+  "rules": {
+    "paragraph_count": 2,
+    "questions_cap": 1
+  },
+  "answer": {
+    "associations": [],
+    "aliases": [],
+    "questions": [
+      {
+        "paragraph": 0,
+        "question": "  "
+      }
+    ]
+  },
+  "issues": [
+    "questions[0].question: empty"
+  ],
+  "corrected": {
+    "associations": [],
+    "aliases": [],
+    "questions": [
+      {
+        "paragraph": 0,
+        "question": "青嶺酒造の創業年は?"
+      }
+    ]
+  }
+}

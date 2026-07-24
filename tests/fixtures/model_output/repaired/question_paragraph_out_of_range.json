@@ -1,0 +1,29 @@
+{
+  "rules": {
+    "paragraph_count": 2,
+    "questions_cap": 1
+  },
+  "answer": {
+    "associations": [],
+    "aliases": [],
+    "questions": [
+      {
+        "paragraph": 9,
+        "question": "杜氏は誰?"
+      }
+    ]
+  },
+  "issues": [
+    "questions[0].paragraph: must cite a paragraph below 2, got 9"
+  ],
+  "corrected": {
+    "associations": [],
+    "aliases": [],
+    "questions": [
+      {
+        "paragraph": 1,
+        "question": "杜氏は誰?"
+      }
+    ]
+  }
+}

@@ -8,6 +8,29 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru extract` replaces merge-level silent item drop with
+  path-addressed corrective retry (#199, implementing ADR 0001 §8) — a
+  business-rule-invalid item (a wrong-typed or zero/non-finite/over-cap
+  weight, an empty or oversized name, a dangling or shadowing alias, an
+  unknown alias kind, an out-of-range or malformed question) earns one
+  targeted corrective turn naming its exact JSON path (e.g.
+  `associations[1].weight: expected finite non-zero number, got string
+  "strong"`) instead of a silent drop, bounded by the existing
+  `TAGURU_EXTRACT_MAX_ATTEMPTS`/`TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES`
+  controls. A dangling-canonical or shadowing alias — judgeable only
+  against the full merged name set, never one chunk alone — is checked
+  once per document, right before merge, and spends at most one
+  corrective turn the same way. `--lossy` / `TAGURU_EXTRACT_LOSSY`
+  restores the previous drop-and-proceed behavior exactly, and the
+  report line marks a lossy run's drops explicitly (`N item(s) dropped
+  (--lossy)`) so they are never confused with a policy trim (a
+  `--questions` cap overflow, a volunteered question nobody asked for).
+  `--lossy` is a manifest compute input like every other extraction
+  control (old manifests default to strict correction and keep matching
+  all-defaults runs). The shared fixture corpus
+  `tests/fixtures/model_output/repaired/` names each (rules, answer,
+  issues, corrected) tuple that #180/#181 (the Python/TypeScript twins)
+  are expected to validate against identically.
 - `taguru extract` puts structured output on the wire and gains an explicit
   output budget with deterministic length escalation (#198, implementing
   ADR 0001 §4.1/§4.2/§7) — `--structured-output` /
@@ -73,6 +96,18 @@ Entries that change an on-disk format or a response shape say so.
   provider finish reason, token usage when the model reports them)
   without copying the private extraction helpers. Callback exceptions are
   caught and reported via `warnings.warn` rather than failing the ingest.
+
+### Changed
+- **Behavior change** (#199, ADR 0001 §12.2 — approved by the ADR
+  itself, not a later regression): by default, `taguru extract` no
+  longer silently drops a business-rule-invalid item while reporting
+  the extraction as fully successful. An invalid item now earns a
+  corrective turn; if the corrected answer is still invalid, **the
+  source fails and no batch file is written** — a run that previously
+  wrote a batch quietly missing that one item now reports failure and
+  writes nothing for that source instead. Pass `--lossy` /
+  `TAGURU_EXTRACT_LOSSY` to keep the previous drop-and-proceed behavior
+  exactly.
 
 ## [0.4.0] - 2026-07-20
 

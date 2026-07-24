@@ -1,0 +1,45 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "answer": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      },
+      "not an association",
+      {
+        "subject": "高瀬",
+        "label": "所属",
+        "object": "青嶺酒造"
+      }
+    ],
+    "aliases": []
+  },
+  "issues": [
+    "associations[1]: expected an object, got string \"not an association\""
+  ],
+  "corrected": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      },
+      {
+        "subject": "青嶺酒造",
+        "label": "創業年",
+        "object": "1907年"
+      },
+      {
+        "subject": "高瀬",
+        "label": "所属",
+        "object": "青嶺酒造"
+      }
+    ],
+    "aliases": []
+  }
+}
