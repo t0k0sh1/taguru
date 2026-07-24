@@ -503,3 +503,128 @@ fn empty_names_are_rejected_at_the_write_boundary() {
     let directory = server.ok("GET", "/contexts", None);
     assert_eq!(directory["contexts"][0]["stats"]["associations"], json!(1));
 }
+
+/// issue #182: a batch with several distinct bad associations gets one
+/// issue per rejected path in a single round trip, not just the first
+/// — the collect-all discipline ADR 0001 §8 already gives extraction,
+/// now applied to this REST write.
+#[test]
+fn add_associations_collects_every_issue_in_one_pass() {
+    let server = Server::start("collectall");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "", "label": "l", "object": "o", "weight": 1.0},
+            {"subject": "s", "label": "l", "object": "o", "weight": 1e300},
+            {"subject": "s2", "label": "l", "object": "o", "weight": "strong"},
+        ])),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], json!("invalid_argument"), "{body}");
+    assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
+    assert_eq!(body["retryable_after_correction"], json!(true), "{body}");
+    let issues = body["issues"].as_array().expect("issues array");
+    assert_eq!(issues.len(), 3, "{body}");
+    let paths: Vec<&str> = issues
+        .iter()
+        .map(|issue| issue["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "associations[0].subject",
+            "associations[1].weight",
+            "associations[2].weight",
+        ],
+        "{body}"
+    );
+    assert_eq!(issues[0]["kind"], json!("empty"), "{body}");
+    assert_eq!(issues[1]["kind"], json!("range"), "{body}");
+    assert_eq!(issues[2]["kind"], json!("type"), "{body}");
+    assert_eq!(issues[2]["actual"], json!("string"), "{body}");
+
+    // Refused whole: nothing landed.
+    let directory = server.ok("GET", "/contexts", None);
+    assert_eq!(directory["contexts"][0]["stats"]["associations"], json!(0));
+}
+
+/// issue #182: a business-rule-invalid item never silently disappears
+/// into a subset write — the write boundary and the response shape
+/// documented for the acceptance criteria stay true even for the
+/// smallest one-bad-item batch.
+#[test]
+fn add_associations_invalid_batch_never_writes_a_valid_subset() {
+    let server = Server::start("nosubset");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "good", "label": "l", "object": "o", "weight": 1.0},
+            {"subject": "bad", "label": "l", "object": "o", "weight": "nope"},
+        ])),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
+    let directory = server.ok("GET", "/contexts", None);
+    assert_eq!(directory["contexts"][0]["stats"]["associations"], json!(0));
+}
+
+/// issue #182 acceptance criterion: invalid `store_passages`
+/// questions/sections return paths that identify both the source and
+/// the item index.
+#[test]
+fn store_passages_issue_paths_name_the_source_and_item_index() {
+    let server = Server::start("passagepaths");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {"doc.md": "text"},
+            "questions": {"doc.md": [
+                {"paragraph": 0, "question": "fine?"},
+                {"paragraph": 0, "question": 123},
+            ]},
+        })),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], json!("invalid_argument"), "{body}");
+    assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
+    let issues = body["issues"].as_array().expect("issues array");
+    assert_eq!(issues.len(), 1, "{body}");
+    assert_eq!(
+        issues[0]["path"],
+        json!("questions['doc.md'][1].question"),
+        "{body}"
+    );
+    assert_eq!(issues[0]["kind"], json!("type"), "{body}");
+
+    // Nothing was stored — an orphaned source in `sections` collects
+    // alongside a wrong-typed question in one pass too.
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {"doc.md": "text"},
+            "sections": {"ghost.md": [{"paragraph": 0, "section": "intro"}]},
+        })),
+    );
+    assert_eq!(status, 400, "{body}");
+    let issues = body["issues"].as_array().expect("issues array");
+    assert_eq!(issues.len(), 1, "{body}");
+    assert_eq!(issues[0]["path"], json!("sections['ghost.md']"), "{body}");
+    assert_eq!(issues[0]["kind"], json!("unknown_reference"), "{body}");
+
+    let lookup = server.ok(
+        "POST",
+        "/contexts/sake/sources/lookup",
+        Some(json!({"sources": ["doc.md"]})),
+    );
+    assert_eq!(lookup["missing"], json!(["doc.md"]), "{lookup}");
+}

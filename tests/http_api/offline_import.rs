@@ -889,6 +889,69 @@ fn a_rejected_batch_in_a_stream_leaves_the_earlier_batch_durable_and_its_own_sou
     );
 }
 
+/// issue #182: a single-batch stream's predicted alias rejection
+/// reports `integrity: "nothing_written"` (no earlier batch could have
+/// landed) with a path-addressed issue naming the offending alias.
+#[test]
+fn a_single_batch_predicted_alias_rejection_reports_nothing_written() {
+    let server = Server::start("http-import-nothing-written");
+    let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \
+                   \"create\": {\"description\": \"d\"}}\n\
+                  {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
+    let (status, body) = post_import(&server, stream, None);
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["code"], json!("conflict"), "{body}");
+    assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
+    assert!(body.get("durable_batches").is_none(), "{body}");
+    assert_eq!(body["retryable_after_correction"], json!(true), "{body}");
+    let issues = body["issues"].as_array().expect("issues array");
+    assert_eq!(issues.len(), 1, "{body}");
+    assert_eq!(
+        issues[0]["path"],
+        json!("batches[0].concepts['Aomine']"),
+        "{body}"
+    );
+    assert_eq!(issues[0]["kind"], json!("unknown_reference"), "{body}");
+}
+
+/// issue #182: a multi-batch stream's rejection reports the exact
+/// durable prefix — the batches that landed before the refused one —
+/// via `integrity: "durable_prefix"` and `durable_batches`, with the
+/// issue's path naming which stream element (`batches[1]`) failed.
+#[test]
+fn a_multi_batch_rejection_reports_its_durable_prefix() {
+    let server = Server::start("http-import-durable-prefix");
+    let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \
+                   \"create\": {\"description\": \"d\"}}\n\
+                  {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+                  {\"passage\": \"青嶺酒造の杜氏は高瀬。\"}\n\
+                  {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
+                  {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
+    let (status, body) = post_import(&server, stream, None);
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert_eq!(body["durable_batches"], json!(1), "{body}");
+    let issues = body["issues"].as_array().expect("issues array");
+    assert_eq!(issues.len(), 1, "{body}");
+    assert_eq!(
+        issues[0]["path"],
+        json!("batches[1].concepts['Aomine']"),
+        "{body}"
+    );
+
+    // A dry run over the identical stream never claims a durable
+    // prefix — nothing is ever written on a preview, however many
+    // batches "previewed clean" before the one that fails.
+    let (dry_status, dry_body) = post_import_dry_run(&server, stream, None);
+    assert_eq!(dry_status, 409, "{dry_body}");
+    assert_eq!(
+        dry_body["integrity"],
+        json!("nothing_written"),
+        "{dry_body}"
+    );
+    assert!(dry_body.get("durable_batches").is_none(), "{dry_body}");
+}
+
 #[test]
 fn the_import_endpoint_reports_section_bookkeeping() {
     let server = Server::start("http-import-sections");

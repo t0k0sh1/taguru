@@ -81,9 +81,9 @@ fn main() {
             // misaddressed server should not be discovered one failed tool
             // call at a time.
             eprintln!(
-                "taguru-mcp: GET /protocol failed ({error}); serving the bundled copy — \
+                "taguru-mcp: GET /protocol failed ({}); serving the bundled copy — \
              is the server up at {}?",
-                bridge.base
+                error.text, bridge.base
             );
             FALLBACK_INSTRUCTIONS.to_string()
         });
@@ -451,14 +451,16 @@ fn batch_rejected() -> Value {
 /// the result crosses stdio to the operator's own process — a size
 /// they asked for, not a budget an adversary can spend against a third
 /// party.
-fn dispatch_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<String, String> {
+fn dispatch_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<String, mcp::ToolError> {
     if name == "retrieve" {
         mcp::run_retrieve(arguments, |method, path, body| {
-            bridge.call(method, &path, body)
+            bridge.call(method, &path, body).map_err(|error| error.text)
         })
         .map(|value| value.to_string())
+        .map_err(mcp::ToolError::from)
     } else {
         mcp::route_tool(name, arguments)
+            .map_err(mcp::ToolError::from)
             .and_then(|(method, path, body)| bridge.call(method, &path, body))
     }
 }
@@ -566,8 +568,16 @@ struct Bridge {
 
 impl Bridge {
     /// One HTTP round trip; the API's JSON error body becomes the Err
-    /// text so the agent reads the server's own explanation.
-    fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<String, String> {
+    /// text so the agent reads the server's own explanation. When that
+    /// body parses as a JSON object, it also rides again as
+    /// [`mcp::ToolError::structured`] (issue #182) — additive
+    /// alongside the prose, never replacing it.
+    fn call(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<String, mcp::ToolError> {
         let mut request = ureq::http::Request::builder()
             .method(method)
             .uri(format!("{}{path}", self.base));
@@ -592,17 +602,25 @@ impl Bridge {
             None => request.body(()).map(|request| self.agent.run(request)),
         };
         let mut response = response
-            .map_err(|error| format!("request assembly failed: {error}"))?
-            .map_err(|error| format!("server unreachable at {}: {error}", self.base))?;
+            .map_err(|error| format!("request assembly failed: {error}"))
+            .map_err(mcp::ToolError::from)?
+            .map_err(|error| format!("server unreachable at {}: {error}", self.base))
+            .map_err(mcp::ToolError::from)?;
         let code = response.status().as_u16();
         if code < 400 {
             response
                 .body_mut()
                 .read_to_string()
-                .map_err(|error| format!("response unreadable: {error}"))
+                .map_err(|error| mcp::ToolError::from(format!("response unreadable: {error}")))
         } else {
             let detail = response.body_mut().read_to_string().unwrap_or_default();
-            Err(format!("HTTP {code}: {detail}"))
+            let structured = serde_json::from_str::<Value>(&detail)
+                .ok()
+                .filter(Value::is_object);
+            Err(mcp::ToolError {
+                text: format!("HTTP {code}: {detail}"),
+                structured,
+            })
         }
     }
 }

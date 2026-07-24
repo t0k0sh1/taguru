@@ -152,6 +152,12 @@ answers back into prose are your job.
    request — and stalls that context's readers while its fsync lands.
    Batching, not concurrency, is the lever: writes to one context
    serialize by design; writes to different contexts run in parallel.
+   Atomicity boundary: this call and step 3's `sources` call are
+   SEPARATE writes — a document's facts can land while its passage
+   store still fails, or vice versa. When a single all-or-nothing
+   write across facts, aliases, and passage for one source matters,
+   use `POST /import`/`taguru import` instead (retract-then-apply,
+   whole batch or nothing).
 3. Register originals: `POST /contexts/{name}/sources` (source id →
    passage). Store the document's full text as-is: the server splits it
    into paragraphs internally (blank-line boundaries) and searches at
@@ -378,6 +384,44 @@ read replica — do NOT retry here; send the write to the writer the
 message names) / `shard_unreachable` (502 from a `taguru route`
 router: a shard this request needs did not answer — retry once the
 shard or its load balancer does).
+
+**Rejected `add_associations`, `store_passages`, and `import` calls carry
+structured detail** (additive fields, present only where they apply —
+absent entirely from every other error and from every success):
+`issues` (up to 20, with the true count named in `error` when there are
+more) is an array of `{"path", "kind", "expected", "actual"}` — `path`
+locates the offending field exactly (`associations[1].weight`,
+`passages['doc'].questions[2].question`, `batches[0].concepts['alias']`),
+`kind` is one of `missing` / `type` / `empty` / `too_long` / `range` /
+`over_limit` / `unknown_reference` / `conflict`, and `expected`/`actual`
+describe the mismatch in the same words a human reads in `error`.
+`integrity` says what a rejection actually left behind:
+`"nothing_written"` (the whole call, or the whole rejected
+`import` batch, wrote nothing) or `"durable_prefix"` (a multi-batch
+`import` stream where earlier batches already landed — `durable_batches`
+names exactly how many; never implies any part of the REJECTED batch
+itself landed, since every batch is whole-or-none). `retryable_after_correction: true` marks a
+rejection a corrected, COMPLETE resend can resolve (a validation issue,
+a batch over its cap, a predicted alias conflict) — absent for a
+rejection resending the same content cannot fix (auth, quota,
+timeout). Over MCP, this same JSON rides twice on a tool error: as
+prose inside `content[0].text` (unchanged from before this existed) and
+again, parsed, as `structuredContent` — read either, but branch on
+`code`/`kind`, never on wording. The correction discipline for all
+three tools: preserve every association/alias/question/passage from
+the attempted write, correct only the listed paths, resend the
+COMPLETE source write or batch (never a partial resubmission of just
+the fixed items), add no fact that was not already there, and if
+correction still fails, leave the source unmodified and report the
+failure rather than retrying blindly. The MCP tool-call layer's own
+argument-shape rejections (a missing required argument, a wrong-typed
+JSON-RPC argument) are a distinct, EARLIER surface — plain prose, no
+`issues` — since nothing reached the server to build them from; schema
+validation on the client/transport side and this server-side contract
+are complementary, not redundant. The server never retries the
+extracting LLM itself here — MCP has no model call to retry — so
+correction and resubmission are entirely the calling host's
+responsibility.
 
 - `401` auth (above). `404` unknown context or group. `409` duplicate
   create / alias conflict / a `POST /maintenance/compact` overlapping

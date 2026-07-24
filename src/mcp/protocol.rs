@@ -128,15 +128,52 @@ pub fn tools_result() -> Value {
     json!({ "tools": tool_definitions() })
 }
 
+/// One tool call's failure. `text` is the prose every transport has
+/// always put in `content[0].text`; `structured`, when the failure's
+/// underlying HTTP error body parsed as a JSON object (issue #182),
+/// carries that same object again as `structuredContent` — a client
+/// that predates the field, or never looks for it, reads exactly the
+/// prose it always has, and `content`/`text` never lose the plain
+/// explanation just because the failure also carries path-addressed
+/// detail.
+pub struct ToolError {
+    pub text: String,
+    pub structured: Option<Value>,
+}
+
+impl From<String> for ToolError {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            structured: None,
+        }
+    }
+}
+
 /// Wraps a tool outcome the MCP way: errors travel as content with
 /// `isError`, so the AGENT reads the server's explanation — a JSON-RPC
-/// error would abort the loop instead of informing it.
-pub fn tool_response(outcome: Result<String, String>) -> Value {
+/// error would abort the loop instead of informing it. An error whose
+/// underlying HTTP body was a JSON object also carries
+/// `structuredContent` (MCP 2025-06-18+) alongside the prose — additive
+/// on the wire, so older clients that only read `content` see no
+/// change.
+pub fn tool_response(outcome: Result<String, ToolError>) -> Value {
     match outcome {
         Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
-        Err(text) => json!({
+        Err(ToolError {
+            text,
+            structured: None,
+        }) => json!({
             "content": [{ "type": "text", "text": text }],
             "isError": true,
+        }),
+        Err(ToolError {
+            text,
+            structured: Some(structured),
+        }) => json!({
+            "content": [{ "type": "text", "text": text }],
+            "isError": true,
+            "structuredContent": structured,
         }),
     }
 }
