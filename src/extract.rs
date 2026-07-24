@@ -1937,7 +1937,7 @@ struct DiagnosticsAttempt<'a> {
 /// events (sdk/python-langchain/src/taguru_langchain/events.py)
 /// wherever the concept matches, so a parity test can compare the two
 /// shapes structurally instead of through a name-mapping table — see
-/// this module's `attempt_record_carries_the_shared_vocabulary` test
+/// this module's `attempt_record_serializes_the_shared_key_set` test
 /// and its Python twin in `tests/unit/test_events.py`. Metadata only:
 /// `response_text` exists exactly when
 /// TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES opted in, byte-capped at
