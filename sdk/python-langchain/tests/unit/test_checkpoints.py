@@ -23,6 +23,7 @@ from .test_ingester import (
     DOC_TEXT,
     MODEL_ANSWER,
     RecordingFakeChatModel,
+    ToolCallingFakeChatModel,
     make_ingester,
     make_ingester_with_messages,
 )
@@ -541,6 +542,39 @@ def test_fingerprint_mismatch_on_each_field_invalidates(
     assert outcome.ok
     assert outcome.chunks_reused == 0
     assert len(llm2.seen_prompts) == 2  # nothing reused — a settings mismatch invalidates all
+
+
+def test_a_changed_structured_output_mode_invalidates_checkpoints(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """The one fingerprint field ``FINGERPRINT_MISMATCH_CASES`` can't cover
+    generically: turning on ``structured_output`` needs a tool-calling fake
+    model (``RecordingFakeChatModel``'s inherited ``bind_tools()`` raises
+    ``NotImplementedError``), not the plain chat fake every other case in
+    that matrix shares."""
+    store = RecordingCheckpointStore()
+    source = _seed_failed_run(sync_client, async_client, store)
+    assert _unit_count(store, source) == 1
+
+    llm = ToolCallingFakeChatModel(
+        tool_call_args=[json.loads(CHUNK1_ANSWER), json.loads(CHUNK2_CORRECTED_ANSWER)]
+    )
+    ingester = TaguruIngester(
+        context="sake",
+        llm=llm,
+        client=sync_client,
+        async_client=async_client,
+        questions=2,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+        checkpoint_store=store,
+        checkpoint_model_id="fake-model",
+        structured_output=True,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source=source)
+
+    assert outcome.ok
+    assert outcome.chunks_reused == 0  # the structured_output mismatch invalidated everything
+    assert outcome.llm_calls == 2
 
 
 def test_a_corrupt_checkpoint_file_on_disk_silently_degrades_to_empty(

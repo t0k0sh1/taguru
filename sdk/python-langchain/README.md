@@ -42,7 +42,7 @@ corrective attempt fired. Useful with slow local models, where a single
 ingester = TaguruIngester(..., on_event=lambda event: print(event.kind))
 ```
 
-### Checkpoint/resume for spot and preemptible instances
+## Checkpoint/resume for spot and preemptible instances
 
 Pass `checkpoint_store` to survive an interruption mid-document (a killed
 process, a reclaimed spot instance) without losing every chunk already
