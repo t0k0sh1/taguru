@@ -211,6 +211,22 @@ Entries that change an on-disk format or a response shape say so.
   provider finish reason, token usage when the model reports them)
   without copying the private extraction helpers. Callback exceptions are
   caught and reported via `warnings.warn` rather than failing the ingest.
+- `langchain-taguru` (TypeScript) gains the same optional `on_event`
+  progress callback (#201, the TypeScript twin of #177/#183) —
+  synchronous, typed events (`document_started`, `chunk_started`,
+  `attempt_started`, `attempt_failed`, `chunk_completed`,
+  `import_started`, `import_completed`,
+  `embedding_refresh_started`/`completed`/`warning`) fire from
+  `ingestText`, field-for-field with the Python twin, so a caller can
+  show live progress and see *why* a corrective attempt fired (parse
+  error, provider finish reason, token usage when the model reports
+  them) without copying the private extraction helpers.
+  `extractFinishReason` folds into a shared `providerMetadata` reader
+  that also reads `usage_metadata`, feeding `AttemptFailed`'s
+  `provider_metadata`. Callback exceptions are caught and reported via
+  `console.warn` rather than failing the ingest. `events.ts` and its ten
+  event shapes are exported from the package index like the Python
+  package exports its events.
 
 ### Changed
 - **Behavior change** (#199, ADR 0001 §12.2 — approved by the ADR
