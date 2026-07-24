@@ -29,8 +29,8 @@ Entries that change an on-disk format or a response shape say so.
   control (old manifests default to strict correction and keep matching
   all-defaults runs). The shared fixture corpus
   `tests/fixtures/model_output/repaired/` names each (rules, answer,
-  issues, corrected) tuple #180/#181 (the Python/TypeScript twins) are
-  expected to validate against identically.
+  issues, corrected) tuple that #180/#181 (the Python/TypeScript twins)
+  are expected to validate against identically.
 - `taguru extract` puts structured output on the wire and gains an explicit
   output budget with deterministic length escalation (#198, implementing
   ADR 0001 §4.1/§4.2/§7) — `--structured-output` /
