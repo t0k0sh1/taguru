@@ -17,14 +17,14 @@ import asyncio
 import time
 import warnings
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from taguru import (
     AsyncTaguru,
     EmbeddingUnavailableError,
@@ -39,14 +39,24 @@ from ._extract import (
     MAX_QUESTIONS_PER_PARAGRAPH,
     MODEL_OUTPUT_JSON_SCHEMA,
     VOCABULARY_CAP,
+    InvalidFault,
+    ItemRules,
     ModelOutput,
+    SyntaxFault,
     chunk,
     corrective_assistant_turn_content,
     corrective_message,
+    corrective_validation_message,
+    cross_output_issues,
+    effective_item_rules,
+    empty_answer_diagnosis,
+    evaluate_answer,
     indicates_length_limit,
+    indicates_refusal,
+    interpret_model_output,
+    is_empty_answer,
     labeled_document,
     merge,
-    parse_model_output,
     render_batch,
     reparse_batch,
     split_paragraphs,
@@ -97,10 +107,193 @@ class IngestOutcome:
     questions_stored: int = 0
     duplicates_dropped: int = 0
     invalid_dropped: int = 0
+    """Under the strict default this counts only merge()'s policy trims
+    (per-paragraph question-cap overflow, a volunteered question when
+    none was requested) — a business-rule-invalid item is corrected or
+    fails the source before merge() ever runs (issue #180). Under
+    ``lossy=True`` it is the old drop-and-proceed tally: every item
+    merge() silently discarded."""
     llm_calls: int = 0
     chunks: int = 0
+    correction_attempts: int = 0
+    """How many corrective turns (Stage 1 syntax/validity retries plus any
+    Stage 2 cross-chunk alias correction) this ingest needed — 0 means
+    every chunk's first answer was accepted as-is."""
+    lossless_repairs: list[str] = field(default_factory=list)
+    """Labels of automatic, information-preserving JSON repairs applied
+    across every accepted answer (e.g. ``"trailing_comma"``, ``"bom"``,
+    ``"code_fence"``, ``"braces_slice"`` — see ``candidate_json``). Empty
+    when no repair was ever needed."""
     error: str | None = None
     embeddings_refresh_warning: str | None = None
+
+
+# -- one attempt's §7-style classification (issue #180, mirrors extract.rs's ------
+# -- classify_attempt / evaluate_answer) ------------------------------------------
+
+_AttemptKind = Literal["valid", "length_limited", "refusal", "empty", "syntax", "invalid"]
+
+
+@dataclass
+class _Attempt:
+    """One model call's outcome, classified from provider metadata BEFORE
+    any parse-level interpretation — a `length`-terminated answer is
+    length-limited even when its prefix happens to parse, since a valid
+    prefix of a cut-off extraction is exactly the "deleted-subset called
+    complete" ADR 0001 forbids."""
+
+    kind: _AttemptKind
+    content: str
+    metadata: ProviderMetadata | None
+    output: ModelOutput | None = None
+    repairs: list[str] = field(default_factory=list)
+    error: str | None = None
+    issues: list[str] | None = None
+
+
+def _classify_text(
+    content: str, metadata: ProviderMetadata | None, rules: ItemRules | None
+) -> _Attempt:
+    finish_reason = metadata.finish_reason if metadata else None
+    if indicates_length_limit(finish_reason):
+        return _Attempt(
+            kind="length_limited",
+            content=content,
+            metadata=metadata,
+            error="the answer hit the provider's output limit",
+        )
+    if indicates_refusal(finish_reason):
+        return _Attempt(kind="refusal", content=content, metadata=metadata, error=finish_reason)
+    if is_empty_answer(content):
+        return _Attempt(
+            kind="empty", content=content, metadata=metadata, error=empty_answer_diagnosis()
+        )
+    try:
+        output, repairs = evaluate_answer(content, rules)
+    except InvalidFault as fault:
+        return _Attempt(kind="invalid", content=content, metadata=metadata, issues=fault.issues)
+    except SyntaxFault as fault:
+        return _Attempt(kind="syntax", content=content, metadata=metadata, error=str(fault))
+    return _Attempt(
+        kind="valid", content=content, metadata=metadata, output=output, repairs=repairs
+    )
+
+
+def _classify_structured(
+    content: str,
+    metadata: ProviderMetadata | None,
+    parsed: Any,
+    parsing_error: Any,
+    rules: ItemRules | None,
+) -> _Attempt:
+    """The structured-output twin of ``_classify_text``: the provider has
+    already parsed (or failed to parse) its own tool-call args against
+    ``MODEL_OUTPUT_JSON_SCHEMA``, so there is no raw JSON text here to
+    lossless-repair, and ``content`` is conventionally empty for a
+    tool-calling response — ``is_empty_answer`` would misfire on it, so
+    emptiness is judged from ``parsed`` instead."""
+    finish_reason = metadata.finish_reason if metadata else None
+    if indicates_length_limit(finish_reason):
+        return _Attempt(
+            kind="length_limited",
+            content=content,
+            metadata=metadata,
+            error="the answer hit the provider's output limit",
+        )
+    if indicates_refusal(finish_reason):
+        return _Attempt(kind="refusal", content=content, metadata=metadata, error=finish_reason)
+    if parsed is None:
+        error = (
+            parsing_error
+            if isinstance(parsing_error, ValueError)
+            else ValueError(str(parsing_error))
+        )
+        return _Attempt(kind="syntax", content=content, metadata=metadata, error=str(error))
+    value = parsed.model_dump() if isinstance(parsed, BaseModel) else parsed
+    output, issues = interpret_model_output(value, effective_item_rules(rules))
+    if rules is not None and issues:
+        return _Attempt(kind="invalid", content=content, metadata=metadata, issues=issues)
+    return _Attempt(kind="valid", content=content, metadata=metadata, output=output)
+
+
+def _diagnosis(result: _Attempt) -> str:
+    """The raw, unwrapped human-readable reason one attempt failed — used
+    for ``AttemptFailed.parse_error``, the corrective ask, and (for
+    ``"invalid"``/``"empty"``) the final failure message verbatim."""
+    if result.kind == "invalid":
+        assert result.issues is not None
+        return (
+            f"the answer left {len(result.issues)} invalid item(s) uncorrected: "
+            f"{'; '.join(result.issues)}"
+        )
+    return result.error or ""
+
+
+def _final_message(result: _Attempt) -> str:
+    """The message raised when a chunk's attempts are exhausted without a
+    valid answer. ``"invalid"``/``"empty"`` stay unwrapped (extract.rs's
+    ``AttemptOutcome::Invalid``/``Empty`` never get the generic wrapper
+    either); ``"syntax"``/``"length_limited"`` get the same
+    "the model would not produce the JSON object" wrapper today's
+    (pre-#180) behavior always used."""
+    diagnosis = _diagnosis(result)
+    if result.kind in ("invalid", "empty"):
+        return diagnosis
+    return f"the model would not produce the JSON object: {diagnosis}"
+
+
+def _corrective_ask(result: _Attempt, fact_budget: int) -> str:
+    """The next attempt's user-facing ask, addressed to whichever kind of
+    failure ``result`` was. ``"empty"`` reuses ``corrective_message``'s
+    ordinary (non-length-limited) text with the empty diagnosis as its
+    ``parse_error`` — the same ask extract.rs's ladder gives an empty
+    answer's one bounded correction."""
+    if result.kind == "invalid":
+        assert result.issues is not None
+        return corrective_validation_message(result.issues)
+    length_limited = result.kind == "length_limited"
+    return corrective_message(result.error or "", length_limited, fact_budget)
+
+
+def _cross_chunk_failure_message(label: str, result: _Attempt) -> str:
+    """The Stage 2 (cross-chunk alias correction) terminal message for one
+    offending chunk's non-valid reply — mirrors extract.rs's
+    ``correct_cross_output_issues`` per-kind texts verbatim."""
+    if result.kind == "length_limited":
+        return (
+            f"{label}: the cross-chunk alias correction was cut off at the output limit — "
+            "failing the source rather than importing a truncated correction"
+        )
+    if result.kind == "refusal":
+        return (
+            f"{label}: the provider refused the cross-chunk alias correction "
+            f"(finish_reason {result.error})"
+        )
+    if result.kind == "empty":
+        return f"{label}: {result.error}"
+    if result.kind == "invalid":
+        assert result.issues is not None
+        return (
+            f"{label}: the cross-chunk alias correction still left {len(result.issues)} "
+            f"invalid item(s) uncorrected: {'; '.join(result.issues)}"
+        )
+    return (
+        f"{label}: the cross-chunk alias correction was not the JSON object asked for "
+        f"({result.error})"
+    )
+
+
+@dataclass
+class _ChunkRecord:
+    """One chunk's accepted output, plus everything Stage 2's single
+    targeted corrective turn needs to rebuild THAT chunk's own
+    conversation (never the whole document's) if `cross_output_issues`
+    flags it: extract.rs's ``ChunkOutput``."""
+
+    output: ModelOutput
+    chunk_index: int
+    user: str
+    answer: str
 
 
 class TaguruIngester:
@@ -145,11 +338,11 @@ class TaguruIngester:
             dependent: a chat model that cannot bind tools raises out of
             this constructor immediately, before any document is ingested,
             rather than surfacing later as a per-attempt failure. Either
-            way the result still goes through ``ModelOutput.model_validate()``
-            and merge()'s business-rule checks (byte caps, weight bounds, an
-            in-range paragraph index, ...) — a schema only narrows what
-            shape a well-behaved provider can return, it does not replace
-            validation.
+            way the result still goes through the same lenient validation
+            walk and merge()'s business-rule checks (byte caps, weight
+            bounds, an in-range paragraph index, ...) — a schema only
+            narrows what shape a well-behaved provider can return, it does
+            not replace validation.
         include_passage: Store the verbatim document as the batch's passage
             (paragraph locators are stripped when off, matching extract).
         chunk_bytes: Prompt-input chunk cap; the stored passage is never
@@ -159,6 +352,16 @@ class TaguruIngester:
             call (501 = not configured is ignored; 502 lands as a warning).
         raise_on_error: ``ingest_documents`` raises on the first failed
             document instead of reporting it in its outcome.
+        lossy: Restore the pre-issue-#180 drop-and-proceed behavior: a
+            business-rule-invalid item (bad weight, dangling alias,
+            out-of-range question, ...) is silently dropped and the source
+            still reports success, exactly like ``merge()`` always did.
+            Default ``False`` (ADR 0001 §8's never-silent-drop default):
+            an invalid item instead earns one targeted, path-addressed
+            corrective turn, and the source fails outright (no ``/import``
+            call) if it is still invalid afterward. This is the one
+            deliberate, opt-out-only behavior change issue #180 makes —
+            see ``IngestOutcome.invalid_dropped``.
         on_event: Optional callback invoked synchronously for each stage of
             an ingest run — document/chunk/attempt/import/embedding-refresh
             progress (see :mod:`taguru_langchain.events`). Must not block:
@@ -189,6 +392,7 @@ class TaguruIngester:
         vocabulary_cap: int = VOCABULARY_CAP,
         refresh_embeddings: bool = True,
         raise_on_error: bool = False,
+        lossy: bool = False,
         on_event: IngestEventCallback | None = None,
     ) -> None:
         if create_context and context_description is None:
@@ -232,6 +436,7 @@ class TaguruIngester:
         self.vocabulary_cap = vocabulary_cap
         self.refresh_embeddings = refresh_embeddings
         self.raise_on_error = raise_on_error
+        self.lossy = lossy
         self.on_event = on_event
 
     # -- shared, transport-free pieces ------------------------------------
@@ -246,29 +451,33 @@ class TaguruIngester:
         return source
 
     def _corrective_turn(
-        self,
-        base_messages: list[BaseMessage],
-        content: str,
-        error: ValueError,
-        length_limited: bool,
+        self, base_messages: list[BaseMessage], prior_answer: str, ask: str
     ) -> list[BaseMessage]:
         """Rebuilds from the system/user base plus only the most recent bad
         turn — never the whole history — so ``corrective_context_bytes``
-        bounds every retry alike, not just the first. ``length_limited``
-        (the provider's own ``finish_reason`` saying the prior answer was
-        cut off at its output cap) swaps the ask from "try again" to "try
-        again shorter" (see ``corrective_message``) — repeating the
-        same-length ask just reproduces the same cutoff, the stall Issue
-        #178 reported. At the all-defaults policy, with a normal
-        (non-length-limited) answer, this reproduces the previous fixed
-        implementation's request bodies exactly."""
+        bounds every retry alike, not just the first. At the all-defaults
+        policy, with a normal (non-length-limited, syntactically bad)
+        answer, this reproduces the previous fixed implementation's
+        request bodies exactly. Shared by the Stage 1 per-chunk loop and
+        Stage 2's cross-chunk alias correction."""
         return [
             *base_messages,
             AIMessage(
-                content=corrective_assistant_turn_content(content, self.corrective_context_bytes)
+                content=corrective_assistant_turn_content(
+                    prior_answer, self.corrective_context_bytes
+                )
             ),
-            HumanMessage(content=corrective_message(str(error), length_limited, self.fact_budget)),
+            HumanMessage(content=ask),
         ]
+
+    def _item_rules(self, paragraph_count: int) -> ItemRules | None:
+        """``None`` under ``lossy=True`` — ``evaluate_answer``/
+        ``interpret_model_output`` then parse leniently and discard
+        whatever they'd have flagged, reproducing pre-issue-#180 behavior
+        byte for byte (``merge()`` alone decides what survives)."""
+        if self.lossy:
+            return None
+        return ItemRules(paragraph_count=paragraph_count, questions_requested=self.questions > 0)
 
     def _build_batch(
         self,
@@ -356,10 +565,12 @@ class TaguruIngester:
 
         vocabulary = self._fetch_vocabulary()
         system = system_prompt(vocabulary, self.questions, self.fact_budget)
+        paragraph_count = len(split_paragraphs(text))
+        rules = self._item_rules(paragraph_count)
         chunks = chunk(labeled_document(text, self.chunk_bytes), self.chunk_bytes)
         outcome.chunks = len(chunks)
 
-        outputs: list[ModelOutput] = []
+        records: list[_ChunkRecord] = []
         for index, piece in enumerate(chunks):
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
@@ -368,14 +579,17 @@ class TaguruIngester:
                 SystemMessage(content=system),
                 HumanMessage(content=user),
             ]
-            output = None
-            prior_bad_turn: tuple[str, ValueError, bool] | None = None
+            record: _ChunkRecord | None = None
+            pending_ask: str | None = None
+            prior_bad_answer: str | None = None
+            last_diagnosis = ""
+            empty_corrected = False
             chunk_llm_calls = 0
             for attempt in range(1, self.max_attempts + 1):
                 messages = (
                     base_messages
-                    if prior_bad_turn is None
-                    else self._corrective_turn(base_messages, *prior_bad_turn)
+                    if prior_bad_answer is None
+                    else self._corrective_turn(base_messages, prior_bad_answer, pending_ask or "")
                 )
                 self._emit(
                     AttemptStarted(
@@ -386,47 +600,93 @@ class TaguruIngester:
                     )
                 )
                 attempt_started_at = time.monotonic()
-                content, output, error, metadata = self._invoke_for_output(messages)
+                result = self._attempt_once(messages, rules)
                 outcome.llm_calls += 1
                 chunk_llm_calls += 1
-                if error is None:
+
+                if result.kind == "valid":
+                    assert result.output is not None
+                    record = _ChunkRecord(
+                        output=result.output, chunk_index=index, user=user, answer=result.content
+                    )
+                    outcome.lossless_repairs.extend(result.repairs)
                     break
-                length_limited = indicates_length_limit(
-                    metadata.finish_reason if metadata else None
-                )
+
+                if result.kind == "refusal":
+                    message = (
+                        f"the provider refused this content (finish_reason {result.error}) — "
+                        "a policy refusal is terminal; no corrective turn can change it"
+                    )
+                    self._emit(
+                        AttemptFailed(
+                            source=source,
+                            chunk_index=index,
+                            attempt=attempt,
+                            max_attempts=self.max_attempts,
+                            parse_error=message,
+                            elapsed_seconds=time.monotonic() - attempt_started_at,
+                            provider_metadata=result.metadata,
+                            length_limited=False,
+                        )
+                    )
+                    raise ValueError(message)
+
+                if result.kind == "empty" and empty_corrected:
+                    diagnosis = _diagnosis(result)
+                    self._emit(
+                        AttemptFailed(
+                            source=source,
+                            chunk_index=index,
+                            attempt=attempt,
+                            max_attempts=self.max_attempts,
+                            parse_error=diagnosis,
+                            elapsed_seconds=time.monotonic() - attempt_started_at,
+                            provider_metadata=result.metadata,
+                            length_limited=False,
+                        )
+                    )
+                    raise ValueError(diagnosis)
+                if result.kind == "empty":
+                    empty_corrected = True
+
+                last_diagnosis = _final_message(result)
                 self._emit(
                     AttemptFailed(
                         source=source,
                         chunk_index=index,
                         attempt=attempt,
                         max_attempts=self.max_attempts,
-                        parse_error=str(error),
+                        parse_error=_diagnosis(result),
                         elapsed_seconds=time.monotonic() - attempt_started_at,
-                        provider_metadata=metadata,
-                        length_limited=length_limited,
+                        provider_metadata=result.metadata,
+                        length_limited=(result.kind == "length_limited"),
+                        validation_issues=result.issues,
                     )
                 )
-                prior_bad_turn = (content, error, length_limited)
-            if output is None:
-                assert prior_bad_turn is not None
-                raise ValueError(
-                    f"the model would not produce the JSON object: {prior_bad_turn[1]}"
-                )
-            outputs.append(output)
+                outcome.correction_attempts += 1
+                pending_ask = _corrective_ask(result, self.fact_budget)
+                prior_bad_answer = result.content
+
+            if record is None:
+                raise ValueError(last_diagnosis)
+            records.append(record)
             self._emit(
                 ChunkCompleted(
                     source=source,
                     index=index,
                     total=len(chunks),
-                    associations_proposed=len(output.associations),
-                    aliases_proposed=len(output.aliases),
-                    questions_proposed=len(output.questions),
+                    associations_proposed=len(record.output.associations),
+                    aliases_proposed=len(record.output.aliases),
+                    questions_proposed=len(record.output.questions),
                     llm_calls=chunk_llm_calls,
                     elapsed_seconds=time.monotonic() - chunk_started_at,
                 )
             )
 
-        ndjson = self._build_batch(source, text, outputs, outcome)
+        if not self.lossy:
+            self._correct_cross_chunk_issues(source, system, records, rules, len(chunks), outcome)
+
+        ndjson = self._build_batch(source, text, [record.output for record in records], outcome)
         outcome.ndjson = ndjson
         if dry_run:
             outcome.ok = True
@@ -444,13 +704,13 @@ class TaguruIngester:
         if self.refresh_embeddings:
             self._emit(EmbeddingRefreshStarted(source=source))
             try:
-                result = self.client.context(self.context).refresh_embeddings()
+                refresh_result = self.client.context(self.context).refresh_embeddings()
                 self._emit(
                     EmbeddingRefreshCompleted(
                         source=source,
                         configured=True,
-                        embedded=result.embedded,
-                        total=result.total,
+                        embedded=refresh_result.embedded,
+                        total=refresh_result.total,
                     )
                 )
             except EmbeddingUnavailableError as error:
@@ -499,43 +759,104 @@ class TaguruIngester:
             return []
         return page.labels
 
-    def _invoke_for_output(
-        self, messages: list[BaseMessage]
-    ) -> tuple[str, ModelOutput | None, ValueError | None, ProviderMetadata | None]:
-        """Runs one model call for one attempt, returning ``(content, output,
-        error, metadata)`` with ``output is None`` iff ``error is not
-        None``. Goes through the ``with_structured_output()`` pipeline built
-        in ``__init__`` when ``structured_output`` is on, else today's plain
-        ``invoke()`` + ``parse_model_output()``. Either path lands in a
-        ``ModelOutput`` the same way — ``model_validate()`` — so
-        schema-constrained generation narrows the model's answer without
-        skipping validation."""
+    def _attempt_once(self, messages: list[BaseMessage], rules: ItemRules | None) -> _Attempt:
+        """Runs one model call for one attempt and classifies it (issue
+        #180's §7-style state machine: length -> refusal -> empty ->
+        syntax/invalid/valid). Goes through the ``with_structured_output()``
+        pipeline built in ``__init__`` when ``structured_output`` is on,
+        else today's plain ``invoke()`` + the free-text validation walk."""
         if self._structured_llm is not None:
             result = self._structured_llm.invoke(messages)
             assert isinstance(result, dict)
             raw = result["raw"]
             content = self._content_text(raw)
             metadata = self._provider_metadata(raw)
-            parsed = result["parsed"]
-            if parsed is None:
-                parsing_error = result["parsing_error"]
-                error = (
-                    parsing_error
-                    if isinstance(parsing_error, ValueError)
-                    else ValueError(str(parsing_error))
-                )
-                return content, None, error, metadata
-            try:
-                return content, ModelOutput.model_validate(parsed), None, metadata
-            except ValidationError as error:
-                return content, None, ValueError(str(error)), metadata
+            return _classify_structured(
+                content, metadata, result["parsed"], result["parsing_error"], rules
+            )
         response = self.llm.invoke(messages)
         content = self._content_text(response)
         metadata = self._provider_metadata(response)
-        try:
-            return content, parse_model_output(content), None, metadata
-        except ValueError as error:
-            return content, None, error, metadata
+        return _classify_text(content, metadata, rules)
+
+    def _correct_cross_chunk_issues(
+        self,
+        source: str,
+        system: str,
+        records: list[_ChunkRecord],
+        rules: ItemRules | None,
+        chunk_total: int,
+        outcome: IngestOutcome,
+    ) -> None:
+        """Issue #180 Stage 2: one targeted corrective turn per output
+        ``cross_output_issues`` flags, rebuilding THAT chunk's own
+        conversation base (never the whole document's) and replaying its
+        own final answer as the prior bad turn. Bounded to exactly one
+        extra call per offending chunk regardless of ``max_attempts``: a
+        still-invalid, still-cross-conflicting, length-limited, refused,
+        or empty reply fails the source outright — Stage 2 never loops a
+        second round. Mirrors extract.rs's ``correct_cross_output_issues``."""
+        for record_index, issues in cross_output_issues([r.output for r in records]):
+            record = records[record_index]
+            label = f"chunk {record.chunk_index + 1}/{chunk_total}"
+            messages = self._corrective_turn(
+                [SystemMessage(content=system), HumanMessage(content=record.user)],
+                record.answer,
+                corrective_validation_message(issues),
+            )
+            self._emit(
+                AttemptStarted(
+                    source=source,
+                    chunk_index=record.chunk_index,
+                    attempt=1,
+                    max_attempts=1,
+                    stage="cross_chunk",
+                )
+            )
+            attempt_started_at = time.monotonic()
+            result = self._attempt_once(messages, rules)
+            outcome.llm_calls += 1
+            outcome.correction_attempts += 1
+            if result.kind == "valid":
+                assert result.output is not None
+                records[record_index] = _ChunkRecord(
+                    output=result.output,
+                    chunk_index=record.chunk_index,
+                    user=record.user,
+                    answer=result.content,
+                )
+                outcome.lossless_repairs.extend(result.repairs)
+                continue
+            message = _cross_chunk_failure_message(label, result)
+            self._emit(
+                AttemptFailed(
+                    source=source,
+                    chunk_index=record.chunk_index,
+                    attempt=1,
+                    max_attempts=1,
+                    parse_error=message,
+                    elapsed_seconds=time.monotonic() - attempt_started_at,
+                    provider_metadata=result.metadata,
+                    length_limited=(result.kind == "length_limited"),
+                    stage="cross_chunk",
+                    validation_issues=result.issues,
+                )
+            )
+            raise ValueError(message)
+
+        # Re-check rather than trust the single corrective turn blindly: a
+        # correction can rename an association another chunk's alias
+        # depended on, introducing a FRESH cross-chunk issue. This is the
+        # bounded re-check, not a second round — any issue here fails the
+        # source.
+        recheck = cross_output_issues([r.output for r in records])
+        if recheck:
+            record_index, issues = recheck[0]
+            chunk_index = records[record_index].chunk_index
+            raise ValueError(
+                f"chunk {chunk_index + 1}/{chunk_total}: still has {len(issues)} cross-chunk "
+                f"alias issue(s) after correction: {'; '.join(issues)}"
+            )
 
     # -- async ------------------------------------------------------------------
 
@@ -550,10 +871,12 @@ class TaguruIngester:
 
         vocabulary = await self._afetch_vocabulary()
         system = system_prompt(vocabulary, self.questions, self.fact_budget)
+        paragraph_count = len(split_paragraphs(text))
+        rules = self._item_rules(paragraph_count)
         chunks = chunk(labeled_document(text, self.chunk_bytes), self.chunk_bytes)
         outcome.chunks = len(chunks)
 
-        outputs: list[ModelOutput] = []
+        records: list[_ChunkRecord] = []
         for index, piece in enumerate(chunks):
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
@@ -562,14 +885,17 @@ class TaguruIngester:
                 SystemMessage(content=system),
                 HumanMessage(content=user),
             ]
-            output = None
-            prior_bad_turn: tuple[str, ValueError, bool] | None = None
+            record: _ChunkRecord | None = None
+            pending_ask: str | None = None
+            prior_bad_answer: str | None = None
+            last_diagnosis = ""
+            empty_corrected = False
             chunk_llm_calls = 0
             for attempt in range(1, self.max_attempts + 1):
                 messages = (
                     base_messages
-                    if prior_bad_turn is None
-                    else self._corrective_turn(base_messages, *prior_bad_turn)
+                    if prior_bad_answer is None
+                    else self._corrective_turn(base_messages, prior_bad_answer, pending_ask or "")
                 )
                 self._emit(
                     AttemptStarted(
@@ -580,47 +906,95 @@ class TaguruIngester:
                     )
                 )
                 attempt_started_at = time.monotonic()
-                content, output, error, metadata = await self._ainvoke_for_output(messages)
+                result = await self._aattempt_once(messages, rules)
                 outcome.llm_calls += 1
                 chunk_llm_calls += 1
-                if error is None:
+
+                if result.kind == "valid":
+                    assert result.output is not None
+                    record = _ChunkRecord(
+                        output=result.output, chunk_index=index, user=user, answer=result.content
+                    )
+                    outcome.lossless_repairs.extend(result.repairs)
                     break
-                length_limited = indicates_length_limit(
-                    metadata.finish_reason if metadata else None
-                )
+
+                if result.kind == "refusal":
+                    message = (
+                        f"the provider refused this content (finish_reason {result.error}) — "
+                        "a policy refusal is terminal; no corrective turn can change it"
+                    )
+                    self._emit(
+                        AttemptFailed(
+                            source=source,
+                            chunk_index=index,
+                            attempt=attempt,
+                            max_attempts=self.max_attempts,
+                            parse_error=message,
+                            elapsed_seconds=time.monotonic() - attempt_started_at,
+                            provider_metadata=result.metadata,
+                            length_limited=False,
+                        )
+                    )
+                    raise ValueError(message)
+
+                if result.kind == "empty" and empty_corrected:
+                    diagnosis = _diagnosis(result)
+                    self._emit(
+                        AttemptFailed(
+                            source=source,
+                            chunk_index=index,
+                            attempt=attempt,
+                            max_attempts=self.max_attempts,
+                            parse_error=diagnosis,
+                            elapsed_seconds=time.monotonic() - attempt_started_at,
+                            provider_metadata=result.metadata,
+                            length_limited=False,
+                        )
+                    )
+                    raise ValueError(diagnosis)
+                if result.kind == "empty":
+                    empty_corrected = True
+
+                last_diagnosis = _final_message(result)
                 self._emit(
                     AttemptFailed(
                         source=source,
                         chunk_index=index,
                         attempt=attempt,
                         max_attempts=self.max_attempts,
-                        parse_error=str(error),
+                        parse_error=_diagnosis(result),
                         elapsed_seconds=time.monotonic() - attempt_started_at,
-                        provider_metadata=metadata,
-                        length_limited=length_limited,
+                        provider_metadata=result.metadata,
+                        length_limited=(result.kind == "length_limited"),
+                        validation_issues=result.issues,
                     )
                 )
-                prior_bad_turn = (content, error, length_limited)
-            if output is None:
-                assert prior_bad_turn is not None
-                raise ValueError(
-                    f"the model would not produce the JSON object: {prior_bad_turn[1]}"
-                )
-            outputs.append(output)
+                outcome.correction_attempts += 1
+                pending_ask = _corrective_ask(result, self.fact_budget)
+                prior_bad_answer = result.content
+
+            if record is None:
+                raise ValueError(last_diagnosis)
+            records.append(record)
             self._emit(
                 ChunkCompleted(
                     source=source,
                     index=index,
                     total=len(chunks),
-                    associations_proposed=len(output.associations),
-                    aliases_proposed=len(output.aliases),
-                    questions_proposed=len(output.questions),
+                    associations_proposed=len(record.output.associations),
+                    aliases_proposed=len(record.output.aliases),
+                    questions_proposed=len(record.output.questions),
                     llm_calls=chunk_llm_calls,
                     elapsed_seconds=time.monotonic() - chunk_started_at,
                 )
             )
 
-        ndjson = self._build_batch(source, text, outputs, outcome)
+        if not self.lossy:
+            await self._acorrect_cross_chunk_issues(
+                source, system, records, rules, len(chunks), outcome
+            )
+
+        ndjson = self._build_batch(source, text, [record.output for record in records], outcome)
         outcome.ndjson = ndjson
         if dry_run:
             outcome.ok = True
@@ -638,13 +1012,13 @@ class TaguruIngester:
         if self.refresh_embeddings:
             self._emit(EmbeddingRefreshStarted(source=source))
             try:
-                result = await self.async_client.context(self.context).refresh_embeddings()
+                refresh_result = await self.async_client.context(self.context).refresh_embeddings()
                 self._emit(
                     EmbeddingRefreshCompleted(
                         source=source,
                         configured=True,
-                        embedded=result.embedded,
-                        total=result.total,
+                        embedded=refresh_result.embedded,
+                        total=refresh_result.total,
                     )
                 )
             except EmbeddingUnavailableError as error:
@@ -692,36 +1066,90 @@ class TaguruIngester:
             return []
         return page.labels
 
-    async def _ainvoke_for_output(
-        self, messages: list[BaseMessage]
-    ) -> tuple[str, ModelOutput | None, ValueError | None, ProviderMetadata | None]:
-        """Async twin of ``_invoke_for_output``."""
+    async def _aattempt_once(
+        self, messages: list[BaseMessage], rules: ItemRules | None
+    ) -> _Attempt:
+        """Async twin of ``_attempt_once``."""
         if self._structured_llm is not None:
             result = await self._structured_llm.ainvoke(messages)
             assert isinstance(result, dict)
             raw = result["raw"]
             content = self._content_text(raw)
             metadata = self._provider_metadata(raw)
-            parsed = result["parsed"]
-            if parsed is None:
-                parsing_error = result["parsing_error"]
-                error = (
-                    parsing_error
-                    if isinstance(parsing_error, ValueError)
-                    else ValueError(str(parsing_error))
-                )
-                return content, None, error, metadata
-            try:
-                return content, ModelOutput.model_validate(parsed), None, metadata
-            except ValidationError as error:
-                return content, None, ValueError(str(error)), metadata
+            return _classify_structured(
+                content, metadata, result["parsed"], result["parsing_error"], rules
+            )
         response = await self.llm.ainvoke(messages)
         content = self._content_text(response)
         metadata = self._provider_metadata(response)
-        try:
-            return content, parse_model_output(content), None, metadata
-        except ValueError as error:
-            return content, None, error, metadata
+        return _classify_text(content, metadata, rules)
+
+    async def _acorrect_cross_chunk_issues(
+        self,
+        source: str,
+        system: str,
+        records: list[_ChunkRecord],
+        rules: ItemRules | None,
+        chunk_total: int,
+        outcome: IngestOutcome,
+    ) -> None:
+        """Async twin of ``_correct_cross_chunk_issues``."""
+        for record_index, issues in cross_output_issues([r.output for r in records]):
+            record = records[record_index]
+            label = f"chunk {record.chunk_index + 1}/{chunk_total}"
+            messages = self._corrective_turn(
+                [SystemMessage(content=system), HumanMessage(content=record.user)],
+                record.answer,
+                corrective_validation_message(issues),
+            )
+            self._emit(
+                AttemptStarted(
+                    source=source,
+                    chunk_index=record.chunk_index,
+                    attempt=1,
+                    max_attempts=1,
+                    stage="cross_chunk",
+                )
+            )
+            attempt_started_at = time.monotonic()
+            result = await self._aattempt_once(messages, rules)
+            outcome.llm_calls += 1
+            outcome.correction_attempts += 1
+            if result.kind == "valid":
+                assert result.output is not None
+                records[record_index] = _ChunkRecord(
+                    output=result.output,
+                    chunk_index=record.chunk_index,
+                    user=record.user,
+                    answer=result.content,
+                )
+                outcome.lossless_repairs.extend(result.repairs)
+                continue
+            message = _cross_chunk_failure_message(label, result)
+            self._emit(
+                AttemptFailed(
+                    source=source,
+                    chunk_index=record.chunk_index,
+                    attempt=1,
+                    max_attempts=1,
+                    parse_error=message,
+                    elapsed_seconds=time.monotonic() - attempt_started_at,
+                    provider_metadata=result.metadata,
+                    length_limited=(result.kind == "length_limited"),
+                    stage="cross_chunk",
+                    validation_issues=result.issues,
+                )
+            )
+            raise ValueError(message)
+
+        recheck = cross_output_issues([r.output for r in records])
+        if recheck:
+            record_index, issues = recheck[0]
+            chunk_index = records[record_index].chunk_index
+            raise ValueError(
+                f"chunk {chunk_index + 1}/{chunk_total}: still has {len(issues)} cross-chunk "
+                f"alias issue(s) after correction: {'; '.join(issues)}"
+            )
 
     # -- lifecycle -------------------------------------------------------------
 

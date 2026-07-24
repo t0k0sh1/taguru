@@ -18,6 +18,7 @@ from taguru import AsyncTaguru, Taguru
 
 from taguru_langchain import TaguruIngester
 from taguru_langchain._extract import MAX_PASSAGE_BYTES
+from taguru_langchain.events import AttemptFailed, AttemptStarted
 
 from .conftest import FakeServer
 
@@ -39,7 +40,6 @@ MODEL_ANSWER = json.dumps(
                 "paragraph": 0,
             },
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0},  # duplicate
-            {"subject": "", "label": "壊", "object": "れ", "weight": 1.0},  # invalid
         ],
         "aliases": [{"alias": "Aomine", "canonical": "青嶺酒造", "kind": "concept"}],
         "questions": [{"paragraph": 1, "question": "杜氏は誰?"}],
@@ -47,7 +47,47 @@ MODEL_ANSWER = json.dumps(
     ensure_ascii=False,
 )
 
+# The business-rule-invalid item issue #180's strict default now rejects on
+# sight (empty subject) rather than letting merge() silently drop it —
+# split out of MODEL_ANSWER so most fixtures stay a clean one-call success;
+# reused by the lossy-mode and corrective-turn tests below.
+INVALID_ASSOCIATION = {"subject": "", "label": "壊", "object": "れ", "weight": 1.0}
+
 DOC_TEXT = "青嶺酒造は1907年創業。\n\n杜氏は高瀬である。"
+
+# chunk_bytes=40 splits DOC_TEXT into exactly its two paragraphs (one chunk
+# each) — the minimum needed to exercise cross-chunk alias validation
+# (issue #180 Stage 2), which only ever fires with more than one chunk.
+CROSS_CHUNK_BYTES = 40
+
+# Chunk 1 (paragraph 0) introduces the concept name "1907年" as an
+# association object.
+CHUNK1_ANSWER = json.dumps(
+    {
+        "associations": [
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0}
+        ],
+        "aliases": [],
+    },
+    ensure_ascii=False,
+)
+# Chunk 2 (paragraph 1) passes Stage 1 alone (every alias field present, not
+# a self-alias) — the shadowing is only visible once chunk 1's "1907年" is
+# in the merged name set, so only Stage 2's cross_output_issues catches it.
+CHUNK2_SHADOWING_ANSWER = json.dumps(
+    {
+        "associations": [{"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0}],
+        "aliases": [{"alias": "1907年", "canonical": "青嶺酒造", "kind": "concept"}],
+    },
+    ensure_ascii=False,
+)
+CHUNK2_CORRECTED_ANSWER = json.dumps(
+    {
+        "associations": [{"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0}],
+        "aliases": [{"alias": "Sake", "canonical": "青嶺酒造", "kind": "concept"}],
+    },
+    ensure_ascii=False,
+)
 
 
 class RecordingFakeChatModel(FakeListChatModel):
@@ -160,7 +200,7 @@ def test_ingest_text_builds_the_batch_and_imports(
     assert outcome.llm_calls == 1
     assert outcome.chunks == 1
     assert outcome.duplicates_dropped == 1
-    assert outcome.invalid_dropped == 1
+    assert outcome.invalid_dropped == 0
     # The server's ImportOutcome passed through.
     assert outcome.associations == 2
     assert outcome.aliases == 1
@@ -205,7 +245,7 @@ def test_structured_output_true_uses_with_structured_output(
     assert outcome.ok
     assert outcome.llm_calls == 1
     assert outcome.duplicates_dropped == 1
-    assert outcome.invalid_dropped == 1
+    assert outcome.invalid_dropped == 0
     assert outcome.associations == 2
     assert outcome.aliases == 1
 
@@ -610,3 +650,308 @@ async def test_async_context_manager_closes_self_built_clients_on_exit() -> None
         assert async_client_ is not None
     assert client._http.is_closed
     assert async_client_._http.is_closed
+
+
+# -- issue #180: lossless JSON repair and path-specific corrective retry ---------
+
+
+def test_a_trailing_comma_answer_repairs_without_an_llm_call_or_item_change(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    answer = (
+        '{"associations": [{"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", '
+        '"weight": 1.0},], "aliases": [], "questions": []}'
+    )
+    ingester, _llm = make_ingester(sync_client, async_client, [answer])
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 1
+    assert outcome.correction_attempts == 0
+    assert outcome.lossless_repairs == ["trailing_comma"]
+    # The trailing comma is gone and the one association survived intact —
+    # fake_server's /import stub echoes fixed counts, so check the actual
+    # rendered batch instead of outcome.associations.
+    assert outcome.ndjson is not None
+    lines = [json.loads(line) for line in outcome.ndjson.strip().split("\n")]
+    facts = [line for line in lines if "subject" in line]
+    assert facts == [{"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0}]
+
+
+def test_a_wrong_typed_field_gets_a_path_specific_corrective_turn(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    bad_weight_answer = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": "strong"}
+            ],
+            "aliases": [],
+        },
+        ensure_ascii=False,
+    )
+    events: list[Any] = []
+    ingester, llm = make_ingester(
+        sync_client, async_client, [bad_weight_answer, MODEL_ANSWER], on_event=events.append
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 2
+    assert outcome.correction_attempts == 1
+
+    corrective = llm.seen_prompts[1][-1].content
+    assert "That was valid JSON but not a valid extraction (1 issue(s)):" in corrective
+    assert "associations[0].weight: expected finite non-zero number" in corrective
+    assert "keep every item" in corrective
+
+    failed = [event for event in events if isinstance(event, AttemptFailed)]
+    assert len(failed) == 1
+    assert failed[0].validation_issues == [
+        'associations[0].weight: expected finite non-zero number, got string "strong"'
+    ]
+
+
+async def test_a_wrong_typed_field_gets_a_path_specific_corrective_turn_async(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    bad_weight_answer = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": "strong"}
+            ],
+            "aliases": [],
+        },
+        ensure_ascii=False,
+    )
+    ingester, llm = make_ingester(sync_client, async_client, [bad_weight_answer, MODEL_ANSWER])
+    outcome = await ingester.aingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 2
+    assert outcome.correction_attempts == 1
+    assert len(llm.seen_prompts) == 2
+
+
+def test_a_second_invalid_answer_fails_the_source_without_import(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    bad_answer = json.dumps({"associations": [INVALID_ASSOCIATION], "aliases": []})
+    ingester, _llm = make_ingester(sync_client, async_client, [bad_answer, bad_answer])
+    with pytest.raises(ValueError, match="invalid item"):
+        ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert fake_server.imported == []
+
+
+def test_a_length_limited_answer_that_parses_is_never_imported(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """ADR 0001: a `length`-terminated answer is length-limited even when
+    its own content happens to parse cleanly — a valid prefix of a cut-off
+    extraction must never be imported as if complete."""
+    truncated_but_parseable = AIMessage(
+        content=MODEL_ANSWER, response_metadata={"done_reason": "length"}
+    )
+    ingester, llm = make_ingester_with_messages(
+        sync_client, async_client, [truncated_but_parseable, AIMessage(content=MODEL_ANSWER)]
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 2
+    corrective = llm.seen_prompts[1][-1].content
+    assert "SHORTER" in corrective
+
+    strict, _llm = make_ingester_with_messages(
+        sync_client, async_client, [truncated_but_parseable], max_attempts=1
+    )
+    with pytest.raises(ValueError, match="would not produce the JSON object"):
+        strict.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    # Only the first (successful) ingest above ever called /import.
+    assert len(fake_server.imported) == 1
+
+
+def test_an_empty_answer_gets_one_corrective_then_the_named_diagnosis(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    ingester, llm = make_ingester(sync_client, async_client, ["", ""], max_attempts=5)
+    with pytest.raises(ValueError, match="the answer was empty"):
+        ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    # Bounded to exactly one corrective regardless of how high max_attempts is.
+    assert len(llm.seen_prompts) == 2
+
+    ingester, _llm = make_ingester(sync_client, async_client, ["", MODEL_ANSWER], max_attempts=5)
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 2
+
+
+async def test_an_empty_answer_gets_one_corrective_then_the_named_diagnosis_async(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    ingester, llm = make_ingester(sync_client, async_client, ["", ""], max_attempts=5)
+    with pytest.raises(ValueError, match="the answer was empty"):
+        await ingester.aingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert len(llm.seen_prompts) == 2
+
+
+def test_a_refusal_finish_reason_is_terminal_without_a_corrective_turn(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    refused = AIMessage(content="", response_metadata={"done_reason": "content_filter"})
+    ingester, llm = make_ingester_with_messages(
+        sync_client, async_client, [refused, AIMessage(content=MODEL_ANSWER)]
+    )
+    with pytest.raises(ValueError, match="policy refusal is terminal"):
+        ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert len(llm.seen_prompts) == 1
+
+
+def test_cross_chunk_alias_issues_get_one_targeted_corrective_turn(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    events: list[Any] = []
+    ingester, llm = make_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, CHUNK2_SHADOWING_ANSWER, CHUNK2_CORRECTED_ANSWER],
+        chunk_bytes=CROSS_CHUNK_BYTES,
+        on_event=events.append,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.chunks == 2
+    assert outcome.llm_calls == 3
+    assert outcome.correction_attempts == 1
+
+    cross_chunk_started = [
+        event
+        for event in events
+        if isinstance(event, AttemptStarted) and event.stage == "cross_chunk"
+    ]
+    assert len(cross_chunk_started) == 1
+    assert cross_chunk_started[0].chunk_index == 1  # the second chunk, 0-indexed
+
+    corrective_prompt = llm.seen_prompts[-1]
+    assert "杜氏は高瀬" in corrective_prompt[1].content  # chunk 2's OWN user turn, replayed
+    assert "names something the associations already contain" in corrective_prompt[-1].content
+
+
+async def test_cross_chunk_alias_issues_get_one_targeted_corrective_turn_async(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    ingester, llm = make_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, CHUNK2_SHADOWING_ANSWER, CHUNK2_CORRECTED_ANSWER],
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    outcome = await ingester.aingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 3
+    assert len(llm.seen_prompts) == 3
+
+
+def test_a_cross_chunk_correction_that_does_not_fix_the_issue_fails_without_import(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """The bounded re-check, not a second round: a "corrective" reply that
+    still structurally passes Stage 1 (so the single Stage 2 call itself
+    counts as "valid") but repeats the exact same shadowing alias must
+    still fail the source — Stage 2 never loops for a second attempt."""
+    ingester, _llm = make_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, CHUNK2_SHADOWING_ANSWER, CHUNK2_SHADOWING_ANSWER],
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    with pytest.raises(ValueError, match="still has 1 cross-chunk alias issue.s. after correction"):
+        ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert fake_server.imported == []
+
+
+def test_a_structurally_invalid_cross_chunk_correction_fails_without_import(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """Unlike the re-check above, Stage 2's OWN corrective reply can itself
+    be Stage-1-invalid (e.g. a wrong-typed field) — a distinct failure
+    surface with its own message."""
+    chunk2_invalid_correction = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": "strong"}
+            ],
+            "aliases": [{"alias": "Sake", "canonical": "青嶺酒造", "kind": "concept"}],
+        },
+        ensure_ascii=False,
+    )
+    ingester, _llm = make_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, CHUNK2_SHADOWING_ANSWER, chunk2_invalid_correction],
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    with pytest.raises(ValueError, match="cross-chunk alias correction still left"):
+        ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert fake_server.imported == []
+
+
+def test_lossy_true_restores_drop_and_proceed(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    answer = json.dumps({"associations": [INVALID_ASSOCIATION], "aliases": []})
+
+    lossy, _llm = make_ingester(sync_client, async_client, [answer], lossy=True)
+    outcome = lossy.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 1
+    assert outcome.invalid_dropped == 1
+
+    strict, _llm = make_ingester(sync_client, async_client, [answer, answer])
+    with pytest.raises(ValueError, match="invalid item"):
+        strict.ingest_text(DOC_TEXT, source="docs/aomine.md")
+
+
+def test_a_failed_reingest_leaves_the_existing_source_untouched(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    ingester, _llm = make_ingester(sync_client, async_client, [MODEL_ANSWER])
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert len(fake_server.imported) == 1
+
+    bad_answer = json.dumps({"associations": [INVALID_ASSOCIATION], "aliases": []})
+    reingest, _llm2 = make_ingester(sync_client, async_client, [bad_answer, bad_answer])
+    with pytest.raises(ValueError, match="invalid item"):
+        reingest.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    # The failed re-ingest never called /import — the prior batch stands.
+    assert len(fake_server.imported) == 1
+
+
+def test_structured_output_invalid_args_get_a_validation_corrective_turn(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    bad_args = {
+        "associations": [
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": "strong"}
+        ],
+        "aliases": [],
+    }
+    good_args = json.loads(MODEL_ANSWER)
+    llm = ToolCallingFakeChatModel(tool_call_args=[bad_args, good_args])
+    events: list[Any] = []
+    ingester = TaguruIngester(
+        context="sake",
+        llm=llm,
+        client=sync_client,
+        async_client=async_client,
+        questions=2,
+        structured_output=True,
+        on_event=events.append,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 2
+    assert outcome.correction_attempts == 1
+
+    failed = [event for event in events if isinstance(event, AttemptFailed)]
+    assert len(failed) == 1
+    assert failed[0].validation_issues == [
+        'associations[0].weight: expected finite non-zero number, got string "strong"'
+    ]
