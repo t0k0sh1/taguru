@@ -316,6 +316,17 @@ export function indicatesLengthLimit(finishReason: string | undefined | null): b
 }
 
 /**
+ * Whether `finishReason` says the provider refused to answer on policy
+ * grounds: "content_filter" is the OpenAI-compatible spelling; "refusal" is
+ * Anthropic's stop_reason for the same thing, met through pass-through
+ * bridges exactly like "max_tokens" in indicatesLengthLimit. Terminal — a
+ * corrective turn cannot argue with a policy.
+ */
+export function indicatesRefusal(finishReason: string | undefined | null): boolean {
+  return finishReason === "content_filter" || finishReason === "refusal";
+}
+
+/**
  * The corrective ask after a malformed answer: the fixed "answer again"
  * text, or — when the provider says the answer was cut off at its output
  * limit — a "SHORTER" ask that names the fact budget when one is set.
@@ -336,6 +347,41 @@ export function correctiveMessage(
     `That was not the single JSON object asked for (${parseError}) — it looks like ` +
     "the answer was cut off at the output limit. Answer again with a SHORTER JSON " +
     `object: fewer associations, shorter names and values.${budgetHint}`
+  );
+}
+
+/**
+ * How many issues one corrective-validation message lists: a pathological
+ * answer with hundreds of malformed items must not make one turn's prompt
+ * balloon without bound — the model gets the worst offenders (in the same
+ * associations->aliases->questions walk order interpretModelOutput collects
+ * them) and a count of the rest.
+ */
+export const MAX_LISTED_ISSUES = 20;
+
+/**
+ * The corrective turn's ask when an answer parsed as JSON but failed Stage
+ * 1/Stage 2 validation (ADR 0001 §8 bucket 2): name every issue by its
+ * path, then ask for the complete corrected object — preserve every item,
+ * correct rather than delete, add nothing that wasn't already there, JSON
+ * only. Distinct from correctiveMessage, which stays reserved for a genuine
+ * parse failure; this wording is the cross-language corrective-text
+ * baseline #180/#181/#199 mirror byte for byte.
+ */
+export function correctiveValidationMessage(issues: string[]): string {
+  let listed = "";
+  for (const issue of issues.slice(0, MAX_LISTED_ISSUES)) {
+    listed += `\n- ${issue}`;
+  }
+  const remainder = issues.length - MAX_LISTED_ISSUES;
+  if (remainder > 0) {
+    listed += `\n… and ${remainder} more issue(s)`;
+  }
+  return (
+    `That was valid JSON but not a valid extraction (${issues.length} issue(s)):${listed}\n` +
+    "Answer again with the complete corrected JSON object: keep every item, correct the " +
+    "fields listed above instead of deleting their items, add nothing that was not " +
+    "already there, and answer with only the JSON object."
   );
 }
 
@@ -419,152 +465,773 @@ export function stripFences(text: string): string {
   return body.trim();
 }
 
-function coerceString(value: unknown, where: string): string | null {
-  if (value === undefined || value === null) {
+/** An answer with no content once fences are stripped — the
+ * thinking-budget-burn shape emptyAnswerDiagnosis names. */
+export function isEmptyAnswer(content: string): boolean {
+  return stripFences(content.trim()) === "";
+}
+
+export function emptyAnswerDiagnosis(): string {
+  return (
+    "the answer was empty — thinking-mode models can burn their whole budget on " +
+    "reasoning before any text"
+  );
+}
+
+function rejectJsonConstant(text: string): void {
+  if (/\b(NaN|Infinity|-Infinity)\b/.test(text)) {
+    // Unreachable in practice: JSON.parse already rejects these as a
+    // SyntaxError (unlike Python's json module, which accepts them as an
+    // extension by default) — this only guards against a future JSON.parse
+    // replacement quietly picking up leniency here.
+    throw new Error(`${text} is not valid JSON`);
+  }
+}
+
+function parseTopLevelObject(text: string): unknown {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+
+function describeParseFailure(text: string): string {
+  try {
+    rejectJsonConstant(text);
+    JSON.parse(text);
+  } catch (error) {
+    return (error as Error).message;
+  }
+  return "the top-level value is not a JSON object";
+}
+
+/**
+ * Delete a comma whose next non-whitespace character closes the
+ * surrounding object/array — always JSON-unambiguous (a trailing comma can
+ * never be meaningful content) — string-aware so a comma sitting inside a
+ * string value is never touched. One of the lossless repairs ADR 0001 §8
+ * bucket 1 has #180/#181 add on top of "today's set" (fence-stripping,
+ * widest-braces slicing) that src/extract.rs already had.
+ */
+function stripTrailingCommas(text: string): { text: string; changed: boolean } {
+  let out = "";
+  let changed = false;
+  let inString = false;
+  let escaped = false;
+  let index = 0;
+  const length = text.length;
+  while (index < length) {
+    const char = text[index]!;
+    if (inString) {
+      out += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      index += 1;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      out += char;
+      index += 1;
+      continue;
+    }
+    if (char === ",") {
+      let look = index + 1;
+      while (look < length && " \t\r\n".includes(text[look]!)) {
+        look += 1;
+      }
+      if (look < length && (text[look] === "}" || text[look] === "]")) {
+        changed = true;
+        index += 1;
+        continue; // drop the comma itself
+      }
+    }
+    out += char;
+    index += 1;
+  }
+  return { text: out, changed };
+}
+
+/**
+ * Trim, strip a BOM, strip fences, and parse into a bare JSON value —
+ * everything evaluateAnswer needs before validating it. A non-object top
+ * level (an array, a scalar) is refused, same as today. Returns the parsed
+ * value alongside the labels of whichever lossless repairs (if any) were
+ * needed to get there, for IngestOutcome.lossless_repairs. Throws
+ * SyntaxFault when no repair recovers a JSON object.
+ */
+export function candidateJson(content: string): { value: unknown; repairs: string[] } {
+  const repairs: string[] = [];
+  // BOM-detection must run BEFORE trim(): unlike Python's str.strip(),
+  // JavaScript's String.prototype.trim() already strips a leading U+FEFF
+  // as whitespace (per the ECMAScript WhiteSpace production) — checking
+  // afterward would never see it.
+  const strippedBom = content.replace(/^﻿+/, "");
+  const bomStripped = strippedBom !== content;
+  const text = strippedBom.trim();
+  if (bomStripped) {
+    repairs.push("bom");
+  }
+  const unfenced = stripFences(text);
+  if (unfenced !== text) {
+    repairs.push("code_fence");
+  }
+  if (!unfenced) {
+    throw new SyntaxFault(emptyAnswerDiagnosis());
+  }
+
+  let value = parseTopLevelObject(unfenced);
+  if (value !== undefined) {
+    return { value, repairs };
+  }
+
+  const firstError = describeParseFailure(unfenced);
+
+  const commaStripped = stripTrailingCommas(unfenced);
+  if (commaStripped.changed) {
+    value = parseTopLevelObject(commaStripped.text);
+    if (value !== undefined) {
+      return { value, repairs: [...repairs, "trailing_comma"] };
+    }
+  }
+
+  const start = unfenced.indexOf("{");
+  const end = unfenced.lastIndexOf("}");
+  if (start >= 0 && start < end) {
+    const sliced = unfenced.slice(start, end + 1);
+    value = parseTopLevelObject(sliced);
+    if (value !== undefined) {
+      return { value, repairs: [...repairs, "braces_slice"] };
+    }
+    const slicedCommaStripped = stripTrailingCommas(sliced);
+    if (slicedCommaStripped.changed) {
+      value = parseTopLevelObject(slicedCommaStripped.text);
+      if (value !== undefined) {
+        return { value, repairs: [...repairs, "braces_slice", "trailing_comma"] };
+      }
+    }
+  }
+
+  throw new SyntaxFault(`not a JSON object: ${firstError}`);
+}
+
+// -- lenient validation walk (mirrors Python's interpret_model_output / --------
+// -- extract.rs's interpret_model_output) --------------------------------------
+//
+// ADR 0001 §8's "lenient parse, strict accounting" ruling: parsing never
+// gets stricter, accounting does. interpretModelOutput reads a JSON object
+// into the same lenient ModelOutput shape the old coerceOutput() produced
+// — absent and null both read as "not present," a wrong-typed or
+// non-object element reads as null/skipped — while collecting a
+// path-addressed issue for every departure. A caller that discards the
+// issues (lossy mode, parseModelOutput's twin) sees byte-for-byte the old
+// behavior; a caller that doesn't (the strict default) can hand every
+// issue to one targeted corrective turn instead of merge() silently
+// dropping the item.
+
+/** The rules one document's items are checked against. */
+export interface ItemRules {
+  /** The document's canonical paragraph count: a question's `paragraph`
+   * citation (and, informationally only, an association's own tag) is
+   * checked against this. */
+  paragraphCount: number;
+  /** Whether this run asked for questions at all (`questions` > 0). When
+   * false, a volunteered `questions` array is merge()'s policy trim, never
+   * a validity issue — see interpretQuestions. */
+  questionsRequested: boolean;
+}
+
+/** Base for a Stage 1 answer-evaluation failure. Class names match the
+ * Python twin's AnswerFault/SyntaxFault/InvalidFault. */
+export class AnswerFault extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
+/** The answer was not parseable JSON, or not a JSON object at all. */
+export class SyntaxFault extends AnswerFault {}
+
+/** The answer was valid JSON but failed Stage 1/Stage 2 validation.
+ * Carries the path-addressed issues verbatim so a corrective turn can
+ * address each one. */
+export class InvalidFault extends AnswerFault {
+  issues: string[];
+  constructor(issues: string[]) {
+    super(`the answer left ${issues.length} invalid item(s) uncorrected: ${issues.join("; ")}`);
+    this.issues = issues;
+  }
+}
+
+/** How many bytes of a string value's own text an issue message embeds
+ * before eliding the rest. */
+export const MAX_ISSUE_VALUE_BYTES = 64;
+
+const DEBUG_STRING_ESCAPES: Record<string, string> = {
+  "\\": "\\\\",
+  '"': '\\"',
+  "\n": "\\n",
+  "\r": "\\r",
+  "\t": "\\t",
+};
+
+/**
+ * Mirror Rust's `{:?}` Debug format for `&str`: always double-quoted, with
+ * the common control escapes spelled out and any other control character
+ * as a `\u{xx}` hex escape; printable non-ASCII (e.g. Japanese text) passes
+ * through unescaped, matching Rust.
+ */
+function rustDebugString(text: string): string {
+  let out = '"';
+  for (const char of text) {
+    const escape = DEBUG_STRING_ESCAPES[char];
+    if (escape !== undefined) {
+      out += escape;
+      continue;
+    }
+    const code = char.codePointAt(0)!;
+    if (code < 0x20 || code === 0x7f) {
+      out += `\\u{${code.toString(16)}}`;
+    } else {
+      out += char;
+    }
+  }
+  return out + '"';
+}
+
+/** extract.rs's quote_for_issue: a Debug-quoted, byte-capped preview of a
+ * string value for a "got …" issue clause. */
+function quoteForIssue(text: string): string {
+  const encoded = Buffer.from(text, "utf-8");
+  if (encoded.length <= MAX_ISSUE_VALUE_BYTES) {
+    return rustDebugString(text);
+  }
+  const truncated = encoded
+    .subarray(0, floorCharBoundary(encoded, MAX_ISSUE_VALUE_BYTES))
+    .toString("utf-8");
+  return `${rustDebugString(truncated)}…`;
+}
+
+/**
+ * Mirror Rust's f64 Display used in weight's own business-rule messages
+ * ("expected finite non-zero number, got …"): no forced trailing `.0` for
+ * a whole number, no scientific notation at ordinary magnitudes. Unlike
+ * the Python twin, this same formatter also covers describeValue's Number
+ * branch — JS's `number` has no int/float split the way Python's
+ * int/float or Rust's serde_json::Number (PosInt/NegInt/Float) do, so
+ * there is no way to tell a JSON `42` literal from a `42.0` literal once
+ * JSON.parse has run; both collapse to the identical value 42, printed
+ * bare here (Rust would print "42.0" for the float-literal source — an
+ * accepted, unavoidable cross-language limitation, not a bug).
+ */
+function formatNumberForIssue(value: number): string {
+  if (Number.isNaN(value)) {
+    return "NaN";
+  }
+  if (value === Number.POSITIVE_INFINITY) {
+    return "inf";
+  }
+  if (value === Number.NEGATIVE_INFINITY) {
+    return "-inf";
+  }
+  return String(value);
+}
+
+/** Render a JSON value's type and, for scalars, its content — for a
+ * wrong-typed-field issue's "got …" clause. */
+function describeValue(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+  if (typeof value === "boolean") {
+    return `boolean ${value}`;
+  }
+  if (typeof value === "number") {
+    return `number ${formatNumberForIssue(value)}`;
+  }
+  if (typeof value === "string") {
+    return `string ${quoteForIssue(value)}`;
+  }
+  if (Array.isArray(value)) {
+    return "an array";
+  }
+  return "an object";
+}
+
+/** A present, non-null field — absent and `null` both read as "not here"
+ * for every optional field this module validates. */
+function getPresent(obj: Record<string, unknown>, key: string): unknown {
+  const value = obj[key];
+  return value === null ? undefined : value;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A non-negative integer that fits u32 — read only from an actual integer
+ * VALUE. Unlike Rust's serde_json::Number (int/float tagged) or Python's
+ * json module (int vs float types), JSON.parse collapses "3" and "3.0"
+ * into the identical JS number 3 — there is no way to tell a whole-number
+ * float source from an integer source here, so (matching the pre-existing
+ * coerceInt this replaces) this accepts any non-negative integer-valued
+ * number regardless of how it was spelled in the JSON source.
+ */
+function interpretPathIndex(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
     return null;
   }
-  if (typeof value !== "string") {
-    throw new Error(`${where} is not a string`);
+  if (value < 0 || value > 0xffffffff) {
+    return null;
   }
   return value;
 }
 
 /**
- * Lenient float coercion mirroring pydantic v2's lax mode (weight is
- * `float | None`): a JSON number rides through, a bool reads as 1/0, and a
- * decimal or exponent string ("1.5", "1e3", "-1", ".5") parses after
- * trimming. A blank or non-numeric string — or any other type — is a hard
- * error, exactly the Python twin's ValidationError. The regex admits only a
- * plain decimal form, so JS's Number() cannot slip a hex/octal literal
- * ("0x10") or a thousands separator past the parity pydantic enforces.
+ * A required string field shared by associations (subject/label/object),
+ * aliases (alias), and questions (question): missing, wrong-typed,
+ * empty-after-trim, and oversized are each their own issue text so the
+ * model sees exactly which of the four it hit.
  */
-function coerceFloat(value: unknown, where: string): number | null {
-  if (value === undefined || value === null) {
+function interpretRequiredString(
+  obj: Record<string, unknown>,
+  key: string,
+  path: string,
+  maxBytes: number,
+  issues: string[],
+): string | null {
+  const value = getPresent(obj, key);
+  if (value === undefined) {
+    issues.push(`${path}.${key}: missing`);
     return null;
-  }
-  if (typeof value === "boolean") {
-    return value ? 1 : 0;
-  }
-  if (typeof value === "number") {
-    return value;
   }
   if (typeof value === "string") {
     const trimmed = value.trim();
-    if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(trimmed)) {
-      throw new Error(`${where} is not a number`);
+    if (trimmed === "") {
+      issues.push(`${path}.${key}: empty`);
+      return null;
     }
-    return Number(trimmed);
+    const length = byteLen(trimmed);
+    if (length > maxBytes) {
+      issues.push(`${path}.${key}: ${length} bytes exceeds the ${maxBytes}-byte cap`);
+      return null;
+    }
+    return trimmed;
   }
-  throw new Error(`${where} is not a number`);
+  issues.push(`${path}.${key}: expected a string, got ${describeValue(value)}`);
+  return null;
 }
 
 /**
- * Lenient integer coercion mirroring pydantic v2's lax mode (paragraph is
- * `int | None`): a bool reads as 1/0, and an integer-valued number or string
- * ("3", "+3", even "3.0") parses. A fractional value (`3.5`, "3.5"), an
- * exponent form ("1e2"), or a non-numeric string is a hard error — the
- * Python twin's ValidationError. pydantic accepts a trailing all-zero
- * fraction on a string but rejects exponents, so mirror that shape exactly.
+ * `weight` is optional (absent/null is a plain 1.0 assertion, kept as
+ * `null` here for merge() to default) but a *present* value must be a
+ * finite, non-zero number under the magnitude cap. A well-TYPED
+ * business-rule violation (zero, over-cap, non-finite) still returns the
+ * weight, not `null`: merge() — not this parse-level pass — is the sole
+ * authority on whether that value survives. Only a WRONG-TYPED value
+ * (never a `number` at all — `typeof` already excludes `boolean` here,
+ * unlike Python where `bool` is an `int` subclass) returns `null`.
  */
-function coerceInt(value: unknown, where: string): number | null {
-  if (value === undefined || value === null) {
+function interpretWeight(obj: Record<string, unknown>, path: string, issues: string[]): number | null {
+  const value = getPresent(obj, "weight");
+  if (value === undefined) {
     return null;
   }
-  if (typeof value === "boolean") {
-    return value ? 1 : 0;
+  if (typeof value !== "number") {
+    issues.push(`${path}.weight: expected finite non-zero number, got ${describeValue(value)}`);
+    return null;
   }
-  if (typeof value === "number") {
-    if (!Number.isInteger(value)) {
-      throw new Error(`${where} is not an integer`);
-    }
-    return value;
-  }
-  if (typeof value === "string") {
-    if (!/^[+-]?\d+(\.0*)?$/.test(value.trim())) {
-      throw new Error(`${where} is not an integer`);
-    }
-    return Number.parseInt(value.trim(), 10);
-  }
-  throw new Error(`${where} is not an integer`);
-}
-
-/**
- * Reshapes a parsed JSON value into ModelOutput, coercing scalar types
- * leniently (see coerceString/coerceFloat/coerceInt) the way parseModelOutput()
- * does for a free-text answer. Exported so a structured-output caller — one
- * that already has a `parsed` value shaped by MODEL_OUTPUT_JSON_SCHEMA — can
- * run it through the same revalidation: LangChain.js's withStructuredOutput()
- * does not itself validate `parsed` against a plain JSON Schema object (only
- * a Zod schema gets that), so a provider that "supports" schema-constrained
- * generation but drifts from it needs the same net a free-text answer gets.
- */
-export function coerceOutput(parsed: unknown): ModelOutput {
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("the answer is not a JSON object");
-  }
-  const shaped = parsed as Record<string, unknown>;
-  const listOf = (value: unknown, where: string): Record<string, unknown>[] => {
-    if (value === undefined || value === null) {
-      return [];
-    }
-    if (!Array.isArray(value)) {
-      throw new Error(`${where} is not an array`);
-    }
-    return value.map((item, index) => {
-      if (typeof item !== "object" || item === null) {
-        throw new Error(`${where}[${index}] is not an object`);
-      }
-      return item as Record<string, unknown>;
-    });
-  };
-  return {
-    associations: listOf(shaped["associations"], "associations").map((item, index) => ({
-      subject: coerceString(item["subject"], `associations[${index}].subject`),
-      label: coerceString(item["label"], `associations[${index}].label`),
-      object: coerceString(item["object"], `associations[${index}].object`),
-      weight: coerceFloat(item["weight"], `associations[${index}].weight`),
-      paragraph: coerceInt(item["paragraph"], `associations[${index}].paragraph`),
-    })),
-    aliases: listOf(shaped["aliases"], "aliases").map((item, index) => ({
-      alias: coerceString(item["alias"], `aliases[${index}].alias`),
-      canonical: coerceString(item["canonical"], `aliases[${index}].canonical`),
-      kind: coerceString(item["kind"], `aliases[${index}].kind`),
-    })),
-    questions: listOf(shaped["questions"], "questions").map((item, index) => ({
-      paragraph: coerceInt(item["paragraph"], `questions[${index}].paragraph`),
-      question: coerceString(item["question"], `questions[${index}].question`),
-    })),
-  };
-}
-
-/**
- * One JSON object, with code fences and surrounding prose tolerated. Throws
- * with a message fit for a corrective turn.
- */
-export function parseModelOutput(content: string): ModelOutput {
-  const unfenced = stripFences(content.trim());
-  if (!unfenced) {
-    throw new Error(
-      "the answer was empty — thinking-mode models can burn their whole budget on " +
-        "reasoning before any text",
+  if (!Number.isFinite(value)) {
+    issues.push(`${path}.weight: expected finite non-zero number, got ${formatNumberForIssue(value)}`);
+  } else if (value === 0) {
+    issues.push(`${path}.weight: expected finite non-zero number, got 0`);
+  } else if (Math.abs(value) > MAX_ASSOCIATION_WEIGHT) {
+    issues.push(
+      `${path}.weight: expected finite non-zero number, got ${formatNumberForIssue(value)} ` +
+        `(over the ${formatNumberForIssue(MAX_ASSOCIATION_WEIGHT)} cap)`,
     );
   }
-  let first: unknown;
-  try {
-    return coerceOutput(JSON.parse(unfenced));
-  } catch (error) {
-    first = error;
+  return value;
+}
+
+/**
+ * An association's `paragraph` is optional and, unlike a question's,
+ * never business-rule-checked here: a well-typed but out-of-range
+ * paragraph costs only the tag in merge() (the fact survives untagged),
+ * so only a wrong-typed value is a validity issue.
+ */
+function interpretAssociationParagraph(
+  obj: Record<string, unknown>,
+  path: string,
+  issues: string[],
+): number | null {
+  const value = getPresent(obj, "paragraph");
+  if (value === undefined) {
+    return null;
   }
-  const start = unfenced.indexOf("{");
-  const end = unfenced.lastIndexOf("}");
-  if (start >= 0 && start < end) {
-    try {
-      return coerceOutput(JSON.parse(unfenced.slice(start, end + 1)));
-    } catch {
-      // fall through to the original error
+  const paragraph = interpretPathIndex(value);
+  if (paragraph === null) {
+    issues.push(
+      `${path}.paragraph: expected an integer paragraph index, got ${describeValue(value)}`,
+    );
+  }
+  return paragraph;
+}
+
+function interpretAssociationItem(
+  index: number,
+  item: unknown,
+  issues: string[],
+): ModelAssociation | null {
+  const path = `associations[${index}]`;
+  if (!isPlainObject(item)) {
+    issues.push(`${path}: expected an object, got ${describeValue(item)}`);
+    return null;
+  }
+  const subject = interpretRequiredString(item, "subject", path, MAX_NAME_BYTES, issues);
+  const label = interpretRequiredString(item, "label", path, MAX_NAME_BYTES, issues);
+  const object = interpretRequiredString(item, "object", path, MAX_NAME_BYTES, issues);
+  const weight = interpretWeight(item, path, issues);
+  const paragraph = interpretAssociationParagraph(item, path, issues);
+  return { subject, label, object, weight, paragraph };
+}
+
+function interpretAssociations(obj: Record<string, unknown>, issues: string[]): ModelAssociation[] {
+  const value = getPresent(obj, "associations");
+  if (value === undefined) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    const result: ModelAssociation[] = [];
+    value.forEach((item, index) => {
+      const parsed = interpretAssociationItem(index, item, issues);
+      if (parsed !== null) {
+        result.push(parsed);
+      }
+    });
+    return result;
+  }
+  issues.push(`associations: expected an array, got ${describeValue(value)}`);
+  return [];
+}
+
+/**
+ * `canonical` never fails on emptiness here: an empty (or merely
+ * non-matching) canonical is exactly a *dangling* canonical, and
+ * dangling-ness can only be judged against the merged association names —
+ * Stage 2's crossOutputIssues, not this item-local pass.
+ */
+function interpretCanonical(
+  obj: Record<string, unknown>,
+  path: string,
+  issues: string[],
+): string | null {
+  const value = getPresent(obj, "canonical");
+  if (value === undefined) {
+    issues.push(`${path}.canonical: missing`);
+    return null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const length = byteLen(trimmed);
+    if (length > MAX_NAME_BYTES) {
+      issues.push(`${path}.canonical: ${length} bytes exceeds the ${MAX_NAME_BYTES}-byte cap`);
+      return null;
+    }
+    return trimmed;
+  }
+  issues.push(`${path}.canonical: expected a string, got ${describeValue(value)}`);
+  return null;
+}
+
+function interpretKind(obj: Record<string, unknown>, path: string, issues: string[]): string | null {
+  const value = getPresent(obj, "kind");
+  if (value === undefined) {
+    issues.push(`${path}.kind: missing`);
+    return null;
+  }
+  if (typeof value === "string") {
+    if (value === "concept" || value === "label") {
+      return value;
+    }
+    issues.push(`${path}.kind: expected "concept" or "label", got ${rustDebugString(value)}`);
+    return null;
+  }
+  issues.push(`${path}.kind: expected "concept" or "label", got ${describeValue(value)}`);
+  return null;
+}
+
+function interpretAliasItem(index: number, item: unknown, issues: string[]): ModelAlias | null {
+  const path = `aliases[${index}]`;
+  if (!isPlainObject(item)) {
+    issues.push(`${path}: expected an object, got ${describeValue(item)}`);
+    return null;
+  }
+  const spelling = interpretRequiredString(item, "alias", path, MAX_NAME_BYTES, issues);
+  const canonical = interpretCanonical(item, path, issues);
+  const kind = interpretKind(item, path, issues);
+  // Self-alias is item-local (both sides come from this one item);
+  // dangling-canonical and shadowing need the merged name set and are
+  // Stage 2's job (crossOutputIssues).
+  if (spelling !== null && canonical !== null && spelling === canonical) {
+    issues.push(`${path}.alias: equals its canonical`);
+  }
+  return { alias: spelling, canonical, kind };
+}
+
+function interpretAliases(obj: Record<string, unknown>, issues: string[]): ModelAlias[] {
+  const value = getPresent(obj, "aliases");
+  if (value === undefined) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    const result: ModelAlias[] = [];
+    value.forEach((item, index) => {
+      const parsed = interpretAliasItem(index, item, issues);
+      if (parsed !== null) {
+        result.push(parsed);
+      }
+    });
+    return result;
+  }
+  issues.push(`aliases: expected an array, got ${describeValue(value)}`);
+  return [];
+}
+
+function interpretQuestionItem(
+  index: number,
+  item: unknown,
+  rules: ItemRules,
+  issues: string[],
+): ModelQuestion | null {
+  const path = `questions[${index}]`;
+  if (!isPlainObject(item)) {
+    if (rules.questionsRequested) {
+      issues.push(`${path}: expected an object, got ${describeValue(item)}`);
+    }
+    return null;
+  }
+  if (!rules.questionsRequested) {
+    // Not asked for: whatever the model volunteers is merge()'s policy
+    // trim (questionsCap === 0), so read it plainly (today's lenient
+    // semantics) without spending an issue on it.
+    const paragraphValue = getPresent(item, "paragraph");
+    const paragraph = paragraphValue === undefined ? null : interpretPathIndex(paragraphValue);
+    const questionValue = getPresent(item, "question");
+    const question = typeof questionValue === "string" ? questionValue : null;
+    return { paragraph, question };
+  }
+  const paragraphValue = getPresent(item, "paragraph");
+  let paragraph: number | null;
+  if (paragraphValue === undefined) {
+    issues.push(`${path}.paragraph: missing`);
+    paragraph = null;
+  } else {
+    const candidate = interpretPathIndex(paragraphValue);
+    if (candidate !== null && candidate < rules.paragraphCount) {
+      paragraph = candidate;
+    } else if (candidate !== null) {
+      issues.push(
+        `${path}.paragraph: must cite a paragraph below ${rules.paragraphCount}, got ${candidate}`,
+      );
+      paragraph = null;
+    } else {
+      issues.push(
+        `${path}.paragraph: expected an integer paragraph index, got ` +
+          `${describeValue(paragraphValue)}`,
+      );
+      paragraph = null;
     }
   }
-  throw new Error(`not a JSON object: ${(first as Error).message ?? String(first)}`);
+  const question = interpretRequiredString(item, "question", path, MAX_QUESTION_BYTES, issues);
+  return { paragraph, question };
+}
+
+function interpretQuestions(
+  obj: Record<string, unknown>,
+  rules: ItemRules,
+  issues: string[],
+): ModelQuestion[] {
+  const value = getPresent(obj, "questions");
+  if (value === undefined) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    const result: ModelQuestion[] = [];
+    value.forEach((item, index) => {
+      const parsed = interpretQuestionItem(index, item, rules, issues);
+      if (parsed !== null) {
+        result.push(parsed);
+      }
+    });
+    return result;
+  }
+  // questionsRequested === false makes any questions array the model
+  // volunteers merge()'s policy trim, never a validity issue.
+  if (rules.questionsRequested) {
+    issues.push(`questions: expected an array, got ${describeValue(value)}`);
+  }
+  return [];
+}
+
+/**
+ * Read a JSON value into the lenient ModelOutput shape while collecting a
+ * path-addressed issue for every departure the lenient walk papers over.
+ * Tolerates a non-object top level (reads nothing) rather than asserting
+ * one — candidateJson is what actually refuses a non-object answer. Walk
+ * order is fixed: associations -> aliases -> questions.
+ */
+export function interpretModelOutput(
+  value: unknown,
+  rules: ItemRules,
+): { output: ModelOutput; issues: string[] } {
+  const issues: string[] = [];
+  const obj = isPlainObject(value) ? value : {};
+  const associations = interpretAssociations(obj, issues);
+  const aliases = interpretAliases(obj, issues);
+  const questions = interpretQuestions(obj, rules, issues);
+  return { output: { associations, aliases, questions }, issues };
+}
+
+const LENIENT_RULES: ItemRules = {
+  paragraphCount: Number.MAX_SAFE_INTEGER,
+  questionsRequested: true,
+};
+
+/**
+ * The rules interpretModelOutput actually applies for a given
+ * evaluateAnswer-style `rules` argument: `rules` itself in strict mode, or
+ * the same lenient/no-op rules lossy mode uses internally — for callers
+ * (the structured-output path in ingest.ts) that need to run
+ * interpretModelOutput directly instead of through evaluateAnswer.
+ */
+export function effectiveItemRules(rules: ItemRules | null): ItemRules {
+  return rules ?? LENIENT_RULES;
+}
+
+/**
+ * The Stage 1 gate every corrective loop calls instead of parseModelOutput
+ * directly: parse, then — when `rules` is not null (this run is not lossy)
+ * — validate every item and throw InvalidFault on any path-addressed
+ * issue. `rules: null` (lossy mode) parses only and discards whatever
+ * interpretModelOutput would have flagged, reproducing today's behavior
+ * byte for byte: merge() alone decides what survives.
+ */
+export function evaluateAnswer(
+  content: string,
+  rules: ItemRules | null,
+): { output: ModelOutput; repairs: string[] } {
+  const { value, repairs } = candidateJson(content);
+  if (rules === null) {
+    const { output } = interpretModelOutput(value, LENIENT_RULES);
+    return { output, repairs };
+  }
+  const { output, issues } = interpretModelOutput(value, rules);
+  if (issues.length > 0) {
+    throw new InvalidFault(issues);
+  }
+  return { output, repairs };
+}
+
+/**
+ * One JSON object, with code fences and surrounding prose tolerated.
+ * Throws with a message fit for a corrective turn. Lenient-mode-only (like
+ * extract.rs's test-only twin): every production corrective loop calls
+ * evaluateAnswer directly instead.
+ */
+export function parseModelOutput(content: string): ModelOutput {
+  const { output } = evaluateAnswer(content, null);
+  return output;
+}
+
+// -- cross-chunk alias validation (mirrors extract.rs cross_output_issues) -----
+
+/**
+ * Judgments possible only against the FULL merged name set (a chunk-1
+ * alias whose canonical only shows up in chunk 3 still lands). Returns one
+ * entry per output index that contributed at least one issue, in output
+ * order, so the caller can address a single targeted corrective turn per
+ * offending output.
+ */
+export function crossOutputIssues(outputs: ModelOutput[]): Array<[number, string[]]> {
+  const conceptNames = new Set<string>();
+  const labelNames = new Set<string>();
+  for (const output of outputs) {
+    for (const item of output.associations) {
+      const subject = (item.subject ?? "").trim();
+      const label = (item.label ?? "").trim();
+      const object = (item.object ?? "").trim();
+      if (subject) conceptNames.add(subject);
+      if (object) conceptNames.add(object);
+      if (label) labelNames.add(label);
+    }
+  }
+
+  // First-registered spelling -> canonical wins, exactly like merge()'s
+  // fold: a later output naming the same spelling with a DIFFERENT
+  // canonical is the conflict, not the first one to claim it.
+  const conceptRegistry = new Map<string, string>();
+  const labelRegistry = new Map<string, string>();
+  const issuesByOutput: Array<[number, string[]]> = [];
+
+  outputs.forEach((output, outputIndex) => {
+    const issues: string[] = [];
+    output.aliases.forEach((aliasItem, aliasIndex) => {
+      const path = `aliases[${aliasIndex}]`;
+      const spelling = aliasItem.alias;
+      const canonical = aliasItem.canonical;
+      const kind = aliasItem.kind;
+      if (spelling === null || spelling === undefined) return; // Stage 1's issue covers this
+      if (canonical === null || canonical === undefined) return;
+      if (kind === null || kind === undefined) return;
+      if (spelling === canonical) return; // Stage 1's self-alias issue covers this
+
+      let names: Set<string>;
+      let registry: Map<string, string>;
+      if (kind === "concept") {
+        names = conceptNames;
+        registry = conceptRegistry;
+      } else if (kind === "label") {
+        names = labelNames;
+        registry = labelRegistry;
+      } else {
+        return; // Stage 1's invalid-kind issue already covers this
+      }
+      if (names.has(spelling)) {
+        issues.push(`${path}.alias: names something the associations already contain`);
+        return;
+      }
+      if (!names.has(canonical)) {
+        issues.push(`${path}.canonical: names nothing the associations contain`);
+        return;
+      }
+      const existing = registry.get(spelling);
+      if (existing === undefined) {
+        registry.set(spelling, canonical);
+      } else if (existing === canonical) {
+        // a repeated identical mapping is merge()'s duplicate fold, not a conflict
+      } else {
+        issues.push(
+          `${path}: conflicts with an earlier alias mapping ${rustDebugString(spelling)} to ` +
+            `${rustDebugString(existing)}`,
+        );
+      }
+    });
+    if (issues.length > 0) {
+      issuesByOutput.push([outputIndex, issues]);
+    }
+  });
+  return issuesByOutput;
 }
 
 // -- merge (mirrors extract.rs merge()) ----------------------------------------------

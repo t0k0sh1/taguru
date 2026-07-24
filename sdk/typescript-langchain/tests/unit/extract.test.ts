@@ -8,19 +8,31 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 
 import {
+  candidateJson,
   chunk,
   correctiveAssistantTurnContent,
   correctiveMessage,
+  correctiveValidationMessage,
+  crossOutputIssues,
+  evaluateAnswer,
   indicatesLengthLimit,
+  indicatesRefusal,
+  interpretModelOutput,
+  InvalidFault,
   labeledDocument,
+  MAX_ASSOCIATION_WEIGHT,
+  MAX_LISTED_ISSUES,
+  MAX_NAME_BYTES,
   merge,
   MODEL_OUTPUT_JSON_SCHEMA,
   parseModelOutput,
   renderBatch,
   splitParagraphs,
+  SyntaxFault,
   systemPrompt,
   labelVocabulary,
   type Extraction,
+  type ItemRules,
   type ModelAlias,
   type ModelAssociation,
   type ModelOutput,
@@ -310,43 +322,367 @@ describe("model-answer parsing", () => {
     expect(() => parseModelOutput("no json here")).toThrow(/not a JSON object/);
   });
 
-  it("coerces model numbers as leniently as the pydantic twin", () => {
-    // Numeric strings and bools ride through, matching pydantic's lax mode
-    // (verified against ModelAssociation in the Python twin).
+  it("no longer coerces numeric strings or bools — issue #180/#181 drops that pydantic-lax-mode parity in favor of the Rust producer's stricter parsing", () => {
+    // ADR 0001 §8/§11 unify parsing on the Rust producer's lenient walk
+    // (interpretModelOutput), which never coerces a string or bool into a
+    // number for weight/paragraph — a present-but-wrong-typed scalar just
+    // reads as null in lossy mode (parseModelOutput), the same as an
+    // absent or JSON-null one. The path-addressed issue this now raises
+    // in strict mode is covered by the interpretModelOutput suite below.
     const strings = parseModelOutput(
       '{"associations": [{"subject": "a", "label": "b", "object": "c",' +
         ' "weight": "1.5", "paragraph": "2"}]}',
     );
-    expect(strings.associations[0]!.weight).toBe(1.5);
-    expect(strings.associations[0]!.paragraph).toBe(2);
+    expect(strings.associations[0]!.weight).toBeNull();
+    expect(strings.associations[0]!.paragraph).toBeNull();
 
     const bools = parseModelOutput(
       '{"associations": [{"subject": "a", "label": "b", "object": "c",' +
         ' "weight": true, "paragraph": false}]}',
     );
-    expect(bools.associations[0]!.weight).toBe(1);
-    expect(bools.associations[0]!.paragraph).toBe(0);
+    expect(bools.associations[0]!.weight).toBeNull();
+    expect(bools.associations[0]!.paragraph).toBeNull();
   });
 
-  it("rejects the numbers pydantic's lax mode rejects", () => {
-    const parse = (assoc: string) => (): unknown =>
-      parseModelOutput(`{"associations": [${assoc}]}`);
-    // A non-numeric weight string.
-    expect(parse('{"subject":"a","label":"b","object":"c","weight":"abc"}')).toThrow(
-      /weight is not a number/,
+  it("never throws on a wrong-typed or fractional scalar in lossy mode — it silently nulls out", () => {
+    // Same ADR 0001 §8 unification: what used to be a hard parse-level
+    // rejection (coerceFloat/coerceInt/coerceString throwing) is now an
+    // item-level issue that lossy-mode parseModelOutput discards, never a
+    // whole-document parse failure.
+    const output = parseModelOutput(
+      '{"associations": [' +
+        '{"subject":"a","label":"b","object":"c","weight":"abc"},' +
+        '{"subject":"a","label":"b","object":"c","paragraph":3.5},' +
+        '{"subject":"a","label":"b","object":"c","paragraph":"1e2"},' +
+        '{"subject":42,"label":"b","object":"c"}' +
+        "]}",
     );
-    // A fractional or exponent paragraph, whether a number or a string.
-    expect(parse('{"subject":"a","label":"b","object":"c","paragraph":3.5}')).toThrow(
-      /paragraph is not an integer/,
+    expect(output.associations[0]!.weight).toBeNull();
+    expect(output.associations[1]!.paragraph).toBeNull();
+    expect(output.associations[2]!.paragraph).toBeNull();
+    expect(output.associations[3]!.subject).toBeNull();
+  });
+});
+
+// -- issue #181: lenient validation walk / cross-chunk alias validation ---------
+// Ports of the Rust/Python twins' own tests for interpretModelOutput,
+// crossOutputIssues, evaluateAnswer, and correctiveValidationMessage — the
+// same cross-language regression floor the rest of this file follows.
+
+const permissiveRules = (): ItemRules => ({ paragraphCount: 100, questionsRequested: true });
+
+const interpret = (text: string, rules: ItemRules): { output: ModelOutput; issues: string[] } => {
+  const { value } = candidateJson(text);
+  return interpretModelOutput(value, rules);
+};
+
+describe("interpretModelOutput (extract.rs/Python golden ports)", () => {
+  it("a null or wrong-typed array field reads as empty, not a parse failure", () => {
+    const nulled = parseModelOutput(
+      '{"associations": null, "questions": [{"paragraph": 0, "question": "何?"}]}',
     );
-    expect(parse('{"subject":"a","label":"b","object":"c","paragraph":"3.5"}')).toThrow(
-      /paragraph is not an integer/,
+    expect(nulled.associations).toEqual([]);
+
+    const objectShaped = parseModelOutput(
+      '{"associations": [{"subject": "a", "label": "l", "object": "b"}], "aliases": {}}',
     );
-    expect(parse('{"subject":"a","label":"b","object":"c","paragraph":"1e2"}')).toThrow(
-      /paragraph is not an integer/,
+    expect(objectShaped.associations).toHaveLength(1);
+    expect(objectShaped.aliases).toEqual([]);
+
+    expect(
+      parseModelOutput('{"associations": {"subject": "a", "label": "l", "object": "b"}}')
+        .associations,
+    ).toEqual([]);
+    expect(parseModelOutput('{"associations": "none"}').associations).toEqual([]);
+  });
+
+  it("missing, wrong-typed, empty, and oversized are four distinct issues", () => {
+    const oversized = "x".repeat(MAX_NAME_BYTES + 1);
+    const text = JSON.stringify({
+      associations: [
+        { label: "l", object: "b" },
+        { subject: 42, label: "l", object: "b" },
+        { subject: "  ", label: "l", object: "b" },
+        { subject: oversized, label: "l", object: "b" },
+      ],
+    });
+    const { issues } = interpret(text, permissiveRules());
+    expect(issues).toEqual([
+      "associations[0].subject: missing",
+      "associations[1].subject: expected a string, got number 42",
+      "associations[2].subject: empty",
+      `associations[3].subject: ${Buffer.byteLength(oversized, "utf-8")} bytes exceeds the 1024-byte cap`,
+    ]);
+  });
+
+  it("an absent or null weight is valid but a wrong-typed one is an issue", () => {
+    const text = JSON.stringify({
+      associations: [
+        { subject: "a", label: "l", object: "b" },
+        { subject: "a", label: "l", object: "c", weight: null },
+        { subject: "a", label: "l", object: "d", weight: "strong" },
+      ],
+    });
+    const { output, issues } = interpret(text, permissiveRules());
+    expect(output.associations[0]!.weight).toBeNull();
+    expect(output.associations[1]!.weight).toBeNull();
+    expect(output.associations[2]!.weight).toBeNull();
+    expect(issues).toEqual([
+      'associations[2].weight: expected finite non-zero number, got string "strong"',
+    ]);
+  });
+
+  it("zero and over-cap weights report the offending value, not a type mismatch", () => {
+    const text = JSON.stringify({
+      associations: [
+        { subject: "a", label: "l", object: "b", weight: 0 },
+        { subject: "a", label: "l", object: "c", weight: MAX_ASSOCIATION_WEIGHT * 2 },
+      ],
+    });
+    const { issues } = interpret(text, permissiveRules());
+    expect(issues).toHaveLength(2);
+    expect(issues[0]).toBe("associations[0].weight: expected finite non-zero number, got 0");
+    expect(issues[1]).toMatch(/^associations\[1\]\.weight: expected finite non-zero number, got/);
+    expect(issues[1]).toContain(`over the ${MAX_ASSOCIATION_WEIGHT} cap`);
+  });
+
+  it("an out-of-range association paragraph is untagged without an issue", () => {
+    const rules: ItemRules = { paragraphCount: 1, questionsRequested: true };
+    const inRange = interpret(
+      '{"associations": [{"subject": "a", "label": "l", "object": "b", "paragraph": 99}]}',
+      rules,
     );
-    // A number where a name is expected stays strict, exactly like pydantic.
-    expect(parse('{"subject":42,"label":"b","object":"c"}')).toThrow(/subject is not a string/);
+    expect(inRange.output.associations[0]!.paragraph).toBe(99);
+    expect(inRange.issues).toEqual([]);
+
+    const wrongTyped = interpret(
+      '{"associations": [{"subject": "a", "label": "l", "object": "b", "paragraph": "two"}]}',
+      rules,
+    );
+    expect(wrongTyped.output.associations[0]!.paragraph).toBeNull();
+    expect(wrongTyped.issues).toEqual([
+      'associations[0].paragraph: expected an integer paragraph index, got string "two"',
+    ]);
+  });
+
+  it("alias item issues cover missing, wrong kind, and self-alias", () => {
+    const text = JSON.stringify({
+      aliases: [
+        { canonical: "b", kind: "concept" },
+        { alias: "x", canonical: "b", kind: "person" },
+        { alias: "y", canonical: "y", kind: "concept" },
+      ],
+    });
+    const { issues } = interpret(text, permissiveRules());
+    expect(issues).toEqual([
+      "aliases[0].alias: missing",
+      'aliases[1].kind: expected "concept" or "label", got "person"',
+      "aliases[2].alias: equals its canonical",
+    ]);
+  });
+
+  it("question issues cover missing, out-of-range, and oversized", () => {
+    const text = JSON.stringify({
+      questions: [
+        { question: "何?" },
+        { paragraph: 9, question: "何?" },
+        { paragraph: 0, question: "  " },
+      ],
+    });
+    const rules: ItemRules = { paragraphCount: 2, questionsRequested: true };
+    const { issues } = interpret(text, rules);
+    expect(issues).toEqual([
+      "questions[0].paragraph: missing",
+      "questions[1].paragraph: must cite a paragraph below 2, got 9",
+      "questions[2].question: empty",
+    ]);
+  });
+
+  it("a volunteered question when none was requested is a policy trim, not an issue", () => {
+    const rules: ItemRules = { paragraphCount: 2, questionsRequested: false };
+    const { output, issues } = interpret('{"questions": [{"question": "何?"}]}', rules);
+    expect(output.questions).toHaveLength(1);
+    expect(issues).toEqual([]);
+  });
+});
+
+describe("crossOutputIssues (extract.rs/Python golden ports)", () => {
+  it("lets a canonical resolved in a later output through", () => {
+    const outputs = [
+      output({ aliases: [alias("Aomine", "青嶺酒造", "concept")] }),
+      output({ associations: [association("青嶺酒造", "杜氏", "高瀬", 1.0)] }),
+    ];
+    expect(crossOutputIssues(outputs)).toEqual([]);
+  });
+
+  it("names dangling and shadowing aliases by output", () => {
+    const outputs = [
+      output({
+        associations: [association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+        aliases: [
+          alias("蔵元", "存在しない", "concept"), // dangling: no such name
+          alias("高瀬", "青嶺酒造", "concept"), // shadows a real name
+        ],
+      }),
+    ];
+    expect(crossOutputIssues(outputs)).toEqual([
+      [
+        0,
+        [
+          "aliases[0].canonical: names nothing the associations contain",
+          "aliases[1].alias: names something the associations already contain",
+        ],
+      ],
+    ]);
+  });
+
+  it("blames the later output for a conflicting canonical", () => {
+    const outputs = [
+      output({
+        associations: [
+          association("青嶺酒造", "杜氏", "高瀬", 1.0),
+          association("蔵元本店", "支店", "青嶺酒造", 1.0),
+        ],
+        aliases: [alias("Aomine", "青嶺酒造", "concept")],
+      }),
+      output({ aliases: [alias("Aomine", "蔵元本店", "concept")] }), // same spelling, different canonical
+    ];
+    expect(crossOutputIssues(outputs)).toEqual([
+      [1, ['aliases[0]: conflicts with an earlier alias mapping "Aomine" to "青嶺酒造"']],
+    ]);
+  });
+
+  it("folds an identical repeated mapping without a conflict", () => {
+    const outputs = [
+      output({
+        associations: [association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+        aliases: [alias("Aomine", "青嶺酒造", "concept")],
+      }),
+      output({ aliases: [alias("Aomine", "青嶺酒造", "concept")] }), // identical repeat
+    ];
+    expect(crossOutputIssues(outputs)).toEqual([]);
+  });
+
+  it("skips aliases Stage 1 already flagged", () => {
+    const outputs = [
+      output({
+        associations: [association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+        aliases: [
+          alias("青嶺酒造", "青嶺酒造", "concept"), // self-alias, Stage 1's issue
+          { alias: null, canonical: "青嶺酒造", kind: "concept" },
+        ],
+      }),
+    ];
+    expect(crossOutputIssues(outputs)).toEqual([]);
+  });
+});
+
+describe("indicatesRefusal", () => {
+  it("is true only for refusal reasons", () => {
+    expect(indicatesRefusal("content_filter")).toBe(true);
+    expect(indicatesRefusal("refusal")).toBe(true);
+    expect(indicatesRefusal("stop")).toBe(false);
+    expect(indicatesRefusal("length")).toBe(false);
+    expect(indicatesRefusal("tool_calls")).toBe(false);
+  });
+});
+
+describe("correctiveValidationMessage", () => {
+  it("lists every issue and states the five-part contract", () => {
+    const issues = [
+      'associations[1].weight: expected finite non-zero number, got string "strong"',
+      "aliases[0].canonical: names nothing the associations contain",
+    ];
+    const message = correctiveValidationMessage(issues);
+    expect(message.startsWith("That was valid JSON but not a valid extraction (2 issue(s)):")).toBe(
+      true,
+    );
+    expect(message).toContain(issues[0]);
+    expect(message).toContain(issues[1]);
+    expect(message).toContain("complete corrected JSON object");
+    expect(message).toContain("keep every item");
+    expect(message).toContain("correct the fields listed above instead of deleting");
+    expect(message).toContain("add nothing that was not already there");
+    expect(message).toContain("only the JSON object");
+  });
+
+  it("caps the listed issues", () => {
+    const issues = Array.from(
+      { length: MAX_LISTED_ISSUES + 3 },
+      (_, i) => `associations[${i}].weight: expected finite non-zero number, got 0`,
+    );
+    const message = correctiveValidationMessage(issues);
+    expect(message).toContain(`(${issues.length} issue(s))`);
+    expect(message).toContain("… and 3 more issue(s)");
+    expect(message).not.toContain(issues[MAX_LISTED_ISSUES]!);
+  });
+});
+
+describe("evaluateAnswer", () => {
+  it("in strict mode surfaces validity issues; lossy mode ignores them", () => {
+    const content = JSON.stringify({
+      associations: [{ subject: "a", label: "l", object: "b", weight: "strong" }],
+    });
+    const strictRules: ItemRules = { paragraphCount: 1, questionsRequested: false };
+    try {
+      evaluateAnswer(content, strictRules);
+      expect.unreachable("expected InvalidFault");
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidFault);
+      expect((error as InvalidFault).issues).toEqual([
+        'associations[0].weight: expected finite non-zero number, got string "strong"',
+      ]);
+    }
+
+    // Lossy mode (rules: null) ignores the same issue and hands back the
+    // parsed output, byte-for-byte parseModelOutput's behavior.
+    const { output } = evaluateAnswer(content, null);
+    expect(output.associations).toHaveLength(1);
+    expect(output.associations[0]!.weight).toBeNull();
+  });
+
+  it("reports a syntax fault before any validation", () => {
+    const strictRules: ItemRules = { paragraphCount: 1, questionsRequested: false };
+    try {
+      evaluateAnswer("not json at all", strictRules);
+      expect.unreachable("expected SyntaxFault");
+    } catch (error) {
+      expect(error).toBeInstanceOf(SyntaxFault);
+      expect((error as Error).message).toMatch(/not a JSON object/);
+    }
+  });
+});
+
+describe("candidateJson lossless repairs (issue #181-only additions)", () => {
+  it("strips a BOM and reports it", () => {
+    const { value, repairs } = candidateJson("﻿" + '{"associations": []}');
+    expect(value).toEqual({ associations: [] });
+    expect(repairs).toEqual(["bom"]);
+  });
+
+  it("removes unambiguous trailing commas", () => {
+    const { value, repairs } = candidateJson(
+      '{"associations": [{"subject": "a", "label": "l", "object": "b",},],}',
+    );
+    expect(value).toEqual({ associations: [{ subject: "a", label: "l", object: "b" }] });
+    expect(repairs).toEqual(["trailing_comma"]);
+
+    // A comma inside a string value must never be touched.
+    const untouched = candidateJson(
+      '{"associations": [{"subject": "a, b", "label": "l", "object": "c"}]}',
+    );
+    expect((untouched.value as { associations: [{ subject: string }] }).associations[0]!.subject).toBe(
+      "a, b",
+    );
+    expect(untouched.repairs).toEqual([]);
+  });
+
+  it("labels fence and braces repairs", () => {
+    const payload = '{"associations": []}';
+    expect(candidateJson("```json\n" + payload + "\n```").repairs).toEqual(["code_fence"]);
+    expect(candidateJson(`Here you go:\n${payload}\nHope that helps!`).repairs).toEqual([
+      "braces_slice",
+    ]);
   });
 });
 
@@ -446,5 +782,62 @@ describe("JSON Schema", () => {
 
   it.each(rejectedFixtures)("rejects %s", (path) => {
     expect(validate(JSON.parse(readFileSync(path, "utf-8")))).toBe(false);
+  });
+});
+
+describe("repaired fixtures (shared with the Rust/Python twins, issue #180/#181/#199)", () => {
+  // Each tests/fixtures/model_output/repaired/*.json names one (rules,
+  // answer, issues, corrected) tuple so all three producers can
+  // mechanically check validate(answer) === issues and
+  // validate(corrected) === [] against the SAME payloads.
+  const fixturesRoot = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../../tests/fixtures/model_output/repaired",
+  );
+  const fixturePaths = readdirSync(fixturesRoot)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => join(fixturesRoot, name));
+
+  interface RepairedFixture {
+    rules: { paragraph_count: number; questions_cap: number };
+    answer: Record<string, unknown>;
+    issues: string[];
+    corrected: Record<string, unknown>;
+  }
+
+  const validate = (payload: unknown, rules: ItemRules): string[] => {
+    const { output, issues } = interpretModelOutput(payload, rules);
+    for (const [, crossIssues] of crossOutputIssues([output])) {
+      issues.push(...crossIssues);
+    }
+    return issues;
+  };
+
+  it("has a non-empty repaired fixture corpus", () => {
+    expect(fixturePaths.length).toBeGreaterThan(0);
+  });
+
+  it.each(fixturePaths)("validates %s identically to the answer/corrected pair", (path) => {
+    const fixture = JSON.parse(readFileSync(path, "utf-8")) as RepairedFixture;
+    const rules: ItemRules = {
+      paragraphCount: fixture.rules.paragraph_count,
+      questionsRequested: fixture.rules.questions_cap > 0,
+    };
+    expect(fixture.issues.length).toBeGreaterThan(0);
+
+    expect(validate(fixture.answer, rules)).toEqual(fixture.issues);
+    expect(validate(fixture.corrected, rules)).toEqual([]);
+
+    // Preserve-every-item (ADR 0001 §8 bucket 2's "correct-not-delete, add
+    // nothing"): a whole-array field that WAS shaped as an array in the
+    // answer must keep the same item count in corrected.
+    for (const field of ["associations", "aliases", "questions"] as const) {
+      const answerItems = fixture.answer[field];
+      if (Array.isArray(answerItems)) {
+        const correctedItems = fixture.corrected[field];
+        const correctedLength = Array.isArray(correctedItems) ? correctedItems.length : 0;
+        expect(correctedLength).toBe(answerItems.length);
+      }
+    }
   });
 });

@@ -61,9 +61,18 @@ instead of parsing a free-text answer. Strictly opt-in and provider/model
 dependent: a chat model that cannot bind tools raises out of the
 constructor immediately, before any document is ingested, rather than
 surfacing later as a per-attempt failure. Either way the answer still goes
-through the same `ModelOutput` revalidation and business-rule checks a
+through the same lenient validation walk and business-rule checks a
 free-text answer gets — a schema only narrows what shape a well-behaved
 provider can return.
+
+By default, a business-rule-invalid item (a bad weight, a dangling alias,
+an out-of-range question, ...) never gets silently dropped and reported as
+a success: it earns one targeted, path-addressed corrective turn naming
+exactly which fields are wrong, and the source fails outright (no
+`/import` call) if it's still invalid afterward. Pass `lossy=True` to
+restore the old drop-and-proceed behavior instead — the source still
+imports, and `IngestOutcome.invalid_dropped` counts what got silently
+discarded.
 
 Not provided, deliberately: a VectorStore facade (Taguru's retrieval is
 structural-first — `similarity_search` would misrepresent it), a Memory class

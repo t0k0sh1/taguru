@@ -8,6 +8,59 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `langchain-taguru` (Python) replaces `TaguruIngester`'s silent
+  merge-level item drop with lossless JSON repair and path-specific
+  corrective retry (#180, implementing ADR 0001 §8 — the Python twin of
+  #199's Rust behavior). Validation moves to a lenient walk
+  (`interpret_model_output`) that reads the same shape the old
+  `ModelOutput.model_validate()` did but collects a path-addressed issue
+  for every departure instead of rejecting the whole answer over one
+  wrong-typed field; a business-rule-invalid item now earns one targeted
+  corrective turn naming its exact JSON path (e.g.
+  `associations[0].weight: expected finite non-zero number, got string
+  "strong"`) instead of a silent drop, and the source fails outright (no
+  `/import` call) if it is still invalid afterward. Two new automatic,
+  information-preserving JSON repairs (BOM stripping, unambiguous
+  trailing-comma removal) are added on top of the existing fence-
+  stripping/widest-braces tolerance. A `length`-terminated answer is
+  treated as length-limited even when its content happens to parse
+  cleanly — a valid prefix of a cut-off extraction is never imported — and
+  a policy refusal (`content_filter`/`refusal`) is now terminal instead of
+  spending a corrective turn on it. A dangling-canonical or shadowing
+  alias — judgeable only against the full merged name set, never one
+  chunk alone — is checked once per document across all chunks, right
+  before merge, and spends at most one corrective turn per offending
+  chunk the same way. `TaguruIngester(lossy=True)` restores the previous
+  drop-and-proceed behavior exactly, reported through
+  `IngestOutcome.invalid_dropped`; `IngestOutcome` also gains
+  `lossless_repairs` and `correction_attempts`, and `AttemptFailed`/
+  `AttemptStarted` gain `stage` (`"item"` vs `"cross_chunk"`) and
+  `AttemptFailed` gains `validation_issues`. Validates against the same
+  shared fixture corpus `tests/fixtures/model_output/repaired/` the Rust
+  twin (#199) uses.
+- `langchain-taguru` (TypeScript) ports the same lossless JSON repair and
+  path-specific corrective retry to `TaguruIngester` (#181, the TS twin of
+  #180/#199). `interpretModelOutput` replaces `coerceOutput`'s
+  all-or-nothing scalar coercion with the same lenient, path-addressed
+  walk: a wrong-typed or business-rule-invalid item earns one targeted
+  corrective turn instead of throwing over the whole answer or being
+  silently dropped by `merge()`. BOM stripping and unambiguous
+  trailing-comma removal join fence-stripping/widest-braces slicing as
+  automatic lossless repairs. A `length`-terminated answer is never
+  imported even when it happens to parse, and a policy refusal
+  (`content_filter`/`refusal`) is now terminal. `crossOutputIssues` checks
+  dangling/shadowing aliases once per document across all chunks, each
+  spending at most one corrective turn. `TaguruIngester({ lossy: true })`
+  restores the previous drop-and-proceed behavior, reported through
+  `IngestOutcome.invalid_dropped`; `IngestOutcome` also gains
+  `lossless_repairs` and `correction_attempts`. One deliberate behavior
+  change beyond the never-silent-drop default: `parseModelOutput` and
+  `TaguruIngester` (lossy or strict) no longer coerce a numeric string or
+  boolean into a number for `weight`/`paragraph` — the pydantic-lax-mode
+  parity `coerceFloat`/`coerceInt` provided is dropped in favor of the
+  Rust producer's stricter, cross-language-consistent parsing (ADR 0001
+  §11). Validates against the same shared fixture corpus
+  `tests/fixtures/model_output/repaired/` the Rust and Python twins use.
 - `add_associations`, `store_passages`, and `POST /import` (including
   MCP's `import` tool) return structured, path-addressed validation
   detail on ingestion refusals (#182, implementing ADR 0001 §8/§11's

@@ -51,9 +51,9 @@ def test_successful_first_attempt_emits_no_attempt_failed(
 
     chunk_completed = next(e for e in events if isinstance(e, ChunkCompleted))
     assert chunk_completed.llm_calls == 1
-    # Raw, pre-merge/dedup proposal counts (MODEL_ANSWER has 4 associations,
-    # one duplicate and one invalid, that only get dropped during merge()).
-    assert chunk_completed.associations_proposed == 4
+    # Raw, pre-merge/dedup proposal counts (MODEL_ANSWER has 3 associations,
+    # one a duplicate that only gets folded during merge()).
+    assert chunk_completed.associations_proposed == 3
     assert chunk_completed.aliases_proposed == 1
     assert chunk_completed.questions_proposed == 1
 

@@ -11,6 +11,7 @@ same batch contract. Revising the prompt here without revising extract.rs
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -301,6 +302,45 @@ def indicates_length_limit(finish_reason: str | None) -> bool:
     return finish_reason in ("length", "max_tokens")
 
 
+def indicates_refusal(finish_reason: str | None) -> bool:
+    """Whether ``finish_reason`` says the provider refused to answer on
+    policy grounds: ``"content_filter"`` is the OpenAI-compatible spelling;
+    ``"refusal"`` is Anthropic's ``stop_reason`` for the same thing, met
+    through pass-through bridges exactly like ``"max_tokens"`` in
+    ``indicates_length_limit``. Terminal — a corrective turn cannot argue
+    with a policy."""
+    return finish_reason in ("content_filter", "refusal")
+
+
+# How many issues one corrective-validation message lists: a pathological
+# answer with hundreds of malformed items must not make one turn's prompt
+# balloon without bound — the model gets the worst offenders (in the same
+# associations->aliases->questions walk order interpret_model_output
+# collects them) and a count of the rest.
+MAX_LISTED_ISSUES = 20
+
+
+def corrective_validation_message(issues: list[str]) -> str:
+    """The corrective turn's ask when an answer parsed as JSON but failed
+    Stage 1/Stage 2 validation (ADR 0001 §8 bucket 2): name every issue by
+    its path, then ask for the complete corrected object — preserve every
+    item, correct rather than delete, add nothing that wasn't already
+    there, JSON only. Distinct from ``corrective_message``, which stays
+    reserved for a genuine parse failure; this wording is the
+    cross-language corrective-text baseline #180/#181/#199 mirror byte for
+    byte."""
+    listed = "".join(f"\n- {issue}" for issue in issues[:MAX_LISTED_ISSUES])
+    remainder = len(issues) - MAX_LISTED_ISSUES
+    if remainder > 0:
+        listed += f"\n… and {remainder} more issue(s)"
+    return (
+        f"That was valid JSON but not a valid extraction ({len(issues)} issue(s)):{listed}\n"
+        "Answer again with the complete corrected JSON object: keep every item, correct the "
+        "fields listed above instead of deleting their items, add nothing that was not "
+        "already there, and answer with only the JSON object."
+    )
+
+
 def corrective_message(parse_error: str, length_limited: bool, fact_budget: int) -> str:
     """The corrective turn's user-facing ask, addressed to ``parse_error``.
     When ``length_limited`` is false this is byte-for-byte today's fixed
@@ -398,26 +438,668 @@ def strip_fences(text: str) -> str:
     return body.strip()
 
 
+def is_empty_answer(content: str) -> bool:
+    """An answer with no content once fences are stripped — the
+    thinking-budget-burn shape ``empty_answer_diagnosis`` names."""
+    return not strip_fences(content.strip())
+
+
+def empty_answer_diagnosis() -> str:
+    return (
+        "the answer was empty — thinking-mode models can burn their whole budget on "
+        "reasoning before any text"
+    )
+
+
+def _reject_json_constant(constant: str) -> Any:
+    """``json.loads`` accepts ``NaN``/``Infinity``/``-Infinity`` as an
+    extension by default; ``serde_json`` treats them as a syntax error
+    (they are not valid JSON), so reject them here to keep
+    ``evaluate_answer``'s error text meaningful across producers."""
+    raise ValueError(f"{constant} is not valid JSON")
+
+
+def _parse_top_level_object(text: str) -> Any | None:
+    try:
+        value = json.loads(text, parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _describe_parse_failure(text: str) -> str:
+    try:
+        json.loads(text, parse_constant=_reject_json_constant)
+    except ValueError as error:
+        return str(error)
+    return "the top-level value is not a JSON object"
+
+
+def _strip_trailing_commas(text: str) -> tuple[str, bool]:
+    """Delete a comma whose next non-whitespace character closes the
+    surrounding object/array — always JSON-unambiguous (a trailing comma
+    can never be meaningful content) — string-aware so a comma sitting
+    inside a string value is never touched. One of the lossless repairs
+    ADR 0001 §8 bucket 1 has #180/#181 add on top of "today's set"
+    (fence-stripping, widest-braces slicing) that src/extract.rs already
+    had."""
+    out: list[str] = []
+    changed = False
+    in_string = False
+    escaped = False
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+            index += 1
+            continue
+        if char == ",":
+            look = index + 1
+            while look < length and text[look] in " \t\r\n":
+                look += 1
+            if look < length and text[look] in "}]":
+                changed = True
+                index += 1
+                continue  # drop the comma itself
+        out.append(char)
+        index += 1
+    return "".join(out), changed
+
+
+def candidate_json(content: str) -> tuple[Any, list[str]]:
+    """Trim, strip a BOM, strip fences, and parse into a bare JSON value —
+    everything ``evaluate_answer`` needs before validating it. A non-object
+    top level (an array, a scalar) is refused, same as today. Returns the
+    parsed value alongside the labels of whichever lossless repairs (if
+    any) were needed to get there, for ``IngestOutcome.lossless_repairs``.
+    Raises ``SyntaxFault`` when no repair recovers a JSON object."""
+    repairs: list[str] = []
+    text = content.strip()
+    stripped_bom = text.lstrip("﻿")
+    if stripped_bom != text:
+        repairs.append("bom")
+        text = stripped_bom
+    unfenced = strip_fences(text)
+    if unfenced != text:
+        repairs.append("code_fence")
+    if not unfenced:
+        raise SyntaxFault(empty_answer_diagnosis())
+
+    value = _parse_top_level_object(unfenced)
+    if value is not None:
+        return value, repairs
+
+    first_error = _describe_parse_failure(unfenced)
+
+    comma_stripped, comma_changed = _strip_trailing_commas(unfenced)
+    if comma_changed:
+        value = _parse_top_level_object(comma_stripped)
+        if value is not None:
+            return value, [*repairs, "trailing_comma"]
+
+    start, end = unfenced.find("{"), unfenced.rfind("}")
+    if 0 <= start < end:
+        sliced = unfenced[start : end + 1]
+        value = _parse_top_level_object(sliced)
+        if value is not None:
+            return value, [*repairs, "braces_slice"]
+        sliced_comma_stripped, sliced_comma_changed = _strip_trailing_commas(sliced)
+        if sliced_comma_changed:
+            value = _parse_top_level_object(sliced_comma_stripped)
+            if value is not None:
+                return value, [*repairs, "braces_slice", "trailing_comma"]
+
+    raise SyntaxFault(f"not a JSON object: {first_error}")
+
+
+# -- lenient validation walk (mirrors extract.rs interpret_model_output) ----------
+#
+# ADR 0001 §8's "lenient parse, strict accounting" ruling: parsing never
+# gets stricter, accounting does. interpret_model_output reads a JSON
+# object into the same lenient ModelOutput shape the old
+# ModelOutput.model_validate() produced — absent and null both read as
+# "not present," a wrong-typed or non-object element reads as None/skipped
+# — while collecting a path-addressed issue for every departure. A caller
+# that discards the issues (lossy mode) sees byte-for-byte the old
+# behavior; a caller that doesn't (the strict default) can hand every
+# issue to one targeted corrective turn instead of merge() silently
+# dropping the item.
+
+
+@dataclass(frozen=True)
+class ItemRules:
+    """The rules one document's items are checked against — the two pieces
+    of per-document context ``interpret_model_output`` needs that no single
+    item carries on its own."""
+
+    # The document's canonical paragraph count: a question's `paragraph`
+    # citation (and, informationally only, an association's own tag) is
+    # checked against this.
+    paragraph_count: int
+    # Whether this run asked for questions at all (`questions` > 0). When
+    # false, a volunteered `questions` array is merge()'s policy trim,
+    # never a validity issue — see `_interpret_questions`.
+    questions_requested: bool
+
+
+class AnswerFault(ValueError):
+    """Base for a Stage 1 answer-evaluation failure — extract.rs's
+    ``AnswerFault`` enum, ported as ``ValueError`` subclasses so every
+    existing ``except ValueError`` call site keeps working unchanged."""
+
+
+class SyntaxFault(AnswerFault):
+    """The answer was not parseable JSON, or not a JSON object at all —
+    extract.rs's ``AnswerFault::Syntax``."""
+
+
+class InvalidFault(AnswerFault):
+    """The answer was valid JSON but failed Stage 1/Stage 2 validation —
+    extract.rs's ``AnswerFault::Invalid``. Carries the path-addressed
+    issues verbatim so a corrective turn can address each one."""
+
+    def __init__(self, issues: list[str]) -> None:
+        self.issues = issues
+        super().__init__(
+            f"the answer left {len(issues)} invalid item(s) uncorrected: {'; '.join(issues)}"
+        )
+
+
+# How many bytes of a string value's own text an issue message embeds
+# before eliding the rest — long enough to recognize the value, short
+# enough that a pathological answer cannot make one issue line balloon.
+MAX_ISSUE_VALUE_BYTES = 64
+
+_DEBUG_STRING_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
+
+
+def _rust_debug_string(text: str) -> str:
+    """Mirror Rust's ``{:?}`` Debug format for ``&str`` — always
+    double-quoted (Python's ``repr()`` prefers single quotes), with the
+    common control escapes spelled out and any other control character as
+    a ``\\u{{xx}}`` hex escape; printable non-ASCII (e.g. Japanese text)
+    passes through unescaped, matching Rust."""
+    pieces = ['"']
+    for char in text:
+        escape = _DEBUG_STRING_ESCAPES.get(char)
+        if escape is not None:
+            pieces.append(escape)
+        elif ord(char) < 0x20 or ord(char) == 0x7F:
+            pieces.append(f"\\u{{{ord(char):x}}}")
+        else:
+            pieces.append(char)
+    pieces.append('"')
+    return "".join(pieces)
+
+
+def _quote_for_issue(text: str) -> str:
+    """extract.rs's ``quote_for_issue``: a Debug-quoted, byte-capped
+    preview of a string value for a "got …" issue clause."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= MAX_ISSUE_VALUE_BYTES:
+        return _rust_debug_string(text)
+    truncated = encoded[:MAX_ISSUE_VALUE_BYTES].decode("utf-8", errors="ignore")
+    return f"{_rust_debug_string(truncated)}…"
+
+
+def _format_f64(value: float) -> str:
+    """Mirror Rust's f64 Display used in extract.rs's issue messages: no
+    forced trailing ``.0`` for a whole number, and no scientific notation
+    (Rust's float Display never switches to it, unlike Python's ``repr()``
+    at very large/small magnitudes — realistic weights never approach that
+    range, so this only needs to be exactly right for ordinary values)."""
+    if value != value:  # NaN
+        return "NaN"
+    if value == math.inf:
+        return "inf"
+    if value == -math.inf:
+        return "-inf"
+    text = repr(value)
+    if "e" in text or "E" in text:
+        text = format(value, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+    elif text.endswith(".0"):
+        text = text[:-2]
+    return text
+
+
+def _describe_number(value: int | float) -> str:
+    """Mirror ``serde_json::Number``'s ``Display`` for ``describe_value``'s
+    "got …" clause — distinct from ``_format_f64`` (Rust's plain
+    ``f64::Display``, used only for weight's own business-rule messages,
+    which strips a whole number's trailing ``.0``). An integer-sourced JSON
+    literal (Python's ``json`` module already tells the two apart) prints
+    bare; a float-sourced one keeps its decimal even when the value is
+    whole — confirmed empirically: ``serde_json`` renders the JSON literal
+    ``42.0`` as ``42.0``, not ``42``."""
+    if isinstance(value, int):
+        return str(value)
+    text = repr(value)
+    if "e" in text or "E" in text:
+        text = format(value, "f")
+        if "." not in text:
+            text += ".0"
+    return text
+
+
+def describe_value(value: Any) -> str:
+    """Render a JSON value's type and, for scalars, its content — for a
+    wrong-typed-field issue's "got …" clause."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return f"boolean {'true' if value else 'false'}"
+    if isinstance(value, (int, float)):
+        return f"number {_describe_number(value)}"
+    if isinstance(value, str):
+        return f"string {_quote_for_issue(value)}"
+    if isinstance(value, list):
+        return "an array"
+    return "an object"
+
+
+def _get_present(obj: dict[str, Any], key: str) -> Any | None:
+    """A present, non-null field — absent and ``null`` both read as "not
+    here" for every optional field this module validates (ADR 0001 §8's
+    ruling applies to required fields; an optional field's null and
+    absence are both simply valid-absent)."""
+    return obj.get(key)
+
+
+def _interpret_paragraph_index(value: Any) -> int | None:
+    """A non-negative integer that fits u32 — read only from an actual
+    JSON integer literal, mirroring ``serde_json``'s ``Number::as_u64()``
+    (a JSON float literal like ``3.0`` returns ``None`` even when
+    whole-numbered). ``bool`` is excluded explicitly: Python's ``int`` is
+    its base class, so an unguarded ``isinstance`` check would read
+    ``true`` as ``1``."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if not 0 <= value <= 0xFFFFFFFF:
+        return None
+    return value
+
+
+def _interpret_required_string(
+    obj: dict[str, Any], key: str, path: str, max_bytes: int, issues: list[str]
+) -> str | None:
+    """A required string field shared by associations (subject/label/
+    object), aliases (alias), and questions (question): missing,
+    wrong-typed, empty-after-trim, and oversized are each their own issue
+    text so the model sees exactly which of the four it hit."""
+    value = _get_present(obj, key)
+    if value is None:
+        issues.append(f"{path}.{key}: missing")
+        return None
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if not trimmed:
+            issues.append(f"{path}.{key}: empty")
+            return None
+        length = _byte_len(trimmed)
+        if length > max_bytes:
+            issues.append(f"{path}.{key}: {length} bytes exceeds the {max_bytes}-byte cap")
+            return None
+        return trimmed
+    issues.append(f"{path}.{key}: expected a string, got {describe_value(value)}")
+    return None
+
+
+def _interpret_weight(obj: dict[str, Any], path: str, issues: list[str]) -> float | None:
+    """``weight`` is optional (absent/null is a plain 1.0 assertion, kept
+    as ``None`` here for ``merge()`` to default) but a *present* value must
+    be a finite, non-zero number under the magnitude cap. A well-TYPED
+    business-rule violation (zero, over-cap, non-finite) still returns the
+    weight, not ``None``: ``merge()`` — not this parse-level pass — is the
+    sole authority on whether that value survives. Returning ``None`` here
+    instead would let a lossy run's ``or 1.0`` default silently launder an
+    invalid weight into a valid-looking ``1.0``. Only a WRONG-TYPED value
+    (never a number at all, including ``bool`` — a subclass of ``int`` in
+    Python) returns ``None``."""
+    value = _get_present(obj, "weight")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        issues.append(
+            f"{path}.weight: expected finite non-zero number, got {describe_value(value)}"
+        )
+        return None
+    try:
+        weight = float(value)
+    except OverflowError:
+        weight = math.inf if value > 0 else -math.inf
+    if not math.isfinite(weight):
+        issues.append(f"{path}.weight: expected finite non-zero number, got {_format_f64(weight)}")
+    elif weight == 0.0:
+        issues.append(f"{path}.weight: expected finite non-zero number, got 0")
+    elif abs(weight) > MAX_ASSOCIATION_WEIGHT:
+        issues.append(
+            f"{path}.weight: expected finite non-zero number, got {_format_f64(weight)} "
+            f"(over the {_format_f64(MAX_ASSOCIATION_WEIGHT)} cap)"
+        )
+    return weight
+
+
+def _interpret_association_paragraph(
+    obj: dict[str, Any], path: str, issues: list[str]
+) -> int | None:
+    """An association's ``paragraph`` is optional and, unlike a question's,
+    never business-rule-checked here: a well-typed but out-of-range
+    paragraph costs only the tag in ``merge()`` (the fact survives
+    untagged), so only a wrong-typed value is a validity issue."""
+    value = _get_present(obj, "paragraph")
+    if value is None:
+        return None
+    paragraph = _interpret_paragraph_index(value)
+    if paragraph is None:
+        issues.append(
+            f"{path}.paragraph: expected an integer paragraph index, got {describe_value(value)}"
+        )
+    return paragraph
+
+
+def _interpret_association_item(
+    index: int, item: Any, issues: list[str]
+) -> ModelAssociation | None:
+    path = f"associations[{index}]"
+    if not isinstance(item, dict):
+        issues.append(f"{path}: expected an object, got {describe_value(item)}")
+        return None
+    subject = _interpret_required_string(item, "subject", path, MAX_NAME_BYTES, issues)
+    label = _interpret_required_string(item, "label", path, MAX_NAME_BYTES, issues)
+    object_ = _interpret_required_string(item, "object", path, MAX_NAME_BYTES, issues)
+    weight = _interpret_weight(item, path, issues)
+    paragraph = _interpret_association_paragraph(item, path, issues)
+    return ModelAssociation(
+        subject=subject, label=label, object=object_, weight=weight, paragraph=paragraph
+    )
+
+
+def _interpret_associations(obj: dict[str, Any], issues: list[str]) -> list[ModelAssociation]:
+    value = _get_present(obj, "associations")
+    if value is None:
+        return []
+    if isinstance(value, list):
+        result = []
+        for index, item in enumerate(value):
+            parsed = _interpret_association_item(index, item, issues)
+            if parsed is not None:
+                result.append(parsed)
+        return result
+    issues.append(f"associations: expected an array, got {describe_value(value)}")
+    return []
+
+
+def _interpret_canonical(obj: dict[str, Any], path: str, issues: list[str]) -> str | None:
+    """``canonical`` never fails on emptiness here: an empty (or merely
+    non-matching) canonical is exactly a *dangling* canonical, and
+    dangling-ness can only be judged against the merged association names
+    — Stage 2's ``cross_output_issues``, not this item-local pass."""
+    value = _get_present(obj, "canonical")
+    if value is None:
+        issues.append(f"{path}.canonical: missing")
+        return None
+    if isinstance(value, str):
+        trimmed = value.strip()
+        length = _byte_len(trimmed)
+        if length > MAX_NAME_BYTES:
+            issues.append(f"{path}.canonical: {length} bytes exceeds the {MAX_NAME_BYTES}-byte cap")
+            return None
+        return trimmed
+    issues.append(f"{path}.canonical: expected a string, got {describe_value(value)}")
+    return None
+
+
+def _interpret_kind(obj: dict[str, Any], path: str, issues: list[str]) -> str | None:
+    value = _get_present(obj, "kind")
+    if value is None:
+        issues.append(f"{path}.kind: missing")
+        return None
+    if isinstance(value, str):
+        if value in ("concept", "label"):
+            return value
+        issues.append(
+            f'{path}.kind: expected "concept" or "label", got {_rust_debug_string(value)}'
+        )
+        return None
+    issues.append(f'{path}.kind: expected "concept" or "label", got {describe_value(value)}')
+    return None
+
+
+def _interpret_alias_item(index: int, item: Any, issues: list[str]) -> ModelAlias | None:
+    path = f"aliases[{index}]"
+    if not isinstance(item, dict):
+        issues.append(f"{path}: expected an object, got {describe_value(item)}")
+        return None
+    spelling = _interpret_required_string(item, "alias", path, MAX_NAME_BYTES, issues)
+    canonical = _interpret_canonical(item, path, issues)
+    kind = _interpret_kind(item, path, issues)
+    # Self-alias is item-local (both sides come from this one item);
+    # dangling-canonical and shadowing need the merged name set and are
+    # Stage 2's job (cross_output_issues).
+    if spelling is not None and canonical is not None and spelling == canonical:
+        issues.append(f"{path}.alias: equals its canonical")
+    return ModelAlias(alias=spelling, canonical=canonical, kind=kind)
+
+
+def _interpret_aliases(obj: dict[str, Any], issues: list[str]) -> list[ModelAlias]:
+    value = _get_present(obj, "aliases")
+    if value is None:
+        return []
+    if isinstance(value, list):
+        result = []
+        for index, item in enumerate(value):
+            parsed = _interpret_alias_item(index, item, issues)
+            if parsed is not None:
+                result.append(parsed)
+        return result
+    issues.append(f"aliases: expected an array, got {describe_value(value)}")
+    return []
+
+
+def _interpret_question_item(
+    index: int, item: Any, rules: ItemRules, issues: list[str]
+) -> ModelQuestion | None:
+    path = f"questions[{index}]"
+    if not isinstance(item, dict):
+        if rules.questions_requested:
+            issues.append(f"{path}: expected an object, got {describe_value(item)}")
+        return None
+    if not rules.questions_requested:
+        # Not asked for: whatever the model volunteers is merge()'s policy
+        # trim (questions_cap == 0), so read it plainly (today's lenient
+        # semantics) without spending an issue on it.
+        paragraph_value = _get_present(item, "paragraph")
+        paragraph = (
+            _interpret_paragraph_index(paragraph_value) if paragraph_value is not None else None
+        )
+        question_value = _get_present(item, "question")
+        question = question_value if isinstance(question_value, str) else None
+        return ModelQuestion(paragraph=paragraph, question=question)
+    paragraph_value = _get_present(item, "paragraph")
+    if paragraph_value is None:
+        issues.append(f"{path}.paragraph: missing")
+        paragraph = None
+    else:
+        candidate = _interpret_paragraph_index(paragraph_value)
+        if candidate is not None and candidate < rules.paragraph_count:
+            paragraph = candidate
+        elif candidate is not None:
+            issues.append(
+                f"{path}.paragraph: must cite a paragraph below {rules.paragraph_count}, "
+                f"got {candidate}"
+            )
+            paragraph = None
+        else:
+            issues.append(
+                f"{path}.paragraph: expected an integer paragraph index, got "
+                f"{describe_value(paragraph_value)}"
+            )
+            paragraph = None
+    question = _interpret_required_string(item, "question", path, MAX_QUESTION_BYTES, issues)
+    return ModelQuestion(paragraph=paragraph, question=question)
+
+
+def _interpret_questions(
+    obj: dict[str, Any], rules: ItemRules, issues: list[str]
+) -> list[ModelQuestion]:
+    value = _get_present(obj, "questions")
+    if value is None:
+        return []
+    if isinstance(value, list):
+        result = []
+        for index, item in enumerate(value):
+            parsed = _interpret_question_item(index, item, rules, issues)
+            if parsed is not None:
+                result.append(parsed)
+        return result
+    # questions_requested == False makes any questions array the model
+    # volunteers merge()'s policy trim, never a validity issue.
+    if rules.questions_requested:
+        issues.append(f"questions: expected an array, got {describe_value(value)}")
+    return []
+
+
+def interpret_model_output(value: Any, rules: ItemRules) -> tuple[ModelOutput, list[str]]:
+    """Read a JSON value into the lenient ``ModelOutput`` shape while
+    collecting a path-addressed issue for every departure the lenient walk
+    papers over. Tolerates a non-object top level (reads nothing) rather
+    than asserting one — ``candidate_json`` is what actually refuses a
+    non-object answer. Walk order is fixed: associations -> aliases ->
+    questions."""
+    issues: list[str] = []
+    obj = value if isinstance(value, dict) else {}
+    associations = _interpret_associations(obj, issues)
+    aliases = _interpret_aliases(obj, issues)
+    questions = _interpret_questions(obj, rules, issues)
+    return ModelOutput(associations=associations, aliases=aliases, questions=questions), issues
+
+
+_LENIENT_RULES = ItemRules(paragraph_count=2**63, questions_requested=True)
+
+
+def effective_item_rules(rules: ItemRules | None) -> ItemRules:
+    """The rules ``interpret_model_output`` actually applies for a given
+    ``evaluate_answer``-style ``rules`` argument: ``rules`` itself in strict
+    mode, or the same lenient/no-op rules lossy mode uses internally
+    (paragraph_count effectively unbounded, questions always "requested" so
+    a volunteered array is read plainly) — for callers (the structured-
+    output path in ``ingest.py``) that need to run ``interpret_model_output``
+    directly instead of through ``evaluate_answer``."""
+    return rules if rules is not None else _LENIENT_RULES
+
+
+def evaluate_answer(content: str, rules: ItemRules | None) -> tuple[ModelOutput, list[str]]:
+    """The Stage 1 gate every corrective loop calls instead of
+    ``parse_model_output`` directly: parse, then — when ``rules`` is not
+    ``None`` (this run is not lossy) — validate every item and raise
+    ``InvalidFault`` on any path-addressed issue. ``rules=None`` (lossy
+    mode) parses only and discards whatever ``interpret_model_output``
+    would have flagged, reproducing today's behavior byte for byte:
+    ``merge()`` alone decides what survives."""
+    value, repairs = candidate_json(content)
+    if rules is None:
+        output, _issues = interpret_model_output(value, _LENIENT_RULES)
+        return output, repairs
+    output, issues = interpret_model_output(value, rules)
+    if issues:
+        raise InvalidFault(issues)
+    return output, repairs
+
+
 def parse_model_output(content: str) -> ModelOutput:
     """One JSON object, with code fences and surrounding prose tolerated.
-    Raises ``ValueError`` with a message fit for a corrective turn."""
-    unfenced = strip_fences(content.strip())
-    if not unfenced:
-        raise ValueError(
-            "the answer was empty — thinking-mode models can burn their whole budget on "
-            "reasoning before any text"
-        )
-    try:
-        return ModelOutput.model_validate(json.loads(unfenced))
-    except Exception as first:  # noqa: BLE001 — json + pydantic errors both land here
-        start = unfenced.find("{")
-        end = unfenced.rfind("}")
-        if 0 <= start < end:
-            try:
-                return ModelOutput.model_validate(json.loads(unfenced[start : end + 1]))
-            except Exception:  # noqa: BLE001
-                pass
-        raise ValueError(f"not a JSON object: {first}") from first
+    Raises ``ValueError`` with a message fit for a corrective turn.
+    Lenient-mode-only (like extract.rs's test-only twin): every production
+    corrective loop calls ``evaluate_answer`` directly instead."""
+    output, _repairs = evaluate_answer(content, None)
+    return output
+
+
+# -- cross-chunk alias validation (mirrors extract.rs cross_output_issues) --------
+
+
+def cross_output_issues(outputs: list[ModelOutput]) -> list[tuple[int, list[str]]]:
+    """Judgments possible only against the FULL merged name set (a
+    chunk-1 alias whose canonical only shows up in chunk 3 still lands).
+    Returns one entry per output index that contributed at least one
+    issue, in output order, so the caller can address a single targeted
+    corrective turn per offending output."""
+    concept_names: set[str] = set()
+    label_names: set[str] = set()
+    for output in outputs:
+        for item in output.associations:
+            subject = (item.subject or "").strip()
+            label = (item.label or "").strip()
+            object_ = (item.object or "").strip()
+            if subject:
+                concept_names.add(subject)
+            if object_:
+                concept_names.add(object_)
+            if label:
+                label_names.add(label)
+
+    # First-registered spelling -> canonical wins, exactly like merge()'s
+    # fold: a later output naming the same spelling with a DIFFERENT
+    # canonical is the conflict, not the first one to claim it.
+    concept_registry: dict[str, str] = {}
+    label_registry: dict[str, str] = {}
+    issues_by_output: list[tuple[int, list[str]]] = []
+
+    for output_index, output in enumerate(outputs):
+        issues: list[str] = []
+        for alias_index, alias_item in enumerate(output.aliases):
+            path = f"aliases[{alias_index}]"
+            spelling, canonical, kind = alias_item.alias, alias_item.canonical, alias_item.kind
+            if spelling is None or canonical is None or kind is None:
+                continue  # Stage 1 already has an issue for this alias
+            if spelling == canonical:
+                continue  # Stage 1's self-alias issue already covers this
+            if kind == "concept":
+                names, registry = concept_names, concept_registry
+            elif kind == "label":
+                names, registry = label_names, label_registry
+            else:
+                continue  # Stage 1's invalid-kind issue already covers this
+            if spelling in names:
+                issues.append(f"{path}.alias: names something the associations already contain")
+                continue
+            if canonical not in names:
+                issues.append(f"{path}.canonical: names nothing the associations contain")
+                continue
+            existing = registry.get(spelling)
+            if existing is None:
+                registry[spelling] = canonical
+            elif existing == canonical:
+                pass  # a repeated identical mapping is merge()'s duplicate fold, not a conflict
+            else:
+                issues.append(
+                    f"{path}: conflicts with an earlier alias mapping "
+                    f"{_rust_debug_string(spelling)} to {_rust_debug_string(existing)}"
+                )
+        if issues:
+            issues_by_output.append((output_index, issues))
+    return issues_by_output
 
 
 # -- merge (mirrors extract.rs merge(): trim, validate, dedup, alias checks) ------

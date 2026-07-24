@@ -41,9 +41,18 @@ they work offline, no API key needed.
 dependent: a chat model that cannot bind tools raises out of the
 constructor immediately, before any document is ingested, rather than
 surfacing later as a per-attempt failure. Either way the answer still goes
-through the same `ModelOutput` revalidation and business-rule checks a
+through the same lenient validation walk and business-rule checks a
 free-text answer gets — a schema only narrows what shape a well-behaved
 provider can return.
+
+By default, a business-rule-invalid item (a bad weight, a dangling alias,
+an out-of-range question, ...) never gets silently dropped and reported as
+a success: it earns one targeted, path-addressed corrective turn naming
+exactly which fields are wrong, and the source fails outright (no
+`/import` call) if it's still invalid afterward. Pass `lossy: true` to
+restore the old drop-and-proceed behavior instead — the source still
+imports, and `IngestOutcome.invalid_dropped` counts what got silently
+discarded.
 
 `TaguruIngester` also takes the same bounded structured-output controls as
 `taguru extract` and the Python SDK, all defaulting to today's unbounded,
