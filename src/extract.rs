@@ -27,8 +27,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -433,13 +433,23 @@ pub fn run(args: &[String]) -> i32 {
         parallel,
         lossy,
         diagnostics,
+        stop: StopSignal::install(),
     };
 
     let mut written = 0usize;
     let mut planned = 0usize;
     let mut skipped = 0usize;
     let mut failures = 0usize;
+    // Issue #179: a stop request is checked between documents (and,
+    // inside extract_document, between top-level chunks) — never mid
+    // model-call. Whichever document was in flight when it landed keeps
+    // every unit already checkpointed; nothing after it is attempted.
+    let mut interrupted = false;
     for path in &files {
+        if run.stop.check() {
+            interrupted = true;
+            break;
+        }
         let source = path.to_string_lossy().into_owned();
         match run.extract_document(path, &source) {
             Ok(Outcome::Written) => {
@@ -460,6 +470,10 @@ pub fn run(args: &[String]) -> i32 {
             }
             Ok(Outcome::Unchanged) => skipped += 1,
             Ok(Outcome::Planned) => planned += 1,
+            Ok(Outcome::Interrupted) => {
+                interrupted = true;
+                break;
+            }
             Err(message) => {
                 eprintln!("taguru: extract: {source}: {message}");
                 failures += 1;
@@ -484,13 +498,28 @@ pub fn run(args: &[String]) -> i32 {
             "extract: {planned} planned, {skipped} unchanged, {failures} failed of {} document(s)",
             files.len()
         );
+    } else if interrupted {
+        println!(
+            "extract: {written} written, {skipped} unchanged, {failures} failed of {} \
+             document(s) — stopped early, chunk checkpoints saved; rerun to resume",
+            files.len()
+        );
     } else {
         println!(
             "extract: {written} written, {skipped} unchanged, {failures} failed of {} document(s)",
             files.len()
         );
     }
-    if failures > 0 { 1 } else { 0 }
+    if failures > 0 {
+        1
+    } else if interrupted {
+        // 128 + SIGINT(2), the same convention StopSignal's forced
+        // second-signal exit uses — a script can tell "stopped safely,
+        // rerun to resume" apart from a hard failure (exit 1).
+        130
+    } else {
+        0
+    }
 }
 
 /// The flags and paths one invocation settled on. `Err` from
@@ -756,6 +785,11 @@ enum Outcome {
     Unchanged,
     /// `--dry-run` reported what would happen without calling anything.
     Planned,
+    /// Issue #179: a cooperative stop request was observed between
+    /// chunks or between documents. Whatever units already landed stay
+    /// checkpointed on disk; nothing was merged, imported, or recorded
+    /// in the manifest — a rerun resumes exactly where this stopped.
+    Interrupted,
 }
 
 /// How [`extract_chunk`] handles a model answer that isn't the JSON
@@ -831,6 +865,123 @@ struct LadderConfig {
     max_output_tokens: Option<usize>,
 }
 
+/// Issue #179's cooperative stop, checked between chunks/documents
+/// rather than interrupting a call in flight. `extract` otherwise never
+/// starts a runtime at all (`run`'s own SAFETY comment); this is the one
+/// exception, confined to a dedicated background thread that does
+/// nothing but wait on a signal — reusing `tokio`'s already-a-workspace-
+/// dependency "signal" feature (the server's `shutdown_signal` depends
+/// on the same feature) instead of adding a new crate.
+///
+/// Mirrors `main.rs`'s `shutdown_signal`/`TerminateSignals` two-stage
+/// semantics exactly: the first SIGINT/SIGTERM sets `requested` and
+/// prints a message; the second exits immediately with code 130 (128 +
+/// SIGINT, the same shell convention). A registration failure (rare;
+/// e.g. the signal is otherwise blocked) leaves `requested` permanently
+/// false and the process's default signal disposition untouched — a
+/// bare Ctrl+C still terminates the process the old way, just without
+/// the cooperative message or a chance to checkpoint the in-flight
+/// chunk.
+struct StopSignal {
+    requested: Arc<AtomicBool>,
+}
+
+impl StopSignal {
+    fn install() -> Self {
+        let requested = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&requested);
+        std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async {
+                let mut signals = StopSignals::install();
+                // Printed once registration completes, so a test (or an
+                // operator scripting around this) can wait for it
+                // instead of guessing a startup margin before sending a
+                // signal — a signal sent earlier hits the process's
+                // default disposition rather than this cooperative path.
+                eprintln!("taguru: extract: stop signal handlers installed");
+                signals.recv().await;
+                flag.store(true, Ordering::SeqCst);
+                eprintln!(
+                    "taguru: extract: stopping after the current chunk — press Ctrl+C again \
+                     to stop immediately"
+                );
+                signals.recv().await;
+                eprintln!("taguru: extract: second stop signal received — exiting immediately");
+                // 128 + SIGINT(2), the shell convention for
+                // signal-terminated — same as shutdown_signal's.
+                std::process::exit(130);
+            });
+        });
+        Self { requested }
+    }
+
+    /// Never blocks: a plain atomic load, safe to call between every
+    /// chunk and every document without measurable overhead.
+    fn check(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+}
+
+/// The extract-local twin of `main.rs`'s `TerminateSignals`: the
+/// SIGINT/SIGTERM streams held for [`StopSignal`]'s whole background
+/// thread so a second signal can be awaited without a re-registration
+/// gap that could lose it.
+struct StopSignals {
+    #[cfg(unix)]
+    interrupt: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    terminate: Option<tokio::signal::unix::Signal>,
+}
+
+impl StopSignals {
+    fn install() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Self {
+                interrupt: signal(SignalKind::interrupt()).ok(),
+                terminate: signal(SignalKind::terminate()).ok(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {}
+        }
+    }
+
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        {
+            async fn wait(stream: &mut Option<tokio::signal::unix::Signal>) {
+                match stream {
+                    Some(stream) => {
+                        stream.recv().await;
+                    }
+                    None => std::future::pending().await,
+                }
+            }
+            let Self {
+                interrupt,
+                terminate,
+            } = self;
+            tokio::select! {
+                () = wait(interrupt) => {}
+                () = wait(terminate) => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
 /// One extract run: the settled flags, the provider, and everything
 /// that accumulates across documents — the manifest, the label
 /// vocabulary offered to later prompts, and the output names already
@@ -884,6 +1035,9 @@ struct Run {
     /// (`None`, the default: no sidecar, stdout/stderr byte-for-byte
     /// today's). Issue #200.
     diagnostics: Option<DiagnosticsSink>,
+    /// Issue #179's cooperative stop flag, checked between chunks and
+    /// between documents.
+    stop: StopSignal,
 }
 
 impl Run {
@@ -897,7 +1051,55 @@ impl Run {
     }
 }
 
+/// [`Run::extract_chunks`]'s result: either every chunk completed, or a
+/// cooperative stop request (issue #179) was observed between chunks
+/// first. Distinct from `Err` — an interruption isn't a failure, and
+/// whatever units already landed are still durably checkpointed.
+enum ChunkLoopResult {
+    Complete(Vec<ChunkOutput>),
+    Interrupted,
+}
+
 impl Run {
+    /// The checkpoint compatibility fingerprint for one document — the
+    /// same fields [`Manifest::matches`]/[`Manifest::record`] already
+    /// carry, minus `output`. Any mismatch against a loaded file's own
+    /// fingerprint treats every cached unit as absent (issue #179).
+    fn checkpoint_fingerprint(&self, hash: &str) -> CheckpointFingerprint {
+        CheckpointFingerprint {
+            sha256: hash.to_string(),
+            model: self.model_name.clone(),
+            prompt_version: PROMPT_VERSION,
+            context: self.context.clone(),
+            questions_n: self.questions,
+            no_passage: self.no_passage,
+            description: self.description.as_deref().unwrap_or("").to_string(),
+            fact_budget: self.fact_budget,
+            structured_output: self.structured_output.manifest_value().to_string(),
+            max_output_tokens: self.max_output_tokens.unwrap_or(0),
+            lossy: self.lossy,
+        }
+    }
+
+    /// Loads one document's checkpoint store. `--force` — already "redo
+    /// this document over" at the manifest level — extends the same
+    /// intent one level deeper: an empty store, ignoring whatever units
+    /// a prior run cached, rather than comparing them against today's
+    /// fingerprint (which would often still match and silently defeat
+    /// the point of forcing a redo).
+    fn load_checkpoints(&self, source: &str, hash: &str) -> CheckpointStore {
+        let fingerprint = self.checkpoint_fingerprint(hash);
+        let path = self
+            .out
+            .join(CHECKPOINT_DIR_NAME)
+            .join(checkpoint_file_name(source));
+        if self.force {
+            CheckpointStore::empty(path, fingerprint)
+        } else {
+            CheckpointStore::load(path, &fingerprint)
+        }
+    }
+
     /// The whole per-document pipeline: caps, the manifest skip, the
     /// chunk loop, merge, self-validation, the atomic write, the
     /// report line. `Err` is one document failing — the caller prints
@@ -948,16 +1150,48 @@ impl Run {
         let canonical_paragraphs = crate::paragraph::split(&text).len();
         let chunks = chunk(&labeled_document(&text, CHUNK_BYTES), CHUNK_BYTES);
         if self.dry_run {
-            println!(
-                "{source}: would extract ({} bytes, {} chunk(s)) → {}",
-                text.len(),
-                chunks.len(),
-                out_path.display()
-            );
+            // Read-only: a dry run still calls/writes nothing, but
+            // reusable-count reporting is exactly what --dry-run is for
+            // (issue #179). Top-level-only — dry-run resolves no ladder
+            // and probes nothing (matching its existing contract), so a
+            // chunk that would end up split on a real run is honestly
+            // reported as pending rather than guessed at.
+            let checkpoints = self.load_checkpoints(source, &hash);
+            let reusable = chunks
+                .iter()
+                .filter(|piece| checkpoints.lookup(&sha256_hex(piece.as_bytes())).is_some())
+                .count();
+            if reusable > 0 {
+                println!(
+                    "{source}: would extract ({} bytes, {} chunk(s), {reusable} reusable from \
+                     checkpoint) → {}",
+                    text.len(),
+                    chunks.len(),
+                    out_path.display()
+                );
+            } else {
+                println!(
+                    "{source}: would extract ({} bytes, {} chunk(s)) → {}",
+                    text.len(),
+                    chunks.len(),
+                    out_path.display()
+                );
+            }
             return Ok(Outcome::Planned);
         }
 
-        let mut outputs = self.extract_chunks(source, &chunks, canonical_paragraphs)?;
+        let checkpoints = self.load_checkpoints(source, &hash);
+        if self.stop.check() {
+            return Ok(Outcome::Interrupted);
+        }
+        let chunk_result =
+            self.extract_chunks(source, &chunks, canonical_paragraphs, &checkpoints)?;
+        let mut outputs = match chunk_result {
+            ChunkLoopResult::Complete(outputs) => outputs,
+            // Whatever units already landed stay on disk — a rerun
+            // resumes from exactly here, never further back.
+            ChunkLoopResult::Interrupted => return Ok(Outcome::Interrupted),
+        };
         // Issue #199 Stage 2: cross-chunk alias validation (dangling
         // canonical, shadowing, conflicting mappings) — the judgment
         // Stage 1 cannot make per-output, only merge() itself could
@@ -1010,6 +1244,12 @@ impl Run {
             self.lossy,
             &file_name,
         );
+        // The batch is durably written and manifest-recorded — the
+        // checkpoint's only purpose (resuming an incomplete document)
+        // no longer applies. A document that fails Stage 2/merge/
+        // self-validation above instead keeps its checkpoint file: the
+        // per-chunk outputs already extracted are still good.
+        checkpoints.clear();
         self.vocabulary.extend(extraction.label_vocabulary());
         self.report(source, &extraction, &out_path);
         Ok(Outcome::Written)
@@ -1023,14 +1263,22 @@ impl Run {
     /// across documents, since the vocabulary above accumulates
     /// document-to-document and concurrent documents could diverge on
     /// label spellings.
+    ///
+    /// Issue #179: the cooperative stop flag is checked between
+    /// top-level chunks here (sequential path only — see
+    /// [`Run::extract_chunks_concurrently`]'s doc comment for why
+    /// `--parallel` is scoped to between-documents instead). A stop
+    /// observed mid-loop returns [`ChunkLoopResult::Interrupted`]
+    /// immediately, keeping whatever units already landed.
     fn extract_chunks(
         &self,
         source: &str,
         chunks: &[String],
         paragraph_count: usize,
-    ) -> Result<Vec<ChunkOutput>, String> {
+        checkpoints: &CheckpointStore,
+    ) -> Result<ChunkLoopResult, String> {
         if self.parallel > 1 {
-            return self.extract_chunks_concurrently(source, chunks, paragraph_count);
+            return self.extract_chunks_concurrently(source, chunks, paragraph_count, checkpoints);
         }
         let client = self
             .client
@@ -1040,6 +1288,9 @@ impl Run {
         let rules = self.item_rules(paragraph_count);
         let mut outputs = Vec::new();
         for (index, piece) in chunks.iter().enumerate() {
+            if self.stop.check() {
+                return Ok(ChunkLoopResult::Interrupted);
+            }
             match extract_chunk_or_ladder(
                 client,
                 &system,
@@ -1052,6 +1303,7 @@ impl Run {
                 self.ladder.as_ref(),
                 rules.as_ref(),
                 self.diagnostics.as_ref(),
+                checkpoints,
             ) {
                 Ok(piece_outputs) => outputs.extend(piece_outputs),
                 Err(message) => {
@@ -1059,7 +1311,7 @@ impl Run {
                 }
             }
         }
-        Ok(outputs)
+        Ok(ChunkLoopResult::Complete(outputs))
     }
 
     /// [`Run::extract_chunks`]'s `--parallel > 1` path: dispatches
@@ -1072,12 +1324,22 @@ impl Run {
     /// document, formatted with its position, and nothing after it is
     /// intentionally dispatched — calls already in flight when the
     /// failure lands simply finish and are discarded.
+    ///
+    /// Issue #179's cooperative stop is deliberately NOT checked
+    /// mid-dispatch here: `dispatch_chunks_concurrently` is shared with
+    /// unrelated embedding-refresh code, and threading a stop flag
+    /// through it would widen that primitive's contract for one caller.
+    /// Under `--parallel`, a stop request only takes effect between
+    /// documents — every already-claimed chunk in this document runs to
+    /// completion (and gets checkpointed) before the run notices the
+    /// request.
     fn extract_chunks_concurrently(
         &self,
         source: &str,
         chunks: &[String],
         paragraph_count: usize,
-    ) -> Result<Vec<ChunkOutput>, String> {
+        checkpoints: &CheckpointStore,
+    ) -> Result<ChunkLoopResult, String> {
         let client = self
             .client
             .as_ref()
@@ -1101,6 +1363,7 @@ impl Run {
                     self.ladder.as_ref(),
                     rules.as_ref(),
                     self.diagnostics.as_ref(),
+                    checkpoints,
                 )
             },
         );
@@ -1115,7 +1378,7 @@ impl Run {
                 }
             }
         }
-        Ok(outputs)
+        Ok(ChunkLoopResult::Complete(outputs))
     }
 
     /// Issue #199 Stage 2: one targeted corrective turn per output
@@ -2403,6 +2666,44 @@ fn extract_chunk(
     Err(last_diagnosis)
 }
 
+/// Issue #179's reuse guard, shared by both the legacy path
+/// (`extract_chunk_or_ladder`'s `None` branch) and every level of
+/// `extract_piece`'s split recursion: a unit is identified by its OWN
+/// text's content hash, never `chunk_index` alone, so a split
+/// sub-piece (ADR 0001 §7's Option D, which can change a document's
+/// unit boundaries mid-run) is a correct, distinct cache key regardless
+/// of how it came to exist.
+fn checkpointed_unit(checkpoints: &CheckpointStore, piece: &str) -> Option<ChunkOutput> {
+    let unit_hash = sha256_hex(piece.as_bytes());
+    checkpoints.lookup(&unit_hash).map(|unit| ChunkOutput {
+        output: unit.output,
+        chunk_index: unit.chunk_index,
+        user: unit.user,
+        answer: unit.answer,
+    })
+}
+
+/// Durably records one freshly-valid unit before its caller returns —
+/// paired with [`checkpointed_unit`] above.
+fn record_checkpoint(
+    checkpoints: &CheckpointStore,
+    source: &str,
+    piece: &str,
+    output: &ChunkOutput,
+) {
+    let unit_hash = sha256_hex(piece.as_bytes());
+    checkpoints.record(
+        source,
+        unit_hash,
+        CheckpointUnit {
+            chunk_index: output.chunk_index,
+            output: output.output.clone(),
+            user: output.user.clone(),
+            answer: output.answer.clone(),
+        },
+    );
+}
+
 /// The one legacy/ladder fork. `None` is the pre-ladder loop
 /// untouched — one chunk, one output, the SHORTER corrective on
 /// `length` — reproducing today's requests and retries byte for byte.
@@ -2421,11 +2722,15 @@ fn extract_chunk_or_ladder(
     ladder: Option<&LadderConfig>,
     rules: Option<&ItemRules>,
     sink: Option<&DiagnosticsSink>,
+    checkpoints: &CheckpointStore,
 ) -> Result<Vec<ChunkOutput>, String> {
     match ladder {
         None => {
+            if let Some(cached) = checkpointed_unit(checkpoints, piece) {
+                return Ok(vec![cached]);
+            }
             let user = user_message(source, chunk_index, chunk_total, piece);
-            extract_chunk(
+            let output = extract_chunk(
                 client,
                 system,
                 &user,
@@ -2435,8 +2740,9 @@ fn extract_chunk_or_ladder(
                 fact_budget,
                 rules,
                 sink,
-            )
-            .map(|output| vec![output])
+            )?;
+            record_checkpoint(checkpoints, source, piece, &output);
+            Ok(vec![output])
         }
         Some(ladder) => {
             let context = PieceContext {
@@ -2450,6 +2756,7 @@ fn extract_chunk_or_ladder(
                 fact_budget,
                 rules,
                 sink,
+                checkpoints,
             };
             extract_piece(&context, piece)
         }
@@ -2472,6 +2779,7 @@ struct PieceContext<'a> {
     fact_budget: usize,
     rules: Option<&'a ItemRules>,
     sink: Option<&'a DiagnosticsSink>,
+    checkpoints: &'a CheckpointStore,
 }
 
 /// ADR 0001 §7 for one piece: a round at the configured budget; on
@@ -2482,7 +2790,18 @@ struct PieceContext<'a> {
 /// split fails the source. Escalation happens at most once per piece
 /// and each split halves the cap down to [`MIN_SPLIT_CAP`], so the
 /// call count is bounded by piece size and `max_attempts`.
+///
+/// Checked against issue #179's checkpoint store before doing any of
+/// that: a cache hit on THIS piece's own content hash returns
+/// immediately with no model call. Since a split's sub-pieces re-enter
+/// this same function with their own text, the one guard at the top
+/// covers every recursion depth — a resumed run whose earlier attempt
+/// split differently still reuses whatever units match today's actual
+/// piece texts, and nothing else.
 fn extract_piece(context: &PieceContext, piece: &str) -> Result<Vec<ChunkOutput>, String> {
+    if let Some(cached) = checkpointed_unit(context.checkpoints, piece) {
+        return Ok(vec![cached]);
+    }
     let user = user_message(
         context.source,
         context.chunk_index,
@@ -2500,7 +2819,10 @@ fn extract_piece(context: &PieceContext, piece: &str) -> Result<Vec<ChunkOutput>
         outcome = extract_round(context, &user, piece.len(), None);
     }
     match outcome {
-        RoundOutcome::Valid(chunk_output) => Ok(vec![chunk_output]),
+        RoundOutcome::Valid(chunk_output) => {
+            record_checkpoint(context.checkpoints, context.source, piece, &chunk_output);
+            Ok(vec![chunk_output])
+        }
         RoundOutcome::Failed(message) => Err(message),
         RoundOutcome::Refusal(reason) => Err(format!(
             "the provider refused this content (finish_reason {reason}) — a policy \
@@ -3048,7 +3370,12 @@ fn user_message(source: &str, index: usize, total: usize, text: &str) -> String 
 /// [`interpret_model_output`] names every departure it papers over as a
 /// path-addressed issue so the strict path can turn it into a
 /// corrective turn instead of a silent drop.
-#[derive(Default)]
+// Clone/Serialize/Deserialize are for the chunk checkpoint file's own
+// storage/(de)serialization (issue #179) only — the lenient hand-rolled
+// parse (`interpret_model_output`) that actually reads a model's raw
+// answer builds these from `serde_json::Value` directly and never
+// touches derive-based deserialization.
+#[derive(Default, Clone, serde::Serialize, Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelOutput {
     associations: Vec<ModelAssociation>,
@@ -3056,6 +3383,7 @@ struct ModelOutput {
     questions: Vec<ModelQuestion>,
 }
 
+#[derive(Clone, serde::Serialize, Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelAssociation {
     subject: Option<String>,
@@ -3065,6 +3393,7 @@ struct ModelAssociation {
     paragraph: Option<u32>,
 }
 
+#[derive(Clone, serde::Serialize, Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelAlias {
     alias: Option<String>,
@@ -3072,6 +3401,7 @@ struct ModelAlias {
     kind: Option<String>,
 }
 
+#[derive(Clone, serde::Serialize, Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelQuestion {
     paragraph: Option<u32>,
@@ -4348,6 +4678,195 @@ fn batch_file_name(source: &str) -> String {
         );
     }
     format!("{name}.jsonl")
+}
+
+/// Directory (adjacent to `--out`, hidden like the manifest) holding
+/// one per-document chunk checkpoint file — issue #179's durable
+/// resume. Never created for `--dry-run` (which calls/writes nothing)
+/// or for a document with no checkpointable units yet.
+const CHECKPOINT_DIR_NAME: &str = ".extract-checkpoints";
+
+/// Same flatten-then-hash-suffix scheme as [`batch_file_name`], `.json`
+/// instead of `.jsonl` — one checkpoint file per document, named from
+/// its source path rather than a hash of it so a `--out` directory
+/// listing stays legible.
+fn checkpoint_file_name(source: &str) -> String {
+    let mut name = source.replace(['/', '\\', ':'], "__");
+    if name.len() > 120 {
+        name = format!(
+            "{}-{}",
+            &name[..floor_char_boundary(&name, 96)],
+            &sha256_hex(source.as_bytes())[..16]
+        );
+    }
+    format!("{name}.json")
+}
+
+/// The same compatibility inputs [`ManifestEntry`]/[`Manifest::matches`]
+/// already check, minus `output` — the per-document gate deciding
+/// whether a checkpoint file's cached units are even consulted. Any
+/// field mismatch (content edited, model/prompt/`--questions`/
+/// `--fact-budget`/`--structured-output`/`--max-output-tokens`/`--lossy`
+/// changed) treats the whole file as absent, so a settings change can
+/// never silently reuse an incompatible output — the same posture
+/// [`Manifest::load`] already takes for an unreadable manifest.
+#[derive(Clone, PartialEq, serde::Serialize, Deserialize)]
+struct CheckpointFingerprint {
+    sha256: String,
+    model: String,
+    prompt_version: u32,
+    context: String,
+    questions_n: usize,
+    no_passage: bool,
+    description: String,
+    fact_budget: usize,
+    structured_output: String,
+    max_output_tokens: usize,
+    lossy: bool,
+}
+
+/// One durable unit of extraction work: a top-level chunk, or (issue
+/// #179's amendment to ADR 0001 §7's split rung) one of the smaller
+/// sub-pieces a length-limited chunk was split into. Keyed by the
+/// unit's OWN content hash rather than `chunk_index` alone, so a
+/// resumed run that splits differently than a prior one never
+/// misattributes a sub-piece's output to the wrong text — see
+/// `extract_piece`'s reuse guard.
+#[derive(Clone, serde::Serialize, Deserialize)]
+struct CheckpointUnit {
+    /// The ORIGINAL chunk's coordinates, kept only for the same "chunk
+    /// i/n" reporting `ChunkOutput::chunk_index` already carries.
+    chunk_index: usize,
+    output: ModelOutput,
+    /// The exact user turn and the model's own final answer text for
+    /// this unit — needed so a reused unit can still participate in
+    /// Stage 2 cross-chunk correction exactly like a freshly-extracted
+    /// one (`correct_cross_output_issues` rebuilds a chunk's own
+    /// conversation from these).
+    user: String,
+    answer: String,
+}
+
+/// One document's durable checkpoint state: the settings it was
+/// extracted under, and every unit completed so far, keyed by content
+/// hash. Persisted as one small JSON file, rewritten atomically
+/// (`storage::write_atomic`) after every new unit lands — small enough
+/// that a read-modify-write-whole-file is simpler and just as durable
+/// as an append-only log, the same shape `Manifest` itself already
+/// uses for a much larger (per-run, not per-document) equivalent.
+#[derive(serde::Serialize, Deserialize)]
+struct DocumentCheckpoints {
+    fingerprint: CheckpointFingerprint,
+    #[serde(default)]
+    units: BTreeMap<String, CheckpointUnit>,
+}
+
+impl DocumentCheckpoints {
+    /// Missing, unreadable, or fingerprint-mismatched checkpoints all
+    /// degrade to "nothing cached" — never an error, and never a false
+    /// reuse of an incompatible output. Mirrors [`Manifest::load`]'s
+    /// posture exactly.
+    fn load(path: &Path, fingerprint: &CheckpointFingerprint) -> Self {
+        let loaded: Option<Self> = fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        match loaded {
+            Some(checkpoints) if checkpoints.fingerprint == *fingerprint => checkpoints,
+            _ => Self {
+                fingerprint: fingerprint.clone(),
+                units: BTreeMap::new(),
+            },
+        }
+    }
+
+    fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let text = serde_json::to_string(self).expect("a checkpoint file serializes");
+        crate::storage::write_atomic(path, text.as_bytes())
+    }
+}
+
+/// The thread-safe handle threaded through one document's extraction —
+/// `--parallel` fans a document's own chunks out across threads (see
+/// `Run::extract_chunks_concurrently`), so lookups and writes need the
+/// same "shared, mutex-guarded, poisoning tolerated" treatment
+/// `DiagnosticsSink` already gives its writer, not `DocumentCheckpoints`
+/// used bare.
+struct CheckpointStore {
+    path: PathBuf,
+    state: Mutex<DocumentCheckpoints>,
+}
+
+impl CheckpointStore {
+    fn load(path: PathBuf, fingerprint: &CheckpointFingerprint) -> Self {
+        let state = DocumentCheckpoints::load(&path, fingerprint);
+        Self {
+            path,
+            state: Mutex::new(state),
+        }
+    }
+
+    /// `--force`'s "start this document over" extended one level
+    /// deeper: an empty store regardless of what a prior run's file
+    /// holds, so a forced re-extraction never silently reuses cached
+    /// units it was explicitly told to redo.
+    fn empty(path: PathBuf, fingerprint: CheckpointFingerprint) -> Self {
+        Self {
+            path,
+            state: Mutex::new(DocumentCheckpoints {
+                fingerprint,
+                units: BTreeMap::new(),
+            }),
+        }
+    }
+
+    /// Look up a unit by its own content hash — the answer to issue
+    /// #179's amendment: a split sub-piece's hash differs from its
+    /// parent's, so this is a correct cache key regardless of how many
+    /// times (or how) a piece has been split. Returns an owned clone so
+    /// the lock is never held across the caller's own work.
+    fn lookup(&self, unit_hash: &str) -> Option<CheckpointUnit> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.units.get(unit_hash).cloned()
+    }
+
+    /// Records one freshly-extracted unit and durably persists the
+    /// whole (small) file before returning, so a kill immediately after
+    /// this call still finds the unit on the next run. A save failure
+    /// only warns — the unit still counts for THIS run; a resume that
+    /// hits the same failure again would simply re-extract it, the same
+    /// "the next run re-extracts" posture a failed manifest save takes.
+    fn record(&self, source: &str, unit_hash: String, unit: CheckpointUnit) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.units.insert(unit_hash, unit);
+        if let Err(error) = state.save(&self.path) {
+            eprintln!(
+                "taguru: extract: {source}: saving checkpoint {}: {error} — the unit still \
+                 counts this run; a resume may repeat it",
+                self.path.display()
+            );
+        }
+    }
+
+    /// Best-effort delete once a document's batch has durably landed —
+    /// the checkpoint's whole purpose (resuming an INCOMPLETE document)
+    /// no longer applies, and clearing it keeps `--dry-run`'s reuse
+    /// count honest for the next document that reuses this source path.
+    /// A failure here is silently ignored, exactly like `Manifest`'s
+    /// "the batch is written; the next run just re-extracts" posture:
+    /// nothing correctness-critical depends on this file disappearing
+    /// promptly.
+    fn clear(&self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 #[cfg(test)]
