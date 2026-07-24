@@ -899,6 +899,12 @@ impl StopSignal {
             };
             runtime.block_on(async {
                 let mut signals = StopSignals::install();
+                // Printed once registration completes, so a test (or an
+                // operator scripting around this) can wait for it
+                // instead of guessing a startup margin before sending a
+                // signal — a signal sent earlier hits the process's
+                // default disposition rather than this cooperative path.
+                eprintln!("taguru: extract: stop signal handlers installed");
                 signals.recv().await;
                 flag.store(true, Ordering::SeqCst);
                 eprintln!(

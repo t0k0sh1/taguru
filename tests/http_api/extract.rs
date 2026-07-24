@@ -4013,14 +4013,38 @@ fn checkpoint_resumes_the_not_yet_completed_sub_piece_after_a_kill_mid_split() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// Blocks until `stderr` prints the line `StopSignal::install()` emits
+/// once its background signal handlers are registered, then spawns a
+/// thread draining whatever follows so the child never blocks writing
+/// to a full stderr pipe (mirrors `support.rs`'s
+/// `read_listen_line_and_drain` for the server's own "listening on"
+/// line). Replaces a fixed startup sleep: sending a signal before
+/// registration completes would hit the process's default disposition
+/// (immediate termination) instead of the cooperative stop path,
+/// which a fixed margin can only ever guess at under variable CI load.
+fn wait_for_stop_signal_handlers(stderr: std::process::ChildStderr) {
+    use std::io::{BufRead, BufReader};
+    let mut lines = BufReader::new(stderr).lines();
+    loop {
+        let line = lines
+            .next()
+            .expect("extract exited before installing its stop signal handlers")
+            .expect("extract stderr must be readable");
+        if line.contains("stop signal handlers installed") {
+            break;
+        }
+    }
+    std::thread::spawn(move || for _ in lines {});
+}
+
 /// Issue #179's cooperative stop: SIGINT lets an in-flight chunk finish
 /// (and get checkpointed) before the process exits with code 130 —
 /// distinct from a hard failure — and a rerun resumes without
 /// re-asking the model for what already landed. Chunk 0's response is
-/// deliberately delayed server-side so SIGINT can be sent any time in a
-/// full second's window without racing the process's own startup —
-/// no matter when it lands within that window, chunk 0 still completes
-/// and gets checkpointed before the next iteration notices the flag.
+/// deliberately delayed server-side so SIGINT can be sent any time
+/// before it, without racing the process's own startup — no matter
+/// when it lands in that window, chunk 0 still completes and gets
+/// checkpointed before the next iteration notices the flag.
 #[test]
 fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
     use std::time::Duration;
@@ -4063,18 +4087,9 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
         .arg(&doc)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = command.spawn().expect("extract must spawn");
+    let mut child = command.spawn().expect("extract must spawn");
+    wait_for_stop_signal_handlers(child.stderr.take().unwrap());
 
-    // Sent well past however long StopSignal's background thread takes
-    // to register its signal handlers on startup (a spawned-child
-    // signal handler needs empirically ~2s of headroom to register
-    // reliably under this test binary's process — likely OS/runtime
-    // scheduling overhead specific to being one of many concurrently
-    // spawned child processes, not a production concern: a real
-    // operator's Ctrl+C arrives well after that on human reaction
-    // time alone) — and still comfortably before chunk 0's
-    // several-second server-side delay elapses.
-    std::thread::sleep(Duration::from_millis(2500));
     let pid = child.id().to_string();
     Command::new("kill")
         .args(["-INT", &pid])
@@ -4160,10 +4175,8 @@ fn a_second_sigint_forces_an_immediate_exit_even_while_permanently_blocked() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().expect("extract must spawn");
+    wait_for_stop_signal_handlers(child.stderr.take().unwrap());
 
-    // Generous startup margin — see the comment in the SIGINT-resume
-    // test above on why this needs headroom under concurrent test load.
-    std::thread::sleep(Duration::from_millis(2500));
     let pid = child.id().to_string();
     // The first signal only sets the cooperative flag — the process
     // stays blocked inside the one chunk's never-answered request, so
