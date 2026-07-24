@@ -30,7 +30,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
 
 use crate::api::{
     MAX_ASSOCIATION_WEIGHT, MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES, MAX_NAME_BYTES,
@@ -41,6 +40,7 @@ const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--fact-budget N] [--config FILE] [--parallel N]
                       [--structured-output MODE] [--max-output-tokens N]
+                      [--lossy]
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
 Reads documents (.md/.txt; a directory expands to its files, sorted by
@@ -60,6 +60,7 @@ chat endpoint:
                       0 omits it entirely (unset: replay it in full)
   TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (off)
   TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (unset)
+  TAGURU_EXTRACT_LOSSY  default for --lossy (0/false)
 
   --dry-run           list what would extract or skip; call nothing
   --force             re-extract documents the manifest says are unchanged
@@ -86,6 +87,14 @@ chat endpoint:
   --parallel N        chunk completions to run concurrently within one
                       document (1, sequential); documents themselves stay
                       sequential — vocabulary accumulates as they land
+  --lossy             restore the pre-#199 behavior: a business-rule-invalid
+                      item (bad weight, dangling alias, out-of-range
+                      question, …) is dropped and counted instead of
+                      triggering a corrective turn or failing the source;
+                      the report always marks a lossy run's drops as such.
+                      Default (off): an invalid item earns one targeted
+                      corrective turn; if it is still invalid afterward,
+                      the source fails and nothing is written.
   --context NAME      the context every batch file targets
   --description TEXT  add a create block (used only if the context is absent)
 
@@ -325,6 +334,23 @@ pub fn run(args: &[String]) -> i32 {
             max_output_tokens: budget,
         }),
     };
+    // Same "hard usage error, not a silent warning" reasoning as
+    // --parallel/--fact-budget above (extract never initializes a
+    // tracing subscriber, so env::env_bool's warn! would go nowhere).
+    let lossy = match args.lossy {
+        Some(value) => value,
+        None => match std::env::var("TAGURU_EXTRACT_LOSSY") {
+            Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => true,
+            Ok(value) if value == "0" || value.eq_ignore_ascii_case("false") => false,
+            Ok(_) => {
+                return crate::config::subcommand_usage_error(
+                    "extract",
+                    "TAGURU_EXTRACT_LOSSY takes 1/true or 0/false",
+                );
+            }
+            Err(_) => false,
+        },
+    };
     let mut run = Run {
         context: args.context,
         description: args.description,
@@ -347,6 +373,7 @@ pub fn run(args: &[String]) -> i32 {
         vocabulary: BTreeSet::new(),
         claimed: BTreeMap::new(),
         parallel,
+        lossy,
     };
 
     let mut written = 0usize;
@@ -438,6 +465,11 @@ struct Args {
     /// sending no output-token parameter at all (today's request) —
     /// resolved in [`run`].
     max_output_tokens: Option<usize>,
+    /// `None` defers to TAGURU_EXTRACT_LOSSY, and then to `false`
+    /// (issue #199's default: an invalid item earns a corrective turn,
+    /// never a silent drop) — resolved in [`run`], same pattern as
+    /// `structured_output`.
+    lossy: Option<bool>,
     context: String,
     description: Option<String>,
     out: PathBuf,
@@ -455,6 +487,7 @@ impl Args {
         let mut parallel: Option<usize> = None;
         let mut structured_output: Option<StructuredOutputMode> = None;
         let mut max_output_tokens: Option<usize> = None;
+        let mut lossy: Option<bool> = None;
         let mut context: Option<String> = None;
         let mut description: Option<String> = None;
         let mut out: Option<PathBuf> = None;
@@ -469,6 +502,7 @@ impl Args {
                 "--dry-run" => dry_run = true,
                 "--force" => force = true,
                 "--no-passage" => no_passage = true,
+                "--lossy" => lossy = Some(true),
                 "--questions" => match rest.next().map(|n| n.parse::<usize>()) {
                     Some(Ok(n)) if (1..=crate::api::MAX_QUESTIONS_PER_PARAGRAPH).contains(&n) => {
                         questions = n;
@@ -628,6 +662,7 @@ impl Args {
             parallel,
             structured_output,
             max_output_tokens,
+            lossy,
             context,
             description,
             out,
@@ -764,6 +799,23 @@ struct Run {
     /// today's sequential loop). Documents themselves always run
     /// sequentially — see [`Run::extract_chunks`].
     parallel: usize,
+    /// Resolved from `--lossy`/TAGURU_EXTRACT_LOSSY (`false`, the
+    /// default). `true` restores merge()'s pre-issue-#199
+    /// drop-and-proceed behavior byte for byte: no Stage 1/Stage 2
+    /// validation, no corrective turn spent on a business-rule
+    /// violation, `report()` marks every drop explicitly as `--lossy`.
+    lossy: bool,
+}
+
+impl Run {
+    /// The Stage 1 item rules for one document, or `None` under
+    /// `--lossy` — see [`evaluate_answer`]/[`ItemRules`].
+    fn item_rules(&self, paragraph_count: usize) -> Option<ItemRules> {
+        (!self.lossy).then_some(ItemRules {
+            paragraph_count,
+            questions_requested: self.questions > 0,
+        })
+    }
 }
 
 impl Run {
@@ -801,6 +853,7 @@ impl Run {
                 self.fact_budget,
                 self.structured_output.manifest_value(),
                 self.max_output_tokens.unwrap_or(0),
+                self.lossy,
             )
             && out_path.is_file()
         {
@@ -825,8 +878,25 @@ impl Run {
             return Ok(Outcome::Planned);
         }
 
+        let mut outputs = self.extract_chunks(source, &chunks, canonical_paragraphs)?;
+        // Issue #199 Stage 2: cross-chunk alias validation (dangling
+        // canonical, shadowing, conflicting mappings) — the judgment
+        // Stage 1 cannot make per-output, only merge() itself could
+        // before this issue, silently. `--lossy` skips it, matching
+        // Stage 1's skip: merge() alone decides what survives.
+        if !self.lossy {
+            let cross_issues = cross_output_issues(&outputs);
+            if !cross_issues.is_empty() {
+                self.correct_cross_output_issues(
+                    &mut outputs,
+                    cross_issues,
+                    chunks.len(),
+                    canonical_paragraphs,
+                )?;
+            }
+        }
         let extraction = merge(
-            self.extract_chunks(source, &chunks)?,
+            outputs.into_iter().map(|chunk| chunk.output).collect(),
             self.questions,
             canonical_paragraphs,
         );
@@ -857,6 +927,7 @@ impl Run {
             self.fact_budget,
             self.structured_output.manifest_value(),
             self.max_output_tokens.unwrap_or(0),
+            self.lossy,
             &file_name,
         );
         self.vocabulary.extend(extraction.label_vocabulary());
@@ -872,15 +943,21 @@ impl Run {
     /// across documents, since the vocabulary above accumulates
     /// document-to-document and concurrent documents could diverge on
     /// label spellings.
-    fn extract_chunks(&self, source: &str, chunks: &[String]) -> Result<Vec<ModelOutput>, String> {
+    fn extract_chunks(
+        &self,
+        source: &str,
+        chunks: &[String],
+        paragraph_count: usize,
+    ) -> Result<Vec<ChunkOutput>, String> {
         if self.parallel > 1 {
-            return self.extract_chunks_concurrently(source, chunks);
+            return self.extract_chunks_concurrently(source, chunks, paragraph_count);
         }
         let client = self
             .client
             .as_ref()
             .expect("a non-dry run built the client");
         let system = system_prompt(&self.vocabulary, self.questions, self.fact_budget);
+        let rules = self.item_rules(paragraph_count);
         let mut outputs = Vec::new();
         for (index, piece) in chunks.iter().enumerate() {
             match extract_chunk_or_ladder(
@@ -893,6 +970,7 @@ impl Run {
                 &self.correction,
                 self.fact_budget,
                 self.ladder.as_ref(),
+                rules.as_ref(),
             ) {
                 Ok(piece_outputs) => outputs.extend(piece_outputs),
                 Err(message) => {
@@ -917,12 +995,14 @@ impl Run {
         &self,
         source: &str,
         chunks: &[String],
-    ) -> Result<Vec<ModelOutput>, String> {
+        paragraph_count: usize,
+    ) -> Result<Vec<ChunkOutput>, String> {
         let client = self
             .client
             .as_ref()
             .expect("a non-dry run built the client");
         let system = system_prompt(&self.vocabulary, self.questions, self.fact_budget);
+        let rules = self.item_rules(paragraph_count);
         let indexed: Vec<(usize, &String)> = chunks.iter().enumerate().collect();
         let outcomes = crate::registry::dispatch_chunks_concurrently(
             &indexed,
@@ -938,6 +1018,7 @@ impl Run {
                     &self.correction,
                     self.fact_budget,
                     self.ladder.as_ref(),
+                    rules.as_ref(),
                 )
             },
         );
@@ -953,6 +1034,117 @@ impl Run {
             }
         }
         Ok(outputs)
+    }
+
+    /// Issue #199 Stage 2: one targeted corrective turn per output
+    /// `cross_output_issues` flagged, rebuilding THAT output's own
+    /// conversation base (never the whole document's) and replaying
+    /// its own final answer as the prior bad turn — Stage 1's
+    /// rebuild-not-accumulate discipline, at the output level. Bounded
+    /// to exactly one extra call per offending output regardless of
+    /// `max_attempts` (the issue's "one targeted corrective turn"): a
+    /// still-invalid, still-cross-conflicting, length-limited,
+    /// refused, or empty reply fails the source outright — Stage 2
+    /// never splits and never loops a second round.
+    fn correct_cross_output_issues(
+        &self,
+        outputs: &mut [ChunkOutput],
+        cross_issues: Vec<(usize, Vec<String>)>,
+        chunk_total: usize,
+        paragraph_count: usize,
+    ) -> Result<(), String> {
+        let client = self
+            .client
+            .as_ref()
+            .expect("a non-dry run built the client");
+        let system = system_prompt(&self.vocabulary, self.questions, self.fact_budget);
+        let options = RequestOptions {
+            response_format: self
+                .ladder
+                .as_ref()
+                .and_then(|ladder| ladder.response_format.clone()),
+            max_tokens: self
+                .ladder
+                .as_ref()
+                .and_then(|ladder| ladder.max_output_tokens),
+        };
+        let rules = self.item_rules(paragraph_count);
+        for (output_index, issues) in cross_issues {
+            let (chunk_index, user, answer) = {
+                let chunk = &outputs[output_index];
+                (chunk.chunk_index, chunk.user.clone(), chunk.answer.clone())
+            };
+            let label = format!("chunk {}/{chunk_total}", chunk_index + 1);
+            let messages = [
+                serde_json::json!({"role": "system", "content": &system}),
+                serde_json::json!({"role": "user", "content": &user}),
+                corrective_assistant_turn(&answer, self.correction.corrective_context_cap),
+                serde_json::json!({
+                    "role": "user",
+                    "content": corrective_validation_message(&issues),
+                }),
+            ];
+            let response = client
+                .complete(&messages, &options)
+                .map_err(|error| format!("{label}: {error}"))?;
+            if indicates_length_limit(response.finish_reason.as_deref()) {
+                return Err(format!(
+                    "{label}: the cross-chunk alias correction was cut off at the output \
+                     limit — failing the source rather than importing a truncated correction"
+                ));
+            }
+            if let Some(reason) = response.finish_reason.as_deref()
+                && indicates_refusal(reason)
+            {
+                return Err(format!(
+                    "{label}: the provider refused the cross-chunk alias correction \
+                     (finish_reason {reason})"
+                ));
+            }
+            if is_empty_answer(&response.content) {
+                return Err(format!("{label}: {}", empty_answer_diagnosis()));
+            }
+            match evaluate_answer(&response.content, rules.as_ref()) {
+                Ok(output) => {
+                    outputs[output_index] = ChunkOutput {
+                        output,
+                        chunk_index,
+                        user,
+                        answer: response.content,
+                    };
+                }
+                Err(AnswerFault::Syntax(error)) => {
+                    return Err(format!(
+                        "{label}: the cross-chunk alias correction was not the JSON object \
+                         asked for ({error})"
+                    ));
+                }
+                Err(AnswerFault::Invalid(issues)) => {
+                    return Err(format!(
+                        "{label}: the cross-chunk alias correction still left {} invalid \
+                         item(s) uncorrected: {}",
+                        issues.len(),
+                        issues.join("; ")
+                    ));
+                }
+            }
+        }
+        // Re-check rather than trust the single corrective turn blindly:
+        // a correction can rename an association another output's alias
+        // depended on, introducing a FRESH cross-output issue. This is
+        // the bounded re-check, not a second round — any issue here
+        // fails the source.
+        if let Some((output_index, issues)) = cross_output_issues(outputs).into_iter().next() {
+            let chunk_index = outputs[output_index].chunk_index;
+            return Err(format!(
+                "chunk {}/{chunk_total}: still has {} cross-chunk alias issue(s) after \
+                 correction: {}",
+                chunk_index + 1,
+                issues.len(),
+                issues.join("; ")
+            ));
+        }
+        Ok(())
     }
 
     /// A skipped document still contributes its labels, so later
@@ -973,7 +1165,16 @@ impl Run {
             notes.push_str(&format!(", {} duplicate(s) folded", extraction.duplicates));
         }
         if extraction.dropped > 0 {
-            notes.push_str(&format!(", {} item(s) dropped", extraction.dropped));
+            // Under the default (strict) mode, a surviving `dropped`
+            // count is only ever merge()'s policy trim (duplicate
+            // overflow, questions_cap == 0 volunteers) — issue #199's
+            // validity issues are corrected or fail the source before
+            // merge() ever runs. `--lossy` restores the pre-#199
+            // drop-and-proceed behavior, so its drops are marked
+            // explicitly: a report line must never look identical
+            // between a policy trim and a silently discarded fact.
+            let marker = if self.lossy { " (--lossy)" } else { "" };
+            notes.push_str(&format!(", {} item(s) dropped{marker}", extraction.dropped));
         }
         println!(
             "{source}: {} association(s), {} alias(es){}{}{notes} → {}",
@@ -1449,8 +1650,58 @@ fn snippet(text: &str) -> String {
     }
 }
 
+/// One extracted output alongside everything issue #199's Stage 2
+/// (cross-chunk alias validation, `cross_output_issues`) needs to send
+/// ONE targeted corrective turn if this output turns out to hold a
+/// dangling/shadowing/conflicting alias once every output is known:
+/// the conversation base that produced it (`chunk_index`/`user`, so
+/// the turn is rebuilt exactly like Stage 1's rebuild-not-accumulate
+/// retries) and the model's own final answer text (`answer`, replayed
+/// through [`corrective_assistant_turn`] as the prior bad turn).
+struct ChunkOutput {
+    output: ModelOutput,
+    /// The ORIGINAL chunk's coordinates, even for a split sub-piece
+    /// (`extract_piece`'s recursion keeps `PieceContext::chunk_index`
+    /// fixed) — used only for "chunk i/n" error text; several
+    /// `ChunkOutput`s can share one `chunk_index` after a split.
+    chunk_index: usize,
+    user: String,
+    answer: String,
+}
+
+/// How a Stage 1 corrective turn (issue #199) asks the model to try
+/// again: [`corrective_message`]'s ordinary/SHORTER text for a genuine
+/// parse failure, or [`corrective_validation_message`]'s path-addressed
+/// text for a syntactically valid answer with validity issues. Held
+/// rather than computed inline so the SAME text can be reused both to
+/// build the next attempt's user turn and, on final failure, to
+/// diagnose why.
+enum CorrectiveAsk {
+    Syntax {
+        parse_error: String,
+        length_limited: bool,
+    },
+    Invalid {
+        issues: Vec<String>,
+    },
+}
+
+impl CorrectiveAsk {
+    fn user_message(&self, fact_budget: usize) -> String {
+        match self {
+            Self::Syntax {
+                parse_error,
+                length_limited,
+            } => corrective_message(parse_error, *length_limited, fact_budget),
+            Self::Invalid { issues } => corrective_validation_message(issues),
+        }
+    }
+}
+
 /// One chunk → one parsed model answer. A model that answers with
-/// something other than the JSON object gets up to
+/// something other than the JSON object — or, under Stage 1 validation
+/// (issue #199, `rules: Some`), a syntactically valid answer that
+/// still carries path-addressed validity issues — gets up to
 /// `policy.max_attempts - 1` corrective turns (1 total attempt at the
 /// policy's floor). Each retry rebuilds the conversation from the
 /// system/user base and appends only the most recent bad turn — never
@@ -1460,24 +1711,26 @@ fn snippet(text: &str) -> String {
 /// the next corrective turn asks for a SHORTER answer instead of
 /// repeating the same ask verbatim (see [`corrective_message`]) —
 /// repeating it just reproduces the same cutoff, which is the stall
-/// Issue #178 reported. At the all-defaults policy this reproduces the
-/// previous fixed implementation's request bodies exactly: 1st call is
-/// base only, 2nd (if needed) is base + the 1st answer + the same
-/// corrective text as before.
+/// Issue #178 reported. At the all-defaults policy (`rules: None`,
+/// lossy) this reproduces the previous fixed implementation's request
+/// bodies exactly: 1st call is base only, 2nd (if needed) is base + the
+/// 1st answer + the same corrective text as before.
 fn extract_chunk(
     client: &ChatClient,
     system: &str,
     user: &str,
+    chunk_index: usize,
     policy: &CorrectionPolicy,
     fact_budget: usize,
-) -> Result<ModelOutput, String> {
+    rules: Option<&ItemRules>,
+) -> Result<ChunkOutput, String> {
     let base = [
         serde_json::json!({"role": "system", "content": system}),
         serde_json::json!({"role": "user", "content": user}),
     ];
-    let mut last = String::new();
+    let mut last_diagnosis = String::new();
     let mut prior_bad_answer: Option<String> = None;
-    let mut length_limited = false;
+    let mut pending: Option<CorrectiveAsk> = None;
     for _ in 0..policy.max_attempts {
         let mut messages = base.to_vec();
         if let Some(bad_answer) = &prior_bad_answer {
@@ -1487,22 +1740,43 @@ fn extract_chunk(
             ));
             messages.push(serde_json::json!({
                 "role": "user",
-                "content": corrective_message(&last, length_limited, fact_budget),
+                "content": pending
+                    .as_ref()
+                    .expect("set alongside prior_bad_answer")
+                    .user_message(fact_budget),
             }));
         }
         let response = client.complete(&messages, &RequestOptions::default())?;
-        match parse_model_output(&response.content) {
-            Ok(output) => return Ok(output),
-            Err(error) => {
-                last = error;
-                length_limited = indicates_length_limit(response.finish_reason.as_deref());
+        match evaluate_answer(&response.content, rules) {
+            Ok(output) => {
+                return Ok(ChunkOutput {
+                    output,
+                    chunk_index,
+                    user: user.to_string(),
+                    answer: response.content,
+                });
+            }
+            Err(AnswerFault::Syntax(error)) => {
+                let length_limited = indicates_length_limit(response.finish_reason.as_deref());
+                last_diagnosis = format!("the model would not produce the JSON object: {error}");
+                pending = Some(CorrectiveAsk::Syntax {
+                    parse_error: error,
+                    length_limited,
+                });
+                prior_bad_answer = Some(response.content);
+            }
+            Err(AnswerFault::Invalid(issues)) => {
+                last_diagnosis = format!(
+                    "the answer left {} invalid item(s) uncorrected: {}",
+                    issues.len(),
+                    issues.join("; ")
+                );
+                pending = Some(CorrectiveAsk::Invalid { issues });
                 prior_bad_answer = Some(response.content);
             }
         }
     }
-    Err(format!(
-        "the model would not produce the JSON object: {last}"
-    ))
+    Err(last_diagnosis)
 }
 
 /// The one legacy/ladder fork. `None` is the pre-ladder loop
@@ -1521,11 +1795,21 @@ fn extract_chunk_or_ladder(
     policy: &CorrectionPolicy,
     fact_budget: usize,
     ladder: Option<&LadderConfig>,
-) -> Result<Vec<ModelOutput>, String> {
+    rules: Option<&ItemRules>,
+) -> Result<Vec<ChunkOutput>, String> {
     match ladder {
         None => {
             let user = user_message(source, chunk_index, chunk_total, piece);
-            extract_chunk(client, system, &user, policy, fact_budget).map(|output| vec![output])
+            extract_chunk(
+                client,
+                system,
+                &user,
+                chunk_index,
+                policy,
+                fact_budget,
+                rules,
+            )
+            .map(|output| vec![output])
         }
         Some(ladder) => {
             let context = PieceContext {
@@ -1537,6 +1821,7 @@ fn extract_chunk_or_ladder(
                 ladder,
                 policy,
                 fact_budget,
+                rules,
             };
             extract_piece(&context, piece)
         }
@@ -1557,6 +1842,7 @@ struct PieceContext<'a> {
     ladder: &'a LadderConfig,
     policy: &'a CorrectionPolicy,
     fact_budget: usize,
+    rules: Option<&'a ItemRules>,
 }
 
 /// ADR 0001 §7 for one piece: a round at the configured budget; on
@@ -1567,7 +1853,7 @@ struct PieceContext<'a> {
 /// split fails the source. Escalation happens at most once per piece
 /// and each split halves the cap down to [`MIN_SPLIT_CAP`], so the
 /// call count is bounded by piece size and `max_attempts`.
-fn extract_piece(context: &PieceContext, piece: &str) -> Result<Vec<ModelOutput>, String> {
+fn extract_piece(context: &PieceContext, piece: &str) -> Result<Vec<ChunkOutput>, String> {
     let user = user_message(
         context.source,
         context.chunk_index,
@@ -1580,7 +1866,7 @@ fn extract_piece(context: &PieceContext, piece: &str) -> Result<Vec<ModelOutput>
         outcome = extract_round(context, &user, None);
     }
     match outcome {
-        RoundOutcome::Valid(output) => Ok(vec![output]),
+        RoundOutcome::Valid(chunk_output) => Ok(vec![chunk_output]),
         RoundOutcome::Failed(message) => Err(message),
         RoundOutcome::Refusal(reason) => Err(format!(
             "the provider refused this content (finish_reason {reason}) — a policy \
@@ -1608,7 +1894,7 @@ fn extract_piece(context: &PieceContext, piece: &str) -> Result<Vec<ModelOutput>
 
 /// How one [`extract_round`] ended, seen from the ladder.
 enum RoundOutcome {
-    Valid(ModelOutput),
+    Valid(ChunkOutput),
     /// The provider's metadata says this round's answer ended at the
     /// output cap — the ladder decides what changes; the round itself
     /// never re-asks under the limit it just hit.
@@ -1619,11 +1905,12 @@ enum RoundOutcome {
 }
 
 /// One trip through the corrective loop at one FIXED output budget —
-/// the ladder's unit. Malformed-`stop` answers get the ordinary
-/// corrective turns; the legacy SHORTER ask never fires here because
-/// `length` exits the round instead of becoming a prompt. An empty
-/// answer gets at most one corrective in the whole round — however
-/// high `max_attempts` is — then the named diagnosis.
+/// the ladder's unit. Malformed-`stop` and Stage-1-invalid answers
+/// (issue #199) both get the ordinary corrective turns; the legacy
+/// SHORTER ask never fires here because `length` exits the round
+/// instead of becoming a prompt. An empty answer gets at most one
+/// corrective in the whole round — however high `max_attempts` is —
+/// then the named diagnosis.
 fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) -> RoundOutcome {
     let options = RequestOptions {
         response_format: context.ladder.response_format.clone(),
@@ -1633,8 +1920,9 @@ fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) 
         serde_json::json!({"role": "system", "content": context.system}),
         serde_json::json!({"role": "user", "content": user}),
     ];
-    let mut last = String::new();
+    let mut last_diagnosis = String::new();
     let mut prior_bad_answer: Option<String> = None;
+    let mut pending: Option<CorrectiveAsk> = None;
     let mut empty_corrected = false;
     for _ in 0..context.policy.max_attempts {
         let mut messages = base.to_vec();
@@ -1645,15 +1933,25 @@ fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) 
             ));
             messages.push(serde_json::json!({
                 "role": "user",
-                "content": corrective_message(&last, false, context.fact_budget),
+                "content": pending
+                    .as_ref()
+                    .expect("set alongside prior_bad_answer")
+                    .user_message(context.fact_budget),
             }));
         }
         let response = match context.client.complete(&messages, &options) {
             Ok(response) => response,
             Err(error) => return RoundOutcome::Failed(error),
         };
-        match classify_attempt(&response) {
-            AttemptOutcome::Valid(output) => return RoundOutcome::Valid(output),
+        match classify_attempt(&response, context.rules) {
+            AttemptOutcome::Valid(output) => {
+                return RoundOutcome::Valid(ChunkOutput {
+                    output,
+                    chunk_index: context.chunk_index,
+                    user: user.to_string(),
+                    answer: response.content,
+                });
+            }
             AttemptOutcome::LengthLimited => return RoundOutcome::LengthLimited,
             AttemptOutcome::Refusal(reason) => return RoundOutcome::Refusal(reason),
             AttemptOutcome::Empty => {
@@ -1661,7 +1959,11 @@ fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) 
                     return RoundOutcome::Failed(empty_answer_diagnosis());
                 }
                 empty_corrected = true;
-                last = empty_answer_diagnosis();
+                last_diagnosis = empty_answer_diagnosis();
+                pending = Some(CorrectiveAsk::Syntax {
+                    parse_error: empty_answer_diagnosis(),
+                    length_limited: false,
+                });
                 prior_bad_answer = Some(response.content);
             }
             AttemptOutcome::Malformed(error) => {
@@ -1676,14 +1978,31 @@ fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) 
                         context.source
                     );
                 }
-                last = error;
+                last_diagnosis = format!("the model would not produce the JSON object: {error}");
+                pending = Some(CorrectiveAsk::Syntax {
+                    parse_error: error,
+                    length_limited: false,
+                });
+                prior_bad_answer = Some(response.content);
+            }
+            AttemptOutcome::Invalid(issues) => {
+                // NOT provider non-conformance: model_output_json_schema's
+                // own doc comment names business rules (weight's
+                // magnitude, alias resolution, byte caps) the wire
+                // schema never encodes, so a schema-constrained answer
+                // can carry these without the provider having broken
+                // its response_format contract.
+                last_diagnosis = format!(
+                    "the answer left {} invalid item(s) uncorrected: {}",
+                    issues.len(),
+                    issues.join("; ")
+                );
+                pending = Some(CorrectiveAsk::Invalid { issues });
                 prior_bad_answer = Some(response.content);
             }
         }
     }
-    RoundOutcome::Failed(format!(
-        "the model would not produce the JSON object: {last}"
-    ))
+    RoundOutcome::Failed(last_diagnosis)
 }
 
 /// One attempt's §7 state, classified from provider metadata BEFORE
@@ -1691,6 +2010,9 @@ fn extract_round(context: &PieceContext, user: &str, max_tokens: Option<usize>) 
 enum AttemptOutcome {
     Valid(ModelOutput),
     Malformed(String),
+    /// Issue #199: syntactically valid JSON that still carries
+    /// path-addressed Stage 1 validity issues.
+    Invalid(Vec<String>),
     LengthLimited,
     Refusal(String),
     Empty,
@@ -1700,8 +2022,9 @@ enum AttemptOutcome {
 /// prefix happens to parse — a valid prefix of a cut-off extraction
 /// is exactly the "deleted-subset called complete" ADR 0001 forbids.
 /// Refusals are terminal before any parsing; an empty answer is named
-/// before serde ever sees it.
-fn classify_attempt(response: &ChatCompletion) -> AttemptOutcome {
+/// before serde ever sees it. `rules: None` (lossy mode) never
+/// produces `Invalid` — see [`evaluate_answer`].
+fn classify_attempt(response: &ChatCompletion, rules: Option<&ItemRules>) -> AttemptOutcome {
     let finish_reason = response.finish_reason.as_deref();
     if indicates_length_limit(finish_reason) {
         return AttemptOutcome::LengthLimited;
@@ -1714,9 +2037,10 @@ fn classify_attempt(response: &ChatCompletion) -> AttemptOutcome {
     if is_empty_answer(&response.content) {
         return AttemptOutcome::Empty;
     }
-    match parse_model_output(&response.content) {
+    match evaluate_answer(&response.content, rules) {
         Ok(output) => AttemptOutcome::Valid(output),
-        Err(error) => AttemptOutcome::Malformed(error),
+        Err(AnswerFault::Syntax(error)) => AttemptOutcome::Malformed(error),
+        Err(AnswerFault::Invalid(issues)) => AttemptOutcome::Invalid(issues),
     }
 }
 
@@ -1767,6 +2091,82 @@ fn corrective_message(parse_error: &str, length_limited: bool, fact_budget: usiz
          the answer was cut off at the output limit. Answer again with a SHORTER JSON \
          object: fewer associations, shorter names and values.{budget_hint}"
     )
+}
+
+/// Cap on how many issues one corrective-validation message lists: a
+/// pathological answer with hundreds of malformed items must not make
+/// one turn's prompt balloon without bound — the model gets the worst
+/// offenders (in the same associations→aliases→questions walk order
+/// [`interpret_model_output`] collects them) and a count of the rest.
+const MAX_LISTED_ISSUES: usize = 20;
+
+/// The corrective turn's ask when an answer parsed as JSON but failed
+/// Stage 1/Stage 2 validation (issue #199, ADR 0001 §8 bucket 2): name
+/// every issue by its path, then ask for the complete corrected
+/// object — preserve every item, correct rather than delete, add
+/// nothing that wasn't already there, JSON only. Distinct from
+/// [`corrective_message`], which stays reserved for a genuine parse
+/// failure (`AnswerFault::Syntax`, ADR 0001 §7's `STOP_MALFORMED`
+/// syntax half); this is the "valid JSON, invalid extraction" half,
+/// and its wording is the cross-language corrective-text baseline
+/// #180/#181 mirror byte for byte.
+fn corrective_validation_message(issues: &[String]) -> String {
+    let mut listed = String::new();
+    for issue in issues.iter().take(MAX_LISTED_ISSUES) {
+        listed.push_str("\n- ");
+        listed.push_str(issue);
+    }
+    let remainder = issues.len().saturating_sub(MAX_LISTED_ISSUES);
+    if remainder > 0 {
+        listed.push_str(&format!("\n… and {remainder} more issue(s)"));
+    }
+    format!(
+        "That was valid JSON but not a valid extraction ({} issue(s)):{listed}\n\
+         Answer again with the complete corrected JSON object: keep every item, correct the \
+         fields listed above instead of deleting their items, add nothing that was not already \
+         there, and answer with only the JSON object.",
+        issues.len()
+    )
+}
+
+/// How one attempt's answer failed Stage 1 (issue #199): a genuine
+/// parse failure (today's [`corrective_message`] path, unchanged) or a
+/// syntactically valid answer that still carries path-addressed
+/// validity issues (the new [`corrective_validation_message`] path).
+#[derive(Debug)]
+enum AnswerFault {
+    Syntax(String),
+    Invalid(Vec<String>),
+}
+
+/// The Stage 1 gate every corrective-loop entry point calls instead of
+/// [`parse_model_output`] directly: parse, then — when `rules` is
+/// `Some`, i.e. this run is not `--lossy` — validate every item and
+/// fail on any path-addressed issue. `rules: None` (lossy mode) parses
+/// only and discards whatever `interpret_model_output` would have
+/// flagged, reproducing today's behavior byte for byte: the same
+/// request goes out, the same answer is accepted, `merge()` alone
+/// decides what survives.
+fn evaluate_answer(content: &str, rules: Option<&ItemRules>) -> Result<ModelOutput, AnswerFault> {
+    let value = candidate_json(content).map_err(AnswerFault::Syntax)?;
+    match rules {
+        None => {
+            let lenient_rules = ItemRules {
+                paragraph_count: usize::MAX,
+                questions_requested: true,
+            };
+            let (output, _issues) = interpret_model_output(&value, &lenient_rules);
+            Ok(output)
+        }
+        Some(rules) => {
+            let (output, issues) = interpret_model_output(&value, rules);
+            if issues.is_empty() {
+                Ok(output)
+            } else {
+                Err(AnswerFault::Invalid(issues))
+            }
+        }
+    }
 }
 
 /// The corrective turn's replay of the model's own prior bad answer,
@@ -1866,119 +2266,79 @@ fn user_message(source: &str, index: usize, total: usize, text: &str) -> String 
 
 /// The shape the model is asked for. Lenient on the model's side —
 /// unknown fields pass, weight defaults — because [`merge`] validates
-/// every item strictly before anything is emitted.
-#[derive(Deserialize)]
+/// every item strictly before anything is emitted, and (issue #199)
+/// [`interpret_model_output`] names every departure it papers over as a
+/// path-addressed issue so the strict path can turn it into a
+/// corrective turn instead of a silent drop.
+#[derive(Default)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelOutput {
-    #[serde(default, deserialize_with = "lenient_vec")]
     associations: Vec<ModelAssociation>,
-    #[serde(default, deserialize_with = "lenient_vec")]
     aliases: Vec<ModelAlias>,
-    #[serde(default, deserialize_with = "lenient_vec")]
     questions: Vec<ModelQuestion>,
 }
 
-/// A field the model set to `null`, to a lone object instead of an
-/// array, or to some other wrong-typed value reaches the same
-/// deserializer as one it omitted. `#[serde(default)]` alone only
-/// covers an absent key, and a plain `Option<Vec<T>>` only covers an
-/// explicit null — neither covers a present value of the wrong shape,
-/// which would otherwise fail this document's whole `ModelOutput` over
-/// one field merge() would happily have treated as empty. Reading it
-/// as a `Value` first, keeping only the shape that parses as an array,
-/// and then dropping just the elements that don't parse as `T` (the
-/// same one-field-not-the-item cost `lenient_string` and friends pay
-/// below) costs the malformed items — never the field, never the
-/// chunk.
-fn lenient_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: DeserializeOwned,
-{
-    let Some(items) = serde_json::Value::deserialize(deserializer)?
-        .as_array()
-        .cloned()
-    else {
-        return Ok(Vec::new());
-    };
-    Ok(items
-        .into_iter()
-        .filter_map(|item| T::deserialize(item).ok())
-        .collect())
-}
-
-// Every field goes through a lenient deserializer: models emit
-// explicit nulls as readily as they omit fields, and a wrong-typed
-// scalar (a string where the schema showed a number) as readily as
-// either. `#[serde(default)]` covers only absence and a plain
-// `Option<T>` covers only null — neither covers a value of the wrong
-// type, which would otherwise fail the whole chunk's deserialization
-// over one field. Reading it as a `Value` first and keeping only a
-// match on the expected shape costs that one field, not the item and
-// not the chunk — merge() already treats an absent field as `None`.
-#[derive(Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelAssociation {
-    #[serde(default, deserialize_with = "lenient_string")]
     subject: Option<String>,
-    #[serde(default, deserialize_with = "lenient_string")]
     label: Option<String>,
-    #[serde(default, deserialize_with = "lenient_string")]
     object: Option<String>,
-    #[serde(default, deserialize_with = "lenient_f64")]
     weight: Option<f64>,
-    #[serde(default, deserialize_with = "lenient_u32")]
     paragraph: Option<u32>,
 }
 
-#[derive(Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelAlias {
-    #[serde(default, deserialize_with = "lenient_string")]
     alias: Option<String>,
-    #[serde(default, deserialize_with = "lenient_string")]
     canonical: Option<String>,
-    #[serde(default, deserialize_with = "lenient_string")]
     kind: Option<String>,
 }
 
-#[derive(Deserialize)]
 #[cfg_attr(test, derive(Debug))]
 struct ModelQuestion {
-    #[serde(default, deserialize_with = "lenient_u32")]
     paragraph: Option<u32>,
-    #[serde(default, deserialize_with = "lenient_string")]
     question: Option<String>,
 }
 
-fn lenient_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(serde_json::Value::deserialize(deserializer)?
-        .as_str()
-        .map(str::to_string))
-}
-
-fn lenient_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(serde_json::Value::deserialize(deserializer)?.as_f64())
-}
-
-fn lenient_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(serde_json::Value::deserialize(deserializer)?
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok()))
+/// The rules one document's items are checked against — the two
+/// pieces of per-document context [`interpret_model_output`] needs
+/// that no single item carries on its own.
+#[derive(Clone, Copy)]
+struct ItemRules {
+    /// The document's canonical paragraph count (`--questions`'
+    /// `paragraph` citations and, informationally only, associations'
+    /// own `paragraph` tag are checked against this).
+    paragraph_count: usize,
+    /// Whether this run asked for questions at all (`--questions N` >
+    /// 0). When false, a volunteered `questions` array is `merge()`'s
+    /// policy trim, never a validity issue — see [`interpret_questions`].
+    questions_requested: bool,
 }
 
 /// The assistant text must contain one JSON object; code fences and
 /// prose around it are tolerated (strip, then widest-braces fallback).
+/// Test-only: exercises the lenient Value-walk parse (via
+/// [`interpret_model_output`]) in isolation from
+/// [`evaluate_answer`]'s strict/lossy distinction — every production
+/// corrective loop calls `evaluate_answer` directly.
+#[cfg(test)]
 fn parse_model_output(content: &str) -> Result<ModelOutput, String> {
+    let value = candidate_json(content)?;
+    let lenient_rules = ItemRules {
+        paragraph_count: usize::MAX,
+        questions_requested: true,
+    };
+    let (output, _issues) = interpret_model_output(&value, &lenient_rules);
+    Ok(output)
+}
+
+/// Trim, strip fences, and parse into a bare `Value` — everything
+/// [`parse_model_output`] used to do before handing the result to
+/// serde's derived `Deserialize`. A non-object top level (an array, a
+/// scalar) is refused here exactly like the derived impl refused it,
+/// so every caller downstream keeps seeing "not a JSON object" for the
+/// same inputs.
+fn candidate_json(content: &str) -> Result<serde_json::Value, String> {
     let unfenced = strip_fences(content.trim());
     // Name the real failure: a thinking-mode model can spend its whole
     // budget on reasoning and answer with no text at all, and "EOF at
@@ -1986,17 +2346,488 @@ fn parse_model_output(content: &str) -> Result<ModelOutput, String> {
     if unfenced.is_empty() {
         return Err(empty_answer_diagnosis());
     }
-    match serde_json::from_str(unfenced) {
-        Ok(output) => Ok(output),
-        Err(first) => {
-            if let (Some(start), Some(end)) = (unfenced.find('{'), unfenced.rfind('}'))
-                && start < end
-                && let Ok(output) = serde_json::from_str(&unfenced[start..=end])
-            {
-                return Ok(output);
-            }
-            Err(format!("not a JSON object: {first}"))
+    if let Some(value) = parse_top_level_object(unfenced) {
+        return Ok(value);
+    }
+    let first = match serde_json::from_str::<serde_json::Value>(unfenced) {
+        Ok(_) => "the top-level value is not a JSON object".to_string(),
+        Err(error) => error.to_string(),
+    };
+    if let (Some(start), Some(end)) = (unfenced.find('{'), unfenced.rfind('}'))
+        && start < end
+        && let Some(value) = parse_top_level_object(&unfenced[start..=end])
+    {
+        return Ok(value);
+    }
+    Err(format!("not a JSON object: {first}"))
+}
+
+fn parse_top_level_object(text: &str) -> Option<serde_json::Value> {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) if value.is_object() => Some(value),
+        _ => None,
+    }
+}
+
+/// Reads a JSON object into the lenient [`ModelOutput`] shape while
+/// collecting a path-addressed issue for every departure the lenient
+/// walk papers over: a present-but-wrong-typed field, a non-object
+/// array element, a missing/empty/oversized required string, an
+/// out-of-range business value. The returned `ModelOutput` is exactly
+/// what today's lenient deserializer would have produced — absent and
+/// null both read as "not present," a malformed scalar or array
+/// element reads as `None`/skipped — so a caller that ignores the
+/// issues (lossy mode, [`parse_model_output`]'s golden-test callers)
+/// sees byte-for-byte the old behavior. Issue #199/ADR 0001 §8: this is
+/// the "lenient parse, strict accounting" split — parsing never gets
+/// stricter, accounting does.
+fn interpret_model_output(
+    value: &serde_json::Value,
+    rules: &ItemRules,
+) -> (ModelOutput, Vec<String>) {
+    let mut issues = Vec::new();
+    let empty_map = serde_json::Map::new();
+    // interpret_model_output tolerates a non-object top level (reads
+    // nothing) rather than asserting one; candidate_json is what
+    // actually refuses a non-object answer for parse_model_output's
+    // callers.
+    let obj = value.as_object().unwrap_or(&empty_map);
+    let associations = interpret_associations(obj, &mut issues);
+    let aliases = interpret_aliases(obj, &mut issues);
+    let questions = interpret_questions(obj, rules, &mut issues);
+    (
+        ModelOutput {
+            associations,
+            aliases,
+            questions,
+        },
+        issues,
+    )
+}
+
+fn interpret_associations(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    issues: &mut Vec<String>,
+) -> Vec<ModelAssociation> {
+    match get_present(obj, "associations") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| interpret_association_item(index, item, issues))
+            .collect(),
+        Some(other) => {
+            issues.push(format!(
+                "associations: expected an array, got {}",
+                describe_value(other)
+            ));
+            Vec::new()
         }
+    }
+}
+
+fn interpret_association_item(
+    index: usize,
+    item: &serde_json::Value,
+    issues: &mut Vec<String>,
+) -> Option<ModelAssociation> {
+    let path = format!("associations[{index}]");
+    let Some(obj) = item.as_object() else {
+        issues.push(format!(
+            "{path}: expected an object, got {}",
+            describe_value(item)
+        ));
+        return None;
+    };
+    let subject = interpret_required_string(obj, "subject", &path, MAX_NAME_BYTES, issues);
+    let label = interpret_required_string(obj, "label", &path, MAX_NAME_BYTES, issues);
+    let object = interpret_required_string(obj, "object", &path, MAX_NAME_BYTES, issues);
+    let weight = interpret_weight(obj, &path, issues);
+    let paragraph = interpret_association_paragraph(obj, &path, issues);
+    Some(ModelAssociation {
+        subject,
+        label,
+        object,
+        weight,
+        paragraph,
+    })
+}
+
+fn interpret_aliases(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    issues: &mut Vec<String>,
+) -> Vec<ModelAlias> {
+    match get_present(obj, "aliases") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| interpret_alias_item(index, item, issues))
+            .collect(),
+        Some(other) => {
+            issues.push(format!(
+                "aliases: expected an array, got {}",
+                describe_value(other)
+            ));
+            Vec::new()
+        }
+    }
+}
+
+fn interpret_alias_item(
+    index: usize,
+    item: &serde_json::Value,
+    issues: &mut Vec<String>,
+) -> Option<ModelAlias> {
+    let path = format!("aliases[{index}]");
+    let Some(obj) = item.as_object() else {
+        issues.push(format!(
+            "{path}: expected an object, got {}",
+            describe_value(item)
+        ));
+        return None;
+    };
+    let alias = interpret_required_string(obj, "alias", &path, MAX_NAME_BYTES, issues);
+    let canonical = interpret_canonical(obj, &path, issues);
+    let kind = interpret_kind(obj, &path, issues);
+    // Self-alias is item-local (both sides come from this one item);
+    // dangling-canonical and shadowing need the merged name set and are
+    // Stage 2's job (issue #199 §2 cross-chunk validation, cross_output_issues).
+    if let (Some(spelling), Some(canonical_name)) = (&alias, &canonical)
+        && spelling == canonical_name
+    {
+        issues.push(format!("{path}.alias: equals its canonical"));
+    }
+    Some(ModelAlias {
+        alias,
+        canonical,
+        kind,
+    })
+}
+
+/// `canonical` never fails on emptiness here: an empty (or merely
+/// non-matching) canonical is exactly a *dangling* canonical, and
+/// dangling-ness can only be judged against the merged association
+/// names — Stage 2's `cross_output_issues`, not this item-local pass.
+fn interpret_canonical(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    issues: &mut Vec<String>,
+) -> Option<String> {
+    match get_present(obj, "canonical") {
+        None => {
+            issues.push(format!("{path}.canonical: missing"));
+            None
+        }
+        Some(serde_json::Value::String(text)) => {
+            let trimmed = text.trim();
+            if trimmed.len() > MAX_NAME_BYTES {
+                issues.push(format!(
+                    "{path}.canonical: {} bytes exceeds the {MAX_NAME_BYTES}-byte cap",
+                    trimmed.len()
+                ));
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Some(other) => {
+            issues.push(format!(
+                "{path}.canonical: expected a string, got {}",
+                describe_value(other)
+            ));
+            None
+        }
+    }
+}
+
+fn interpret_kind(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    issues: &mut Vec<String>,
+) -> Option<String> {
+    match get_present(obj, "kind") {
+        None => {
+            issues.push(format!("{path}.kind: missing"));
+            None
+        }
+        Some(serde_json::Value::String(text)) if text == "concept" || text == "label" => {
+            Some(text.clone())
+        }
+        Some(serde_json::Value::String(text)) => {
+            issues.push(format!(
+                "{path}.kind: expected \"concept\" or \"label\", got {text:?}"
+            ));
+            None
+        }
+        Some(other) => {
+            issues.push(format!(
+                "{path}.kind: expected \"concept\" or \"label\", got {}",
+                describe_value(other)
+            ));
+            None
+        }
+    }
+}
+
+fn interpret_questions(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    rules: &ItemRules,
+    issues: &mut Vec<String>,
+) -> Vec<ModelQuestion> {
+    match get_present(obj, "questions") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| interpret_question_item(index, item, rules, issues))
+            .collect(),
+        Some(other) => {
+            // questions_cap == 0 makes any questions array the model
+            // volunteers merge()'s policy trim, never a validity issue
+            // — see the doc comment on ItemRules::questions_requested.
+            if rules.questions_requested {
+                issues.push(format!(
+                    "questions: expected an array, got {}",
+                    describe_value(other)
+                ));
+            }
+            Vec::new()
+        }
+    }
+}
+
+fn interpret_question_item(
+    index: usize,
+    item: &serde_json::Value,
+    rules: &ItemRules,
+    issues: &mut Vec<String>,
+) -> Option<ModelQuestion> {
+    let path = format!("questions[{index}]");
+    let Some(obj) = item.as_object() else {
+        if rules.questions_requested {
+            issues.push(format!(
+                "{path}: expected an object, got {}",
+                describe_value(item)
+            ));
+        }
+        return None;
+    };
+    if !rules.questions_requested {
+        // Not asked for: whatever the model volunteers is merge()'s
+        // policy trim (questions_cap == 0), so read it plainly (today's
+        // lenient semantics) without spending an issue on it.
+        let paragraph = get_present(obj, "paragraph").and_then(interpret_paragraph_index);
+        let question = get_present(obj, "question")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        return Some(ModelQuestion {
+            paragraph,
+            question,
+        });
+    }
+    let paragraph = match get_present(obj, "paragraph") {
+        None => {
+            issues.push(format!("{path}.paragraph: missing"));
+            None
+        }
+        Some(value) => match interpret_paragraph_index(value) {
+            Some(paragraph) if (paragraph as usize) < rules.paragraph_count => Some(paragraph),
+            Some(paragraph) => {
+                issues.push(format!(
+                    "{path}.paragraph: must cite a paragraph below {}, got {paragraph}",
+                    rules.paragraph_count
+                ));
+                None
+            }
+            None => {
+                issues.push(format!(
+                    "{path}.paragraph: expected an integer paragraph index, got {}",
+                    describe_value(value)
+                ));
+                None
+            }
+        },
+    };
+    let question = interpret_required_string(
+        obj,
+        "question",
+        &path,
+        crate::api::MAX_QUESTION_BYTES,
+        issues,
+    );
+    Some(ModelQuestion {
+        paragraph,
+        question,
+    })
+}
+
+/// A required string field shared by associations (`subject`/`label`/
+/// `object`), aliases (`alias`), and questions (`question`): missing,
+/// wrong-typed, empty-after-trim, and oversized are each their own
+/// issue text so the model sees exactly which of the four it hit.
+fn interpret_required_string(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    path: &str,
+    max_bytes: usize,
+    issues: &mut Vec<String>,
+) -> Option<String> {
+    match get_present(obj, key) {
+        None => {
+            issues.push(format!("{path}.{key}: missing"));
+            None
+        }
+        Some(serde_json::Value::String(text)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                issues.push(format!("{path}.{key}: empty"));
+                None
+            } else if trimmed.len() > max_bytes {
+                issues.push(format!(
+                    "{path}.{key}: {} bytes exceeds the {max_bytes}-byte cap",
+                    trimmed.len()
+                ));
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Some(other) => {
+            issues.push(format!(
+                "{path}.{key}: expected a string, got {}",
+                describe_value(other)
+            ));
+            None
+        }
+    }
+}
+
+/// `weight` is optional (absent/null is a plain 1.0 assertion, kept as
+/// `None` here for `merge()` to default) but a *present* value must be
+/// a finite, non-zero number under the magnitude cap — a zero asserts
+/// nothing and an infinite/oversized one is not a fact merge() can
+/// carry. A well-TYPED business-rule violation (zero, over-cap,
+/// non-finite) still returns `Some(weight)`, not `None`: `merge()` —
+/// not this parse-level pass — is the sole authority on whether that
+/// value survives (its own zero/finite/magnitude checks, unchanged by
+/// issue #199), in strict mode via the corrective turn this value's
+/// issue triggers and in `--lossy` via its original drop-and-proceed
+/// logic. Returning `None` here instead would let a lossy run's
+/// `unwrap_or(1.0)` default silently launder an invalid weight into a
+/// valid-looking `1.0` — exactly the silent behavior change issue #199
+/// forbids for a mode whose entire contract is "byte-for-byte today's
+/// behavior." Only a WRONG-TYPED value (never a number at all) returns
+/// `None`, matching `lenient_f64`'s original type-only leniency.
+fn interpret_weight(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    issues: &mut Vec<String>,
+) -> Option<f64> {
+    match get_present(obj, "weight") {
+        None => None,
+        Some(serde_json::Value::Number(number)) => {
+            let weight = number.as_f64().unwrap_or(f64::NAN);
+            if !weight.is_finite() {
+                issues.push(format!(
+                    "{path}.weight: expected finite non-zero number, got {weight}"
+                ));
+            } else if weight == 0.0 {
+                issues.push(format!(
+                    "{path}.weight: expected finite non-zero number, got 0"
+                ));
+            } else if weight.abs() > MAX_ASSOCIATION_WEIGHT {
+                issues.push(format!(
+                    "{path}.weight: expected finite non-zero number, got {weight} \
+                     (over the {MAX_ASSOCIATION_WEIGHT} cap)"
+                ));
+            }
+            Some(weight)
+        }
+        Some(other) => {
+            issues.push(format!(
+                "{path}.weight: expected finite non-zero number, got {}",
+                describe_value(other)
+            ));
+            None
+        }
+    }
+}
+
+/// An association's `paragraph` is optional and, unlike a question's,
+/// never business-rule-checked here: a well-typed but out-of-range
+/// paragraph costs only the tag in `merge()` (the fact survives
+/// untagged), so only a wrong-typed value is a validity issue.
+fn interpret_association_paragraph(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    issues: &mut Vec<String>,
+) -> Option<u32> {
+    match get_present(obj, "paragraph") {
+        None => None,
+        Some(value) => match interpret_paragraph_index(value) {
+            Some(paragraph) => Some(paragraph),
+            None => {
+                issues.push(format!(
+                    "{path}.paragraph: expected an integer paragraph index, got {}",
+                    describe_value(value)
+                ));
+                None
+            }
+        },
+    }
+}
+
+/// A non-negative integer that fits `u32` — the same shape
+/// `lenient_u32` used to accept, just read from a `Value` already in
+/// hand instead of through a deserializer.
+fn interpret_paragraph_index(value: &serde_json::Value) -> Option<u32> {
+    value.as_u64().and_then(|value| u32::try_from(value).ok())
+}
+
+/// A present, non-null field read from a JSON object — absent and
+/// `null` are the same "not here" for every optional field this
+/// module validates (ADR 0001 §8's ruling applies to required fields;
+/// an optional field's null and absence are both simply valid-absent).
+fn get_present<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    match obj.get(key) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(value),
+    }
+}
+
+/// How many bytes of a string value's own text an issue message
+/// embeds before eliding the rest — long enough to recognize the
+/// value, short enough that a pathological answer cannot make one
+/// issue line balloon.
+const MAX_ISSUE_VALUE_BYTES: usize = 64;
+
+/// Renders a JSON value's type and, for scalars, its content — for a
+/// wrong-typed-field issue's "got …" clause. A `String` is quoted
+/// (`string "high"`) so the corrective message can distinguish a
+/// wrong-typed value from a business-rule violation on a rightly-typed
+/// one (which builds its own "got 0"/"got 2000000" text instead of
+/// calling this).
+fn describe_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(flag) => format!("boolean {flag}"),
+        serde_json::Value::Number(number) => format!("number {number}"),
+        serde_json::Value::String(text) => format!("string {}", quote_for_issue(text)),
+        serde_json::Value::Array(_) => "an array".to_string(),
+        serde_json::Value::Object(_) => "an object".to_string(),
+    }
+}
+
+fn quote_for_issue(text: &str) -> String {
+    let cut = floor_char_boundary(text, MAX_ISSUE_VALUE_BYTES);
+    if cut < text.len() {
+        format!("{:?}…", &text[..cut])
+    } else {
+        format!("{text:?}")
     }
 }
 
@@ -2155,6 +2986,100 @@ impl Extraction {
             .chain(self.labels.values().cloned())
             .collect()
     }
+}
+
+/// Issue #199 Stage 2: the alias judgments that can only be made
+/// against the FULL merged name set, never one output alone — a
+/// chunk-1 alias whose canonical only shows up in chunk 3 is valid
+/// (see `merge`'s own comment on this below), so validating aliases
+/// output-by-output would reject something `merge` happily accepts.
+/// Called only once Stage 1 (`interpret_model_output`'s own issues) is
+/// clean for every output, so every alias here already has a
+/// well-formed, non-self `alias`/`canonical`/`kind` to judge — items
+/// Stage 1 already flagged are skipped rather than re-flagged.
+/// Returns one entry per output INDEX (position in `outputs`, matching
+/// `ChunkOutput`'s own array position after Stage 1 — not the
+/// original document chunk) that contributed at least one issue, in
+/// output order, so the caller can address a single targeted
+/// corrective turn per offending output.
+fn cross_output_issues(outputs: &[ChunkOutput]) -> Vec<(usize, Vec<String>)> {
+    let mut concept_names: HashSet<String> = HashSet::new();
+    let mut label_names: HashSet<String> = HashSet::new();
+    for chunk in outputs {
+        let output = &chunk.output;
+        for item in &output.associations {
+            let subject = item.subject.as_deref().unwrap_or_default().trim();
+            let label = item.label.as_deref().unwrap_or_default().trim();
+            let object = item.object.as_deref().unwrap_or_default().trim();
+            if !subject.is_empty() {
+                concept_names.insert(subject.to_string());
+            }
+            if !object.is_empty() {
+                concept_names.insert(object.to_string());
+            }
+            if !label.is_empty() {
+                label_names.insert(label.to_string());
+            }
+        }
+    }
+
+    // First-registered spelling → canonical wins, exactly like merge()'s
+    // Entry::Vacant/Entry::Occupied fold — a later output naming the
+    // same spelling with a DIFFERENT canonical is the conflict, not the
+    // first one to claim it.
+    let mut concept_registry: BTreeMap<String, String> = BTreeMap::new();
+    let mut label_registry: BTreeMap<String, String> = BTreeMap::new();
+    let mut issues_by_output: Vec<(usize, Vec<String>)> = Vec::new();
+
+    for (output_index, chunk) in outputs.iter().enumerate() {
+        let mut issues = Vec::new();
+        for (alias_index, alias) in chunk.output.aliases.iter().enumerate() {
+            let path = format!("aliases[{alias_index}]");
+            let (Some(spelling), Some(canonical), Some(kind)) =
+                (&alias.alias, &alias.canonical, &alias.kind)
+            else {
+                continue; // Stage 1 already has an issue for this alias
+            };
+            if spelling == canonical {
+                continue; // Stage 1's self-alias issue already covers this
+            }
+            let (names, registry) = match kind.as_str() {
+                "concept" => (&concept_names, &mut concept_registry),
+                "label" => (&label_names, &mut label_registry),
+                _ => continue, // Stage 1's invalid-kind issue already covers this
+            };
+            if names.contains(spelling) {
+                issues.push(format!(
+                    "{path}.alias: names something the associations already contain"
+                ));
+                continue;
+            }
+            if !names.contains(canonical) {
+                issues.push(format!(
+                    "{path}.canonical: names nothing the associations contain"
+                ));
+                continue;
+            }
+            match registry.get(spelling) {
+                None => {
+                    registry.insert(spelling.clone(), canonical.clone());
+                }
+                Some(existing) if existing == canonical => {
+                    // A repeated identical mapping is merge()'s
+                    // duplicate fold, not a conflict.
+                }
+                Some(existing) => {
+                    issues.push(format!(
+                        "{path}: conflicts with an earlier alias mapping {spelling:?} to {existing:?}"
+                    ));
+                }
+            }
+        }
+        if !issues.is_empty() {
+            issues_by_output.push((output_index, issues));
+        }
+    }
+    issues_by_output
 }
 
 /// `questions_cap` is this run's --questions N (0 = the model was
@@ -2518,6 +3443,17 @@ struct ManifestEntry {
     /// other and re-extracts.
     #[serde(default)]
     max_output_tokens: usize,
+    /// --lossy of the run that wrote this batch (issue #199): whether
+    /// invalid items were dropped-and-counted instead of corrected or
+    /// failed changes what the batch's facts even are, so toggling it
+    /// re-extracts. `false` (off) for entries written before this
+    /// field existed, the same "new field defaults to the value that
+    /// changes today's behavior least" precedent `structured_output`/
+    /// `max_output_tokens` set: an unforced re-run of an old batch
+    /// keeps matching rather than spuriously re-extracting everything;
+    /// `--force` re-extracts under the new strict-by-default rules.
+    #[serde(default)]
+    lossy: bool,
     output: String,
 }
 
@@ -2551,6 +3487,7 @@ impl Manifest {
         fact_budget: usize,
         structured_output: &str,
         max_output_tokens: usize,
+        lossy: bool,
     ) -> bool {
         self.documents.get(source).is_some_and(|entry| {
             entry.sha256 == sha256
@@ -2563,6 +3500,7 @@ impl Manifest {
                 && entry.fact_budget == fact_budget
                 && entry.structured_output == structured_output
                 && entry.max_output_tokens == max_output_tokens
+                && entry.lossy == lossy
         })
     }
 
@@ -2579,6 +3517,7 @@ impl Manifest {
         fact_budget: usize,
         structured_output: &str,
         max_output_tokens: usize,
+        lossy: bool,
         output: &str,
     ) {
         self.documents.insert(
@@ -2594,6 +3533,7 @@ impl Manifest {
                 fact_budget,
                 structured_output: structured_output.to_string(),
                 max_output_tokens,
+                lossy,
                 output: output.to_string(),
             },
         );
@@ -2767,6 +3707,196 @@ mod tests {
         assert_eq!(output.associations.len(), 2);
     }
 
+    /// Test-only shorthand: parse `text` and run [`interpret_model_output`]
+    /// with a document big enough that no paragraph reference goes out
+    /// of range unless the test means it to.
+    fn interpret(text: &str, rules: ItemRules) -> (ModelOutput, Vec<String>) {
+        let value = candidate_json(text).expect("valid JSON object");
+        interpret_model_output(&value, &rules)
+    }
+
+    fn permissive_rules() -> ItemRules {
+        ItemRules {
+            paragraph_count: 100,
+            questions_requested: true,
+        }
+    }
+
+    #[test]
+    fn missing_and_wrong_typed_and_empty_and_oversized_are_four_distinct_issues() {
+        let oversized = "x".repeat(MAX_NAME_BYTES + 1);
+        let text = format!(
+            r#"{{"associations": [
+                {{"label": "l", "object": "b"}},
+                {{"subject": 42, "label": "l", "object": "b"}},
+                {{"subject": "  ", "label": "l", "object": "b"}},
+                {{"subject": "{oversized}", "label": "l", "object": "b"}}
+            ]}}"#
+        );
+        let (_, issues) = interpret(&text, permissive_rules());
+        assert_eq!(
+            issues,
+            vec![
+                "associations[0].subject: missing".to_string(),
+                "associations[1].subject: expected a string, got number 42".to_string(),
+                "associations[2].subject: empty".to_string(),
+                format!(
+                    "associations[3].subject: {} bytes exceeds the {MAX_NAME_BYTES}-byte cap",
+                    oversized.len()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_absent_or_null_weight_is_valid_but_a_wrong_typed_one_is_an_issue() {
+        let text = r#"{"associations": [
+            {"subject": "a", "label": "l", "object": "b"},
+            {"subject": "a", "label": "l", "object": "c", "weight": null},
+            {"subject": "a", "label": "l", "object": "d", "weight": "strong"}
+        ]}"#;
+        let (output, issues) = interpret(text, permissive_rules());
+        assert_eq!(output.associations[0].weight, None);
+        assert_eq!(output.associations[1].weight, None);
+        assert_eq!(output.associations[2].weight, None);
+        assert_eq!(
+            issues,
+            vec!["associations[2].weight: expected finite non-zero number, got string \"strong\""]
+        );
+    }
+
+    #[test]
+    fn zero_and_overcap_weights_report_the_offending_value_not_a_type_mismatch() {
+        let text = format!(
+            r#"{{"associations": [
+                {{"subject": "a", "label": "l", "object": "b", "weight": 0}},
+                {{"subject": "a", "label": "l", "object": "c", "weight": {}}}
+            ]}}"#,
+            MAX_ASSOCIATION_WEIGHT * 2.0
+        );
+        let (_, issues) = interpret(&text, permissive_rules());
+        assert_eq!(issues.len(), 2);
+        assert_eq!(
+            issues[0],
+            "associations[0].weight: expected finite non-zero number, got 0"
+        );
+        assert!(
+            issues[1].starts_with("associations[1].weight: expected finite non-zero number, got")
+                && issues[1].contains(&format!("over the {MAX_ASSOCIATION_WEIGHT} cap")),
+            "{}",
+            issues[1]
+        );
+    }
+
+    #[test]
+    fn a_skipped_non_object_element_never_shifts_its_siblings_indexes() {
+        // issue #199's index-fidelity requirement: the model must see
+        // its OWN array position in the corrective feedback, not a
+        // position renumbered by an item this pass silently skipped.
+        let text = r#"{"associations": [
+            {"subject": "a", "label": "l", "object": "b"},
+            "not an association",
+            {"subject": "c", "label": "l", "object": "d", "weight": "bad"}
+        ]}"#;
+        let (output, issues) = interpret(text, permissive_rules());
+        assert_eq!(output.associations.len(), 2);
+        assert_eq!(
+            issues,
+            vec![
+                "associations[1]: expected an object, got string \"not an association\"",
+                "associations[2].weight: expected finite non-zero number, got string \"bad\""
+            ]
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_association_paragraph_is_untagged_without_an_issue() {
+        // ADR 0001 §8: a well-typed-but-out-of-range association
+        // paragraph costs only the tag in merge(), never the fact —
+        // interpret_model_output must not spend an issue on it either,
+        // matching merge_tags_associations_with_their_paragraph_but_never_drops_for_it.
+        let text = r#"{"associations": [
+            {"subject": "a", "label": "l", "object": "b", "paragraph": 99}
+        ]}"#;
+        let rules = ItemRules {
+            paragraph_count: 1,
+            questions_requested: true,
+        };
+        let (output, issues) = interpret(text, rules);
+        assert_eq!(output.associations[0].paragraph, Some(99));
+        assert!(issues.is_empty(), "{issues:?}");
+
+        // A wrong-typed paragraph, in contrast, IS an issue — it is a
+        // parse-level departure, not a business-range judgment.
+        let wrong_typed = r#"{"associations": [
+            {"subject": "a", "label": "l", "object": "b", "paragraph": "two"}
+        ]}"#;
+        let (output, issues) = interpret(wrong_typed, rules);
+        assert_eq!(output.associations[0].paragraph, None);
+        assert_eq!(
+            issues,
+            vec![
+                "associations[0].paragraph: expected an integer paragraph index, got string \"two\""
+            ]
+        );
+    }
+
+    #[test]
+    fn alias_item_issues_cover_missing_wrong_kind_and_self_alias() {
+        let text = r#"{"aliases": [
+            {"canonical": "b", "kind": "concept"},
+            {"alias": "x", "canonical": "b", "kind": "person"},
+            {"alias": "y", "canonical": "y", "kind": "concept"}
+        ]}"#;
+        let (_, issues) = interpret(text, permissive_rules());
+        assert_eq!(
+            issues,
+            vec![
+                "aliases[0].alias: missing",
+                "aliases[1].kind: expected \"concept\" or \"label\", got \"person\"",
+                "aliases[2].alias: equals its canonical",
+            ]
+        );
+    }
+
+    #[test]
+    fn question_issues_cover_missing_out_of_range_and_oversized() {
+        let text = r#"{"questions": [
+            {"question": "何?"},
+            {"paragraph": 9, "question": "何?"},
+            {"paragraph": 0, "question": "  "}
+        ]}"#;
+        let rules = ItemRules {
+            paragraph_count: 2,
+            questions_requested: true,
+        };
+        let (_, issues) = interpret(text, rules);
+        assert_eq!(
+            issues,
+            vec![
+                "questions[0].paragraph: missing",
+                "questions[1].paragraph: must cite a paragraph below 2, got 9",
+                "questions[2].question: empty",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_volunteered_question_when_none_was_requested_is_a_policy_trim_not_an_issue() {
+        // questions_cap == 0: merge() drops whatever the model
+        // volunteers regardless of shape — that is a decision the
+        // operator made (no --questions flag), never a validity issue
+        // worth a corrective turn.
+        let text = r#"{"questions": [{"question": "何?"}]}"#;
+        let rules = ItemRules {
+            paragraph_count: 2,
+            questions_requested: false,
+        };
+        let (output, issues) = interpret(text, rules);
+        assert_eq!(output.questions.len(), 1);
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
     #[test]
     fn json_schema_accepts_and_rejects_the_shared_fixtures() {
         // The same corpus tests/fixtures/model_output validates against in
@@ -2829,6 +3959,109 @@ mod tests {
         );
     }
 
+    /// The three-producer fixture plan issue #199/ADR 0001 §11 calls
+    /// for (shared with #180/#181): each `repaired/*.json` names one
+    /// (`rules`, `answer`, `issues`, `corrected`) tuple so all three
+    /// producers can mechanically check `validate(answer) == issues`
+    /// and `validate(corrected) == []` against the SAME payloads.
+    #[test]
+    fn repaired_fixtures_name_their_issues_and_their_corrections_validate_clean() {
+        let fixtures_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model_output/repaired");
+
+        /// One output's full Stage 1 + Stage 2 issue list, in the same
+        /// order production code would surface them: item-local first,
+        /// then cross-item (there's only ever one output here, so
+        /// cross_output_issues degenerates to "the alias judgments
+        /// this one answer's aliases need").
+        fn validate(value: &serde_json::Value, rules: &ItemRules) -> Vec<String> {
+            let (output, mut issues) = interpret_model_output(value, rules);
+            let chunk = chunk_output(output);
+            for (_, cross_issues) in cross_output_issues(&[chunk]) {
+                issues.extend(cross_issues);
+            }
+            issues
+        }
+
+        let mut count = 0;
+        for entry in fs::read_dir(&fixtures_root).expect("repaired fixtures dir") {
+            let path = entry.expect("dir entry").path();
+            let text = fs::read_to_string(&path).expect("read fixture");
+            let fixture: serde_json::Value =
+                serde_json::from_str(&text).expect("fixture is valid JSON");
+            let label = path.display().to_string();
+
+            let paragraph_count = fixture["rules"]["paragraph_count"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{label}: rules.paragraph_count"))
+                as usize;
+            let questions_cap = fixture["rules"]["questions_cap"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{label}: rules.questions_cap"));
+            let rules = ItemRules {
+                paragraph_count,
+                questions_requested: questions_cap > 0,
+            };
+
+            let expected_issues: Vec<String> = fixture["issues"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{label}: issues array"))
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{label}: issue must be a string"))
+                        .to_string()
+                })
+                .collect();
+            assert!(
+                !expected_issues.is_empty(),
+                "{label}: a repaired fixture names at least one issue by definition"
+            );
+
+            let answer = &fixture["answer"];
+            assert_eq!(
+                validate(answer, &rules),
+                expected_issues,
+                "{label}: answer's issues didn't match"
+            );
+
+            let corrected = &fixture["corrected"];
+            let corrected_issues = validate(corrected, &rules);
+            assert!(
+                corrected_issues.is_empty(),
+                "{label}: corrected answer must validate clean, got {corrected_issues:?}"
+            );
+
+            // Preserve-every-item (ADR 0001 §8 bucket 2's
+            // "correct-not-delete, add nothing"): a whole-array field
+            // that WAS shaped as an array in the answer must keep the
+            // same item count in `corrected` — a field the answer got
+            // wrong at the whole-field level (e.g. `questions_not_an_array`)
+            // has no prior item count to preserve, so it's exempt.
+            for field in ["associations", "aliases", "questions"] {
+                if let Some(answer_items) = answer.get(field).and_then(|v| v.as_array()) {
+                    let corrected_len = corrected
+                        .get(field)
+                        .and_then(|v| v.as_array())
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                    assert_eq!(
+                        answer_items.len(),
+                        corrected_len,
+                        "{label}: {field} item count changed between answer and corrected"
+                    );
+                }
+            }
+
+            count += 1;
+        }
+        assert!(
+            count > 0,
+            "the repaired fixture directory must not be empty"
+        );
+    }
+
     fn association(subject: &str, label: &str, object: &str, weight: f64) -> ModelAssociation {
         ModelAssociation {
             subject: Some(subject.into()),
@@ -2844,6 +4077,18 @@ mod tests {
             alias: Some(alias.into()),
             canonical: Some(canonical.into()),
             kind: Some(kind.into()),
+        }
+    }
+
+    /// Test-only shorthand for a `ChunkOutput` whose conversation base
+    /// doesn't matter to the test at hand (only `cross_output_issues`'s
+    /// own output-array position does).
+    fn chunk_output(output: ModelOutput) -> ChunkOutput {
+        ChunkOutput {
+            output,
+            chunk_index: 0,
+            user: String::new(),
+            answer: String::new(),
         }
     }
 
@@ -2901,6 +4146,116 @@ mod tests {
         assert_eq!(merged.dropped, 7);
         assert!(merged.label_vocabulary().contains("杜氏"));
         assert!(merged.label_vocabulary().contains("創業年"));
+    }
+
+    #[test]
+    fn cross_output_issues_lets_a_canonical_resolved_in_a_later_output_through() {
+        // The chunk-1-alias/chunk-3-canonical case merge()'s own
+        // comment calls out: the alias must NOT be flagged just because
+        // its own output doesn't yet know the name.
+        let outputs = vec![
+            chunk_output(ModelOutput {
+                associations: Vec::new(),
+                aliases: vec![alias("Aomine", "青嶺酒造", "concept")],
+                questions: Vec::new(),
+            }),
+            chunk_output(ModelOutput {
+                associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+                aliases: Vec::new(),
+                questions: Vec::new(),
+            }),
+        ];
+        assert_eq!(cross_output_issues(&outputs), Vec::new());
+    }
+
+    #[test]
+    fn cross_output_issues_names_dangling_and_shadowing_aliases_by_output() {
+        let outputs = vec![chunk_output(ModelOutput {
+            associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+            aliases: vec![
+                alias("蔵元", "存在しない", "concept"), // dangling: no such name
+                alias("高瀬", "青嶺酒造", "concept"),   // shadows a real name
+            ],
+            questions: Vec::new(),
+        })];
+        assert_eq!(
+            cross_output_issues(&outputs),
+            vec![(
+                0,
+                vec![
+                    "aliases[0].canonical: names nothing the associations contain".to_string(),
+                    "aliases[1].alias: names something the associations already contain"
+                        .to_string(),
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn cross_output_issues_blames_the_later_output_for_a_conflicting_canonical() {
+        let outputs = vec![
+            chunk_output(ModelOutput {
+                associations: vec![
+                    association("青嶺酒造", "杜氏", "高瀬", 1.0),
+                    association("蔵元本店", "支店", "青嶺酒造", 1.0),
+                ],
+                aliases: vec![alias("Aomine", "青嶺酒造", "concept")],
+                questions: Vec::new(),
+            }),
+            chunk_output(ModelOutput {
+                associations: Vec::new(),
+                // Same spelling "Aomine", a DIFFERENT canonical this time.
+                aliases: vec![alias("Aomine", "蔵元本店", "concept")],
+                questions: Vec::new(),
+            }),
+        ];
+        assert_eq!(
+            cross_output_issues(&outputs),
+            vec![(
+                1,
+                vec![
+                    "aliases[0]: conflicts with an earlier alias mapping \"Aomine\" to \"青嶺酒造\""
+                        .to_string()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn cross_output_issues_folds_an_identical_repeated_mapping_without_a_conflict() {
+        let outputs = vec![
+            chunk_output(ModelOutput {
+                associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+                aliases: vec![alias("Aomine", "青嶺酒造", "concept")],
+                questions: Vec::new(),
+            }),
+            chunk_output(ModelOutput {
+                associations: Vec::new(),
+                aliases: vec![alias("Aomine", "青嶺酒造", "concept")], // identical repeat
+                questions: Vec::new(),
+            }),
+        ];
+        assert_eq!(cross_output_issues(&outputs), Vec::new());
+    }
+
+    #[test]
+    fn cross_output_issues_skips_aliases_stage_1_already_flagged() {
+        // A self-alias or an unresolved (None) field already earned a
+        // Stage 1 issue; Stage 2 must not pile a second, misleading
+        // judgment ("dangling"/"shadowing") on top of it.
+        let outputs = vec![chunk_output(ModelOutput {
+            associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+            aliases: vec![
+                alias("青嶺酒造", "青嶺酒造", "concept"), // self-alias, Stage 1's issue
+                ModelAlias {
+                    alias: None,
+                    canonical: Some("青嶺酒造".to_string()),
+                    kind: Some("concept".to_string()),
+                },
+            ],
+            questions: Vec::new(),
+        })];
+        assert_eq!(cross_output_issues(&outputs), Vec::new());
     }
 
     /// Whitespace-only differences must FOLD, not split: the graph's
@@ -3072,33 +4427,53 @@ mod tests {
             0,
             "",
             0,
+            false,
             "a.md.jsonl",
         );
-        assert!(manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0));
-        assert!(!manifest.matches("a.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0));
-        assert!(!manifest.matches("a.md", "hash-1", "model-2", "sake", 0, false, "", 0, "", 0));
-        assert!(!manifest.matches("b.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0));
+        assert!(manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+        ));
+        assert!(!manifest.matches(
+            "a.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false
+        ));
+        assert!(!manifest.matches(
+            "a.md", "hash-1", "model-2", "sake", 0, false, "", 0, "", 0, false
+        ));
+        assert!(!manifest.matches(
+            "b.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+        ));
         // A re-pointed --context must re-extract, not keep files whose
         // headers still name the old target.
-        assert!(!manifest.matches("a.md", "hash-1", "model-1", "vats", 0, false, "", 0, "", 0));
+        assert!(!manifest.matches(
+            "a.md", "hash-1", "model-1", "vats", 0, false, "", 0, "", 0, false
+        ));
         // Toggling --no-passage changes whether the batch carries the
         // source passage at all — a skip would keep the stale shape.
-        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, true, "", 0, "", 0));
+        assert!(!manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, true, "", 0, "", 0, false
+        ));
         // A changed --description is baked into the batch header, so it
         // must re-extract too rather than skip with the old one.
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "new desc", 0, "", 0
+            "a.md", "hash-1", "model-1", "sake", 0, false, "new desc", 0, "", 0, false
         ));
         // A changed --fact-budget is folded into the system prompt like
         // --questions, so it must re-extract too rather than skip.
-        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 5, "", 0));
+        assert!(!manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 5, "", 0, false
+        ));
         // A changed --structured-output or --max-output-tokens changes
         // what the model can answer — computation inputs like the rest.
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "auto", 0
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "auto", 0, false
         ));
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 2048
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 2048, false
+        ));
+        // Issue #199: a changed --lossy changes what the batch's facts
+        // even are (dropped vs. corrected), so it must re-extract too.
+        assert!(!manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true
         ));
 
         // A prompt bump invalidates entries recorded under the old one.
@@ -3107,7 +4482,9 @@ mod tests {
             .get_mut("a.md")
             .expect("just recorded")
             .prompt_version = PROMPT_VERSION + 1;
-        assert!(!manifest.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0));
+        assert!(!manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+        ));
 
         let dir = std::env::temp_dir().join(format!("taguru-manifest-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -3126,13 +4503,13 @@ mod tests {
             0,
             "",
             0,
+            false,
             "a.md.jsonl",
         );
         manifest.save(&path).unwrap();
-        assert!(
-            Manifest::load(&path)
-                .matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0)
-        );
+        assert!(Manifest::load(&path).matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+        ));
         fs::write(&path, "not json").unwrap();
         assert!(Manifest::load(&path).documents.is_empty());
 
@@ -3147,13 +4524,15 @@ mod tests {
         .unwrap();
         let legacy = Manifest::load(&path);
         assert_eq!(legacy.documents.len(), 1);
-        assert!(!legacy.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0));
+        assert!(!legacy.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+        ));
 
         // An entry written before the structured_output/
-        // max_output_tokens fields existed (all other fields current)
-        // must keep matching an all-defaults run — the new controls
-        // default to their zero values precisely so old manifests
-        // don't force a spurious re-extraction of everything.
+        // max_output_tokens/lossy fields existed (all other fields
+        // current) must keep matching an all-defaults run — the new
+        // controls default to their zero/false values precisely so old
+        // manifests don't force a spurious re-extraction of everything.
         fs::write(
             &path,
             format!(
@@ -3164,7 +4543,9 @@ mod tests {
         )
         .unwrap();
         let pre_ladder = Manifest::load(&path);
-        assert!(pre_ladder.matches("a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0));
+        assert!(pre_ladder.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+        ));
         assert!(!pre_ladder.matches(
             "a.md",
             "hash-1",
@@ -3175,7 +4556,13 @@ mod tests {
             "",
             0,
             "json-schema",
-            0
+            0,
+            false
+        ));
+        // Issue #199: an entry from before --lossy existed defaults to
+        // `false` (strict) and must NOT match a --lossy run.
+        assert!(!pre_ladder.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true
         ));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -3215,7 +4602,7 @@ mod tests {
             finish_reason: Some("length".to_string()),
         };
         assert!(matches!(
-            classify_attempt(&completion),
+            classify_attempt(&completion, None),
             AttemptOutcome::LengthLimited
         ));
         // Length also outranks emptiness: a thinking model that burned
@@ -3226,7 +4613,7 @@ mod tests {
             finish_reason: Some("max_tokens".to_string()),
         };
         assert!(matches!(
-            classify_attempt(&empty_at_cap),
+            classify_attempt(&empty_at_cap, None),
             AttemptOutcome::LengthLimited
         ));
         let refused = ChatCompletion {
@@ -3234,26 +4621,50 @@ mod tests {
             finish_reason: Some("content_filter".to_string()),
         };
         assert!(matches!(
-            classify_attempt(&refused),
+            classify_attempt(&refused, None),
             AttemptOutcome::Refusal(reason) if reason == "content_filter"
         ));
         let empty = ChatCompletion {
             content: "```json\n```".to_string(),
             finish_reason: Some("stop".to_string()),
         };
-        assert!(matches!(classify_attempt(&empty), AttemptOutcome::Empty));
+        assert!(matches!(
+            classify_attempt(&empty, None),
+            AttemptOutcome::Empty
+        ));
         let ok = ChatCompletion {
             content: valid.to_string(),
             finish_reason: Some("stop".to_string()),
         };
-        assert!(matches!(classify_attempt(&ok), AttemptOutcome::Valid(_)));
+        assert!(matches!(
+            classify_attempt(&ok, None),
+            AttemptOutcome::Valid(_)
+        ));
         let malformed = ChatCompletion {
             content: "not json".to_string(),
             finish_reason: None,
         };
         assert!(matches!(
-            classify_attempt(&malformed),
+            classify_attempt(&malformed, None),
             AttemptOutcome::Malformed(_)
+        ));
+
+        // With rules engaged (strict mode), a syntactically valid
+        // answer with a business-rule violation classifies as Invalid,
+        // not Valid — issue #199.
+        let strict_rules = ItemRules {
+            paragraph_count: 1,
+            questions_requested: false,
+        };
+        let invalid = ChatCompletion {
+            content:
+                r#"{"associations": [{"subject": "a", "label": "l", "object": "b", "weight": 0}]}"#
+                    .to_string(),
+            finish_reason: Some("stop".to_string()),
+        };
+        assert!(matches!(
+            classify_attempt(&invalid, Some(&strict_rules)),
+            AttemptOutcome::Invalid(_)
         ));
     }
 
@@ -3671,6 +5082,77 @@ mod tests {
     fn corrective_message_names_the_fact_budget_when_length_limited_and_set() {
         let message = corrective_message("bad json", true, 5);
         assert!(message.contains("Keep it to at most 5 association(s) total."));
+    }
+
+    #[test]
+    fn corrective_validation_message_lists_every_issue_and_states_the_five_part_contract() {
+        let issues = vec![
+            "associations[1].weight: expected finite non-zero number, got string \"strong\""
+                .to_string(),
+            "aliases[0].canonical: names nothing the associations contain".to_string(),
+        ];
+        let message = corrective_validation_message(&issues);
+        assert!(
+            message.starts_with("That was valid JSON but not a valid extraction (2 issue(s)):")
+        );
+        assert!(message.contains(&issues[0]));
+        assert!(message.contains(&issues[1]));
+        // The ADR 0001 §8 bucket-2 contract: complete object, preserve
+        // every item, correct-not-delete, add nothing, JSON only.
+        assert!(message.contains("complete corrected JSON object"));
+        assert!(message.contains("keep every item"));
+        assert!(message.contains("correct the fields listed above instead of deleting"));
+        assert!(message.contains("add nothing that was not already there"));
+        assert!(message.contains("only the JSON object"));
+    }
+
+    #[test]
+    fn corrective_validation_message_caps_the_listed_issues() {
+        let issues: Vec<String> = (0..(MAX_LISTED_ISSUES + 3))
+            .map(|i| format!("associations[{i}].weight: expected finite non-zero number, got 0"))
+            .collect();
+        let message = corrective_validation_message(&issues);
+        assert!(message.contains(&format!("({} issue(s))", issues.len())));
+        assert!(message.contains("… and 3 more issue(s)"));
+        assert!(!message.contains(&issues[MAX_LISTED_ISSUES]));
+    }
+
+    #[test]
+    fn evaluate_answer_in_strict_mode_surfaces_validity_issues_lossy_mode_ignores() {
+        let content = r#"{"associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": "strong"}
+        ]}"#;
+        let strict_rules = ItemRules {
+            paragraph_count: 1,
+            questions_requested: false,
+        };
+        let Err(AnswerFault::Invalid(issues)) = evaluate_answer(content, Some(&strict_rules))
+        else {
+            panic!("expected AnswerFault::Invalid");
+        };
+        assert_eq!(
+            issues,
+            vec!["associations[0].weight: expected finite non-zero number, got string \"strong\""]
+        );
+
+        // Lossy mode (`rules: None`) ignores the same issue and hands
+        // back the parsed output, byte-for-byte parse_model_output's
+        // behavior.
+        let output = evaluate_answer(content, None).expect("lossy mode never fails on validity");
+        assert_eq!(output.associations.len(), 1);
+        assert_eq!(output.associations[0].weight, None);
+    }
+
+    #[test]
+    fn evaluate_answer_reports_a_syntax_fault_before_any_validation() {
+        let strict_rules = ItemRules {
+            paragraph_count: 1,
+            questions_requested: false,
+        };
+        match evaluate_answer("not json at all", Some(&strict_rules)) {
+            Err(AnswerFault::Syntax(message)) => assert!(message.contains("not a JSON object")),
+            _ => panic!("expected AnswerFault::Syntax"),
+        }
     }
 
     #[test]

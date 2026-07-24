@@ -1,0 +1,41 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "answer": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      }
+    ],
+    "aliases": [
+      {
+        "alias": "蔵元",
+        "canonical": "存在しない",
+        "kind": "concept"
+      }
+    ]
+  },
+  "issues": [
+    "aliases[0].canonical: names nothing the associations contain"
+  ],
+  "corrected": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      }
+    ],
+    "aliases": [
+      {
+        "alias": "蔵元",
+        "canonical": "青嶺酒造",
+        "kind": "concept"
+      }
+    ]
+  }
+}

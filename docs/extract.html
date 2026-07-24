@@ -88,6 +88,7 @@ TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
                     0 omits it entirely (default: unset, replay in full)
 TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (default off)
 TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (default unset)
+TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
 
 --dry-run           list what would extract or skip; calls nothing
 --force             re-extract documents the manifest says are unchanged
@@ -108,6 +109,9 @@ TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (default unset
 --parallel N        chunk completions to run concurrently within one
                     document (default 1, sequential); overrides
                     TAGURU_EXTRACT_PARALLEL when both are set
+--lossy             restore the pre-#199 behavior: drop a business-rule-invalid
+                    item (bad weight, dangling alias, out-of-range question, …)
+                    and count it instead of correcting or failing (see below)
 --context NAME      the context every batch file targets
 --description TEXT  attach a create block (used only when the context is absent)
 --config F          read KEY=VALUE environment from F (same dialect as serve)</code></pre>
@@ -164,7 +168,7 @@ TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (default unset
     <p>Model output is treated as untrusted input, and the contract is enforced on this side of the wire:</p>
     <ul>
       <li>Exact duplicate triples fold into one line (the in-document paraphrase rule, applied mechanically).</li>
-      <li>Invalid items — empty names, names over the caps, zero/non-finite/over-cap weights, unknown alias kinds — are dropped and counted.</li>
+      <li>Invalid items — empty names, names over the caps, zero/non-finite/over-cap weights, unknown alias kinds, dangling or shadowing aliases, out-of-range questions — earn a <b>path-addressed corrective turn</b> by default (see below), never a silent drop.</li>
       <li>A missing or out-of-range paragraph tag loses <b>only the tag</b>, never the fact — the association keeps the model's subject/label/object/weight judgment as-is.</li>
       <li>An alias is adopted only when its canonical is a name this file's associations register, and never when the alias spelling is itself such a name (either would fail the batch at apply time).</li>
       <li>Every file written is re-parsed with the import parser before it is written — <b>extract cannot produce a file import would reject</b>.</li>
@@ -189,6 +193,27 @@ TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (default unset
       <code>--max-output-tokens</code> or <code>--structured-output</code> engages the ladder
       <a href="#structured-output">below</a>, a cut-off answer is regenerated or split instead —
       never asked to shrink.
+    </p>
+    <p>
+      A syntactically valid answer that still fails the contract above gets the same corrective
+      treatment, bounded by the same <code>TAGURU_EXTRACT_MAX_ATTEMPTS</code>/
+      <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code> controls — never a second, unbounded
+      mechanism. The turn names every violation by its exact JSON path (for example
+      <code>associations[1].weight: expected finite non-zero number, got string "strong"</code> or
+      <code>aliases[0].canonical: names nothing the associations contain</code>) and asks for the
+      complete corrected object: keep every item, correct the named fields rather than deleting
+      their items, add nothing that wasn't already there, JSON only. A dangling or shadowing alias
+      can only be judged once every chunk of the document has answered — that check runs once per
+      document, right before the facts are merged, and (like the per-chunk check) spends at most
+      one corrective turn before giving up. If the corrected answer is <i>still</i> invalid, or the
+      model answers with something cut off, refused, or empty, the source fails outright and
+      nothing is written — a batch is only ever the source's complete, valid truth, never a subset
+      quietly missing the items that didn't fit. <code>--lossy</code> (or
+      <code>TAGURU_EXTRACT_LOSSY</code>) opts back into the pre-this-behavior default: invalid
+      items are dropped and counted without ever costing a corrective turn, and the one-line report
+      marks every such run's drops with <code>(--lossy)</code> so a policy trim (a
+      <code>--questions</code> cap overflow, a volunteered question nobody asked for) is never
+      confused with a discarded fact.
     </p>
     <p>
       This corrective-turn policy is a separate layer from transport retries: a transient

@@ -1,0 +1,29 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "answer": {
+    "associations": [
+      {
+        "subject": "  ",
+        "label": "杜氏",
+        "object": "高瀬"
+      }
+    ],
+    "aliases": []
+  },
+  "issues": [
+    "associations[0].subject: empty"
+  ],
+  "corrected": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      }
+    ],
+    "aliases": []
+  }
+}

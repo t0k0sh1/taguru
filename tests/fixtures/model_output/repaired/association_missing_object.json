@@ -1,0 +1,29 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "answer": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "所在地",
+        "object": null
+      }
+    ],
+    "aliases": []
+  },
+  "issues": [
+    "associations[0].object: missing"
+  ],
+  "corrected": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "所在地",
+        "object": "広島県"
+      }
+    ],
+    "aliases": []
+  }
+}

@@ -273,6 +273,9 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_FACT_BUDGET")
         .env_remove("TAGURU_EXTRACT_MAX_ATTEMPTS")
         .env_remove("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES")
+        .env_remove("TAGURU_EXTRACT_STRUCTURED_OUTPUT")
+        .env_remove("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS")
+        .env_remove("TAGURU_EXTRACT_LOSSY")
         .env_remove("TAGURU_CONFIG")
 }
 
@@ -362,10 +365,18 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ("TAGURU_EXTRACT_API_KEY", "sekrit"),
     ];
+    // Issue #199: the default (strict) mode would turn aomine's
+    // null-valued item and dangling alias into corrective turns instead
+    // of silent drops — this test is about the pipeline end to end
+    // (fences, dedup, corrective-on-garbage, manifest, import, serving),
+    // not #199's own corrective behavior (covered by the dedicated
+    // strict-mode tests below), so it opts into the pre-#199
+    // drop-and-proceed behavior explicitly.
     let (code, stdout, stderr) = run_extract(
         &out,
         &provider,
         &[
+            "--lossy",
             "--context",
             "sake",
             "--description",
@@ -377,7 +388,7 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("3 association(s)"), "{stdout}");
     assert!(stdout.contains("1 duplicate(s) folded"), "{stdout}");
-    assert!(stdout.contains("2 item(s) dropped"), "{stdout}");
+    assert!(stdout.contains("2 item(s) dropped (--lossy)"), "{stdout}");
     assert!(stdout.contains("2 written"), "{stdout}");
 
     let requests = requests.join().unwrap();
@@ -466,6 +477,7 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
         &out,
         &dead,
         &[
+            "--lossy",
             "--context",
             "sake",
             "--description",
@@ -486,7 +498,14 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     let (code, stdout, stderr) = run_extract(
         &out,
         &provider,
-        &["--force", "--context", "sake", aomine_src, takase_src],
+        &[
+            "--lossy",
+            "--force",
+            "--context",
+            "sake",
+            aomine_src,
+            takase_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("2 written"), "{stdout}");
@@ -502,7 +521,7 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     let (code, stdout, stderr) = run_extract(
         &out,
         &provider,
-        &["--context", "vats", aomine_src, takase_src],
+        &["--lossy", "--context", "vats", aomine_src, takase_src],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
@@ -2272,6 +2291,491 @@ fn changing_max_output_tokens_forces_a_re_extraction() {
     let (code, stdout, _) = run_extract(&out, &provider, &budget_args);
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.contains("1 unchanged"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+// Issue #199: merge-level silent item drop replaced by path-addressed
+// corrective retry. The default (strict) mode earns a targeted
+// corrective turn for a business-rule-invalid item instead of dropping
+// it; `--lossy` restores the pre-#199 behavior exactly.
+
+/// A single invalid weight earns one corrective turn naming its exact
+/// path; when the model corrects it, every item survives and nothing
+/// is reported dropped.
+#[test]
+fn strict_default_corrects_an_invalid_weight_and_keeps_every_item() {
+    let docs = batch_dir("extract-strict-weight-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-strict-weight-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": "strong"}
+        ],
+        "aliases": []
+    })
+    .to_string();
+    let good_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": 0.9}
+        ],
+        "aliases": []
+    })
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![bad_reply, good_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 association(s)"), "{stdout}");
+    assert!(!stdout.contains("dropped"), "{stdout}");
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].contains("associations[0].weight: expected finite non-zero number, got string"),
+        "{}",
+        requests[1]
+    );
+    assert!(requests[1].contains("keep every item"), "{}", requests[1]);
+    assert!(
+        requests[1].contains("correct the fields listed above instead of deleting"),
+        "{}",
+        requests[1]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// When the corrected answer is still invalid, the source fails
+/// outright — no batch is written, matching the never-silent-drop
+/// ruling (ADR 0001 §8).
+#[test]
+fn strict_default_fails_the_source_when_the_corrected_answer_is_still_invalid() {
+    let docs = batch_dir("extract-strict-fail-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-strict-fail-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": "strong"}
+        ],
+        "aliases": []
+    })
+    .to_string();
+    // Default max_attempts is 2 — both attempts answer the same
+    // invalid weight, so the corrective turn cannot save it.
+    let (url, requests) = stub_chat_server(vec![bad_reply.clone(), bad_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("associations[0].weight: expected finite non-zero number"),
+        "{stderr}"
+    );
+    assert!(
+        stray_batch_files(&out).is_empty(),
+        "a failed source must not write a batch file"
+    );
+    assert_eq!(requests.join().unwrap().len(), 2);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A failed re-extraction (`--force` against an always-invalid stub)
+/// must leave a previously written batch byte-for-byte untouched —
+/// the server-side atomicity guarantee (#187) extended to the
+/// producer side.
+#[test]
+fn a_failed_reextraction_leaves_the_existing_batch_untouched() {
+    let docs = batch_dir("extract-strict-untouched-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-strict-untouched-out");
+
+    let good_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": 1.0}
+        ],
+        "aliases": []
+    })
+    .to_string();
+    let (url, _) = stub_chat_server(vec![good_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let written = stray_batch_files(&out);
+    assert_eq!(written.len(), 1, "{written:?}");
+    let batch_path = out.join(&written[0]);
+    let original_bytes = std::fs::read(&batch_path).unwrap();
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": "strong"}
+        ],
+        "aliases": []
+    })
+    .to_string();
+    let (url, _) = stub_chat_server(vec![bad_reply.clone(), bad_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &["--force", "--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        std::fs::read(&batch_path).unwrap(),
+        original_bytes,
+        "a failed re-extraction must not touch the existing batch"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Stage 2 (cross-chunk alias validation): a dangling canonical earns
+/// its own corrective turn naming the exact alias path.
+#[test]
+fn a_dangling_alias_earns_a_cross_chunk_corrective_turn() {
+    let docs = batch_dir("extract-strict-dangling-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-strict-dangling-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "x", "canonical": "存在しない", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let good_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "x", "canonical": "a", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![bad_reply, good_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("dropped"), "{stdout}");
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].contains("aliases[0].canonical: names nothing the associations contain"),
+        "{}",
+        requests[1]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A `--questions` answer citing a paragraph out of the document's
+/// canonical range earns a corrective turn, not a silent drop.
+#[test]
+fn an_out_of_range_question_paragraph_earns_a_corrective_turn() {
+    let docs = batch_dir("extract-strict-question-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "段落0の文です。").unwrap();
+    let out = batch_dir("extract-strict-question-out");
+
+    let bad_reply = json!({
+        "associations": [],
+        "aliases": [],
+        "questions": [{"paragraph": 9, "question": "何?"}]
+    })
+    .to_string();
+    let good_reply = json!({
+        "associations": [],
+        "aliases": [],
+        "questions": [{"paragraph": 0, "question": "何?"}]
+    })
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![bad_reply, good_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &["--questions", "1", "--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 question(s)"), "{stdout}");
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].contains("questions[0].paragraph: must cite a paragraph below 1, got 9"),
+        "{}",
+        requests[1]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// An alias in an early chunk whose canonical only shows up in a later
+/// chunk is exactly today's `merge()` comment: Stage 2 must resolve it
+/// against the FULL merged name set and never spend a corrective turn
+/// on it.
+#[test]
+fn a_chunk_1_alias_resolved_by_a_later_chunk_needs_no_corrective_turn() {
+    let docs = batch_dir("extract-strict-crosschunk-docs");
+    let doc = docs.join("big.md");
+    std::fs::write(&doc, multi_chunk_document(20)).unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let out = batch_dir("extract-strict-crosschunk-out");
+
+    let (code, dry_stdout, stderr) =
+        run_extract(&out, &[], &["--dry-run", "--context", "c", doc_src]);
+    assert_eq!(code, 0, "stdout: {dry_stdout}\nstderr: {stderr}");
+    let total_chunks = chunk_count_from_dry_run(&dry_stdout);
+    assert!(
+        total_chunks >= 2,
+        "fixture must split into at least 2 chunks to prove cross-chunk resolution: {dry_stdout}"
+    );
+
+    let mut replies: Vec<String> = (0..total_chunks)
+        .map(|_| json!({"associations": [], "aliases": []}).to_string())
+        .collect();
+    replies[0] = json!({
+        "associations": [],
+        "aliases": [{"alias": "Aomine", "canonical": "青嶺酒造", "kind": "concept"}]
+    })
+    .to_string();
+    *replies.last_mut().unwrap() = json!({
+        "associations": [{"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬"}],
+        "aliases": []
+    })
+    .to_string();
+
+    let (url, requests) = stub_chat_server(replies);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(&out, &provider, &["--context", "c", doc_src]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("dropped"), "{stdout}");
+    assert_eq!(
+        requests.join().unwrap().len(),
+        total_chunks,
+        "a canonical resolved by a later chunk must not trigger any corrective turn"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `--lossy` restores the pre-#199 drop-and-proceed behavior exactly:
+/// no corrective turn is spent on a validity issue, and the report
+/// marks the drop explicitly so it is never confused with a policy
+/// trim.
+#[test]
+fn lossy_flag_skips_correction_and_marks_the_drop_explicitly() {
+    let docs = batch_dir("extract-lossy-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-lossy-out");
+
+    // weight 0 (not a wrong-typed weight): merge()'s lenient default
+    // for a MISSING/malformed weight is 1.0 (a plain assertion, not a
+    // drop) — only a well-typed business-rule violation like zero
+    // actually gets dropped, so this is a faithful pre-#199 drop case.
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": 0}
+        ],
+        "aliases": []
+    })
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![bad_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &["--lossy", "--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 item(s) dropped (--lossy)"), "{stdout}");
+    assert_eq!(
+        requests.join().unwrap().len(),
+        1,
+        "--lossy must never spend a corrective turn on a validity issue"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `TAGURU_EXTRACT_MAX_ATTEMPTS=1` bounds Stage 1's validity corrective
+/// turn exactly like it bounds the syntax corrective turn: one attempt
+/// total, no correction, straight to failure.
+#[test]
+fn strict_default_with_max_attempts_of_one_skips_the_validity_corrective_turn() {
+    let docs = batch_dir("extract-strict-maxone-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-strict-maxone-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": 0}
+        ],
+        "aliases": []
+    })
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![bad_reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_MAX_ATTEMPTS", "1"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("associations[0].weight: expected finite non-zero number"),
+        "{stderr}"
+    );
+    assert_eq!(
+        requests.join().unwrap().len(),
+        1,
+        "max_attempts=1 must not send a corrective turn even for a validity issue"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn extract_rejects_a_bad_lossy_env_var_value() {
+    let docs = batch_dir("extract-lossy-env-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "content").unwrap();
+    let out = batch_dir("extract-lossy-env-out");
+
+    let provider = [
+        ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ("TAGURU_EXTRACT_LOSSY", "nope"),
+    ];
+    let (code, _, stderr) =
+        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("TAGURU_EXTRACT_LOSSY takes 1/true or 0/false"),
+        "{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// TAGURU_EXTRACT_LOSSY alone (no `--lossy` flag) must engage lossy
+/// mode — the same flag-defers-to-env pattern as every other
+/// TAGURU_EXTRACT_* control.
+#[test]
+fn extract_lossy_env_var_enables_lossy_mode_without_the_flag() {
+    let docs = batch_dir("extract-lossy-envon-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-lossy-envon-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": 0}
+        ],
+        "aliases": []
+    })
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![bad_reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_LOSSY", "true"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("(--lossy)"), "{stdout}");
+    assert_eq!(requests.join().unwrap().len(), 1);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `--lossy` wins over a conflicting TAGURU_EXTRACT_LOSSY=false, the
+/// same flag-over-environment precedence every other control follows.
+#[test]
+fn extract_lossy_flag_overrides_the_environment_variable() {
+    let docs = batch_dir("extract-lossy-override-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-lossy-override-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": 0}
+        ],
+        "aliases": []
+    })
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![bad_reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_LOSSY", "false"),
+        ],
+        &["--lossy", "--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("(--lossy)"), "{stdout}");
+    assert_eq!(requests.join().unwrap().len(), 1);
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

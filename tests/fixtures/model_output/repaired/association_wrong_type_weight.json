@@ -1,0 +1,31 @@
+{
+  "rules": {
+    "paragraph_count": 2,
+    "questions_cap": 0
+  },
+  "answer": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬",
+        "weight": "strong"
+      }
+    ],
+    "aliases": []
+  },
+  "issues": [
+    "associations[0].weight: expected finite non-zero number, got string \"strong\""
+  ],
+  "corrected": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬",
+        "weight": 0.9
+      }
+    ],
+    "aliases": []
+  }
+}
