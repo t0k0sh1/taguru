@@ -65,6 +65,9 @@ class FakeServer:
         # EmbeddingUnavailableError, distinguished by its `reason`.
         self.embeddings_refresh_status = 501
         self.embeddings_refresh_result: dict[str, Any] = {"embedded": 0, "total": 0}
+        # When set, /import fails with a 500 — exercises the "checkpoints
+        # survive an import failure" case (issue #211).
+        self.fail_import = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -204,6 +207,16 @@ class FakeServer:
         if path.endswith("/labels"):
             return ok({"total": 2, "labels": ["代表銘柄", "杜氏"]})
         if path == "/import":
+            if self.fail_import:
+                return httpx.Response(
+                    500,
+                    json={
+                        "status": "error",
+                        "code": "internal",
+                        "error": "simulated import failure",
+                        "time": 0.001,
+                    },
+                )
             self.imported.append(body if isinstance(body, str) else "")
             return ok(
                 {

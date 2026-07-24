@@ -21,7 +21,15 @@ from taguru_langchain.events import (
 )
 
 from .conftest import FakeServer
-from .test_ingester import DOC_TEXT, MODEL_ANSWER, make_ingester_with_messages
+from .test_checkpoints import RecordingCheckpointStore, _build_ingester
+from .test_ingester import (
+    CHUNK1_ANSWER,
+    CHUNK2_CORRECTED_ANSWER,
+    CROSS_CHUNK_BYTES,
+    DOC_TEXT,
+    MODEL_ANSWER,
+    make_ingester_with_messages,
+)
 
 SUCCESSFUL_KINDS = [
     "document_started",
@@ -317,3 +325,136 @@ def test_attempt_failed_shares_the_rust_diagnostics_key_set() -> None:
         "ProviderMetadata's fields must match the Rust record's nested "
         "provider_metadata object — see the same Rust test."
     )
+
+
+# -- checkpoint/resume events (issue #211) --------------------------------------
+
+
+def _resume_event_kinds(events: list[IngestEvent]) -> list[str]:
+    return [event.kind for event in events]
+
+
+def test_a_reused_chunk_emits_chunk_started_and_completed_with_zero_llm_calls_and_no_attempts(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    store = RecordingCheckpointStore()
+    source = "docs/aomine.md"
+    seed_ingester, _llm = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, "not json", "not json"],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    with pytest.raises(ValueError):
+        seed_ingester.ingest_text(source=source, text=DOC_TEXT)
+
+    events: list[IngestEvent] = []
+    ingester, _llm2 = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK2_CORRECTED_ANSWER],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+        on_event=events.append,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source=source)
+    assert outcome.ok
+
+    assert _resume_event_kinds(events) == [
+        "document_started",
+        "chunk_started",
+        "chunk_completed",
+        "chunk_started",
+        "attempt_started",
+        "chunk_completed",
+        "import_started",
+        "import_completed",
+        "embedding_refresh_started",
+        "embedding_refresh_completed",
+    ]
+
+    chunk_completed = [e for e in events if isinstance(e, ChunkCompleted)]
+    reused, fresh = chunk_completed
+    assert reused.index == 0
+    assert reused.reused is True
+    assert reused.llm_calls == 0
+    assert fresh.index == 1
+    assert fresh.reused is False
+    assert fresh.llm_calls == 1
+
+    # No AttemptStarted/AttemptFailed was ever emitted for the reused
+    # chunk (index 0) — no model call happened for it.
+    assert not any(isinstance(e, AttemptStarted) and e.chunk_index == 0 for e in events)
+
+
+async def test_resume_event_stream_async_matches_sync(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    store = RecordingCheckpointStore()
+    source = "docs/aomine.md"
+    seed_ingester, _llm = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, "not json", "not json"],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    with pytest.raises(ValueError):
+        await seed_ingester.aingest_text(source=source, text=DOC_TEXT)
+
+    events: list[IngestEvent] = []
+    ingester, _llm2 = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK2_CORRECTED_ANSWER],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+        on_event=events.append,
+    )
+    outcome = await ingester.aingest_text(DOC_TEXT, source=source)
+    assert outcome.ok
+    assert _resume_event_kinds(events) == [
+        "document_started",
+        "chunk_started",
+        "chunk_completed",
+        "chunk_started",
+        "attempt_started",
+        "chunk_completed",
+        "import_started",
+        "import_completed",
+        "embedding_refresh_started",
+        "embedding_refresh_completed",
+    ]
+
+
+def test_an_interrupted_run_emits_no_import_events(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    events: list[IngestEvent] = []
+    store = RecordingCheckpointStore()
+    ingester, _llm = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+        on_event=events.append,
+    )
+    calls = {"n": 0}
+
+    def should_stop() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md", should_stop=should_stop)
+    assert outcome.interrupted
+    # Chunk 0 (nothing cached yet) runs for real; the stop fires at the
+    # top of chunk 1's iteration, before its ChunkStarted.
+    assert _resume_event_kinds(events) == [
+        "document_started",
+        "chunk_started",
+        "attempt_started",
+        "chunk_completed",
+    ]
+    assert not any(event.kind.startswith("import_") for event in events)
