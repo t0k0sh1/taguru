@@ -34,6 +34,18 @@ conversational long-term memory — each mirrored in Python) live in
 [examples/langchain](https://github.com/t0k0sh1/taguru/tree/main/examples/langchain);
 they work offline, no API key needed.
 
+`TaguruIngester` takes an optional `on_event` callback for live progress —
+document/chunk/attempt/import/embedding-refresh events, including *why* a
+corrective attempt fired. Useful with slow local models, where a single
+`ingestText()` call can otherwise look like one long silent block:
+
+```typescript
+const ingester = new TaguruIngester({
+  ...,
+  on_event: (event) => console.log(event.kind),
+});
+```
+
 `TaguruIngester` also takes an optional `structured_output` flag (default
 `false`) that asks the chat model for JSON-schema-constrained generation —
 `llm.withStructuredOutput(MODEL_OUTPUT_JSON_SCHEMA, { includeRaw: true })`

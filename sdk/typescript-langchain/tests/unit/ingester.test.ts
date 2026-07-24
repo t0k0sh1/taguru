@@ -7,10 +7,11 @@ import { FakeChatModel, FakeListChatModel } from "@langchain/core/utils/testing"
 import { describe, expect, it } from "vitest";
 
 import { MAX_PASSAGE_BYTES } from "../../src/extract.js";
+import type { AttemptFailed, AttemptStarted, IngestEvent } from "../../src/events.js";
 import { TaguruIngester } from "../../src/ingest.js";
 import { FakeServer } from "./stub.js";
 
-const MODEL_ANSWER = JSON.stringify({
+export const MODEL_ANSWER = JSON.stringify({
   associations: [
     { subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0, paragraph: 1 },
     { subject: "青嶺酒造", label: "創業年", object: "1907年", weight: 1.0, paragraph: 0 },
@@ -26,7 +27,7 @@ const MODEL_ANSWER = JSON.stringify({
 // by the lossy-mode and corrective-turn tests below.
 const INVALID_ASSOCIATION = { subject: "", label: "壊", object: "れ", weight: 1.0 };
 
-const DOC_TEXT = "青嶺酒造は1907年創業。\n\n杜氏は高瀬である。";
+export const DOC_TEXT = "青嶺酒造は1907年創業。\n\n杜氏は高瀬である。";
 
 // chunk_bytes: 40 splits DOC_TEXT into exactly its two paragraphs (one chunk
 // each) — the minimum needed to exercise cross-chunk alias validation (issue
@@ -107,7 +108,7 @@ class ToolCallingFakeChatModel extends BaseChatModel {
  * cannot carry — and records every message array it was invoked with.
  * The twin of the Python suite's RecordingFakeMessagesListChatModel.
  */
-class RecordingFakeMessagesChatModel extends BaseChatModel {
+export class RecordingFakeMessagesChatModel extends BaseChatModel {
   responses: AIMessage[];
   calls = 0;
   seenPrompts: BaseMessage[][] = [];
@@ -130,7 +131,7 @@ class RecordingFakeMessagesChatModel extends BaseChatModel {
   }
 }
 
-const makeWithMessages = (
+export const makeWithMessages = (
   server: FakeServer,
   responses: AIMessage[],
   fields: Record<string, unknown> = {},
@@ -458,10 +459,12 @@ describe("TaguruIngester (issue #181: lossless JSON repair and path-specific cor
       associations: [{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: "strong" }],
       aliases: [],
     });
-    const { ingester, llm } = makeWithMessages(new FakeServer(), [
-      new AIMessage(badWeightAnswer),
-      new AIMessage(MODEL_ANSWER),
-    ]);
+    const events: IngestEvent[] = [];
+    const { ingester, llm } = makeWithMessages(
+      new FakeServer(),
+      [new AIMessage(badWeightAnswer), new AIMessage(MODEL_ANSWER)],
+      { on_event: (event: IngestEvent) => events.push(event) },
+    );
     const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
     expect(outcome.ok).toBe(true);
     expect(outcome.llm_calls).toBe(2);
@@ -471,6 +474,11 @@ describe("TaguruIngester (issue #181: lossless JSON repair and path-specific cor
     expect(corrective).toContain("That was valid JSON but not a valid extraction (1 issue(s)):");
     expect(corrective).toContain("associations[0].weight: expected finite non-zero number");
     expect(corrective).toContain("keep every item");
+
+    const failed = events.find((event) => event.kind === "attempt_failed") as AttemptFailed;
+    expect(failed.validation_issues).toEqual([
+      'associations[0].weight: expected finite non-zero number, got string "strong"',
+    ]);
   });
 
   it("fails the source without import when a second answer is still invalid", async () => {
@@ -550,6 +558,7 @@ describe("TaguruIngester (issue #181: lossless JSON repair and path-specific cor
 
   it("gives cross-chunk alias issues one targeted corrective turn", async () => {
     const server = new FakeServer();
+    const events: IngestEvent[] = [];
     const { ingester, llm } = makeWithMessages(
       server,
       [
@@ -557,7 +566,7 @@ describe("TaguruIngester (issue #181: lossless JSON repair and path-specific cor
         new AIMessage(CHUNK2_SHADOWING_ANSWER),
         new AIMessage(CHUNK2_CORRECTED_ANSWER),
       ],
-      { chunk_bytes: CROSS_CHUNK_BYTES },
+      { chunk_bytes: CROSS_CHUNK_BYTES, on_event: (event: IngestEvent) => events.push(event) },
     );
     const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
     expect(outcome.ok).toBe(true);
@@ -570,6 +579,12 @@ describe("TaguruIngester (issue #181: lossless JSON repair and path-specific cor
     expect(correctivePrompt.at(-1)!.content as string).toContain(
       "names something the associations already contain",
     );
+
+    const crossChunkStarted = events.filter(
+      (event): event is AttemptStarted => event.kind === "attempt_started" && event.stage === "cross_chunk",
+    );
+    expect(crossChunkStarted).toHaveLength(1);
+    expect(crossChunkStarted[0]!.chunk_index).toBe(1);
   });
 
   it("fails without import when a cross-chunk correction still leaves the issue (bounded re-check)", async () => {
@@ -650,15 +665,22 @@ describe("TaguruIngester (issue #181: lossless JSON repair and path-specific cor
     };
     const goodArgs = JSON.parse(MODEL_ANSWER) as Record<string, unknown>;
     const llm = new ToolCallingFakeChatModel({ toolCallArgs: [badArgs, goodArgs] });
+    const events: IngestEvent[] = [];
     const outcome = await new TaguruIngester({
       context: "sake",
       llm,
       client: new FakeServer().client(),
       questions: 2,
       structured_output: true,
+      on_event: (event: IngestEvent) => events.push(event),
     }).ingestText(DOC_TEXT, { source: "docs/aomine.md" });
     expect(outcome.ok).toBe(true);
     expect(outcome.llm_calls).toBe(2);
     expect(outcome.correction_attempts).toBe(1);
+
+    const failed = events.find((event) => event.kind === "attempt_failed") as AttemptFailed;
+    expect(failed.validation_issues).toEqual([
+      'associations[0].weight: expected finite non-zero number, got string "strong"',
+    ]);
   });
 });

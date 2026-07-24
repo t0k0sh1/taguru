@@ -47,6 +47,11 @@ import {
   type ItemRules,
   type ModelOutput,
 } from "./extract.js";
+import type {
+  IngestEvent,
+  IngestEventCallback,
+  ProviderMetadata,
+} from "./events.js";
 
 /** Total attempts (1 initial + corrections) at the JSON object per chunk. */
 const DEFAULT_MAX_ATTEMPTS = 2;
@@ -142,6 +147,17 @@ export interface TaguruIngesterFields {
    * `IngestOutcome.invalid_dropped`.
    */
   lossy?: boolean;
+  /**
+   * Live progress/diagnostics: fires typed events (document/chunk/attempt
+   * started, attempt failed with parse error + provider metadata, chunk
+   * completed, import started/completed, embedding refresh started/
+   * completed/warning) from ingestText, so a caller can show progress and
+   * see *why* a corrective attempt fired without copying the private
+   * extraction helpers. Must be synchronous and non-blocking (see
+   * IngestEventCallback). Default undefined: no callback, no behavior
+   * difference.
+   */
+  on_event?: IngestEventCallback;
 }
 
 /**
@@ -173,13 +189,15 @@ interface AttemptResult {
   repairs: string[];
   error: string | null;
   issues: string[] | null;
+  metadata: ProviderMetadata | null;
 }
 
 function classifyText(
   content: string,
-  finishReason: string | undefined,
+  metadata: ProviderMetadata | null,
   rules: ItemRules | null,
 ): AttemptResult {
+  const finishReason = metadata?.finish_reason ?? undefined;
   if (indicatesLengthLimit(finishReason)) {
     return {
       kind: "length_limited",
@@ -188,10 +206,19 @@ function classifyText(
       repairs: [],
       error: "the answer hit the provider's output limit",
       issues: null,
+      metadata,
     };
   }
   if (indicatesRefusal(finishReason)) {
-    return { kind: "refusal", content, output: null, repairs: [], error: finishReason!, issues: null };
+    return {
+      kind: "refusal",
+      content,
+      output: null,
+      repairs: [],
+      error: finishReason!,
+      issues: null,
+      metadata,
+    };
   }
   if (isEmptyAnswer(content)) {
     return {
@@ -201,14 +228,23 @@ function classifyText(
       repairs: [],
       error: emptyAnswerDiagnosis(),
       issues: null,
+      metadata,
     };
   }
   try {
     const { output, repairs } = evaluateAnswer(content, rules);
-    return { kind: "valid", content, output, repairs, error: null, issues: null };
+    return { kind: "valid", content, output, repairs, error: null, issues: null, metadata };
   } catch (error) {
     if (error instanceof InvalidFault) {
-      return { kind: "invalid", content, output: null, repairs: [], error: null, issues: error.issues };
+      return {
+        kind: "invalid",
+        content,
+        output: null,
+        repairs: [],
+        error: null,
+        issues: error.issues,
+        metadata,
+      };
     }
     if (error instanceof SyntaxFault) {
       return {
@@ -218,6 +254,7 @@ function classifyText(
         repairs: [],
         error: error.message,
         issues: null,
+        metadata,
       };
     }
     throw error;
@@ -234,10 +271,11 @@ function classifyText(
  */
 function classifyStructured(
   content: string,
-  finishReason: string | undefined,
+  metadata: ProviderMetadata | null,
   parsed: Record<string, unknown> | null | undefined,
   rules: ItemRules | null,
 ): AttemptResult {
+  const finishReason = metadata?.finish_reason ?? undefined;
   if (indicatesLengthLimit(finishReason)) {
     return {
       kind: "length_limited",
@@ -246,10 +284,19 @@ function classifyStructured(
       repairs: [],
       error: "the answer hit the provider's output limit",
       issues: null,
+      metadata,
     };
   }
   if (indicatesRefusal(finishReason)) {
-    return { kind: "refusal", content, output: null, repairs: [], error: finishReason!, issues: null };
+    return {
+      kind: "refusal",
+      content,
+      output: null,
+      repairs: [],
+      error: finishReason!,
+      issues: null,
+      metadata,
+    };
   }
   if (parsed === undefined || parsed === null) {
     return {
@@ -261,13 +308,14 @@ function classifyStructured(
         "the model's structured-output call produced no parsed result (LangChain.js surfaces " +
         "no further detail here — see assembleStructuredOutputPipeline's includeRaw:true fallback)",
       issues: null,
+      metadata,
     };
   }
   const { output, issues } = interpretModelOutput(parsed, effectiveItemRules(rules));
   if (rules !== null && issues.length > 0) {
-    return { kind: "invalid", content, output: null, repairs: [], error: null, issues };
+    return { kind: "invalid", content, output: null, repairs: [], error: null, issues, metadata };
   }
-  return { kind: "valid", content, output, repairs: [], error: null, issues: null };
+  return { kind: "valid", content, output, repairs: [], error: null, issues: null, metadata };
 }
 
 /** The raw, unwrapped human-readable reason one attempt failed — used for
@@ -374,6 +422,7 @@ export class TaguruIngester {
   private readonly create_context: boolean;
   private readonly context_description: string | undefined;
   private readonly structuredLlm: Runnable<BaseLanguageModelInput, StructuredOutputResult> | null;
+  private readonly on_event: IngestEventCallback | undefined;
 
   constructor(fields: TaguruIngesterFields) {
     if (fields.create_context && fields.context_description === undefined) {
@@ -419,6 +468,7 @@ export class TaguruIngester {
     this.raise_on_error = fields.raise_on_error ?? false;
     this.structured_output = fields.structured_output ?? false;
     this.lossy = fields.lossy ?? false;
+    this.on_event = fields.on_event;
     // Opt-in only (see the Python twin's docstring for the full rationale):
     // built once here so a chat model that cannot bind tools fails fast, at
     // construction, rather than surfacing later as a per-attempt failure.
@@ -431,6 +481,25 @@ export class TaguruIngester {
           name: "ModelOutput",
         })
       : null;
+  }
+
+  /**
+   * Reports one progress/diagnostic event to `on_event`, if set. A raising
+   * callback is caught and reported via `console.warn` rather than
+   * breaking the ingest it was reporting on — mirrors the Python twin's
+   * `_emit`.
+   */
+  private emit(event: IngestEvent): void {
+    if (this.on_event === undefined) {
+      return;
+    }
+    try {
+      this.on_event(event);
+    } catch (error) {
+      console.warn(
+        `TaguruIngester on_event callback raised ${String(error)}; ingest continues`,
+      );
+    }
   }
 
   /**
@@ -447,13 +516,13 @@ export class TaguruIngester {
     if (this.structuredLlm !== null) {
       const result = await this.structuredLlm.invoke(messages);
       const content = contentText(result.raw);
-      const finishReason = extractFinishReason(result.raw);
-      return classifyStructured(content, finishReason, result.parsed, rules);
+      const metadata = providerMetadata(result.raw);
+      return classifyStructured(content, metadata, result.parsed, rules);
     }
     const response = await this.llm.invoke(messages);
     const content = contentText(response);
-    const finishReason = extractFinishReason(response);
-    return classifyText(content, finishReason, rules);
+    const metadata = providerMetadata(response);
+    return classifyText(content, metadata, rules);
   }
 
   /**
@@ -497,6 +566,15 @@ export class TaguruIngester {
         ),
         new HumanMessage(correctiveValidationMessage(issues)),
       ];
+      this.emit({
+        kind: "attempt_started",
+        source: outcome.source,
+        chunk_index: chunkRecord.chunkIndex,
+        attempt: 1,
+        max_attempts: 1,
+        stage: "cross_chunk",
+      });
+      const attemptStartedAt = performance.now();
       const result = await this.attemptOnce(messages, rules);
       outcome.llm_calls += 1;
       outcome.correction_attempts += 1;
@@ -510,7 +588,21 @@ export class TaguruIngester {
         outcome.lossless_repairs.push(...result.repairs);
         continue;
       }
-      throw new Error(crossChunkFailureMessage(label, result));
+      const message = crossChunkFailureMessage(label, result);
+      this.emit({
+        kind: "attempt_failed",
+        source: outcome.source,
+        chunk_index: chunkRecord.chunkIndex,
+        attempt: 1,
+        max_attempts: 1,
+        parse_error: message,
+        elapsed_seconds: (performance.now() - attemptStartedAt) / 1000,
+        provider_metadata: result.metadata,
+        length_limited: result.kind === "length_limited",
+        stage: "cross_chunk",
+        validation_issues: result.issues,
+      });
+      throw new Error(message);
     }
 
     // Re-check rather than trust the single corrective turn blindly: a
@@ -540,6 +632,11 @@ export class TaguruIngester {
     if (this.include_passage && Buffer.byteLength(text, "utf-8") > MAX_PASSAGE_BYTES) {
       throw new Error(`document exceeds the ${MAX_PASSAGE_BYTES}-byte passage cap`);
     }
+    this.emit({
+      kind: "document_started",
+      source: options.source,
+      text_bytes: Buffer.byteLength(text, "utf-8"),
+    });
 
     const vocabulary = await this.fetchVocabulary();
     const system = systemPrompt(vocabulary, this.questions, this.fact_budget);
@@ -550,6 +647,14 @@ export class TaguruIngester {
 
     const records: ChunkRecord[] = [];
     for (let index = 0; index < chunks.length; index += 1) {
+      this.emit({
+        kind: "chunk_started",
+        source: options.source,
+        index,
+        total: chunks.length,
+      });
+      const chunkStartedAt = performance.now();
+      let chunkLlmCalls = 0;
       const user = userMessage(options.source, index, chunks.length, chunks[index]!);
       const base: BaseMessage[] = [new SystemMessage(system), new HumanMessage(user)];
       let chunkRecord: ChunkRecord | null = null;
@@ -574,8 +679,18 @@ export class TaguruIngester {
                 ),
                 new HumanMessage(pendingAsk ?? ""),
               ];
+        this.emit({
+          kind: "attempt_started",
+          source: options.source,
+          chunk_index: index,
+          attempt: attempt + 1,
+          max_attempts: this.max_attempts,
+          stage: "item",
+        });
+        const attemptStartedAt = performance.now();
         const result = await this.attemptOnce(messages, rules);
         outcome.llm_calls += 1;
+        chunkLlmCalls += 1;
 
         if (result.kind === "valid") {
           chunkRecord = { output: result.output!, chunkIndex: index, user, answer: result.content };
@@ -584,20 +699,60 @@ export class TaguruIngester {
         }
 
         if (result.kind === "refusal") {
-          throw new Error(
+          const message =
             `the provider refused this content (finish_reason ${result.error}) — a policy ` +
-              "refusal is terminal; no corrective turn can change it",
-          );
+            "refusal is terminal; no corrective turn can change it";
+          this.emit({
+            kind: "attempt_failed",
+            source: options.source,
+            chunk_index: index,
+            attempt: attempt + 1,
+            max_attempts: this.max_attempts,
+            parse_error: message,
+            elapsed_seconds: (performance.now() - attemptStartedAt) / 1000,
+            provider_metadata: result.metadata,
+            length_limited: false,
+            stage: "item",
+            validation_issues: null,
+          });
+          throw new Error(message);
         }
 
         if (result.kind === "empty" && emptyCorrected) {
-          throw new Error(diagnosisFor(result));
+          const message = diagnosisFor(result);
+          this.emit({
+            kind: "attempt_failed",
+            source: options.source,
+            chunk_index: index,
+            attempt: attempt + 1,
+            max_attempts: this.max_attempts,
+            parse_error: message,
+            elapsed_seconds: (performance.now() - attemptStartedAt) / 1000,
+            provider_metadata: result.metadata,
+            length_limited: false,
+            stage: "item",
+            validation_issues: null,
+          });
+          throw new Error(message);
         }
         if (result.kind === "empty") {
           emptyCorrected = true;
         }
 
         lastDiagnosis = finalMessageFor(result);
+        this.emit({
+          kind: "attempt_failed",
+          source: options.source,
+          chunk_index: index,
+          attempt: attempt + 1,
+          max_attempts: this.max_attempts,
+          parse_error: diagnosisFor(result),
+          elapsed_seconds: (performance.now() - attemptStartedAt) / 1000,
+          provider_metadata: result.metadata,
+          length_limited: result.kind === "length_limited",
+          stage: "item",
+          validation_issues: result.issues,
+        });
         outcome.correction_attempts += 1;
         pendingAsk = correctiveAskFor(result, this.fact_budget);
         priorBadAnswer = result.content;
@@ -607,6 +762,17 @@ export class TaguruIngester {
         throw new Error(lastDiagnosis);
       }
       records.push(chunkRecord);
+      this.emit({
+        kind: "chunk_completed",
+        source: options.source,
+        index,
+        total: chunks.length,
+        associations_proposed: chunkRecord.output.associations.length,
+        aliases_proposed: chunkRecord.output.aliases.length,
+        questions_proposed: chunkRecord.output.questions.length,
+        llm_calls: chunkLlmCalls,
+        elapsed_seconds: (performance.now() - chunkStartedAt) / 1000,
+      });
     }
 
     if (!this.lossy) {
@@ -636,17 +802,45 @@ export class TaguruIngester {
       return outcome;
     }
 
+    this.emit({ kind: "import_started", source: options.source });
+    const importStartedAt = performance.now();
     const applied = await this.client.importBatches(ndjson);
     record(outcome, applied.batches[0]!);
     outcome.ok = true;
+    this.emit({
+      kind: "import_completed",
+      source: options.source,
+      elapsed_seconds: (performance.now() - importStartedAt) / 1000,
+    });
 
     if (this.refresh_embeddings) {
+      this.emit({ kind: "embedding_refresh_started", source: options.source });
       try {
-        await this.client.context(this.context).refreshEmbeddings();
+        const refreshResult = await this.client.context(this.context).refreshEmbeddings();
+        this.emit({
+          kind: "embedding_refresh_completed",
+          source: options.source,
+          configured: true,
+          embedded: refreshResult.embedded,
+          total: refreshResult.total,
+        });
       } catch (error) {
         if (error instanceof EmbeddingUnavailableError && error.reason === "provider_error") {
           outcome.embeddings_refresh_warning = error.message;
-        } else if (!(error instanceof EmbeddingUnavailableError)) {
+          this.emit({
+            kind: "embedding_refresh_warning",
+            source: options.source,
+            message: error.message,
+          });
+        } else if (error instanceof EmbeddingUnavailableError) {
+          this.emit({
+            kind: "embedding_refresh_completed",
+            source: options.source,
+            configured: false,
+            embedded: 0,
+            total: 0,
+          });
+        } else {
           throw error;
         }
       }
@@ -741,19 +935,46 @@ function record(outcome: IngestOutcome, applied: ImportOutcome): void {
  */
 const FINISH_REASON_KEYS = ["done_reason", "finish_reason", "stop_reason"] as const;
 
-function extractFinishReason(message: unknown): string | undefined {
-  const metadata = (message as { response_metadata?: unknown }).response_metadata;
-  if (typeof metadata !== "object" || metadata === null) {
-    return undefined;
-  }
-  const record = metadata as Record<string, unknown>;
-  for (const key of FINISH_REASON_KEYS) {
-    const value = record[key];
-    if (value !== undefined && value !== null) {
-      return String(value);
+function readTokenCount(usage: Record<string, unknown> | null, key: string): number | null {
+  const value = usage?.[key];
+  return typeof value === "number" ? value : null;
+}
+
+/**
+ * Provider-reported details for one model call, read from
+ * `response_metadata`/`usage_metadata` on an AIMessage — the shared
+ * metadata reader `AttemptFailed` events and diagnostics both draw from.
+ * Mirrors the Python twin's `_provider_metadata`: returns `null` (not a
+ * ProviderMetadata of nulls) when there is neither a finish reason nor
+ * usage metadata at all.
+ */
+function providerMetadata(message: unknown): ProviderMetadata | null {
+  const responseMetadata = (message as { response_metadata?: unknown }).response_metadata;
+  let finishReason: string | null = null;
+  if (typeof responseMetadata === "object" && responseMetadata !== null) {
+    const record = responseMetadata as Record<string, unknown>;
+    for (const key of FINISH_REASON_KEYS) {
+      const value = record[key];
+      if (value !== undefined && value !== null) {
+        finishReason = String(value);
+        break;
+      }
     }
   }
-  return undefined;
+  const usageMetadata = (message as { usage_metadata?: unknown }).usage_metadata;
+  const usage =
+    typeof usageMetadata === "object" && usageMetadata !== null
+      ? (usageMetadata as Record<string, unknown>)
+      : null;
+  if (finishReason === null && usage === null) {
+    return null;
+  }
+  return {
+    finish_reason: finishReason,
+    input_tokens: readTokenCount(usage, "input_tokens"),
+    output_tokens: readTokenCount(usage, "output_tokens"),
+    total_tokens: readTokenCount(usage, "total_tokens"),
+  };
 }
 
 function contentText(message: unknown): string {

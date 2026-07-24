@@ -40,6 +40,14 @@ export class FakeServer {
   /** When set, the cross-context /sources/search call (the text lane)
    * fails with a 500, to exercise text/graph lane isolation. */
   failTextSearch = false;
+  /** /embeddings/refresh's status: 501 (default, no provider configured),
+   * 200 (success — served with embeddingsRefreshResult), or 502 (provider
+   * error). Mirrors the Python conftest's FakeServer knob of the same
+   * name. */
+  embeddingsRefreshStatus: 200 | 501 | 502 = 501;
+  /** The body /embeddings/refresh returns when embeddingsRefreshStatus is
+   * 200. */
+  embeddingsRefreshResult: { embedded: number; total: number } = { embedded: 0, total: 0 };
 
   fetch: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -179,9 +187,14 @@ export class FakeServer {
       });
     }
     if (path.endsWith("/embeddings/refresh")) {
+      if (this.embeddingsRefreshStatus === 200) {
+        return ok(this.embeddingsRefreshResult);
+      }
+      const error =
+        this.embeddingsRefreshStatus === 502 ? "provider failure" : "no provider";
       return new Response(
-        JSON.stringify({ status: "error", error: "no provider", time: 0.001 }),
-        { status: 501 },
+        JSON.stringify({ status: "error", error, time: 0.001 }),
+        { status: this.embeddingsRefreshStatus },
       );
     }
     throw new Error(`unrouted path: ${path}`);
