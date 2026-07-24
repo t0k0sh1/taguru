@@ -12,15 +12,28 @@ from pathlib import Path
 import jsonschema
 
 from taguru_langchain._extract import (
+    MAX_ASSOCIATION_WEIGHT,
+    MAX_LISTED_ISSUES,
+    MAX_NAME_BYTES,
     MODEL_OUTPUT_JSON_SCHEMA,
+    InvalidFault,
+    ItemRules,
     ModelAlias,
     ModelAssociation,
     ModelOutput,
     ModelQuestion,
+    SyntaxFault,
+    candidate_json,
     chunk,
     corrective_assistant_turn_content,
     corrective_message,
+    corrective_validation_message,
+    cross_output_issues,
+    describe_value,
+    evaluate_answer,
     indicates_length_limit,
+    indicates_refusal,
+    interpret_model_output,
     labeled_document,
     merge,
     parse_model_output,
@@ -411,3 +424,446 @@ def test_json_schema_accepts_and_rejects_the_shared_fixtures() -> None:
         assert not validator.is_valid(payload), (
             f"{path.name} should NOT validate against the schema"
         )
+
+
+# -- issue #180: lenient validation walk / cross-chunk alias validation ----------
+# Ports of src/extract.rs's own tests for interpret_model_output,
+# cross_output_issues, evaluate_answer, and corrective_validation_message —
+# the same cross-language regression floor the rest of this file follows.
+
+
+def _interpret(text: str, rules: ItemRules) -> tuple[ModelOutput, list[str]]:
+    value, _repairs = candidate_json(text)
+    return interpret_model_output(value, rules)
+
+
+def _permissive_rules() -> ItemRules:
+    return ItemRules(paragraph_count=100, questions_requested=True)
+
+
+def test_a_null_array_field_reads_as_empty_not_a_parse_failure() -> None:
+    """Port of extract.rs a_null_array_field_reads_as_empty_not_a_parse_failure."""
+    nulled = '{"associations": null, "questions": [{"paragraph": 0, "question": "何?"}]}'
+    output = parse_model_output(nulled)
+    assert output.associations == []
+    merged = merge([output], 1, 1)
+    assert merged.questions == [(0, "何?")]
+
+
+def test_a_wrong_typed_array_field_reads_as_empty_not_a_parse_failure() -> None:
+    """Port of extract.rs a_wrong_typed_array_field_reads_as_empty_not_a_parse_failure."""
+    object_shaped = (
+        '{"associations": [{"subject": "a", "label": "l", "object": "b"}], "aliases": {}}'
+    )
+    output = parse_model_output(object_shaped)
+    assert len(output.associations) == 1
+    assert output.aliases == []
+
+    unwrapped = '{"associations": {"subject": "a", "label": "l", "object": "b"}}'
+    assert parse_model_output(unwrapped).associations == []
+
+    scalar = '{"associations": "none"}'
+    assert parse_model_output(scalar).associations == []
+
+
+def test_missing_and_wrong_typed_and_empty_and_oversized_are_four_distinct_issues() -> None:
+    """Port of extract.rs
+    missing_and_wrong_typed_and_empty_and_oversized_are_four_distinct_issues."""
+    oversized = "x" * (MAX_NAME_BYTES + 1)
+    text = json.dumps(
+        {
+            "associations": [
+                {"label": "l", "object": "b"},
+                {"subject": 42, "label": "l", "object": "b"},
+                {"subject": "  ", "label": "l", "object": "b"},
+                {"subject": oversized, "label": "l", "object": "b"},
+            ]
+        }
+    )
+    _output, issues = _interpret(text, _permissive_rules())
+    assert issues == [
+        "associations[0].subject: missing",
+        "associations[1].subject: expected a string, got number 42",
+        "associations[2].subject: empty",
+        f"associations[3].subject: {len(oversized)} bytes exceeds the 1024-byte cap",
+    ]
+
+
+def test_an_absent_or_null_weight_is_valid_but_a_wrong_typed_one_is_an_issue() -> None:
+    """Port of extract.rs an_absent_or_null_weight_is_valid_but_a_wrong_typed_one_is_an_issue."""
+    text = json.dumps(
+        {
+            "associations": [
+                {"subject": "a", "label": "l", "object": "b"},
+                {"subject": "a", "label": "l", "object": "c", "weight": None},
+                {"subject": "a", "label": "l", "object": "d", "weight": "strong"},
+            ]
+        }
+    )
+    output, issues = _interpret(text, _permissive_rules())
+    assert output.associations[0].weight is None
+    assert output.associations[1].weight is None
+    assert output.associations[2].weight is None
+    assert issues == [
+        'associations[2].weight: expected finite non-zero number, got string "strong"'
+    ]
+
+
+def test_zero_and_overcap_weights_report_the_offending_value_not_a_type_mismatch() -> None:
+    """Port of extract.rs
+    zero_and_overcap_weights_report_the_offending_value_not_a_type_mismatch."""
+    text = json.dumps(
+        {
+            "associations": [
+                {"subject": "a", "label": "l", "object": "b", "weight": 0},
+                {
+                    "subject": "a",
+                    "label": "l",
+                    "object": "c",
+                    "weight": MAX_ASSOCIATION_WEIGHT * 2.0,
+                },
+            ]
+        }
+    )
+    _output, issues = _interpret(text, _permissive_rules())
+    assert len(issues) == 2
+    assert issues[0] == "associations[0].weight: expected finite non-zero number, got 0"
+    assert issues[1].startswith("associations[1].weight: expected finite non-zero number, got")
+    assert f"over the {int(MAX_ASSOCIATION_WEIGHT)} cap" in issues[1]
+
+
+def test_an_out_of_range_association_paragraph_is_untagged_without_an_issue() -> None:
+    """Port of extract.rs an_out_of_range_association_paragraph_is_untagged_without_an_issue."""
+    text = json.dumps(
+        {"associations": [{"subject": "a", "label": "l", "object": "b", "paragraph": 99}]}
+    )
+    rules = ItemRules(paragraph_count=1, questions_requested=True)
+    output, issues = _interpret(text, rules)
+    assert output.associations[0].paragraph == 99
+    assert issues == []
+
+    wrong_typed = json.dumps(
+        {"associations": [{"subject": "a", "label": "l", "object": "b", "paragraph": "two"}]}
+    )
+    output, issues = _interpret(wrong_typed, rules)
+    assert output.associations[0].paragraph is None
+    assert issues == [
+        'associations[0].paragraph: expected an integer paragraph index, got string "two"'
+    ]
+
+
+def test_alias_item_issues_cover_missing_wrong_kind_and_self_alias() -> None:
+    """Port of extract.rs alias_item_issues_cover_missing_wrong_kind_and_self_alias."""
+    text = json.dumps(
+        {
+            "aliases": [
+                {"canonical": "b", "kind": "concept"},
+                {"alias": "x", "canonical": "b", "kind": "person"},
+                {"alias": "y", "canonical": "y", "kind": "concept"},
+            ]
+        }
+    )
+    _output, issues = _interpret(text, _permissive_rules())
+    assert issues == [
+        "aliases[0].alias: missing",
+        'aliases[1].kind: expected "concept" or "label", got "person"',
+        "aliases[2].alias: equals its canonical",
+    ]
+
+
+def test_question_issues_cover_missing_out_of_range_and_oversized() -> None:
+    """Port of extract.rs question_issues_cover_missing_out_of_range_and_oversized."""
+    text = json.dumps(
+        {
+            "questions": [
+                {"question": "何?"},
+                {"paragraph": 9, "question": "何?"},
+                {"paragraph": 0, "question": "  "},
+            ]
+        }
+    )
+    rules = ItemRules(paragraph_count=2, questions_requested=True)
+    _output, issues = _interpret(text, rules)
+    assert issues == [
+        "questions[0].paragraph: missing",
+        "questions[1].paragraph: must cite a paragraph below 2, got 9",
+        "questions[2].question: empty",
+    ]
+
+
+def test_a_volunteered_question_when_none_was_requested_is_a_policy_trim_not_an_issue() -> None:
+    """Port of extract.rs
+    a_volunteered_question_when_none_was_requested_is_a_policy_trim_not_an_issue."""
+    text = '{"questions": [{"question": "何?"}]}'
+    rules = ItemRules(paragraph_count=2, questions_requested=False)
+    output, issues = _interpret(text, rules)
+    assert len(output.questions) == 1
+    assert issues == []
+
+
+def test_cross_output_issues_lets_a_canonical_resolved_in_a_later_output_through() -> None:
+    """Port of extract.rs
+    cross_output_issues_lets_a_canonical_resolved_in_a_later_output_through."""
+    outputs = [
+        ModelOutput(aliases=[alias("Aomine", "青嶺酒造", "concept")]),
+        ModelOutput(associations=[association("青嶺酒造", "杜氏", "高瀬", 1.0)]),
+    ]
+    assert cross_output_issues(outputs) == []
+
+
+def test_cross_output_issues_names_dangling_and_shadowing_aliases_by_output() -> None:
+    """Port of extract.rs cross_output_issues_names_dangling_and_shadowing_aliases_by_output."""
+    outputs = [
+        ModelOutput(
+            associations=[association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+            aliases=[
+                alias("蔵元", "存在しない", "concept"),  # dangling: no such name
+                alias("高瀬", "青嶺酒造", "concept"),  # shadows a real name
+            ],
+        )
+    ]
+    assert cross_output_issues(outputs) == [
+        (
+            0,
+            [
+                "aliases[0].canonical: names nothing the associations contain",
+                "aliases[1].alias: names something the associations already contain",
+            ],
+        )
+    ]
+
+
+def test_cross_output_issues_blames_the_later_output_for_a_conflicting_canonical() -> None:
+    """Port of extract.rs
+    cross_output_issues_blames_the_later_output_for_a_conflicting_canonical."""
+    outputs = [
+        ModelOutput(
+            associations=[
+                association("青嶺酒造", "杜氏", "高瀬", 1.0),
+                association("蔵元本店", "支店", "青嶺酒造", 1.0),
+            ],
+            aliases=[alias("Aomine", "青嶺酒造", "concept")],
+        ),
+        # Same spelling "Aomine", a DIFFERENT canonical this time.
+        ModelOutput(aliases=[alias("Aomine", "蔵元本店", "concept")]),
+    ]
+    assert cross_output_issues(outputs) == [
+        (1, ['aliases[0]: conflicts with an earlier alias mapping "Aomine" to "青嶺酒造"'])
+    ]
+
+
+def test_cross_output_issues_folds_an_identical_repeated_mapping_without_a_conflict() -> None:
+    """Port of extract.rs
+    cross_output_issues_folds_an_identical_repeated_mapping_without_a_conflict."""
+    outputs = [
+        ModelOutput(
+            associations=[association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+            aliases=[alias("Aomine", "青嶺酒造", "concept")],
+        ),
+        ModelOutput(aliases=[alias("Aomine", "青嶺酒造", "concept")]),  # identical repeat
+    ]
+    assert cross_output_issues(outputs) == []
+
+
+def test_cross_output_issues_skips_aliases_stage_1_already_flagged() -> None:
+    """Port of extract.rs cross_output_issues_skips_aliases_stage_1_already_flagged."""
+    outputs = [
+        ModelOutput(
+            associations=[association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+            aliases=[
+                alias("青嶺酒造", "青嶺酒造", "concept"),  # self-alias, Stage 1's issue
+                ModelAlias(alias=None, canonical="青嶺酒造", kind="concept"),
+            ],
+        )
+    ]
+    assert cross_output_issues(outputs) == []
+
+
+def test_indicates_refusal_is_true_only_for_refusal_reasons() -> None:
+    """Port of extract.rs indicates_refusal_is_true_only_for_refusal_reasons."""
+    assert indicates_refusal("content_filter")
+    assert indicates_refusal("refusal")
+    assert not indicates_refusal("stop")
+    assert not indicates_refusal("length")
+    assert not indicates_refusal("tool_calls")
+
+
+def test_corrective_validation_message_lists_every_issue_and_states_the_five_part_contract() -> (
+    None
+):
+    """Port of extract.rs
+    corrective_validation_message_lists_every_issue_and_states_the_five_part_contract."""
+    issues = [
+        'associations[1].weight: expected finite non-zero number, got string "strong"',
+        "aliases[0].canonical: names nothing the associations contain",
+    ]
+    message = corrective_validation_message(issues)
+    assert message.startswith("That was valid JSON but not a valid extraction (2 issue(s)):")
+    assert issues[0] in message
+    assert issues[1] in message
+    # The ADR 0001 §8 bucket-2 contract: complete object, preserve every
+    # item, correct-not-delete, add nothing, JSON only.
+    assert "complete corrected JSON object" in message
+    assert "keep every item" in message
+    assert "correct the fields listed above instead of deleting" in message
+    assert "add nothing that was not already there" in message
+    assert "only the JSON object" in message
+
+
+def test_corrective_validation_message_caps_the_listed_issues() -> None:
+    """Port of extract.rs corrective_validation_message_caps_the_listed_issues."""
+    issues = [
+        f"associations[{i}].weight: expected finite non-zero number, got 0"
+        for i in range(MAX_LISTED_ISSUES + 3)
+    ]
+    message = corrective_validation_message(issues)
+    assert f"({len(issues)} issue(s))" in message
+    assert "… and 3 more issue(s)" in message
+    assert issues[MAX_LISTED_ISSUES] not in message
+
+
+def test_evaluate_answer_in_strict_mode_surfaces_validity_issues_lossy_mode_ignores() -> None:
+    """Port of extract.rs
+    evaluate_answer_in_strict_mode_surfaces_validity_issues_lossy_mode_ignores."""
+    content = json.dumps(
+        {"associations": [{"subject": "a", "label": "l", "object": "b", "weight": "strong"}]}
+    )
+    strict_rules = ItemRules(paragraph_count=1, questions_requested=False)
+    try:
+        evaluate_answer(content, strict_rules)
+    except InvalidFault as fault:
+        assert fault.issues == [
+            'associations[0].weight: expected finite non-zero number, got string "strong"'
+        ]
+    else:
+        raise AssertionError("expected InvalidFault")
+
+    # Lossy mode (rules=None) ignores the same issue and hands back the
+    # parsed output, byte-for-byte parse_model_output's behavior.
+    output, _repairs = evaluate_answer(content, None)
+    assert len(output.associations) == 1
+    assert output.associations[0].weight is None
+
+
+def test_evaluate_answer_reports_a_syntax_fault_before_any_validation() -> None:
+    """Port of extract.rs evaluate_answer_reports_a_syntax_fault_before_any_validation."""
+    strict_rules = ItemRules(paragraph_count=1, questions_requested=False)
+    try:
+        evaluate_answer("not json at all", strict_rules)
+    except SyntaxFault as fault:
+        assert "not a JSON object" in str(fault)
+    else:
+        raise AssertionError("expected SyntaxFault")
+
+
+def test_repaired_fixtures_name_their_issues_and_their_corrections_validate_clean() -> None:
+    """Port of extract.rs repaired_fixtures_name_their_issues_and_their_corrections_validate_clean.
+
+    Each tests/fixtures/model_output/repaired/*.json names one (rules,
+    answer, issues, corrected) tuple so all three producers can mechanically
+    check validate(answer) == issues and validate(corrected) == [] against
+    the SAME payloads (ADR 0001 §11's shared-fixture plan for #180/#181,
+    mirroring #199's Rust twin).
+    """
+
+    def validate(payload: dict, rules: ItemRules) -> list[str]:
+        output, issues = interpret_model_output(payload, rules)
+        for _, cross_issues in cross_output_issues([output]):
+            issues.extend(cross_issues)
+        return issues
+
+    paths = sorted((FIXTURES_ROOT / "repaired").glob("*.json"))
+    assert paths, "the repaired fixture directory must not be empty"
+    for path in paths:
+        fixture = json.loads(path.read_text(encoding="utf-8"))
+        rules = ItemRules(
+            paragraph_count=fixture["rules"]["paragraph_count"],
+            questions_requested=fixture["rules"]["questions_cap"] > 0,
+        )
+        expected_issues = fixture["issues"]
+        assert expected_issues, f"{path.name}: a repaired fixture names at least one issue"
+
+        answer = fixture["answer"]
+        assert validate(answer, rules) == expected_issues, (
+            f"{path.name}: answer's issues didn't match"
+        )
+
+        corrected = fixture["corrected"]
+        corrected_issues = validate(corrected, rules)
+        assert not corrected_issues, (
+            f"{path.name}: corrected answer must validate clean, got {corrected_issues}"
+        )
+
+        # Preserve-every-item (ADR 0001 §8 bucket 2's "correct-not-delete,
+        # add nothing"): a whole-array field that WAS shaped as an array in
+        # the answer must keep the same item count in corrected.
+        for field_name in ("associations", "aliases", "questions"):
+            answer_items = answer.get(field_name)
+            if isinstance(answer_items, list):
+                corrected_items = corrected.get(field_name)
+                corrected_len = len(corrected_items) if isinstance(corrected_items, list) else 0
+                assert len(answer_items) == corrected_len, (
+                    f"{path.name}: {field_name} item count changed between answer and corrected"
+                )
+
+
+def test_candidate_json_strips_a_bom_and_reports_it() -> None:
+    """Python-only: BOM stripping is a lossless repair #180 adds beyond
+    extract.rs's "today's set" (ADR 0001 §8 bucket 1)."""
+    value, repairs = candidate_json("﻿" + '{"associations": []}')
+    assert value == {"associations": []}
+    assert repairs == ["bom"]
+
+
+def test_candidate_json_removes_unambiguous_trailing_commas() -> None:
+    """Python-only: trailing-comma removal is the other lossless repair
+    ADR 0001 §8 bucket 1 names #180/#181 as adding."""
+    value, repairs = candidate_json(
+        '{"associations": [{"subject": "a", "label": "l", "object": "b",},],}'
+    )
+    assert value == {"associations": [{"subject": "a", "label": "l", "object": "b"}]}
+    assert repairs == ["trailing_comma"]
+
+    # A comma inside a string value must never be touched.
+    value, repairs = candidate_json(
+        '{"associations": [{"subject": "a, b", "label": "l", "object": "c"}]}'
+    )
+    assert value["associations"][0]["subject"] == "a, b"
+    assert repairs == []
+
+
+def test_candidate_json_labels_fence_and_braces_repairs() -> None:
+    payload = '{"associations": []}'
+    _value, repairs = candidate_json(f"```json\n{payload}\n```")
+    assert repairs == ["code_fence"]
+
+    _value, repairs = candidate_json(f"Here you go:\n{payload}\nHope that helps!")
+    assert repairs == ["braces_slice"]
+
+
+def test_json_nan_and_infinity_are_a_syntax_fault_like_serde() -> None:
+    """Python's json module accepts NaN/Infinity/-Infinity as an extension
+    by default; serde_json treats them as a syntax error, so
+    evaluate_answer must reject them the same way for cross-producer
+    parity."""
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        payload = (
+            '{"associations": [{"subject": "a", "label": "l", "object": "b", '
+            f'"weight": {literal}}}]}}'
+        )
+        try:
+            candidate_json(payload)
+        except SyntaxFault:
+            pass
+        else:
+            raise AssertionError(f"{literal} must be a syntax fault")
+
+
+def test_describe_value_keeps_a_float_sources_decimal_even_when_whole() -> None:
+    """serde_json::Number's Display (confirmed empirically) renders the JSON
+    literal 42.0 as "42.0", not "42" — unlike Rust's plain f64::Display
+    (weight's own messages), which does drop a whole number's trailing .0.
+    An integer-sourced literal still prints bare."""
+    assert describe_value(42) == "number 42"
+    assert describe_value(42.0) == "number 42.0"
+    assert describe_value(42.5) == "number 42.5"
