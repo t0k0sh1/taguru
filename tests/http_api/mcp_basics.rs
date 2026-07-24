@@ -266,3 +266,122 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
     let text = via_index["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("\"source\":\"docs/aomine.md\""), "{text}");
 }
+
+/// issue #182: a rejected ingestion tool call carries the same
+/// structured JSON the raw REST error body does, a second time, as
+/// `structuredContent` — alongside the unchanged prose in
+/// `content[0].text` — so the MCP host can branch on `issues`/
+/// `integrity`/`kind` without parsing free text.
+#[test]
+fn mcp_tool_call_carries_structured_content_on_a_rejected_ingestion_write() {
+    let server = Server::start("mcp-structured");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+
+    let (status, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "add_associations",
+                   "arguments": {"context": "sake", "associations": [
+                       {"subject": "s", "label": "l", "object": "o", "weight": "strong"}
+                   ]}}})),
+    );
+    assert_eq!(
+        status, 200,
+        "the JSON-RPC envelope itself still succeeds: {reply}"
+    );
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("HTTP 400"), "{text}");
+    assert!(
+        text.contains("associations[0].weight"),
+        "the plain prose is unchanged from before structuredContent existed: {text}"
+    );
+
+    let structured = &reply["result"]["structuredContent"];
+    assert_eq!(structured["code"], json!("invalid_argument"), "{reply}");
+    assert_eq!(structured["integrity"], json!("nothing_written"), "{reply}");
+    assert_eq!(
+        structured["retryable_after_correction"],
+        json!(true),
+        "{reply}"
+    );
+    let issues = structured["issues"].as_array().expect("issues array");
+    assert_eq!(issues.len(), 1, "{reply}");
+    assert_eq!(
+        issues[0]["path"],
+        json!("associations[0].weight"),
+        "{reply}"
+    );
+    assert_eq!(issues[0]["kind"], json!("type"), "{reply}");
+
+    // A successful call carries no structuredContent at all — the
+    // field exists only to describe a rejection's structured detail.
+    let (status, ok_reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "add_associations",
+                   "arguments": {"context": "sake", "associations": [
+                       {"subject": "s", "label": "l", "object": "o", "weight": 1.0}
+                   ]}}})),
+    );
+    assert_eq!(status, 200);
+    assert!(ok_reply["result"].get("isError").is_none(), "{ok_reply}");
+    assert!(
+        ok_reply["result"].get("structuredContent").is_none(),
+        "{ok_reply}"
+    );
+
+    // A route-level argument-shape rejection (never reaches the
+    // server) stays plain prose — there is no HTTP round trip to parse
+    // a structured body from.
+    let (status, route_error) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "add_associations", "arguments": {"context": "sake"}}})),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(route_error["result"]["isError"], true, "{route_error}");
+    assert!(
+        route_error["result"].get("structuredContent").is_none(),
+        "{route_error}"
+    );
+    let route_error_text = route_error["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        route_error_text.contains("missing required argument 'associations'"),
+        "{route_error_text}"
+    );
+}
+
+/// issue #182: the MCP `import` tool reports the same durable-prefix
+/// integrity a raw `POST /import` refusal does, over the Streamable
+/// HTTP transport.
+#[test]
+fn mcp_import_tool_reports_durable_prefix_on_a_mid_stream_rejection() {
+    let server = Server::start("mcp-import-durable-prefix");
+    let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \
+                   \"create\": {\"description\": \"d\"}}\n\
+                  {\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}\n\
+                  {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
+                  {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
+    let (status, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "import", "arguments": {"stream": stream}}})),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    let structured = &reply["result"]["structuredContent"];
+    assert_eq!(structured["integrity"], json!("durable_prefix"), "{reply}");
+    assert_eq!(structured["durable_batches"], json!(1), "{reply}");
+    assert_eq!(
+        structured["issues"][0]["path"],
+        json!("batches[1].concepts['Aomine']"),
+        "{reply}"
+    );
+}

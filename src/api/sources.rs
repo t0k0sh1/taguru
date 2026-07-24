@@ -5,6 +5,7 @@ use std::time::Instant;
 use axum::extract::State;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use taguru::deadline::Deadline;
 
 use crate::metrics::{ErrorKind, RetrievalCacheOp, SearchOp};
@@ -13,11 +14,12 @@ use crate::registry::{AppState, CitationLookup, PassageExplainLookup, SemanticFi
 use super::aliases::KeysetQuery;
 use super::recall::cross_targets;
 use super::{
-    AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, MAX_MATCH_LIMIT, MAX_NAME_BYTES,
+    AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, Issue, MAX_MATCH_LIMIT, MAX_NAME_BYTES,
     MAX_PASSAGES_PER_REQUEST, MAX_QUESTION_BYTES, MAX_QUESTIONS_PER_PARAGRAPH, MAX_SECTION_BYTES,
-    access_error, bounded_parallel_map, cache_and_serve, clamp, cross_search_concurrency,
-    deadline_exceeded, empty, error, not_found, ok, orphaned_source, overlong, oversized,
-    replay_cached_search, search_log_enabled,
+    MAX_TAG_BYTES, MAX_TAGS_PER_SOURCE, RefusalDetail, access_error, bounded_parallel_map,
+    cache_and_serve, clamp, collected_validation_message, cross_search_concurrency,
+    deadline_exceeded, empty, error, not_found, ok, overlong, oversized, replay_cached_search,
+    search_log_enabled, truncate_issues, validation_error,
 };
 
 #[derive(Debug, Deserialize)]
@@ -1497,39 +1499,407 @@ pub async fn cross_search_passages(
 /// section markers per source, each naming a paragraph of that
 /// source's text IN THIS REQUEST (a question or section cannot attach
 /// to text the request does not carry: storage replaces per source,
-/// wholesale).
-#[derive(Debug, Deserialize)]
+/// wholesale). Built by [`interpret_store_passages`]'s raw-JSON walk
+/// (issue #182) rather than derived `Deserialize`, so a wrong-typed or
+/// orphaned field anywhere in the body is diagnosed alongside every
+/// other issue in one pass instead of rejecting the whole request at
+/// the JSON-extractor layer.
+#[derive(Debug)]
 pub struct StorePassagesRequest {
     pub passages: BTreeMap<String, String>,
-    #[serde(default)]
     pub questions: BTreeMap<String, Vec<QuestionSpec>>,
-    #[serde(default)]
     pub sections: BTreeMap<String, Vec<SectionSpec>>,
     /// Source tags (#167), per source in THIS request — the same
     /// source-must-name-a-passage rule as questions/sections, and the
     /// same wholesale-replace semantics: a re-store without tags
     /// clears them.
-    #[serde(default)]
     pub tags: BTreeMap<String, Vec<String>>,
     /// User-supplied document dates (#167), epoch seconds per source
     /// in THIS request — the document's own time, which time filters
     /// prefer over the server's `stored_at` stamp.
-    #[serde(default)]
     pub dates: BTreeMap<String, u64>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct QuestionSpec {
     pub paragraph: u32,
     pub question: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct SectionSpec {
     pub paragraph: u32,
     pub section: String,
+}
+
+/// One `{paragraph, <text-field>}` item shared by questions and
+/// sections — reads the paragraph index, then the named bounded text
+/// field, collecting an [`Issue`] per problem instead of stopping at
+/// the first (issue #182).
+fn interpret_paragraph_and_text(
+    item: &Value,
+    path: &str,
+    text_key: &str,
+    text_cap: usize,
+    issues: &mut Vec<Issue>,
+) -> (u32, String) {
+    let Some(obj) = item.as_object() else {
+        issues.push(Issue::wrong_type(path, "an object", item));
+        return (0, String::new());
+    };
+    let paragraph = match obj.get("paragraph") {
+        None | Some(Value::Null) => {
+            issues.push(Issue::missing(
+                format!("{path}.paragraph"),
+                "a non-negative integer paragraph index",
+            ));
+            0
+        }
+        Some(value @ Value::Number(number)) => {
+            match number.as_u64().and_then(|value| u32::try_from(value).ok()) {
+                Some(paragraph) => paragraph,
+                None => {
+                    issues.push(Issue::wrong_type(
+                        format!("{path}.paragraph"),
+                        "a non-negative integer paragraph index",
+                        value,
+                    ));
+                    0
+                }
+            }
+        }
+        Some(other) => {
+            issues.push(Issue::wrong_type(
+                format!("{path}.paragraph"),
+                "a non-negative integer paragraph index",
+                other,
+            ));
+            0
+        }
+    };
+    let text = interpret_bounded_text(obj, text_key, path, text_cap, issues);
+    (paragraph, text)
+}
+
+/// A required, non-empty, within-cap string field read from a JSON
+/// object — shared by question text, section labels, and tags (issue
+/// #182), each a short string riding a paragraph index or a source.
+fn interpret_bounded_text(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+    path: &str,
+    cap: usize,
+    issues: &mut Vec<Issue>,
+) -> String {
+    let full_path = format!("{path}.{key}");
+    match obj.get(key) {
+        None | Some(Value::Null) => {
+            issues.push(Issue::missing(full_path, "a non-empty string"));
+            String::new()
+        }
+        Some(Value::String(text)) if text.is_empty() => {
+            issues.push(Issue::empty(full_path));
+            String::new()
+        }
+        Some(Value::String(text)) if text.len() > cap => {
+            issues.push(Issue::too_long(full_path, cap, text.len()));
+            String::new()
+        }
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => {
+            issues.push(Issue::wrong_type(full_path, "a non-empty string", other));
+            String::new()
+        }
+    }
+}
+
+/// `source`'s orphan rule shared by questions/sections/tags/dates: a
+/// source must name a passage carried alongside it IN THIS REQUEST — a
+/// question or section cannot attach to text the request does not
+/// carry.
+fn check_orphaned_source(
+    path: String,
+    source: &str,
+    passages: &BTreeMap<String, String>,
+    issues: &mut Vec<Issue>,
+) {
+    if !passages.contains_key(source) {
+        issues.push(Issue::unknown_reference(
+            path,
+            "a source id present in this request's own `passages`",
+        ));
+    }
+}
+
+/// Interprets `passages`: an object of source id → text. Source ids are
+/// names like any other (empty or oversized refused), the text itself
+/// rides under the body cap instead.
+fn interpret_passages(
+    obj: &serde_json::Map<String, Value>,
+    issues: &mut Vec<Issue>,
+) -> BTreeMap<String, String> {
+    let mut passages = BTreeMap::new();
+    match obj.get("passages") {
+        None | Some(Value::Null) => {
+            issues.push(Issue::missing("passages", "an object of source id -> text"));
+        }
+        Some(Value::Object(map)) => {
+            for (source, text) in map {
+                if source.is_empty() {
+                    issues.push(Issue::empty("a passage source id"));
+                } else if source.len() > MAX_NAME_BYTES {
+                    issues.push(Issue::too_long(
+                        "a passage source id",
+                        MAX_NAME_BYTES,
+                        source.len(),
+                    ));
+                }
+                match text {
+                    Value::String(text) => {
+                        passages.insert(source.clone(), text.clone());
+                    }
+                    other => issues.push(Issue::wrong_type(
+                        format!("passages['{source}']"),
+                        "a string",
+                        other,
+                    )),
+                }
+            }
+        }
+        Some(other) => issues.push(Issue::wrong_type(
+            "passages",
+            "an object of source id -> text",
+            other,
+        )),
+    }
+    passages
+}
+
+/// Interprets `questions`: an object of source → `[{paragraph,
+/// question}]` — sources must name passages in THIS request, sizes and
+/// per-paragraph counts stay under the shared caps (whether a
+/// paragraph index exists in the text is settled at store time, one
+/// rule for every entrance).
+fn interpret_questions(
+    obj: &serde_json::Map<String, Value>,
+    passages: &BTreeMap<String, String>,
+    issues: &mut Vec<Issue>,
+) -> BTreeMap<String, Vec<QuestionSpec>> {
+    let mut questions = BTreeMap::new();
+    match obj.get("questions") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(map)) => {
+            for (source, list) in map {
+                let path = format!("questions['{source}']");
+                let Some(array) = list.as_array() else {
+                    issues.push(Issue::wrong_type(path, "an array", list));
+                    continue;
+                };
+                check_orphaned_source(path.clone(), source, passages, issues);
+                let mut per_paragraph: BTreeMap<u32, usize> = BTreeMap::new();
+                let mut specs = Vec::with_capacity(array.len());
+                for (index, item) in array.iter().enumerate() {
+                    let item_path = format!("{path}[{index}]");
+                    let (paragraph, question) = interpret_paragraph_and_text(
+                        item,
+                        &item_path,
+                        "question",
+                        MAX_QUESTION_BYTES,
+                        issues,
+                    );
+                    let count = per_paragraph.entry(paragraph).or_insert(0);
+                    *count += 1;
+                    if *count > MAX_QUESTIONS_PER_PARAGRAPH {
+                        issues.push(Issue::over_limit(
+                            format!("{item_path}.paragraph"),
+                            format!("at most {MAX_QUESTIONS_PER_PARAGRAPH} questions per paragraph"),
+                            format!("paragraph {paragraph} carries more than {MAX_QUESTIONS_PER_PARAGRAPH} questions"),
+                        ));
+                    }
+                    specs.push(QuestionSpec {
+                        paragraph,
+                        question,
+                    });
+                }
+                questions.insert(source.clone(), specs);
+            }
+        }
+        Some(other) => issues.push(Issue::wrong_type(
+            "questions",
+            "an object of source -> [{paragraph, question}]",
+            other,
+        )),
+    }
+    questions
+}
+
+/// Interprets `sections`: an object of source → `[{paragraph,
+/// section}]`, the same orphan/size rule as questions (no per-paragraph
+/// count cap — ingest's batch format has none either).
+fn interpret_sections(
+    obj: &serde_json::Map<String, Value>,
+    passages: &BTreeMap<String, String>,
+    issues: &mut Vec<Issue>,
+) -> BTreeMap<String, Vec<SectionSpec>> {
+    let mut sections = BTreeMap::new();
+    match obj.get("sections") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(map)) => {
+            for (source, list) in map {
+                let path = format!("sections['{source}']");
+                let Some(array) = list.as_array() else {
+                    issues.push(Issue::wrong_type(path, "an array", list));
+                    continue;
+                };
+                check_orphaned_source(path.clone(), source, passages, issues);
+                let mut specs = Vec::with_capacity(array.len());
+                for (index, item) in array.iter().enumerate() {
+                    let item_path = format!("{path}[{index}]");
+                    let (paragraph, section) = interpret_paragraph_and_text(
+                        item,
+                        &item_path,
+                        "section",
+                        MAX_SECTION_BYTES,
+                        issues,
+                    );
+                    specs.push(SectionSpec { paragraph, section });
+                }
+                sections.insert(source.clone(), specs);
+            }
+        }
+        Some(other) => issues.push(Issue::wrong_type(
+            "sections",
+            "an object of source -> [{paragraph, section}]",
+            other,
+        )),
+    }
+    sections
+}
+
+/// Interprets `tags`: an object of source → `[tag]` (#167) — the same
+/// orphan rule as questions/sections, plus the shared per-source count
+/// cap and per-tag byte cap.
+fn interpret_tags(
+    obj: &serde_json::Map<String, Value>,
+    passages: &BTreeMap<String, String>,
+    issues: &mut Vec<Issue>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut tags = BTreeMap::new();
+    match obj.get("tags") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(map)) => {
+            for (source, list) in map {
+                let path = format!("tags['{source}']");
+                let Some(array) = list.as_array() else {
+                    issues.push(Issue::wrong_type(path, "an array of strings", list));
+                    continue;
+                };
+                check_orphaned_source(path.clone(), source, passages, issues);
+                if array.len() > MAX_TAGS_PER_SOURCE {
+                    issues.push(Issue::over_limit(
+                        path,
+                        format!("at most {MAX_TAGS_PER_SOURCE} tags"),
+                        format!("{} tags", array.len()),
+                    ));
+                }
+                let mut values = Vec::with_capacity(array.len());
+                for (index, item) in array.iter().enumerate() {
+                    let item_path = format!("tags['{source}'][{index}]");
+                    match item {
+                        Value::String(text) if text.is_empty() => {
+                            issues.push(Issue::empty(item_path));
+                        }
+                        Value::String(text) if text.len() > MAX_TAG_BYTES => {
+                            issues.push(Issue::too_long(item_path, MAX_TAG_BYTES, text.len()));
+                        }
+                        Value::String(text) => values.push(text.clone()),
+                        other => {
+                            issues.push(Issue::wrong_type(item_path, "a non-empty string", other))
+                        }
+                    }
+                }
+                tags.insert(source.clone(), values);
+            }
+        }
+        Some(other) => issues.push(Issue::wrong_type(
+            "tags",
+            "an object of source -> [tag]",
+            other,
+        )),
+    }
+    tags
+}
+
+/// Interprets `dates`: an object of source → epoch seconds (#167) — the
+/// same orphan rule as questions/sections/tags.
+fn interpret_dates(
+    obj: &serde_json::Map<String, Value>,
+    passages: &BTreeMap<String, String>,
+    issues: &mut Vec<Issue>,
+) -> BTreeMap<String, u64> {
+    let mut dates = BTreeMap::new();
+    match obj.get("dates") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(map)) => {
+            for (source, value) in map {
+                let path = format!("dates['{source}']");
+                check_orphaned_source(path.clone(), source, passages, issues);
+                match value {
+                    Value::Number(number) => match number.as_u64() {
+                        Some(epoch) => {
+                            dates.insert(source.clone(), epoch);
+                        }
+                        None => issues.push(Issue::wrong_type(
+                            path,
+                            "a non-negative integer (epoch seconds)",
+                            value,
+                        )),
+                    },
+                    other => issues.push(Issue::wrong_type(
+                        path,
+                        "a non-negative integer (epoch seconds)",
+                        other,
+                    )),
+                }
+            }
+        }
+        Some(other) => issues.push(Issue::wrong_type(
+            "dates",
+            "an object of source -> epoch seconds",
+            other,
+        )),
+    }
+    dates
+}
+
+/// Interprets the `store_passages` request body as a lenient JSON walk
+/// (issue #182), collecting every field's issues in one pass instead of
+/// rejecting the whole request at the first bad value — mirroring, for
+/// this REST write, the same collect-all discipline ADR 0001 §8 already
+/// gives a retrying LLM's answer. The built-so-far request is discarded
+/// the moment any issue is found, since the whole write is refused
+/// together — `nothing_written`.
+fn interpret_store_passages(value: &Value) -> Result<StorePassagesRequest, Vec<Issue>> {
+    let Some(obj) = value.as_object() else {
+        return Err(vec![Issue::wrong_type("", "an object", value)]);
+    };
+    let mut issues = Vec::new();
+    let passages = interpret_passages(obj, &mut issues);
+    let questions = interpret_questions(obj, &passages, &mut issues);
+    let sections = interpret_sections(obj, &passages, &mut issues);
+    let tags = interpret_tags(obj, &passages, &mut issues);
+    let dates = interpret_dates(obj, &passages, &mut issues);
+    if issues.is_empty() {
+        Ok(StorePassagesRequest {
+            passages,
+            questions,
+            sections,
+            tags,
+            dates,
+        })
+    } else {
+        Err(issues)
+    }
 }
 
 /// What a passage store accomplished. `stored` counts the batch (the
@@ -1551,149 +1921,44 @@ pub async fn store_passages(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
-    AppJson(request): AppJson<StorePassagesRequest>,
+    AppJson(body): AppJson<Value>,
 ) -> Response {
     let started_at = Instant::now();
-    // Refused before any tokenization or lock is taken: nothing of an
-    // oversized batch is stored.
-    if request.passages.len() > MAX_PASSAGES_PER_REQUEST {
+    // Refused before any tokenization or lock is taken, and before the
+    // per-field walk below: nothing of an oversized batch is stored,
+    // and there is no point diagnosing thousands of sources nothing
+    // will ever write.
+    if let Some(passages) = body.get("passages").and_then(Value::as_object)
+        && passages.len() > MAX_PASSAGES_PER_REQUEST
+    {
         return error(
             ErrorCode::OverLimit,
             format!(
                 "batch of {} passages exceeds the per-request limit of \
                  {MAX_PASSAGES_PER_REQUEST}; split the store",
-                request.passages.len()
+                passages.len()
             ),
             started_at,
         );
     }
-    // Source ids are names (the passage text itself is a document and
-    // rides under the body cap instead) — and like every name, an
-    // empty one is refused: it would list as a blank entry in GET
-    // /sources and answer lookups nothing sensible ever asks.
-    for source in request.passages.keys() {
-        if let Some(refusal) = oversized("a passage source id", source, MAX_NAME_BYTES, started_at)
-        {
-            return refusal;
-        }
-        if let Some(refusal) = empty("a passage source id", source, started_at) {
-            return refusal;
-        }
-    }
-    // Question structure is the request's to get right: sources must
-    // name passages in THIS request, sizes and per-paragraph counts
-    // stay under the shared caps. (Whether a paragraph index exists in
-    // the text is settled at store time, one rule for every entrance.)
-    for (source, questions) in &request.questions {
-        if let Some(refusal) = orphaned_source("questions", source, &request.passages, started_at) {
-            return refusal;
-        }
-        let mut per_paragraph: BTreeMap<u32, usize> = BTreeMap::new();
-        for spec in questions {
-            if spec.question.len() > MAX_QUESTION_BYTES {
-                return error(
-                    ErrorCode::InvalidArgument,
-                    format!(
-                        "a question for '{source}' is {} bytes; questions are capped at \
-                         {MAX_QUESTION_BYTES} bytes",
-                        spec.question.len()
-                    ),
-                    started_at,
-                );
-            }
-            // Embedded verbatim on the next refresh, where providers
-            // refuse zero-length input — which would stall the whole
-            // refresh pass at this row, every pass.
-            if let Some(refusal) = empty(
-                &format!("a question for '{source}'"),
-                &spec.question,
-                started_at,
-            ) {
-                return refusal;
-            }
-            let count = per_paragraph.entry(spec.paragraph).or_insert(0);
-            *count += 1;
-            if *count > MAX_QUESTIONS_PER_PARAGRAPH {
-                return error(
-                    ErrorCode::InvalidArgument,
-                    format!(
-                        "paragraph {} of '{source}' carries more than \
-                         {MAX_QUESTIONS_PER_PARAGRAPH} questions",
-                        spec.paragraph
-                    ),
-                    started_at,
-                );
-            }
-        }
-    }
-    // Tag and date structure follows the same rule: sources must name
-    // passages in THIS request, sizes and counts stay under the shared
-    // caps (the same ones the batch format and the search filter
-    // enforce, one vocabulary end to end).
-    for (source, tags) in &request.tags {
-        if let Some(refusal) = orphaned_source("tags", source, &request.passages, started_at) {
-            return refusal;
-        }
-        if tags.len() > super::MAX_TAGS_PER_SOURCE {
-            return error(
+    let request = match interpret_store_passages(&body) {
+        Ok(request) => request,
+        Err(issues) => {
+            let (issues, total) = truncate_issues(issues);
+            let message = collected_validation_message("the passage store", &issues, total);
+            return validation_error(
                 ErrorCode::InvalidArgument,
-                format!(
-                    "'{source}' carries {} tags where a source holds at most {}",
-                    tags.len(),
-                    super::MAX_TAGS_PER_SOURCE
-                ),
+                message,
+                RefusalDetail {
+                    issues,
+                    integrity: Some("nothing_written"),
+                    retryable_after_correction: Some(true),
+                    ..Default::default()
+                },
                 started_at,
             );
         }
-        for tag in tags {
-            if let Some(refusal) = empty(&format!("a tag for '{source}'"), tag, started_at) {
-                return refusal;
-            }
-            if let Some(refusal) = oversized(
-                &format!("a tag for '{source}'"),
-                tag,
-                super::MAX_TAG_BYTES,
-                started_at,
-            ) {
-                return refusal;
-            }
-        }
-    }
-    for source in request.dates.keys() {
-        if let Some(refusal) = orphaned_source("dates", source, &request.passages, started_at) {
-            return refusal;
-        }
-    }
-    // Section structure follows questions' rule: sources must name
-    // passages in THIS request, sizes stay under the shared cap.
-    // (Whether a paragraph index exists in the text is settled at
-    // store time, same as questions; ingest's batch format has no
-    // per-paragraph section count limit either, so neither does this.)
-    for (source, sections) in &request.sections {
-        if let Some(refusal) = orphaned_source("sections", source, &request.passages, started_at) {
-            return refusal;
-        }
-        for spec in sections {
-            if spec.section.len() > MAX_SECTION_BYTES {
-                return error(
-                    ErrorCode::InvalidArgument,
-                    format!(
-                        "a section label for '{source}' is {} bytes; section labels are \
-                         capped at {MAX_SECTION_BYTES} bytes",
-                        spec.section.len()
-                    ),
-                    started_at,
-                );
-            }
-            if let Some(refusal) = empty(
-                &format!("a section label for '{source}'"),
-                &spec.section,
-                started_at,
-            ) {
-                return refusal;
-            }
-        }
-    }
+    };
     let mut questions = request.questions;
     let mut sections = request.sections;
     let mut tags = request.tags;

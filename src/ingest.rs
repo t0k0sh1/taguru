@@ -52,7 +52,7 @@ use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use taguru::context::Context;
+use taguru::context::{AliasError, Context};
 use taguru::deadline::Deadline;
 
 use crate::api::{
@@ -1090,8 +1090,55 @@ pub(crate) enum ApplyRefusal {
     /// refused up front (409) — no context created, no marker opened,
     /// no retraction, nothing. Distinct from `Partial { applied: 0,
     /// .. }`, which can only follow the retraction (itself a write)
-    /// already landing.
-    Rejected(String),
+    /// already landing. Structured (issue #182) rather than a bare
+    /// message, so the HTTP endpoint can name the offending alias as a
+    /// path-addressed `Issue` instead of prose alone.
+    Rejected(AliasRejection),
+}
+
+/// Which alias namespace a predicted rejection concerns — concepts
+/// intern subjects/objects, labels intern relation names.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+pub(crate) enum AliasNamespace {
+    Concept,
+    Label,
+}
+
+impl AliasNamespace {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Concept => "concepts",
+            Self::Label => "labels",
+        }
+    }
+}
+
+/// A predicted alias rejection (issue #182): this batch's own alias
+/// operations would resolve to [`AliasError::UnknownCanonical`] or
+/// [`AliasError::Conflict`] once actually applied — named precisely
+/// enough to build a structured `Issue` from, not just the prose
+/// [`AliasRejection::text`] already reported.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct AliasRejection {
+    pub(crate) namespace: AliasNamespace,
+    pub(crate) alias: String,
+    pub(crate) canonical: String,
+    pub(crate) error: AliasError,
+}
+
+impl AliasRejection {
+    pub(crate) fn text(&self) -> String {
+        format!(
+            "{} alias '{}' → '{}': {}; nothing was applied",
+            match self.namespace {
+                AliasNamespace::Concept => "concept",
+                AliasNamespace::Label => "label",
+            },
+            self.alias,
+            self.canonical,
+            self.error,
+        )
+    }
 }
 
 impl ApplyRefusal {
@@ -1152,7 +1199,7 @@ impl ApplyRefusal {
             // Access.
             Self::Access(AccessError::QuotaExceeded(message)) => message.clone(),
             Self::Partial { message, .. } => message.clone(),
-            Self::Rejected(message) => message.clone(),
+            Self::Rejected(rejection) => rejection.text(),
         }
     }
 }
@@ -1205,7 +1252,7 @@ fn corrected_associations(batch: &Batch, paragraph_count: Option<usize>) -> (Vec
 /// the value `AppState::create` seeds a new context with. A context
 /// that does not exist and brings no `create` block is left to the
 /// ordinary `NoContext` refusal that follows this check.
-fn predicted_alias_rejection(state: &AppState, batch: &Batch) -> Option<String> {
+fn predicted_alias_rejection(state: &AppState, batch: &Batch) -> Option<AliasRejection> {
     if batch.concepts.is_empty() && batch.labels.is_empty() {
         return None;
     }
@@ -1214,18 +1261,24 @@ fn predicted_alias_rejection(state: &AppState, batch: &Batch) -> Option<String> 
         .iter()
         .flat_map(|op| [op.subject.as_str(), op.object.as_str()]);
     let labels = batch.associations.iter().map(|op| op.label.as_str());
-    let check = move |context: &Context| -> Option<String> {
+    let check = move |context: &Context| -> Option<AliasRejection> {
         if let Err((alias, canonical, error)) =
             context.check_concept_aliases(&batch.concepts, concepts)
         {
-            return Some(format!(
-                "concept alias '{alias}' → '{canonical}': {error}; nothing was applied"
-            ));
+            return Some(AliasRejection {
+                namespace: AliasNamespace::Concept,
+                alias: alias.to_string(),
+                canonical: canonical.to_string(),
+                error,
+            });
         }
         if let Err((alias, canonical, error)) = context.check_label_aliases(&batch.labels, labels) {
-            return Some(format!(
-                "label alias '{alias}' → '{canonical}': {error}; nothing was applied"
-            ));
+            return Some(AliasRejection {
+                namespace: AliasNamespace::Label,
+                alias: alias.to_string(),
+                canonical: canonical.to_string(),
+                error,
+            });
         }
         None
     };
@@ -1265,8 +1318,8 @@ fn predicted_alias_rejection(state: &AppState, batch: &Batch) -> Option<String> 
 /// retract-then-apply idempotency already makes the repair exact, so
 /// detection is the remaining gap.
 pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, ApplyRefusal> {
-    if let Some(message) = predicted_alias_rejection(state, batch) {
-        return Err(ApplyRefusal::Rejected(message));
+    if let Some(rejection) = predicted_alias_rejection(state, batch) {
+        return Err(ApplyRefusal::Rejected(rejection));
     }
 
     let mut created = false;
@@ -1470,8 +1523,8 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
 /// drop counts) reads through to the same state a real batch would
 /// query, so it matches exactly.
 pub(crate) fn preview_batch(state: &AppState, batch: &Batch) -> Result<Applied, ApplyRefusal> {
-    if let Some(message) = predicted_alias_rejection(state, batch) {
-        return Err(ApplyRefusal::Rejected(message));
+    if let Some(rejection) = predicted_alias_rejection(state, batch) {
+        return Err(ApplyRefusal::Rejected(rejection));
     }
 
     let created = state.directory_entry(&batch.context).is_none();
@@ -2438,7 +2491,16 @@ mod tests {
             .ops_written(),
             5
         );
-        assert_eq!(ApplyRefusal::Rejected("boom".to_string()).ops_written(), 0);
+        assert_eq!(
+            ApplyRefusal::Rejected(AliasRejection {
+                namespace: AliasNamespace::Concept,
+                alias: "a".to_string(),
+                canonical: "c".to_string(),
+                error: AliasError::UnknownCanonical,
+            })
+            .ops_written(),
+            0
+        );
     }
 
     /// Move one deterministic filesystem failure through the complete

@@ -774,6 +774,99 @@ fn the_mcp_bridge_applies_a_multi_line_import_stream_through_a_live_server() {
     );
 }
 
+/// issue #182: a rejected ingestion tool call carries the same
+/// structured JSON detail over the stdio bridge as it does over
+/// `POST /mcp` — `Bridge::call` parses the downstream HTTP error body
+/// itself and attaches it as `structuredContent`, alongside the
+/// unchanged prose in `content[0].text`.
+#[test]
+fn the_mcp_bridge_carries_structured_content_on_a_rejected_write() {
+    use std::io::Write;
+
+    let (mut server, addr, dir) = spawn_server("mcp-bridge-structured");
+
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_taguru-mcp"))
+        .env("TAGURU_URL", format!("http://{addr}"))
+        .env_remove("TAGURU_API_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge must spawn");
+
+    let create = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "create_context", "arguments": {"name": "sake"}}
+    });
+    let invalid = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "add_associations", "arguments": {"context": "sake", "associations": [
+            {"subject": "s", "label": "l", "object": "o", "weight": "strong"}
+        ]}}
+    });
+
+    let mut stdin = bridge.stdin.take().unwrap();
+    writeln!(stdin, "{create}").unwrap();
+    writeln!(stdin, "{invalid}").unwrap();
+    drop(stdin);
+
+    let stdout = bridge.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines();
+        let _ = sender.send(lines.next().and_then(Result::ok));
+        let _ = sender.send(lines.next().and_then(Result::ok));
+    });
+    // The bridge dispatches queued `tools/call` requests onto a worker
+    // pool, so the two replies are not guaranteed to arrive in request
+    // order — match by `id` instead of position.
+    let first = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the bridge must answer the first call")
+        .expect("one JSON-RPC response line");
+    let second = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the bridge must answer the second call")
+        .expect("one JSON-RPC response line");
+
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let first: serde_json::Value = serde_json::from_str(&first).expect("reply must be JSON");
+    let second: serde_json::Value = serde_json::from_str(&second).expect("reply must be JSON");
+    let answer = if first["id"] == serde_json::json!(2) {
+        first
+    } else {
+        second
+    };
+    assert_eq!(
+        answer["result"]["isError"],
+        serde_json::json!(true),
+        "{answer}"
+    );
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("associations[0].weight"), "{text}");
+    let structured = &answer["result"]["structuredContent"];
+    assert_eq!(
+        structured["integrity"],
+        serde_json::json!("nothing_written"),
+        "{answer}"
+    );
+    assert_eq!(
+        structured["issues"][0]["path"],
+        serde_json::json!("associations[0].weight"),
+        "{answer}"
+    );
+    assert_eq!(
+        structured["issues"][0]["kind"],
+        serde_json::json!("type"),
+        "{answer}"
+    );
+}
+
 /// A client that pipelines far more `tools/call` requests than
 /// `TAGURU_MCP_MAX_CONCURRENT_TOOLS` must still get every one of them
 /// answered, each matched to its own id — proving the fixed-size worker

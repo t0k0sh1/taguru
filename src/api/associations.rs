@@ -4,16 +4,199 @@ use axum::extract::State;
 use axum::response::Response;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use taguru::deadline::Deadline;
 
 use crate::registry::{AppState, AssocOp};
 
 use super::{
-    AppJson, AppPath, ErrorCode, MAX_ASSOCIATION_WEIGHT, MAX_ASSOCIATIONS_PER_REQUEST,
-    MAX_NAME_BYTES, access_error, deadline_exceeded, empty, error, key_name, ok, oversized,
-    partial_write_error,
+    AppJson, AppPath, ErrorCode, Issue, MAX_ASSOCIATION_WEIGHT, MAX_ASSOCIATIONS_PER_REQUEST,
+    MAX_NAME_BYTES, RefusalDetail, access_error, collected_validation_message, deadline_exceeded,
+    describe_value, empty, error, key_name, ok, oversized, partial_write_error, truncate_issues,
+    validation_error,
 };
+
+/// Reads one `associations[index]` item's required, non-empty,
+/// within-cap string field — the raw-JSON twin of what a
+/// `Deserialize<String>` plus the old post-hoc `oversized`/`empty`
+/// checks did together. Working from `Value` (issue #182) instead of a
+/// typed struct means a wrong-typed field is diagnosed alongside every
+/// other item's issues in one pass, rather than rejecting the whole
+/// batch at the JSON-extractor layer before this handler ever runs.
+fn interpret_required_string(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+    path: &str,
+    issues: &mut Vec<Issue>,
+) -> String {
+    let full_path = format!("{path}.{key}");
+    match obj.get(key) {
+        None | Some(Value::Null) => {
+            issues.push(Issue::missing(full_path, "a non-empty string"));
+            String::new()
+        }
+        Some(Value::String(text)) if text.is_empty() => {
+            issues.push(Issue::empty(full_path));
+            String::new()
+        }
+        Some(Value::String(text)) if text.len() > MAX_NAME_BYTES => {
+            issues.push(Issue::too_long(full_path, MAX_NAME_BYTES, text.len()));
+            String::new()
+        }
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => {
+            issues.push(Issue::wrong_type(full_path, "a non-empty string", other));
+            String::new()
+        }
+    }
+}
+
+/// `source`'s shape: omitted (or null) means the ordinary unsourced
+/// association — see [`AssocOp::source`] — but a source that IS
+/// present is a name like any other and must carry something, or it
+/// would intern a real, permanent source id that unrelated callers'
+/// mistakes then silently merge into.
+fn interpret_source(
+    obj: &serde_json::Map<String, Value>,
+    path: &str,
+    issues: &mut Vec<Issue>,
+) -> Option<String> {
+    match obj.get("source") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) if text.is_empty() => {
+            issues.push(Issue::empty(format!("{path}.source")));
+            None
+        }
+        Some(Value::String(text)) if text.len() > MAX_NAME_BYTES => {
+            issues.push(Issue::too_long(
+                format!("{path}.source"),
+                MAX_NAME_BYTES,
+                text.len(),
+            ));
+            None
+        }
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(other) => {
+            issues.push(Issue::wrong_type(
+                format!("{path}.source"),
+                "a string",
+                other,
+            ));
+            None
+        }
+    }
+}
+
+/// A weight the graph must never accumulate, refused whole like every
+/// other rejected item: JSON cannot carry Infinity or NaN, but it
+/// carries 1e300 just fine, and saturation never washes out of an edge.
+fn interpret_weight(
+    obj: &serde_json::Map<String, Value>,
+    path: &str,
+    issues: &mut Vec<Issue>,
+) -> f64 {
+    let full_path = format!("{path}.weight");
+    let expected = format!("a finite number with |weight| <= {MAX_ASSOCIATION_WEIGHT}");
+    match obj.get("weight") {
+        None | Some(Value::Null) => {
+            issues.push(Issue::missing(full_path, expected));
+            0.0
+        }
+        Some(Value::Number(number)) => {
+            let weight = number.as_f64().unwrap_or(f64::NAN);
+            if !weight.is_finite() || weight.abs() > MAX_ASSOCIATION_WEIGHT {
+                issues.push(Issue::range(
+                    full_path,
+                    expected,
+                    describe_value(obj.get("weight").unwrap()),
+                ));
+                0.0
+            } else {
+                weight
+            }
+        }
+        Some(other) => {
+            issues.push(Issue::wrong_type(full_path, expected, other));
+            0.0
+        }
+    }
+}
+
+/// Zero-based paragraph position within `source` — meaningless without
+/// one, so `apply_op` only ever honors it alongside `source`.
+fn interpret_paragraph(
+    obj: &serde_json::Map<String, Value>,
+    path: &str,
+    issues: &mut Vec<Issue>,
+) -> Option<u32> {
+    match obj.get("paragraph") {
+        None | Some(Value::Null) => None,
+        Some(value @ Value::Number(number)) => {
+            match number.as_u64().and_then(|value| u32::try_from(value).ok()) {
+                Some(paragraph) => Some(paragraph),
+                None => {
+                    issues.push(Issue::wrong_type(
+                        format!("{path}.paragraph"),
+                        "a non-negative integer paragraph index",
+                        value,
+                    ));
+                    None
+                }
+            }
+        }
+        Some(other) => {
+            issues.push(Issue::wrong_type(
+                format!("{path}.paragraph"),
+                "a non-negative integer paragraph index",
+                other,
+            ));
+            None
+        }
+    }
+}
+
+/// Interprets the `associations` request body as a lenient JSON walk
+/// (issue #182), collecting every item's issues in one pass instead of
+/// rejecting the whole batch at the first bad field — mirroring, for
+/// this REST write, the same collect-all discipline ADR 0001 §8 already
+/// gives a retrying LLM's answer (`extract.rs::interpret_model_output`).
+/// Returns the built ops on a clean pass; the built-so-far ops are
+/// discarded (never returned) the moment any issue is found, since the
+/// whole batch is refused together — `nothing_written`.
+fn interpret_associations(value: &Value) -> Result<Vec<AssocOp>, Vec<Issue>> {
+    let Some(array) = value.as_array() else {
+        return Err(vec![Issue::wrong_type("associations", "an array", value)]);
+    };
+    let mut issues = Vec::new();
+    let mut ops = Vec::with_capacity(array.len());
+    for (index, item) in array.iter().enumerate() {
+        let path = format!("associations[{index}]");
+        let Some(obj) = item.as_object() else {
+            issues.push(Issue::wrong_type(path, "an object", item));
+            continue;
+        };
+        let subject = interpret_required_string(obj, "subject", &path, &mut issues);
+        let label = interpret_required_string(obj, "label", &path, &mut issues);
+        let object = interpret_required_string(obj, "object", &path, &mut issues);
+        let weight = interpret_weight(obj, &path, &mut issues);
+        let source = interpret_source(obj, &path, &mut issues);
+        let paragraph = interpret_paragraph(obj, &path, &mut issues);
+        ops.push(AssocOp {
+            subject,
+            label,
+            object,
+            weight,
+            source,
+            paragraph,
+        });
+    }
+    if issues.is_empty() {
+        Ok(ops)
+    } else {
+        Err(issues)
+    }
+}
 
 /// A batch of assertions — the arguments of `associate` /
 /// `associate_from` as JSON fields ([`AssocOp`], shared with the WAL).
@@ -23,77 +206,44 @@ pub async fn add_associations(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
-    AppJson(associations): AppJson<Vec<AssocOp>>,
+    AppJson(body): AppJson<Value>,
 ) -> Response {
     let started_at = Instant::now();
-    // Refused before the write lock is even taken: nothing of an
-    // oversized batch is applied.
-    if associations.len() > MAX_ASSOCIATIONS_PER_REQUEST {
+    // Refused before the write lock is even taken, and before the
+    // per-item walk below: nothing of an oversized batch is applied,
+    // and there is no point diagnosing thousands of items nothing will
+    // ever write.
+    if let Some(array) = body.as_array()
+        && array.len() > MAX_ASSOCIATIONS_PER_REQUEST
+    {
         return error(
             ErrorCode::OverLimit,
             format!(
                 "batch of {} associations exceeds the per-request limit of \
                  {MAX_ASSOCIATIONS_PER_REQUEST}; split the ingest",
-                associations.len()
+                array.len()
             ),
             started_at,
         );
     }
-    // Also refused whole: a weight the graph must never accumulate.
-    // JSON cannot carry Infinity or NaN, but it carries 1e300 just
-    // fine, and saturation never washes out of an edge.
-    for (index, op) in associations.iter().enumerate() {
-        if !op.weight.is_finite() || op.weight.abs() > MAX_ASSOCIATION_WEIGHT {
-            return error(
+    let associations = match interpret_associations(&body) {
+        Ok(associations) => associations,
+        Err(issues) => {
+            let (issues, total) = truncate_issues(issues);
+            let message = collected_validation_message("the associations batch", &issues, total);
+            return validation_error(
                 ErrorCode::InvalidArgument,
-                format!(
-                    "associations[{index}].weight {} is outside the accepted range \
-                     (finite, |weight| <= {MAX_ASSOCIATION_WEIGHT}); nothing was applied",
-                    op.weight
-                ),
+                message,
+                RefusalDetail {
+                    issues,
+                    integrity: Some("nothing_written"),
+                    retryable_after_correction: Some(true),
+                    ..Default::default()
+                },
                 started_at,
             );
         }
-        // And a name the graph must never intern — see MAX_NAME_BYTES.
-        let source = op.source.as_deref().unwrap_or("");
-        for (field, value) in [
-            ("subject", op.subject.as_str()),
-            ("label", op.label.as_str()),
-            ("object", op.object.as_str()),
-            ("source", source),
-        ] {
-            if let Some(refusal) = oversized(
-                &format!("associations[{index}].{field}"),
-                value,
-                MAX_NAME_BYTES,
-                started_at,
-            ) {
-                return refusal;
-            }
-        }
-        // subject/label/object name the triple itself and must carry
-        // something. A source may be OMITTED — that is the ordinary
-        // unsourced-association case (see AssocOp::source) — but a
-        // source that is PRESENT is a name like any other: an empty
-        // string would intern a real, permanent source id that every
-        // later attribution list displays and that unrelated callers'
-        // mistakes silently merge into.
-        for (field, value) in [
-            ("subject", Some(op.subject.as_str())),
-            ("label", Some(op.label.as_str())),
-            ("object", Some(op.object.as_str())),
-            ("source", op.source.as_deref()),
-        ] {
-            let Some(value) = value else {
-                continue;
-            };
-            if let Some(refusal) =
-                empty(&format!("associations[{index}].{field}"), value, started_at)
-            {
-                return refusal;
-            }
-        }
-    }
+    };
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }

@@ -119,8 +119,8 @@ pub async fn serve(
             // a budget already spent must be caught before paying for
             // the parked worker and the dispatched fan-out behind it,
             // not after.
-            let outcome = if deadline.expired() {
-                Err(DEADLINE_EXCEEDED.to_string())
+            let outcome: Result<String, mcp::ToolError> = if deadline.expired() {
+                Err(DEADLINE_EXCEEDED.to_string().into())
             } else {
                 tokio::task::block_in_place(|| {
                     let handle = tokio::runtime::Handle::current();
@@ -128,16 +128,18 @@ pub async fn serve(
                         &arguments,
                         Some(max_result_bytes),
                         |method, path, body| {
-                            handle.block_on(call_inner(
-                                dispatch.clone(),
-                                method,
-                                &path,
-                                body,
-                                key.as_ref(),
-                                scope.as_ref(),
-                                max_result_bytes,
-                                deadline,
-                            ))
+                            handle
+                                .block_on(call_inner(
+                                    dispatch.clone(),
+                                    method,
+                                    &path,
+                                    body,
+                                    key.as_ref(),
+                                    scope.as_ref(),
+                                    max_result_bytes,
+                                    deadline,
+                                ))
+                                .map_err(|error| error.text)
                         },
                     )
                 })
@@ -160,6 +162,7 @@ pub async fn serve(
                         Ok(text)
                     }
                 })
+                .map_err(mcp::ToolError::from)
             };
             mcp::response(id, mcp::tool_response(outcome))
         }
@@ -178,7 +181,7 @@ pub async fn serve(
                     )
                     .await
                 }
-                Err(error) => Err(error),
+                Err(error) => Err(mcp::ToolError::from(error)),
             };
             mcp::response(id, mcp::tool_response(outcome))
         }
@@ -202,7 +205,7 @@ async fn call_inner(
     scope: Option<&crate::auth::KeyScope>,
     max_result_bytes: usize,
     deadline: Deadline,
-) -> Result<String, String> {
+) -> Result<String, mcp::ToolError> {
     let builder = Request::builder().method(method).uri(path);
     let mut request = match body {
         // A string argument (the `import` tool's NDJSON stream) rides
@@ -222,7 +225,8 @@ async fn call_inner(
     // into the URL. A long enough one exceeds `http::Uri`'s length limit,
     // which the builder reports here — fail this one call gracefully
     // rather than panic the task.
-    .map_err(|error| format!("could not build the in-process request: {error}"))?;
+    .map_err(|error| format!("could not build the in-process request: {error}"))
+    .map_err(mcp::ToolError::from)?;
     // The outer request's identity travels with the dispatched call:
     // the authorization layer on the dispatch router judges each tool
     // call by the same grant the raw API would. The scope goes with
@@ -253,22 +257,35 @@ async fn call_inner(
         // downstream. Surface the real status instead of swapping it for
         // an unrelated cap message.
         Err(error) if is_length_limit(&error) && status.is_success() => {
-            return Err(RESULT_TOO_BIG.to_string());
+            return Err(RESULT_TOO_BIG.to_string().into());
         }
         Err(error) if is_length_limit(&error) => {
             return Err(format!(
                 "HTTP {}: (error body exceeds the MCP response cap, \
                  TAGURU_MCP_MAX_RESULT_BYTES)",
                 status.as_u16()
-            ));
+            )
+            .into());
         }
-        Err(error) => return Err(format!("response unreadable: {error}")),
+        Err(error) => return Err(format!("response unreadable: {error}").into()),
     };
     let text = String::from_utf8_lossy(&bytes).into_owned();
     if status.is_success() {
         Ok(text)
     } else {
-        Err(format!("HTTP {}: {text}", status.as_u16()))
+        // The downstream JSON error body (issue #182's structured
+        // `issues`/`integrity`/`retryable_after_correction` included,
+        // when the failure is one that carries them) rides again as
+        // `structuredContent`, alongside the same prose this transport
+        // has always put in `content[0].text` — additive, so a client
+        // that only reads `content` sees no change.
+        let structured = serde_json::from_str::<Value>(&text)
+            .ok()
+            .filter(Value::is_object);
+        Err(mcp::ToolError {
+            text: format!("HTTP {}: {text}", status.as_u16()),
+            structured,
+        })
     }
 }
 

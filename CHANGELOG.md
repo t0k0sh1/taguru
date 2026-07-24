@@ -61,6 +61,41 @@ Entries that change an on-disk format or a response shape say so.
   Rust producer's stricter, cross-language-consistent parsing (ADR 0001
   §11). Validates against the same shared fixture corpus
   `tests/fixtures/model_output/repaired/` the Rust and Python twins use.
+- `add_associations`, `store_passages`, and `POST /import` (including
+  MCP's `import` tool) return structured, path-addressed validation
+  detail on ingestion refusals (#182, implementing ADR 0001 §8/§11's
+  MCP consistency obligation). **Response shape change**: the JSON
+  error body gains four additive fields, present only where they apply
+  (absent from every success and from every other error) —
+  `issues` (up to 20, `{path, kind, expected, actual}` per rejected
+  field; `kind` one of `missing`/`type`/`empty`/`too_long`/`range`/
+  `over_limit`/`unknown_reference`/`conflict`), `integrity`
+  (`"nothing_written"`, or a multi-batch `import` stream's
+  `"durable_prefix"` with `durable_batches` naming exactly how many
+  earlier batches already landed — never implying any part of the
+  REJECTED batch itself landed), and `retryable_after_correction`
+  (`true` when a corrected, complete resend can resolve the rejection).
+  `add_associations` and `store_passages` now collect every item's
+  issues in one pass instead of stopping at the first bad one, so a
+  rejection names every offending path at once; both also read a raw
+  JSON body now, so a wrong-typed field (e.g. `weight: "strong"`) is
+  reported as a path-addressed `invalid_argument` issue instead of a
+  generic `malformed_request` — a deliberate, additive shape and
+  error-classification change for these two endpoints (existing
+  consumers reading only `status`/`code`/`error`/`time` are
+  unaffected). Over MCP, a rejected tool call's structured detail rides
+  again as `structuredContent` (MCP 2025-06-18+) alongside the
+  unchanged prose in `content[0].text`. `taguru import`'s predicted
+  alias rejection (`ApplyRefusal::Rejected`) is now a structured
+  `AliasRejection` internally; its prose `text()` is byte-for-byte
+  unchanged. Tool descriptions and `GET /protocol`'s "Errors and
+  limits"/"Ingest loop" sections document the new fields, the `kind`
+  vocabulary, the atomicity boundary between `add_associations`/
+  `store_passages` and `import`, and the correction discipline
+  (preserve every item, correct only the listed paths, resend the
+  complete write, never delete-as-repair, add no unsupported fact).
+  MCP never retries the extracting LLM itself — correction and
+  resubmission are entirely the calling host's responsibility.
 - `taguru extract` replaces merge-level silent item drop with
   path-addressed corrective retry (#199, implementing ADR 0001 §8) — a
   business-rule-invalid item (a wrong-typed or zero/non-finite/over-cap

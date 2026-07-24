@@ -6,16 +6,18 @@ use axum::response::{IntoResponse, Response};
 
 use serde::{Deserialize, Serialize};
 
+use taguru::context::AliasError;
 use taguru::deadline::Deadline;
 
 use crate::groups::GroupRecord;
+use crate::ingest::AliasRejection;
 use crate::metrics::ErrorKind;
 use crate::registry::AppState;
 
 use super::groups::{scope_refusal, scoped_member_contexts};
 use super::{
-    AppBytes, AppPath, AppQuery, ErrorCode, access_error, access_error_noted, deadline_exceeded,
-    error, group_not_found, key_name, nesting_error_code, ok,
+    AppBytes, AppPath, AppQuery, ErrorCode, Issue, RefusalDetail, access_error, access_error_noted,
+    deadline_exceeded, error, group_not_found, key_name, nesting_error_code, ok, validation_error,
 };
 
 /// `POST /import`'s query string.
@@ -98,15 +100,67 @@ fn import_outcome(batch: &crate::ingest::Batch, applied: &crate::ingest::Applied
     }
 }
 
+/// Names one predicted alias rejection (issue #182) as a path-addressed
+/// [`Issue`]: `batches[{index}]` locates which stream element failed,
+/// the alias namespace and spelling locate the mapping, and the kind
+/// mirrors what [`AliasError`] itself distinguishes.
+fn alias_rejection_issue(batch_index: usize, rejection: &AliasRejection) -> Issue {
+    let path = format!(
+        "batches[{batch_index}].{}['{}']",
+        rejection.namespace.as_str(),
+        rejection.alias
+    );
+    match rejection.error {
+        AliasError::UnknownCanonical => Issue::unknown_reference(
+            path,
+            format!(
+                "'{}' already interned as a concept or label this batch's associations use",
+                rejection.canonical
+            ),
+        ),
+        AliasError::Conflict => Issue::conflict(
+            path,
+            format!("resolves to '{}'", rejection.canonical),
+            "already resolves to a different record",
+        ),
+        AliasError::Full(_) => {
+            Issue::conflict(path, "context capacity available", "context is full")
+        }
+    }
+}
+
+/// The `integrity` verdict for a mid-stream import refusal (issue
+/// #182): `nothing_written` when no batch before this one landed (or
+/// this is a `dry_run`, which never writes anything at all regardless
+/// of how many batches "previewed clean"), otherwise a
+/// `durable_prefix` naming exactly how many did — never implying a
+/// subset of THIS batch's own writes was accepted, since every batch
+/// is all-or-nothing.
+fn stream_integrity(previewed_or_landed: usize, dry_run: bool) -> (&'static str, Option<usize>) {
+    if dry_run || previewed_or_landed == 0 {
+        ("nothing_written", None)
+    } else {
+        ("durable_prefix", Some(previewed_or_landed))
+    }
+}
+
 /// Maps one batch's [`ApplyRefusal`](crate::ingest::ApplyRefusal) onto
 /// the response, `note` naming which batch of a stream refused (empty
 /// for a single-batch body, keeping that path's responses exactly as
-/// they were).
+/// they were). `batch_index` and `durable_batches` (batches before this
+/// one that already landed) feed the structured detail (issue #182) the
+/// two provably-atomic arms (`NoContext`, `Rejected`) can carry;
+/// `Partial`/`Io`/`Access` cannot prove how much of THIS batch landed,
+/// so their prose stays the only account, as before.
+#[allow(clippy::too_many_arguments)] // the batch's stream position, spread flat like call_inner's outer context
 fn import_refusal(
     state: &AppState,
     batch: &crate::ingest::Batch,
     refusal: crate::ingest::ApplyRefusal,
     note: &str,
+    batch_index: usize,
+    durable_batches: usize,
+    dry_run: bool,
     started_at: Instant,
 ) -> Response {
     match refusal {
@@ -115,11 +169,23 @@ fn import_refusal(
         crate::ingest::ApplyRefusal::Access(failure) => {
             access_error_noted(state, failure, &batch.context, note, started_at)
         }
-        refusal @ crate::ingest::ApplyRefusal::NoContext(_) => error(
-            ErrorCode::NoContext,
-            format!("{note}{}", refusal.text()),
-            started_at,
-        ),
+        refusal @ crate::ingest::ApplyRefusal::NoContext(_) => {
+            let (integrity, durable_batches) = stream_integrity(durable_batches, dry_run);
+            validation_error(
+                ErrorCode::NoContext,
+                format!("{note}{}", refusal.text()),
+                RefusalDetail {
+                    issues: vec![Issue::missing(
+                        format!("batches[{batch_index}].create"),
+                        "a create block, since the named context does not exist yet",
+                    )],
+                    integrity: Some(integrity),
+                    durable_batches,
+                    retryable_after_correction: Some(true),
+                },
+                started_at,
+            )
+        }
         refusal @ crate::ingest::ApplyRefusal::Io(_) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
@@ -149,11 +215,22 @@ fn import_refusal(
         // Predicted before anything mutated — no create, no marker,
         // no retraction, so unlike `Partial` above there is no write
         // to note.
-        refusal @ crate::ingest::ApplyRefusal::Rejected(_) => error(
-            ErrorCode::Conflict,
-            format!("{note}{}", refusal.text()),
-            started_at,
-        ),
+        crate::ingest::ApplyRefusal::Rejected(rejection) => {
+            let (integrity, durable_batches) = stream_integrity(durable_batches, dry_run);
+            let issue = alias_rejection_issue(batch_index, &rejection);
+            let message = format!("{note}{}", rejection.text());
+            validation_error(
+                ErrorCode::Conflict,
+                message,
+                RefusalDetail {
+                    issues: vec![issue],
+                    integrity: Some(integrity),
+                    durable_batches,
+                    retryable_after_correction: Some(true),
+                },
+                started_at,
+            )
+        }
     }
 }
 
@@ -187,20 +264,39 @@ pub(super) fn restore_refusal(
     // A budget that ran out mid-restore is a resumable prefix, not a
     // rejected set: some records may have landed, and the batches
     // before them did. The validation arms, by contrast, wrote nothing
-    // in the group phase.
-    let message = match &refusal {
-        RestoreGroupsError::Timeout { .. } => format!(
-            "group restore exceeded its budget with {batches_landed} batch(es) durable \
-             (TAGURU_REQUEST_TIMEOUT_SECS tunes this); {}",
-            refusal.text()
+    // in the group phase — every batch landed, so the group phase's
+    // own refusal is provably a durable prefix (issue #182), never a
+    // partial group write of its own (`restore_groups` validates the
+    // whole set before applying any of it).
+    match &refusal {
+        RestoreGroupsError::Timeout { .. } => error(
+            code,
+            format!(
+                "group restore exceeded its budget with {batches_landed} batch(es) durable \
+                 (TAGURU_REQUEST_TIMEOUT_SECS tunes this); {}",
+                refusal.text()
+            ),
+            started_at,
         ),
-        _ => format!(
-            "group records refused with every batch landed ({batches_landed} durable); \
-             fixing the stream and re-POSTing it whole is exact: {}",
-            refusal.text()
-        ),
-    };
-    error(code, message, started_at)
+        _ => {
+            let (integrity, durable_batches) = stream_integrity(batches_landed, false);
+            validation_error(
+                code,
+                format!(
+                    "group records refused with every batch landed ({batches_landed} durable); \
+                     fixing the stream and re-POSTing it whole is exact: {}",
+                    refusal.text()
+                ),
+                RefusalDetail {
+                    integrity: Some(integrity),
+                    durable_batches,
+                    retryable_after_correction: Some(true),
+                    ..Default::default()
+                },
+                started_at,
+            )
+        }
+    }
 }
 
 /// The "N batches already landed" prefix a multi-batch import prepends
@@ -286,8 +382,20 @@ pub async fn import_batch(
     }
     let stream = match crate::ingest::parse_stream(&body[..]) {
         Ok(stream) => stream,
-        // Line-numbered, like the CLI's validation pass.
-        Err(message) => return error(ErrorCode::MalformedRequest, message, started_at),
+        // Line-numbered, like the CLI's validation pass. Nothing in the
+        // stream has been touched yet — a fixed-up resend is exact.
+        Err(message) => {
+            return validation_error(
+                ErrorCode::MalformedRequest,
+                message,
+                RefusalDetail {
+                    integrity: Some("nothing_written"),
+                    retryable_after_correction: Some(true),
+                    ..Default::default()
+                },
+                started_at,
+            );
+        }
     };
     // Import's contexts live in the BODY, out of the route-level
     // authorization check's reach — a context-scoped key is judged
@@ -298,7 +406,7 @@ pub async fn import_batch(
             .iter()
             .find(|batch| !scope.allows_context(&batch.context))
     {
-        return error(
+        return validation_error(
             ErrorCode::Forbidden,
             format!(
                 "key '{}' has no grant on context '{}' (batch source '{}'); nothing \
@@ -307,6 +415,10 @@ pub async fn import_batch(
                 refused.context,
                 refused.source
             ),
+            RefusalDetail {
+                integrity: Some("nothing_written"),
+                ..Default::default()
+            },
             started_at,
         );
     }
@@ -351,12 +463,18 @@ pub async fn import_batch(
                          own source)",
                     ),
                 );
-                return Err(Box::new(error(
+                let (integrity, durable_batches) = stream_integrity(outcomes.len(), query.dry_run);
+                return Err(Box::new(validation_error(
                     ErrorCode::Timeout,
                     format!(
                         "{note}request exceeded its budget partway through a multi-batch \
                          import (TAGURU_REQUEST_TIMEOUT_SECS tunes this)"
                     ),
+                    RefusalDetail {
+                        integrity: Some(integrity),
+                        durable_batches,
+                        ..Default::default()
+                    },
                     started_at,
                 )));
             }
@@ -393,12 +511,18 @@ pub async fn import_batch(
                          own source)",
                     ),
                 );
-                return Err(Box::new(error(
+                let (integrity, durable_batches) = stream_integrity(outcomes.len(), query.dry_run);
+                return Err(Box::new(validation_error(
                     ErrorCode::StorageFull,
                     format!(
                         "{note}{}",
                         crate::registry::storage_quota_message(&batch.context, used, ceiling)
                     ),
+                    RefusalDetail {
+                        integrity: Some(integrity),
+                        durable_batches,
+                        ..Default::default()
+                    },
                     started_at,
                 )));
             }
@@ -441,7 +565,14 @@ pub async fn import_batch(
                         ),
                     );
                     return Err(Box::new(import_refusal(
-                        &state, batch, refusal, &note, started_at,
+                        &state,
+                        batch,
+                        refusal,
+                        &note,
+                        index,
+                        outcomes.len(),
+                        query.dry_run,
+                        started_at,
                     )));
                 }
             }

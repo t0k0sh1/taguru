@@ -34,8 +34,8 @@ mod schema;
 // further out.
 #[allow(unused_imports)]
 pub use protocol::{
-    Call, FALLBACK_PROTOCOL_VERSION, Message, cancelled_request_id, classify, error_response,
-    initialize_result, response, tool_response, tools_result,
+    Call, FALLBACK_PROTOCOL_VERSION, Message, ToolError, cancelled_request_id, classify,
+    error_response, initialize_result, response, tool_response, tools_result,
 };
 #[allow(unused_imports)]
 pub use retrieve::{run_retrieve, run_retrieve_bounded};
@@ -947,9 +947,38 @@ mod tests {
         assert_eq!(ok["content"][0]["text"], "fine");
         assert!(ok.get("isError").is_none());
 
-        let err = tool_response(Err("HTTP 404: gone".into()));
+        let err = tool_response(Err("HTTP 404: gone".to_string().into()));
         assert_eq!(err["isError"], true);
         assert_eq!(err["content"][0]["text"], "HTTP 404: gone");
+        assert!(
+            err.get("structuredContent").is_none(),
+            "a plain string error (route_tool's own prose, an unparseable body) carries no \
+             structuredContent: {err}"
+        );
+    }
+
+    /// issue #182: an ingestion refusal whose HTTP body parsed as a
+    /// JSON object rides again as `structuredContent`, alongside the
+    /// same prose every error has always carried in `content[0].text`
+    /// — additive, so a client that only reads `content` sees no
+    /// change from before this field existed.
+    #[test]
+    fn tool_response_carries_structured_content_alongside_the_prose() {
+        let body = json!({
+            "status": "error",
+            "code": "invalid_argument",
+            "error": "the associations batch refused 1 issue(s): ...; nothing was applied",
+            "issues": [{"path": "associations[0].weight", "kind": "type", "expected": "a number", "actual": "string"}],
+            "integrity": "nothing_written",
+            "retryable_after_correction": true,
+        });
+        let err = tool_response(Err(ToolError {
+            text: format!("HTTP 400: {body}"),
+            structured: Some(body.clone()),
+        }));
+        assert_eq!(err["isError"], true);
+        assert_eq!(err["content"][0]["text"], format!("HTTP 400: {body}"));
+        assert_eq!(err["structuredContent"], body);
     }
 
     #[test]

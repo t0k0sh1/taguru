@@ -222,21 +222,205 @@ impl ErrorCode {
     }
 }
 
+/// One path-addressed validation failure inside a rejected ingestion
+/// call (issue #182) — the machine-actionable twin of one clause in
+/// the accompanying prose `error`, so an MCP host corrects exactly the
+/// named fields and resends the complete write instead of guessing
+/// from text alone. Shape and `kind` vocabulary mirror ADR 0001 §8's
+/// corrective-issue contract (`extract.rs`'s lenient walk builds the
+/// same four fields for a retrying LLM); this is the twin for a caller
+/// that can never itself retry the model — the MCP host.
+#[derive(Serialize, Clone)]
+pub(crate) struct Issue {
+    pub path: String,
+    pub kind: &'static str,
+    pub expected: String,
+    pub actual: String,
+}
+
+impl Issue {
+    pub(crate) fn missing(path: impl Into<String>, expected: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            kind: "missing",
+            expected: expected.into(),
+            actual: "absent".to_string(),
+        }
+    }
+
+    pub(crate) fn wrong_type(
+        path: impl Into<String>,
+        expected: impl Into<String>,
+        value: &serde_json::Value,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            kind: "type",
+            expected: expected.into(),
+            actual: type_name(value).to_string(),
+        }
+    }
+
+    pub(crate) fn empty(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            kind: "empty",
+            expected: "a non-empty string".to_string(),
+            actual: "an empty string".to_string(),
+        }
+    }
+
+    pub(crate) fn too_long(path: impl Into<String>, cap: usize, actual_bytes: usize) -> Self {
+        Self {
+            path: path.into(),
+            kind: "too_long",
+            expected: format!("at most {cap} bytes"),
+            actual: format!("{actual_bytes} bytes"),
+        }
+    }
+
+    pub(crate) fn range(
+        path: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            kind: "range",
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
+
+    pub(crate) fn over_limit(
+        path: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            kind: "over_limit",
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
+
+    pub(crate) fn unknown_reference(path: impl Into<String>, expected: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            kind: "unknown_reference",
+            expected: expected.into(),
+            actual: "not present in this request".to_string(),
+        }
+    }
+
+    pub(crate) fn conflict(
+        path: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            kind: "conflict",
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
+}
+
+/// The bare JSON type name for an [`Issue::wrong_type`]'s `actual`
+/// field — a one-word answer distinct from [`describe_value`]'s
+/// human-readable preview, which still carries the value itself for
+/// the prose `error` message.
+fn type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Renders a JSON value's type and, for scalars, a bounded preview of
+/// its content, for the human-readable "got …" half of a validation
+/// message — the prose counterpart to [`Issue::wrong_type`]'s bare
+/// `actual`. Independently mirrors (a different module, validating a
+/// different input) the vocabulary `extract.rs::describe_value` uses
+/// for the model answer's own lenient walk.
+pub(crate) fn describe_value(value: &serde_json::Value) -> String {
+    const MAX_ISSUE_VALUE_CHARS: usize = 64;
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(flag) => format!("boolean {flag}"),
+        serde_json::Value::Number(number) => format!("number {number}"),
+        serde_json::Value::String(text) => {
+            let preview: String = text.chars().take(MAX_ISSUE_VALUE_CHARS).collect();
+            if preview.chars().count() < text.chars().count() {
+                format!("string {preview:?}…")
+            } else {
+                format!("string {preview:?}")
+            }
+        }
+        serde_json::Value::Array(_) => "an array".to_string(),
+        serde_json::Value::Object(_) => "an object".to_string(),
+    }
+}
+
+/// How many [`Issue`]s a rejected call's prose enumerates before
+/// simply counting the rest — the same cap `extract.rs`'s corrective
+/// message caps a retrying LLM's turn at (`MAX_LISTED_ISSUES`,
+/// extract.rs:2101), so neither surface can be made to balloon a
+/// response by sending a batch with thousands of bad items.
+pub(crate) const MAX_LISTED_ISSUES: usize = 20;
+
+/// The structured detail of a rejected ingestion write (issue #182):
+/// the path-addressed [`Issue`]s an MCP host corrects before the
+/// complete resend, whether the write's integrity is provably
+/// `"nothing_written"` or a `"durable_prefix"` of earlier-landed
+/// batches, and whether the refusal is one a correction can resolve at
+/// all. `Default` so a call site names only the fields it has.
+#[derive(Default)]
+pub(crate) struct RefusalDetail {
+    pub issues: Vec<Issue>,
+    pub integrity: Option<&'static str>,
+    pub durable_batches: Option<usize>,
+    pub retryable_after_correction: Option<bool>,
+}
+
 #[derive(Serialize)]
 pub struct ApiError {
     status: &'static str,
     code: &'static str,
     error: String,
     time: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    issues: Vec<Issue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    integrity: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    durable_batches: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retryable_after_correction: Option<bool>,
 }
 
 impl ApiError {
-    fn new(code: ErrorCode, error: impl Into<String>, started_at: Instant) -> Self {
+    fn new(
+        code: ErrorCode,
+        error: impl Into<String>,
+        started_at: Instant,
+        detail: RefusalDetail,
+    ) -> Self {
         Self {
             status: "error",
             code: code.as_str(),
             error: error.into(),
             time: started_at.elapsed().as_secs_f64(),
+            issues: detail.issues,
+            integrity: detail.integrity,
+            durable_batches: detail.durable_batches,
+            retryable_after_correction: detail.retryable_after_correction,
         }
     }
 }
@@ -251,6 +435,67 @@ pub(crate) fn ok<T: Serialize>(result: T, started_at: Instant) -> Response {
 /// own rejection status.
 pub(crate) fn error(code: ErrorCode, message: impl Into<String>, started_at: Instant) -> Response {
     coded(code.status(), code, message, started_at)
+}
+
+/// [`error`], extended with issue #182's structured [`RefusalDetail`]
+/// for the ingestion refusals an MCP host must correct-and-resend
+/// rather than blindly retry. `detail.issues` past [`MAX_LISTED_ISSUES`]
+/// are counted into the prose, not silently dropped.
+pub(crate) fn validation_error(
+    code: ErrorCode,
+    message: impl Into<String>,
+    mut detail: RefusalDetail,
+    started_at: Instant,
+) -> Response {
+    let total = detail.issues.len();
+    let message = if total > MAX_LISTED_ISSUES {
+        detail.issues.truncate(MAX_LISTED_ISSUES);
+        format!(
+            "{} ({total} issues total; showing the first {MAX_LISTED_ISSUES})",
+            message.into()
+        )
+    } else {
+        message.into()
+    };
+    let status = code.status();
+    (
+        status,
+        Json(ApiError::new(code, message, started_at, detail)),
+    )
+        .into_response()
+}
+
+/// Splits a collect-all validation pass's issues at [`MAX_LISTED_ISSUES`]
+/// — the issues to list, and the true total — so a batch with hundreds
+/// of bad items cannot make the response balloon without bound; the
+/// caller's own prose (via [`collected_validation_message`]) names the
+/// true total regardless.
+pub(crate) fn truncate_issues(mut issues: Vec<Issue>) -> (Vec<Issue>, usize) {
+    let total = issues.len();
+    issues.truncate(MAX_LISTED_ISSUES);
+    (issues, total)
+}
+
+/// Formats one collect-all ingestion refusal's prose (issue #182): one
+/// bullet per listed issue, a remainder count past the cap, then a
+/// final "nothing was applied" — the REST analogue of
+/// `extract.rs::corrective_validation_message`, naming every offending
+/// path instead of stopping at the first so a caller fixes the whole
+/// write in one round trip.
+pub(crate) fn collected_validation_message(what: &str, issues: &[Issue], total: usize) -> String {
+    let mut message = format!("{what} refused {total} issue(s):");
+    for issue in issues {
+        message.push_str(&format!(
+            "\n- {}: expected {}, got {}",
+            issue.path, issue.expected, issue.actual
+        ));
+    }
+    let remainder = total.saturating_sub(issues.len());
+    if remainder > 0 {
+        message.push_str(&format!("\n… and {remainder} more issue(s)"));
+    }
+    message.push_str("; nothing was applied");
+    message
 }
 
 /// Refuses every mutating verb on a read replica (issue #129), crisply
@@ -302,7 +547,16 @@ fn coded(
     message: impl Into<String>,
     started_at: Instant,
 ) -> Response {
-    (status, Json(ApiError::new(code, message, started_at))).into_response()
+    (
+        status,
+        Json(ApiError::new(
+            code,
+            message,
+            started_at,
+            RefusalDetail::default(),
+        )),
+    )
+        .into_response()
 }
 
 /// `CatchPanicLayer`'s panic handler: a handler that unwinds still owes
@@ -901,24 +1155,6 @@ fn empty(what: &str, value: &str, started_at: Instant) -> Option<Response> {
         error(
             ErrorCode::InvalidArgument,
             format!("{what} must not be empty; nothing was applied"),
-            started_at,
-        )
-    })
-}
-
-/// Companion to `oversized`/`empty`: `Some(400)` when `source` names a
-/// passage the request itself does not carry alongside it — a question
-/// or section cannot attach to text the request does not carry.
-fn orphaned_source(
-    what: &str,
-    source: &str,
-    passages: &BTreeMap<String, String>,
-    started_at: Instant,
-) -> Option<Response> {
-    (!passages.contains_key(source)).then(|| {
-        error(
-            ErrorCode::InvalidArgument,
-            format!("{what} for '{source}' arrived without a passage for it in this request"),
             started_at,
         )
     })
