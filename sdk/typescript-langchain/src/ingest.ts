@@ -24,18 +24,27 @@ import {
   MODEL_OUTPUT_JSON_SCHEMA,
   VOCABULARY_CAP,
   chunk,
-  coerceOutput,
   correctiveAssistantTurnContent,
   correctiveMessage,
+  correctiveValidationMessage,
+  crossOutputIssues,
+  effectiveItemRules,
+  emptyAnswerDiagnosis,
+  evaluateAnswer,
   indicatesLengthLimit,
+  indicatesRefusal,
+  interpretModelOutput,
+  InvalidFault,
+  isEmptyAnswer,
   labeledDocument,
   merge,
-  parseModelOutput,
   renderBatch,
   reparseBatch,
   splitParagraphs,
+  SyntaxFault,
   systemPrompt,
   userMessage,
+  type ItemRules,
   type ModelOutput,
 } from "./extract.js";
 
@@ -60,10 +69,25 @@ export interface IngestOutcome {
   aliases: number;
   passage_stored: boolean;
   questions_stored: number;
+  /** Under the strict default this counts only merge()'s policy trims
+   * (per-paragraph question-cap overflow, a volunteered question when
+   * none was requested) — a business-rule-invalid item is corrected or
+   * fails the source before merge() ever runs (issue #181). Under
+   * `lossy: true` it is the old drop-and-proceed tally: every item
+   * merge() silently discarded. */
   duplicates_dropped: number;
   invalid_dropped: number;
   llm_calls: number;
   chunks: number;
+  /** How many corrective turns (Stage 1 syntax/validity retries plus any
+   * Stage 2 cross-chunk alias correction) this ingest needed — 0 means
+   * every chunk's first answer was accepted as-is. */
+  correction_attempts: number;
+  /** Labels of automatic, information-preserving JSON repairs applied
+   * across every accepted answer (e.g. "trailing_comma", "bom",
+   * "code_fence", "braces_slice" — see candidateJson). Empty when no
+   * repair was ever needed. */
+  lossless_repairs: string[];
   error: string | null;
   embeddings_refresh_warning: string | null;
 }
@@ -82,6 +106,8 @@ const emptyOutcome = (source: string): IngestOutcome => ({
   invalid_dropped: 0,
   llm_calls: 0,
   chunks: 0,
+  correction_attempts: 0,
+  lossless_repairs: [],
   error: null,
   embeddings_refresh_warning: null,
 });
@@ -105,6 +131,17 @@ export interface TaguruIngesterFields {
   refresh_embeddings?: boolean;
   raise_on_error?: boolean;
   structured_output?: boolean;
+  /**
+   * Restore the pre-issue-#181 drop-and-proceed behavior: a
+   * business-rule-invalid item (bad weight, dangling alias, out-of-range
+   * question, ...) is silently dropped and the source still reports
+   * success, exactly like merge() always did. Default `false` (ADR 0001
+   * §8's never-silent-drop default): an invalid item instead earns one
+   * targeted, path-addressed corrective turn, and the source fails
+   * outright (no /import call) if it is still invalid afterward. See
+   * `IngestOutcome.invalid_dropped`.
+   */
+  lossy?: boolean;
 }
 
 /**
@@ -113,9 +150,204 @@ export interface TaguruIngesterFields {
  * stays at its Record<string, any> default. The .d.ts types `parsed` as
  * always-present, but the implementation's own includeRaw:true fallback
  * (@langchain/core's assembleStructuredOutputPipeline) can still resolve it
- * to null on a failed extraction — invokeForOutput() below checks for that.
+ * to null on a failed extraction — attemptOnce() below checks for that.
  */
-type StructuredOutputResult = { raw: BaseMessage; parsed: Record<string, unknown> };
+type StructuredOutputResult = { raw: BaseMessage; parsed: Record<string, unknown> | null };
+
+// -- one attempt's §7-style classification (issue #181, mirrors extract.rs's ---
+// -- classify_attempt / evaluate_answer and the Python twin's _Attempt) --------
+
+type AttemptKind = "valid" | "length_limited" | "refusal" | "empty" | "syntax" | "invalid";
+
+/**
+ * One model call's outcome, classified from provider metadata BEFORE any
+ * parse-level interpretation — a `length`-terminated answer is
+ * length-limited even when its prefix happens to parse, since a valid
+ * prefix of a cut-off extraction is exactly the "deleted-subset called
+ * complete" ADR 0001 forbids.
+ */
+interface AttemptResult {
+  kind: AttemptKind;
+  content: string;
+  output: ModelOutput | null;
+  repairs: string[];
+  error: string | null;
+  issues: string[] | null;
+}
+
+function classifyText(
+  content: string,
+  finishReason: string | undefined,
+  rules: ItemRules | null,
+): AttemptResult {
+  if (indicatesLengthLimit(finishReason)) {
+    return {
+      kind: "length_limited",
+      content,
+      output: null,
+      repairs: [],
+      error: "the answer hit the provider's output limit",
+      issues: null,
+    };
+  }
+  if (indicatesRefusal(finishReason)) {
+    return { kind: "refusal", content, output: null, repairs: [], error: finishReason!, issues: null };
+  }
+  if (isEmptyAnswer(content)) {
+    return {
+      kind: "empty",
+      content,
+      output: null,
+      repairs: [],
+      error: emptyAnswerDiagnosis(),
+      issues: null,
+    };
+  }
+  try {
+    const { output, repairs } = evaluateAnswer(content, rules);
+    return { kind: "valid", content, output, repairs, error: null, issues: null };
+  } catch (error) {
+    if (error instanceof InvalidFault) {
+      return { kind: "invalid", content, output: null, repairs: [], error: null, issues: error.issues };
+    }
+    if (error instanceof SyntaxFault) {
+      return {
+        kind: "syntax",
+        content,
+        output: null,
+        repairs: [],
+        error: error.message,
+        issues: null,
+      };
+    }
+    throw error;
+  }
+}
+
+/**
+ * The structured-output twin of classifyText: the provider has already
+ * parsed (or failed to parse) its own tool-call args against
+ * MODEL_OUTPUT_JSON_SCHEMA, so there is no raw JSON text here to
+ * lossless-repair, and `content` is conventionally empty for a
+ * tool-calling response — isEmptyAnswer would misfire on it, so emptiness
+ * is judged from `parsed` instead.
+ */
+function classifyStructured(
+  content: string,
+  finishReason: string | undefined,
+  parsed: Record<string, unknown> | null | undefined,
+  rules: ItemRules | null,
+): AttemptResult {
+  if (indicatesLengthLimit(finishReason)) {
+    return {
+      kind: "length_limited",
+      content,
+      output: null,
+      repairs: [],
+      error: "the answer hit the provider's output limit",
+      issues: null,
+    };
+  }
+  if (indicatesRefusal(finishReason)) {
+    return { kind: "refusal", content, output: null, repairs: [], error: finishReason!, issues: null };
+  }
+  if (parsed === undefined || parsed === null) {
+    return {
+      kind: "syntax",
+      content,
+      output: null,
+      repairs: [],
+      error:
+        "the model's structured-output call produced no parsed result (LangChain.js surfaces " +
+        "no further detail here — see assembleStructuredOutputPipeline's includeRaw:true fallback)",
+      issues: null,
+    };
+  }
+  const { output, issues } = interpretModelOutput(parsed, effectiveItemRules(rules));
+  if (rules !== null && issues.length > 0) {
+    return { kind: "invalid", content, output: null, repairs: [], error: null, issues };
+  }
+  return { kind: "valid", content, output, repairs: [], error: null, issues: null };
+}
+
+/** The raw, unwrapped human-readable reason one attempt failed — used for
+ * the corrective ask and (for "invalid"/"empty") the final failure message
+ * verbatim. */
+function diagnosisFor(result: AttemptResult): string {
+  if (result.kind === "invalid") {
+    const issues = result.issues!;
+    return `the answer left ${issues.length} invalid item(s) uncorrected: ${issues.join("; ")}`;
+  }
+  return result.error ?? "";
+}
+
+/**
+ * The message thrown when a chunk's attempts are exhausted without a valid
+ * answer. "invalid"/"empty" stay unwrapped (extract.rs's
+ * AttemptOutcome::Invalid/Empty never get the generic wrapper either);
+ * "syntax"/"length_limited" get the same "the model would not produce the
+ * JSON object" wrapper today's (pre-#181) behavior always used.
+ */
+function finalMessageFor(result: AttemptResult): string {
+  const diagnosis = diagnosisFor(result);
+  if (result.kind === "invalid" || result.kind === "empty") {
+    return diagnosis;
+  }
+  return `the model would not produce the JSON object: ${diagnosis}`;
+}
+
+/**
+ * The next attempt's user-facing ask, addressed to whichever kind of
+ * failure `result` was. "empty" reuses correctiveMessage's ordinary
+ * (non-length-limited) text with the empty diagnosis as its parseError.
+ */
+function correctiveAskFor(result: AttemptResult, factBudget: number): string {
+  if (result.kind === "invalid") {
+    return correctiveValidationMessage(result.issues!);
+  }
+  const lengthLimited = result.kind === "length_limited";
+  return correctiveMessage(result.error ?? "", lengthLimited, factBudget);
+}
+
+/**
+ * The Stage 2 (cross-chunk alias correction) terminal message for one
+ * offending chunk's non-valid reply — mirrors extract.rs's
+ * correct_cross_output_issues per-kind texts verbatim.
+ */
+function crossChunkFailureMessage(label: string, result: AttemptResult): string {
+  if (result.kind === "length_limited") {
+    return (
+      `${label}: the cross-chunk alias correction was cut off at the output limit — ` +
+      "failing the source rather than importing a truncated correction"
+    );
+  }
+  if (result.kind === "refusal") {
+    return `${label}: the provider refused the cross-chunk alias correction (finish_reason ${result.error})`;
+  }
+  if (result.kind === "empty") {
+    return `${label}: ${result.error}`;
+  }
+  if (result.kind === "invalid") {
+    const issues = result.issues!;
+    return (
+      `${label}: the cross-chunk alias correction still left ${issues.length} invalid item(s) ` +
+      `uncorrected: ${issues.join("; ")}`
+    );
+  }
+  return `${label}: the cross-chunk alias correction was not the JSON object asked for (${result.error})`;
+}
+
+/**
+ * One chunk's accepted output, plus everything Stage 2's single targeted
+ * corrective turn needs to rebuild THAT chunk's own conversation (never
+ * the whole document's) if crossOutputIssues flags it.
+ */
+interface ChunkRecord {
+  output: ModelOutput;
+  chunkIndex: number;
+  user: string;
+  answer: string;
+}
 
 /**
  * Decompose LangChain Documents into one Taguru context via a chat model.
@@ -135,6 +367,7 @@ export class TaguruIngester {
   readonly refresh_embeddings: boolean;
   readonly raise_on_error: boolean;
   readonly structured_output: boolean;
+  readonly lossy: boolean;
 
   private readonly llm: BaseChatModel;
   private readonly client: Taguru;
@@ -185,6 +418,7 @@ export class TaguruIngester {
     this.refresh_embeddings = fields.refresh_embeddings ?? true;
     this.raise_on_error = fields.raise_on_error ?? false;
     this.structured_output = fields.structured_output ?? false;
+    this.lossy = fields.lossy ?? false;
     // Opt-in only (see the Python twin's docstring for the full rationale):
     // built once here so a chat model that cannot bind tools fails fast, at
     // construction, rather than surfacing later as a per-attempt failure.
@@ -200,54 +434,97 @@ export class TaguruIngester {
   }
 
   /**
-   * One model call for one attempt, returning `{ content, output, error,
-   * finishReason }` with `output === null` iff `error !== null`. Goes
-   * through the withStructuredOutput() pipeline built in the constructor
-   * when structured_output is on, else today's plain invoke() +
-   * parseModelOutput(). Either path lands in a ModelOutput the same way —
-   * coerceOutput() — so schema-constrained generation narrows the model's
-   * answer without skipping revalidation. finishReason comes from the
-   * provider regardless of parse success, so the retry loop can tell a
-   * length-limited answer from an ordinary malformed one.
+   * Runs one model call for one attempt and classifies it (issue #181's
+   * §7-style state machine: length -> refusal -> empty ->
+   * syntax/invalid/valid). Goes through the withStructuredOutput()
+   * pipeline built in the constructor when structured_output is on, else
+   * today's plain invoke() + the free-text validation walk.
    */
-  private async invokeForOutput(messages: BaseMessage[]): Promise<{
-    content: string;
-    output: ModelOutput | null;
-    error: Error | null;
-    finishReason: string | undefined;
-  }> {
+  private async attemptOnce(
+    messages: BaseMessage[],
+    rules: ItemRules | null,
+  ): Promise<AttemptResult> {
     if (this.structuredLlm !== null) {
       const result = await this.structuredLlm.invoke(messages);
       const content = contentText(result.raw);
       const finishReason = extractFinishReason(result.raw);
-      // Narrow through unknown first — see StructuredOutputResult's comment
-      // on why `parsed` can be null here despite its declared type.
-      const parsed: unknown = result.parsed;
-      if (parsed === undefined || parsed === null) {
-        return {
-          content,
-          output: null,
-          error: new Error(
-            "the model's structured-output call produced no parsed result " +
-              "(LangChain.js surfaces no further detail here — see " +
-              "assembleStructuredOutputPipeline's includeRaw:true fallback)",
-          ),
-          finishReason,
-        };
-      }
-      try {
-        return { content, output: coerceOutput(parsed), error: null, finishReason };
-      } catch (error) {
-        return { content, output: null, error: error as Error, finishReason };
-      }
+      return classifyStructured(content, finishReason, result.parsed, rules);
     }
     const response = await this.llm.invoke(messages);
     const content = contentText(response);
     const finishReason = extractFinishReason(response);
-    try {
-      return { content, output: parseModelOutput(content), error: null, finishReason };
-    } catch (error) {
-      return { content, output: null, error: error as Error, finishReason };
+    return classifyText(content, finishReason, rules);
+  }
+
+  /**
+   * `null` under `lossy: true` — evaluateAnswer/interpretModelOutput then
+   * parse leniently and discard whatever they'd have flagged, reproducing
+   * pre-issue-#181 behavior byte for byte (merge() alone decides what
+   * survives).
+   */
+  private itemRules(paragraphCount: number): ItemRules | null {
+    if (this.lossy) {
+      return null;
+    }
+    return { paragraphCount, questionsRequested: this.questions > 0 };
+  }
+
+  /**
+   * Issue #181 Stage 2: one targeted corrective turn per output
+   * crossOutputIssues flags, rebuilding THAT chunk's own conversation base
+   * (never the whole document's) and replaying its own final answer as
+   * the prior bad turn. Bounded to exactly one extra call per offending
+   * chunk regardless of max_attempts: a still-invalid, still-cross-
+   * conflicting, length-limited, refused, or empty reply fails the source
+   * outright — Stage 2 never loops a second round. Mirrors extract.rs's
+   * correct_cross_output_issues.
+   */
+  private async correctCrossChunkIssues(
+    system: string,
+    records: ChunkRecord[],
+    rules: ItemRules | null,
+    chunkTotal: number,
+    outcome: IngestOutcome,
+  ): Promise<void> {
+    for (const [recordIndex, issues] of crossOutputIssues(records.map((r) => r.output))) {
+      const chunkRecord = records[recordIndex]!;
+      const label = `chunk ${chunkRecord.chunkIndex + 1}/${chunkTotal}`;
+      const messages: BaseMessage[] = [
+        new SystemMessage(system),
+        new HumanMessage(chunkRecord.user),
+        new AIMessage(
+          correctiveAssistantTurnContent(chunkRecord.answer, this.corrective_context_bytes),
+        ),
+        new HumanMessage(correctiveValidationMessage(issues)),
+      ];
+      const result = await this.attemptOnce(messages, rules);
+      outcome.llm_calls += 1;
+      outcome.correction_attempts += 1;
+      if (result.kind === "valid") {
+        records[recordIndex] = {
+          output: result.output!,
+          chunkIndex: chunkRecord.chunkIndex,
+          user: chunkRecord.user,
+          answer: result.content,
+        };
+        outcome.lossless_repairs.push(...result.repairs);
+        continue;
+      }
+      throw new Error(crossChunkFailureMessage(label, result));
+    }
+
+    // Re-check rather than trust the single corrective turn blindly: a
+    // correction can rename an association another chunk's alias depended
+    // on, introducing a FRESH cross-chunk issue. This is the bounded
+    // re-check, not a second round — any issue here fails the source.
+    const recheck = crossOutputIssues(records.map((r) => r.output));
+    if (recheck.length > 0) {
+      const [recordIndex, issues] = recheck[0]!;
+      const chunkIndex = records[recordIndex]!.chunkIndex;
+      throw new Error(
+        `chunk ${chunkIndex + 1}/${chunkTotal}: still has ${issues.length} cross-chunk alias ` +
+          `issue(s) after correction: ${issues.join("; ")}`,
+      );
     }
   }
 
@@ -266,58 +543,81 @@ export class TaguruIngester {
 
     const vocabulary = await this.fetchVocabulary();
     const system = systemPrompt(vocabulary, this.questions, this.fact_budget);
+    const paragraphCount = splitParagraphs(text).length;
+    const rules = this.itemRules(paragraphCount);
     const chunks = chunk(labeledDocument(text, this.chunk_bytes), this.chunk_bytes);
     outcome.chunks = chunks.length;
 
-    const outputs: ModelOutput[] = [];
+    const records: ChunkRecord[] = [];
     for (let index = 0; index < chunks.length; index += 1) {
       const user = userMessage(options.source, index, chunks.length, chunks[index]!);
       const base: BaseMessage[] = [new SystemMessage(system), new HumanMessage(user)];
-      let output: ModelOutput | null = null;
+      let chunkRecord: ChunkRecord | null = null;
       // Each retry rebuilds the conversation from the system/user base and
       // appends only the most recent bad turn — never the whole history —
       // so corrective_context_bytes bounds every retry alike, not just the
       // first. At the all-defaults policy this reproduces the previous
       // fixed implementation's request bodies exactly.
-      let priorBadTurn: { content: string; error: Error; lengthLimited: boolean } | null = null;
-      for (let attempt = 0; attempt < this.max_attempts && output === null; attempt += 1) {
+      let pendingAsk: string | null = null;
+      let priorBadAnswer: string | null = null;
+      let lastDiagnosis = "";
+      let emptyCorrected = false;
+
+      for (let attempt = 0; attempt < this.max_attempts && chunkRecord === null; attempt += 1) {
         const messages: BaseMessage[] =
-          priorBadTurn === null
+          priorBadAnswer === null
             ? base
             : [
                 ...base,
                 new AIMessage(
-                  correctiveAssistantTurnContent(
-                    priorBadTurn.content,
-                    this.corrective_context_bytes,
-                  ),
+                  correctiveAssistantTurnContent(priorBadAnswer, this.corrective_context_bytes),
                 ),
-                new HumanMessage(
-                  correctiveMessage(
-                    priorBadTurn.error.message,
-                    priorBadTurn.lengthLimited,
-                    this.fact_budget,
-                  ),
-                ),
+                new HumanMessage(pendingAsk ?? ""),
               ];
-        const { content, output: parsed, error, finishReason } = await this.invokeForOutput(messages);
+        const result = await this.attemptOnce(messages, rules);
         outcome.llm_calls += 1;
-        if (error === null) {
-          output = parsed;
-        } else {
-          priorBadTurn = { content, error, lengthLimited: indicatesLengthLimit(finishReason) };
+
+        if (result.kind === "valid") {
+          chunkRecord = { output: result.output!, chunkIndex: index, user, answer: result.content };
+          outcome.lossless_repairs.push(...result.repairs);
+          break;
         }
+
+        if (result.kind === "refusal") {
+          throw new Error(
+            `the provider refused this content (finish_reason ${result.error}) — a policy ` +
+              "refusal is terminal; no corrective turn can change it",
+          );
+        }
+
+        if (result.kind === "empty" && emptyCorrected) {
+          throw new Error(diagnosisFor(result));
+        }
+        if (result.kind === "empty") {
+          emptyCorrected = true;
+        }
+
+        lastDiagnosis = finalMessageFor(result);
+        outcome.correction_attempts += 1;
+        pendingAsk = correctiveAskFor(result, this.fact_budget);
+        priorBadAnswer = result.content;
       }
-      if (output === null) {
-        throw new Error(
-          `the model would not produce the JSON object: ${priorBadTurn?.error.message}`,
-        );
+
+      if (chunkRecord === null) {
+        throw new Error(lastDiagnosis);
       }
-      outputs.push(output);
+      records.push(chunkRecord);
     }
 
-    const paragraphCount = splitParagraphs(text).length;
-    const extraction = merge(outputs, this.questions, paragraphCount);
+    if (!this.lossy) {
+      await this.correctCrossChunkIssues(system, records, rules, chunks.length, outcome);
+    }
+
+    const extraction = merge(
+      records.map((r) => r.output),
+      this.questions,
+      paragraphCount,
+    );
     outcome.duplicates_dropped = extraction.duplicates;
     outcome.invalid_dropped = extraction.dropped;
     const description = this.create_context ? (this.context_description ?? null) : null;

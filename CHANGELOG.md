@@ -38,6 +38,29 @@ Entries that change an on-disk format or a response shape say so.
   `AttemptFailed` gains `validation_issues`. Validates against the same
   shared fixture corpus `tests/fixtures/model_output/repaired/` the Rust
   twin (#199) uses.
+- `langchain-taguru` (TypeScript) ports the same lossless JSON repair and
+  path-specific corrective retry to `TaguruIngester` (#181, the TS twin of
+  #180/#199). `interpretModelOutput` replaces `coerceOutput`'s
+  all-or-nothing scalar coercion with the same lenient, path-addressed
+  walk: a wrong-typed or business-rule-invalid item earns one targeted
+  corrective turn instead of throwing over the whole answer or being
+  silently dropped by `merge()`. BOM stripping and unambiguous
+  trailing-comma removal join fence-stripping/widest-braces slicing as
+  automatic lossless repairs. A `length`-terminated answer is never
+  imported even when it happens to parse, and a policy refusal
+  (`content_filter`/`refusal`) is now terminal. `crossOutputIssues` checks
+  dangling/shadowing aliases once per document across all chunks, each
+  spending at most one corrective turn. `TaguruIngester({ lossy: true })`
+  restores the previous drop-and-proceed behavior, reported through
+  `IngestOutcome.invalid_dropped`; `IngestOutcome` also gains
+  `lossless_repairs` and `correction_attempts`. One deliberate behavior
+  change beyond the never-silent-drop default: `parseModelOutput` and
+  `TaguruIngester` (lossy or strict) no longer coerce a numeric string or
+  boolean into a number for `weight`/`paragraph` — the pydantic-lax-mode
+  parity `coerceFloat`/`coerceInt` provided is dropped in favor of the
+  Rust producer's stricter, cross-language-consistent parsing (ADR 0001
+  §11). Validates against the same shared fixture corpus
+  `tests/fixtures/model_output/repaired/` the Rust and Python twins use.
 - `taguru extract` replaces merge-level silent item drop with
   path-addressed corrective retry (#199, implementing ADR 0001 §8) — a
   business-rule-invalid item (a wrong-typed or zero/non-finite/over-cap
