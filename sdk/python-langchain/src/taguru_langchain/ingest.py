@@ -14,9 +14,11 @@ over synonym-coining), and embeddings refresh best-effort after each run.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import threading
 import time
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -38,6 +40,7 @@ from ._extract import (
     MAX_PASSAGE_BYTES,
     MAX_QUESTIONS_PER_PARAGRAPH,
     MODEL_OUTPUT_JSON_SCHEMA,
+    PROMPT_VERSION,
     VOCABULARY_CAP,
     InvalidFault,
     ItemRules,
@@ -62,6 +65,13 @@ from ._extract import (
     split_paragraphs,
     system_prompt,
     user_message,
+)
+from .checkpoints import (
+    CheckpointStore,
+    _CheckpointFingerprint,
+    _CheckpointUnit,
+    _derive_model_identity,
+    _DocumentCheckpoints,
 )
 from .events import (
     AttemptFailed,
@@ -126,6 +136,17 @@ class IngestOutcome:
     when no repair was ever needed."""
     error: str | None = None
     embeddings_refresh_warning: str | None = None
+    interrupted: bool = False
+    """True when a ``should_stop`` callable (or ``threading.Event``) fired
+    between chunks and this document's extraction stopped early (issue
+    #211). ``ok`` stays ``False``: nothing was imported. When
+    ``checkpoint_store`` is configured, every chunk completed before the
+    stop is already durably persisted — rerunning the same
+    ``ingest_text``/``ingest_documents`` call resumes without re-calling
+    the model for them."""
+    chunks_reused: int = 0
+    """How many chunks this run satisfied from ``checkpoint_store`` instead
+    of a fresh model call."""
 
 
 # -- one attempt's §7-style classification (issue #180, mirrors extract.rs's ------
@@ -283,6 +304,19 @@ def _cross_chunk_failure_message(label: str, result: _Attempt) -> str:
     )
 
 
+def _normalize_stop(
+    should_stop: Callable[[], bool] | threading.Event | None,
+) -> Callable[[], bool]:
+    """A cooperative-stop parameter (issue #211), collapsed to one plain
+    predicate checked between chunks. Not named ``stop`` — in LangChain
+    that word means stop *sequences* passed to ``invoke``."""
+    if should_stop is None:
+        return lambda: False
+    if isinstance(should_stop, threading.Event):
+        return should_stop.is_set
+    return should_stop
+
+
 @dataclass
 class _ChunkRecord:
     """One chunk's accepted output, plus everything Stage 2's single
@@ -368,6 +402,23 @@ class TaguruIngester:
             ``aingest_text`` calls it directly too, with no thread hop or
             await. Exceptions it raises are caught and reported via
             ``warnings.warn`` rather than failing the ingest.
+        checkpoint_store: Optional durable per-chunk checkpoint store (issue
+            #211, the Python twin of ``taguru extract``'s issue #210) — see
+            :mod:`taguru_langchain.checkpoints`. ``None`` (the default)
+            reproduces today's behavior exactly: every chunk lives only in
+            memory for the run, and an interruption loses all of it.
+            Configured, each chunk's accepted output is durably persisted
+            keyed by its own content hash before the next chunk starts, a
+            settings or content change invalidates the whole cache rather
+            than risking a false reuse, and the checkpoint is cleared once
+            the document's batch has landed (kept if the document
+            ultimately fails, so the next attempt can resume).
+        checkpoint_model_id: Explicit model identity folded into the
+            checkpoint fingerprint. Required only when ``checkpoint_store``
+            is set and ``llm`` exposes none of ``model``/``model_name``/
+            ``model_id``/``deployment_name`` — the constructor raises
+            immediately rather than checkpointing under an unstable or
+            absent model identity.
     """
 
     def __init__(
@@ -394,6 +445,8 @@ class TaguruIngester:
         raise_on_error: bool = False,
         lossy: bool = False,
         on_event: IngestEventCallback | None = None,
+        checkpoint_store: CheckpointStore | None = None,
+        checkpoint_model_id: str | None = None,
     ) -> None:
         if create_context and context_description is None:
             raise ValueError("create_context=True requires context_description")
@@ -438,6 +491,15 @@ class TaguruIngester:
         self.raise_on_error = raise_on_error
         self.lossy = lossy
         self.on_event = on_event
+        self.checkpoint_store = checkpoint_store
+        self.checkpoint_model_id = checkpoint_model_id
+        if checkpoint_store is not None and checkpoint_model_id is None:
+            if _derive_model_identity(llm) is None:
+                raise ValueError(
+                    "checkpoint_store requires checkpoint_model_id: this chat model exposes "
+                    "none of model/model_name/model_id/deployment_name, so the checkpoint "
+                    "fingerprint has no stable model identity to key on"
+                )
 
     # -- shared, transport-free pieces ------------------------------------
 
@@ -551,13 +613,156 @@ class TaguruIngester:
             total_tokens=usage["total_tokens"] if usage else None,
         )
 
+    # -- checkpoint/resume (issue #211, the Python twin of #210) -------------
+    #
+    # Every helper below is synchronous and does no I/O of its own beyond
+    # calling `checkpoint_store` — `aingest_text` calls the same methods
+    # directly, exactly like it already calls the synchronous `on_event`
+    # callback, so the sync/async twins stay line-for-line identical at
+    # every checkpoint insertion point.
+
+    def _checkpoint_fingerprint(self, text: str) -> _CheckpointFingerprint:
+        """The compatibility inputs a cached unit's reuse depends on: the
+        document's own content plus every setting that shapes what a valid
+        answer looks like. Any mismatch on rerun degrades the whole
+        checkpoint file to empty (``_load_checkpoints``) — a settings
+        change can never silently reuse an incompatible cached chunk."""
+        model = self.checkpoint_model_id
+        if model is None:
+            model = _derive_model_identity(self.llm)
+        assert model is not None  # __init__ already required one or the other
+        return _CheckpointFingerprint(
+            sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            model=model,
+            prompt_version=PROMPT_VERSION,
+            context=self.context,
+            questions_n=self.questions,
+            no_passage=not self.include_passage,
+            description=(self.context_description or "") if self.create_context else "",
+            fact_budget=self.fact_budget,
+            structured_output="langchain" if self.structured_output else "",
+            lossy=self.lossy,
+        )
+
+    def _load_checkpoints(self, source: str, text: str) -> _DocumentCheckpoints | None:
+        """``None`` when no store is configured — every checkpoint call site
+        below treats that as "nothing to look up, nothing to record". A
+        store failure (the store itself raising — a network error, a
+        permission error) only warns and starts the document without any
+        cached chunks; a store answering with bytes that are corrupt or
+        fingerprint-stale degrades silently instead (see
+        ``_DocumentCheckpoints.from_bytes``) — that is expected steady
+        state (first run, changed settings), not a failure worth a
+        warning."""
+        if self.checkpoint_store is None:
+            return None
+        fingerprint = self._checkpoint_fingerprint(text)
+        try:
+            data = self.checkpoint_store.load(source)
+        except Exception as error:
+            warnings.warn(
+                f"TaguruIngester checkpoint store failed to load {source!r}: {error!r} — "
+                "starting this document without any cached chunks",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            data = None
+        return _DocumentCheckpoints.from_bytes(data, fingerprint)
+
+    @staticmethod
+    def _unit_hash(piece: str) -> str:
+        """Content hash of one extraction unit's OWN text — never the
+        chunk's index — so a resume whose chunking differs from a prior
+        run still reuses whatever pieces happen to match today's actual
+        text and only re-extracts the rest."""
+        return hashlib.sha256(piece.encode("utf-8")).hexdigest()
+
+    def _checkpointed_unit(
+        self, checkpoints: _DocumentCheckpoints | None, piece: str
+    ) -> _ChunkRecord | None:
+        """A cache hit reconstructs ``_ChunkRecord`` from the STORED
+        ``user``/``answer`` (never recomputed) — this is what lets a
+        reused chunk still participate in Stage 2 cross-chunk correction
+        exactly like a freshly-extracted one."""
+        if checkpoints is None:
+            return None
+        unit = checkpoints.lookup(self._unit_hash(piece))
+        if unit is None:
+            return None
+        return _ChunkRecord(
+            output=unit.output, chunk_index=unit.chunk_index, user=unit.user, answer=unit.answer
+        )
+
+    def _record_checkpoint(
+        self,
+        checkpoints: _DocumentCheckpoints | None,
+        source: str,
+        piece: str,
+        record: _ChunkRecord,
+    ) -> None:
+        """Persists the whole (small) checkpoint file before returning, so a
+        kill immediately after this call still finds the unit on the next
+        run. A save failure only warns — the unit still counts for THIS
+        run; a resume that hits the same failure again would simply
+        re-extract it."""
+        if checkpoints is None or self.checkpoint_store is None:
+            return
+        checkpoints.record(
+            self._unit_hash(piece),
+            _CheckpointUnit(
+                chunk_index=record.chunk_index,
+                output=record.output,
+                user=record.user,
+                answer=record.answer,
+            ),
+        )
+        try:
+            self.checkpoint_store.save(source, checkpoints.to_bytes())
+        except Exception as error:
+            warnings.warn(
+                f"TaguruIngester failed to save a checkpoint for {source!r}: {error!r} — "
+                "the completed chunk still counts this run; a resume may repeat it",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
+    def _delete_checkpoints(self, source: str) -> None:
+        """Best-effort: the checkpoint's whole purpose (resuming an
+        INCOMPLETE document) no longer applies once the batch has landed.
+        A failure here is silently ignored — nothing correctness-critical
+        depends on this file disappearing promptly."""
+        if self.checkpoint_store is None:
+            return
+        try:
+            self.checkpoint_store.delete(source)
+        except Exception:
+            pass
+
     # -- sync ----------------------------------------------------------------
 
-    def ingest_text(self, text: str, *, source: str, dry_run: bool = False) -> IngestOutcome:
+    def ingest_text(
+        self,
+        text: str,
+        *,
+        source: str,
+        dry_run: bool = False,
+        should_stop: Callable[[], bool] | threading.Event | None = None,
+    ) -> IngestOutcome:
         """Ingest one text under one source id. Raises on failure (unlike
-        ``ingest_documents``, there is no "continue with the rest" here)."""
+        ``ingest_documents``, there is no "continue with the rest" here).
+
+        ``should_stop`` (issue #211, a zero-argument callable or a
+        ``threading.Event``) is checked between chunks; when it fires,
+        ``IngestOutcome.interrupted`` is ``True``, ``ok`` stays ``False``,
+        and nothing is imported. With ``checkpoint_store`` configured,
+        every chunk completed before the stop is already durably
+        persisted, so rerunning the same call resumes without re-calling
+        the model for them. ``dry_run=True`` still makes real model
+        calls and records checkpoints for them, but the checkpoint is
+        never deleted (no import ever lands to justify clearing it)."""
         if self.client is None:
             raise ValueError("this ingester was built with only an async client")
+        stop = _normalize_stop(should_stop)
         outcome = IngestOutcome(source=source, ok=False)
         if self.include_passage and len(text.encode("utf-8")) > MAX_PASSAGE_BYTES:
             raise ValueError(f"document exceeds the {MAX_PASSAGE_BYTES}-byte passage cap")
@@ -569,11 +774,33 @@ class TaguruIngester:
         rules = self._item_rules(paragraph_count)
         chunks = chunk(labeled_document(text, self.chunk_bytes), self.chunk_bytes)
         outcome.chunks = len(chunks)
+        checkpoints = self._load_checkpoints(source, text)
 
         records: list[_ChunkRecord] = []
         for index, piece in enumerate(chunks):
+            if stop():
+                outcome.interrupted = True
+                return outcome
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
+            cached = self._checkpointed_unit(checkpoints, piece)
+            if cached is not None:
+                records.append(cached)
+                outcome.chunks_reused += 1
+                self._emit(
+                    ChunkCompleted(
+                        source=source,
+                        index=index,
+                        total=len(chunks),
+                        associations_proposed=len(cached.output.associations),
+                        aliases_proposed=len(cached.output.aliases),
+                        questions_proposed=len(cached.output.questions),
+                        llm_calls=0,
+                        elapsed_seconds=time.monotonic() - chunk_started_at,
+                        reused=True,
+                    )
+                )
+                continue
             user = user_message(source, index, len(chunks), piece)
             base_messages: list[BaseMessage] = [
                 SystemMessage(content=system),
@@ -670,6 +897,7 @@ class TaguruIngester:
             if record is None:
                 raise ValueError(last_diagnosis)
             records.append(record)
+            self._record_checkpoint(checkpoints, source, piece, record)
             self._emit(
                 ChunkCompleted(
                     source=source,
@@ -700,6 +928,7 @@ class TaguruIngester:
         )
         self._record(outcome, applied.batches[0])
         outcome.ok = True
+        self._delete_checkpoints(source)
 
         if self.refresh_embeddings:
             self._emit(EmbeddingRefreshStarted(source=source))
@@ -726,12 +955,23 @@ class TaguruIngester:
         return outcome
 
     def ingest_documents(
-        self, documents: Sequence[Document], *, dry_run: bool = False
+        self,
+        documents: Sequence[Document],
+        *,
+        dry_run: bool = False,
+        should_stop: Callable[[], bool] | threading.Event | None = None,
     ) -> list[IngestOutcome]:
         """Ingest each document independently; one failure never stops the
-        rest (set ``raise_on_error=True`` to fail fast)."""
+        rest (set ``raise_on_error=True`` to fail fast). ``should_stop``
+        (issue #211) is checked between documents too, and once a
+        document's own ``ingest_text`` reports ``interrupted`` the run
+        stops there — an interruption bypasses ``raise_on_error``
+        entirely, since it is not a failure."""
+        stop = _normalize_stop(should_stop)
         outcomes: list[IngestOutcome] = []
         for document in documents:
+            if stop():
+                break
             try:
                 source = self._source_of(document)
             except ValueError as error:
@@ -740,13 +980,20 @@ class TaguruIngester:
                 outcomes.append(IngestOutcome(source="", ok=False, error=str(error)))
                 continue
             try:
-                outcomes.append(
-                    self.ingest_text(document.page_content, source=source, dry_run=dry_run)
+                outcome = self.ingest_text(
+                    document.page_content,
+                    source=source,
+                    dry_run=dry_run,
+                    should_stop=should_stop,
                 )
             except Exception as error:
                 if self.raise_on_error:
                     raise
                 outcomes.append(IngestOutcome(source=source, ok=False, error=str(error)))
+                continue
+            outcomes.append(outcome)
+            if outcome.interrupted:
+                break
         return outcomes
 
     def _fetch_vocabulary(self) -> list[str]:
@@ -860,10 +1107,23 @@ class TaguruIngester:
 
     # -- async ------------------------------------------------------------------
 
-    async def aingest_text(self, text: str, *, source: str, dry_run: bool = False) -> IngestOutcome:
-        """Async ``ingest_text``."""
+    async def aingest_text(
+        self,
+        text: str,
+        *,
+        source: str,
+        dry_run: bool = False,
+        should_stop: Callable[[], bool] | threading.Event | None = None,
+    ) -> IngestOutcome:
+        """Async ``ingest_text``. Also safe under plain ``asyncio`` task
+        cancellation when ``checkpoint_store`` is configured: every
+        completed chunk is durably checkpointed before the loop reaches
+        its next ``await``, and ``asyncio.CancelledError`` (a
+        ``BaseException``, not caught by any ``except Exception`` here)
+        propagates straight out without losing that work."""
         if self.async_client is None:
             raise ValueError("this ingester was built with only a sync client")
+        stop = _normalize_stop(should_stop)
         outcome = IngestOutcome(source=source, ok=False)
         if self.include_passage and len(text.encode("utf-8")) > MAX_PASSAGE_BYTES:
             raise ValueError(f"document exceeds the {MAX_PASSAGE_BYTES}-byte passage cap")
@@ -875,11 +1135,33 @@ class TaguruIngester:
         rules = self._item_rules(paragraph_count)
         chunks = chunk(labeled_document(text, self.chunk_bytes), self.chunk_bytes)
         outcome.chunks = len(chunks)
+        checkpoints = await self._aload_checkpoints(source, text)
 
         records: list[_ChunkRecord] = []
         for index, piece in enumerate(chunks):
+            if stop():
+                outcome.interrupted = True
+                return outcome
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
+            cached = self._checkpointed_unit(checkpoints, piece)
+            if cached is not None:
+                records.append(cached)
+                outcome.chunks_reused += 1
+                self._emit(
+                    ChunkCompleted(
+                        source=source,
+                        index=index,
+                        total=len(chunks),
+                        associations_proposed=len(cached.output.associations),
+                        aliases_proposed=len(cached.output.aliases),
+                        questions_proposed=len(cached.output.questions),
+                        llm_calls=0,
+                        elapsed_seconds=time.monotonic() - chunk_started_at,
+                        reused=True,
+                    )
+                )
+                continue
             user = user_message(source, index, len(chunks), piece)
             base_messages: list[BaseMessage] = [
                 SystemMessage(content=system),
@@ -976,6 +1258,7 @@ class TaguruIngester:
             if record is None:
                 raise ValueError(last_diagnosis)
             records.append(record)
+            await self._arecord_checkpoint(checkpoints, source, piece, record)
             self._emit(
                 ChunkCompleted(
                     source=source,
@@ -1008,6 +1291,7 @@ class TaguruIngester:
         )
         self._record(outcome, applied.batches[0])
         outcome.ok = True
+        await self._adelete_checkpoints(source)
 
         if self.refresh_embeddings:
             self._emit(EmbeddingRefreshStarted(source=source))
@@ -1034,11 +1318,18 @@ class TaguruIngester:
         return outcome
 
     async def aingest_documents(
-        self, documents: Sequence[Document], *, dry_run: bool = False
+        self,
+        documents: Sequence[Document],
+        *,
+        dry_run: bool = False,
+        should_stop: Callable[[], bool] | threading.Event | None = None,
     ) -> list[IngestOutcome]:
         """Async ``ingest_documents``."""
+        stop = _normalize_stop(should_stop)
         outcomes: list[IngestOutcome] = []
         for document in documents:
+            if stop():
+                break
             try:
                 source = self._source_of(document)
             except ValueError as error:
@@ -1047,14 +1338,80 @@ class TaguruIngester:
                 outcomes.append(IngestOutcome(source="", ok=False, error=str(error)))
                 continue
             try:
-                outcomes.append(
-                    await self.aingest_text(document.page_content, source=source, dry_run=dry_run)
+                outcome = await self.aingest_text(
+                    document.page_content,
+                    source=source,
+                    dry_run=dry_run,
+                    should_stop=should_stop,
                 )
             except Exception as error:
                 if self.raise_on_error:
                     raise
                 outcomes.append(IngestOutcome(source=source, ok=False, error=str(error)))
+                continue
+            outcomes.append(outcome)
+            if outcome.interrupted:
+                break
         return outcomes
+
+    async def _aload_checkpoints(self, source: str, text: str) -> _DocumentCheckpoints | None:
+        """Async twin of ``_load_checkpoints``. The store call itself runs
+        via ``asyncio.to_thread`` — unlike ``on_event``'s "must not block"
+        callback, a checkpoint store is explicitly meant to reach object
+        storage or a database (issue #211), and a synchronous network call
+        there must not stall the event loop."""
+        if self.checkpoint_store is None:
+            return None
+        fingerprint = self._checkpoint_fingerprint(text)
+        try:
+            data = await asyncio.to_thread(self.checkpoint_store.load, source)
+        except Exception as error:
+            warnings.warn(
+                f"TaguruIngester checkpoint store failed to load {source!r}: {error!r} — "
+                "starting this document without any cached chunks",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            data = None
+        return _DocumentCheckpoints.from_bytes(data, fingerprint)
+
+    async def _arecord_checkpoint(
+        self,
+        checkpoints: _DocumentCheckpoints | None,
+        source: str,
+        piece: str,
+        record: _ChunkRecord,
+    ) -> None:
+        """Async twin of ``_record_checkpoint``."""
+        if checkpoints is None or self.checkpoint_store is None:
+            return
+        checkpoints.record(
+            self._unit_hash(piece),
+            _CheckpointUnit(
+                chunk_index=record.chunk_index,
+                output=record.output,
+                user=record.user,
+                answer=record.answer,
+            ),
+        )
+        try:
+            await asyncio.to_thread(self.checkpoint_store.save, source, checkpoints.to_bytes())
+        except Exception as error:
+            warnings.warn(
+                f"TaguruIngester failed to save a checkpoint for {source!r}: {error!r} — "
+                "the completed chunk still counts this run; a resume may repeat it",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
+    async def _adelete_checkpoints(self, source: str) -> None:
+        """Async twin of ``_delete_checkpoints``."""
+        if self.checkpoint_store is None:
+            return
+        try:
+            await asyncio.to_thread(self.checkpoint_store.delete, source)
+        except Exception:
+            pass
 
     async def _afetch_vocabulary(self) -> list[str]:
         assert self.async_client is not None

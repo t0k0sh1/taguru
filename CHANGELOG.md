@@ -256,6 +256,49 @@ Entries that change an on-disk format or a response shape say so.
   Python and TypeScript `TaguruIngester` checkpoint/resume ports are
   tracked as separate follow-up issues; #179 stays open until they
   land.
+- `langchain-taguru` (Python) `TaguruIngester` gains durable per-chunk
+  checkpoints, cooperative stop, and resume (#211, the Python twin of
+  #210's Rust behavior for #179) — an interruption mid-document
+  (a killed process, a reclaimed spot instance) no longer loses every
+  chunk already extracted for it. A new optional `checkpoint_store`
+  constructor argument accepts anything implementing the three-method
+  `CheckpointStore` protocol (`load`/`save`/`delete`, keyed by source
+  id — the SDK, not the store, owns the fingerprint gate and the
+  content-hash unit keying, so a custom backend cannot cause a false
+  reuse even in principle); `FilesystemCheckpointStore` is the
+  batteries-included default, one JSON file per document under a given
+  directory, written atomically (temp file, fsync, rename, parent-dir
+  fsync). Each chunk unit is keyed by the hash of its own (labeled)
+  text rather than its index, matching the Rust side's #179 amendment
+  and leaving room for a future Python split rung to resume correctly
+  the same way. The checkpoint fingerprint mirrors the Rust side's
+  `CheckpointFingerprint` (content hash, model identity, prompt
+  version, and every output-shaping setting) minus `max_attempts`/
+  `chunk_bytes` — deliberately, matching Rust: a validated chunk output
+  does not depend on retry budget, and a chunk-size change just makes
+  today's pieces hash differently, a safe cache miss rather than a
+  correctness hazard. `checkpoint_model_id` is required when the chat
+  model exposes none of `model`/`model_name`/`model_id`/
+  `deployment_name` for the fingerprint to key on — checked at
+  construction time, not first use. A reused chunk emits the same
+  `ChunkStarted`/`ChunkCompleted` event pair as a fresh one (with
+  `llm_calls=0` and a new `ChunkCompleted.reused=True`), and still
+  participates in Stage 2 cross-chunk correction exactly like a
+  freshly-extracted chunk, replaying its own stored conversation. A
+  new `should_stop` argument (a zero-argument callable, or a
+  `threading.Event`) to `ingest_text`/`aingest_text`/
+  `ingest_documents`/`aingest_documents` stops cooperatively between
+  chunks (and between documents); `IngestOutcome` gains `interrupted`
+  (true when a stop was honored — not a failure, and bypasses
+  `raise_on_error` in the batch APIs) and `chunks_reused`. A
+  document's checkpoint is deleted once its batch actually lands in
+  `/import` and kept when the document ultimately fails; `dry_run=True`
+  records checkpoints (real model calls happen) but never deletes them,
+  since no import ever lands. The async twin's store calls run via
+  `asyncio.to_thread` so a synchronous backend (a filesystem write, a
+  blocking object-storage SDK call) cannot stall the event loop. The
+  TypeScript port remains tracked separately; #179 stays open until it
+  lands too.
 
 ### Changed
 - **Behavior change** (#199, ADR 0001 §12.2 — approved by the ADR

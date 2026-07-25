@@ -103,6 +103,11 @@ class ChunkCompleted:
     questions_proposed: int
     llm_calls: int
     elapsed_seconds: float
+    reused: bool = False
+    """True when this chunk was satisfied from a ``checkpoint_store``
+    instead of a fresh model call (issue #211) — ``llm_calls`` is 0 in
+    that case too, and no ``AttemptStarted``/``AttemptFailed`` events were
+    emitted for it."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)

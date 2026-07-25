@@ -42,6 +42,52 @@ corrective attempt fired. Useful with slow local models, where a single
 ingester = TaguruIngester(..., on_event=lambda event: print(event.kind))
 ```
 
+## Checkpoint/resume for spot and preemptible instances
+
+Pass `checkpoint_store` to survive an interruption mid-document (a killed
+process, a reclaimed spot instance) without losing every chunk already
+extracted for it:
+
+```python
+from taguru_langchain import FilesystemCheckpointStore
+
+ingester = TaguruIngester(
+    ...,
+    checkpoint_store=FilesystemCheckpointStore(".taguru-checkpoints"),
+)
+```
+
+Each chunk's accepted output is durably persisted (keyed by the chunk's own
+content hash) before the next chunk starts; rerunning the same
+`ingest_text()`/`ingest_documents()` call after an interruption resumes
+without re-calling the model for chunks already completed. Changing the
+document's content, the model, or any output-shaping setting (`fact_budget`,
+`structured_output`, `questions`, ...) invalidates the whole cache rather
+than risking a silent reuse of an incompatible output. The checkpoint is
+cleared once the document's batch actually lands in `/import`, and kept if
+the document ultimately fails — so a `dry_run=True` call, which never
+imports, still records checkpoints but never deletes them. Pass
+`should_stop` (a zero-argument callable, or a `threading.Event`) to stop
+cooperatively between chunks; `IngestOutcome.interrupted` reports whether
+that happened.
+
+`checkpoint_store` accepts anything implementing the three-method
+`CheckpointStore` protocol (`load`/`save`/`delete`, keyed by source id), so
+object storage or a database work as a drop-in replacement for
+`FilesystemCheckpointStore` on an ephemeral instance with no durable local
+disk:
+
+```python
+class S3CheckpointStore:
+    def load(self, source: str) -> bytes | None: ...
+    def save(self, source: str, data: bytes) -> None: ...  # must be atomic
+    def delete(self, source: str) -> None: ...
+```
+
+To force a full re-extraction ignoring whatever is cached, delete that
+source's checkpoint yourself — `store.delete(source)`, or
+`FilesystemCheckpointStore.path_for(source).unlink()`.
+
 Three more constructor arguments bound how a chunk's structured-output
 retry behaves, all optional and all unchanged by default: `fact_budget`
 asks the model to keep a chunk's answer to at most N associations;
