@@ -96,21 +96,29 @@ function truncateUtf8Prefix(text: string, maxBytes: number): string {
 }
 
 /**
- * Same flatten-then-hash-suffix scheme as `taguru extract`'s
- * `checkpoint_file_name` (src/extract.rs): path separators and `:` flatten
- * to `__` so the checkpoint directory stays flat, and a flattened name over
- * 120 UTF-8 bytes truncates to a <=96-byte prefix plus a 16-hex-character
- * content-hash suffix so long source paths never blow a filesystem's
- * name-length limit while staying collision-resistant.
+ * Path separators and `:` flatten to `__` so the checkpoint directory stays
+ * flat and the name stays human-readable, then a 16-hex-character
+ * content-hash suffix is ALWAYS appended — flattening alone is not
+ * injective (`"a/b"`, `"a:b"`, and `"a__b"` all flatten to `"a__b"`), so
+ * without the suffix, distinct short source ids could collide on the same
+ * file and silently overwrite each other's checkpoint progress. A
+ * flattened name over 120 UTF-8 bytes also truncates to a <=96-byte prefix
+ * so long source paths never blow a filesystem's name-length limit; the
+ * hash suffix alone (not the truncated prefix) is what keeps two such
+ * names apart. Loosely inspired by `taguru extract`'s
+ * `checkpoint_file_name` (src/extract.rs), which truncates the same way
+ * but — unlike this scheme — still only suffixes past the 120-byte
+ * threshold and shares this same short-name collision risk (tracked
+ * separately, since fixing it there is out of this port's scope).
  */
 export async function checkpointFileName(source: string): Promise<string> {
-  let name = flattenSource(source);
-  if (new TextEncoder().encode(name).length > 120) {
-    const prefix = truncateUtf8Prefix(name, 96);
-    const suffix = (await sha256Hex(source)).slice(0, 16);
-    name = `${prefix}-${suffix}`;
-  }
-  return `${name}.json`;
+  const flattened = flattenSource(source);
+  const prefix =
+    new TextEncoder().encode(flattened).length > 120
+      ? truncateUtf8Prefix(flattened, 96)
+      : flattened;
+  const suffix = (await sha256Hex(source)).slice(0, 16);
+  return `${prefix}-${suffix}.json`;
 }
 
 /**

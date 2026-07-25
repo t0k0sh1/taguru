@@ -55,9 +55,10 @@ extracted for it:
 ```typescript
 import { FilesystemCheckpointStore, TaguruIngester } from "langchain-taguru";
 
+const checkpointStore = new FilesystemCheckpointStore(".taguru-checkpoints");
 const ingester = new TaguruIngester({
   ...,
-  checkpoint_store: new FilesystemCheckpointStore(".taguru-checkpoints"),
+  checkpoint_store: checkpointStore,
 });
 ```
 
@@ -90,8 +91,8 @@ interface S3CheckpointStore extends CheckpointStore {
 ```
 
 To force a full re-extraction ignoring whatever is cached, delete that
-source's checkpoint yourself — `store.delete(source)`, or remove the file at
-`await store.pathFor(source)`.
+source's checkpoint yourself — `await checkpointStore.delete(source)`, or
+remove the file at `await checkpointStore.pathFor(source)`.
 
 `TaguruIngester` also takes an optional `structured_output` flag (default
 `false`) that asks the chat model for JSON-schema-constrained generation —

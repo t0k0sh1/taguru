@@ -79,7 +79,22 @@ describe("FilesystemCheckpointStore", () => {
   });
 
   it("flattens path separators in the checkpoint file name", async () => {
-    expect(await checkpointFileName("docs/a:b\\c.md")).toBe("docs__a__b__c.md.json");
+    const name = await checkpointFileName("docs/a:b\\c.md");
+    expect(name.startsWith("docs__a__b__c.md-")).toBe(true);
+    expect(name.endsWith(".json")).toBe(true);
+  });
+
+  it("always appends a hash suffix, even for short names that flatten identically", async () => {
+    // flattenSource alone is not injective — these three distinct source
+    // ids all flatten to "a__b" — so the hash suffix (not the flattened
+    // prefix) is what must keep their checkpoint files apart.
+    const names = await Promise.all(
+      ["a/b", "a:b", "a__b"].map((source) => checkpointFileName(source)),
+    );
+    expect(new Set(names).size).toBe(3);
+    for (const name of names) {
+      expect(name.startsWith("a__b-")).toBe(true);
+    }
   });
 
   it("truncates long sources with a hash suffix at a UTF-8 boundary", async () => {
@@ -115,7 +130,7 @@ describe("FilesystemCheckpointStore", () => {
   it("atomic write leaves no tmp litter", async () => {
     const store = new FilesystemCheckpointStore(dir);
     await store.save("docs/aomine.md", encode("{}"));
-    expect(readdirSync(dir)).toEqual(["docs__aomine.md.json"]);
+    expect(readdirSync(dir)).toEqual([await checkpointFileName("docs/aomine.md")]);
   });
 
   it("a failed rename keeps the old file and cleans up staging", async () => {
@@ -124,7 +139,7 @@ describe("FilesystemCheckpointStore", () => {
     vi.mocked(fsPromises.rename).mockRejectedValueOnce(new Error("simulated replace failure"));
     await expect(store.save("docs/aomine.md", encode("replacement"))).rejects.toThrow();
     expect(decode((await store.load("docs/aomine.md"))!)).toBe("original");
-    expect(readdirSync(dir)).toEqual(["docs__aomine.md.json"]);
+    expect(readdirSync(dir)).toEqual([await checkpointFileName("docs/aomine.md")]);
   });
 
   it("load never creates the directory and save creates it on demand", async () => {
