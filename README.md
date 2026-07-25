@@ -23,9 +23,10 @@ playbook for clients itself: `GET /protocol` (the content of
 [src/llm-protocol.md](src/llm-protocol.md)).
 
 **Documentation: <https://t0k0sh1.github.io/taguru/>** — getting
-started, concepts, the import/extract references, deployment guides
-(Docker Compose, Kubernetes, Amazon Bedrock), the internal
-architecture, and a walkthrough of an LLM retrieving over MCP.
+started, concepts, context & group modeling, the import/extract
+references, deployment guides (Docker Compose, Kubernetes, Amazon
+Bedrock), the internal architecture, and a walkthrough of an LLM
+retrieving over MCP.
 
 ## Install
 
@@ -69,7 +70,10 @@ context it came from. Every search response also carries a `plan`:
 which contexts were actually searched and — for passage search — which
 lanes ran there and why not when one was skipped, with the effective
 cosine floor. Deep dives (`activate`, `explore`) stay per-context:
-search across, then pull the thread where it answered.
+search across, then pull the thread where it answered. How to draw
+those boundaries for real documents — which parts of a paper or a
+codebase become contexts, and which become groups — is the [modeling
+guide](https://t0k0sh1.github.io/taguru/modeling.html).
 
 Sources carry **metadata**: a server-stamped `stored_at`, an optional
 user-supplied document `date`, and `tags` — accepted at store and
