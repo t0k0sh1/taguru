@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Troubleshooting — Taguru</title>
+  <meta name="description" content="Symptom-driven triage for a local RAG stack on Taguru: version skew and pre-1.0 response-shape changes, stale Docker images, separating Taguru request latency from LLM generation latency, embedding 404s and lexical degrade, and local model behavior (thinking, context window, output caps, streaming).">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="troubleshooting.html" aria-current="page">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">guide · troubleshooting</div>
+    <h1>Troubleshooting — slow, stuck, or the wrong shape</h1>
+    <p class="lede">
+      A local RAG stack is four layers stacked on top of each other: the Taguru server, the
+      embedding provider, the LLM serving layer, and the SDK or integration package gluing them
+      together. The same three symptoms — <b>slow</b>, <b>stuck</b>, <b>the wrong shape</b> — can
+      come from any of the four, and the fix for one layer does nothing for another. This page
+      attributes a symptom to a layer with a cheap diagnostic before anything gets changed,
+      reset, or reinstalled.
+    </p>
+  </header>
+
+  <section id="triage">
+    <h2>Start here: symptom → layer → diagnostic → remedy</h2>
+    <p class="section-sub">
+      Find the row that matches, run the one diagnostic, then follow the remedy link. Every
+      diagnostic below is read-only.
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Symptom</th><th>Likely layer</th><th>First diagnostic</th><th>Remedy</th></tr></thead>
+        <tbody>
+          <tr><td><code>expected an object for PassagePage, got list</code> (Python SDK)</td><td>version skew — a 0.4.x SDK against a 0.3.x server</td><td><code>taguru version</code> vs. the SDK version</td><td><a href="#compatibility">Compatibility</a></td></tr>
+          <tr><td>a client chokes on an unexpected <code>{plan, hits}</code> object, or can't find <code>plan</code></td><td>version skew — a 0.3.x client against a 0.4.x server</td><td>same as above</td><td><a href="#compatibility">Compatibility</a></td></tr>
+          <tr><td>behavior doesn't match the docs; a documented field is just missing</td><td>a stale Docker image — <code>latest</code> was never re-pulled</td><td><code>/metrics</code> → <code>taguru_build_info{version="…"}</code></td><td><a href="#stale-image">The image you think you're running</a></td></tr>
+          <tr><td>an answer takes minutes, but Taguru's own request logs show milliseconds</td><td>LLM generation, not Taguru</td><td>compare end-to-end time against the <code>latency_ms</code> log field</td><td><a href="#latency">Whose seconds are they?</a>, <a href="#local-llm">The serving layer</a></td></tr>
+          <tr><td>everything is slow, including a bare <code>curl</code> search with no LLM involved</td><td>Taguru itself, or its embedding provider</td><td><code>"http"</code> log lines, <code>TAGURU_LOG_SEARCHES=1</code></td><td><a href="#latency">Whose seconds are they?</a>, <a href="#embedding">The semantic lane</a></td></tr>
+          <tr><td>search still returns results, but paraphrased queries stopped matching</td><td>the semantic lane silently degraded to lexical-only</td><td><code>plan.contexts[].lanes.vector.ran</code> on the search response</td><td><a href="#embedding">The semantic lane</a></td></tr>
+          <tr><td>immediate failure: <code>embedding provider answered HTTP 404</code></td><td><code>TAGURU_EMBED_URL</code> is missing the <code>/v1/embeddings</code> path</td><td><code>curl</code> the configured URL directly</td><td><a href="#embedding">The semantic lane</a></td></tr>
+          <tr><td>long silence and a busy GPU, then a timeout or an empty answer</td><td>a thinking model spending the whole budget on reasoning tokens</td><td>provider logs, the response's <code>finish_reason</code></td><td><a href="#local-llm">The serving layer</a></td></tr>
+          <tr><td>the first request after idle is very slow; streaming "feels fast" but the total doesn't change</td><td>model load / VRAM (context window), or a streaming misconception</td><td>time a second, back-to-back request</td><td><a href="#local-llm">The serving layer</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note warn">
+      <b>None of the rows above are fixed by deleting the data directory.</b> A wipe destroys the
+      corpus along with whatever evidence would have shown which layer was actually at fault —
+      and the fault is usually not in Taguru's stored data at all. Reach for a reset last, not
+      first, and if a remedy crosses a release boundary, take a backup before you start (see
+      <a href="#stale-image">below</a>).
+    </p>
+  </section>
+
+  <section id="compatibility">
+    <h2>Version skew: reading every layer's version</h2>
+    <p class="section-sub">
+      Server, SDK, and integration package all ship from this one repository in lockstep — one
+      version number per release, not one per package. The fix for skew is always the same:
+      make every layer read the same minor version.
+    </p>
+    <pre><code><span class="c"># server — a subcommand, not a flag</span>
+taguru version
+
+<span class="c"># server, without a shell in the container (the image is FROM scratch)</span>
+curl -s localhost:8248/metrics | grep taguru_build_info
+docker run --rm ghcr.io/t0k0sh1/taguru:0.4.0 version
+
+<span class="c"># Python SDK / LangChain integration</span>
+python -c "import taguru; print(taguru.__version__)"
+python -c "import taguru_langchain; print(taguru_langchain.__version__)"
+
+<span class="c"># TypeScript SDK / LangChain integration</span>
+npm ls taguru
+npm ls langchain-taguru</code></pre>
+    <p>
+      The MCP bridge answers the same question over the protocol: its <code>initialize</code>
+      response's <code>serverInfo.version</code> names the server it's attached to.
+    </p>
+    <p>
+      Before 1.0, a minor version bump is allowed to change a response's shape, and one already
+      has: <code>POST /contexts/{name}/sources/search</code> (and the cross-context form) went
+      from a bare array of hits to a <code>PassagePage</code> object, <code>{plan, hits}</code>,
+      in 0.4.0.
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th></th><th>server 0.3.x</th><th>server 0.4.x</th></tr></thead>
+        <tbody>
+          <tr><td>SDK/client built for 0.3.x</td><td>works</td><td>fails — the object has no <code>[i]</code> to index, or the client can't find the fields it expects at the top level</td></tr>
+          <tr><td>SDK/client built for 0.4.x</td><td>fails — <code>expected an object for PassagePage, got list</code></td><td>works</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      The <code>hits</code> themselves are unchanged; they moved under a <code>hits</code> key,
+      and <code>plan</code> is new — per-context lane execution (which of BM25/vector ran, why
+      one didn't, the effective cosine floor). The remedy is never to patch around the shape:
+      pin an older SDK to an older server, or upgrade every layer together.
+    </p>
+  </section>
+
+  <section id="stale-image">
+    <h2>The Docker image you think you're running</h2>
+    <p class="section-sub">
+      <code>image: ghcr.io/t0k0sh1/taguru:latest</code> guarantees nothing after the first pull —
+      Docker does not re-pull an already-cached tag on <code>up</code> or a plain restart.
+    </p>
+    <p>
+      Diagnostic: compare the running server's reported version against the release you expect.
+      <code>/metrics</code>'s <code>taguru_build_info{version="…"}</code> is the ground truth (the
+      image has no shell for <code>docker exec</code> to fall back on); <code>docker compose
+      images taguru</code> or <code>docker inspect</code>'s digest are secondary checks against
+      what's cached locally.
+    </p>
+    <p>
+      Update: pull, then recreate — a pulled image alone changes nothing until the container is
+      rebuilt from it.
+    </p>
+    <pre><code>docker compose pull taguru
+docker compose up -d</code></pre>
+    <p>
+      The durable fix is to stop using <code>latest</code> at all. <code>deploy/docker-compose.yml</code>
+      pins on purpose (<code>image: ghcr.io/t0k0sh1/taguru:0.4.0 # pin; latest moves</code>) — see
+      <a href="docker-compose.html#image">Docker Compose — the image</a> for the pin and digest-pin
+      guidance.
+    </p>
+    <p class="note warn">
+      <b>Back up before crossing a format bump.</b> Image formats migrate forward on load and
+      never write the old version back out — rolling the binary back past a format bump means
+      rolling the volume back with it. See <a href="docker-compose.html#model">Docker Compose —
+      the model</a> for why a rollback is a restore, and
+      <a href="docker-compose.html#backup">Docker Compose — backups</a> for <code>POST
+      /flush</code> + snapshot, <code>taguru export</code>/<code>import</code>, and
+      <code>TAGURU_REPLICATE_URL</code> + <code>taguru restore</code>.
+    </p>
+  </section>
+
+  <section id="latency">
+    <h2>Whose seconds are they: Taguru's or the model's?</h2>
+    <p class="section-sub">
+      Every request Taguru serves logs one line to stderr — read that line before assuming
+      Taguru is the slow part.
+    </p>
+    <p>
+      The access-log middleware emits a <code>tracing::info!</code> line per request, message
+      <code>"http"</code>, carrying <code>method</code>, <code>route</code>,
+      <code>context</code>, <code>group</code>, <code>status</code>, <code>key</code>, and
+      <code>latency_ms</code>. With <code>TAGURU_LOG_FORMAT=json</code> it's one JSON object per
+      request — the least ambiguous way to read it:
+    </p>
+    <pre><code>{"fields":{"message":"http","method":"POST","route":"/contexts/sake/sources/search","context":"sake","group":null,"status":200,"key":"-","latency_ms":6.2}}</code></pre>
+    <p>
+      The default, human-readable stderr format carries the same fields on one line per request,
+      timestamp and level first. <code>TAGURU_LOG_SEARCHES=1</code> adds a second,
+      opt-in line per <code>resolve</code>/<code>activate</code>/<code>sources/search</code> call
+      naming the cue, hit count, and top score — useful for judging relevance, though it doesn't
+      carry latency itself.
+    </p>
+    <p>
+      The procedure: time the full round trip at the client, then read <code>latency_ms</code> on
+      the retrieval call inside that same window. The difference is everything downstream of
+      Taguru — the integration code and the LLM's generation. As a rule of thumb, retrieval is
+      milliseconds and local generation is seconds to minutes; an answer that takes 45 seconds
+      with an 8 ms search line behind it is not a Taguru problem — see
+      <a href="#local-llm">the serving layer</a>.
+    </p>
+    <p>
+      One nuance: a <b>slow</b> <code>latency_ms</code> on <code>sources/search</code> can itself
+      be the embedding provider — the query embedding's round trip happens inside that request.
+      Cross-check the <code>taguru_embedding_breaker_*</code> series on <code>/metrics</code>
+      before concluding Taguru's own retrieval path is at fault.
+    </p>
+  </section>
+
+  <section id="embedding">
+    <h2>The semantic lane: 404s and silent degrade</h2>
+    <p class="section-sub">
+      Two different failure modes wear the same name ("embeddings aren't working") but look
+      nothing alike in practice.
+    </p>
+    <p>
+      <b>Loud failure — a configuration mistake.</b> <code>TAGURU_EMBED_URL</code> must be the
+      full OpenAI-compatible endpoint, not a base URL — <code>http://127.0.0.1:8257/v1/embeddings</code>,
+      not <code>http://127.0.0.1:8257</code>. Point it at a base URL and the provider 404s;
+      Taguru does not retry a 404 (only 429 and 5xx are treated as transient), so it fails the
+      request immediately with <code>embedding provider answered HTTP 404</code>. Diagnostic:
+      hit the configured URL directly.
+    </p>
+    <pre><code>curl -s -X POST "$TAGURU_EMBED_URL" \
+  -H 'content-type: application/json' \
+  -d '{"model":"'"$TAGURU_EMBED_MODEL"'","input":["ping"]}'</code></pre>
+    <p>
+      <b>Quiet degrade — search keeps answering.</b> A failure at query time (provider down,
+      timeout, circuit breaker open after 3 consecutive failures) doesn't fail the search — it
+      logs a warning, <code>passage query embedding failed; serving the lexical lane alone</code>,
+      and answers from BM25 only. The response says so in-band, which is the check that actually
+      distinguishes "results got worse" from "something broke":
+    </p>
+    <pre><code>{
+  "plan": {
+    "contexts": [
+      { "name": "sake", "lanes": { "vector": { "ran": false, "reason": "the query embedding failed: …" } } }
+    ]
+  },
+  "hits": [ … ]
+}</code></pre>
+    <p>
+      <code>sources/search/explain</code> reports the same reason in more detail. A degraded
+      result is never pinned into the retrieval cache, so the next request tries the embedding
+      call again rather than repeating a stale lexical-only answer forever.
+    </p>
+    <p>
+      Why the symptom is "paraphrases stop matching" rather than "search breaks": BM25 always
+      runs, and the vector lane is fused in by reciprocal rank fusion on top of it — losing the
+      vector lane degrades recall on paraphrase and synonym queries, it doesn't empty the result
+      set. See <a href="architecture.html#search">Internal architecture — search</a> for the two
+      lanes and fusion.
+    </p>
+  </section>
+
+  <section id="local-llm">
+    <h2>The serving layer: thinking, context, caps, streaming</h2>
+    <p class="section-sub">
+      None of the four below are Taguru settings — they belong to the model server behind
+      whatever base URL your LLM client points at. Each mechanism is general; the concrete knob
+      shown is Ollama's, the server this was field-tested against.
+    </p>
+    <ul>
+      <li><b>Thinking mode.</b> A reasoning model can spend the entire time budget on invisible thinking tokens before the first byte of an actual answer — a busy GPU, then a timeout or, with no timeout set, an empty response after minutes. Disabling thinking is a decision made at the serving layer or the client integration, not at Taguru: Taguru's own LLM-facing tooling speaks plain OpenAI-compatible chat and never toggles a vendor's thinking flag. Either pick a non-thinking model or disable thinking where the model is served.</li>
+      <li><b>Context window.</b> An unspecified or too-small context window truncates a large prompt <b>silently</b> — no error, just a worse answer built on a partial prompt — and also changes the model's VRAM footprint and load latency, which is why the first request after an idle period can be far slower than the rest. On Ollama, the window is set per served model, not per request: bake it into a derived model with <code>FROM &lt;base&gt;</code> + <code>PARAMETER num_ctx 16384</code>, then <code>ollama create</code>.</li>
+      <li><b>Output cap and prompt volume.</b> Generation time scales with the output token cap (Ollama's <code>num_predict</code>), how many passages retrieval handed back, and the size of the assembled prompt. Trimming retrieval breadth (fewer hits, tighter <code>top_k</code>) is a legitimate way to cut generation latency, not just a relevance knob.</li>
+      <li><b>One model for extraction, a different one for answers.</b> A disciplined, structured-output-friendly model for <a href="extract.html#local-models">extraction</a> and a faster, more conversational one for answering the user are usually different picks — but alternating both through a single serving slot on one GPU pays a full reload on every swap. Give each its own slot, or its own served instance, if both run concurrently.</li>
+      <li><b>Streaming changes what arrives first, not how long the whole thing takes.</b> Streaming improves time-to-first-token — the user sees something sooner — but total generation time for a given output length is the same with or without it. A fast-feeling first token is not evidence of a fast request; measure the full completion, not the first chunk.</li>
+    </ul>
+  </section>
+
+  <section id="observability">
+    <h2>Seeing the split: spans, request IDs, token counts</h2>
+    <p class="section-sub">
+      The fastest way to stop re-diagnosing the same "is it Taguru or the model" question is to
+      make the split visible in your own logs, once, rather than re-deriving it from raw timing
+      every time.
+    </p>
+    <p>
+      Wrap the retrieval call and the generation call in <b>separate spans</b> rather than one
+      "searching…" span that quietly includes the LLM call — a UI spinner that covers both stages
+      is exactly what makes a slow generation look like a slow search. Record, per attempt: a
+      request ID, the provider's <code>finish_reason</code>, input/output token counts, and
+      elapsed time. That record is what turns "it's slow" into a specific layer the next time it
+      happens.
+    </p>
+    <p>
+      Taguru already ships most of the retrieval-side half of this: <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>
+      turns every request into a span, with the embedding provider call as a child span and a
+      <code>trace_id</code> in the access log (see <a href="architecture.html#observability">Internal
+      architecture — observability</a>); <code>taguru extract --diagnostics-out</code> writes
+      <code>elapsed_seconds</code>, <code>finish_reason</code>, and token counts per LLM attempt
+      as JSONL; the LangChain SDK's <code>on_event</code> callback mirrors the same fields as
+      typed events. Instrument the generation call the same way, on the application side, to get
+      the other half of the split.
+    </p>
+    <div class="next-links">
+      <a class="nav-card" href="extract.html#local-models" style="flex:1 1 16rem">
+        <span class="nc-title">Local models: five field notes</span>
+        <p>The same serving-layer behavior, from the extraction side — timeouts, thinking mode, and the manifest's model-name trust.</p>
+      </a>
+      <a class="nav-card" href="docker-compose.html" style="flex:1 1 16rem">
+        <span class="nc-title">Deploy with Docker Compose</span>
+        <p>Pinning an image, backups, and restore — the durable fix for the stale-image row above.</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>

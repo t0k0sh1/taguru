@@ -25,8 +25,9 @@ playbook for clients itself: `GET /protocol` (the content of
 **Documentation: <https://t0k0sh1.github.io/taguru/>** — getting
 started, concepts, context & group modeling, the import/extract
 references, deployment guides (Docker Compose, Kubernetes, Amazon
-Bedrock), the internal architecture, and a walkthrough of an LLM
-retrieving over MCP.
+Bedrock), a compatibility and local-RAG troubleshooting guide, the
+internal architecture, and a walkthrough of an LLM retrieving over
+MCP.
 
 ## Install
 
@@ -256,7 +257,12 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   clean runner on every release. The commands, and why the signing
   identity must be pinned exactly, are in
   [SECURITY.md](SECURITY.md#verifying-a-release); prefer a digest pin
-  in deploys ([deploy/README.md](deploy/README.md)).
+  in deploys ([deploy/README.md](deploy/README.md)). A `latest` tag
+  that never re-pulled itself, or an SDK a minor version off from the
+  server, both show up as confusing errors rather than a version
+  mismatch — see the [troubleshooting
+  guide](https://t0k0sh1.github.io/taguru/troubleshooting.html) for
+  the triage.
 - **Linux is what's tested.** CI runs on `ubuntu-latest` and
   `ubuntu-24.04-arm` only, matching what's released — crates.io source
   and the Linux container image above, no Windows binaries. A few call
