@@ -34,6 +34,7 @@
       <div class="side-group-label">Reference</div>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
+      <a href="long-running.html">Long-running ingestion</a>
     </div>
     <div class="side-group">
       <div class="side-group-label">Deploy</div>
@@ -245,7 +246,10 @@ taguru import batches/</code></pre>
     <p>
       What the prompt asks and what is enforced, chunking, manifest details, the trust model,
       and measured quality per model class are in the
-      <a href="extract.html">document extraction reference</a>.
+      <a href="extract.html">document extraction reference</a>. For a corpus large enough that
+      one run spans hours or several short-lived instances, see
+      <a href="long-running.html">long-running ingestion</a>: bounded run windows, interrupt and
+      resume, and torn-import recovery.
     </p>
   </section>
 

@@ -34,6 +34,7 @@
       <div class="side-group-label">Reference</div>
       <a href="import.html">Batch import</a>
       <a href="extract.html" aria-current="page">Document extraction</a>
+      <a href="long-running.html">Long-running ingestion</a>
     </div>
     <div class="side-group">
       <div class="side-group-label">Deploy</div>
@@ -407,7 +408,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       instance: schedule it to run against a persistent <code>--out</code>, let the scheduler kill
       it whenever the instance is reclaimed, and requeue the same command — the manifest skips
       finished documents, checkpoints skip finished chunks within the document that was
-      in flight, and nothing already paid for is ever paid for twice.
+      in flight, and nothing already paid for is ever paid for twice. Composing this with
+      <code>taguru import</code>'s own atomicity into a full run/interrupt/resume operating
+      picture — bounded windows, work-unit enumeration, failure/re-submission — is the
+      <a href="long-running.html">long-running ingestion guide</a>.
     </p>
   </section>
 
@@ -458,7 +462,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       inside <code>--out</code> risks collision with a batch file or the manifest itself. Keep it
       outside <code>--out</code>. It is a diagnostic aid, never a source of truth: the manifest
       stays exactly what it has always been, a skip-index of successes, with no diagnostics
-      mixed in.
+      mixed in. For watching this sidecar (or the SDK's equivalent event stream) live against a
+      multi-hour run, see <a href="long-running.html#progress">long-running ingestion</a>.
     </p>
   </section>
 

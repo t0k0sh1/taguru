@@ -88,6 +88,10 @@ To force a full re-extraction ignoring whatever is cached, delete that
 source's checkpoint yourself — `store.delete(source)`, or
 `FilesystemCheckpointStore.path_for(source).unlink()`.
 
+For composing this with a bounded, resumable runner (time/item windows,
+signal handling, torn-import repair), see
+[long-running ingestion](https://t0k0sh1.github.io/taguru/long-running.html).
+
 Three more constructor arguments bound how a chunk's structured-output
 retry behaves, all optional and all unchanged by default: `fact_budget`
 asks the model to keep a chunk's answer to at most N associations;

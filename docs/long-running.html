@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Long-running ingestion — Taguru</title>
+  <meta name="description" content="Operating taguru extract and taguru import as one long job: enumerating work, bounding a run to a time or count window, stopping and resuming, checkpoint keys, torn-import repair, and the split between what Taguru guarantees and what your runner decides.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="long-running.html" aria-current="page">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">guide · operations</div>
+    <h1>Long-running ingestion — interrupt, checkpoint, resume</h1>
+    <p class="lede">
+      A local model turns a corpus of any real size into a job that runs for hours, not seconds.
+      This page composes <a href="extract.html"><code>taguru extract</code></a>'s manifest and
+      chunk checkpoints with <a href="import.html"><code>taguru import</code></a>'s atomic,
+      idempotent batch contract into one operating picture: enumerate the work, run it in bounded
+      windows, survive a kill at any point, and converge to done without ever paying twice for
+      the same chunk. Neither reference page's contract changes here — this page names the
+      pattern and draws the line between what Taguru guarantees and what your runner decides.
+    </p>
+  </header>
+
+  <section id="lifecycle">
+    <h2>The run lifecycle: converging over bounded windows</h2>
+    <p class="section-sub">
+      A concrete run: 112 documents, a corpus large enough that one pass needs several
+      short-lived instances.
+    </p>
+    <div class="arch">
+      <div class="arch-layer">
+        <div class="arch-label">enumerate</div>
+        <div class="arch-row">
+          <div class="arch-box dim"><b>112 work units</b><span>the whole corpus listed before any model call — <code>taguru extract --dry-run --out batches/ docs/</code></span></div>
+        </div>
+      </div>
+      <div class="arch-down">↓</div>
+      <div class="arch-layer">
+        <div class="arch-label">window 1 · 45 min</div>
+        <div class="arch-row">
+          <div class="arch-box"><b>41 completed</b><span>each committed as it landed — a manifest entry, then an import</span></div>
+          <div class="arch-box lane-text"><b>2 failed</b><span>named on stderr; the run keeps going</span></div>
+          <div class="arch-box dim"><b>69 pending</b><span>not yet attempted</span></div>
+        </div>
+      </div>
+      <div class="arch-down">↓</div>
+      <div class="arch-layer">
+        <div class="arch-label">interrupt</div>
+        <div class="arch-row">
+          <div class="arch-box dim"><b>first signal</b><span>finish the chunk in flight, checkpoint it, exit 130 — nothing already paid for is lost</span></div>
+        </div>
+      </div>
+      <div class="arch-down">↓</div>
+      <div class="arch-layer">
+        <div class="arch-label">window 2</div>
+        <div class="arch-row">
+          <div class="arch-box"><b>41 skipped free</b><span>manifest / source-listing says done</span></div>
+          <div class="arch-box"><b>2 retried</b><span>yesterday's failures, from scratch</span></div>
+          <div class="arch-box"><b>69 resumed</b><span>the in-flight document continues from its chunk checkpoints, the rest start fresh</span></div>
+        </div>
+      </div>
+      <div class="arch-down">↓</div>
+      <div class="arch-layer">
+        <div class="arch-label">converged</div>
+        <div class="arch-row">
+          <div class="arch-box"><b>112 completed · 0 pending</b><span>a third run is a free no-op — exit 0, nothing to do</span></div>
+        </div>
+      </div>
+    </div>
+    <p>
+      Three properties make this converge instead of just retrying forever: every work unit is
+      enumerated <b>before</b> the first model call, so "pending" always has a concrete count; a
+      success is committed the moment it lands, never batched up and lost together on the next
+      failure; and a failure marks exactly the one unit that failed, so a rerun's cost is
+      proportional to what's left, not to what already happened. None of this requires Taguru to
+      know about "runs" or "jobs" at all — <code>taguru extract</code>'s manifest and
+      <a href="extract.html#checkpoints">chunk checkpoints</a>, plus
+      <code>taguru import</code>'s <a href="import.html#one-file-one-source">retract-then-apply</a>
+      idempotency, are what make each window's work durable on its own.
+    </p>
+  </section>
+
+  <section id="responsibilities">
+    <h2>The split: what Taguru guarantees, what your runner decides</h2>
+    <p class="section-sub">
+      Every pattern on this page composes these guarantees; none of them require Taguru to be
+      aware that a "long job" is happening.
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Taguru provides</th><th>Your runner provides</th></tr></thead>
+        <tbody>
+          <tr><td>Durable writes, source attribution, atomic per-source import (<a href="import.html#one-file-one-source">retract-then-apply</a>, nothing partial ever visible)</td><td>Splitting a corpus into work units (documents, or PDF sections) and a queue to drive them</td></tr>
+          <tr><td>The extract manifest and chunk checkpoints — free re-run of what's already done</td><td>A time or item bound on one process invocation</td></tr>
+          <tr><td>Source listing / <code>--dry-run</code> as the completion test</td><td>Signal handling and the decision of when a kill is "safe" vs "now"</td></tr>
+          <tr><td>Validation errors, the per-source batch-open marker for torn imports</td><td>Progress UI/log, a failure summary, and the policy for what gets retried</td></tr>
+          <tr><td>A re-runnable batch contract — the same file or command is always safe to run again</td><td>Deciding when "good enough" is reached and the job is done</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      Taguru ships no <code>--max-minutes</code> or <code>--max-items</code> flag, on
+      <code>extract</code> or <code>import</code>, and none is planned — bounding a run's window
+      is deliberately left to the runner. The reason it can be: because rerunning
+      <code>taguru extract</code>/<code>taguru import</code> is <b>free</b> for anything already
+      done, a bound needs no cooperation from Taguru to be safe. <code>timeout</code>(1), a
+      cron/scheduler window, or a runner's own argument parsing are all sufficient — see
+      <a href="#cli-loop">below</a>.
+    </p>
+  </section>
+
+  <section id="units">
+    <h2>Work units, checkpoint keys, and deciding what is done</h2>
+    <p>
+      The default unit is <b>one document</b> — one file under <code>taguru extract</code>'s input
+      directory becomes one batch file, whose header names its own source id, which becomes one
+      row in <code>--out</code>'s manifest. For a corpus of a few large PDFs rather than many
+      small documents, the natural unit shrinks to <b>one section</b>: split each PDF by heading
+      first (a runner responsibility — Taguru has no PDF reader), feed each section to
+      <code>taguru extract</code> as its own document with a source id that names its parent, e.g.
+      <code>manual.pdf#installation</code>. Each section is then an independent batch, its own
+      manifest row, its own retract-then-apply unit — a failure in one section never touches
+      another's.
+    </p>
+    <p>
+      Two <b>distinct</b> completion tests exist, one per stage — do not conflate them:
+    </p>
+    <ul>
+      <li><b>Extract stage</b>: a document is done when its entry in <code>.extract-manifest.json</code> matches the current compute-input fingerprint (content hash × model × prompt version × context × output-shaping flags). <code>taguru extract --dry-run</code> reports this without calling the model.</li>
+      <li><b>Import stage</b>: querying a running server's <code>GET /contexts/{name}/sources</code> (or the SDK's <code>iter_sources()</code>, see <a href="#custom-runner">below</a>) tells you exactly which sources have landed. That test is sound only because a failed batch now writes <b>nothing</b> — a partially-applied source can no longer masquerade as a completed one (the fix that closed this gap is <a href="https://github.com/t0k0sh1/taguru/issues/187">issue #187</a>; before it, "source exists" was not a safe checkpoint test for a resumable client). Offline, there is no per-source listing (<code>taguru inspect</code> reports a source <b>count</b> and any surviving import markers, not individual ids) — but you rarely need one there: retract-then-apply makes <code>taguru import</code> idempotent, so simply re-importing the whole <code>--out</code> directory after every window is cheap and correct without first figuring out what already landed.</li>
+    </ul>
+    <p>
+      Below document granularity, <a href="extract.html#checkpoints">chunk checkpoints</a> key
+      each unit by the <b>hash of its own text</b>, not chunk index — so a resumed run's chunk
+      splits don't have to line up with a prior run's for reuse to be recognized. Combined with
+      the manifest above, a rerun only ever pays for chunks whose content, model, or
+      output-shaping settings actually changed.
+    </p>
+  </section>
+
+  <section id="stopping">
+    <h2>Stopping: the first signal, the second, and what a rerun sees</h2>
+    <p>
+      <code>taguru extract</code>'s <code>Ctrl+C</code>/<code>SIGTERM</code> handling is
+      cooperative and already covered in full at
+      <a href="extract.html#checkpoints">the checkpoints reference</a>: the first signal finishes
+      the chunk in flight, checkpoints it, and exits <code>130</code>; a second signal forces an
+      immediate exit, also <code>130</code>, for when the graceful path itself is stuck. The
+      LangChain SDK exposes the same shape as an argument, not ambient signal handling: pass
+      <code>should_stop</code> (a zero-argument callable, or a <code>threading.Event</code>) to
+      <code>ingest_text()</code>/<code>ingest_documents()</code> — checked between chunks, and
+      when it fires, <code>IngestOutcome.interrupted</code> is <code>True</code> and nothing
+      imports. Wiring an actual <code>SIGINT</code> handler that flips the event (first signal)
+      or exits the process outright (second) is the runner's job — see
+      <a href="#custom-runner">below</a> for one shape of it.
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Stop</th><th>What survives</th><th>What a rerun does</th></tr></thead>
+        <tbody>
+          <tr><td>First signal (safe stop)</td><td>every chunk checkpointed before the signal, plus every document/source already imported</td><td>resumes the in-flight document mid-chunk; re-attempts nothing already checkpointed or imported</td></tr>
+          <tr><td>Second signal (immediate stop)</td><td>same as above, minus whatever chunk was in flight at that exact instant (discarded, not partially checkpointed)</td><td>re-attempts only that one in-flight chunk; everything earlier still resumes</td></tr>
+          <tr><td><code>kill -9</code> (no cooperation possible)</td><td>same as the second signal — the process never sees the request to stop, but nothing durable was ever written mid-chunk in the first place</td><td>identical to the second-signal case above</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="cli-loop">
+    <h2>Path one: a bounded loop around the built-in CLI</h2>
+    <p class="section-sub">
+      No custom code — <code>timeout</code>(1) and exit-code dispatch around the two shipped
+      subcommands.
+    </p>
+    <pre><code><span class="c"># 45m and the -k grace period are timeout(1)'s — taguru extract has no time flag of its own.
+# -s INT sends the same signal Ctrl+C would (taguru's cooperative first-stage stop);
+# -k 30 sends SIGKILL 30s later only if the process is still stuck on the graceful path.</span>
+timeout -k 30 -s INT 45m taguru extract --context sake --description "酒蔵の知識" \
+  --out batches/ docs/                <span class="c"># --description is ignored once the context already exists</span>
+rc=$?
+taguru import batches/            <span class="c"># apply whatever this window finished — safe even if extract above was cut short</span>
+
+<span class="c"># rc: 130 window's time ran out mid-run   → requeue the identical command
+#      1   some documents failed, the rest completed → rerun retries only the failures
+#           (the manifest records only successes, so a plain rerun already does this)
+#      0   nothing left to extract → converged, the job is done</span>
+case "$rc" in
+  130) echo "window expired, $(taguru extract --dry-run --out batches/ docs/ | grep -c 'would extract') unit(s) still not extracted" ;;
+  1)   echo "some documents failed — see stderr above; rerun to retry them" ;;
+  0)   echo "converged" ;;
+esac</code></pre>
+    <p>
+      <code>--dry-run</code>'s per-document line is <code>"{source}: would extract (…) → …"</code>
+      for anything not yet in the manifest, and <code>"{source}: unchanged, skipped (--force
+      re-extracts)"</code> for the rest — counting the former is the honest "how much is left"
+      signal, since neither line literally says "pending".
+    </p>
+    <p>
+      Bounding by <b>count</b> instead of time means passing a slice of the not-yet-extracted
+      files as explicit arguments — <code>taguru extract</code> accepts individual file paths
+      alongside directories, so
+      <code>taguru extract --out batches/ $(taguru extract --dry-run --out batches/ docs/ | sed -n 's/: would extract.*//p' | head -20)</code>
+      processes at most 20 documents this invocation; run lifecycle's relation-label convergence
+      (extract.html's <a href="extract.html#prompt">prompt section</a>) happens within one
+      invocation, so slicing this way is safe, just less able to converge vocabulary across the
+      whole corpus in one shot. Avoid <code>set -e</code> in a wrapping shell script around this
+      block — exit <code>130</code> is an expected, not exceptional, outcome here.
+    </p>
+  </section>
+
+  <section id="custom-runner">
+    <h2>Path two: a custom runner on the LangChain SDK</h2>
+    <p class="section-sub">
+      When the work unit is finer than "one document" (e.g. sections split from a handful of
+      PDFs) or the deployment needs its own progress UI, a small runner around
+      <code>TaguruIngester</code> gets the same properties. The flags below are this sample's
+      own — nothing here is a Taguru API.
+    </p>
+    <pre><code><span class="c"># runner.py — one process invocation, bounded by --max-minutes / --max-items.
+# Both flags belong to this script's own argparse, not to taguru_langchain.</span>
+import argparse, signal, threading, time
+from langchain_openai import ChatOpenAI
+from taguru import Taguru
+from taguru_langchain import TaguruIngester, FilesystemCheckpointStore
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--max-minutes", type=float, default=45.0)
+parser.add_argument("--max-items", type=int, default=None)
+args = parser.parse_args()
+
+stop = threading.Event()
+def on_signal(signum, frame):
+    <span class="c"># first SIGINT/SIGTERM: stop cooperatively between chunks;</span>
+    <span class="c"># second: fall through to the default handler and exit immediately.</span>
+    if stop.is_set():
+        signal.signal(signum, signal.SIG_DFL)
+        raise KeyboardInterrupt
+    stop.set()
+signal.signal(signal.SIGINT, on_signal)
+signal.signal(signal.SIGTERM, on_signal)
+
+client = Taguru()  <span class="c"># $TAGURU_URL / $TAGURU_API_TOKEN</span>
+done = set(client.context("sake").iter_sources())  <span class="c"># the completion test — import stage</span>
+
+ingester = TaguruIngester(
+    context="sake",
+    llm=ChatOpenAI(model="gpt-4.1", temperature=0),
+    checkpoint_store=FilesystemCheckpointStore(".taguru-checkpoints"),
+    on_event=lambda e: print(e.kind, getattr(e, "source", "")),
+)
+
+deadline = time.monotonic() + args.max_minutes * 60
+failures = []
+corpus = load_corpus()  <span class="c"># yours — a list of LangChain Document, one per section/document</span>
+pending = [doc for doc in corpus if doc.metadata["source"] not in done]
+if args.max_items:
+    pending = pending[: args.max_items]   <span class="c"># this run's own count bound</span>
+
+for doc in pending:
+    if stop.is_set() or time.monotonic() >= deadline:
+        break
+    try:
+        outcome = ingester.ingest_text(doc.page_content, source=doc.metadata["source"], should_stop=stop)
+        if outcome.interrupted:
+            break   <span class="c"># chunk checkpoints already saved what completed; exit and requeue</span>
+    except Exception as exc:
+        failures.append((doc.metadata["source"], exc))   <span class="c"># one failure never aborts the job</span>
+
+print(f"{len(pending) - len(failures)} succeeded, {len(failures)} failed, "
+      f"{len(corpus) - len(done) - len(pending)} not reached this window")
+for source, exc in failures:
+    print(f"  FAILED {source}: {exc}")</code></pre>
+    <p>
+      Everything durable here is Taguru's: <code>checkpoint_store</code> persists each accepted
+      chunk before the next one starts, and a document that ultimately fails keeps its checkpoint
+      for the next attempt (see the SDK's own
+      <a href="https://github.com/t0k0sh1/taguru/tree/main/sdk/python-langchain#checkpointresume-for-spot-and-preemptible-instances">checkpoint/resume section</a>). Everything bounding the window —
+      <code>--max-minutes</code>, <code>--max-items</code>, the signal handler, the per-document
+      <code>try</code>/<code>except</code>, the failure summary — is this sample's own policy,
+      freely rewritten to fit a different scheduler or retry budget.
+    </p>
+  </section>
+
+  <section id="progress">
+    <h2>Progress you can watch: attempts, tokens, retries</h2>
+    <p>
+      Both producers expose the same shape of per-attempt visibility, deliberately mirrored field
+      for field (see <a href="extract.html#diagnostics">the diagnostics reference</a> for the full
+      schema). The CLI's <code>--diagnostics-out FILE</code> writes one JSONL record per LLM
+      attempt, flushed incrementally — <code>tail -f diagnostics.jsonl | jq</code> against a
+      running job shows each attempt's <code>state</code>, <code>elapsed_seconds</code>, and
+      <code>provider_metadata.finish_reason</code>/<code>output_tokens</code> as it happens,
+      including the corrective-retry attempts a single silent <code>ingest_text()</code> call
+      would otherwise hide.
+    </p>
+    <p>
+      The SDK's <code>on_event</code> callback (issue
+      <a href="https://github.com/t0k0sh1/taguru/issues/177">#177</a>) emits the same information
+      as typed events: <code>document_started</code>, <code>chunk_started</code>,
+      <code>attempt_started</code>, <code>attempt_failed</code> (with <code>parse_error</code>,
+      <code>elapsed_seconds</code>, <code>provider_metadata</code>), <code>chunk_completed</code>
+      (<code>reused=True</code> when a checkpoint satisfied it — no LLM call at all),
+      <code>import_started</code>/<code>import_completed</code>, and the embedding-refresh
+      events. It must stay synchronous and non-blocking; a callback exception is caught and
+      reported via <code>warnings.warn</code> rather than corrupting the ingest it was observing.
+    </p>
+  </section>
+
+  <section id="failures">
+    <h2>Failures, torn imports, and re-submission</h2>
+    <p>
+      Extract-side failure is per-document: the run exits <code>1</code>, the failing document's
+      stderr line (or diagnostics record) names why, every other document continues, and the
+      failed document keeps its chunk checkpoints — a rerun resumes it rather than starting over.
+    </p>
+    <p>
+      Import-side failure is where "torn" becomes possible in principle:
+      <a href="import.html#validate">validate-then-apply</a> already rejects a malformed file
+      before anything is written, but a fault reaching mid-batch (capacity, disk) between the
+      four durable steps (retract → passage → associations → aliases) is caught by a per-source
+      <b>batch-open marker</b>, written before the first step and removed only after the last.
+      A surviving marker is named at the server's next boot and by <code>taguru inspect</code>,
+      verbatim:
+    </p>
+    <pre><code>sake: WARNING — the import of source 'docs/aomine.md' never completed; its truth
+may be half-applied — re-import its batch file or retract the source</code></pre>
+    <p>
+      Both repairs are exact, because retract-then-apply already makes them so: re-import the
+      original (or corrected) batch file, or retract the source outright and leave it absent.
+      Over HTTP, <code>POST /import</code> reports the same fault as <code>409</code> (conflict)
+      or <code>507</code> (capacity) with a message naming what landed — the retraction still
+      makes the corrected retry exact. The one operational rule that keeps this from happening
+      under a concurrent runner: never race two imports of the <b>same</b> source — one writer
+      at a time per source, enforced by the runner, not by Taguru.
+    </p>
+  </section>
+
+  <section id="changes">
+    <h2>When sources change or disappear</h2>
+    <p>
+      A document edited between runs is just a manifest mismatch: its content hash no longer
+      matches the recorded compute inputs, so it re-extracts, and the resulting batch's
+      retract-then-apply replaces the old source's facts wholesale on import — no separate
+      "diff" step exists or is needed.
+    </p>
+    <p>
+      A document <b>removed</b> from the corpus is different: nothing in Taguru garbage-collects
+      a source that stops being extracted. The manifest only ever grows entries; it has no notion
+      of "no longer part of this corpus." Detecting and retiring stale membership is the runner's
+      job — diff the corpus's current file list (or section list) against
+      <code>iter_sources()</code>/<code>GET /contexts/{name}/sources</code>, and for anything
+      present in Taguru but absent from the corpus, emit a header-only <b>pure retraction</b>
+      batch (a <code>taguru_batch</code> header with no operation lines) naming that source — see
+      <a href="import.html#one-file-one-source">"one file = one source's complete truth"</a>.
+    </p>
+  </section>
+
+  <section id="specs">
+    <h2>Where each guarantee is specified</h2>
+    <p>This page is a composition, not a new contract — the normative source for each piece:</p>
+    <ul>
+      <li>Extract manifest — <a href="extract.html#manifest">extract.html#manifest</a>; chunk checkpoints and cooperative stop — <a href="extract.html#checkpoints">extract.html#checkpoints</a>; diagnostics sidecar — <a href="extract.html#diagnostics">extract.html#diagnostics</a>.</li>
+      <li>One-source-one-batch idempotency — <a href="import.html#one-file-one-source">import.html#one-file-one-source</a>; validate-then-apply and the batch-open marker — <a href="import.html#validate">import.html#validate</a>; HTTP status semantics — <a href="import.html#http">import.html#http</a>.</li>
+      <li>LangChain SDK progress events (issue <a href="https://github.com/t0k0sh1/taguru/issues/177">#177</a>) and checkpoint/resume (issue <a href="https://github.com/t0k0sh1/taguru/issues/179">#179</a>) — <a href="https://github.com/t0k0sh1/taguru/tree/main/sdk/python-langchain#checkpointresume-for-spot-and-preemptible-instances">Python SDK README</a> · <a href="https://github.com/t0k0sh1/taguru/tree/main/sdk/typescript-langchain#checkpointresume-for-spot-and-preemptible-instances">TypeScript SDK README</a>.</li>
+      <li>Atomic per-source import (the fix that makes source listing a sound completion test) — <a href="https://github.com/t0k0sh1/taguru/issues/187">issue #187</a>.</li>
+    </ul>
+    <div class="next-links">
+      <a class="nav-card" href="extract.html" style="flex:1 1 16rem">
+        <span class="nc-title">Document extraction reference</span>
+        <p>The full manifest, chunk checkpoint, and diagnostics contract this page composes.</p>
+      </a>
+      <a class="nav-card" href="import.html" style="flex:1 1 16rem">
+        <span class="nc-title">Batch import reference</span>
+        <p>Retract-then-apply, validation, the batch-open marker, and POST /import.</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>
