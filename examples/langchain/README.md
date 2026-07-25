@@ -2,7 +2,7 @@
 
 Use-case examples for the [SDK packages](../../sdk/): the `taguru` core
 client plus `langchain-taguru`'s `TaguruRetriever` / `TaguruIngester`. One
-directory per use case; most contain a Python and a TypeScript version of
+directory per use case; each contains a Python and a TypeScript version of
 the same program, mirrored line for line — pick your language and diff them
 if you're porting.
 
@@ -11,7 +11,7 @@ if you're porting.
 | [rag_qa](rag_qa/) | The full RAG loop: LLM-decomposed ingest, then a retriever → prompt → LLM chain answering questions with verbatim per-paragraph citations |
 | [document_ingestion](document_ingestion/) | The write path's governance: dry-run review of the exact NDJSON, apply the reviewed batch, re-ingest as per-source REPLACE (no double counting), retract |
 | [conversational_memory](conversational_memory/) | Taguru as an assistant's long-term memory: one source per session, recall in later sessions, correction by negative weight |
-| [local_rag](local_rag/) (Python only) | A fixed, fully local RAG corpus from PDFs: `TaguruIngester(context=...)` switched per paper section, groups searched across papers, source id vs. citation label kept separate |
+| [local_rag](local_rag/) | A fixed, fully local RAG corpus from PDFs: `TaguruIngester(context=...)` switched per paper section, groups searched across papers, source id vs. citation label kept separate |
 
 ## Running them
 
@@ -24,8 +24,8 @@ does is visible without any credentials. Point `TAGURU_URL` (and
 (with `langchain-openai` / `@langchain/openai` installed) for the real
 thing. [local_rag](local_rag/) is the exception: it drives its real-model
 path with a local Ollama model instead (`OLLAMA_MODEL`, with
-`langchain-ollama` installed and the model already pulled) — see its own
-README.
+`langchain-ollama` / `@langchain/ollama` installed and the model already
+pulled) — see its own README.
 
 ### Python
 
