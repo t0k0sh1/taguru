@@ -188,8 +188,9 @@ curl -X POST localhost:8248/import -H 'Authorization: Bearer <key>' \
 ```
 
 [ADR 0002](adr/0002-remote-cli-access.md) plans a `taguru import --url`
-shortcut for this same request, chunked under the server's body cap
-automatically — not yet built; `curl`/`POST /import` is the way today.
+shortcut for this same request, split into complete batches under the
+server's body cap automatically (never mid-batch) — not yet built;
+`curl`/`POST /import` is the way today.
 
 Where do batch files come from? Any pipeline that speaks the format —
 or the packaged producer: `taguru extract` reads `.md`/`.txt`

@@ -263,7 +263,7 @@ instead of the intended server.
 | Verb | Remote? | Mechanism |
 |---|---|---|
 | `serve`, `route` | n/a | these *are* the server |
-| `version` | n/a | prints the local binary's own version; a running server's version is read from `/health` (§9) once the follow-up in #244 lands |
+| `version` | n/a | prints the local binary's own version; a running server's version is read from `/health` (§10) once the follow-up in #244 lands |
 | `health`, `calibrate`, `communities` | already remote-only | unchanged: positional URL, else `default_base_url()` |
 | `import` | **dual-mode** | `--url` sends to `POST /import`; absent, local `TAGURU_DATA_DIR` |
 | `export` | **dual-mode** | `--url` enumerates and calls the per-context/group export endpoints; absent, local `TAGURU_DATA_DIR` |
@@ -316,23 +316,40 @@ verb's own confirmation UX — explicitly out of scope here (§1).
 
 ## 8. Failure semantics: timeout, retry, idempotency
 
-- **Timeout**: the client budget follows `calibrate`'s existing
-  precedent (`Duration::from_secs(35)`, src/calibrate.rs:673-677,
-  documented as "above the server's default 30s request budget, so a
-  server-side timeout answers as itself... instead of a client-side
-  cut") — comfortably above the server's own
-  `TAGURU_REQUEST_TIMEOUT_SECS` default of 30 (src/config.rs:71,
-  src/env.rs:170-183). No new environment variable is introduced for
-  this; a server operator who raises `TAGURU_REQUEST_TIMEOUT_SECS`
-  raises it for every client uniformly, CLI included, once the
-  follow-up implementation reads it the same way `calibrate` does.
-- **No automatic retry, ever, on any of the three verbs.** A dropped
-  connection after a request was sent leaves the caller unable to know
-  whether the server applied it, and `import` in particular cannot
-  safely be replayed blind (§9). Every failure is reported with the
-  server's own error text (or the transport error) and the command
-  exits non-zero; retrying is the operator's or CI's decision, informed
-  by `--dry-run` re-verification where that applies.
+- **Timeout**: the client budget is a fixed `Duration::from_secs(35)`,
+  following `calibrate`'s own precedent (src/calibrate.rs:673-677,
+  documented there as "above the server's default 30s request budget,
+  so a server-side timeout answers as itself... instead of a
+  client-side cut") — a constant chosen above the server's *default*
+  `TAGURU_REQUEST_TIMEOUT_SECS` of 30 (src/config.rs:71,
+  src/env.rs:170-183). Like `calibrate`, the follow-up implementation
+  does **not** read that variable itself: an operator who raises the
+  server's budget well past 35 seconds (a slow embedding backend, a
+  deep heavy-ops queue) can still see the CLI cut the connection before
+  the server's own extended budget would have answered. This is not a
+  gap this ADR introduces — `calibrate`/`communities` already carry it
+  today — and this ADR does not resolve it here; a follow-up may have
+  the CLI read `TAGURU_REQUEST_TIMEOUT_SECS` itself and add its own
+  margin, a distinct decision left to whichever of §12.1's issues
+  implements the timeout.
+- **No automatic retry of a completed, ambiguous outcome** — a
+  transport failure, a 5xx, a `429`/`503` shed, or any response whose
+  application-level status the client can't classify — **on any of the
+  three verbs.** This is deliberately narrower than "never send a
+  second request": §9's 413 adaptation (halving an oversized chunk and
+  resending) acts on a response the server returns *before* applying
+  anything (src/api/import.rs:371 validates and rejects an oversized
+  body ahead of any write), so it is a bounded, pre-application
+  adjustment to the request shape, not a retry of a completed
+  operation — nothing about it papers over an ambiguous outcome. What
+  stays a hard rule is that once a request may have been *applied*, a
+  second attempt is the operator's or CI's decision, not the CLI's,
+  because a blind retry loop cannot tell a transient network blip from
+  a wrong `--url`, an expired token, or a genuinely invalid batch — all
+  of which fail identically from the client's point of view, and none
+  of which a fixed number of automatic retries fixes. Every failure is
+  reported with the server's own error text (or the transport error)
+  and the command exits non-zero.
 - **No automatic HTTP redirect following.** Nothing in this server's
   write path issues a redirect (§2.4) — a 3xx would only come from an
   intermediary the operator placed (a reverse proxy), and following one
@@ -343,34 +360,57 @@ verb's own confirmation UX — explicitly out of scope here (§1).
 - **Idempotency, stated per verb**: `export` is a pure read, safely
   repeatable. `compact` is safe to re-run — compaction of an
   already-compact context is a no-op cost, not a correctness risk.
-  `import` has no idempotency guarantee — replaying an already-applied
-  batch may create duplicate associations exactly as a second local
-  `taguru import` of the same file would. On a mid-transfer disconnect,
-  the CLI's message states the ambiguity plainly ("connection lost —
-  the server may have applied some batches; re-run `--dry-run` before
-  retrying") rather than implying either "nothing happened" or
-  "everything happened."
+  `import` **is** idempotent, by the same contract `taguru import` and
+  `POST /import` already document: every batch is retract-then-apply,
+  scoped to its own `source` field (src/api/import.rs:356-359, 676) —
+  "re-POSTing the whole corrected stream is exact, never
+  double-counted," in the server's own words, and this is exactly why
+  §7 calls `import` additive/idempotent. A mid-transfer disconnect
+  partway through §9's chunked stream therefore has a clean recovery,
+  never a "did it apply twice?" question: the CLI's message names the
+  ambiguity in *which chunk* landed, not in whether landing was safe to
+  repeat — "connection lost after chunk N/M — re-run `--dry-run` to
+  confirm what would change, then resume" — because every chunk that
+  did land is itself a set of complete, replay-safe batches (§9).
 
 ## 9. Payload limits: the 8 MiB body cap and the missing bulk export
 
 - **Remote `import`**: `POST /import`'s body limit defaults to 8 MiB
-  (`DEFAULT_MAX_BODY_BYTES`, src/env.rs:168) and answers 413 above it.
-  The remote client splits its NDJSON input on line boundaries into
-  chunks under the cap (starting at 4 MiB, half the default, to leave
-  headroom for a server configured lower) and issues one `POST /import`
-  per chunk; a 413 on a chunk still oversized only from the cap being
-  configured lower than assumed halves that chunk and resends — the
-  server rejects an oversized body *before* applying anything
-  (src/api/import.rs:371), so this adaptation is safe. This changes
-  nothing about atomicity: batch application is already per-batch, not
-  whole-file, on the local path too (`stream_integrity`,
-  src/api/import.rs:139-163) — splitting the request stream does not
-  introduce a transactionality guarantee that was never there.
+  (`DEFAULT_MAX_BODY_BYTES`, src/env.rs:168) and answers 413 above it —
+  *before* applying anything (src/api/import.rs:371), which is what
+  makes the adaptation below safe. The remote client splits its NDJSON
+  input on **batch boundaries, never mid-batch**: a batch runs from its
+  `taguru_batch` header line to the next `taguru_batch`/`taguru_group`
+  line or EOF — the exact range `route`'s own scatter-gather proxy
+  already computes to split one import stream across shards
+  (`split_batches`, src/route.rs:2466-2508, whose own doc comment
+  states the rule this ADR reuses rather than reinvents). Packing whole
+  batches into each request up to a byte budget (starting at 4 MiB,
+  half the 8 MiB default, to leave headroom for a server configured
+  lower) keeps every batch's `create`/`store_passages`/
+  `add_associations`/`add_aliases` record set inside one request, the
+  unit the retract-then-apply contract already treats as atomic — a
+  line-boundary split would risk severing that set across two requests
+  (e.g. an `add_associations` record landing with no `taguru_batch`
+  header ahead of it in that request, which the parser correctly
+  rejects as malformed). A single batch that alone exceeds the byte
+  budget is a **hard failure**, reported by naming the oversized source
+  and pointing at the two real fixes — raise the server's
+  `TAGURU_MAX_BODY_BYTES`, or reduce what that one source's batch
+  carries (split the source upstream of import) — because splitting a
+  batch's own record set client-side would mean reimplementing the
+  retract-then-apply contract's atomicity boundary outside the server
+  that owns it. A 413 on a chunk still oversized only because the cap
+  is configured lower than assumed halves that chunk (never crossing a
+  batch boundary) and resends. This changes nothing about atomicity:
+  batch application is already per-batch, not whole-file, on the local
+  path too (`stream_integrity`, src/api/import.rs:139-163) — and, as §8
+  states, every batch's retract-then-apply contract already makes a
+  corrected re-POST of a whole stream exact and safe, chunking or not.
   Server-side chunked/streaming ingestion (removing the cap entirely)
-  is explicitly **not** pursued here — client-side splitting solves the
-  case this ADR scopes without touching the server's request-body
-  handling, and nothing in the audited evidence shows the cap binding
-  outside bulk migration, which the client-side split already covers.
+  is explicitly **not** pursued here — client-side, batch-respecting
+  splitting solves the case this ADR scopes without touching the
+  server's request-body handling.
 - **Remote `export`**: there is no endpoint that exports every context
   and group in a single call (§2.3). The remote client performs `GET
   /contexts` and `GET /groups` and calls each item's export endpoint in
@@ -387,25 +427,40 @@ verb's own confirmation UX — explicitly out of scope here (§1).
 
 ## 10. Version discovery
 
-`GET /health` currently returns bare `"ok"` text (200) or an `ApiError`
-JSON body (503) — no version anywhere in either (src/metrics.rs:2054-2083).
-There is no `/version` endpoint; the only places a server states its own
-version today are `/metrics`'s `taguru_build_info` gauge and MCP's
+`GET /health` on a `serve` instance currently returns bare `"ok"` text
+on success (200) or an `ApiError` JSON body on failure (503) — no
+version anywhere in either (src/metrics.rs:2054-2083). `route`'s own
+`/health` (src/route.rs:2513-2523) already differs: it always answers
+JSON — `{"status": "ok", "router": true, "shards": N}` — since the
+router has its own health concept (shard count; no write path of its
+own to degrade). Neither carries a version today. There is no
+`/version` endpoint; the only places a server states its own version
+today are `/metrics`'s `taguru_build_info` gauge and MCP's
 `initialize` response `serverInfo.version`. `taguru health` itself only
 checks the status code and prints whatever body came back
 (src/cli.rs:449-465) — it does not require the literal string `"ok"` —
-so changing `/health`'s success body to a small JSON object carrying a
-`version` field is compatible with the one consumer that reads it today.
+so changing `serve`'s success body to a small JSON object carrying a
+`version` field is compatible with the one consumer that reads it
+today, and is a heavier lift than `route`'s side of the same change:
+`route` only adds one key to a JSON object it already returns; `serve`
+migrates its success body from text to JSON for the first time.
 
-The concrete failure this closes: `auth::required_role`'s catch-all
-(§2.4) means a route a newer CLI knows about but an older server does
-not answers 401/403 (unclassified → `Role::Admin`, then the key's
-actual role fails that bar), not 404. An operator debugging that sees
-"a permissions problem" and starts adjusting scopes, when the real
-issue is a version skew — the wrong diagnosis for the actual fault.
+The concrete failure this closes, for a **non-Admin-scoped key**: a
+route a newer CLI knows about but an older server does not answers
+403, not 404 — `enforce_authorization` (src/auth.rs:772-793) resolves
+an unmatched route to the literal string `"<unmatched>"`, which
+`required_role`'s catch-all (§2.4) maps to `Role::Admin`, and a Read or
+Write key fails that bar before the request ever reaches the router's
+own 404 fallback (`unknown_path`, src/main.rs:868). An **Admin-scoped**
+key clears that bar and *does* reach the real 404 — the masking is
+specific to non-Admin keys, which is most keys by design (§2.4). An
+operator debugging the 403 case sees "a permissions problem" and
+starts adjusting scopes, when the real issue is a version skew — the
+wrong diagnosis for the actual fault, and one a plain 404 would have
+named correctly.
 
-**Decision**: add a `version` field to `/health`'s success body (issue
-B, §12.1) — no separate `/version` endpoint, no capability-matrix
+**Decision**: add a `version` field to `/health`'s success body (#244,
+§12.1) — no separate `/version` endpoint, no capability-matrix
 response. This repository's compatibility doctrine (docs/troubleshooting.html
 `#compatibility`: one release, one version number across every layer;
 pre-1.0, minor bumps may break) already makes the version number the
@@ -430,6 +485,20 @@ new fallback source for these three verbs' `--url`, not just this
 particular name; second, `KNOWN_KEYS` is a lint over the *server's*
 configuration file, and admitting a client-side-only variable into it
 would misrepresent what the list means.
+
+**Profiles** — a named connection preset (e.g. `--profile prod` backed
+by a store of `{url, token}` pairs), one of the candidate mechanisms
+issue #190's own body raised — are not introduced by this ADR either,
+for the same scope-discipline reason as `TAGURU_URL` above: nothing in
+`taguru` today reads a profile store, `--config` is already an
+env-file loader rather than a named-target store (`load_config`,
+src/config.rs:115), and layering a second, profile-shaped
+configuration mechanism alongside it — for three verbs whose whole
+point is that the command line names the target explicitly (§4) — cuts
+against this section's own reasoning twice over, not once. If recurring
+named remote targets turn out to be worth that machinery, that is
+`#248`'s question to answer, not a decision made here as a side effect
+of adding `--url`.
 
 Whether `TAGURU_URL` (or an equivalent) should ever back the three
 *existing* remote verbs, whether `--url` should become an alias for
@@ -494,7 +563,7 @@ capability matrix beyond the version field (§10); remote `inspect` or
   ADR's decision in the same PR; any description that overstates or
   understates what today's CLI can do is corrected there.
 - The `--url "$TAGURU_URL"` CI idiom (§5) is documented by whichever of
-  issues C/D/E lands first, alongside that verb's own `--help` text —
+  #245/#246/#247 lands first, alongside that verb's own `--help` text —
   not written speculatively here before the flag exists.
 
 ## Appendix: requirement traceability
