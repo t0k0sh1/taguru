@@ -116,6 +116,7 @@ taguru version
 
 <span class="c"># server, without a shell in the container (the image is FROM scratch)</span>
 curl -s localhost:8248/metrics | grep taguru_build_info
+curl -s localhost:8248/health   <span class="c"># {"status": "ok", "version": "…"}</span>
 docker run --rm ghcr.io/t0k0sh1/taguru:0.4.0 version
 
 <span class="c"># Python SDK / LangChain integration</span>
@@ -130,11 +131,15 @@ npm ls langchain-taguru</code></pre>
       response's <code>serverInfo.version</code> names the server it's attached to.
     </p>
     <p>
-      <code>GET /health</code> itself doesn't carry a version today — reach for
-      <code>/metrics</code>'s <code>taguru_build_info</code> or <code>taguru version</code> above.
-      A follow-up planned in <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0002-remote-cli-access.md">ADR 0002</a>
-      adds a <code>version</code> field to <code>/health</code>'s own response, for scripts that
-      already poll it and would rather not add a second call.
+      <code>GET /health</code>'s own success body carries a version too, per
+      <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0002-remote-cli-access.md">ADR 0002</a> §10 —
+      <code>{"status": "ok", "version": "…"}</code> — for scripts that already poll it and would
+      rather not add a second call. <code>taguru route</code>'s own <code>/health</code> carries
+      the same field beside its <code>router</code>/<code>shards</code> keys. A server built before
+      this field existed (0.4.x and earlier) still answers the bare text <code>ok</code> with no
+      version at all; the <code>--url</code> forms of <code>import</code>/<code>export</code>/
+      <code>compact</code> read this field once per run and warn on stderr (without blocking)
+      when it names a different minor than the CLI itself.
     </p>
     <p>
       Before 1.0, a minor version bump is allowed to change a response's shape, and one already

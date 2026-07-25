@@ -2513,11 +2513,14 @@ fn split_batches(body: &[u8]) -> Vec<std::ops::Range<usize>> {
 async fn health(State(state): State<RouterState>) -> Response {
     // The router itself has no degraded write path to report; shard
     // health belongs to the shards' own probes (and surfaces here per
-    // request as pass-through errors and `unreached` labels).
+    // request as pass-through errors and `unreached` labels). `version`
+    // names the router's own build (ADR 0002 §10) — same binary as
+    // `serve`, so the same field means the same thing here.
     axum::Json(json!({
         "status": "ok",
         "router": true,
         "shards": state.map().shards.len(),
+        "version": env!("CARGO_PKG_VERSION"),
     }))
     .into_response()
 }

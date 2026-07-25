@@ -355,7 +355,9 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   to the new shard. Delete before re-import — a leftover copy keeps
   answering the old shard's slice of every group fan-out.
 - **Health and metrics.** `GET /health` is readiness (503 while the
-  write path is degraded — route away, don't restart), `GET /live` is
+  write path is degraded — route away, don't restart) and its `200`
+  body names the server's own version (`{"status": "ok", "version":
+  "…"}`, or a router's `router`/`shards`/`version`), `GET /live` is
   liveness, `GET /metrics` is Prometheus text.
   `TAGURU_METRICS_PER_CONTEXT=all` (or top-`N` by disk size) adds
   per-context capacity gauges — disk bytes by file family, resident

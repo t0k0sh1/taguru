@@ -198,7 +198,7 @@ fn taguru_config_variable_names_the_file_too() {
 }
 
 #[test]
-fn health_answers_ok_against_a_live_server() {
+fn health_prints_the_json_ok_body_against_a_live_server() {
     let (mut child, addr, dir) = spawn_server("health-ok");
     let output = run(&["health", &format!("http://{addr}")]);
     let _ = child.kill();
@@ -209,7 +209,11 @@ fn health_answers_ok_against_a_live_server() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let body: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("health prints the /health JSON body");
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

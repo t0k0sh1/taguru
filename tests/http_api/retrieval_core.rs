@@ -1,6 +1,6 @@
 //! The documented retrieve loop and protocol tier reporting, driven over HTTP.
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::support::*;
 
@@ -125,7 +125,13 @@ fn full_retrieval_loop_over_http() {
 
     // Health, playbook, empty directory.
     let (status, health) = server.call("GET", "/health", None);
-    assert_eq!((status, health), (200, Value::String("ok".into())));
+    assert_eq!(status, 200, "{health}");
+    assert_eq!(health["status"], json!("ok"), "{health}");
+    assert_eq!(
+        health["version"],
+        json!(env!("CARGO_PKG_VERSION")),
+        "{health}"
+    );
     let (status, protocol) = server.call("GET", "/protocol", None);
     assert_eq!(status, 200);
     assert!(protocol.as_str().unwrap().contains("# Taguru"));
