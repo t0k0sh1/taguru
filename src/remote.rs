@@ -18,6 +18,13 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+/// The `/health` version-skew preflight's own timeout — short and
+/// separate from `Api`'s 35s request budget, since it is a
+/// best-effort check that must not delay the real request behind it.
+/// Matches `taguru health`'s own precedent for a quick, throwaway
+/// probe (src/cli.rs).
+const HEALTH_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
+
 /// A failure from the envelope surface, with 404 told apart — "no
 /// artifact yet" is a first-run state, not an error.
 pub(crate) enum ApiFailure {
@@ -151,9 +158,23 @@ impl Api {
     /// on a transport error, a non-200 status, or a body that carries
     /// nothing comparable — the verb's own first request reproduces
     /// any real fault with a better message than a guess made here
-    /// would.
+    /// would. Runs on its own short timeout rather than `Api`'s 35s
+    /// request budget: this is a best-effort preflight, not the real
+    /// request, and a stalled or unreachable server should cost it a
+    /// few seconds, not most of a minute, before the caller's actual
+    /// request gets a turn.
     fn version_skew_line(&self, verb: &str) -> Option<String> {
-        let body = self.get_raw(&["health"]).ok()?;
+        let url = self.url(&["health"]).ok()?;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(HEALTH_PREFLIGHT_TIMEOUT))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut response = self.bearer(agent.get(&url)).call().ok()?;
+        if response.status().as_u16() != 200 {
+            return None;
+        }
+        let body = response.body_mut().read_to_string().ok()?;
         skew_warning(verb, &self.base, env!("CARGO_PKG_VERSION"), &body)
     }
 

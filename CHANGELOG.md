@@ -328,9 +328,9 @@ Entries that change an on-disk format or a response shape say so.
   The `503` failure bodies (`unhealthy`, `maintenance`) are unchanged,
   and `/health` stays auth-exempt. `taguru health` is compatible by
   construction — it judges the status code and prints the body
-  verbatim, so it now prints the JSON line — but anything scripted
-  against the literal body `ok` should read the `status` field
-  instead. This is the version-discovery half of ADR 0002 §10; the
+  without parsing it, so it now prints the JSON line — but anything
+  scripted against the literal body `ok` should read the `status`
+  field instead. This is the version-discovery half of ADR 0002 §10; the
   `--url` forms of `import`/`export`/`compact` (#245-#247) will read
   the field once per run and print a one-line stderr warning — never
   blocking — when the server's major.minor differs from the CLI's own;
