@@ -47,7 +47,8 @@
     <div class="side-group">
       <div class="side-group-label">How it works</div>
       <a href="architecture.html">Internal architecture</a>
-      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
     </div>
   </nav>
   <div class="sidebar-footer">
@@ -228,7 +229,9 @@
       for <code>retrieve</code> against one context after deliberately splitting a corpus into
       several undoes the split; a LangChain retriever crossing the same set is
       <code>TaguruRetriever(groups=["paper/bert", "paper/gpt"])</code>, not a loop of per-context
-      retrievers.
+      retrievers. Run end to end against real PDFs — extraction, this cross-group retriever, and
+      a local answer model — in the <a href="local-rag-walkthrough.html">local RAG
+      walkthrough</a>.
     </p>
     <p>
       None of this needs a group that exists only to be searched. An ad-hoc cross-paper question

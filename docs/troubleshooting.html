@@ -47,7 +47,8 @@
     <div class="side-group">
       <div class="side-group-label">How it works</div>
       <a href="architecture.html">Internal architecture</a>
-      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
     </div>
   </nav>
   <div class="sidebar-footer">
@@ -287,7 +288,7 @@ docker compose up -d</code></pre>
       <li><b>Thinking mode.</b> A reasoning model can spend the entire time budget on invisible thinking tokens before the first byte of an actual answer — a busy GPU, then a timeout or, with no timeout set, an empty response after minutes. Disabling thinking is a decision made at the serving layer or the client integration, not at Taguru: Taguru's own LLM-facing tooling speaks plain OpenAI-compatible chat and never toggles a vendor's thinking flag. Either pick a non-thinking model or disable thinking where the model is served.</li>
       <li><b>Context window.</b> An unspecified or too-small context window truncates a large prompt <b>silently</b> — no error, just a worse answer built on a partial prompt — and also changes the model's VRAM footprint and load latency, which is why the first request after an idle period can be far slower than the rest. On Ollama, the window is set per served model, not per request: bake it into a derived model with <code>FROM &lt;base&gt;</code> + <code>PARAMETER num_ctx 16384</code>, then <code>ollama create</code>.</li>
       <li><b>Output cap and prompt volume.</b> Generation time scales with the output token cap (Ollama's <code>num_predict</code>), how many passages retrieval handed back, and the size of the assembled prompt. Trimming retrieval breadth (fewer hits, tighter <code>top_k</code>) is a legitimate way to cut generation latency, not just a relevance knob.</li>
-      <li><b>One model for extraction, a different one for answers.</b> A disciplined, structured-output-friendly model for <a href="extract.html#local-models">extraction</a> and a faster, more conversational one for answering the user are usually different picks — but alternating both through a single serving slot on one GPU pays a full reload on every swap. Give each its own slot, or its own served instance, if both run concurrently.</li>
+      <li><b>One model for extraction, a different one for answers.</b> A disciplined, structured-output-friendly model for <a href="extract.html#local-models">extraction</a> and a faster, more conversational one for answering the user are usually different picks — but alternating both through a single serving slot on one GPU pays a full reload on every swap. Give each its own slot, or its own served instance, if both run concurrently. The <a href="local-rag-walkthrough.html">local RAG walkthrough</a> keeps extract, embed, and answer as three separately configured local models end to end.</li>
       <li><b>Streaming changes what arrives first, not how long the whole thing takes.</b> Streaming improves time-to-first-token — the user sees something sooner — but total generation time for a given output length is the same with or without it. A fast-feeling first token is not evidence of a fast request; measure the full completion, not the first chunk.</li>
     </ul>
   </section>

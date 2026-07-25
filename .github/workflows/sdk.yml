@@ -50,10 +50,14 @@ jobs:
       - name: Install packages
         # setuptools rides along: the runner's tool-cache copy lags
         # behind known advisories, and the environment audit below
-        # rightly refuses to look away.
+        # rightly refuses to look away. pypdf is the local_rag example's
+        # own dependency (PDF text extraction), installed here rather
+        # than from examples/langchain/requirements.txt because that
+        # file's editable SDK paths are relative to being run from
+        # examples/langchain, not the repo root this job runs from.
         run: |
           python -m pip install --upgrade pip setuptools
-          pip install -e "sdk/python[dev]" -e "sdk/python-langchain[dev]"
+          pip install -e "sdk/python[dev]" -e "sdk/python-langchain[dev]" pypdf
       # Audit the environment the install step just resolved, the way the
       # typescript job audits its installed workspace. Handing pip-audit a
       # project directory re-resolves it from PyPI instead, which fails at

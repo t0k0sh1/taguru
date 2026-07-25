@@ -47,7 +47,8 @@
     <div class="side-group">
       <div class="side-group-label">How it works</div>
       <a href="architecture.html">Internal architecture</a>
-      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
     </div>
   </nav>
   <div class="sidebar-footer">
@@ -155,8 +156,12 @@
         <p>The flat-buffer graph, the disk-as-truth registry, WAL durability, three retrieval paths, auth and observability.</p>
       </a>
       <a class="nav-card" href="mcp-rag-walkthrough.html">
-        <span class="nc-title">Walkthrough: how an LLM pulls knowledge out</span>
+        <span class="nc-title">MCP walkthrough: how an LLM pulls knowledge out</span>
         <p>One full round trip in real MCP requests and responses. A question the graph answers, and a question that switches to the text lane.</p>
+      </a>
+      <a class="nav-card" href="local-rag-walkthrough.html">
+        <span class="nc-title">Local RAG walkthrough</span>
+        <p>Multiple PDFs into a fixed, fully local corpus — Ollama for extract, embed, and answer; a LangChain retriever across paper groups; citations traced back to page and paragraph.</p>
       </a>
     </div>
   </section>

@@ -47,7 +47,8 @@
     <div class="side-group">
       <div class="side-group-label">How it works</div>
       <a href="architecture.html">Internal architecture</a>
-      <a href="mcp-rag-walkthrough.html">Walkthrough</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
     </div>
   </nav>
   <div class="sidebar-footer">
@@ -79,6 +80,11 @@
     <pre><code>taguru extract --context sake --description "酒蔵の知識" \
   --out batches/ docs/                <span class="c"># every .md/.txt under docs/, in name order</span>
 taguru import batches/               <span class="c"># offline — or POST each file to /import</span></code></pre>
+    <p class="note">
+      PDFs are not among the formats above. Converting one to text first and driving
+      <code>TaguruIngester</code> from the SDK instead of this CLI is the
+      <a href="local-rag-walkthrough.html">local RAG walkthrough</a>'s approach.
+    </p>
     <pre><code>TAGURU_EXTRACT_URL      OpenAI-compatible /chat/completions endpoint (required)
 TAGURU_EXTRACT_MODEL    model name (required)
 TAGURU_EXTRACT_API_KEY  Bearer credential (optional)
@@ -163,7 +169,9 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       These five are the extraction side of the same serving layer. The same knobs — thinking
       mode, context window, output caps, and streaming — seen from the answering side, plus where
       to separate Taguru's own latency from the model's, are in
-      <a href="troubleshooting.html#local-llm">Troubleshooting — the serving layer</a>.
+      <a href="troubleshooting.html#local-llm">Troubleshooting — the serving layer</a>. All of
+      it applied together, against Ollama, extract through answer, is the
+      <a href="local-rag-walkthrough.html">local RAG walkthrough</a>.
     </p>
   </section>
 
