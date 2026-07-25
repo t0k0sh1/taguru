@@ -30,13 +30,13 @@
 //! usage error.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cli::default_base_url;
 use crate::config::{load_config, subcommand_usage_error};
+use crate::remote::Api;
 
 const CALIBRATE_USAGE: &str =
     "usage: taguru calibrate --context NAME --probes FILE [--json] [--config FILE] [URL]
@@ -658,108 +658,6 @@ fn parse_probes(text: &str) -> Result<Vec<Probe>, String> {
     Ok(probes)
 }
 
-/// The one HTTP door: bearer attached when the environment holds one,
-/// 200 unwrapped to `result`, anything else an error message carrying
-/// the server's own words.
-struct Api {
-    agent: ureq::Agent,
-    base: String,
-    token: Option<String>,
-}
-
-impl Api {
-    fn new(base: String) -> Self {
-        Self {
-            // Above the server's default 30s request budget, so a
-            // server-side timeout answers as itself (a 408 body with
-            // words) instead of a client-side cut.
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(35)))
-                .http_status_as_error(false)
-                .build()
-                .into(),
-            base,
-            token: bearer_token(),
-        }
-    }
-
-    /// Percent-encodes each path segment through the url crate — cue
-    /// text never rides the path, but context names are operator
-    /// strings and 日本語 names must address the same context the
-    /// server stores.
-    fn url(&self, segments: &[&str]) -> Result<String, String> {
-        let mut url = url::Url::parse(&self.base)
-            .map_err(|error| format!("'{}' is not a usable base URL: {error}", self.base))?;
-        url.path_segments_mut()
-            .map_err(|()| format!("'{}' cannot carry a path", self.base))?
-            .extend(segments);
-        Ok(url.to_string())
-    }
-
-    fn get(&self, segments: &[&str]) -> Result<Value, String> {
-        let url = self.url(segments)?;
-        let mut request = self.agent.get(&url);
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-        finish(request.call(), &url)
-    }
-
-    fn post(&self, segments: &[&str], body: &Value) -> Result<Value, String> {
-        let url = self.url(segments)?;
-        let mut request = self
-            .agent
-            .post(&url)
-            .header("Content-Type", "application/json");
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-        finish(request.send(body.to_string().as_str()), &url)
-    }
-}
-
-/// Unwraps one response: 200 hands back `result`, anything else the
-/// server's own error line (or the transport's).
-fn finish(
-    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
-    url: &str,
-) -> Result<Value, String> {
-    let mut response = response.map_err(|error| format!("{url}: {error}"))?;
-    let status = response.status().as_u16();
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|error| format!("{url}: unreadable response: {error}"))?;
-    let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    if status != 200 {
-        let message = parsed["error"].as_str().unwrap_or(text.trim());
-        return Err(format!("{url} answered {status}: {message}"));
-    }
-    if parsed["result"].is_null() && !text.contains("\"result\"") {
-        return Err(format!("{url}: not a taguru response: {}", text.trim()));
-    }
-    Ok(parsed["result"].clone())
-}
-
-/// The bearer the server would accept, read the way the server reads
-/// it: `TAGURU_API_TOKEN` outright, else the first `name:token` entry
-/// of `TAGURU_API_TOKENS`. `None` = an unauthenticated server.
-/// Crate-visible: `taguru communities` authenticates the same way.
-pub(crate) fn bearer_token() -> Option<String> {
-    if let Ok(token) = std::env::var("TAGURU_API_TOKEN") {
-        let token = token.trim();
-        if !token.is_empty() {
-            return Some(token.to_string());
-        }
-    }
-    let ring = std::env::var("TAGURU_API_TOKENS").ok()?;
-    ring.split(',').find_map(|entry| {
-        let (_, token) = entry.trim().split_once(':')?;
-        let token = token.trim();
-        (!token.is_empty()).then(|| token.to_string())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,18 +846,5 @@ mod tests {
         // Nothing semantic but the canonical → no lower-band entry.
         let only_self = json!([{"name": "琥珀", "score": 0.9, "tier": "semantic"}]);
         assert_eq!(best_other(only_self.as_array().unwrap(), "琥珀"), None);
-    }
-
-    #[test]
-    fn the_first_keyring_entry_serves_as_the_bearer() {
-        // bearer_token reads the environment; exercising the parsing
-        // through a thread-safe seam would mean injecting the env —
-        // the split_once discipline is pinned here instead.
-        let ring = "ci:tokA,laptop:tokB";
-        let first = ring
-            .split(',')
-            .find_map(|entry| entry.trim().split_once(':'))
-            .map(|(_, token)| token);
-        assert_eq!(first, Some("tokA"));
     }
 }

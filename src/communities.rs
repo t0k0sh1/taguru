@@ -27,7 +27,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -36,10 +35,10 @@ use crate::api::communities::{
     COMMUNITIES_FORMAT, COMMUNITY_SOURCE_PREFIX, CONTAINS_LABEL, CommunitiesManifest,
     INCLUDES_LABEL, MANIFEST_SOURCE, ManifestCommunity, derived_context_name,
 };
-use crate::calibrate::bearer_token;
 use crate::cli::default_base_url;
 use crate::config::{load_config, subcommand_usage_error};
 use crate::registry::ContextRevision;
+use crate::remote::{Api, ApiFailure};
 
 const COMMUNITIES_USAGE: &str = "usage: taguru communities --context NAME [--into NAME] [--dry-run] [--json] [--config FILE] [URL]
        taguru communities --group NAME [--dry-run] [--json] [--config FILE] [URL]
@@ -292,7 +291,7 @@ fn derive(api: &Api, name: &str, derived: &str, dry_run: bool) -> Result<Report,
     // exactly like fresh communities do.
     let mut old_texts: BTreeMap<String, String> = BTreeMap::new();
     if !reused_sources.is_empty() {
-        old_texts = api.lookup_passages(derived, &reused_sources)?;
+        old_texts = lookup_passages(api, derived, &reused_sources)?;
     }
     let torn = reused_sources
         .iter()
@@ -362,7 +361,7 @@ fn derive(api: &Api, name: &str, derived: &str, dry_run: bool) -> Result<Report,
     // old sources still exist and the (old or new) manifest accounts
     // for them.
     for id in &vanished {
-        api.retract_source(derived, &format!("{COMMUNITY_SOURCE_PREFIX}{id}"))?;
+        retract_source(api, derived, &format!("{COMMUNITY_SOURCE_PREFIX}{id}"))?;
     }
     Ok(report)
 }
@@ -740,173 +739,36 @@ fn parse_analysis(stream: &str) -> Result<Analysis, String> {
     })
 }
 
-/// A failure from the envelope surface, with 404 told apart — "no
-/// artifact yet" is a first-run state, not an error.
-enum ApiFailure {
-    NotFound(String),
-    Other(String),
-}
-
-impl ApiFailure {
-    fn into_message(self) -> String {
-        match self {
-            ApiFailure::NotFound(message) | ApiFailure::Other(message) => message,
-        }
-    }
-}
-
-/// The HTTP door, calibrate's shape plus the two raw-body surfaces
-/// this verb needs: the ndjson analysis stream in, the import stream
-/// out.
-struct Api {
-    agent: ureq::Agent,
-    base: String,
-    token: Option<String>,
-}
-
-impl Api {
-    fn new(base: String) -> Self {
-        Self {
-            // Above the server's default 30s request budget, so a
-            // server-side timeout answers as itself instead of a
-            // client-side cut (calibrate's rule).
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(35)))
-                .http_status_as_error(false)
-                .build()
-                .into(),
-            base,
-            token: bearer_token(),
-        }
-    }
-
-    fn url(&self, segments: &[&str]) -> Result<String, String> {
-        let mut url = url::Url::parse(&self.base)
-            .map_err(|error| format!("'{}' is not a usable base URL: {error}", self.base))?;
-        url.path_segments_mut()
-            .map_err(|()| format!("'{}' cannot carry a path", self.base))?
-            .extend(segments);
-        Ok(url.to_string())
-    }
-
-    /// GET returning the raw body — the analysis stream is JSON
-    /// Lines, not the envelope.
-    fn get_raw(&self, segments: &[&str]) -> Result<String, String> {
-        let url = self.url(segments)?;
-        let mut request = self.agent.get(&url);
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-        let mut response = request.call().map_err(|error| format!("{url}: {error}"))?;
-        let status = response.status().as_u16();
-        let text = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|error| format!("{url}: unreadable response: {error}"))?;
-        if status != 200 {
-            let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            let message = parsed["error"].as_str().unwrap_or(text.trim());
-            return Err(format!("{url} answered {status}: {message}"));
-        }
-        Ok(text)
-    }
-
-    fn get_envelope(&self, segments: &[&str]) -> Result<Value, ApiFailure> {
-        let url = self.url(segments).map_err(ApiFailure::Other)?;
-        let mut request = self.agent.get(&url);
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-        finish(request.call(), &url)
-    }
-
-    fn post_envelope(&self, segments: &[&str], body: &Value) -> Result<Value, ApiFailure> {
-        let url = self.url(segments).map_err(ApiFailure::Other)?;
-        let mut request = self
-            .agent
-            .post(&url)
-            .header("Content-Type", "application/json");
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-        finish(request.send(body.to_string().as_str()), &url)
-    }
-
-    /// One `POST /import` request carrying a pack of whole batches.
-    fn import(&self, stream: &str) -> Result<(), String> {
-        let url = self.url(&["import"])?;
-        let mut request = self
-            .agent
-            .post(&url)
-            .header("Content-Type", "application/x-ndjson");
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-        finish(request.send(stream), &url)
-            .map(|_| ())
-            .map_err(|failure| failure.into_message())
-    }
-
-    fn lookup_passages(
-        &self,
-        context: &str,
-        sources: &[String],
-    ) -> Result<BTreeMap<String, String>, String> {
-        let body = json!({"sources": sources});
-        let result = self
-            .post_envelope(&["contexts", context, "sources", "lookup"], &body)
-            .map_err(|failure| failure.into_message())?;
-        let mut passages = BTreeMap::new();
-        if let Some(map) = result["passages"].as_object() {
-            for (source, text) in map {
-                if let Some(text) = text.as_str() {
-                    passages.insert(source.clone(), text.to_string());
-                }
+/// This verb's domain helpers over the shared HTTP door — the
+/// `contexts/{}/sources/...` path knowledge lives here, not in
+/// `Api` itself.
+fn lookup_passages(
+    api: &Api,
+    context: &str,
+    sources: &[String],
+) -> Result<BTreeMap<String, String>, String> {
+    let body = json!({"sources": sources});
+    let result = api
+        .post_envelope(&["contexts", context, "sources", "lookup"], &body)
+        .map_err(|failure| failure.into_message())?;
+    let mut passages = BTreeMap::new();
+    if let Some(map) = result["passages"].as_object() {
+        for (source, text) in map {
+            if let Some(text) = text.as_str() {
+                passages.insert(source.clone(), text.to_string());
             }
         }
-        Ok(passages)
     }
-
-    fn retract_source(&self, context: &str, source: &str) -> Result<(), String> {
-        self.post_envelope(
-            &["contexts", context, "sources", "retract"],
-            &json!({"source": source}),
-        )
-        .map(|_| ())
-        .map_err(|failure| failure.into_message())
-    }
+    Ok(passages)
 }
 
-/// Unwraps one envelope response: 200 hands back `result`, 404 comes
-/// apart as [`ApiFailure::NotFound`], anything else carries the
-/// server's own words.
-fn finish(
-    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
-    url: &str,
-) -> Result<Value, ApiFailure> {
-    let mut response = response.map_err(|error| ApiFailure::Other(format!("{url}: {error}")))?;
-    let status = response.status().as_u16();
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|error| ApiFailure::Other(format!("{url}: unreadable response: {error}")))?;
-    let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    if status != 200 {
-        let message = parsed["error"].as_str().unwrap_or(text.trim());
-        let message = format!("{url} answered {status}: {message}");
-        return Err(if status == 404 {
-            ApiFailure::NotFound(message)
-        } else {
-            ApiFailure::Other(message)
-        });
-    }
-    if parsed["result"].is_null() && !text.contains("\"result\"") {
-        return Err(ApiFailure::Other(format!(
-            "{url}: not a taguru response: {}",
-            text.trim()
-        )));
-    }
-    Ok(parsed["result"].clone())
+fn retract_source(api: &Api, context: &str, source: &str) -> Result<(), String> {
+    api.post_envelope(
+        &["contexts", context, "sources", "retract"],
+        &json!({"source": source}),
+    )
+    .map(|_| ())
+    .map_err(|failure| failure.into_message())
 }
 
 #[cfg(test)]
