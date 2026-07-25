@@ -29,6 +29,7 @@ mod oauth_http;
 mod paragraph;
 mod passages;
 mod registry;
+mod remote;
 mod remote_mcp;
 mod replica;
 mod route;
