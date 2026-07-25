@@ -299,6 +299,25 @@ Entries that change an on-disk format or a response shape say so.
   blocking object-storage SDK call) cannot stall the event loop. The
   TypeScript port remains tracked separately; #179 stays open until it
   lands too.
+- `langchain-taguru` (TypeScript) `TaguruIngester` gains the same durable
+  per-chunk checkpoints, cooperative stop, and resume (#212, the
+  TypeScript twin of #211's Python behavior and #210's Rust behavior for
+  #179 — the last outstanding port; #179 can now close). Semantics are
+  identical to the Python entry above (unit-hash keying, the fingerprint
+  gate, atomic writes, delete-on-success/keep-on-failure, `dry_run`
+  recording but never deleting); a few fields are TypeScript-idiomatic
+  rather than byte-for-byte ports: `CheckpointStore`'s three methods are
+  async and exchange `Uint8Array` (`taguru_langchain`'s `bytes` twin);
+  `should_stop` accepts a zero-argument function or an `AbortSignal`
+  (the JS analogue of `threading.Event`); hashing uses the Web Crypto
+  global (`crypto.subtle`) so the module needs no top-level `node:`
+  import, and `FilesystemCheckpointStore`'s `node:fs`/`node:path` use is
+  behind dynamic imports (the same pattern the core SDK's
+  `Context.exportToFile` already uses), which makes
+  `FilesystemCheckpointStore.pathFor` async; `checkpoint_model_id` is
+  required when the chat model exposes none of `model`/`modelName`/
+  `modelId`/`deploymentName`; `ChunkCompleted.reused` is a required
+  (not optional) boolean.
 
 ### Changed
 - **Behavior change** (#199, ADR 0001 §12.2 — approved by the ADR

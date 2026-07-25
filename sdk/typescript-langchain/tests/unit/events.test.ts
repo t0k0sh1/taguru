@@ -7,12 +7,14 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AttemptFailed,
   AttemptStarted,
+  ChunkCompleted,
   EmbeddingRefreshCompleted,
   EmbeddingRefreshWarning,
   IngestEvent,
   ProviderMetadata,
 } from "../../src/events.js";
-import { DOC_TEXT, makeWithMessages, MODEL_ANSWER } from "./ingester.test.js";
+import { buildIngester, RecordingCheckpointStore } from "./checkpoints.test.js";
+import { CHUNK1_ANSWER, CHUNK2_CORRECTED_ANSWER, CROSS_CHUNK_BYTES, DOC_TEXT, makeWithMessages, MODEL_ANSWER } from "./ingester.test.js";
 import { FakeServer } from "./stub.js";
 
 const SUCCESSFUL_KINDS = [
@@ -243,5 +245,49 @@ describe("TaguruIngester on_event", () => {
     expect(metadataFields).toEqual(
       new Set(["finish_reason", "input_tokens", "output_tokens", "total_tokens"]),
     );
+  });
+
+  it("a resumed run's reused chunk emits chunk_started/chunk_completed with zero llm_calls and no attempts", async () => {
+    // Issue #212: a checkpoint-satisfied chunk gets the same
+    // chunk_started/chunk_completed pair as a freshly-extracted one, but
+    // no attempt_started/attempt_failed in between, llm_calls: 0, and
+    // reused: true — the fresh chunk right after it looks completely
+    // ordinary (reused: false).
+    const server = new FakeServer();
+    const store = new RecordingCheckpointStore();
+    const source = "docs/aomine.md";
+    const { ingester: seed } = buildIngester(server, [CHUNK1_ANSWER, "not json", "not json"], {
+      checkpoint_store: store,
+      chunk_bytes: CROSS_CHUNK_BYTES,
+    });
+    await expect(seed.ingestText(DOC_TEXT, { source })).rejects.toThrow();
+
+    const events: IngestEvent[] = [];
+    const { ingester } = buildIngester(server, [CHUNK2_CORRECTED_ANSWER], {
+      checkpoint_store: store,
+      chunk_bytes: CROSS_CHUNK_BYTES,
+      on_event: (event) => events.push(event),
+    });
+    const outcome = await ingester.ingestText(DOC_TEXT, { source });
+    expect(outcome.ok).toBe(true);
+
+    expect(events.map((event) => event.kind)).toEqual([
+      "document_started",
+      "chunk_started",
+      "chunk_completed",
+      "chunk_started",
+      "attempt_started",
+      "chunk_completed",
+      "import_started",
+      "import_completed",
+      "embedding_refresh_started",
+      "embedding_refresh_completed",
+    ]);
+
+    const completed = events.filter(
+      (event) => event.kind === "chunk_completed",
+    ) as ChunkCompleted[];
+    expect(completed[0]).toMatchObject({ index: 0, llm_calls: 0, reused: true });
+    expect(completed[1]).toMatchObject({ index: 1, reused: false });
   });
 });

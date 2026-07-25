@@ -48,6 +48,10 @@ export class FakeServer {
   /** The body /embeddings/refresh returns when embeddingsRefreshStatus is
    * 200. */
   embeddingsRefreshResult: { embedded: number; total: number } = { embedded: 0, total: 0 };
+  /** When true, /import fails with a 500 — exercises checkpoint survival
+   * across an import failure (issue #212). Mirrors the Python conftest's
+   * `fail_import` knob. */
+  failImport = false;
 
   fetch: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -165,6 +169,12 @@ export class FakeServer {
       return ok({ total: 2, labels: ["代表銘柄", "杜氏"] });
     }
     if (path === "/import") {
+      if (this.failImport) {
+        return new Response(
+          JSON.stringify({ status: "error", code: "internal", error: "simulated failure", time: 0.001 }),
+          { status: 500 },
+        );
+      }
       this.imported.push(typeof init?.body === "string" ? init.body : "");
       return ok({
         batches: [

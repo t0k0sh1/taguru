@@ -22,6 +22,7 @@ import {
   MAX_PASSAGE_BYTES,
   MAX_QUESTIONS_PER_PARAGRAPH,
   MODEL_OUTPUT_JSON_SCHEMA,
+  PROMPT_VERSION,
   VOCABULARY_CAP,
   chunk,
   correctiveAssistantTurnContent,
@@ -52,6 +53,13 @@ import type {
   IngestEventCallback,
   ProviderMetadata,
 } from "./events.js";
+import {
+  deriveModelIdentity,
+  sha256Hex,
+  DocumentCheckpoints,
+  type CheckpointFingerprint,
+  type CheckpointStore,
+} from "./checkpoints.js";
 
 /** Total attempts (1 initial + corrections) at the JSON object per chunk. */
 const DEFAULT_MAX_ATTEMPTS = 2;
@@ -95,6 +103,17 @@ export interface IngestOutcome {
   lossless_repairs: string[];
   error: string | null;
   embeddings_refresh_warning: string | null;
+  /**
+   * True when a `should_stop` check was honored between chunks (or, for
+   * `ingestDocuments`, between documents) — not a failure: `ok` stays
+   * `false` and nothing was imported, but every chunk validated before the
+   * stop is durably checkpointed for the next run to resume from (issue
+   * #212, the TypeScript twin of #211/#210 for #179).
+   */
+  interrupted: boolean;
+  /** How many chunks were satisfied from a checkpoint store instead of a
+   * fresh model call. */
+  chunks_reused: number;
 }
 
 const emptyOutcome = (source: string): IngestOutcome => ({
@@ -115,7 +134,30 @@ const emptyOutcome = (source: string): IngestOutcome => ({
   lossless_repairs: [],
   error: null,
   embeddings_refresh_warning: null,
+  interrupted: false,
+  chunks_reused: 0,
 });
+
+/**
+ * A caller-supplied cooperative-stop check for `ingestText`/
+ * `ingestDocuments`: either a zero-argument predicate, or an `AbortSignal`
+ * (the JS-idiomatic analogue of a `threading.Event` — the same cancellation
+ * vocabulary `fetch`/`setTimeout` already use). Checked only between chunks
+ * and between documents, never mid-model-call: an in-flight LLM call always
+ * finishes. Deliberately not named `stop` — LangChain uses that word for
+ * stop sequences.
+ */
+export type ShouldStop = (() => boolean) | AbortSignal;
+
+function normalizeStop(shouldStop: ShouldStop | undefined): () => boolean {
+  if (shouldStop === undefined) {
+    return () => false;
+  }
+  if (typeof shouldStop === "function") {
+    return shouldStop;
+  }
+  return () => shouldStop.aborted;
+}
 
 export interface TaguruIngesterFields {
   context: string;
@@ -158,6 +200,22 @@ export interface TaguruIngesterFields {
    * difference.
    */
   on_event?: IngestEventCallback;
+  /**
+   * Enables durable per-chunk checkpoints (issue #212): each chunk's
+   * validated output is persisted here as soon as it is accepted, so an
+   * interrupted document (process killed, spot instance reclaimed) can
+   * resume without recalling the model for chunks already validated.
+   * Default undefined: no checkpointing, unchanged behavior.
+   */
+  checkpoint_store?: CheckpointStore;
+  /**
+   * Overrides the model identity baked into the checkpoint fingerprint.
+   * Required when `checkpoint_store` is set and `llm` exposes none of
+   * `model`/`modelName`/`modelId`/`deploymentName` (checked at
+   * construction — see `deriveModelIdentity` in checkpoints.ts); optional
+   * otherwise.
+   */
+  checkpoint_model_id?: string;
 }
 
 /**
@@ -416,6 +474,8 @@ export class TaguruIngester {
   readonly raise_on_error: boolean;
   readonly structured_output: boolean;
   readonly lossy: boolean;
+  readonly checkpoint_store: CheckpointStore | undefined;
+  readonly checkpoint_model_id: string | undefined;
 
   private readonly llm: BaseChatModel;
   private readonly client: Taguru;
@@ -469,6 +529,19 @@ export class TaguruIngester {
     this.structured_output = fields.structured_output ?? false;
     this.lossy = fields.lossy ?? false;
     this.on_event = fields.on_event;
+    this.checkpoint_store = fields.checkpoint_store;
+    this.checkpoint_model_id = fields.checkpoint_model_id;
+    if (
+      this.checkpoint_store !== undefined &&
+      this.checkpoint_model_id === undefined &&
+      deriveModelIdentity(fields.llm) === null
+    ) {
+      throw new Error(
+        "checkpoint_store requires checkpoint_model_id: this chat model exposes none of " +
+          "model/modelName/modelId/deploymentName, so the checkpoint fingerprint has no " +
+          "stable model identity to key on",
+      );
+    }
     // Opt-in only (see the Python twin's docstring for the full rationale):
     // built once here so a chat model that cannot bind tools fails fast, at
     // construction, rather than surfacing later as a per-attempt failure.
@@ -626,8 +699,9 @@ export class TaguruIngester {
    */
   async ingestText(
     text: string,
-    options: { source: string; dry_run?: boolean },
+    options: { source: string; dry_run?: boolean; should_stop?: ShouldStop },
   ): Promise<IngestOutcome> {
+    const stop = normalizeStop(options.should_stop);
     const outcome = emptyOutcome(options.source);
     if (this.include_passage && Buffer.byteLength(text, "utf-8") > MAX_PASSAGE_BYTES) {
       throw new Error(`document exceeds the ${MAX_PASSAGE_BYTES}-byte passage cap`);
@@ -644,9 +718,14 @@ export class TaguruIngester {
     const rules = this.itemRules(paragraphCount);
     const chunks = chunk(labeledDocument(text, this.chunk_bytes), this.chunk_bytes);
     outcome.chunks = chunks.length;
+    const checkpoints = await this.loadCheckpoints(options.source, text);
 
     const records: ChunkRecord[] = [];
     for (let index = 0; index < chunks.length; index += 1) {
+      if (stop()) {
+        outcome.interrupted = true;
+        return outcome;
+      }
       this.emit({
         kind: "chunk_started",
         source: options.source,
@@ -654,6 +733,24 @@ export class TaguruIngester {
         total: chunks.length,
       });
       const chunkStartedAt = performance.now();
+      const cached = await this.checkpointedUnit(checkpoints, chunks[index]!);
+      if (cached !== null) {
+        records.push(cached);
+        outcome.chunks_reused += 1;
+        this.emit({
+          kind: "chunk_completed",
+          source: options.source,
+          index,
+          total: chunks.length,
+          associations_proposed: cached.output.associations.length,
+          aliases_proposed: cached.output.aliases.length,
+          questions_proposed: cached.output.questions.length,
+          llm_calls: 0,
+          elapsed_seconds: (performance.now() - chunkStartedAt) / 1000,
+          reused: true,
+        });
+        continue;
+      }
       let chunkLlmCalls = 0;
       const user = userMessage(options.source, index, chunks.length, chunks[index]!);
       const base: BaseMessage[] = [new SystemMessage(system), new HumanMessage(user)];
@@ -762,6 +859,7 @@ export class TaguruIngester {
         throw new Error(lastDiagnosis);
       }
       records.push(chunkRecord);
+      await this.recordCheckpoint(checkpoints, options.source, chunks[index]!, chunkRecord);
       this.emit({
         kind: "chunk_completed",
         source: options.source,
@@ -772,6 +870,7 @@ export class TaguruIngester {
         questions_proposed: chunkRecord.output.questions.length,
         llm_calls: chunkLlmCalls,
         elapsed_seconds: (performance.now() - chunkStartedAt) / 1000,
+        reused: false,
       });
     }
 
@@ -812,6 +911,10 @@ export class TaguruIngester {
       source: options.source,
       elapsed_seconds: (performance.now() - importStartedAt) / 1000,
     });
+    // Deletion happens here — after the import lands, before the
+    // best-effort embeddings refresh below — so a refresh warning can
+    // never resurrect a checkpoint this document no longer needs.
+    await this.deleteCheckpoints(options.source);
 
     if (this.refresh_embeddings) {
       this.emit({ kind: "embedding_refresh_started", source: options.source });
@@ -854,10 +957,14 @@ export class TaguruIngester {
    */
   async ingestDocuments(
     documents: DocumentInterface[],
-    options: { dry_run?: boolean } = {},
+    options: { dry_run?: boolean; should_stop?: ShouldStop } = {},
   ): Promise<IngestOutcome[]> {
+    const stop = normalizeStop(options.should_stop);
     const outcomes: IngestOutcome[] = [];
     for (const document of documents) {
+      if (stop()) {
+        break;
+      }
       let source: string;
       try {
         source = this.sourceOf(document);
@@ -871,9 +978,15 @@ export class TaguruIngester {
         continue;
       }
       try {
-        outcomes.push(
-          await this.ingestText(document.pageContent, { source, dry_run: options.dry_run }),
-        );
+        const outcome = await this.ingestText(document.pageContent, {
+          source,
+          dry_run: options.dry_run,
+          should_stop: options.should_stop,
+        });
+        outcomes.push(outcome);
+        if (outcome.interrupted) {
+          break;
+        }
       } catch (error) {
         if (this.raise_on_error) {
           throw error;
@@ -912,6 +1025,121 @@ export class TaguruIngester {
         return [];
       }
       throw error;
+    }
+  }
+
+  // -- checkpoint/resume (issue #212, the TypeScript twin of #211/#210) --
+
+  /**
+   * The compatibility inputs that gate reuse of a cached chunk: content
+   * hash of the WHOLE raw document (not per-chunk), model identity, and
+   * every output-shaping setting. See CheckpointFingerprint's doc comment
+   * for what is deliberately excluded and why.
+   */
+  private async checkpointFingerprint(text: string): Promise<CheckpointFingerprint> {
+    return {
+      sha256: await sha256Hex(text),
+      model: this.checkpoint_model_id ?? deriveModelIdentity(this.llm)!,
+      prompt_version: PROMPT_VERSION,
+      context: this.context,
+      questions_n: this.questions,
+      no_passage: !this.include_passage,
+      description: this.create_context ? (this.context_description ?? "") : "",
+      fact_budget: this.fact_budget,
+      structured_output: this.structured_output ? "langchain" : "",
+      lossy: this.lossy,
+    };
+  }
+
+  /**
+   * `null` when no store is configured. A store `load` failure is caught
+   * and reported via `console.warn` — the run proceeds as though nothing
+   * were cached, never as a hard failure.
+   */
+  private async loadCheckpoints(source: string, text: string): Promise<DocumentCheckpoints | null> {
+    if (this.checkpoint_store === undefined) {
+      return null;
+    }
+    const fingerprint = await this.checkpointFingerprint(text);
+    let data: Uint8Array | null;
+    try {
+      data = await this.checkpoint_store.load(source);
+    } catch (error) {
+      console.warn(
+        `TaguruIngester checkpoint store failed to load ${JSON.stringify(source)}: ` +
+          `${String(error)} — starting this document without any cached chunks`,
+      );
+      data = null;
+    }
+    return DocumentCheckpoints.fromBytes(data, fingerprint);
+  }
+
+  /**
+   * Looks up `piece` (the labeled chunk text exactly as fed to the loop —
+   * never its index) by content hash and, on a hit, reconstructs the
+   * `ChunkRecord` from the STORED user/answer/output rather than
+   * recomputing anything.
+   */
+  private async checkpointedUnit(
+    checkpoints: DocumentCheckpoints | null,
+    piece: string,
+  ): Promise<ChunkRecord | null> {
+    if (checkpoints === null) {
+      return null;
+    }
+    const unit = checkpoints.lookup(await sha256Hex(piece));
+    if (unit === null) {
+      return null;
+    }
+    return { output: unit.output, chunkIndex: unit.chunk_index, user: unit.user, answer: unit.answer };
+  }
+
+  /**
+   * Records one validated chunk and rewrites the whole checkpoint file —
+   * small enough that a read-modify-write-whole-file is simpler, and just
+   * as durable, as an append-only log. A store `save` failure is caught
+   * and reported via `console.warn`: the chunk still counts for this run,
+   * but a resume may repeat it.
+   */
+  private async recordCheckpoint(
+    checkpoints: DocumentCheckpoints | null,
+    source: string,
+    piece: string,
+    chunkRecord: ChunkRecord,
+  ): Promise<void> {
+    if (checkpoints === null || this.checkpoint_store === undefined) {
+      return;
+    }
+    checkpoints.record(await sha256Hex(piece), {
+      chunk_index: chunkRecord.chunkIndex,
+      output: chunkRecord.output,
+      user: chunkRecord.user,
+      answer: chunkRecord.answer,
+    });
+    try {
+      await this.checkpoint_store.save(source, checkpoints.toBytes());
+    } catch (error) {
+      console.warn(
+        `TaguruIngester failed to save a checkpoint for ${JSON.stringify(source)}: ` +
+          `${String(error)} — the completed chunk still counts this run; a resume may repeat it`,
+      );
+    }
+  }
+
+  /**
+   * Best-effort cleanup once a document's batch has actually landed —
+   * failures are silently ignored (the save/delete asymmetry, inherited
+   * from the Rust twin: nothing correctness-critical depends on prompt
+   * cleanup, unlike a save that a resume would otherwise repeat).
+   */
+  private async deleteCheckpoints(source: string): Promise<void> {
+    if (this.checkpoint_store === undefined) {
+      return;
+    }
+    try {
+      await this.checkpoint_store.delete(source);
+    } catch {
+      // silently ignored
     }
   }
 }
