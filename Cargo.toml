@@ -42,6 +42,10 @@ http-body-util = "0.1.3"
 # and already ubiquitous in the wider tree.
 sha2 = "0.11"
 getrandom = "0.4"
+# Already in the tree through getrandom/mio; made direct for
+# pthread_sigmask — issue #213's fix needs main-thread signal blocking
+# that std has no safe API for.
+libc = "0.2"
 # Already in the tree through axum; made direct so the loopback
 # redirect-URI check parses the host instead of matching a prefix.
 url = "2.5"

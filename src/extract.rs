@@ -187,6 +187,11 @@ const MAX_CHAT_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 const MANIFEST_NAME: &str = ".extract-manifest.json";
 
 pub fn run(args: &[String]) -> i32 {
+    // Issue #213: must happen before anything that could block on I/O
+    // (including argument parsing's own error paths, which are cheap
+    // but not worth special-casing) — see block_stop_signals_on_this_
+    // thread's doc comment for why.
+    block_stop_signals_on_this_thread();
     let args = match Args::parse(args) {
         Ok(args) => args,
         Err(code) => return code,
@@ -865,6 +870,59 @@ struct LadderConfig {
     max_output_tokens: Option<usize>,
 }
 
+/// Blocks SIGINT/SIGTERM on the calling thread (issue #213). Signal
+/// masks are inherited by every thread spawned afterward, so calling
+/// this once at the very top of [`run`] — before the chat client or
+/// any other thread exists — keeps the delivery-eligible signal mask
+/// clear everywhere except [`StopSignal`]'s own dedicated listener
+/// thread, which unblocks it for itself alone.
+///
+/// Without this, a signal delivered while the main thread is inside a
+/// blocking socket read can interrupt that read with `EINTR` — on
+/// Linux, a read on a socket with `SO_RCVTIMEO` set (which is how
+/// `ureq` implements its own timeout) is never auto-restarted by
+/// `SA_RESTART`, regardless of how the handler is installed (see
+/// signal(7)). `ureq` then treats the interrupted read as a transport
+/// failure and silently reconnects, resending the in-flight chunk's
+/// whole request on a brand new connection — invisible to the
+/// cooperative-stop design, which only ever meant to check the flag
+/// between chunks, never abandon one mid-call. Confirmed via `strace`
+/// against a stub that holds the retried connection open: without this
+/// fix the process hangs on the retry indefinitely instead of finishing
+/// the original chunk and stopping cleanly (issue #213).
+#[cfg(unix)]
+fn block_stop_signals_on_this_thread() {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+fn block_stop_signals_on_this_thread() {}
+
+/// Undoes [`block_stop_signals_on_this_thread`] for the calling thread
+/// only — [`StopSignal::install`]'s dedicated listener thread calls
+/// this so it alone remains eligible to receive the raw signal (some
+/// thread must be, or the kernel has nowhere to deliver it and
+/// `signal-hook`/`tokio::signal`'s handler never runs).
+#[cfg(unix)]
+fn unblock_stop_signals_on_this_thread() {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+fn unblock_stop_signals_on_this_thread() {}
+
 /// Issue #179's cooperative stop, checked between chunks/documents
 /// rather than interrupting a call in flight. `extract` otherwise never
 /// starts a runtime at all (`run`'s own SAFETY comment); this is the one
@@ -891,6 +949,7 @@ impl StopSignal {
         let requested = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&requested);
         std::thread::spawn(move || {
+            unblock_stop_signals_on_this_thread();
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_io()
                 .build()

@@ -4037,14 +4037,71 @@ fn wait_for_stop_signal_handlers(stderr: std::process::ChildStderr) {
     std::thread::spawn(move || for _ in lines {});
 }
 
+/// [`std::process::Child::wait_with_output`], but force-kills the child
+/// and panics with a clear message if it hasn't exited within
+/// `deadline` — issue #213: an earlier fix attempt here hung silently
+/// until the CI job's own (much longer) timeout killed it instead of
+/// failing this test directly, which cost a full 15-minute round trip
+/// to even notice. Stdout is drained on a background thread the whole
+/// time it waits, exactly like `wait_with_output` would, so a chatty
+/// child still can't deadlock on a full pipe while this polls.
+fn wait_with_deadline(
+    mut child: std::process::Child,
+    deadline: std::time::Duration,
+) -> std::process::Output {
+    use std::io::Read;
+    let stdout_handle = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = pipe.read_to_end(&mut buffer);
+            buffer
+        })
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("polling the child must not fail") {
+            break status;
+        }
+        if start.elapsed() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("extract did not exit within {deadline:?} after SIGINT — see issue #213");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let stdout = stdout_handle
+        .map(|handle| handle.join().unwrap())
+        .unwrap_or_default();
+    std::process::Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    }
+}
+
 /// Issue #179's cooperative stop: SIGINT lets an in-flight chunk finish
 /// (and get checkpointed) before the process exits with code 130 —
 /// distinct from a hard failure — and a rerun resumes without
 /// re-asking the model for what already landed. Chunk 0's response is
 /// deliberately delayed server-side so SIGINT can be sent any time
-/// before it, without racing the process's own startup — no matter
-/// when it lands in that window, chunk 0 still completes and gets
-/// checkpointed before the next iteration notices the flag.
+/// before it lands. That alone doesn't bound when SIGINT is safe to
+/// send, though (issue #213): `StopSignal::install()` (and its
+/// readiness marker) runs before the file loop even starts, well
+/// before chunk 0's request is dispatched — on a loaded CI runner,
+/// signal delivery can beat the main thread to its first stop check,
+/// interrupting before chunk 0 ever starts. So the mock server also
+/// signals over a channel once it has actually received chunk 0's
+/// request, and the test waits on that too before sending SIGINT —
+/// chunk 0 is then guaranteed in flight (mid-sleep, awaiting its
+/// response) no matter how the two processes are scheduled.
+///
+/// Every wait below carries its own bound (`recv_timeout`, a read
+/// timeout on the stream, [`wait_with_deadline`] instead of a bare
+/// `wait_with_output`) rather than trusting a fixed sleep: an earlier
+/// attempt at this fix closed the original race but then hung for the
+/// full CI job timeout instead of failing fast when something
+/// unexpected happened — these bounds turn any future surprise into a
+/// quick, diagnosable failure instead of a repeat of that.
 #[test]
 fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
     use std::time::Duration;
@@ -4063,13 +4120,26 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
     );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
+    let (chunk0_received_tx, chunk0_received_rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         use std::io::Write;
         let mut held = Vec::new();
         for (index, stream) in listener.incoming().enumerate() {
             let Ok(mut stream) = stream else { continue };
             if index == 0 {
-                let _ = read_http_request(&mut stream);
+                // A read timeout here means an unexpected connection
+                // (anything that isn't a complete HTTP request within
+                // 10s) fails this thread's `read_http_request` call
+                // loudly instead of blocking it forever — which would
+                // otherwise silently starve `chunk0_received_tx` and
+                // rely entirely on the receiver's own timeout below.
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                let request = read_http_request(&mut stream);
+                assert!(
+                    request.is_some(),
+                    "chunk 0's connection must carry a complete HTTP request within 10s"
+                );
+                let _ = chunk0_received_tx.send(());
                 std::thread::sleep(Duration::from_millis(4000));
                 let _ = stream.write_all(response0.as_bytes());
             } else {
@@ -4089,6 +4159,9 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
         .stderr(Stdio::piped());
     let mut child = command.spawn().expect("extract must spawn");
     wait_for_stop_signal_handlers(child.stderr.take().unwrap());
+    chunk0_received_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("chunk 0's request must reach the mock server before SIGINT is sent");
 
     let pid = child.id().to_string();
     Command::new("kill")
@@ -4096,9 +4169,7 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
         .status()
         .expect("kill must run");
 
-    let output = child
-        .wait_with_output()
-        .expect("extract must exit after SIGINT");
+    let output = wait_with_deadline(child, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(130), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("stopped early"), "{stdout}");
