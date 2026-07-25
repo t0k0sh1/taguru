@@ -98,6 +98,15 @@ For the endpoint list and the ingest/retrieval discipline, ask the
 running server: `GET /protocol`. A guided tour is
 [Getting started](https://t0k0sh1.github.io/taguru/getting-started.html).
 
+Four entrances, depending on what you're building:
+
+| What you want | Start here |
+|---|---|
+| An LLM agent that ingests and retrieves for itself | [MCP](#using-it-from-an-llm-agent-mcp), below |
+| Your own code, over HTTP or the Python/TypeScript SDKs | [Getting started](https://t0k0sh1.github.io/taguru/getting-started.html), then [SDKs and examples](#sdks-and-examples) |
+| A pile of documents, loaded all at once | [Loading knowledge in bulk](#loading-knowledge-in-bulk), below |
+| A fixed, fully local RAG corpus built with LangChain and Ollama | [Local RAG walkthrough](https://t0k0sh1.github.io/taguru/local-rag-walkthrough.html) |
+
 ## Using it from an LLM agent (MCP)
 
 `taguru-mcp` is an MCP stdio bridge to a running HTTP server. Agents
@@ -450,8 +459,12 @@ npm install taguru        # or: npm install langchain-taguru
 Library-level examples live in [examples/](examples/) — one directory
 per example, each with its own README. Runnable LangChain use cases
 (RAG QA with citations, governed ingestion, conversational long-term
-memory) live in [examples/langchain/](examples/langchain/), each as a
-Python and a TypeScript program mirrored line for line.
+memory) live in [examples/langchain/](examples/langchain/); most are a
+Python and a TypeScript program mirrored line for line, and
+[local_rag](examples/langchain/local_rag/) (Python only for now) builds
+a fixed, fully local RAG corpus from PDFs with Ollama — the reference
+code for the [local RAG
+walkthrough](https://t0k0sh1.github.io/taguru/local-rag-walkthrough.html).
 
 ## License
 

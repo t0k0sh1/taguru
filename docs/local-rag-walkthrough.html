@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local RAG walkthrough — Taguru</title>
+  <meta name="description" content="An end-to-end walkthrough: several PDFs become a fixed, fully local RAG corpus with the Python SDK, langchain-taguru, and Ollama — extract, embed, and answer as three separate local models, paper sections mapped onto contexts and groups, and every answer traceable back to its PDF, section, and paragraph.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html" aria-current="page">Local RAG walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">python sdk × langchain · local rag walkthrough</div>
+    <h1>Local RAG over PDFs — fully local with the Python SDK, LangChain, and Ollama</h1>
+    <p class="lede">
+      Two fictional sake-science papers go in as PDFs and come out as a fixed, fully local
+      corpus: no cloud API, no cloud LLM, nothing pulled at request time. This page builds the
+      pipeline end to end — PDF → sections → contexts and groups → LLM-decomposed facts — and
+      then serves it with a plain LangChain retriever and answer chain, every claim traceable
+      back to its PDF, section, and paragraph.
+    </p>
+    <div class="hero-meta">
+      <span><b>How:</b> Python SDK + <code>langchain-taguru</code> against a local Taguru server</span>
+      <span><b>Models:</b> three local Ollama models — extract, embed, answer</span>
+      <span><b>Fixture:</b> two fictional papers, <code>paper/tanaka2024</code> and <code>paper/sato2023</code></span>
+    </div>
+  </header>
+
+  <section id="goal">
+    <h2>Four responsibilities, four places they run</h2>
+    <p class="section-sub">The offline half builds the corpus; the online half only ever reads it. Nothing here calls out past localhost.</p>
+    <div class="arch">
+      <div class="arch-layer">
+        <div class="arch-label">offline pipeline</div>
+        <div class="arch-row">
+          <div class="arch-box"><b>PDF → sections</b><span>pypdf, your code, run once per document</span></div>
+          <div class="arch-box"><b>extract</b><span><code>TaguruIngester</code> + a local chat model, per section</span></div>
+        </div>
+      </div>
+      <div class="arch-down">↓ writes to</div>
+      <div class="arch-layer">
+        <div class="arch-label">taguru server</div>
+        <div class="arch-row">
+          <div class="arch-box dim"><b>contexts &amp; groups</b><span>the association graph, one per paper section</span></div>
+          <div class="arch-box lane-text"><b>embed</b><span>server-side semantic lane, a local embedding model</span></div>
+        </div>
+      </div>
+      <div class="arch-down">↑ read by</div>
+      <div class="arch-layer">
+        <div class="arch-label">serving code</div>
+        <div class="arch-row">
+          <div class="arch-box"><b>TaguruRetriever</b><span>reads only — never writes back</span></div>
+          <div class="arch-box"><b>answer</b><span>a local chat model, independent of the extract model</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Responsibility</th><th>Runs as</th><th>Example local model</th><th>Configured via</th></tr></thead>
+        <tbody>
+          <tr><td>server</td><td>the Taguru container</td><td>—</td><td><a href="docker-compose.html">Docker Compose</a></td></tr>
+          <tr><td>extract</td><td>a chat model bound to <code>TaguruIngester</code></td><td><code>qwen2.5:7b-instruct</code></td><td><code>ChatOllama</code> passed as <code>llm=</code></td></tr>
+          <tr><td>embed</td><td>the server's semantic passage lane</td><td><code>nomic-embed-text</code></td><td><code>TAGURU_EMBED_URL</code> / <code>TAGURU_EMBED_MODEL</code></td></tr>
+          <tr><td>answer</td><td>a chat model at the end of an LCEL chain</td><td><code>qwen2.5:7b-instruct</code> or a lighter pick</td><td><code>ChatOllama</code> passed to the chain</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      This is the SDK-side counterpart to the <a href="mcp-rag-walkthrough.html">MCP
+      walkthrough</a>: there, an LLM agent calls Taguru MCP tools directly and does its own
+      decomposition and composition turn by turn. Here, your code owns both ends —
+      <code>TaguruIngester</code> for the write path, <code>TaguruRetriever</code> and an LCEL
+      chain for the read path — and the corpus underneath is modeled the same way either time.
+    </p>
+  </section>
+
+  <section id="prerequisites">
+    <h2>Prerequisites: check, don't pull</h2>
+    <p class="section-sub">Docker, Python 3.10+, and Ollama with the models this walkthrough names already present.</p>
+    <pre><code><span class="c"># the extract/answer model and the embedding model — both must already be pulled</span>
+ollama list | grep -E <span class="s">'qwen2.5:7b-instruct|nomic-embed-text'</span></code></pre>
+    <p class="note warn">
+      <b>Nothing on this page pulls a model for you.</b> Neither the shell snippets here nor the
+      <a href="https://github.com/t0k0sh1/taguru/tree/main/examples/langchain/local_rag">reference
+      example</a> runs <code>ollama pull</code>. A multi-gigabyte download happening as a side
+      effect of running a walkthrough is a surprise nobody asked for — if <code>ollama list</code>
+      comes back empty, pull the models yourself first:
+      <code>ollama pull qwen2.5:7b-instruct &amp;&amp; ollama pull nomic-embed-text</code>.
+    </p>
+  </section>
+
+  <section id="server">
+    <h2>Start the server, wire it to Ollama's embeddings</h2>
+    <p class="section-sub"><code>deploy/docker-compose.yml</code> as-is, plus the semantic-lane environment pointed at Ollama's OpenAI-compatible endpoint.</p>
+    <pre><code><span class="c"># docker-compose.override.yml — merges over deploy/docker-compose.yml</span>
+services:
+  taguru:
+    environment:
+      <span class="c"># the container reaches the host's Ollama through this DNS name</span>
+      TAGURU_EMBED_URL: <span class="s">http://host.docker.internal:11434/v1/embeddings</span>
+      TAGURU_EMBED_MODEL: <span class="s">nomic-embed-text</span>
+      TAGURU_EMBED_PASSAGES: <span class="s">"1"</span>   <span class="c"># opt in to embedding stored paragraphs, not just glosses</span></code></pre>
+    <pre><code>TAGURU_API_TOKENS=<span class="s">'ops:CHANGE-ME'</span> docker compose \
+  -f deploy/docker-compose.yml -f docker-compose.override.yml up -d</code></pre>
+    <p class="note">
+      Skipping this section is fine — search still works on BM25 and the graph lane alone,
+      <code>TAGURU_EMBED_PASSAGES</code> is opt-in for a reason. What changes is paraphrase
+      recall on the text lane, and <code>TAGURU_SEMANTIC_FLOOR</code>'s default (0.35) is
+      calibrated for <code>text-embedding-3-large</code>, not any particular local model —
+      measure the right value for yours with <code>taguru calibrate</code> before trusting the
+      floor, and see <a href="troubleshooting.html#embedding">Troubleshooting — the semantic
+      lane</a> if a search response's <code>plan</code> says the vector lane didn't run.
+    </p>
+  </section>
+
+  <section id="versions">
+    <h2>Pin every layer to the same minor version</h2>
+    <p class="section-sub">Server, SDK, and <code>langchain-taguru</code> ship from one repository in lockstep — read all three before trusting a shape.</p>
+    <pre><code><span class="c"># the image tag IS the server's pin — there is no HTTP /version endpoint</span>
+grep <span class="s">'image:'</span> deploy/docker-compose.yml   <span class="c"># ghcr.io/t0k0sh1/taguru:0.4.0</span>
+
+<span class="c"># pin the Python side to the matching minor</span>
+pip install <span class="s">'taguru==0.4.*'</span> <span class="s">'langchain-taguru==0.4.*'</span>
+
+<span class="c"># fail loudly at startup rather than silently on the first odd response shape</span>
+python -c <span class="s">"import taguru, taguru_langchain as tl; \
+assert taguru.__version__.startswith('0.4.') and tl.__version__.startswith('0.4.'); \
+print(taguru.__version__, tl.__version__)"</span></code></pre>
+    <p>
+      A shell-less container has no <code>taguru version</code> to run inside it — read
+      <code>/metrics</code> instead:
+      <code>curl -s localhost:8248/metrics | grep taguru_build_info</code>. Full triage for a
+      mismatch (a 0.3.x client against a 0.4.x server, or the reverse) is
+      <a href="troubleshooting.html#compatibility">Troubleshooting — version skew</a>.
+    </p>
+  </section>
+
+  <section id="pdf-to-sections">
+    <h2>PDF into numbered sections</h2>
+    <p class="section-sub">Extraction happens through the SDK here, not the CLI — <code>taguru extract</code> reads <code>.md</code>/<code>.txt</code> only.</p>
+    <p class="note warn">
+      <b><code>taguru extract</code> does not read PDFs.</b> The CLI producer is documented
+      against <code>.md</code>/<code>.txt</code> (<a href="extract.html#cli">the CLI shape</a>);
+      pointing it at a PDF directory extracts nothing. Converting a PDF to text is this
+      pipeline's job — plain <code>pypdf</code>, no LangChain document loader needed for this
+      much — before any Taguru code runs at all. If you would rather stay on the CLI path after
+      this step, write each section out
+      as its own <code>.md</code> file and hand the directory to <code>taguru extract</code> +
+      <a href="import.html"><code>taguru import</code></a> instead of the SDK path below —
+      everything from <a href="#modeling">context and group modeling</a> onward applies
+      either way.
+    </p>
+    <pre><code><span class="k">from</span> pypdf <span class="k">import</span> PdfReader
+<span class="k">import</span> re
+
+SECTION_RE = re.<span class="k">compile</span>(<span class="s">r"^(\d+)\.\s+(.+)$"</span>, re.MULTILINE)
+
+<span class="k">def</span> pdf_to_sections(pdf_path, paper_id):
+    pages = PdfReader(pdf_path).pages
+    text = <span class="s">"\n"</span>.join(p.extract_text() <span class="k">for</span> p <span class="k">in</span> pages)
+    marks = list(SECTION_RE.finditer(text))
+    <span class="k">for</span> i, m <span class="k">in</span> enumerate(marks):
+        start = m.end()
+        end = marks[i + <span class="nu">1</span>].start() <span class="k">if</span> i + <span class="nu">1</span> &lt; len(marks) <span class="k">else</span> len(text)
+        <span class="k">yield</span> {
+            <span class="s">"paper"</span>: paper_id,
+            <span class="s">"n"</span>: int(m.group(<span class="nu">1</span>)),
+            <span class="s">"title"</span>: m.group(<span class="nu">2</span>).strip(),
+            <span class="s">"text"</span>: text[start:end].strip(),
+        }</code></pre>
+    <p>
+      A numbered-heading regex is enough for a fixture; a real corpus's headings vary more and
+      may need a smarter splitter. What matters for everything downstream is only the shape of
+      the result: one dict per section, carrying which paper it belongs to, its section number,
+      and its text.
+    </p>
+  </section>
+
+  <section id="modeling">
+    <h2>One section, one context; one paper, one group</h2>
+    <p class="section-sub">The same mapping the <a href="modeling.html#worked-example">modeling guide</a>'s worked example uses for BERT, applied to these two papers.</p>
+    <pre><code>group: paper/tanaka2024
+├── context: section/tanaka2024/1
+├── context: section/tanaka2024/2
+└── context: section/tanaka2024/3
+
+group: paper/sato2023
+├── context: section/sato2023/1
+└── context: section/sato2023/2</code></pre>
+    <p>
+      A section's vocabulary stays stable within it — exactly the one-spelling-one-referent
+      contract a context exists to hold — so the section is the context, and the paper is the
+      group that bundles its sections back together for cross-paper search
+      (<a href="modeling.html#cross-search">why a group, never a super-context</a>). Group
+      creation has to be idempotent by hand — <code>groups.create</code> 409s if the group
+      already exists, so a rerun catches that and switches to a delta update instead of failing:
+    </p>
+    <pre><code><span class="k">from</span> taguru <span class="k">import</span> Taguru, ConflictError
+
+client = Taguru()
+
+<span class="k">def</span> ensure_group(name, description, contexts):
+    <span class="k">try</span>:
+        client.groups.create(name, description=description, contexts=contexts)
+    <span class="k">except</span> ConflictError:
+        client.groups.update(name, add_contexts=contexts)</code></pre>
+    <p>
+      Context creation gets the same idempotence for free from <code>TaguruIngester</code>
+      itself — <code>create_context=True</code> stamps a create block that only takes effect
+      when the context is still absent, so re-running the pipeline over an unchanged PDF
+      neither fails nor duplicates anything. That call shows up next, where the ingester for
+      each section actually runs.
+    </p>
+  </section>
+
+  <section id="ingest">
+    <h2>One <code>TaguruIngester</code> per section, one local model doing the extracting</h2>
+    <p class="section-sub">The extract responsibility from the table above, in code: a fresh <code>context=</code> for every section, the same <code>llm=</code> throughout.</p>
+    <pre><code><span class="k">from</span> langchain_core.documents <span class="k">import</span> Document
+<span class="k">from</span> langchain_ollama <span class="k">import</span> ChatOllama
+<span class="k">from</span> taguru_langchain <span class="k">import</span> TaguruIngester
+
+extract_llm = ChatOllama(model=<span class="s">"qwen2.5:7b-instruct"</span>, temperature=<span class="nu">0</span>)
+
+section_contexts = []
+<span class="k">for</span> section <span class="k">in</span> pdf_to_sections(<span class="s">"papers/tanaka2024.pdf"</span>, <span class="s">"tanaka2024"</span>):
+    context = <span class="s">f"section/{section['paper']}/{section['n']}"</span>
+    ingester = TaguruIngester(
+        context=context,                       <span class="c"># switches every iteration</span>
+        llm=extract_llm,
+        client=client,
+        create_context=<span class="k">True</span>,
+        context_description=<span class="s">f"{section['paper']} §{section['n']} — {section['title']}"</span>,
+    )
+    doc = Document(
+        page_content=section[<span class="s">"text"</span>],
+        metadata={<span class="s">"source"</span>: <span class="s">f"{section['paper']}/{section['n']}"</span>},
+    )
+    outcome = ingester.ingest_documents([doc])[<span class="nu">0</span>]
+    print(<span class="s">f"{context}: {outcome.associations} facts, {outcome.aliases} aliases"</span>)
+    section_contexts.append(context)
+
+ensure_group(<span class="s">"paper/tanaka2024"</span>, <span class="s">"Tanaka et al. 2024, full paper"</span>, section_contexts)</code></pre>
+    <p>
+      <code>metadata["source"]</code> is the retract-then-apply idempotency unit —
+      <code>tanaka2024/3</code> here — chosen by this pipeline, not handed out by the server.
+      There is no separate "internal source ID" API to look up: whatever string goes in at
+      ingest is the same string every later read (search hits, <code>cite_passage</code>) comes
+      back with. <code>refresh_embeddings</code> defaults on, so if the semantic lane is
+      configured (<a href="#server">above</a>) each section's paragraphs are embedded right
+      after its facts land — no separate step to remember.
+    </p>
+  </section>
+
+  <section id="retrieve">
+    <h2>One retriever, both papers, named by group</h2>
+    <p class="section-sub">No super-context was ever created — the group names in <code>groups=</code> are the entire cross-paper search target.</p>
+    <pre><code><span class="k">from</span> taguru_langchain <span class="k">import</span> TaguruRetriever
+
+retriever = TaguruRetriever(
+    client=client,
+    groups=[<span class="s">"paper/tanaka2024"</span>, <span class="s">"paper/sato2023"</span>],
+    k=<span class="nu">8</span>,
+)
+
+<span class="k">for</span> doc <span class="k">in</span> retriever.invoke(<span class="s">"How does low-temperature fermentation affect ginjo aroma yield?"</span>):
+    meta = doc.metadata
+    print(<span class="s">f"  [{meta['lane']:&gt;9}] {meta['context']} — {meta['source']} ¶{meta['paragraph']}"</span>)</code></pre>
+    <p>
+      Each returned <code>Document</code>'s metadata carries <code>context</code>, <code>source</code>,
+      <code>paragraph</code>, <code>section</code>, and <code>lane</code> — which paper section
+      answered is never a guess, whether the hit came from the graph, the text lane, or both.
+      Reaching for <code>TaguruRetriever(context=...)</code> per paper in a loop instead would
+      undo the split this pipeline just built; naming both groups in one retriever is the point.
+    </p>
+  </section>
+
+  <section id="answer">
+    <h2>Search, then answer — as two separate, separately observed phases</h2>
+    <p class="section-sub">The retrieval step and the generation step are shown here as distinct calls with distinct output, on purpose, and a different local model backs each.</p>
+    <pre><code><span class="k">from</span> langchain_core.output_parsers <span class="k">import</span> StrOutputParser
+<span class="k">from</span> langchain_core.prompts <span class="k">import</span> ChatPromptTemplate
+<span class="k">from</span> langchain_core.runnables <span class="k">import</span> RunnablePassthrough
+
+answer_llm = ChatOllama(model=<span class="s">"qwen2.5:7b-instruct"</span>, temperature=<span class="nu">0</span>)
+
+<span class="c"># the API has no notion of a "citation label" — this mapping is entirely this</span>
+<span class="c"># pipeline's own, built once from whatever is human-readable for your corpus</span>
+CITATION_LABELS = {
+    <span class="s">"tanaka2024/3"</span>: <span class="s">"Tanaka et al. 2024, §3"</span>,
+    <span class="s">"sato2023/2"</span>: <span class="s">"Sato et al. 2023, §2"</span>,
+}
+
+<span class="k">def</span> format_docs(docs):
+    <span class="k">return</span> <span class="s">"\n"</span>.join(<span class="s">f"[{d.metadata['source']}] {d.page_content}"</span> <span class="k">for</span> d <span class="k">in</span> docs)
+
+PROMPT = ChatPromptTemplate.from_messages([
+    (<span class="s">"system"</span>, <span class="s">"Answer using only the context below. Cite every claim "
+     "with its bracketed source id, e.g. [tanaka2024/3].\n\n{context}"</span>),
+    (<span class="s">"human"</span>, <span class="s">"{question}"</span>),
+])
+
+chain = (
+    {<span class="s">"context"</span>: retriever | format_docs, <span class="s">"question"</span>: RunnablePassthrough()}
+    | PROMPT | answer_llm | StrOutputParser()
+)
+
+question = <span class="s">"How does low-temperature fermentation affect ginjo aroma yield?"</span>
+
+<span class="c"># phase 1 — observe what retrieval brought back, before any generation runs</span>
+<span class="k">for</span> doc <span class="k">in</span> retriever.invoke(question):
+    label = CITATION_LABELS.get(doc.metadata[<span class="s">"source"</span>], doc.metadata[<span class="s">"source"</span>])
+    print(<span class="s">f"  [{doc.metadata['lane']:&gt;9}] {label}: {doc.page_content[:60]}…"</span>)
+
+<span class="c"># phase 2 — observe the answer, generated from exactly those documents</span>
+print(chain.invoke(question))</code></pre>
+    <p>
+      A source id like <code>tanaka2024/3</code> is a machine key chosen at ingest time; a
+      citation label like <i>"Tanaka et al. 2024, §3"</i> is what a person reading the answer
+      wants to see. Taguru's API only ever deals in the former — the mapping between the two is
+      this pipeline's own <code>CITATION_LABELS</code> dict, built once from whatever front
+      matter the PDFs carry.
+    </p>
+    <p>
+      The trace back to the original PDF is one call away, and it reaches the paragraph, not
+      just the section:
+    </p>
+    <pre><code>citation = client.context(<span class="s">"section/tanaka2024/3"</span>).cite_passage(<span class="s">"tanaka2024/3"</span>, <span class="nu">0</span>)
+print(citation.text)   <span class="c"># the verbatim paragraph the answer's claim came from</span></code></pre>
+  </section>
+
+  <section id="fixed-corpus">
+    <h2>Fixed means the pipeline is offline and the app never rebuilds it</h2>
+    <p class="section-sub">Everything above this line runs once, out of band; everything below <a href="#retrieve">retrieve</a> is all a deployed app ever needs.</p>
+    <p>
+      Building the corpus is the job of the pipeline in <a href="#pdf-to-sections">PDF →
+      sections</a> through <a href="#ingest">ingest</a> — run it, walk away, and the serving code
+      in <a href="#retrieve">retrieve</a> and <a href="#answer">answer</a> never touches
+      <code>TaguruIngester</code> at all. There is deliberately no "re-index this corpus" button
+      wired into an app UI: adding a paper is re-running the offline pipeline over one more PDF,
+      not a feature the serving surface exposes. Re-running the pipeline over an
+      <b>already-ingested</b> PDF is safe by construction — each section's source id is the same
+      string every time, so <code>TaguruIngester</code>'s retract-then-apply replaces that
+      section's facts in place instead of accumulating duplicates, and <code>ensure_group</code>
+      above is a no-op the second time a paper's sections are already members.
+    </p>
+    <p>
+      For a corpus too large for one sitting — dozens of papers instead of two — the same
+      pipeline benefits from checkpointing so an interruption doesn't restart from PDF one; see
+      <a href="long-running.html">Long-running ingestion</a> for the shape (both the CLI and the
+      SDK's own <code>checkpoint_store</code>) that this walkthrough's two-paper fixture didn't
+      need.
+    </p>
+  </section>
+
+  <section id="next">
+    <div class="next-links">
+      <a class="nav-card" href="https://github.com/t0k0sh1/taguru/tree/main/examples/langchain/local_rag" style="flex:1 1 16rem">
+        <span class="nc-title">Reference example (Python)</span>
+        <p>This walkthrough as a runnable program — offline with fake models, or against real Ollama models when you point it at them.</p>
+      </a>
+      <a class="nav-card" href="modeling.html" style="flex:1 1 16rem">
+        <span class="nc-title">Context &amp; group modeling</span>
+        <p>The worked example this page's section/group mapping is drawn from, and the anti-patterns to avoid at larger scale.</p>
+      </a>
+      <a class="nav-card" href="mcp-rag-walkthrough.html" style="flex:1 1 16rem">
+        <span class="nc-title">MCP walkthrough</span>
+        <p>The same retrieval discipline from the other side: an LLM agent pulling knowledge out through Taguru MCP tools, traced call by call.</p>
+      </a>
+      <a class="nav-card" href="docker-compose.html" style="flex:1 1 16rem">
+        <span class="nc-title">Deploy with Docker Compose</span>
+        <p>The single-container model this walkthrough's server section builds on — image pinning, backups, restore.</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>

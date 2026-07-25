@@ -6,5 +6,12 @@
 -e ../../sdk/python
 -e ../../sdk/python-langchain
 
+# PDF text extraction for local_rag.
+pypdf>=5
+
 # Optional, to drive the examples with a real LLM (export OPENAI_API_KEY):
 # langchain-openai>=1.0
+
+# Optional, to drive local_rag against real local models (export
+# OLLAMA_MODEL, with the model already pulled — see `ollama list`):
+# langchain-ollama>=0.2
