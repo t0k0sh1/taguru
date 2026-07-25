@@ -130,6 +130,13 @@ npm ls langchain-taguru</code></pre>
       response's <code>serverInfo.version</code> names the server it's attached to.
     </p>
     <p>
+      <code>GET /health</code> itself doesn't carry a version today — reach for
+      <code>/metrics</code>'s <code>taguru_build_info</code> or <code>taguru version</code> above.
+      A follow-up planned in <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0002-remote-cli-access.md">ADR 0002</a>
+      adds a <code>version</code> field to <code>/health</code>'s own response, for scripts that
+      already poll it and would rather not add a second call.
+    </p>
+    <p>
       Before 1.0, a minor version bump is allowed to change a response's shape, and one already
       has: <code>POST /contexts/{name}/sources/search</code> (and the cross-context form) went
       from a bare array of hits to a <code>PassagePage</code> object, <code>{plan, hits}</code>,
