@@ -191,7 +191,9 @@ the offline producer's environment only, and local or bridged models
 (Ollama, LiteLLM in front of Bedrock) work the same way. Full
 contracts:
 [batch import](https://t0k0sh1.github.io/taguru/import.html) ·
-[document extraction](https://t0k0sh1.github.io/taguru/extract.html).
+[document extraction](https://t0k0sh1.github.io/taguru/extract.html) ·
+[long-running ingestion](https://t0k0sh1.github.io/taguru/long-running.html)
+(interrupt, checkpoint, resume).
 
 ## Configuration
 

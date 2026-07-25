@@ -34,6 +34,7 @@
       <div class="side-group-label">Reference</div>
       <a href="import.html" aria-current="page">Batch import</a>
       <a href="extract.html">Document extraction</a>
+      <a href="long-running.html">Long-running ingestion</a>
     </div>
     <div class="side-group">
       <div class="side-group-label">Deploy</div>
@@ -259,6 +260,11 @@ taguru import --config prod.env a.jsonl b.jsonl</code></pre>
       <li>A batch that stops between its four durable steps (retract &rarr; passage &rarr; associations &rarr; aliases) is <b>detected</b>, not just repairable: a per-source batch-open marker is written before the first step and removed only after the last, so the server's next boot and <code>taguru inspect</code> name any source whose import never completed. An alias step predicted to conflict is refused before this marker ever opens &mdash; canonical/alias resolution is simulated read-only against the batch's own fresh names and the context's current state &mdash; so a content-driven refusal leaves nothing to detect; the marker's presence now narrows to a capacity or disk fault reaching mid-batch. Either documented repair clears it &mdash; re-import the file, or retract the source. Cross-store atomicity is deliberately not attempted; retract-then-apply already makes the repair exact.</li>
       <li>Writes go through the same registry the server uses — staged on the WAL and fsynced, budgets enforced, one flush at the end. So <code>taguru inspect</code> and the next boot see exactly the state a live ingest would have produced. Imports count as writes in each context's usage stats.</li>
     </ul>
+    <p>
+      The operational procedure for a marker left by an interrupted bulk load — diagnosing it,
+      choosing a repair, and folding that into a resumable runner's failure handling — is in
+      <a href="long-running.html#failures">long-running ingestion</a>.
+    </p>
     <p class="note warn">
       <b>Validating everything first has a cost</b>: every parsed file stays in memory until
       apply, so the run's footprint is proportional to the <b>total</b> size of the file set

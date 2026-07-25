@@ -94,6 +94,10 @@ To force a full re-extraction ignoring whatever is cached, delete that
 source's checkpoint yourself — `await checkpointStore.delete(source)`, or
 remove the file at `await checkpointStore.pathFor(source)`.
 
+For composing this with a bounded, resumable runner (time/item windows,
+signal handling, torn-import repair), see
+[long-running ingestion](https://t0k0sh1.github.io/taguru/long-running.html).
+
 `TaguruIngester` also takes an optional `structured_output` flag (default
 `false`) that asks the chat model for JSON-schema-constrained generation —
 `llm.withStructuredOutput(MODEL_OUTPUT_JSON_SCHEMA, { includeRaw: true })`
