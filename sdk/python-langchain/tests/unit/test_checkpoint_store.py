@@ -30,7 +30,22 @@ def test_filesystem_store_round_trips_units(tmp_path: Path) -> None:
 
 
 def test_checkpoint_file_name_flattens_path_separators() -> None:
-    assert _checkpoint_file_name("docs/a:b\\c.md") == "docs__a__b__c.md.json"
+    name = _checkpoint_file_name("docs/a:b\\c.md")
+    assert name.startswith("docs__a__b__c.md-")
+    assert name.endswith(".json")
+
+
+def test_checkpoint_file_name_always_carries_a_hash_suffix() -> None:
+    # Distinct short source ids that flatten to the same string must not
+    # collide: "a/b", "a:b", and "a__b" all flatten to "a__b", so only an
+    # unconditional hash suffix keeps them apart (issue #227).
+    name_a = _checkpoint_file_name("a/b")
+    name_b = _checkpoint_file_name("a:b")
+    name_c = _checkpoint_file_name("a__b")
+    assert len({name_a, name_b, name_c}) == 3
+    for name in (name_a, name_b, name_c):
+        assert name.startswith("a__b-")
+        assert name.endswith(".json")
 
 
 def test_checkpoint_file_name_truncates_long_sources_with_a_hash_suffix() -> None:
@@ -65,7 +80,7 @@ def test_atomic_write_leaves_no_tmp_litter(tmp_path: Path) -> None:
     store = FilesystemCheckpointStore(tmp_path)
     store.save("docs/aomine.md", b"{}")
     entries = os.listdir(tmp_path)
-    assert entries == ["docs__aomine.md.json"]
+    assert entries == [_checkpoint_file_name("docs/aomine.md")]
 
 
 def test_a_failed_replace_keeps_the_old_file_and_cleans_up_staging(
@@ -82,7 +97,7 @@ def test_a_failed_replace_keeps_the_old_file_and_cleans_up_staging(
         store.save("docs/aomine.md", b"replacement")
 
     assert store.load("docs/aomine.md") == b"original"
-    assert os.listdir(tmp_path) == ["docs__aomine.md.json"]
+    assert os.listdir(tmp_path) == [_checkpoint_file_name("docs/aomine.md")]
 
 
 def test_load_never_creates_the_directory_and_save_creates_it_on_demand(tmp_path: Path) -> None:
