@@ -459,11 +459,10 @@ npm install taguru        # or: npm install langchain-taguru
 Library-level examples live in [examples/](examples/) — one directory
 per example, each with its own README. Runnable LangChain use cases
 (RAG QA with citations, governed ingestion, conversational long-term
-memory) live in [examples/langchain/](examples/langchain/); most are a
+memory) live in [examples/langchain/](examples/langchain/); each is a
 Python and a TypeScript program mirrored line for line, and
-[local_rag](examples/langchain/local_rag/) (Python only for now) builds
-a fixed, fully local RAG corpus from PDFs with Ollama — the reference
-code for the [local RAG
+[local_rag](examples/langchain/local_rag/) builds a fixed, fully local
+RAG corpus from PDFs with Ollama — the reference code for the [local RAG
 walkthrough](https://t0k0sh1.github.io/taguru/local-rag-walkthrough.html).
 
 ## License

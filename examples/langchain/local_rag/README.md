@@ -11,25 +11,29 @@ once:
  question: passthrough} | ChatPromptTemplate | chat model | string parser
 ```
 
-Python only for now — no TypeScript mirror yet (see [../README.md](../README.md)
-for why the rest of `examples/langchain/` mirrors line for line).
-
 ## Run
 
 ```sh
-cd examples/langchain
-.venv/bin/python local_rag/python/main.py
+# Python                                       # TypeScript
+cd examples/langchain                          cd examples/langchain
+.venv/bin/python local_rag/python/main.py      npm start --workspace=local_rag/typescript
 ```
 
-(Setup is in [../README.md](../README.md).) With no `TAGURU_URL` a real server is
-spawned; with no `OLLAMA_MODEL` every LLM role — extract and answer — runs on a
-deterministic fake model, so the wiring is visible without any local model
-installed. This script never runs `ollama pull`: point `OLLAMA_MODEL` at a model
-you've already pulled (`ollama list`) for the real thing, e.g.:
+(Setup for both is in [../README.md](../README.md).) With no `TAGURU_URL` a real
+server is spawned; with no `OLLAMA_MODEL` every LLM role — extract and answer —
+runs on a deterministic fake model, so the wiring is visible without any local
+model installed. Neither version ever runs `ollama pull`: point `OLLAMA_MODEL`
+at a model you've already pulled (`ollama list`) for the real thing, e.g.:
 
 ```sh
 OLLAMA_MODEL=qwen2.5:7b-instruct .venv/bin/python local_rag/python/main.py
+OLLAMA_MODEL=qwen2.5:7b-instruct npm start --workspace=local_rag/typescript
 ```
+
+The TypeScript version additionally needs `pdf-parse` for PDF text extraction
+(installed automatically with `npm install`; the Python side's equivalent is
+`pypdf`) and, for the real-model path, `@langchain/ollama` (the Python side's
+`langchain-ollama`).
 
 The embedding responsibility (the server's semantic passage lane) is
 independent of this script — it is server configuration
@@ -50,13 +54,13 @@ is <https://t0k0sh1.github.io/taguru/local-rag-walkthrough.html>.
   in full before generation ever runs, so a wrong or thin answer is
   diagnosable — did retrieval bring back the right section, or did the
   answer model use it badly?
-- `CITATION_LABELS` in `main.py` is the entire mapping between a Taguru
-  **source id** (`tanaka2024/3`, the retract-then-apply idempotency unit
-  chosen at ingest) and a human-readable **citation label** (`Tanaka et al.
-  2024, §3`) — the API only ever deals in the former.
-- The final `cite_passage` call traces the answer's claim back to the exact
-  paragraph the fake extraction says it came from — the same call works
-  identically against a PDF ingested for real.
-- Run it twice in a row: `ensure_group` and `TaguruIngester`'s
-  `create_context=True` both make the write path idempotent, so a second
-  run neither fails nor double-counts facts.
+- `CITATION_LABELS` in `main.py` / `main.ts` is the entire mapping between a
+  Taguru **source id** (`tanaka2024/3`, the retract-then-apply idempotency
+  unit chosen at ingest) and a human-readable **citation label** (`Tanaka et
+  al. 2024, §3`) — the API only ever deals in the former.
+- The final `cite_passage` / `citePassage` call traces the answer's claim
+  back to the exact paragraph the fake extraction says it came from — the
+  same call works identically against a PDF ingested for real.
+- Run it twice in a row: `ensure_group` / `ensureGroup` and
+  `TaguruIngester`'s `create_context: true` both make the write path
+  idempotent, so a second run neither fails nor double-counts facts.
