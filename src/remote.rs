@@ -72,14 +72,21 @@ impl Api {
         Ok(url.to_string())
     }
 
+    /// Attaches the bearer header when the environment holds one.
+    /// Generic over ureq's request-builder typestate so every verb —
+    /// GET without a body, POST with one — can share it.
+    fn bearer<B>(&self, request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+        match &self.token {
+            Some(token) => request.header("Authorization", format!("Bearer {token}")),
+            None => request,
+        }
+    }
+
     /// GET returning the raw body — the analysis stream is JSON
     /// Lines, not the envelope.
     pub(crate) fn get_raw(&self, segments: &[&str]) -> Result<String, String> {
         let url = self.url(segments)?;
-        let mut request = self.agent.get(&url);
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
+        let request = self.bearer(self.agent.get(&url));
         let mut response = request.call().map_err(|error| format!("{url}: {error}"))?;
         let status = response.status().as_u16();
         let text = response
@@ -88,18 +95,14 @@ impl Api {
             .map_err(|error| format!("{url}: unreadable response: {error}"))?;
         if status != 200 {
             let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            let message = parsed["error"].as_str().unwrap_or(text.trim());
-            return Err(format!("{url} answered {status}: {message}"));
+            return Err(status_error(status, &parsed, &text, &url));
         }
         Ok(text)
     }
 
     pub(crate) fn get_envelope(&self, segments: &[&str]) -> Result<Value, ApiFailure> {
         let url = self.url(segments).map_err(ApiFailure::Other)?;
-        let mut request = self.agent.get(&url);
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
+        let request = self.bearer(self.agent.get(&url));
         finish(request.call(), &url)
     }
 
@@ -109,13 +112,11 @@ impl Api {
         body: &Value,
     ) -> Result<Value, ApiFailure> {
         let url = self.url(segments).map_err(ApiFailure::Other)?;
-        let mut request = self
-            .agent
-            .post(&url)
-            .header("Content-Type", "application/json");
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
+        let request = self.bearer(
+            self.agent
+                .post(&url)
+                .header("Content-Type", "application/json"),
+        );
         finish(request.send(body.to_string().as_str()), &url)
     }
 
@@ -136,17 +137,24 @@ impl Api {
     /// One `POST /import` request carrying a pack of whole batches.
     pub(crate) fn import(&self, stream: &str) -> Result<(), String> {
         let url = self.url(&["import"])?;
-        let mut request = self
-            .agent
-            .post(&url)
-            .header("Content-Type", "application/x-ndjson");
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
+        let request = self.bearer(
+            self.agent
+                .post(&url)
+                .header("Content-Type", "application/x-ndjson"),
+        );
         finish(request.send(stream), &url)
             .map(|_| ())
             .map_err(|failure| failure.into_message())
     }
+}
+
+/// Formats a non-2xx response the way the server would want it read:
+/// its own `error` field if the body carries one, otherwise the
+/// trimmed body itself. Shared by [`finish`] and [`Api::get_raw`] so
+/// the two error surfaces can't drift apart.
+fn status_error(status: u16, parsed: &Value, text: &str, url: &str) -> String {
+    let message = parsed["error"].as_str().unwrap_or(text.trim());
+    format!("{url} answered {status}: {message}")
 }
 
 /// Unwraps one envelope response: 200 hands back `result`, 404 comes
@@ -164,15 +172,21 @@ fn finish(
         .map_err(|error| ApiFailure::Other(format!("{url}: unreadable response: {error}")))?;
     let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     if status != 200 {
-        let message = parsed["error"].as_str().unwrap_or(text.trim());
-        let message = format!("{url} answered {status}: {message}");
+        let message = status_error(status, &parsed, &text, url);
         return Err(if status == 404 {
             ApiFailure::NotFound(message)
         } else {
             ApiFailure::Other(message)
         });
     }
-    if parsed["result"].is_null() && !text.contains("\"result\"") {
+    // Keys off the parsed object itself — a substring search over the
+    // raw text would also match "result" appearing inside a nested
+    // value (e.g. `{"data":{"result":"nested"}}`), letting a
+    // non-envelope response through as an accidental `Ok(Null)`.
+    if !parsed
+        .as_object()
+        .is_some_and(|body| body.contains_key("result"))
+    {
         return Err(ApiFailure::Other(format!(
             "{url}: not a taguru response: {}",
             text.trim()
@@ -193,7 +207,13 @@ pub(crate) fn bearer_token() -> Option<String> {
             return Some(token.to_string());
         }
     }
-    let ring = std::env::var("TAGURU_API_TOKENS").ok()?;
+    token_from_ring(&std::env::var("TAGURU_API_TOKENS").ok()?)
+}
+
+/// The first `name:token` entry of a keyring that carries a token —
+/// the parsing half of [`bearer_token`], pulled out so a test can
+/// exercise it directly instead of pinning a copy of the logic.
+fn token_from_ring(ring: &str) -> Option<String> {
     ring.split(',').find_map(|entry| {
         let (_, token) = entry.trim().split_once(':')?;
         let token = token.trim();
@@ -203,16 +223,19 @@ pub(crate) fn bearer_token() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::token_from_ring;
+
     #[test]
     fn the_first_keyring_entry_serves_as_the_bearer() {
-        // bearer_token reads the environment; exercising the parsing
-        // through a thread-safe seam would mean injecting the env —
-        // the split_once discipline is pinned here instead.
-        let ring = "ci:tokA,laptop:tokB";
-        let first = ring
-            .split(',')
-            .find_map(|entry| entry.trim().split_once(':'))
-            .map(|(_, token)| token);
-        assert_eq!(first, Some("tokA"));
+        assert_eq!(
+            token_from_ring("ci:tokA,laptop:tokB"),
+            Some("tokA".to_string())
+        );
+        // an entry without a token falls through to the next one
+        assert_eq!(
+            token_from_ring("ci: ,laptop:tokB"),
+            Some("tokB".to_string())
+        );
+        assert_eq!(token_from_ring("nocolon"), None);
     }
 }
