@@ -99,6 +99,14 @@ export interface ChunkCompleted {
   questions_proposed: number;
   llm_calls: number;
   elapsed_seconds: number;
+  /**
+   * True when this chunk was satisfied from a checkpoint store instead of a
+   * fresh model call (issue #212's checkpoint/resume — the TypeScript twin
+   * of #211/#210's Rust/Python behavior for #179): `llm_calls` is 0 and no
+   * `AttemptStarted`/`AttemptFailed` events were emitted for it. False for
+   * every freshly-extracted chunk.
+   */
+  reused: boolean;
 }
 
 export interface ImportStarted {

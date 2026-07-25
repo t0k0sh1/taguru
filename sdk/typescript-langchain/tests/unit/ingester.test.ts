@@ -32,27 +32,27 @@ export const DOC_TEXT = "青嶺酒造は1907年創業。\n\n杜氏は高瀬で�
 // chunk_bytes: 40 splits DOC_TEXT into exactly its two paragraphs (one chunk
 // each) — the minimum needed to exercise cross-chunk alias validation (issue
 // #181 Stage 2), which only ever fires with more than one chunk.
-const CROSS_CHUNK_BYTES = 40;
+export const CROSS_CHUNK_BYTES = 40;
 
 // Chunk 1 (paragraph 0) introduces the concept name "1907年" as an
 // association object.
-const CHUNK1_ANSWER = JSON.stringify({
+export const CHUNK1_ANSWER = JSON.stringify({
   associations: [{ subject: "青嶺酒造", label: "創業年", object: "1907年", weight: 1.0 }],
   aliases: [],
 });
 // Chunk 2 (paragraph 1) passes Stage 1 alone (every alias field present, not
 // a self-alias) — the shadowing is only visible once chunk 1's "1907年" is
 // in the merged name set, so only Stage 2's crossOutputIssues catches it.
-const CHUNK2_SHADOWING_ANSWER = JSON.stringify({
+export const CHUNK2_SHADOWING_ANSWER = JSON.stringify({
   associations: [{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0 }],
   aliases: [{ alias: "1907年", canonical: "青嶺酒造", kind: "concept" }],
 });
-const CHUNK2_CORRECTED_ANSWER = JSON.stringify({
+export const CHUNK2_CORRECTED_ANSWER = JSON.stringify({
   associations: [{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0 }],
   aliases: [{ alias: "Sake", canonical: "青嶺酒造", kind: "concept" }],
 });
 
-const make = (server: FakeServer, responses: string[], fields: Record<string, unknown> = {}) =>
+export const make = (server: FakeServer, responses: string[], fields: Record<string, unknown> = {}) =>
   new TaguruIngester({
     context: "sake",
     llm: new FakeListChatModel({ responses }),
@@ -74,7 +74,7 @@ const make = (server: FakeServer, responses: string[], fields: Record<string, un
  * to `parsed: null` otherwise (confirmed by direct probing — a plain
  * AIMessage fails that check even though it is otherwise identical).
  */
-class ToolCallingFakeChatModel extends BaseChatModel {
+export class ToolCallingFakeChatModel extends BaseChatModel {
   toolCallArgs: Record<string, unknown>[];
   calls = 0;
 
