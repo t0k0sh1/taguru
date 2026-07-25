@@ -3584,13 +3584,21 @@ fn extract_lossy_flag_overrides_the_environment_variable() {
 // -- issue #179: durable chunk checkpoints, cooperative stop, and resume ------------------
 
 /// The on-disk path of one document's chunk checkpoint file — the
-/// flatten-then-`.json` naming scheme `extract.rs`'s private
+/// flatten-then-hash-suffix naming scheme `extract.rs`'s private
 /// `checkpoint_file_name` uses, replicated here since an integration
-/// test only ever sees the compiled binary's filesystem effects.
+/// test only ever sees the compiled binary's filesystem effects. Every
+/// source gets the 16-hex-character hash suffix unconditionally
+/// (issue #227); the >120-byte truncation of the flattened prefix
+/// isn't replicated since every source used in these tests is short.
 fn checkpoint_file_path(out: &std::path::Path, source: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
     let name = source.replace(['/', '\\', ':'], "__");
+    let hash: String = Sha256::digest(source.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     out.join(".extract-checkpoints")
-        .join(format!("{name}.json"))
+        .join(format!("{name}-{}.json", &hash[..16]))
 }
 
 /// The number of units recorded in one document's checkpoint file, or

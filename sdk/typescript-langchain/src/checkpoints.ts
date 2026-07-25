@@ -105,11 +105,11 @@ function truncateUtf8Prefix(text: string, maxBytes: number): string {
  * flattened name over 120 UTF-8 bytes also truncates to a <=96-byte prefix
  * so long source paths never blow a filesystem's name-length limit; the
  * hash suffix alone (not the truncated prefix) is what keeps two such
- * names apart. Loosely inspired by `taguru extract`'s
- * `checkpoint_file_name` (src/extract.rs), which truncates the same way
- * but — unlike this scheme — still only suffixes past the 120-byte
- * threshold and shares this same short-name collision risk (tracked
- * separately, since fixing it there is out of this port's scope).
+ * names apart. Same scheme as `taguru extract`'s `checkpoint_file_name`
+ * (src/extract.rs) and `langchain-taguru`'s `_checkpoint_file_name`
+ * (checkpoints.py), which originally only suffixed past the 120-byte
+ * threshold and shared this same short-name collision risk until issue
+ * #227 fixed all three ports to always suffix.
  */
 export async function checkpointFileName(source: string): Promise<string> {
   const flattened = flattenSource(source);

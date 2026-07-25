@@ -82,16 +82,19 @@ def _truncate_utf8_prefix(text: str, max_bytes: int) -> str:
 def _checkpoint_file_name(source: str) -> str:
     """Same flatten-then-hash-suffix scheme as ``taguru extract``'s
     ``checkpoint_file_name`` (src/extract.rs): path separators and ``:``
-    flatten to ``__`` so the checkpoint directory stays flat, and a
-    flattened name over 120 UTF-8 bytes truncates to a ≤96-byte prefix plus
-    a 16-hex-character content-hash suffix so long source paths never blow
-    a filesystem's name-length limit while staying collision-resistant."""
+    flatten to ``__`` so the checkpoint directory stays flat and the name
+    stays human-readable, then a 16-hex-character content-hash suffix is
+    ALWAYS appended — flattening alone is not injective (``"a/b"``,
+    ``"a:b"``, and ``"a__b"`` all flatten to ``"a__b"``), so without the
+    suffix, distinct short source ids could collide on the same file and
+    silently share (and overwrite) each other's checkpoint progress. A
+    flattened name over 120 UTF-8 bytes also truncates to a ≤96-byte prefix
+    so long source paths never blow a filesystem's name-length limit; the
+    hash suffix alone is what keeps such names apart."""
     name = _flatten_source(source)
-    if len(name.encode("utf-8")) > 120:
-        prefix = _truncate_utf8_prefix(name, 96)
-        suffix = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
-        name = f"{prefix}-{suffix}"
-    return f"{name}.json"
+    prefix = _truncate_utf8_prefix(name, 96) if len(name.encode("utf-8")) > 120 else name
+    suffix = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}-{suffix}.json"
 
 
 def _fsync_dir(directory: Path) -> None:

@@ -4745,20 +4745,27 @@ fn batch_file_name(source: &str) -> String {
 /// or for a document with no checkpointable units yet.
 const CHECKPOINT_DIR_NAME: &str = ".extract-checkpoints";
 
-/// Same flatten-then-hash-suffix scheme as [`batch_file_name`], `.json`
-/// instead of `.jsonl` — one checkpoint file per document, named from
-/// its source path rather than a hash of it so a `--out` directory
-/// listing stays legible.
+/// Loosely based on [`batch_file_name`]'s flatten-then-hash scheme,
+/// `.json` instead of `.jsonl` — one checkpoint file per document,
+/// named from its source path so a `--out` directory listing stays
+/// legible. Unlike `batch_file_name`, the hash suffix is ALWAYS
+/// appended, not just past the 120-byte threshold: flattening alone is
+/// not injective (`"a/b"`, `"a:b"`, and `"a__b"` all flatten to
+/// `"a__b"`), so without an unconditional suffix, distinct short
+/// source ids could collide on the same file and silently share (and
+/// overwrite) each other's checkpoint progress. A flattened name over
+/// 120 UTF-8 bytes still truncates to a <=96-byte prefix so long
+/// source paths never blow a filesystem's name-length limit, but that
+/// truncated prefix is now purely a human-readable label — the hash
+/// suffix alone is what keeps names apart.
 fn checkpoint_file_name(source: &str) -> String {
-    let mut name = source.replace(['/', '\\', ':'], "__");
-    if name.len() > 120 {
-        name = format!(
-            "{}-{}",
-            &name[..floor_char_boundary(&name, 96)],
-            &sha256_hex(source.as_bytes())[..16]
-        );
-    }
-    format!("{name}.json")
+    let flattened = source.replace(['/', '\\', ':'], "__");
+    let prefix = if flattened.len() > 120 {
+        &flattened[..floor_char_boundary(&flattened, 96)]
+    } else {
+        flattened.as_str()
+    };
+    format!("{prefix}-{}.json", &sha256_hex(source.as_bytes())[..16])
 }
 
 /// The same compatibility inputs [`ManifestEntry`]/[`Manifest::matches`]
@@ -6487,6 +6494,35 @@ mod tests {
         // Two long paths differing at the tail stay distinct.
         let other = format!("deep/{}/doc2.md", "x".repeat(300));
         assert_ne!(name, batch_file_name(&other));
+    }
+
+    #[test]
+    fn checkpoint_file_names_always_carry_a_hash_suffix() {
+        // Unlike batch_file_name, distinct short source ids that flatten to
+        // the same string must not collide: "a/b", "a:b", and "a__b" all
+        // flatten to "a__b", so only an unconditional hash suffix keeps
+        // them apart (issue #227).
+        let a = checkpoint_file_name("a/b");
+        let b = checkpoint_file_name("a:b");
+        let c = checkpoint_file_name("a__b");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+        for name in [&a, &b, &c] {
+            assert!(name.starts_with("a__b-"), "{name}");
+            assert!(name.ends_with(".json"), "{name}");
+        }
+    }
+
+    #[test]
+    fn checkpoint_file_names_truncate_long_sources_with_a_hash_suffix() {
+        let long = format!("deep/{}/doc.md", "x".repeat(300));
+        let name = checkpoint_file_name(&long);
+        assert!(name.len() <= 130, "{}", name.len());
+        assert!(name.ends_with(".json"));
+        // Two long paths differing at the tail stay distinct.
+        let other = format!("deep/{}/doc2.md", "x".repeat(300));
+        assert_ne!(name, checkpoint_file_name(&other));
     }
 
     #[test]

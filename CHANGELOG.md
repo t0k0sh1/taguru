@@ -331,6 +331,23 @@ Entries that change an on-disk format or a response shape say so.
   `TAGURU_EXTRACT_LOSSY` to keep the previous drop-and-proceed behavior
   exactly.
 
+### Fixed
+- **On-disk format change**: `taguru extract`'s and `langchain-taguru`
+  (Python)'s chunk checkpoint file names now always carry a
+  16-hex-character content-hash suffix, closing a short-source-id
+  collision (#227). The flatten step (`/`, `\`, `:` → `__`) is not
+  injective — `"a/b"`, `"a:b"`, and `"a__b"` all flattened to the same
+  string, and since none was anywhere near the old 120-byte
+  hash-suffix threshold, they collided on one checkpoint file and could
+  silently share (and overwrite) each other's checkpoint progress.
+  `langchain-taguru` (TypeScript) already suffixed unconditionally
+  (#226/#212); all three ports now agree. Every source's checkpoint
+  file name changes, not just previously-colliding ones; a
+  `.extract-checkpoints`/checkpoint-store directory from before this
+  fix is not read under the new names and degrades to a one-time cold
+  start for any in-flight interrupted document — safe, not a false
+  reuse.
+
 ## [0.4.0] - 2026-07-20
 
 ### Added
