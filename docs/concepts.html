@@ -29,6 +29,7 @@
       <div class="side-group-label">Guide</div>
       <a href="getting-started.html">Getting started</a>
       <a href="concepts.html" aria-current="page">Concepts</a>
+      <a href="modeling.html">Modeling</a>
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
@@ -140,6 +141,11 @@
       scores are corpus-local. Deep dives (<code>activate</code>, <code>explore</code>,
       <code>resolve</code>) stay per-context by design: search across, then pull the thread
       inside the context that answered.
+    </p>
+    <p class="note">
+      Worked mappings — a paper split into section contexts and chapter groups, parts as
+      sources, cross-paper search, and the pseudo-hierarchy trap — are in
+      <a href="modeling.html">Modeling</a>.
     </p>
   </section>
 
@@ -316,8 +322,12 @@
     </ul>
 
     <div class="next-links">
+      <a class="nav-card" href="modeling.html" style="flex:1 1 16rem">
+        <span class="nc-title">Next: Modeling</span>
+        <p>Mapping real documents — papers, contracts, codebases — onto these contexts and groups.</p>
+      </a>
       <a class="nav-card" href="architecture.html" style="flex:1 1 16rem">
-        <span class="nc-title">Next: Internal architecture</span>
+        <span class="nc-title">Internal architecture</span>
         <p>The implementation that carries this discipline — flat buffers, the WAL, three retrieval paths.</p>
       </a>
       <a class="nav-card" href="mcp-rag-walkthrough.html" style="flex:1 1 16rem">
