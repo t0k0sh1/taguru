@@ -160,10 +160,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <li><b>A wall of a malformed answer near the output cap can stall a chunk for minutes.</b> A small local model that runs its output budget out mid-answer produces one huge invalid response; replaying that whole response back verbatim and then asking for the same length again just reproduces the same cutoff — one chunk of a few hundred bytes measured at 4-5 minutes this way. The first-class fix is <code>--max-output-tokens</code>: with an explicit budget, a cut-off answer takes the deterministic escalation ladder (<a href="#structured-output">below</a>) instead of a shorter-please retry. Without one, <code>--fact-budget N</code> asks for fewer associations per chunk up front, the truncation-aware correction (see <a href="#prompt">below</a>) asks for a shorter answer once the provider's <code>finish_reason</code> says the prior one was cut off, and <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES=0</code> is the blunter fallback: never replay the bad answer at all.</li>
     </ul>
     <p>
-      These five are the extraction side of the same serving layer. The retrieval-side view of
-      thinking mode, context window, output caps, and streaming — plus where to separate Taguru's
-      own latency from the model's — is <a href="troubleshooting.html#local-llm">Troubleshooting —
-      the serving layer</a>.
+      These five are the extraction side of the same serving layer. The same knobs — thinking
+      mode, context window, output caps, and streaming — seen from the answering side, plus where
+      to separate Taguru's own latency from the model's, are in
+      <a href="troubleshooting.html#local-llm">Troubleshooting — the serving layer</a>.
     </p>
   </section>
 

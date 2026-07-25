@@ -76,7 +76,7 @@
     <h2>Start here: symptom → layer → diagnostic → remedy</h2>
     <p class="section-sub">
       Find the row that matches, run the one diagnostic, then follow the remedy link. Every
-      diagnostic below is read-only.
+      diagnostic in the table below is read-only.
     </p>
     <div class="tbl">
       <table>
@@ -86,7 +86,7 @@
           <tr><td>a client chokes on an unexpected <code>{plan, hits}</code> object, or can't find <code>plan</code></td><td>version skew — a 0.3.x client against a 0.4.x server</td><td>same as above</td><td><a href="#compatibility">Compatibility</a></td></tr>
           <tr><td>behavior doesn't match the docs; a documented field is just missing</td><td>a stale Docker image — <code>latest</code> was never re-pulled</td><td><code>/metrics</code> → <code>taguru_build_info{version="…"}</code></td><td><a href="#stale-image">The image you think you're running</a></td></tr>
           <tr><td>an answer takes minutes, but Taguru's own request logs show milliseconds</td><td>LLM generation, not Taguru</td><td>compare end-to-end time against the <code>latency_ms</code> log field</td><td><a href="#latency">Whose seconds are they?</a>, <a href="#local-llm">The serving layer</a></td></tr>
-          <tr><td>everything is slow, including a bare <code>curl</code> search with no LLM involved</td><td>Taguru itself, or its embedding provider</td><td><code>"http"</code> log lines, <code>TAGURU_LOG_SEARCHES=1</code></td><td><a href="#latency">Whose seconds are they?</a>, <a href="#embedding">The semantic lane</a></td></tr>
+          <tr><td>everything is slow, including a bare <code>curl</code> search with no LLM involved</td><td>Taguru itself, or its embedding provider</td><td><code>"http"</code> log lines; <code>TAGURU_LOG_SEARCHES=1</code> if needed (logs raw cue text — see caveat)</td><td><a href="#latency">Whose seconds are they?</a>, <a href="#embedding">The semantic lane</a></td></tr>
           <tr><td>search still returns results, but paraphrased queries stopped matching</td><td>the semantic lane silently degraded to lexical-only</td><td><code>plan.contexts[].lanes.vector.ran</code> on the search response</td><td><a href="#embedding">The semantic lane</a></td></tr>
           <tr><td>immediate failure: <code>embedding provider answered HTTP 404</code></td><td><code>TAGURU_EMBED_URL</code> is missing the <code>/v1/embeddings</code> path</td><td><code>curl</code> the configured URL directly</td><td><a href="#embedding">The semantic lane</a></td></tr>
           <tr><td>long silence and a busy GPU, then a timeout or an empty answer</td><td>a thinking model spending the whole budget on reasoning tokens</td><td>provider logs, the response's <code>finish_reason</code></td><td><a href="#local-llm">The serving layer</a></td></tr>
@@ -208,6 +208,12 @@ docker compose up -d</code></pre>
       naming the cue, hit count, and top score — useful for judging relevance, though it doesn't
       carry latency itself.
     </p>
+    <p class="note warn">
+      <b>Cues are the user's memory content.</b> This event log is off by default on purpose —
+      turning it on copies raw query text into your log pipeline, which is a data-handling
+      decision, not just a debug toggle. Turn it on only when you've thought about where those
+      logs land and who can read them, and turn it back off once you're done.
+    </p>
     <p>
       The procedure: time the full round trip at the client, then read <code>latency_ms</code> on
       the retrieval call inside that same window. The difference is everything downstream of
@@ -302,14 +308,21 @@ docker compose up -d</code></pre>
       happens.
     </p>
     <p>
-      Taguru already ships most of the retrieval-side half of this: <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>
+      Taguru ships the retrieval-side half of this natively: <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>
       turns every request into a span, with the embedding provider call as a child span and a
       <code>trace_id</code> in the access log (see <a href="architecture.html#observability">Internal
-      architecture — observability</a>); <code>taguru extract --diagnostics-out</code> writes
-      <code>elapsed_seconds</code>, <code>finish_reason</code>, and token counts per LLM attempt
-      as JSONL; the LangChain SDK's <code>on_event</code> callback mirrors the same fields as
-      typed events. Instrument the generation call the same way, on the application side, to get
-      the other half of the split.
+      architecture — observability</a>). Taguru has no visibility into the answering call at all —
+      it happens in your application, after retrieval has already handed back hits — so that half
+      has to be instrumented on your side.
+    </p>
+    <p>
+      For the shape to mirror, Taguru's own extraction pipeline is a working example of
+      attempt-level LLM observability, even though it's a different LLM call (building the corpus
+      offline, not answering a query): <code>taguru extract --diagnostics-out</code> writes
+      <code>elapsed_seconds</code>, <code>finish_reason</code>, and token counts per attempt as
+      JSONL, and the LangChain SDK's <code>on_event</code> callback emits the same fields as typed
+      events. That per-attempt shape — an id, <code>finish_reason</code>, token counts, elapsed
+      time — is exactly what the answering call needs too.
     </p>
     <div class="next-links">
       <a class="nav-card" href="extract.html#local-models" style="flex:1 1 16rem">
