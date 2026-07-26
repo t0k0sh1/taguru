@@ -8,6 +8,35 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- New top-level verb `taguru benchmark extract` (#256, implementing ADR
+  0003 §5/§6/§8/§9.1/§9.2/§10, depending on #262): runs `taguru extract
+  --diagnostics-out` across a matrix of models named by a `models.json`
+  file, one subprocess per (model, run) cell, every cell over the same
+  corpus under the same task settings — a `models.json` entry may
+  describe only a provider's identity and capability, never a task
+  setting, so the fairness invariant is enforced by construction. Every
+  `TAGURU_EXTRACT_*` variable is scrubbed from the child's inherited
+  environment and set explicitly per cell (including values left at
+  their defaults); each cell gets a fresh `cells/<model_id>/run<NN>/`
+  directory so `extract`'s own manifest/checkpoint skip logic can never
+  cross-skip between cells, and `--force` is never used. Writes, under
+  `--out`: `manifest.json` (run identity, resolved settings, the
+  document/chunk dictionary, per-model provider-probe facts, per-cell
+  outcomes; version range-accepted like `.ctx` images, since taguru
+  both writes and re-reads it on resume), `models.lock.json`
+  (`models.json` with defaults folded in, no secrets), and
+  `runs/<model_id>.run<NN>.jsonl` per cell (header, document start/end,
+  chunk, and attempt records — the diagnostics sidecar's own records
+  carried through unmodified plus harness identity, joined by
+  `(document_id, chunk_index)` rather than line position). Re-running
+  the same `--out` resumes: a cell already recorded `complete` or
+  `failed` is skipped outright; an `interrupted` cell is retried into
+  its own directory, where `extract`'s own `.extract-manifest.json`/
+  `.extract-checkpoints/` resume it at the document/chunk level: a
+  changed `models.json`, corpus, or task setting refuses to resume with
+  a usage error naming what drifted, rather than silently mixing two
+  matrix definitions in one directory. See `docs/benchmark.html` for
+  the full schema and `models.json`'s secrets/fairness rules.
 - `taguru extract --diagnostics-out`'s JSONL sidecar gains two record
   kinds (#262, ADR 0003 §7): one `kind: "chunk"` record per chunk,
   written before that chunk's first attempt, carrying its

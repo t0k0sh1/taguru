@@ -10,6 +10,7 @@
 mod support;
 
 mod auth;
+mod benchmark;
 mod calibrate;
 mod communities;
 mod directory;
