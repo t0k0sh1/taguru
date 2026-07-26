@@ -68,6 +68,40 @@ impl ApiFailure {
     }
 }
 
+/// One `POST /import` chunk's failure, with the three shapes `import
+/// --url` (#247) must tell apart, ADR 0002 §9: a 413 is a
+/// pre-application refusal safe to adapt to (halve and resend); a
+/// transport failure leaves which chunk landed ambiguous (§8's "connection
+/// lost after chunk N/M" message); anything else is the server's own
+/// refusal, whose envelope may carry `integrity`/`durable_batches`
+/// (issue #182) worth surfacing verbatim.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) enum ImportFailure {
+    /// 413 — refused before applying anything (src/api/import.rs:371),
+    /// which is what makes halving the chunk and resending safe.
+    TooLarge(String),
+    /// The request itself did not complete — which chunk (if any)
+    /// landed is unknown, not merely "assume it failed."
+    Transport(String),
+    /// Any other non-200: the parsed envelope rides along so the
+    /// caller can read `code`/`integrity`/`durable_batches` without a
+    /// second round trip.
+    Refused {
+        status: u16,
+        message: String,
+        body: Value,
+    },
+}
+
+impl ImportFailure {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::TooLarge(message) | Self::Transport(message) => message,
+            Self::Refused { message, .. } => message,
+        }
+    }
+}
+
 /// The one HTTP door: bearer attached when the environment holds one,
 /// 200 unwrapped to `result`, anything else an error message carrying
 /// the server's own words.
@@ -253,17 +287,68 @@ impl Api {
         Ok(names)
     }
 
-    /// One `POST /import` request carrying a pack of whole batches.
+    /// One `POST /import` request carrying a pack of whole batches —
+    /// the coarse view for callers that don't need to tell a 413 apart
+    /// from any other refusal. `import --url` (#247) uses
+    /// [`Api::import_chunk`] instead, which does.
     pub(crate) fn import(&self, stream: &str) -> Result<(), String> {
-        let url = self.url(&["import"])?;
+        self.import_chunk(stream, false)
+            .map(|_| ())
+            .map_err(ImportFailure::into_message)
+    }
+
+    /// One `POST /import` request, `?dry_run=true` appended when
+    /// `dry_run` is set — the structured view `import --url` (#247)
+    /// needs to adapt to a 413 (halve and resend, ADR 0002 §9) and to
+    /// report a mid-stream refusal's `integrity`/`durable_batches`
+    /// envelope fields, neither of which the message-only [`Api::import`]
+    /// can distinguish.
+    pub(crate) fn import_chunk(&self, stream: &str, dry_run: bool) -> Result<Value, ImportFailure> {
+        let query: &[(&str, &str)] = if dry_run { &[("dry_run", "true")] } else { &[] };
+        let url = self
+            .url_with_query(&["import"], query)
+            .map_err(ImportFailure::Transport)?;
         let request = self.bearer(
             self.agent
                 .post(&url)
                 .header("Content-Type", "application/x-ndjson"),
         );
-        finish(request.send(stream), &url)
-            .map(|_| ())
-            .map_err(|failure| failure.into_message())
+        let mut response = request
+            .send(stream)
+            .map_err(|error| ImportFailure::Transport(format!("{url}: {error}")))?;
+        let status = response.status().as_u16();
+        let retry_after = retry_after_header(&response);
+        let text = response.body_mut().read_to_string().map_err(|error| {
+            ImportFailure::Transport(format!("{url}: unreadable response: {error}"))
+        })?;
+        let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        if status == 413 {
+            return Err(ImportFailure::TooLarge(status_error(
+                status,
+                &parsed,
+                &text,
+                &url,
+                retry_after.as_deref(),
+            )));
+        }
+        if status != 200 {
+            return Err(ImportFailure::Refused {
+                status,
+                message: status_error(status, &parsed, &text, &url, retry_after.as_deref()),
+                body: parsed,
+            });
+        }
+        if !parsed
+            .as_object()
+            .is_some_and(|body| body.contains_key("result"))
+        {
+            return Err(ImportFailure::Refused {
+                status,
+                message: format!("{url}: not a taguru response: {}", text.trim()),
+                body: parsed,
+            });
+        }
+        Ok(parsed["result"].clone())
     }
 
     /// One `GET /health`, formatted as a version-skew warning. `None`
@@ -452,7 +537,7 @@ mod tests {
 
     use std::sync::{Arc, Mutex};
 
-    use super::{Api, reject_userinfo, skew_warning, token_from_ring};
+    use super::{Api, ImportFailure, reject_userinfo, skew_warning, token_from_ring};
 
     #[test]
     fn the_first_keyring_entry_serves_as_the_bearer() {
@@ -771,5 +856,99 @@ mod tests {
         );
         let api = Api::new(base);
         assert_eq!(api.version_skew_line("import"), None);
+    }
+
+    /// `import_chunk(stream, true)` appends `?dry_run=true` to the
+    /// request line — `import --url --dry-run` (#247) depends on this
+    /// to preview instead of applying.
+    #[test]
+    fn import_chunk_appends_dry_run_true_only_when_asked() {
+        let (base, requests) = respond_in_order_capturing(vec![
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"batches": []}, "status": "ok"}),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"batches": []}, "status": "ok"}),
+            ),
+        ]);
+        let api = Api::new(base);
+        api.import_chunk("{}\n", false).expect("a 200 must decode");
+        api.import_chunk("{}\n", true).expect("a 200 must decode");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(!requests[0].contains("dry_run"), "{}", requests[0]);
+        assert!(requests[1].contains("dry_run=true"), "{}", requests[1]);
+    }
+
+    /// A 413 decodes as [`ImportFailure::TooLarge`] — the one status
+    /// `import --url` treats as safe to adapt to (halve and resend,
+    /// ADR 0002 §9) rather than a refusal to stop on.
+    #[test]
+    fn import_chunk_classifies_a_413_as_too_large() {
+        let base = respond_once(
+            "HTTP/1.1 413 Payload Too Large",
+            json!({"status": "error", "code": "payload_too_large", "error": "too big"}),
+        );
+        let api = Api::new(base);
+        match api.import_chunk("{}\n", false) {
+            Err(ImportFailure::TooLarge(message)) => {
+                assert!(message.contains("too big"), "{message}")
+            }
+            _ => panic!("expected TooLarge, got a different outcome"),
+        }
+    }
+
+    /// Any other non-200 decodes as [`ImportFailure::Refused`], with
+    /// the parsed envelope riding along — `import --url`'s mid-stream
+    /// refusal report reads `integrity`/`durable_batches` straight off
+    /// this body rather than re-parsing the message text.
+    #[test]
+    fn import_chunk_carries_the_envelope_body_on_a_refusal() {
+        let base = respond_once(
+            "HTTP/1.1 404 Not Found",
+            json!({
+                "status": "error",
+                "code": "no_context",
+                "error": "no such context",
+                "integrity": "durable_prefix",
+                "durable_batches": 2,
+            }),
+        );
+        let api = Api::new(base);
+        match api.import_chunk("{}\n", false) {
+            Err(ImportFailure::Refused {
+                status,
+                message,
+                body,
+            }) => {
+                assert_eq!(status, 404);
+                assert!(message.contains("no such context"), "{message}");
+                assert_eq!(body["integrity"], "durable_prefix");
+                assert_eq!(body["durable_batches"], 2);
+            }
+            _ => panic!("expected Refused, got a different outcome"),
+        }
+    }
+
+    /// [`a_shed_response_displays_its_retry_after_header`]'s twin
+    /// through `import_chunk`: a 503 still surfaces `Retry-After` in
+    /// the displayed message, whichever [`ImportFailure`] variant that
+    /// status maps to.
+    #[test]
+    fn import_chunk_displays_retry_after_on_a_shed_response() {
+        let base = respond_once_with_headers(
+            "HTTP/1.1 503 Service Unavailable",
+            "retry-after: 3\r\n",
+            json!({"status": "error", "code": "overloaded", "error": "heavy-operation ceiling"}),
+        );
+        let api = Api::new(base);
+        let message = api
+            .import_chunk("{}\n", false)
+            .expect_err("503 must not be read as success")
+            .into_message();
+        assert!(message.contains("503"), "{message}");
+        assert!(message.contains("(Retry-After: 3)"), "{message}");
     }
 }

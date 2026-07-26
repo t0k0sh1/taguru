@@ -180,17 +180,23 @@ file replaces cleanly instead of double-counting weights.
 A **running** server takes the same contract at `POST /import` (one
 request = one batch file or stream, same validation, same
 replace-a-source semantics), so live systems bulk-load without a
-downtime window:
+downtime window. `taguru import --url URL FILE|DIR...` is the
+shortcut ([ADR 0002](adr/0002-remote-cli-access.md) §9): the input is
+split into complete batches under the server's body cap automatically
+(never mid-batch), a 413 halves the offending chunk and resends, and
+`--dry-run` previews every chunk first:
+
+```sh
+taguru import --url "$TAGURU_URL" backups/
+```
+
+`curl`/`POST /import` still works directly when a single file and
+finer control over the request are enough:
 
 ```sh
 curl -X POST localhost:8248/import -H 'Authorization: Bearer <key>' \
   --data-binary @docs-aomine.jsonl   # --data-binary: -d strips the newlines
 ```
-
-[ADR 0002](adr/0002-remote-cli-access.md) plans a `taguru import --url`
-shortcut for this same request, split into complete batches under the
-server's body cap automatically (never mid-batch) — not yet built;
-`curl`/`POST /import` is the way today.
 
 Where do batch files come from? Any pipeline that speaks the format —
 or the packaged producer: `taguru extract` reads `.md`/`.txt`

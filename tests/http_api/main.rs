@@ -29,6 +29,7 @@ mod quotas;
 mod reload;
 mod remote_compact;
 mod remote_export;
+mod remote_import;
 mod replication;
 mod resolve_match;
 mod retrieval_cache;

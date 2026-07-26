@@ -77,11 +77,18 @@
       <code>taguru import</code> applies batch files straight to the data directory — without a
       running server, and never beside one: the directory lock makes them mutually exclusive
       (an advisory flock — dependable on local disks; a network filesystem may grant it to both sides).
+      Point it at a <b>running</b> server instead with <code>--url</code>.
     </p>
     <pre><code>taguru import batch/                  <span class="c"># every *.jsonl under batch/, in name order</span>
 taguru import --dry-run batch/        <span class="c"># validate and report; touches nothing</span>
-taguru import --config prod.env a.jsonl b.jsonl</code></pre>
+taguru import --config prod.env a.jsonl b.jsonl
+taguru import --url http://127.0.0.1:8248 batch/   <span class="c"># send to a running server instead</span></code></pre>
     <p>Exit codes: <code>0</code> everything applied · <code>1</code> something was refused or failed (details on stderr) · <code>2</code> usage error.</p>
+    <p>
+      <code>--no-embed</code> is offline-only — combined with <code>--url</code> it is a usage
+      error, since the server's own <code>TAGURU_EMBED_URL</code> configuration decides once the
+      request lands there.
+    </p>
   </section>
 
   <section id="one-file-one-source">
@@ -317,8 +324,58 @@ curl -X POST localhost:8248/import \
     <p>
       Choosing the entrance: no server yet, or a huge initial load → <code>taguru import</code>
       (no per-request caps, one flush at the end). A live system that must keep answering →
-      <code>POST /import</code>.
+      <code>POST /import</code> directly, or <code>taguru import --url</code> below for a whole
+      file set at once.
     </p>
+  </section>
+
+  <section id="url">
+    <h2><code>import --url</code>: chunked over the wire</h2>
+    <p class="section-sub">
+      <code>taguru import --url URL FILE|DIR...</code> drives <code>POST /import</code> for a
+      whole file set the same way <code>taguru import</code> drives the local write path —
+      without the operator hand-splitting anything to fit under the body cap.
+    </p>
+    <pre><code>taguru import --url "$TAGURU_URL" backups/
+taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview every chunk first</span></code></pre>
+    <ul>
+      <li>
+        The input is split on <b>batch boundaries only</b>, never mid-batch: a batch runs from its
+        <code>taguru_batch</code> header line to the next <code>taguru_batch</code>/<code>taguru_group</code>
+        line or EOF, the exact rule <code>taguru route</code>'s own cross-shard import splitting
+        already uses. Whole batches are packed into each request up to a byte budget starting at
+        4&nbsp;MiB (half the 8&nbsp;MiB default <code>TAGURU_MAX_BODY_BYTES</code>, leaving headroom
+        for a server configured lower).
+      </li>
+      <li>
+        A single batch that alone exceeds the budget is a <b>hard error</b> naming the source and
+        the two real fixes: raise the server's <code>TAGURU_MAX_BODY_BYTES</code>, or reduce what
+        that source's batch carries (split the source upstream of import). Splitting a batch's own
+        record set client-side is not an option — it would reimplement the retract-then-apply
+        contract's atomicity boundary outside the server that owns it.
+      </li>
+      <li>
+        A <code>413</code> on a chunk still oversized only because the cap is configured lower than
+        assumed halves that chunk (never crossing a batch boundary) and resends — safe because the
+        server refuses a <code>413</code> before applying anything.
+      </li>
+      <li>
+        <code>taguru_group</code> records ride after every batch chunk of the run, the same order
+        the local path already applies them in, so a group naming a context an earlier chunk's
+        batch creates always arrives after it.
+      </li>
+      <li>
+        A lost connection reports which chunk landed and points at <code>--dry-run</code> to
+        confirm what remains before resuming — nothing past that point is retried automatically.
+        Import's retract-then-apply contract makes any resend exact, so this is a "where," never a
+        "was it safe," question.
+      </li>
+      <li>
+        Auth rides <code>TAGURU_API_TOKEN</code> (or the first <code>name:token</code> entry of
+        <code>TAGURU_API_TOKENS</code>), the same variables the server itself reads, and the admin
+        role <code>POST /import</code> requires.
+      </li>
+    </ul>
   </section>
 
   <section id="streams">
