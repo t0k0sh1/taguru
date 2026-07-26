@@ -8,6 +8,22 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru extract --diagnostics-out`'s JSONL sidecar gains two record
+  kinds (#262, ADR 0003 §7): one `kind: "chunk"` record per chunk,
+  written before that chunk's first attempt, carrying its
+  `chunk_sha256`/`chunk_bytes` and the `paragraph_first`/
+  `paragraph_last` range of the server's own canonical paragraph
+  numbering that chunk covers (a paragraph-index range, never a byte
+  offset — chunking runs on a relabeled document rendering, not the
+  original bytes); and one `kind: "document"` record per document
+  written, a structured counterpart to the existing human-readable
+  summary line (`associations`/`concepts`/`labels`/`questions`/
+  `duplicates`/`dropped`/`batch_path`). `AttemptRecord`'s own shape is
+  unchanged — existing consumers keep working unmodified by filtering
+  on `kind == "attempt"`, the same discriminator the sidecar already
+  required. A new `pub(crate) chunk_plan` helper computes this
+  provenance in-process, for the benchmark harness (#256) to call
+  directly without a subprocess.
 - `taguru import` gains `--url URL` (#247, implementing ADR 0002
   §6/§8/§9, depending on #243's shared `src/remote.rs` client):
   pointed at a running server instead of `TAGURU_DATA_DIR`, the input

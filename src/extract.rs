@@ -101,15 +101,20 @@ chat endpoint:
                       Default (off): an invalid item earns one targeted
                       corrective turn; if it is still invalid afterward,
                       the source fails and nothing is written.
-  --diagnostics-out FILE  write one JSONL record per LLM attempt (source,
-                      chunk, attempt, ADR 0001 §7 state, finish_reason,
-                      token usage, latency, parse/validation issues) —
-                      metadata only; TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES
-                      opts into a byte-capped raw answer per record.
-                      Truncated fresh at open: FILE describes this run,
-                      not a log appended across runs. Default (unset):
-                      no sidecar, stdout/stderr unchanged. Ignored under
-                      --dry-run, which calls nothing to record.
+  --diagnostics-out FILE  write a JSONL sidecar of tagged records (`kind`):
+                      one \"chunk\" record per chunk with its provenance
+                      (source, chunk_index/total, hash, paragraph range);
+                      one \"attempt\" record per LLM attempt (source, chunk,
+                      attempt, ADR 0001 §7 state, finish_reason, token
+                      usage, latency, parse/validation issues); one
+                      \"document\" record per document written (association/
+                      alias/duplicate/dropped counts) — metadata only;
+                      TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES opts an \"attempt\"
+                      record into a byte-capped raw answer. Truncated fresh
+                      at open: FILE describes this run, not a log appended
+                      across runs. Default (unset): no sidecar, stdout/
+                      stderr unchanged. Ignored under --dry-run, which
+                      calls nothing to record.
   --context NAME      the context every batch file targets
   --description TEXT  add a create block (used only if the context is absent)
 
@@ -1207,7 +1212,7 @@ impl Run {
         // association and question can cite an index the server
         // itself validates against.
         let canonical_paragraphs = crate::paragraph::split(&text).len();
-        let chunks = chunk(&labeled_document(&text, CHUNK_BYTES), CHUNK_BYTES);
+        let plan = chunk_plan(&text);
         if self.dry_run {
             // Read-only: a dry run still calls/writes nothing, but
             // reusable-count reporting is exactly what --dry-run is for
@@ -1216,23 +1221,23 @@ impl Run {
             // chunk that would end up split on a real run is honestly
             // reported as pending rather than guessed at.
             let checkpoints = self.load_checkpoints(source, &hash);
-            let reusable = chunks
+            let reusable = plan
                 .iter()
-                .filter(|piece| checkpoints.lookup(&sha256_hex(piece.as_bytes())).is_some())
+                .filter(|descriptor| checkpoints.lookup(&descriptor.sha256).is_some())
                 .count();
             if reusable > 0 {
                 println!(
                     "{source}: would extract ({} bytes, {} chunk(s), {reusable} reusable from \
                      checkpoint) → {}",
                     text.len(),
-                    chunks.len(),
+                    plan.len(),
                     out_path.display()
                 );
             } else {
                 println!(
                     "{source}: would extract ({} bytes, {} chunk(s)) → {}",
                     text.len(),
-                    chunks.len(),
+                    plan.len(),
                     out_path.display()
                 );
             }
@@ -1243,6 +1248,12 @@ impl Run {
         if self.stop.check() {
             return Ok(Outcome::Interrupted);
         }
+        if let Some(sink) = self.diagnostics.as_ref() {
+            for (index, descriptor) in plan.iter().enumerate() {
+                sink.emit_chunk(source, index, plan.len(), descriptor);
+            }
+        }
+        let chunks: Vec<String> = plan.into_iter().map(|descriptor| descriptor.text).collect();
         let chunk_result =
             self.extract_chunks(source, &chunks, canonical_paragraphs, &checkpoints)?;
         let mut outputs = match chunk_result {
@@ -1311,6 +1322,9 @@ impl Run {
         checkpoints.clear();
         self.vocabulary.extend(extraction.label_vocabulary());
         self.report(source, &extraction, &out_path);
+        if let Some(sink) = self.diagnostics.as_ref() {
+            sink.emit_document(source, &extraction, &out_path);
+        }
         Ok(Outcome::Written)
     }
 
@@ -1770,6 +1784,81 @@ fn labeled_document(text: &str, cap: usize) -> String {
     blocks.join("\n\n")
 }
 
+/// One chunk, with the paragraph-index provenance a diagnostics
+/// consumer needs to point back at the original document — issue
+/// #262. `text` is exactly what the model sees; `sha256` is the same
+/// value a checkpoint stores its unit under
+/// ([`CheckpointStore::lookup`]), so a caller that already has a
+/// [`ChunkDescriptor`] never re-hashes to consult the checkpoint.
+pub(crate) struct ChunkDescriptor {
+    pub(crate) text: String,
+    pub(crate) sha256: String,
+    /// Inclusive, matching [`crate::paragraph::split`]'s own
+    /// `ParagraphSpan.index` — the coordinate system the batch's
+    /// `paragraph` locator, passage store, BM25 lane, and vector lane
+    /// all already share (ADR 0003 §7). Never a byte offset: `chunk()`
+    /// works on [`labeled_document`]'s derived, relabeled rendering, so
+    /// any byte offset it could report would describe that rendering,
+    /// shifted by every `[N] ` prefix, never the original file.
+    pub(crate) paragraph_first: u32,
+    pub(crate) paragraph_last: u32,
+}
+
+/// Plans `text`'s chunks exactly as [`Run::extract_document`] will
+/// split and send them, annotated with each chunk's paragraph range
+/// and content hash (issue #262). This is a read of [`chunk`]'s and
+/// [`labeled_document`]'s own output, not a second implementation of
+/// their packing rule — the one function ADR 0003 §7 says must never
+/// be duplicated — so the chunks this returns are byte-for-byte
+/// [`Run::extract_document`]'s own.
+///
+/// Also the seam #256's benchmark harness calls in-process (same
+/// binary as `extract`) to build its manifest's document/chunk
+/// dictionary, without going through a subprocess.
+pub(crate) fn chunk_plan(text: &str) -> Vec<ChunkDescriptor> {
+    chunk_plan_with_cap(text, CHUNK_BYTES)
+}
+
+fn chunk_plan_with_cap(text: &str, cap: usize) -> Vec<ChunkDescriptor> {
+    chunk(&labeled_document(text, cap), cap)
+        .into_iter()
+        .map(|piece| {
+            // Every block in a chunk is `[N] `-labeled and no block is
+            // ever re-split by chunk() (labeled_document reserves the
+            // label's own room, so a labeled block never exceeds cap) —
+            // splitting on "\n\n" therefore always yields whole,
+            // labeled blocks, never a bare continuation.
+            let first = piece
+                .split("\n\n")
+                .next()
+                .expect("split(\"\\n\\n\") yields at least one piece");
+            let last = piece
+                .rsplit("\n\n")
+                .next()
+                .expect("rsplit(\"\\n\\n\") yields at least one piece");
+            ChunkDescriptor {
+                sha256: sha256_hex(piece.as_bytes()),
+                paragraph_first: leading_paragraph_number(first),
+                paragraph_last: leading_paragraph_number(last),
+                text: piece,
+            }
+        })
+        .collect()
+}
+
+/// Parses the `[N] ` label [`labeled_document`] prefixes onto every
+/// block. A block without one would mean `chunk()`/`labeled_document`
+/// stopped upholding the invariant [`chunk_plan_with_cap`] relies on —
+/// a taguru bug, not a condition a caller can act on, so this panics
+/// rather than fabricating provenance.
+fn leading_paragraph_number(block: &str) -> u32 {
+    block
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("] "))
+        .and_then(|(digits, _)| digits.parse().ok())
+        .expect("labeled_document prefixes every block with its [N] label")
+}
+
 /// The document's text, refused early when it could never ride as a
 /// batch passage: unreadable, over the 8 MiB passage cap, or not UTF-8.
 /// Size is checked from metadata BEFORE the read for the common case —
@@ -2118,16 +2207,20 @@ impl ChatClient {
 }
 
 /// The `--diagnostics-out`/`TAGURU_EXTRACT_DIAGNOSTICS` JSONL sidecar
-/// (issue #200, ADR 0001 §10): one line per LLM attempt, opt-in,
-/// metadata-only by default. `File::create` truncates on open — the
-/// sidecar describes THIS run, never a prior one appended to, so a
-/// skipped-everything rerun leaves it empty rather than stale
-/// (docs/extract.html says so). `Mutex`-guarded because `--parallel`
-/// dispatches chunk workers concurrently onto the same file
-/// (`crate::registry::dispatch_chunks_concurrently`); each `emit` call
-/// is one `write_all` + `flush` so a killed run keeps every completed
-/// line — no fsync, unlike `wal.rs`'s crash-durable records: this
-/// sidecar is advisory, and a document's own batch file and the
+/// (issue #200, ADR 0001 §10): a tagged stream of records — `kind`
+/// discriminates `chunk` (once per chunk, before its first attempt),
+/// `attempt` (one per LLM attempt, the original and still the only
+/// `kind` most consumers need), and `document` (once per document
+/// written) — opt-in, metadata-only by default (issue #262, ADR 0003
+/// §7). `File::create` truncates on open — the sidecar describes THIS
+/// run, never a prior one appended to, so a skipped-everything rerun
+/// leaves it empty rather than stale (docs/extract.html says so).
+/// `Mutex`-guarded because `--parallel` dispatches chunk workers
+/// concurrently onto the same file
+/// (`crate::registry::dispatch_chunks_concurrently`); each emitted
+/// record is one `write_all` + `flush` so a killed run keeps every
+/// completed line — no fsync, unlike `wal.rs`'s crash-durable records:
+/// this sidecar is advisory, and a document's own batch file and the
 /// manifest are what "written" actually means.
 struct DiagnosticsSink {
     writer: Mutex<std::io::BufWriter<fs::File>>,
@@ -2183,10 +2276,67 @@ impl DiagnosticsSink {
             requested_max_tokens: attempt.requested_max_tokens,
             response_text,
         };
-        let mut line = match serde_json::to_string(&record) {
+        self.write_record(&record);
+    }
+
+    /// One `kind: "chunk"` record, before that chunk's first attempt
+    /// (issue #262, ADR 0003 §7): `source`/`chunk_index`/`chunk_total`
+    /// identify it the same way an `attempt` record does, and
+    /// `chunk_sha256`/`paragraph_first`/`paragraph_last` are exactly
+    /// [`ChunkDescriptor`]'s own provenance fields, unmodified.
+    fn emit_chunk(
+        &self,
+        source: &str,
+        chunk_index: usize,
+        chunk_total: usize,
+        descriptor: &ChunkDescriptor,
+    ) {
+        self.write_record(&ChunkRecord {
+            kind: "chunk",
+            source: source.to_string(),
+            chunk_index,
+            chunk_total,
+            chunk_sha256: descriptor.sha256.clone(),
+            chunk_bytes: descriptor.text.len(),
+            paragraph_first: descriptor.paragraph_first,
+            paragraph_last: descriptor.paragraph_last,
+        });
+    }
+
+    /// One `kind: "document"` record, built at the same call site as
+    /// [`Run::report`] from the same `Extraction` value already in
+    /// scope there (issue #262, ADR 0003 §7) — a structured version of
+    /// what `report` only ever prints as one human-readable line.
+    /// Unlike `report`, `concepts` and `labels` are counted separately
+    /// rather than combined into one "alias(es)" figure, since both
+    /// `BTreeMap`s are already in scope at no extra cost. Written only
+    /// once a document lands successfully — a document that fails
+    /// never reaches this call site, so its absence here marks exactly
+    /// that, the same "absence marks incomplete" convention `kind:
+    /// "cell"` uses at the harness's cell scope (ADR 0003 §9.2).
+    fn emit_document(&self, source: &str, extraction: &Extraction, out_path: &Path) {
+        self.write_record(&DocumentRecord {
+            kind: "document",
+            source: source.to_string(),
+            associations: extraction.associations.len(),
+            concepts: extraction.concepts.len(),
+            labels: extraction.labels.len(),
+            questions: extraction.questions.len(),
+            duplicates: extraction.duplicates,
+            dropped: extraction.dropped,
+            batch_path: out_path.display().to_string(),
+        });
+    }
+
+    /// Serializes and appends one record, shared by [`Self::emit`],
+    /// [`Self::emit_chunk`], and [`Self::emit_document`] — the
+    /// serialize-then-append-then-warn-once mechanics are identical
+    /// across all three `kind`s; only the record shape differs.
+    fn write_record(&self, record: &impl serde::Serialize) {
+        let mut line = match serde_json::to_string(record) {
             Ok(line) => line,
-            // AttemptRecord's fields are all plain, always-serializable
-            // types — this would be a taguru bug, not a runtime
+            // Every record type here is plain, always-serializable
+            // fields — this would be a taguru bug, not a runtime
             // condition; never seen in practice, worth 0 diagnostics
             // rather than a panic mid-extraction.
             Err(_) => return,
@@ -2295,6 +2445,42 @@ struct ProviderMetadataRecord {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     total_tokens: Option<u64>,
+}
+
+/// One `kind: "chunk"` JSONL line (issue #262, ADR 0003 §7): the
+/// provenance a benchmark harness or any other `--diagnostics-out`
+/// consumer needs to point an attempt back at the original document —
+/// `paragraph_first`/`paragraph_last` are a `crate::paragraph::split`
+/// index range, never a byte offset (see [`ChunkDescriptor`]).
+/// `AttemptRecord` gains no field for this; the two stay joinable by
+/// `(source, chunk_index)`, matching the key an `attempt` record
+/// already carries.
+#[derive(serde::Serialize)]
+struct ChunkRecord {
+    kind: &'static str,
+    source: String,
+    chunk_index: usize,
+    chunk_total: usize,
+    chunk_sha256: String,
+    chunk_bytes: usize,
+    paragraph_first: u32,
+    paragraph_last: u32,
+}
+
+/// One `kind: "document"` JSONL line (issue #262, ADR 0003 §7): the
+/// structured counterpart of [`Run::report`]'s single human-readable
+/// line, written once a document lands successfully.
+#[derive(serde::Serialize)]
+struct DocumentRecord {
+    kind: &'static str,
+    source: String,
+    associations: usize,
+    concepts: usize,
+    labels: usize,
+    questions: usize,
+    duplicates: usize,
+    dropped: usize,
+    batch_path: String,
 }
 
 /// What the run's structured-output rung resolved to, reported once on
@@ -5071,6 +5257,85 @@ mod tests {
         }
     }
 
+    /// The exact serialized key sets of the two record kinds issue
+    /// #262 adds — `AttemptRecord` above stays untouched by this issue
+    /// by construction; these two are new, additive `kind`s on the same
+    /// sidecar (ADR 0003 §7).
+    #[test]
+    fn chunk_and_document_records_serialize_their_fixed_key_sets() {
+        let chunk_value: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&ChunkRecord {
+                kind: "chunk",
+                source: "doc.md".to_string(),
+                chunk_index: 0,
+                chunk_total: 2,
+                chunk_sha256: "abc123".to_string(),
+                chunk_bytes: 512,
+                paragraph_first: 0,
+                paragraph_last: 3,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut chunk_keys: Vec<&str> = chunk_value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        chunk_keys.sort_unstable();
+        assert_eq!(
+            chunk_keys,
+            vec![
+                "chunk_bytes",
+                "chunk_index",
+                "chunk_sha256",
+                "chunk_total",
+                "kind",
+                "paragraph_first",
+                "paragraph_last",
+                "source",
+            ]
+        );
+
+        let document_value: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&DocumentRecord {
+                kind: "document",
+                source: "doc.md".to_string(),
+                associations: 41,
+                concepts: 6,
+                labels: 2,
+                questions: 0,
+                duplicates: 3,
+                dropped: 0,
+                batch_path: "out/doc.md.jsonl".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut document_keys: Vec<&str> = document_value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        document_keys.sort_unstable();
+        assert_eq!(
+            document_keys,
+            vec![
+                "associations",
+                "batch_path",
+                "concepts",
+                "dropped",
+                "duplicates",
+                "kind",
+                "labels",
+                "questions",
+                "source",
+            ]
+        );
+    }
+
     #[test]
     fn model_answers_parse_through_fences_and_prose() {
         let plain =
@@ -5799,6 +6064,79 @@ mod tests {
         assert_eq!(pieces.concat(), wall);
 
         assert!(chunk("   \n\n  ", 100).is_empty());
+    }
+
+    /// `chunk_plan` is a read of [`chunk`]'s and [`labeled_document`]'s
+    /// own output (issue #262, ADR 0003 §7), never a second
+    /// implementation of their packing rule — every chunk it plans must
+    /// be byte-for-byte what those two functions already produce.
+    #[test]
+    fn chunk_plan_reproduces_chunk_and_reports_each_chunks_paragraph_range() {
+        let text = "第一段落。\n\n第二段落。\n\n第三段落。";
+
+        // Whole document as one chunk: the coordinate spans every
+        // paragraph the labeled rendering carries.
+        let whole = chunk_plan_with_cap(text, 1000);
+        assert_eq!(whole.len(), 1);
+        assert_eq!(whole[0].paragraph_first, 0);
+        assert_eq!(whole[0].paragraph_last, 2);
+        assert_eq!(whole[0].text, chunk(&labeled_document(text, 1000), 1000)[0]);
+        assert_eq!(whole[0].sha256, sha256_hex(whole[0].text.as_bytes()));
+
+        // One paragraph per chunk: each chunk names exactly its own
+        // paragraph, and the chunk text itself matches chunk() applied
+        // to the same labeled rendering.
+        let split = chunk_plan_with_cap(text, 20);
+        assert_eq!(split.len(), 3);
+        for (index, descriptor) in split.iter().enumerate() {
+            assert_eq!(descriptor.paragraph_first, index as u32);
+            assert_eq!(descriptor.paragraph_last, index as u32);
+            assert_eq!(descriptor.sha256, sha256_hex(descriptor.text.as_bytes()));
+        }
+        let expected = chunk(&labeled_document(text, 20), 20);
+        let actual: Vec<String> = split
+            .into_iter()
+            .map(|descriptor| descriptor.text)
+            .collect();
+        assert_eq!(actual, expected);
+
+        // A blank document plans no chunks.
+        assert!(chunk_plan_with_cap("   \n\n  ", 100).is_empty());
+    }
+
+    /// An oversized paragraph straddles several chunks (ADR 0003 §7)
+    /// and every one of them must repeat its true paragraph number
+    /// rather than guessing at a range — the two general properties
+    /// below hold regardless of exactly how the byte packing landed,
+    /// so this doesn't hand-simulate [`chunk`]'s arithmetic a second
+    /// time.
+    #[test]
+    fn chunk_plan_paragraph_range_never_reorders_and_repeats_across_a_straddled_chunk() {
+        let wall = "あ".repeat(60);
+        let straddled = chunk_plan_with_cap(&wall, 32);
+        assert!(straddled.len() > 1, "an oversized paragraph must split");
+        assert!(
+            straddled
+                .iter()
+                .all(|descriptor| descriptor.paragraph_first == 0
+                    && descriptor.paragraph_last == 0),
+            "every chunk of a single oversized paragraph names that one paragraph"
+        );
+
+        // A normal paragraph, an oversized one, and another normal one:
+        // whatever the middle packing did, the first chunk always opens
+        // on paragraph 0 (the very first block appended) and the last
+        // chunk always closes on paragraph 2 (the very last block
+        // appended) — true independent of the cap's exact arithmetic.
+        let mixed = format!("序文。\n\n{wall}\n\n結び。");
+        let plan = chunk_plan_with_cap(&mixed, 32);
+        assert!(plan.len() > 2);
+        assert_eq!(plan.first().unwrap().paragraph_first, 0);
+        assert_eq!(plan.last().unwrap().paragraph_last, 2);
+        // Paragraph numbers never go backwards from one chunk to the next.
+        for pair in plan.windows(2) {
+            assert!(pair[1].paragraph_first >= pair[0].paragraph_last);
+        }
     }
 
     #[test]
