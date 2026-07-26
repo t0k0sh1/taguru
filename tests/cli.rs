@@ -823,6 +823,15 @@ fn benchmark_compare_derives_measurements_from_a_results_directory() {
     assert!(measurements["documents"]["m"]["brewery"]["run01"].is_object());
     assert_no_banned_keys(&measurements);
 
+    // issue #258: the same-ness parameters every stability metric was
+    // computed under, recorded so the artifact stays re-derivable
+    // without reading benchmark::identity's source (ADR 0003 §9.4).
+    assert_eq!(measurements["matching"]["module"], "benchmark::identity");
+    assert_eq!(measurements["matching"]["case_fold"], true);
+    assert_eq!(measurements["matching"]["unicode_normalization"], "NFKC");
+    assert_eq!(measurements["matching"]["alias_expansion"], "batch-local");
+    assert!(measurements["models"]["m"]["stability.run_pair_jaccard"].is_object());
+
     let csv_text = std::fs::read_to_string(dir.join("measurements.csv")).unwrap();
     assert_eq!(
         csv_text.lines().next(),

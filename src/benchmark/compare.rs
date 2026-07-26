@@ -24,6 +24,8 @@ use serde_json::{Map, Value};
 
 use crate::config::subcommand_usage_error;
 
+use super::identity;
+
 const BENCHMARK_MEASUREMENTS_VERSION: u64 = 1;
 
 const USAGE: &str = "\
@@ -244,6 +246,11 @@ struct MeasurementsFile {
     run_id: String,
     generated_at: String,
     percentile_method: &'static str,
+    /// The same parameter block ADR 0003 §9.4 requires every
+    /// `differences.jsonl` header to carry — recorded here too so
+    /// `stability.*`'s same-ness judgments (issue #258) stay
+    /// re-derivable without reading `benchmark::identity`'s source.
+    matching: identity::Matching,
     inputs: InputsBlock,
     definitions: BTreeMap<String, MetricDef>,
     cells: BTreeMap<String, CellBlock>,
@@ -344,6 +351,10 @@ struct BatchStats {
     alias_orphans: u64,
     paragraph_out_of_range: u64,
     invalid_lines: u64,
+    /// The same association/alias lines, kept raw (issue #258) for
+    /// `stability_metrics` to key and compare across runs — a second
+    /// view of the same parse, not a second read of the batch.
+    rows: identity::BatchRows,
 }
 
 /// Classifies every line of one `cells/**` batch file into the five
@@ -353,20 +364,14 @@ struct BatchStats {
 /// trade-off from `crate::ingest::parse_batch`, which this module
 /// deliberately does not reuse (ADR 0003 §9.3).
 fn analyze_batch(text: &str, paragraph_count: usize) -> BatchStats {
-    struct AssocRow {
-        subject: String,
-        object: String,
-        label: String,
-        weight: f64,
-        paragraph: Option<u64>,
-    }
     struct AliasRow {
         canonical: String,
         kind: String,
     }
 
-    let mut assoc_rows: Vec<AssocRow> = Vec::new();
+    let mut assoc_rows: Vec<identity::RawAssociation> = Vec::new();
     let mut alias_rows: Vec<AliasRow> = Vec::new();
+    let mut identity_alias_lines: Vec<identity::AliasLine> = Vec::new();
     let mut locator_paragraphs: Vec<u64> = Vec::new();
     let mut invalid_lines: u64 = 0;
 
@@ -396,7 +401,7 @@ fn analyze_batch(text: &str, paragraph_count: usize) -> BatchStats {
             if let Some(p) = paragraph {
                 locator_paragraphs.push(p);
             }
-            assoc_rows.push(AssocRow {
+            assoc_rows.push(identity::RawAssociation {
                 subject: subject.to_string(),
                 object: object.to_string(),
                 label: label.to_string(),
@@ -408,7 +413,14 @@ fn analyze_batch(text: &str, paragraph_count: usize) -> BatchStats {
         let alias = obj.get("alias").and_then(Value::as_str);
         let canonical = obj.get("canonical").and_then(Value::as_str);
         let kind = obj.get("kind").and_then(Value::as_str);
-        if let (Some(_alias), Some(canonical), Some(kind)) = (alias, canonical, kind) {
+        if let (Some(alias), Some(canonical), Some(kind)) = (alias, canonical, kind) {
+            if let Some(parsed_kind) = identity::parse_alias_kind(kind) {
+                identity_alias_lines.push(identity::AliasLine {
+                    alias: alias.to_string(),
+                    canonical: canonical.to_string(),
+                    kind: parsed_kind,
+                });
+            }
             alias_rows.push(AliasRow {
                 canonical: canonical.to_string(),
                 kind: kind.to_string(),
@@ -462,12 +474,17 @@ fn analyze_batch(text: &str, paragraph_count: usize) -> BatchStats {
             stats.alias_orphans += 1;
         }
     }
+    stats.rows = identity::BatchRows {
+        associations: assoc_rows,
+        aliases: identity_alias_lines,
+    };
     stats
 }
 
 // ============================== Aggregation ==============================
 
 fn compute_measurements(dir: &Path) -> Result<MeasurementsFile, String> {
+    let matching = identity::Matching::default();
     let manifest = super::load_bench_manifest(&dir.join("manifest.json"))?;
     let documents_by_id: BTreeMap<&str, &super::DocumentInfo> = manifest
         .documents
@@ -744,6 +761,13 @@ fn compute_measurements(dir: &Path) -> Result<MeasurementsFile, String> {
         metrics.extend(document_pooled_metrics(docs));
         metrics.extend(attempt_rate_metrics(attempts));
         metrics.extend(document_outcome_rates(docs));
+        let runs_for_model: BTreeSet<usize> = manifest
+            .cells
+            .iter()
+            .filter(|c| &c.model_id == model_id)
+            .map(|c| c.run_index)
+            .collect();
+        metrics.extend(stability_metrics(&matching, &runs_for_model, docs));
         let cell_total = manifest
             .cells
             .iter()
@@ -785,6 +809,7 @@ fn compute_measurements(dir: &Path) -> Result<MeasurementsFile, String> {
         run_id: manifest.run_id.clone(),
         generated_at: super::iso8601_utc(super::now_unix_secs()),
         percentile_method: "nearest-rank",
+        matching,
         inputs: InputsBlock {
             runs: inputs_runs,
             cells: "cells/",
@@ -1103,6 +1128,240 @@ fn document_outcome_rates(docs: &[&DocRow]) -> MetricsMap {
         "document.failed_rate".to_string(),
         MetricValue::Ratio(ratio_metric(failed, total)),
     );
+    m
+}
+
+// ============================== Stability (issue #258) ==============================
+
+/// `stability.*`/`run.*`: how much one model's own extraction varied
+/// from run to run (issue #258, ADR 0003 §9.4). Model scope only — a
+/// cell is a single run, so a cross-run value has nothing to mean at
+/// cell scope, and `documents`' `model -> document -> run_label` shape
+/// (§9.3) has no slot for a value spanning runs. `run_indexes` comes
+/// from `manifest.cells`, not from `docs`, so a run with zero document
+/// rows still contributes a `0` sample to the `run.*` distributions
+/// rather than silently shrinking `n`.
+fn stability_metrics(
+    matching: &identity::Matching,
+    run_indexes: &BTreeSet<usize>,
+    docs: &[&DocRow],
+) -> MetricsMap {
+    let mut m = MetricsMap::new();
+
+    // ---- run.*: one sample per run ----
+    let mut associations_by_run: BTreeMap<usize, u64> =
+        run_indexes.iter().map(|&r| (r, 0)).collect();
+    let mut elapsed_by_run: BTreeMap<usize, f64> = run_indexes.iter().map(|&r| (r, 0.0)).collect();
+    let mut written_by_run: BTreeMap<usize, u64> = run_indexes.iter().map(|&r| (r, 0)).collect();
+    for doc in docs {
+        *associations_by_run.entry(doc.run_index).or_insert(0) += doc.associations.unwrap_or(0);
+        *elapsed_by_run.entry(doc.run_index).or_insert(0.0) += doc.elapsed_seconds_sum;
+        if doc.outcome.as_deref() == Some("written") {
+            *written_by_run.entry(doc.run_index).or_insert(0) += 1;
+        }
+    }
+    m.insert(
+        "run.associations_total".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(
+            associations_by_run.values().map(|&v| v as f64).collect(),
+        )),
+    );
+    m.insert(
+        "run.elapsed_seconds_total".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(
+            elapsed_by_run.values().copied().collect(),
+        )),
+    );
+    m.insert(
+        "run.documents_written".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(
+            written_by_run.values().map(|&v| v as f64).collect(),
+        )),
+    );
+
+    // ---- stability.*: cross-run same-ness, keyed by benchmark::identity ----
+    // A document counts as "completed" in a run exactly when its
+    // DocRow carries a batch (outcome=written and the batch was
+    // readable) — the same condition compute_measurements already uses
+    // to gate extraction-shape metrics, so a harness/model completion
+    // failure (tracked separately by document.written_rate) never
+    // masquerades as extraction instability here.
+    let mut presence_table = identity::PresenceTable::default();
+    let mut keys_by_run_and_doc: BTreeMap<(usize, String), BTreeSet<identity::AssocKey>> =
+        BTreeMap::new();
+    let mut completed_runs_by_doc: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    let mut alias_presence: BTreeMap<
+        (String, identity::AliasKind, String),
+        BTreeMap<usize, String>,
+    > = BTreeMap::new();
+    let mut completed_batches: u64 = 0;
+
+    for doc in docs {
+        let Some(batch) = &doc.batch else {
+            continue;
+        };
+        completed_batches += 1;
+        completed_runs_by_doc
+            .entry(doc.document_id.clone())
+            .or_default()
+            .insert(doc.run_index);
+
+        let aliases = identity::AliasMap::from_batch(matching, &batch.rows.aliases);
+        let keyed = identity::keyed_associations(
+            matching,
+            &doc.document_id,
+            &batch.rows.associations,
+            &aliases,
+        );
+        keys_by_run_and_doc.insert(
+            (doc.run_index, doc.document_id.clone()),
+            keyed.keys().cloned().collect(),
+        );
+        presence_table.insert_run(doc.run_index, keyed);
+
+        for alias_line in &batch.rows.aliases {
+            let normalized_alias = identity::normalize_term(matching, &alias_line.alias);
+            let canonical = aliases.resolve(alias_line.kind, &normalized_alias);
+            alias_presence
+                .entry((doc.document_id.clone(), alias_line.kind, normalized_alias))
+                .or_default()
+                .insert(doc.run_index, canonical);
+        }
+    }
+
+    // stability.run_pair_jaccard: every unordered run pair, restricted
+    // to documents both runs of the pair completed.
+    let run_list: Vec<usize> = run_indexes.iter().copied().collect();
+    let mut jaccard_samples: Vec<f64> = Vec::new();
+    for (i, &run_a) in run_list.iter().enumerate() {
+        for &run_b in &run_list[i + 1..] {
+            let mut keys_a: BTreeSet<identity::AssocKey> = BTreeSet::new();
+            let mut keys_b: BTreeSet<identity::AssocKey> = BTreeSet::new();
+            for (document_id, completed_in) in &completed_runs_by_doc {
+                if !completed_in.contains(&run_a) || !completed_in.contains(&run_b) {
+                    continue;
+                }
+                if let Some(set) = keys_by_run_and_doc.get(&(run_a, document_id.clone())) {
+                    keys_a.extend(set.iter().cloned());
+                }
+                if let Some(set) = keys_by_run_and_doc.get(&(run_b, document_id.clone())) {
+                    keys_b.extend(set.iter().cloned());
+                }
+            }
+            if let Some(score) = identity::jaccard(&keys_a, &keys_b) {
+                jaccard_samples.push(score);
+            }
+        }
+    }
+    m.insert(
+        "stability.run_pair_jaccard".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(jaccard_samples)),
+    );
+
+    // stability.keys_distinct
+    let keys_distinct = if completed_batches == 0 {
+        Count { value: None, n: 0 }
+    } else {
+        Count {
+            value: Some(presence_table.len() as f64),
+            n: completed_batches,
+        }
+    };
+    m.insert(
+        "stability.keys_distinct".to_string(),
+        MetricValue::Count(keys_distinct),
+    );
+
+    // stability.keys_in_all_runs_ratio / keys_in_single_run_ratio /
+    // key_presence_ratio: scoped to keys whose own document completed
+    // in 2 or more runs — a key from a document completed only once
+    // could never appear anywhere but "all runs it had", which would
+    // make every such key trivially "in all runs" and dilute the ratio
+    // with values that carry no run-to-run comparison at all.
+    let mut eligible_keys: u64 = 0;
+    let mut in_all_runs: u64 = 0;
+    let mut in_single_run: u64 = 0;
+    let mut presence_ratio_samples: Vec<f64> = Vec::new();
+    // stability.{polarity,weight,attribution}_variation_ratio: scoped
+    // to keys observed in 2 or more runs — a key seen in only one run
+    // has nothing to vary against.
+    let mut varying_keys: u64 = 0;
+    let mut polarity_variations: u64 = 0;
+    let mut weight_variations: u64 = 0;
+    let mut attribution_variations: u64 = 0;
+    for (key, presence) in presence_table.iter() {
+        let doc_completed_runs = completed_runs_by_doc
+            .get(&key.document_id)
+            .map(BTreeSet::len)
+            .unwrap_or(0);
+        let n_present = presence.n_present();
+        if doc_completed_runs >= 2 {
+            eligible_keys += 1;
+            if n_present == doc_completed_runs {
+                in_all_runs += 1;
+            }
+            if n_present == 1 {
+                in_single_run += 1;
+            }
+            presence_ratio_samples.push(n_present as f64 / doc_completed_runs as f64);
+        }
+        if n_present >= 2 {
+            varying_keys += 1;
+            if identity::polarity_varies(presence) {
+                polarity_variations += 1;
+            }
+            if identity::weight_varies(presence, matching.weight_tolerance) {
+                weight_variations += 1;
+            }
+            if identity::attribution_varies(presence) {
+                attribution_variations += 1;
+            }
+        }
+    }
+    m.insert(
+        "stability.keys_in_all_runs_ratio".to_string(),
+        MetricValue::Ratio(ratio_metric(in_all_runs, eligible_keys)),
+    );
+    m.insert(
+        "stability.keys_in_single_run_ratio".to_string(),
+        MetricValue::Ratio(ratio_metric(in_single_run, eligible_keys)),
+    );
+    m.insert(
+        "stability.key_presence_ratio".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(presence_ratio_samples)),
+    );
+    m.insert(
+        "stability.polarity_variation_ratio".to_string(),
+        MetricValue::Ratio(ratio_metric(polarity_variations, varying_keys)),
+    );
+    m.insert(
+        "stability.weight_variation_ratio".to_string(),
+        MetricValue::Ratio(ratio_metric(weight_variations, varying_keys)),
+    );
+    m.insert(
+        "stability.attribution_variation_ratio".to_string(),
+        MetricValue::Ratio(ratio_metric(attribution_variations, varying_keys)),
+    );
+
+    // stability.alias_canonical_variation_ratio: scoped to (document,
+    // kind, alias) spellings declared in 2 or more completed runs.
+    let mut alias_n: u64 = 0;
+    let mut alias_variations: u64 = 0;
+    for canonicals_by_run in alias_presence.values() {
+        if canonicals_by_run.len() < 2 {
+            continue;
+        }
+        alias_n += 1;
+        let distinct: BTreeSet<&String> = canonicals_by_run.values().collect();
+        if distinct.len() > 1 {
+            alias_variations += 1;
+        }
+    }
+    m.insert(
+        "stability.alias_canonical_variation_ratio".to_string(),
+        MetricValue::Ratio(ratio_metric(alias_variations, alias_n)),
+    );
+
     m
 }
 
@@ -1689,6 +1948,175 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
                  across documents in scope — a label reused only across different documents, \
                  never within one, is not counted as reuse here.",
             ),
+        ),
+    );
+
+    const MATCHING_SOURCE: &str = "cells/**/*.jsonl association/alias lines, keyed by \
+         benchmark::identity under measurements.json's own matching block";
+
+    d.insert(
+        "stability.run_pair_jaccard".to_string(),
+        def(
+            "ratio",
+            "distribution",
+            M_SCOPES,
+            "Association-key overlap between two of this model's runs: |intersection| / \
+             |union| of the two runs' association keys, one sample per unordered run pair.",
+            MATCHING_SOURCE,
+            Some(
+                "Restricted to documents both runs of the pair completed (outcome=written, \
+                 batch readable); a pair with no shared completed document, or whose shared \
+                 documents' key sets are both empty, contributes no sample rather than a \
+                 synthesized ratio.",
+            ),
+        ),
+    );
+    d.insert(
+        "stability.keys_distinct".to_string(),
+        def(
+            "association",
+            "count",
+            M_SCOPES,
+            "Number of distinct association keys observed across every run this model \
+             completed at least one document in.",
+            MATCHING_SOURCE,
+            Some("n is the number of completed (run, document) batches pooled, not the number of keys."),
+        ),
+    );
+    d.insert(
+        "stability.keys_in_all_runs_ratio".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            M_SCOPES,
+            "Share of association keys, among keys whose document completed in 2 or more \
+             runs, that appeared in every one of that document's completed runs.",
+            MATCHING_SOURCE,
+            Some(
+                "A key from a document completed in only one run is excluded from both the \
+                 numerator and the denominator — it has no run-to-run comparison to make.",
+            ),
+        ),
+    );
+    d.insert(
+        "stability.keys_in_single_run_ratio".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            M_SCOPES,
+            "Share of association keys, among keys whose document completed in 2 or more \
+             runs, that appeared in exactly one of that document's completed runs.",
+            MATCHING_SOURCE,
+            Some(
+                "Shares its denominator with stability.keys_in_all_runs_ratio; a key can \
+                 count toward at most one of the two numerators.",
+            ),
+        ),
+    );
+    d.insert(
+        "stability.key_presence_ratio".to_string(),
+        def(
+            "ratio",
+            "distribution",
+            M_SCOPES,
+            "For each association key whose document completed in 2 or more runs, the share \
+             of that document's completed runs the key was present in — one sample per key.",
+            MATCHING_SOURCE,
+            None,
+        ),
+    );
+    d.insert(
+        "stability.polarity_variation_ratio".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            M_SCOPES,
+            "Share of association keys observed in 2 or more runs whose weight sign (positive, \
+             negative, or exactly 0) was not the same in every observation.",
+            MATCHING_SOURCE,
+            Some(
+                "A weight of exactly 0 is its own sign category, matching \
+                 extraction.weight_positive/extraction.weight_negative's own convention.",
+            ),
+        ),
+    );
+    d.insert(
+        "stability.weight_variation_ratio".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            M_SCOPES,
+            "Share of association keys observed in 2 or more runs whose observed weights spread \
+             by more than matching.weight_tolerance.",
+            MATCHING_SOURCE,
+            Some("A spread exactly equal to weight_tolerance does not count as variation, only a strict excess does."),
+        ),
+    );
+    d.insert(
+        "stability.attribution_variation_ratio".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            M_SCOPES,
+            "Share of association keys observed in 2 or more runs whose set of paragraph \
+             locators was not identical across every observation.",
+            MATCHING_SOURCE,
+            Some(
+                "Structurally 0 for a --no-passage run, since every association line's \
+                 paragraph locator is stripped before the batch is written — the same caveat \
+                 extraction.paragraph_attributed_rate states.",
+            ),
+        ),
+    );
+    d.insert(
+        "stability.alias_canonical_variation_ratio".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            M_SCOPES,
+            "Share of (document, alias-kind, alias-spelling) triples declared in 2 or more \
+             completed runs whose resolved canonical was not the same in every declaring run.",
+            MATCHING_SOURCE,
+            Some("Alias resolution is batch-local (matching.alias_expansion): only the declaring batch's own alias lines are consulted."),
+        ),
+    );
+    d.insert(
+        "run.associations_total".to_string(),
+        def(
+            "association",
+            "distribution",
+            M_SCOPES,
+            "One run's total written associations, summed across every document in that run — \
+             one sample per run this model has a cell for.",
+            "runs/*.jsonl kind=document phase=end .associations, summed per run_index",
+            Some(
+                "A document that was not written contributes 0, not a missing sample — \
+                 document.written_rate is where an incomplete document's failure is measured.",
+            ),
+        ),
+    );
+    d.insert(
+        "run.elapsed_seconds_total".to_string(),
+        def(
+            "second",
+            "distribution",
+            M_SCOPES,
+            "One run's total attempt time, summed across every document and every attempt in \
+             that run — one sample per run this model has a cell for.",
+            "runs/*.jsonl kind=attempt .elapsed_seconds, summed per run_index",
+            None,
+        ),
+    );
+    d.insert(
+        "run.documents_written".to_string(),
+        def(
+            "document",
+            "distribution",
+            M_SCOPES,
+            "Number of documents that reached outcome=written in one run — one sample per run \
+             this model has a cell for.",
+            "runs/*.jsonl kind=document phase=end .outcome==written, counted per run_index",
+            None,
         ),
     );
 

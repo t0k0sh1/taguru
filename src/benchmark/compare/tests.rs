@@ -145,6 +145,77 @@ fn no_banned_key_appears_anywhere_in_the_artifact() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The 12 metric names issue #258 adds. Kept as an explicit list (not
+/// derived from `build_definitions`) so a rename or an accidental drop
+/// shows up as a failing assertion here rather than silently narrowing
+/// what [`stability_lexicon_test_covers_every_new_metric_name`] checks.
+const STABILITY_METRIC_NAMES: [&str; 12] = [
+    "stability.run_pair_jaccard",
+    "stability.keys_distinct",
+    "stability.keys_in_all_runs_ratio",
+    "stability.keys_in_single_run_ratio",
+    "stability.key_presence_ratio",
+    "stability.polarity_variation_ratio",
+    "stability.weight_variation_ratio",
+    "stability.attribution_variation_ratio",
+    "stability.alias_canonical_variation_ratio",
+    "run.associations_total",
+    "run.elapsed_seconds_total",
+    "run.documents_written",
+];
+
+/// ADR 0003 §9.4's stricter lexicon is stated for `differences.jsonl`
+/// (#259), but #258 sets the naming precedent #259 inherits — so its
+/// own new metric names are held to the same bar here, on top of
+/// `no_banned_key_appears_anywhere_in_the_artifact`'s §9.3 rank-word
+/// check above.
+const ADR_9_4_LEXICON: [&str; 13] = [
+    "miss",
+    "error",
+    "wrong",
+    "incorrect",
+    "fail",
+    "omit",
+    "expected",
+    "gold",
+    "truth",
+    "recall",
+    "precision",
+    "better",
+    "worse",
+];
+
+#[test]
+fn stability_lexicon_test_covers_every_new_metric_name() {
+    let dir = synthetic_multi_run_results_dir("stability-name-coverage");
+    let measurements = compute_measurements(&dir).expect("computes");
+    let model = &measurements.models["m"];
+    let mut emitted: BTreeSet<&str> = BTreeSet::new();
+    for name in model.keys() {
+        if name.starts_with("stability.") || name.starts_with("run.") {
+            emitted.insert(name.as_str());
+        }
+    }
+    let expected: BTreeSet<&str> = STABILITY_METRIC_NAMES.into_iter().collect();
+    assert_eq!(
+        emitted, expected,
+        "STABILITY_METRIC_NAMES has drifted from what compute_measurements actually emits"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn no_adr_0003_lexicon_word_appears_in_a_stability_metric_name() {
+    for name in STABILITY_METRIC_NAMES {
+        for banned in ADR_9_4_LEXICON {
+            assert!(
+                !name.to_lowercase().contains(banned),
+                "banned lexicon fragment '{banned}' found in metric name '{name}'"
+            );
+        }
+    }
+}
+
 #[test]
 fn every_emitted_metric_keys_definitions_and_units_match_csv() {
     let dir = synthetic_results_dir("definitions-coverage");
@@ -263,6 +334,65 @@ fn csv_is_an_exact_value_projection_of_the_json() {
         checked += 1;
     }
     assert!(checked > 0, "the synthetic fixture produced no CSV rows");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn csv_is_an_exact_value_projection_of_the_json_with_two_runs() {
+    // Same check as csv_is_an_exact_value_projection_of_the_json, but
+    // over synthetic_multi_run_results_dir — the fixture that actually
+    // exercises stability.run_pair_jaccard and the run.* distributions
+    // with n > 1, unlike the single-run fixture above.
+    let dir = synthetic_multi_run_results_dir("csv-projection-multi-run");
+    let measurements = compute_measurements(&dir).expect("computes");
+    let csv = render_csv(&measurements);
+
+    let mut checked = 0;
+    let mut saw_stability_metric = false;
+    for line in csv.lines().skip(1) {
+        let fields: Vec<&str> = line.split(',').collect();
+        let (scope, model_id, run_index, document_id, metric, stat, value, _unit, n) = (
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[7],
+            fields[8],
+        );
+        if metric.starts_with("stability.") || metric.starts_with("run.") {
+            saw_stability_metric = true;
+        }
+        let metric_value = match scope {
+            "cell" => {
+                let cell_id = format!("{model_id}.run{:0>2}", run_index);
+                &measurements.cells[&cell_id].metrics[metric]
+            }
+            "model" => &measurements.models[model_id][metric],
+            "document" => {
+                &measurements.documents[model_id][document_id][&format!("run{:0>2}", run_index)]
+                    [metric]
+            }
+            other => panic!("unexpected scope {other}"),
+        };
+        let (json_n, rows) = (metric_value.sample_size(), metric_csv_rows(metric_value));
+        assert_eq!(n.parse::<u64>().unwrap(), json_n);
+        let expected = rows.iter().find(|(s, _)| *s == stat).unwrap().1;
+        match expected {
+            None => assert!(
+                value.is_empty(),
+                "expected empty for {metric}/{stat}, got {value}"
+            ),
+            Some(v) => {
+                let parsed: f64 = value.parse().unwrap();
+                assert!(
+                    (parsed - v).abs() < 1e-9,
+                    "{metric}/{stat}: {parsed} != {v}"
+                );
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "the synthetic fixture produced no CSV rows");
+    assert!(
+        saw_stability_metric,
+        "the multi-run fixture must exercise at least one stability.*/run.* row"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -448,6 +578,26 @@ this is not json
         stats.invalid_lines, 2,
         "the non-JSON line and the unrecognized-shape line"
     );
+}
+
+#[test]
+fn analyze_batch_captures_raw_rows_for_identity_keying() {
+    let batch = "\
+{\"subject\":\"Alice\",\"label\":\"knows\",\"object\":\"Bob\",\"weight\":1.0,\"paragraph\":0}
+{\"alias\":\"Bob\",\"canonical\":\"bob\",\"kind\":\"concept\"}
+{\"alias\":\"x\",\"canonical\":\"y\",\"kind\":\"mystery\"}
+";
+    let stats = analyze_batch(batch, 5);
+    assert_eq!(stats.rows.associations.len(), 1);
+    assert_eq!(stats.rows.associations[0].subject, "Alice");
+    assert_eq!(stats.rows.associations[0].weight, 1.0);
+    assert_eq!(
+        stats.rows.aliases.len(),
+        1,
+        "the unrecognized 'mystery' kind is excluded from identity's alias rows"
+    );
+    assert_eq!(stats.rows.aliases[0].alias, "Bob");
+    assert_eq!(stats.rows.aliases[0].canonical, "bob");
 }
 
 #[test]
@@ -683,6 +833,373 @@ fn synthetic_results_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// Builds a two-run results directory for one model, exercising every
+/// `stability.*`/`run.*` metric (issue #258) against hand-computable
+/// expected values:
+///
+/// - `brewery` completes in both runs. Its `beer co`/`brews`/`lager`
+///   association is declared with different casing, an opposite
+///   weight sign, and a different paragraph in run02 than in run01 —
+///   the same association key (case folding merges the spellings), so
+///   it exercises polarity and attribution variation. Its
+///   `beer co`/`brews`/`ale` association is identical (case aside) in
+///   both runs — a control key that must show *no* variation. run02
+///   alone adds a `beer co`/`founded in`/`1990` association — a
+///   run-local key. The `BrewCo Group` concept alias resolves to
+///   `beer co` in run01 but to `brewer` in run02 — alias variation,
+///   independent of any association's own key.
+/// - `sake` completes only in run01 (run02's attempt times out) — its
+///   keys must be excluded from every ratio that requires 2+ completed
+///   runs for the same document, and from every run-pair Jaccard
+///   sample (no document is shared between the pair's two completed
+///   sets).
+fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
+    let dir = temp_dir(tag);
+    fs::create_dir_all(dir.join("runs")).unwrap();
+    fs::create_dir_all(dir.join("cells/m/run01")).unwrap();
+    fs::create_dir_all(dir.join("cells/m/run02")).unwrap();
+
+    fs::write(
+        dir.join("cells/m/run01/brewery.jsonl"),
+        "\
+{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/brewery.md\"}
+{\"passage\":\"text\"}
+{\"subject\":\"Beer Co\",\"label\":\"brews\",\"object\":\"Lager\",\"weight\":1.0,\"paragraph\":0}
+{\"subject\":\"Beer Co\",\"label\":\"brews\",\"object\":\"Ale\",\"weight\":1.0,\"paragraph\":0}
+{\"alias\":\"Beer Co\",\"canonical\":\"beer co\",\"kind\":\"concept\"}
+{\"alias\":\"Lager\",\"canonical\":\"lager\",\"kind\":\"concept\"}
+{\"alias\":\"Ale\",\"canonical\":\"ale\",\"kind\":\"concept\"}
+{\"alias\":\"BrewCo Group\",\"canonical\":\"beer co\",\"kind\":\"concept\"}
+",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("cells/m/run01/sake.jsonl"),
+        "\
+{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/sake.md\"}
+{\"passage\":\"text\"}
+{\"subject\":\"Sake Co\",\"label\":\"brews\",\"object\":\"Junmai\",\"weight\":1.0,\"paragraph\":0}
+{\"subject\":\"Sake Co\",\"label\":\"brews\",\"object\":\"Ginjo\",\"weight\":1.0,\"paragraph\":1}
+",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("cells/m/run02/brewery.jsonl"),
+        "\
+{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/brewery.md\"}
+{\"passage\":\"text\"}
+{\"subject\":\"BEER CO\",\"label\":\"brews\",\"object\":\"LAGER\",\"weight\":-1.0,\"paragraph\":5}
+{\"subject\":\"BEER CO\",\"label\":\"brews\",\"object\":\"ALE\",\"weight\":1.0,\"paragraph\":0}
+{\"subject\":\"Beer Co\",\"label\":\"founded in\",\"object\":\"1990\",\"weight\":1.0,\"paragraph\":2}
+{\"alias\":\"BEER CO\",\"canonical\":\"beer co\",\"kind\":\"concept\"}
+{\"alias\":\"LAGER\",\"canonical\":\"lager\",\"kind\":\"concept\"}
+{\"alias\":\"ALE\",\"canonical\":\"ale\",\"kind\":\"concept\"}
+{\"alias\":\"BrewCo Group\",\"canonical\":\"brewer\",\"kind\":\"concept\"}
+",
+    )
+    .unwrap();
+
+    fn attempt(
+        cell_id: &str,
+        run_index: usize,
+        document_id: &str,
+        document_sha256: &str,
+        elapsed_seconds: f64,
+        state: &str,
+    ) -> Value {
+        serde_json::json!({
+            "kind": "attempt", "source": format!("corpus/{document_id}.md"), "stage": "item",
+            "chunk_index": 0, "attempt": 1, "max_attempts": 2, "state": state,
+            "length_limited": false, "elapsed_seconds": elapsed_seconds,
+            "provider_metadata": if state == "stop_valid" {
+                serde_json::json!({"finish_reason": "stop", "input_tokens": 100,
+                    "output_tokens": 20, "total_tokens": 120})
+            } else {
+                Value::Null
+            },
+            "parse_error": if state == "stop_valid" { Value::Null } else { Value::String("timed out".into()) },
+            "validation_issues": null,
+            "ts": 0.0, "cell_id": cell_id, "model_id": "m", "run_index": run_index,
+            "document_id": document_id, "document_sha256": document_sha256,
+            "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
+        })
+    }
+    fn doc_start(cell_id: &str, document_id: &str, source: &str, document_sha256: &str) -> Value {
+        serde_json::json!({
+            "kind": "document", "ts": 0.0, "cell_id": cell_id,
+            "document_id": document_id, "source": source,
+            "document_sha256": document_sha256, "chunk_total": 1, "phase": "start",
+        })
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn doc_end_written(
+        cell_id: &str,
+        document_id: &str,
+        source: &str,
+        document_sha256: &str,
+        associations: u64,
+        batch_path: &str,
+    ) -> Value {
+        serde_json::json!({
+            "kind": "document", "ts": 1.0, "cell_id": cell_id,
+            "document_id": document_id, "source": source,
+            "document_sha256": document_sha256, "phase": "end", "outcome": "written",
+            "associations": associations, "concepts": 0, "labels": 0, "questions": 0,
+            "duplicates": 0, "dropped": 0, "batch_path": batch_path,
+        })
+    }
+    fn doc_end_failed(
+        cell_id: &str,
+        document_id: &str,
+        source: &str,
+        document_sha256: &str,
+    ) -> Value {
+        serde_json::json!({
+            "kind": "document", "ts": 1.0, "cell_id": cell_id,
+            "document_id": document_id, "source": source,
+            "document_sha256": document_sha256, "phase": "end", "outcome": "failed",
+            "associations": null, "concepts": null, "labels": null, "questions": null,
+            "duplicates": null, "dropped": null, "batch_path": null,
+        })
+    }
+
+    let run01_lines = [
+        serde_json::json!({
+            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-multi",
+            "cell_id": "m.run01", "model_id": "m", "model_name": "m-model",
+            "run_index": 1, "prompt_version": 1,
+        }),
+        doc_start("m.run01", "brewery", "corpus/brewery.md", "sha-brewery"),
+        attempt("m.run01", 1, "brewery", "sha-brewery", 4.0, "stop_valid"),
+        doc_end_written(
+            "m.run01",
+            "brewery",
+            "corpus/brewery.md",
+            "sha-brewery",
+            2,
+            "cells/m/run01/brewery.jsonl",
+        ),
+        doc_start("m.run01", "sake", "corpus/sake.md", "sha-sake"),
+        attempt("m.run01", 1, "sake", "sha-sake", 5.0, "stop_valid"),
+        doc_end_written(
+            "m.run01",
+            "sake",
+            "corpus/sake.md",
+            "sha-sake",
+            2,
+            "cells/m/run01/sake.jsonl",
+        ),
+        serde_json::json!({
+            "kind": "cell", "ts": 6.0, "cell_id": "m.run01", "outcome": "complete",
+            "documents_written": 2, "attempts_total": 2, "exit_code": 0,
+        }),
+    ];
+    fs::write(
+        dir.join("runs/m.run01.jsonl"),
+        run01_lines
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let run02_lines = [
+        serde_json::json!({
+            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-multi",
+            "cell_id": "m.run02", "model_id": "m", "model_name": "m-model",
+            "run_index": 2, "prompt_version": 1,
+        }),
+        doc_start("m.run02", "brewery", "corpus/brewery.md", "sha-brewery"),
+        attempt("m.run02", 2, "brewery", "sha-brewery", 6.0, "stop_valid"),
+        doc_end_written(
+            "m.run02",
+            "brewery",
+            "corpus/brewery.md",
+            "sha-brewery",
+            3,
+            "cells/m/run02/brewery.jsonl",
+        ),
+        doc_start("m.run02", "sake", "corpus/sake.md", "sha-sake"),
+        attempt("m.run02", 2, "sake", "sha-sake", 7.0, "timeout"),
+        doc_end_failed("m.run02", "sake", "corpus/sake.md", "sha-sake"),
+        serde_json::json!({
+            "kind": "cell", "ts": 8.0, "cell_id": "m.run02", "outcome": "complete",
+            "documents_written": 1, "attempts_total": 2, "exit_code": 0,
+        }),
+    ];
+    fs::write(
+        dir.join("runs/m.run02.jsonl"),
+        run02_lines
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let manifest = serde_json::json!({
+        "taguru_benchmark_manifest": 1,
+        "run_id": "run-multi",
+        "started_at": "2026-07-26T09:00:00Z",
+        "finished_at": "2026-07-26T09:10:00Z",
+        "taguru_version": "0.0.0",
+        "sdk_versions": {},
+        "harness": {},
+        "extraction_settings": {},
+        "documents": [
+            {
+                "document_id": "brewery", "path": "corpus/brewery.md", "bytes": 100,
+                "sha256": "sha-brewery", "paragraph_count": 10, "chunk_total": 1, "chunks": [],
+            },
+            {
+                "document_id": "sake", "path": "corpus/sake.md", "bytes": 50,
+                "sha256": "sha-sake", "paragraph_count": 5, "chunk_total": 1, "chunks": [],
+            },
+        ],
+        "models": [
+            {
+                "model_id": "m", "model_name": "m-model", "endpoint": "http://x",
+                "digest": null, "quantization": null, "context_window": null,
+                "structured_output_requested": "auto", "timeout_secs": 60,
+                "provider_probe": {"attempted": [], "ok": true, "note": null},
+            },
+        ],
+        "cells": [
+            {
+                "cell_id": "m.run01", "model_id": "m", "run_index": 1,
+                "runs_file": "runs/m.run01.jsonl", "cell_dir": "cells/m/run01",
+                "structured_output_resolved": "json_schema",
+                "started_at": "2026-07-26T09:00:01Z",
+                "finished_at": "2026-07-26T09:04:00Z", "outcome": "complete",
+            },
+            {
+                "cell_id": "m.run02", "model_id": "m", "run_index": 2,
+                "runs_file": "runs/m.run02.jsonl", "cell_dir": "cells/m/run02",
+                "structured_output_resolved": "json_schema",
+                "started_at": "2026-07-26T09:05:00Z",
+                "finished_at": "2026-07-26T09:09:00Z", "outcome": "complete",
+            },
+        ],
+        "environment": {"os": "linux", "arch": "x86_64"},
+    });
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    dir
+}
+
+#[test]
+fn stability_metrics_over_two_runs_match_hand_computed_values() {
+    let dir = synthetic_multi_run_results_dir("stability-multi-run");
+    let measurements = compute_measurements(&dir).expect("computes");
+    let model = &measurements.models["m"];
+
+    // stability.run_pair_jaccard: the only pair (run01, run02),
+    // restricted to `brewery` (the only document both runs completed).
+    // run01 keys = {(beer co,brews,lager), (beer co,brews,ale)};
+    // run02 keys = {(beer co,brews,lager), (beer co,brews,ale),
+    // (beer co,founded in,1990)}. |intersection|=2, |union|=3.
+    let MetricValue::Distribution(jaccard) = &model["stability.run_pair_jaccard"] else {
+        panic!()
+    };
+    assert_eq!(jaccard.n, 1);
+    assert!((jaccard.sum.unwrap() - 2.0 / 3.0).abs() < 1e-9);
+
+    // 5 distinct keys: brewery's {lager, ale, founded in/1990}, sake's
+    // {junmai, ginjo} — over 3 completed (run, document) batches
+    // (sake never completed in run02).
+    let MetricValue::Count(keys_distinct) = &model["stability.keys_distinct"] else {
+        panic!()
+    };
+    assert_eq!(keys_distinct.value, Some(5.0));
+    assert_eq!(keys_distinct.n, 3);
+
+    // Eligible keys (document completed in 2+ runs) are brewery's 3
+    // keys only — sake completed in just 1 run. lager/ale are in both
+    // runs (n_present=2 of 2); founded-in/1990 is run02-only
+    // (n_present=1 of 2).
+    let MetricValue::Ratio(in_all) = &model["stability.keys_in_all_runs_ratio"] else {
+        panic!()
+    };
+    assert_eq!(in_all.n, 3);
+    assert_eq!(in_all.numerator, Some(2));
+    let MetricValue::Ratio(in_single) = &model["stability.keys_in_single_run_ratio"] else {
+        panic!()
+    };
+    assert_eq!(in_single.n, 3);
+    assert_eq!(in_single.numerator, Some(1));
+
+    let MetricValue::Distribution(presence) = &model["stability.key_presence_ratio"] else {
+        panic!()
+    };
+    assert_eq!(presence.n, 3);
+    assert_eq!(presence.min, Some(0.5));
+    assert_eq!(presence.max, Some(1.0));
+    assert!((presence.sum.unwrap() - 2.5).abs() < 1e-9);
+
+    // Keys observed in 2+ runs: lager (polarity + weight + attribution
+    // all vary) and ale (nothing varies) — 2 keys, 1 of each variation.
+    let MetricValue::Ratio(polarity) = &model["stability.polarity_variation_ratio"] else {
+        panic!()
+    };
+    assert_eq!(polarity.n, 2);
+    assert_eq!(polarity.numerator, Some(1));
+    let MetricValue::Ratio(weight) = &model["stability.weight_variation_ratio"] else {
+        panic!()
+    };
+    assert_eq!(weight.n, 2);
+    assert_eq!(weight.numerator, Some(1));
+    let MetricValue::Ratio(attribution) = &model["stability.attribution_variation_ratio"] else {
+        panic!()
+    };
+    assert_eq!(attribution.n, 2);
+    assert_eq!(attribution.numerator, Some(1));
+
+    // 4 alias spellings declared in both runs (beer co, lager, ale,
+    // brewco group); only "BrewCo Group" resolves to a different
+    // canonical (beer co in run01, brewer in run02).
+    let MetricValue::Ratio(alias_variation) = &model["stability.alias_canonical_variation_ratio"]
+    else {
+        panic!()
+    };
+    assert_eq!(alias_variation.n, 4);
+    assert_eq!(alias_variation.numerator, Some(1));
+
+    // run.*: one sample per run (run_indexes come from manifest.cells,
+    // not from which documents happened to complete).
+    let MetricValue::Distribution(run_assoc) = &model["run.associations_total"] else {
+        panic!()
+    };
+    assert_eq!(run_assoc.n, 2);
+    assert_eq!(
+        run_assoc.min,
+        Some(3.0),
+        "run02: 3 (brewery) + 0 (sake failed)"
+    );
+    assert_eq!(run_assoc.max, Some(4.0), "run01: 2 (brewery) + 2 (sake)");
+
+    let MetricValue::Distribution(run_written) = &model["run.documents_written"] else {
+        panic!()
+    };
+    assert_eq!(run_written.min, Some(1.0), "run02: only brewery written");
+    assert_eq!(run_written.max, Some(2.0), "run01: both written");
+
+    let MetricValue::Distribution(run_elapsed) = &model["run.elapsed_seconds_total"] else {
+        panic!()
+    };
+    assert_eq!(run_elapsed.n, 2);
+    assert_eq!(run_elapsed.min, Some(9.0), "run01: 4.0 + 5.0");
+    assert_eq!(run_elapsed.max, Some(13.0), "run02: 6.0 + 7.0");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn compute_measurements_over_a_synthetic_results_directory() {
     let dir = synthetic_results_dir("smoke");
@@ -743,8 +1260,107 @@ fn compute_measurements_over_a_synthetic_results_directory() {
 }
 
 #[test]
+fn stability_metrics_with_a_single_run_are_the_defined_zero_shape() {
+    // synthetic_results_dir has exactly one run (m.run01) — every
+    // cross-run stability.* metric has nothing to compare and must
+    // emit n:0/null (ADR 0003 §9.3's defined shape), while run.* still
+    // reports its one sample.
+    let dir = synthetic_results_dir("stability-n1");
+    let measurements = compute_measurements(&dir).expect("computes");
+    let model = &measurements.models["m"];
+
+    let MetricValue::Distribution(jaccard) = &model["stability.run_pair_jaccard"] else {
+        panic!()
+    };
+    assert_eq!(jaccard.n, 0, "a single run has no pair to compare");
+
+    let MetricValue::Count(keys_distinct) = &model["stability.keys_distinct"] else {
+        panic!()
+    };
+    assert_eq!(
+        keys_distinct.value,
+        Some(2.0),
+        "brewery's 2 associations are 2 distinct keys"
+    );
+    assert_eq!(keys_distinct.n, 1, "one completed (run, document) batch");
+
+    for ratio_metric_name in [
+        "stability.keys_in_all_runs_ratio",
+        "stability.keys_in_single_run_ratio",
+        "stability.polarity_variation_ratio",
+        "stability.weight_variation_ratio",
+        "stability.attribution_variation_ratio",
+        "stability.alias_canonical_variation_ratio",
+    ] {
+        let MetricValue::Ratio(r) = &model[ratio_metric_name] else {
+            panic!("{ratio_metric_name} is not a Ratio")
+        };
+        assert_eq!(
+            r.n, 0,
+            "{ratio_metric_name}: no key has a second run to compare against"
+        );
+        assert_eq!(r.value, None);
+        assert_eq!(r.numerator, None);
+    }
+
+    let MetricValue::Distribution(presence) = &model["stability.key_presence_ratio"] else {
+        panic!()
+    };
+    assert_eq!(presence.n, 0);
+
+    let MetricValue::Distribution(run_assoc) = &model["run.associations_total"] else {
+        panic!()
+    };
+    assert_eq!(run_assoc.n, 1, "one run this model has a cell for");
+    assert_eq!(
+        run_assoc.sum,
+        Some(2.0),
+        "brewery's 2 associations; sake failed and contributes 0"
+    );
+
+    let MetricValue::Distribution(run_written) = &model["run.documents_written"] else {
+        panic!()
+    };
+    assert_eq!(run_written.sum, Some(1.0), "only brewery was written");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn compute_measurements_records_the_default_matching_block() {
+    let dir = synthetic_results_dir("matching-block");
+    let measurements = compute_measurements(&dir).expect("computes");
+    assert_eq!(measurements.matching, identity::Matching::default());
+    let value = serde_json::to_value(&measurements).unwrap();
+    assert_eq!(
+        value["matching"],
+        serde_json::json!({
+            "module": "benchmark::identity",
+            "case_fold": true,
+            "unicode_normalization": "NFKC",
+            "alias_expansion": "batch-local",
+            "weight_tolerance": 0.0,
+        }),
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn compute_measurements_is_deterministic_across_two_runs() {
     let dir = synthetic_results_dir("determinism");
+    let first = compute_measurements(&dir).expect("computes");
+    let second = compute_measurements(&dir).expect("computes");
+    assert_eq!(render_csv(&first), render_csv(&second));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stability_metrics_are_deterministic_across_two_runs() {
+    // The multi-run fixture's alias/presence bookkeeping iterates
+    // BTreeMaps throughout (issue #258) — this pins that down the same
+    // way compute_measurements_is_deterministic_across_two_runs does
+    // for the rest of the artifact.
+    let dir = synthetic_multi_run_results_dir("stability-determinism");
     let first = compute_measurements(&dir).expect("computes");
     let second = compute_measurements(&dir).expect("computes");
     assert_eq!(render_csv(&first), render_csv(&second));

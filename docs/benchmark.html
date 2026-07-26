@@ -354,6 +354,8 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
   "run_id": "...",
   "generated_at": "2026-07-26T10:05:12Z",
   "percentile_method": "nearest-rank",
+  "matching": { "module": "benchmark::identity", "case_fold": true,
+      "unicode_normalization": "NFKC", "alias_expansion": "batch-local", "weight_tolerance": 0.0 },
   "inputs": { "runs": ["runs/qwen25-7b-q4.run01.jsonl"], "cells": "cells/" },
   "definitions": { "latency.attempt_seconds": { "unit": "second", "statistic": "distribution",
       "scopes": ["cell", "model", "document"], "description": "...", "source": "...",
@@ -455,9 +457,43 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
         <tr><td><code>extraction.paragraph_attributed_rate</code></td><td>cell, model, document</td><td>Share of association lines carrying a paragraph locator.</td></tr>
         <tr><td><code>extraction.relation_reuse_ratio</code></td><td>cell, model, document</td><td>Share of association lines whose label was not that document's first use of it.</td></tr>
         <tr><td><code>extraction.alias_orphans</code>, <code>.paragraph_out_of_range</code>, <code>.batch_lines_invalid</code></td><td>cell, model, document</td><td>Batch-writer health checks: aliases with no matching canonical, locators past a document's paragraph count, and lines matching none of the batch format's known shapes.</td></tr>
+        <tr><td><code>stability.run_pair_jaccard</code></td><td>model</td><td>Association-key overlap between two of a model's own runs, one sample per unordered run pair, restricted to documents both runs completed.</td></tr>
+        <tr><td><code>stability.keys_distinct</code></td><td>model</td><td>Distinct association keys observed across every run a model completed at least one document in.</td></tr>
+        <tr><td><code>stability.keys_in_all_runs_ratio</code>, <code>.keys_in_single_run_ratio</code></td><td>model</td><td>Among keys whose document completed in 2+ runs, the share present in every one of those runs vs. in exactly one.</td></tr>
+        <tr><td><code>stability.key_presence_ratio</code></td><td>model</td><td>Per key (document completed in 2+ runs), the share of that document's completed runs the key appeared in.</td></tr>
+        <tr><td><code>stability.polarity_variation_ratio</code>, <code>.weight_variation_ratio</code>, <code>.attribution_variation_ratio</code></td><td>model</td><td>Among keys observed in 2+ runs, the share whose weight sign, weight value (past <code>matching.weight_tolerance</code>), or paragraph locator set disagreed across runs.</td></tr>
+        <tr><td><code>stability.alias_canonical_variation_ratio</code></td><td>model</td><td>Among (document, alias-kind, spelling) triples declared in 2+ completed runs, the share whose resolved canonical was not the same in every declaring run.</td></tr>
+        <tr><td><code>run.associations_total</code>, <code>.elapsed_seconds_total</code>, <code>.documents_written</code></td><td>model</td><td>One run's own totals — one sample per run a model has a cell for, including a run that completed zero documents.</td></tr>
       </tbody>
       </table>
     </div>
+    <p class="section-sub">Run-to-run stability and the <code>matching</code> block</p>
+    <p>
+      <code>stability.*</code> (issue #258) measures how much a model's own extraction varied
+      across its <code>N</code> runs — model scope only, since a cell is a single run and
+      <code>documents</code>' own <code>model → document → run_label</code> shape has no slot for
+      a value that spans runs. Two association lines count as "the same association" once
+      normalized (case folding, Unicode NFKC) and resolved through that batch's own alias
+      declarations (<code>alias_expansion: "batch-local"</code> — only the declaring batch's
+      alias lines are consulted, the same conflict-first-wins and chain-following semantics the
+      live graph's own alias resolution uses) into one <code>benchmark::identity</code>
+      <code>AssocKey</code>. This same-ness core is deliberately independent of
+      <code>crate::context</code>'s own entry normalization — it does not fold katakana to
+      hiragana, since a model's choice of script between runs is exactly the kind of variation
+      these metrics exist to observe, not something to fold away first.
+    </p>
+    <p>
+      The parameters that judgment was made under are recorded verbatim in
+      <code>measurements.json</code>'s own top-level <code>matching</code> block, shown above —
+      so the artifact stays re-derivable without reading <code>benchmark::identity</code>'s
+      source. A document only ever contributes to these metrics through a run in which it
+      <i>completed</i> (<code>outcome: "written"</code> and its batch was readable); a harness or
+      model completion failure is <code>document.written_rate</code>'s concern, not folded into
+      extraction instability here. #259's model-pair <code>differences.jsonl</code> reuses this
+      same module and records the identical <code>matching</code> block in its own header (ADR
+      0003 §9.4), so a same-ness judgment about "did two runs agree" and "did two models agree"
+      is always traceable to one parameter set.
+    </p>
     <p class="section-sub">Known limitations</p>
     <p>
       Carried forward as <code>caveat</code> strings in <code>measurements.json</code>'s own
