@@ -946,7 +946,10 @@ impl GroupRestoreOutcome {
 
 /// What one compaction accomplished — the before/after footprint and
 /// the dead weight shed, for the CLI report and the endpoint response.
-#[derive(Debug, Clone, Copy, Serialize)]
+/// `Deserialize` lets `compact --url` read this straight back out of a
+/// `POST /contexts/{name}/compact` response, so the remote path can
+/// render the exact same report line the local path does.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct CompactOutcome {
     pub bytes_before: usize,
     pub bytes_after: usize,
@@ -957,7 +960,7 @@ pub struct CompactOutcome {
 /// One context's [`CompactOutcome`] inside a
 /// [`AppState::run_maintenance_compaction`] sweep, named so the sweep's
 /// response can say which contexts it touched.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaintenanceCompactionEntry {
     pub name: String,
     #[serde(flatten)]
@@ -967,7 +970,7 @@ pub struct MaintenanceCompactionEntry {
 /// What a `POST /maintenance/compact` sweep accomplished: every context
 /// it compacted, worst dead ratio first, and whether the deadline cut
 /// the sweep short of the full candidate list.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaintenanceCompactionOutcome {
     pub contexts: Vec<MaintenanceCompactionEntry>,
     pub deadline_exceeded: bool,

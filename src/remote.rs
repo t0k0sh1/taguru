@@ -134,13 +134,20 @@ impl Api {
         let request = self.bearer(self.agent.get(&url));
         let mut response = request.call().map_err(|error| format!("{url}: {error}"))?;
         let status = response.status().as_u16();
+        let retry_after = retry_after_header(&response);
         let text = response
             .body_mut()
             .read_to_string()
             .map_err(|error| format!("{url}: unreadable response: {error}"))?;
         if status != 200 {
             let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            return Err(status_error(status, &parsed, &text, &url));
+            return Err(status_error(
+                status,
+                &parsed,
+                &text,
+                &url,
+                retry_after.as_deref(),
+            ));
         }
         Ok(text)
     }
@@ -287,8 +294,9 @@ impl Api {
     /// `/health` read, one stderr line when the server's minor version
     /// differs from this CLI's — never a blocker, since a replica
     /// mid-rollout legitimately runs a different minor than its
-    /// writer for a while. Wired in by `export --url` (#245);
-    /// `compact`/`import --url` (#246/#247) call the same method.
+    /// writer for a while. Wired in by `export --url` (#245) and
+    /// `compact --url` (#246); `import --url` (#247) calls the same
+    /// method.
     pub(crate) fn warn_on_version_skew(&self, verb: &str) {
         if let Some(line) = self.version_skew_line(verb) {
             eprintln!("{line}");
@@ -338,11 +346,36 @@ fn skew_warning(verb: &str, base: &str, cli: &str, health_body: &str) -> Option<
 
 /// Formats a non-2xx response the way the server would want it read:
 /// its own `error` field if the body carries one, otherwise the
-/// trimmed body itself. Shared by [`finish`] and [`Api::get_raw`] so
-/// the two error surfaces can't drift apart.
-fn status_error(status: u16, parsed: &Value, text: &str, url: &str) -> String {
+/// trimmed body itself, plus `Retry-After` when the response carried
+/// one — a heavy-ops or maintenance shed (503) and a rate limit (429)
+/// both set it (`src/limits.rs`). ADR 0002 §8: displayed for the
+/// operator to act on, never acted on by the client itself, so the
+/// value is shown exactly as the server sent it (delta-seconds or an
+/// HTTP-date, unparsed either way). Shared by [`finish`] and
+/// [`Api::get_raw`] so the two error surfaces can't drift apart.
+fn status_error(
+    status: u16,
+    parsed: &Value,
+    text: &str,
+    url: &str,
+    retry_after: Option<&str>,
+) -> String {
     let message = parsed["error"].as_str().unwrap_or(text.trim());
-    format!("{url} answered {status}: {message}")
+    match retry_after {
+        Some(value) => format!("{url} answered {status}: {message} (Retry-After: {value})"),
+        None => format!("{url} answered {status}: {message}"),
+    }
+}
+
+/// The `Retry-After` header's raw value, when the response carried
+/// one — read before the body so a caller free to consume the body
+/// afterward without losing it.
+fn retry_after_header(response: &ureq::http::Response<ureq::Body>) -> Option<String> {
+    response
+        .headers()
+        .get(ureq::http::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 /// Unwraps one envelope response: 200 hands back `result`, 404 comes
@@ -354,13 +387,14 @@ fn finish(
 ) -> Result<Value, ApiFailure> {
     let mut response = response.map_err(|error| ApiFailure::Other(format!("{url}: {error}")))?;
     let status = response.status().as_u16();
+    let retry_after = retry_after_header(&response);
     let text = response
         .body_mut()
         .read_to_string()
         .map_err(|error| ApiFailure::Other(format!("{url}: unreadable response: {error}")))?;
     let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     if status != 200 {
-        let message = status_error(status, &parsed, &text, url);
+        let message = status_error(status, &parsed, &text, url, retry_after.as_deref());
         return Err(if status == 404 {
             ApiFailure::NotFound(message)
         } else {
@@ -517,6 +551,34 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// [`respond_once`], with extra header lines spliced into the
+    /// response — the only way to exercise a `Retry-After` reading
+    /// without a real taguru server in front of the client.
+    fn respond_once_with_headers(
+        status_line: &str,
+        extra_headers: &str,
+        body: serde_json::Value,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let status_line = status_line.to_string();
+        let extra_headers = extra_headers.to_string();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer); // discard the request itself
+            let body = body.to_string();
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra_headers}\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        format!("http://{addr}")
+    }
+
     /// A scripted multi-response HTTP stub — bind, accept one
     /// connection per entry in order, answer each with its own fixed
     /// status and JSON body, close, then move to the next. Lets a test
@@ -649,6 +711,34 @@ mod tests {
             .expect("0.1.0 differs from this build's own version");
         assert!(line.contains("0.1.0"), "{line}");
         assert!(line.contains(&base), "{line}");
+    }
+
+    #[test]
+    fn a_shed_response_displays_its_retry_after_header() {
+        let base = respond_once_with_headers(
+            "HTTP/1.1 503 Service Unavailable",
+            "retry-after: 1\r\n",
+            json!({"status": "error", "code": "overloaded", "error": "server is at its heavy-operation ceiling"}),
+        );
+        let api = Api::new(base);
+        let error = api
+            .get_raw(&["contexts", "sake", "export"])
+            .expect_err("503 must not be read as success");
+        assert!(error.contains("503"), "{error}");
+        assert!(error.contains("(Retry-After: 1)"), "{error}");
+    }
+
+    #[test]
+    fn a_response_without_the_header_carries_no_retry_after_suffix() {
+        let base = respond_once(
+            "HTTP/1.1 404 Not Found",
+            json!({"status": "error", "code": "no_context", "error": "no such context"}),
+        );
+        let api = Api::new(base);
+        let error = api
+            .get_raw(&["contexts", "nope", "export"])
+            .expect_err("404 must not be read as success");
+        assert!(!error.contains("Retry-After"), "{error}");
     }
 
     #[test]
