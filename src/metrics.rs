@@ -2042,15 +2042,18 @@ pub async fn live() -> &'static str {
     "ok"
 }
 
-/// GET /health: 200 "ok" while the write path is healthy, 503 in the
-/// ApiError shape when the most recent image flush failed — or the
-/// flusher tick that would have flushed it panicked instead of running.
-/// The check is the flusher's own outcome, so an orchestrator's probe
-/// turns red within one flush interval of the disk going bad — and
-/// green again one interval after it recovers. (An idle server with
-/// nothing dirty reports its last known state.) The readiness signal:
-/// stop routing traffic while the disk is bad, resume when it heals —
-/// liveness lives at `/live`.
+/// GET /health: 200 `{"status": "ok", "version": "<CARGO_PKG_VERSION>"}`
+/// while the write path is healthy, 503 in the ApiError shape when the
+/// most recent image flush failed — or the flusher tick that would
+/// have flushed it panicked instead of running. The check is the
+/// flusher's own outcome, so an orchestrator's probe turns red within
+/// one flush interval of the disk going bad — and green again one
+/// interval after it recovers. (An idle server with nothing dirty
+/// reports its last known state.) The readiness signal: stop routing
+/// traffic while the disk is bad, resume when it heals — liveness
+/// lives at `/live`. The `version` field lets a remote CLI (ADR 0002
+/// §10) detect a minor-version skew from the one request it already
+/// sends.
 pub async fn health(State(state): State<AppState>) -> Response {
     if state.metrics().maintenance_active() {
         return crate::api::error(
@@ -2062,7 +2065,11 @@ pub async fn health(State(state): State<AppState>) -> Response {
         );
     }
     if state.metrics().flush_is_healthy() {
-        return "ok".into_response();
+        return axum::Json(serde_json::json!({
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
+        }))
+        .into_response();
     }
     let reason = if state.metrics().flusher_panicked() {
         "the flusher task panicked on its last tick — this is a bug, not a disk \
@@ -2632,6 +2639,30 @@ mod tests {
         assert!(!metrics.maintenance_active());
 
         assert!(metrics.try_enter_maintenance(), "reopened after exit");
+    }
+
+    /// The healthy body names this build's own version (ADR 0002 §10)
+    /// so a remote CLI can read it off the one request it already
+    /// sends, instead of the bare `"ok"` text an older server answers.
+    #[tokio::test]
+    async fn health_names_its_own_version_when_healthy() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-metrics-health-version-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = crate::registry::AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        let response = health(State(state.clone())).await;
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The readiness probe treats a maintenance sweep as a deliberate

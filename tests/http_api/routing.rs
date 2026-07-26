@@ -567,3 +567,19 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
+
+/// The router answers its own `/health` locally rather than proxying
+/// to a shard (ADR 0002 §10) — its `version` names the router binary
+/// itself, beside the existing `router`/`shards` fields.
+#[test]
+fn the_router_health_names_its_own_version() {
+    let shard = Server::start("router-health-shard");
+    let router = Server::start_router("router-health", &format!("sake = {}\n", shard.base), &[]);
+
+    let (status, body) = router.call("GET", "/health", None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["status"], json!("ok"), "{body}");
+    assert_eq!(body["router"], json!(true), "{body}");
+    assert_eq!(body["shards"], json!(1), "{body}");
+    assert_eq!(body["version"], json!(env!("CARGO_PKG_VERSION")), "{body}");
+}

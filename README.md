@@ -355,8 +355,15 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   to the new shard. Delete before re-import — a leftover copy keeps
   answering the old shard's slice of every group fan-out.
 - **Health and metrics.** `GET /health` is readiness (503 while the
-  write path is degraded — route away, don't restart), `GET /live` is
-  liveness, `GET /metrics` is Prometheus text.
+  write path is degraded — route away, don't restart) and its `200`
+  body names the server's own version (`{"status": "ok", "version":
+  "…"}`). `taguru route`'s own `/health` always answers `200` with
+  `router`/`shards`/`version` beside `status` — it reports the
+  router's own state, not shard readiness, since the router has no
+  degraded write path of its own to report; a load balancer wanting
+  shard readiness must probe each shard's `/health` directly, not the
+  router's. `GET /live` is liveness, `GET /metrics` is Prometheus
+  text.
   `TAGURU_METRICS_PER_CONTEXT=all` (or top-`N` by disk size) adds
   per-context capacity gauges — disk bytes by file family, resident
   bytes, pinned, counts — measured at flush time, never by the scrape.

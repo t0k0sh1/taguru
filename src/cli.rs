@@ -50,7 +50,9 @@ USAGE:
                                         No data directory, no state — scale
                                         routers freely behind one LB. Auth is
                                         pass-through: the shards enforce keys
-  taguru version                        print the version
+  taguru version                        print this binary's version; a running
+                                        server reports its own version in its
+                                        GET /health response body
   taguru health [--config FILE] [URL]   exit 0 iff a running server's /health
                                         answers 200 — the container
                                         HEALTHCHECK; URL defaults to TAGURU_ADDR
