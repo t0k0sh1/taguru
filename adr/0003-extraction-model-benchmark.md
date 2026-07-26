@@ -334,18 +334,31 @@ whatever the parent process itself inherited, with no precedence rule to
 reason about — the parent builds one settings map, passes it to the
 child, and serializes the same map into `manifest.json`.
 
-**Hermetic scrub.** `Command::env_clear()` is too blunt — it would also
-remove `PATH`, `HOME`, and proxy variables a real endpoint may need. The
-rule is deny-by-default over the `TAGURU_EXTRACT_*` namespace: start from
-the parent's environment; `env_remove` every `TAGURU_EXTRACT_*` key
-listed in `KNOWN_KEYS` (src/config.rs:51-\*, the file's own typo-lint
-list — reused here as the enumeration of what `extract` reads); then
-`env` the cell's resolved values explicitly, including ones left at their
-defaults. A stray `TAGURU_EXTRACT_LOSSY=1` in the operator's shell cannot
-silently make one cell unfair, and no key's value is "whatever happened
-to be inherited." Non-`TAGURU_EXTRACT_*` variables pass through
-unscrubbed; `manifest.json` names the pass-through set (not its values)
-so a reader can see what was left uncontrolled.
+**`TAGURU_EXTRACT_*` scrub — scoped fairness, not full-environment
+reproducibility.** `Command::env_clear()` is too blunt — it would also
+remove `PATH`, `HOME`, and proxy variables a real endpoint may need, and
+building a general-purpose allowlist for those is a materially larger
+undertaking §255 did not ask this ADR to take on. The rule instead is
+deny-by-default over exactly the namespace §2.1 showed `taguru extract`
+itself reads: start from the parent's environment; `env_remove` every
+`TAGURU_EXTRACT_*` key listed in `KNOWN_KEYS` (src/config.rs:51-\*, the
+file's own typo-lint list — reused here as the enumeration of what
+`extract` reads); then `env` the cell's resolved values explicitly,
+including ones left at their defaults. This closes exactly the hazard R2
+names — a stray `TAGURU_EXTRACT_LOSSY=1` in the operator's shell cannot
+silently make one cell unfair, and no `TAGURU_EXTRACT_*` key's value is
+"whatever happened to be inherited." It deliberately does **not** close a
+different, broader hazard: `HTTP_PROXY`, locale, TLS trust settings, and
+every other non-`TAGURU_EXTRACT_*` variable pass through from the
+harness's own process unscrubbed, and `manifest.json` records only their
+*names*, not their values — so two cells run under different proxy or
+locale settings would not be distinguishable from the manifest alone.
+Nothing observed in this codebase makes that variance likely (`extract`
+reads no such variable itself), but the guarantee this section makes is
+scoped to `TAGURU_EXTRACT_*` fairness, not to bit-for-bit environment
+reproducibility; a future ADR revision that wants the latter needs its
+own explicit allowlist-with-redacted-fingerprints design, not an
+extension of this one's scrub.
 
 **Reflected in #256**: construct and record a complete
 `TAGURU_EXTRACT_*` map per cell; never write a per-cell config file;
@@ -411,8 +424,8 @@ document order in `manifest.json` (§9.1).
 prompts, but it does change measured latency through contention and makes
 diagnostics line order nondeterministic (fan-out onto one
 `Mutex<BufWriter<File>>`, src/extract.rs's `DiagnosticsSink`). Joins in
-`runs/*.jsonl` are always by key — `(source, chunk_index)` — never by
-line position.
+`runs/*.jsonl` are always by key — `(document_id, chunk_index)`, per the
+definition in §9.1 — never by line position.
 
 **The structured-output probe is a per-cell fact, recorded, not
 assumed stable.** Under `auto`, `resolve_response_format` probes the live
@@ -424,7 +437,7 @@ conflating a rung difference with a model difference.
 **Reflected in #256**: fresh `cells/<model_id>/run<NN>/` per cell, never
 `--force`; corpus passed as one sorted directory with resolved order
 recorded in the manifest; `--parallel` global, default 1; every join by
-`(source, chunk_index)`, never by line order.
+`(document_id, chunk_index)`, never by line order or by `source`.
 
 ## 7. Chunk provenance: the unavoidable, bounded change to `extract.rs`
 
@@ -475,9 +488,16 @@ diagnostics-retention territory, and #256 is already large without it):
 1. `kind: "chunk"` — once per chunk, before its first attempt: `source`,
    `chunk_index`, `chunk_total`, `chunk_sha256`, `chunk_bytes`,
    `paragraph_first`, `paragraph_last`.
-2. `kind: "document"` — the structured form of `Run::report`
-   (src/extract.rs:1710-1739): every number it already computes,
-   emitted rather than only printed.
+2. `kind: "document"` — a structured record built at the same call site
+   as `Run::report` (src/extract.rs:1710-1739), from the same
+   `Extraction` value already in scope there: `associations.len()`,
+   `concepts.len()`, `labels.len()`, `questions.len()`, `duplicates`,
+   `dropped`. `Run::report` itself only ever *prints*
+   `concepts.len() + labels.len()` combined as one "alias(es)" count for
+   a human reader; the new record computes the two `BTreeMap` lengths
+   separately, which costs nothing extra since both maps are already in
+   scope — it is not a claim that `Run::report`'s own body already emits
+   six separate numbers.
 
 `AttemptRecord` itself gains no field. This keeps
 `attempt_record_serializes_the_shared_key_set` (src/extract.rs:4951) and
@@ -517,8 +537,9 @@ today's single `kind` value, now doing double duty.
 > A per-model record may describe only what the provider *is* or *can
 > do*. Everything that shapes the task — corpus, `--context`,
 > `--questions`, `--fact-budget`, `--no-passage`, `--lossy`,
-> `--description`, `--parallel`, run count — is global to the matrix and
-> is a flag on `taguru benchmark extract`, never a per-model key.
+> `--description`, `--parallel`, `--max-output-tokens`, run count — is
+> global to the matrix and is a flag on `taguru benchmark extract`, never
+> a per-model key.
 
 Stated as an invariant, not a convention, because acceptance criterion 1
 requires the same fixture, prompt, and settings across models: if task
@@ -526,18 +547,31 @@ settings were expressible per model, a `models.json` could describe an
 unfair comparison that **no downstream artifact could detect** —
 `measurements.json` would show a model with a larger `fact_budget` as
 simply more productive. Making the settings inexpressible per model means
-the file cannot encode that error.
+the file cannot encode that error. `max_output_tokens` is exactly this
+kind of setting, not a capability: a lower cap directly suppresses the
+association counts and raises the `length_limited` rate #257 aggregates,
+the same shape of unfairness `fact_budget` already guards against — so it
+is global, set once by `--max-output-tokens` on `taguru benchmark
+extract`, and `extraction_settings` in `manifest.json` (§9.1) carries the
+single value every cell ran under.
 
-`structured_output` and `max_output_tokens` are the deliberate exception,
-principled rather than arbitrary: ADR 0001 established the
-structured-output rung as a provider capability, and `auto` already
-probes the live endpoint per run (`resolve_response_format`,
-src/extract.rs:2306; `probe_structured_output`, src/extract.rs:2360) — the
-resolved rung varies per model whether or not the file says so. Forcing
-one rung globally would exclude models that cannot honor
-`json_schema` or handicap those that can; §6 already requires the
-resolved rung be recorded per cell so a rung difference is never mistaken
-for a model difference.
+`structured_output` is the one deliberate exception, and its
+justification does not extend to `max_output_tokens`: ADR 0001
+established the structured-output rung as a provider capability, and
+`auto` already probes the live endpoint per run
+(`resolve_response_format`, src/extract.rs:2306; `probe_structured_output`,
+src/extract.rs:2360) — the resolved rung varies per model whether or not
+the file says so, and forcing one rung globally would exclude models that
+cannot honor `json_schema` or handicap those that can. §6 already
+requires the resolved rung be recorded per cell so a rung difference is
+never mistaken for a model difference. `max_output_tokens` has no
+equivalent auto-probe: nothing discovers a provider's true output ceiling
+at startup, so unlike the structured-output rung, a per-model value here
+would be the operator's unverified guess, not a measured capability. If a
+provider's hard limit sits below the global `--max-output-tokens`, that
+is a startup usage error naming the model and the limit, not a silent
+per-model downgrade — the same "fail fast rather than encode an
+undetectable unfairness" posture the invariant states above.
 
 ### Schema
 
@@ -546,8 +580,7 @@ for a model difference.
   "taguru_benchmark_models": 1,
   "defaults": {
     "timeout_secs": 300,
-    "structured_output": "auto",
-    "max_output_tokens": null
+    "structured_output": "auto"
   },
   "models": [
     {
@@ -557,7 +590,6 @@ for a model difference.
       "url": "http://localhost:11434/v1/chat/completions",
       "api_key_env": null,
       "structured_output": "auto",
-      "max_output_tokens": 2048,
       "timeout_secs": 300,
       "note": "baseline"
     },
@@ -567,12 +599,15 @@ for a model difference.
       "model": "gpt-oss-120b",
       "url": "https://example.internal/v1/chat/completions",
       "api_key_env": "BENCH_KEY_HOSTED",
-      "structured_output": "json-schema",
-      "max_output_tokens": 4096
+      "structured_output": "json-schema"
     }
   ]
 }
 ```
+
+`max_output_tokens` is deliberately absent from this schema — it is a
+global `--max-output-tokens` flag on `taguru benchmark extract`, not a
+per-model field (see the fairness invariant above).
 
 - `taguru_benchmark_models` follows the batch/group/communities
   version-stamp convention (§10).
@@ -603,16 +638,25 @@ memory only, never a file (the second, independent reason §5 rejects
 per-cell config files). A named variable that is unset is a usage error
 at matrix startup, before any model is called. `models.lock.json` and
 `manifest.json` record `api_key_env`'s *name* and whether it was set,
-never the value; an endpoint URL is recorded with any inline
-`user:password@` userinfo stripped. A `models.json` carrying a key-shaped
-value where `api_key_env` belongs is a hard usage error naming the
-correct field, so the mistake is caught at write time rather than
-committed to a repository.
+never the value. A `models.json` carrying a key-shaped value where
+`api_key_env` belongs, or an `url` whose authority component carries
+inline `user:password@` userinfo, is a hard usage error at parse time —
+naming the correct field and refusing to run any cell — rather than a
+value the harness silently redacts on the way out. Stripping only when
+*writing* an artifact was rejected: it leaves the credential sitting in
+the user-authored `models.json` itself (read, not written, by the
+harness, so the blockquote's guarantee would otherwise not cover it) for
+as long as that file exists, and still forwards it to the child
+unredacted in the meantime. Rejecting it at input time is also the
+cheaper rule to enforce for the same reason §8's other secrets guard is
+cheap: the check runs once, before any model is called, not once per
+artifact write site.
 
 **Reflected in #256**: parse and version-check `models.json`; enforce the
 fairness invariant by construction (no per-model task-setting field
-exists to parse); resolve defaults into `models.lock.json`; validate
-every `api_key_env` up front; never write a key value to disk.
+exists to parse); reject any `url` carrying inline userinfo at parse
+time; resolve defaults into `models.lock.json`; validate every
+`api_key_env` up front; never write a key value to disk.
 
 ## 9. Artifact schemas
 
@@ -669,6 +713,7 @@ absence has one unambiguous meaning, matching `SearchContextPlan`'s own
     "fact_budget": 0,
     "no_passage": false,
     "description": "",
+    "max_output_tokens": null,
     "max_attempts": 2,
     "parallel": 1,
     "timeout_secs": 300
@@ -732,6 +777,19 @@ alone, never on the model, so repeating it per cell would be N×M copies
 of one fact; `runs/*.jsonl` denormalizes only what identifies a line
 without a join (§9.2).
 
+**`document_id` is the join key, not `source`.** The harness derives it
+once, when the corpus is enumerated to build `documents[]` above: the
+source path relative to the corpus root, with `/` replaced by `__` and
+the extension stripped, deduplicated with a short content-hash suffix on
+collision — the same flatten-then-hash scheme `checkpoint_file_name`
+already uses for exactly this reason (src/extract.rs:4761-4770). It is
+computed once and reused verbatim by every cell, which is what makes it
+stable across models and runs; `source` is carried alongside every record
+purely for human-readable display and is never assumed unique or
+canonical on its own — `taguru extract` accepts whatever path string a
+cell happened to be invoked with, and two cells could in principle spell
+the same file differently.
+
 ### 9.2 `runs/<model_id>.run<NN>.jsonl`
 
 One file per cell — the cell is the unit of execution, failure, retry,
@@ -742,10 +800,20 @@ discriminator (matching `AttemptRecord.kind`, src/extract.rs:2270):
 | `kind` | Cardinality | Purpose |
 |---|---|---|
 | `header` | 1, line 1 | version stamp + cell identity |
-| `document` | 1 per document attempted | §7's structured `Run::report` + identity |
+| `document` | 2 per document attempted (`phase: "start"`, `phase: "end"`) | identity, then §7's structured `Run::report` |
 | `chunk` | 1 per chunk | §7's provenance, before that chunk's first attempt |
 | `attempt` | 1 per completion call | `AttemptRecord` verbatim + harness envelope + denormalized chunk keys |
 | `cell` | 0 or 1, last line | cell totals — **its absence marks an interrupted cell** |
+
+A `document` pair follows the same "absence marks incomplete" convention
+as `kind: "cell"`: the `phase: "start"` record carries identity only
+(`document_id`, `source`, `document_sha256`, `chunk_total`) and is
+written before the first chunk is attempted; the `phase: "end"` record
+carries §7's `Run::report`-derived counts and is written only once the
+document finishes (successfully or not). A `document_id` with a `start`
+record but no matching `end` record marks a document abandoned mid-run —
+the same interruption signal `kind: "cell"`'s absence gives at the whole
+cell's scope, one level down.
 
 ```json
 {"kind":"header","taguru_benchmark_runs":1,"run_id":"20260726T091422Z-3f7a1c","cell_id":"qwen25-7b-q4.run1","model_id":"qwen25-7b-q4","model_name":"qwen2.5:7b","run_index":1,"prompt_version":2}
@@ -756,14 +824,17 @@ discriminator (matching `AttemptRecord.kind`, src/extract.rs:2270):
 {"kind":"cell","ts":1784787961.550,"cell_id":"qwen25-7b-q4.run1","outcome":"complete","documents_written":12,"attempts_total":31,"exit_code":0}
 ```
 
-An `attempt` line has three layers. **Layer 1 is byte-identical to
-`AttemptRecord`** — a `--diagnostics-out` reader reads a `runs/*.jsonl`
-attempt line unchanged, field for field
-(`kind`, `source`, `stage`, `chunk_index`, `attempt`, `max_attempts`,
+An `attempt` line is one merged JSON object built from three layers of
+fields, not a copy of any single upstream record. **Layer 1 carries every
+`AttemptRecord` field through verbatim, unrenamed and unmodified** —
+`kind`, `source`, `stage`, `chunk_index`, `attempt`, `max_attempts`,
 `state`, `length_limited`, `elapsed_seconds`, `provider_metadata`,
 `parse_error`, `validation_issues`, and the three conditionally-omitted
-fields). **Layer 2** is the harness envelope: `ts`, `cell_id`,
-`model_id`, `run_index`, `document_id`. **Layer 3** is denormalized from
+fields all keep the exact value `--diagnostics-out` would have written,
+so a consumer reading only those keys sees `AttemptRecord` unchanged.
+**Layer 2** is the harness envelope, added alongside layer 1's keys: `ts`,
+`cell_id`, `model_id`, `run_index`, `document_id`. **Layer 3** is
+denormalized from
 that chunk's own `kind: "chunk"` record: `document_sha256`,
 `chunk_sha256`, `paragraph_first`, `paragraph_last`. The harness
 denormalizes rather than `extract.rs` emitting it directly, so
@@ -783,7 +854,7 @@ instead. Both are carried forward as `caveat` strings on the affected
 metric definitions (§9.3) rather than silently smoothed over.
 
 **Reflected in #256**: consume #262's `chunk`/`document` records;
-denormalize into `runs/*.jsonl`; join on `(source, chunk_index)`.
+denormalize into `runs/*.jsonl`; join on `(document_id, chunk_index)`.
 
 ### 9.3 `measurements.json` / `measurements.csv`
 
@@ -819,6 +890,17 @@ by an external re-aggregator. `sum` is present wherever a rate derives
 from it, so a reader can re-derive the rate rather than trust it. Both
 rules are stated in the artifact's own `definitions` block, not only in
 this ADR.
+
+**`n == 0` is a defined shape, not an omission.** A cell where every
+attempt failed before producing a sample (every completion timed out,
+say) still emits the metric, with `n: 0` and `min`/`p50`/`p90`/`p99`/
+`max`/`mean`/`sum` all `null` — the same "present and `null`, never
+omitted" policy §9.1 already states for probe-dependent fields, so a
+reader can tell "measured, zero samples" from "this metric does not
+apply to this scope" by the key's presence alone. A ratio metric (the `{"value", "n", "numerator"}` shape
+`attempt.state_rate.*` uses below) follows the same rule at its own
+denominator: `n: 0` pairs with `value: null` and `numerator: null`, never
+a divide-by-zero `NaN` and never a silently misleading `0.0`.
 
 ```json
 {
@@ -863,12 +945,23 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,count,1
 
 `scope` is `cell` \| `model` \| `document`; `metric` is a dotted name
 keying `definitions`; `stat` is `value` \| `min` \| `p50` \| `p90` \|
-`p99` \| `max` \| `mean` \| `sum` \| `n`. Adding a metric adds rows, not
-columns, so `taguru_benchmark_measurements` never has to rev just because
-#257 grows a metric, and the shape is inherently rank-free — there is no
-column to put a rank in. `measurements.csv` carries no version stamp of
-its own; it is a lossless flattening of `measurements.json` and the pair
-is written atomically together, so its version is `measurements.json`'s.
+`p99` \| `max` \| `mean` \| `sum` \| `n` \| `numerator`. Adding a metric
+adds rows, not columns, so `taguru_benchmark_measurements` never has to
+rev just because #257 grows a metric, and the shape is inherently
+rank-free — there is no column to put a rank in. `measurements.csv`
+carries no version stamp of its own; its version is
+`measurements.json`'s, and the pair is written atomically together.
+
+`measurements.csv` is a **value projection** of `measurements.json`, not
+a lossless flattening of it: every numeric field of every `Distribution`
+and ratio (including `numerator`, so an empty-sample cell's `n: 0` and
+`null`s from the rule above round-trip exactly) becomes one row, but the
+artifact's `definitions` block — unit, statistic, description, source,
+`caveat` — and its `inputs`/`run_id`/`generated_at` metadata stay
+JSON-only. A tool that needs a metric's caveat (the `stop_malformed`
+state-conflation note from §9.2, for one) reads `measurements.json`; the
+CSV is for spreadsheets and `pandas`/`sqlite`, not for reconstructing the
+JSON it was derived from.
 
 `runs/*.jsonl` alone cannot supply extraction-shape metrics that need the
 full item list (positive/negative weight split, distinct subjects,
@@ -931,19 +1024,31 @@ from `runs/*.jsonl` and `manifest.json` are sufficient to locate 元文書・
 
 | Artifact | Key | Type | Initial |
 |---|---|---|---|
+| `models.json` (input) | `taguru_benchmark_models` | `u64` | `1` |
+| `models.lock.json` | `taguru_benchmark_models` (reused, see below) | `u64` | `1` |
 | `manifest.json` | `taguru_benchmark_manifest` | `u64` | `1` |
 | `runs/*.jsonl` | `taguru_benchmark_runs` | `u64` | `1` (header record, line 1) |
 | `measurements.json` | `taguru_benchmark_measurements` | `u64` | `1` |
 | `differences.jsonl` | `taguru_benchmark_differences` | `u64` | `1` (header record, line 1) |
 
-**Four independent stamps, not one shared stamp.** `src/ingest.rs:115-117`
+`models.lock.json` carries no independent format of its own — it is
+`models.json` with `defaults` folded into every entry and no other
+transformation, so it reuses `models.json`'s exact stamp key and value
+rather than minting a sixth. A reader that understands one schema
+understands both; nothing about resolving defaults changes the shape a
+version number would need to describe.
+
+**Five independent stamps across six files, not one shared stamp.**
+`src/ingest.rs:115-117`
 states the precedent directly: `GROUP_VERSION` is kept *"separate from
 [`BATCH_VERSION`] so either shape can rev without dragging the other
-along."* The four artifacts here have different producers (#256 writes
-`manifest.json`/`runs/`; #257 writes `measurements.*`; #259 writes
-`differences.jsonl`) and different consumers; one shared stamp would mean
-a one-column addition to `measurements.csv` invalidates every archived
-`runs/*.jsonl` that never changed. `u64` matches every JSON version key
+along."* The artifacts here have different producers (the user or
+tooling upstream of the harness writes `models.json`; #256 writes
+`models.lock.json`/`manifest.json`/`runs/`; #257 writes
+`measurements.*`; #259 writes `differences.jsonl`) and different
+consumers; one shared stamp would mean a one-column addition to
+`measurements.csv` invalidates every archived `runs/*.jsonl` that never
+changed. `u64` matches every JSON version key
 already in the tree (`taguru_batch`, `taguru_group`, `taguru_communities`,
 src/ingest.rs:113,118; src/api/communities.rs:106); `u32` stays reserved
 for stamps on the binary wire (`IMAGE_VERSION`, src/context/image.rs:51;
@@ -964,16 +1069,25 @@ keeping one on disk — its doc comment keeps a version-history log
 (src/context/image.rs:34-50) for exactly this reason. A
 `benchmark-results/` directory is squarely the second case: no tool but
 taguru writes one, and re-reading an old one — "外部ツールでも再集計でき
-る" — is what #189 asks for. **All four benchmark artifacts therefore
-accept the `IMAGE_VERSION` posture**: readers carry `#[serde(default)]`
-per field with a documented "least behavior change for an old file"
-rationale, the same discipline `ManifestEntry`'s own fields already
-follow (src/extract.rs:4568-4624 — each field's doc comment states what
-its default preserves). Within an accepted range a revision may only
-*add* a field; removing or repurposing one drops the old version out of
-the accepted range and forces a bump instead. §11's `eval.jsonl` is the
-one exception, and goes the other way (equality) for the opposite
-reason — there, the user is the producer.
+る" — is what #189 asks for. **`manifest.json`, `runs/*.jsonl`,
+`measurements.json`, `differences.jsonl`, and `models.lock.json`
+therefore accept the `IMAGE_VERSION` posture**: readers carry
+`#[serde(default)]` per field with a documented "least behavior change
+for an old file" rationale, the same discipline `ManifestEntry`'s own
+fields already follow (src/extract.rs:4568-4624 — each field's doc
+comment states what its default preserves). Within an accepted range a
+revision may only *add* a field; removing or repurposing one drops the
+old version out of the accepted range and forces a bump instead.
+
+`models.json` and §11's `eval.jsonl` are the two exceptions, and go the
+other way (**equality**) for the same reason as each other: both are
+*authored by the user*, not written and later re-read by taguru itself,
+so the `taguru_batch` reasoning applies to them, not `IMAGE_VERSION`'s —
+taguru must refuse to guess at a shape a person wrote by hand rather than
+silently defaulting missing fields into a hand-edited matrix definition.
+`models.lock.json` stays on the range-acceptance side of that split
+despite reusing `models.json`'s stamp key, because taguru itself is what
+writes and re-reads *it*.
 
 **JSONL stamps live on the header record only, never on every line** —
 `taguru_batch`'s own placement as line 1 of a batch
