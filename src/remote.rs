@@ -554,6 +554,8 @@ mod tests {
     /// [`respond_once`], with extra header lines spliced into the
     /// response — the only way to exercise a `Retry-After` reading
     /// without a real taguru server in front of the client.
+    /// `extra_headers` must already end each line with its own
+    /// `\r\n`; the splice adds none of its own.
     fn respond_once_with_headers(
         status_line: &str,
         extra_headers: &str,
@@ -739,6 +741,26 @@ mod tests {
             .get_raw(&["contexts", "nope", "export"])
             .expect_err("404 must not be read as success");
         assert!(!error.contains("Retry-After"), "{error}");
+    }
+
+    /// [`a_shed_response_displays_its_retry_after_header`], but through
+    /// the POST envelope path (`Api::post` → `finish`) instead of
+    /// `get_raw` — the one `compact --url`'s per-context and sweep
+    /// calls actually walk, so this is the path this PR's own new
+    /// behavior needs proven, not just the pre-existing GET path.
+    #[test]
+    fn a_shed_envelope_response_displays_its_retry_after_header() {
+        let base = respond_once_with_headers(
+            "HTTP/1.1 503 Service Unavailable",
+            "retry-after: 7\r\n",
+            json!({"status": "error", "code": "overloaded", "error": "heavy-operation ceiling"}),
+        );
+        let api = Api::new(base);
+        let error = api
+            .post(&["contexts", "sake", "compact"], &json!({}))
+            .expect_err("503 must not be read as success");
+        assert!(error.contains("503"), "{error}");
+        assert!(error.contains("(Retry-After: 7)"), "{error}");
     }
 
     #[test]
