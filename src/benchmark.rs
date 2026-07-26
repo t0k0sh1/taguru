@@ -31,6 +31,18 @@ use crate::config::subcommand_usage_error;
 
 mod compare;
 
+const TOP_USAGE: &str = "\
+usage: taguru benchmark <extract|compare> ...
+
+  extract   run `taguru extract` across a model matrix, writing a
+            results directory — see `taguru benchmark extract --help`
+  compare   derive measurements.json/measurements.csv from a finished
+            results directory — see `taguru benchmark compare --help`
+
+Contract and discipline: docs/benchmark.html,
+adr/0003-extraction-model-benchmark.md.
+";
+
 const USAGE: &str = "\
 usage: taguru benchmark extract --models FILE --context NAME --out DIR
                       [--runs N] [--questions N] [--fact-budget N]
@@ -84,7 +96,7 @@ adr/0003-extraction-model-benchmark.md.
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("--help") | Some("-h") => {
-            print!("{USAGE}");
+            print!("{TOP_USAGE}");
             0
         }
         Some("extract") => run_extract(&args[1..]),

@@ -358,7 +358,7 @@ fn analyze_batch(text: &str, paragraph_count: usize) -> BatchStats {
         object: String,
         label: String,
         weight: f64,
-        paragraph: Option<u32>,
+        paragraph: Option<u64>,
     }
     struct AliasRow {
         canonical: String,
@@ -367,7 +367,7 @@ fn analyze_batch(text: &str, paragraph_count: usize) -> BatchStats {
 
     let mut assoc_rows: Vec<AssocRow> = Vec::new();
     let mut alias_rows: Vec<AliasRow> = Vec::new();
-    let mut locator_paragraphs: Vec<u32> = Vec::new();
+    let mut locator_paragraphs: Vec<u64> = Vec::new();
     let mut invalid_lines: u64 = 0;
 
     for line in text.lines() {
@@ -392,10 +392,7 @@ fn analyze_batch(text: &str, paragraph_count: usize) -> BatchStats {
         if let (Some(subject), Some(label), Some(object), Some(weight)) =
             (subject, label, object, weight)
         {
-            let paragraph = obj
-                .get("paragraph")
-                .and_then(Value::as_u64)
-                .map(|v| v as u32);
+            let paragraph = obj.get("paragraph").and_then(Value::as_u64);
             if let Some(p) = paragraph {
                 locator_paragraphs.push(p);
             }
@@ -420,7 +417,7 @@ fn analyze_batch(text: &str, paragraph_count: usize) -> BatchStats {
         }
         if obj.contains_key("question") {
             if let Some(p) = obj.get("paragraph").and_then(Value::as_u64) {
-                locator_paragraphs.push(p as u32);
+                locator_paragraphs.push(p);
             }
             continue;
         }
@@ -448,7 +445,7 @@ fn analyze_batch(text: &str, paragraph_count: usize) -> BatchStats {
         concept_universe.insert(row.object.clone());
     }
     for paragraph in &locator_paragraphs {
-        if *paragraph as usize >= paragraph_count {
+        if *paragraph >= paragraph_count as u64 {
             stats.paragraph_out_of_range += 1;
         }
     }
@@ -611,13 +608,23 @@ fn compute_measurements(dir: &Path) -> Result<MeasurementsFile, String> {
         document_ids.extend(starts.keys().cloned());
         document_ids.extend(ends.keys().cloned());
 
+        // Grouped once so the loop below is linear in attempt count,
+        // not quadratic in (documents × attempts).
+        let mut cell_attempts_by_doc: BTreeMap<&str, Vec<&AttemptRow>> = BTreeMap::new();
+        for a in &cell_attempts {
+            cell_attempts_by_doc
+                .entry(a.document_id.as_str())
+                .or_default()
+                .push(a);
+        }
+        let no_attempts: Vec<&AttemptRow> = Vec::new();
+
         for document_id in document_ids {
             let start_ts = starts.get(&document_id).copied();
             let end = ends.get(&document_id);
-            let attempts_for_doc: Vec<&AttemptRow> = cell_attempts
-                .iter()
-                .filter(|a| a.document_id == document_id)
-                .collect();
+            let attempts_for_doc: &[&AttemptRow] = cell_attempts_by_doc
+                .get(document_id.as_str())
+                .unwrap_or(&no_attempts);
             let elapsed_seconds_sum: f64 = attempts_for_doc.iter().map(|a| a.elapsed_seconds).sum();
             let input_tokens_values: Vec<u64> = attempts_for_doc
                 .iter()
@@ -1244,7 +1251,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             CMD_SCOPES,
             "Time to extract one chunk, summing every retry of that chunk's attempts.",
             "runs/*.jsonl kind=attempt .elapsed_seconds, summed per (cell_id, document_id, \
-             chunk_index) for stage=item attempts",
+             chunk_index) for every attempt whose stage is not cross_chunk",
             Some(
                 "A chunk retried N times reports the sum of all N attempts, not wall time; \
                  under --parallel this sum can exceed the run's actual wall-clock span. \
@@ -1826,12 +1833,26 @@ fn write_measurements(dir: &Path, measurements: &MeasurementsFile) -> Result<(),
 
     let staged_csv = crate::storage::stage_bytes(&csv_path, csv_text.as_bytes(), false)
         .map_err(|error| format!("staging {}: {error}", csv_path.display()))?;
-    let staged_json = crate::storage::stage_bytes(&json_path, json_text.as_bytes(), false)
-        .map_err(|error| format!("staging {}: {error}", json_path.display()))?;
-    crate::storage::commit_staged(&staged_csv, &csv_path)
-        .map_err(|error| format!("publishing {}: {error}", csv_path.display()))?;
-    crate::storage::commit_staged(&staged_json, &json_path)
-        .map_err(|error| format!("publishing {}: {error}", json_path.display()))?;
+    // Every branch below already has `staged_csv` on disk under its
+    // temporary name, and some also have `staged_json` — a later
+    // failure must not leave either behind, since `stage_bytes` only
+    // ever cleans up its own partial write, not a sibling call's.
+    let staged_json = match crate::storage::stage_bytes(&json_path, json_text.as_bytes(), false) {
+        Ok(staged) => staged,
+        Err(error) => {
+            let _ = crate::storage::remove_persisted_file(&staged_csv);
+            return Err(format!("staging {}: {error}", json_path.display()));
+        }
+    };
+    if let Err(error) = crate::storage::commit_staged(&staged_csv, &csv_path) {
+        let _ = crate::storage::remove_persisted_file(&staged_csv);
+        let _ = crate::storage::remove_persisted_file(&staged_json);
+        return Err(format!("publishing {}: {error}", csv_path.display()));
+    }
+    if let Err(error) = crate::storage::commit_staged(&staged_json, &json_path) {
+        let _ = crate::storage::remove_persisted_file(&staged_json);
+        return Err(format!("publishing {}: {error}", json_path.display()));
+    }
     Ok(())
 }
 

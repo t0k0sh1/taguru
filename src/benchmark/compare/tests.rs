@@ -2,10 +2,10 @@ use super::*;
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "taguru-benchmark-compare-{tag}-{}-{}",
-        std::process::id(),
-        line!()
+        "taguru-benchmark-compare-{tag}-{}",
+        std::process::id()
     ));
+    let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -457,6 +457,21 @@ fn analyze_batch_treats_an_unattributed_alias_kind_as_not_this_metrics_call() {
     assert_eq!(stats.alias_orphans, 0);
 }
 
+#[test]
+fn analyze_batch_does_not_wrap_a_paragraph_locator_past_u32_max() {
+    // A paragraph value beyond u32::MAX must not silently truncate to a
+    // small, in-range number (e.g. 4294967296 wrapping to 0) — it must
+    // still be counted as out-of-range.
+    let batch = "{\"subject\":\"a\",\"label\":\"knows\",\"object\":\"b\",\"weight\":1.0,\
+                 \"paragraph\":4294967296}\n";
+    let stats = analyze_batch(batch, 5);
+    assert_eq!(stats.paragraph_attributed, 1);
+    assert_eq!(
+        stats.paragraph_out_of_range, 1,
+        "4294967296 must not wrap to 0 and pass as in-range"
+    );
+}
+
 // ============================== token exclusion ==============================
 
 #[test]
@@ -755,5 +770,42 @@ fn a_manifest_naming_an_unreadable_runs_file_is_an_error() {
     .unwrap();
     let error = compute_measurements(&dir).unwrap_err();
     assert!(error.contains("m.run01"), "{error}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ============================== atomic write cleanup ==============================
+
+#[test]
+fn write_measurements_cleans_up_staged_files_when_a_later_commit_fails() {
+    // Persistence op sequence: stage(csv), stage(json), commit(csv),
+    // commit(json) — allowing the first 2 through and failing the 3rd
+    // exercises the exact case where `staged_csv` was already staged
+    // and its own commit is what fails.
+    let dir = synthetic_results_dir("write-cleanup");
+    let measurements = compute_measurements(&dir).expect("computes");
+
+    crate::storage::fail_persistence_ops_after(2);
+    let result = write_measurements(&dir, &measurements);
+    let past_end = crate::storage::clear_persistence_fault();
+
+    assert!(result.is_err(), "the injected commit failure must surface");
+    assert!(
+        !past_end,
+        "the fault must have fired for this test to be meaningful"
+    );
+    assert!(!dir.join("measurements.csv").exists());
+    assert!(!dir.join("measurements.json").exists());
+
+    let leftover: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp"))
+        .collect();
+    assert!(
+        leftover.is_empty(),
+        "staged temp files were left behind: {leftover:?}"
+    );
+
     let _ = fs::remove_dir_all(&dir);
 }
