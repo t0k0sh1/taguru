@@ -25,6 +25,34 @@ use serde_json::Value;
 /// probe (src/cli.rs).
 const HEALTH_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
 
+/// The page size the enumeration walk requests explicitly — matches
+/// the server's own ceiling (`MAX_MATCH_LIMIT`, src/api.rs), named
+/// here so the short-page termination rule has a known number to
+/// compare against instead of guessing at the server's default.
+const LIST_PAGE_LIMIT: usize = 1000;
+
+/// ADR 0002 §7: a URL carrying userinfo (`https://user:token@host/`)
+/// is refused — credentials on the command line are readable from
+/// `ps` and shell history for the lifetime of the terminal, the exact
+/// leak the existing `TAGURU_API_TOKEN` environment variable already
+/// avoids. An unparseable `base` is left alone here: `Api::url`
+/// already produces its own "not a usable base URL" message for that
+/// case, on the first real request, and duplicating it here would
+/// give one fault two different error surfaces.
+pub(crate) fn reject_userinfo(base: &str) -> Result<(), String> {
+    let Ok(url) = url::Url::parse(base) else {
+        return Ok(());
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(
+            "the URL must not carry credentials (user:password@…) — set TAGURU_API_TOKEN \
+             (or TAGURU_API_TOKENS) instead"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// A failure from the envelope surface, with 404 told apart — "no
 /// artifact yet" is a first-run state, not an error.
 pub(crate) enum ApiFailure {
@@ -71,11 +99,21 @@ impl Api {
     /// context names are operator strings and 日本語 names must
     /// address the same context the server stores.
     fn url(&self, segments: &[&str]) -> Result<String, String> {
+        self.url_with_query(segments, &[])
+    }
+
+    /// Same as [`Api::url`], with query pairs appended — the
+    /// enumeration walk's `limit`/`after` keyset paging is the only
+    /// caller today.
+    fn url_with_query(&self, segments: &[&str], query: &[(&str, &str)]) -> Result<String, String> {
         let mut url = url::Url::parse(&self.base)
             .map_err(|error| format!("'{}' is not a usable base URL: {error}", self.base))?;
         url.path_segments_mut()
             .map_err(|()| format!("'{}' cannot carry a path", self.base))?
             .extend(segments);
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query);
+        }
         Ok(url.to_string())
     }
 
@@ -141,6 +179,73 @@ impl Api {
             .map_err(ApiFailure::into_message)
     }
 
+    /// [`Api::get`] with query pairs appended to the request.
+    fn get_with_query(&self, segments: &[&str], query: &[(&str, &str)]) -> Result<Value, String> {
+        let url = self.url_with_query(segments, query)?;
+        let request = self.bearer(self.agent.get(&url));
+        finish(request.call(), &url).map_err(ApiFailure::into_message)
+    }
+
+    /// Every name in a listing collection (`"contexts"` or
+    /// `"groups"`), keyset-walked with the server's own page size —
+    /// the enumeration step `export --url` (and, after it, `compact
+    /// --url`) needs before it can call each item's own endpoint.
+    pub(crate) fn list_names(&self, collection: &str) -> Result<Vec<String>, String> {
+        self.list_names_paged(collection, LIST_PAGE_LIMIT)
+    }
+
+    /// [`Api::list_names`] with an explicit page size, split out so a
+    /// test can walk several pages (including the short-page
+    /// termination and the non-advancing-cursor guard) without
+    /// provisioning thousands of contexts to cross the real ceiling.
+    ///
+    /// The collection name doubles as the envelope's array key — both
+    /// `GET /contexts` and `GET /groups` answer `{total, <collection>:
+    /// [{name, ...}, ...]}`, keyset-paged by `after`/`limit`.
+    fn list_names_paged(&self, collection: &str, page: usize) -> Result<Vec<String>, String> {
+        let mut names = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let limit = page.to_string();
+            let mut query: Vec<(&str, &str)> = vec![("limit", limit.as_str())];
+            if let Some(cursor) = after.as_deref() {
+                query.push(("after", cursor));
+            }
+            let body = self.get_with_query(&[collection], &query)?;
+            let items = body[collection]
+                .as_array()
+                .ok_or_else(|| format!("{}: not a taguru {collection} page", self.base))?;
+            let mut page_names = Vec::with_capacity(items.len());
+            for item in items {
+                let name = item["name"].as_str().ok_or_else(|| {
+                    format!("{}: a {collection} entry is missing its name", self.base)
+                })?;
+                page_names.push(name.to_string());
+            }
+            let page_len = page_names.len();
+            // Checked against the FIRST name, not the last: a page is
+            // internally sorted ascending (the server keyset-pages a
+            // name-sorted directory), so first > cursor already proves
+            // every name in the page cleared it. Checking only the
+            // last name would miss a page that partially overlaps the
+            // previous one (cursor "b", page ["a", "c"]) — first > cursor
+            // fails there, catching the would-be duplicate "a".
+            if let (Some(cursor), Some(first)) = (after.as_deref(), page_names.first())
+                && first.as_str() <= cursor
+            {
+                return Err(format!(
+                    "the server's {collection} page did not advance past '{cursor}'"
+                ));
+            }
+            after = page_names.last().cloned();
+            names.extend(page_names);
+            if page_len < page || after.is_none() {
+                break;
+            }
+        }
+        Ok(names)
+    }
+
     /// One `POST /import` request carrying a pack of whole batches.
     pub(crate) fn import(&self, stream: &str) -> Result<(), String> {
         let url = self.url(&["import"])?;
@@ -182,10 +287,8 @@ impl Api {
     /// `/health` read, one stderr line when the server's minor version
     /// differs from this CLI's — never a blocker, since a replica
     /// mid-rollout legitimately runs a different minor than its
-    /// writer for a while. Wired in by `import`/`export`/`compact
-    /// --url` (#245-#247); `#[allow(dead_code)]` until the first of
-    /// those calls it.
-    #[allow(dead_code)]
+    /// writer for a while. Wired in by `export --url` (#245);
+    /// `compact`/`import --url` (#246/#247) call the same method.
     pub(crate) fn warn_on_version_skew(&self, verb: &str) {
         if let Some(line) = self.version_skew_line(verb) {
             eprintln!("{line}");
@@ -313,7 +416,9 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{Api, skew_warning, token_from_ring};
+    use std::sync::{Arc, Mutex};
+
+    use super::{Api, reject_userinfo, skew_warning, token_from_ring};
 
     #[test]
     fn the_first_keyring_entry_serves_as_the_bearer() {
@@ -410,6 +515,126 @@ mod tests {
             let _ = stream.write_all(response.as_bytes());
         });
         format!("http://{addr}")
+    }
+
+    /// A scripted multi-response HTTP stub — bind, accept one
+    /// connection per entry in order, answer each with its own fixed
+    /// status and JSON body, close, then move to the next. Lets a test
+    /// exercise a client that issues several requests in sequence
+    /// (`list_names_paged`'s keyset walk) against one fake server, and
+    /// hands back each request's start line so the test can assert on
+    /// the query string the client actually sent.
+    fn respond_in_order_capturing(
+        responses: Vec<(&'static str, serde_json::Value)>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_clone = Arc::clone(&requests);
+        std::thread::spawn(move || {
+            for (status_line, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buffer = [0u8; 2048];
+                let read = stream.read(&mut buffer).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let start_line = request.lines().next().unwrap_or("").to_string();
+                requests_clone.lock().unwrap().push(start_line);
+                let body = body.to_string();
+                let response = format!(
+                    "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), requests)
+    }
+
+    #[test]
+    fn list_names_walks_after_cursors_until_a_short_page() {
+        let (base, requests) = respond_in_order_capturing(vec![
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 5, "contexts": [{"name": "a"}, {"name": "b"}]}}),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 5, "contexts": [{"name": "c"}, {"name": "d"}]}}),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 5, "contexts": [{"name": "e"}]}}),
+            ),
+        ]);
+        let api = Api::new(base);
+        let names = api
+            .list_names_paged("contexts", 2)
+            .expect("three pages should walk cleanly to a short-page end");
+        assert_eq!(names, vec!["a", "b", "c", "d", "e"]);
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "{requests:?}");
+        assert!(
+            requests[0].contains("limit=2") && !requests[0].contains("after="),
+            "{}",
+            requests[0]
+        );
+        assert!(requests[1].contains("after=b"), "{}", requests[1]);
+        assert!(requests[2].contains("after=d"), "{}", requests[2]);
+    }
+
+    #[test]
+    fn list_names_refuses_a_page_that_does_not_advance() {
+        let (base, _requests) = respond_in_order_capturing(vec![
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 4, "contexts": [{"name": "a"}, {"name": "b"}]}}),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 4, "contexts": [{"name": "a"}, {"name": "b"}]}}),
+            ),
+        ]);
+        let api = Api::new(base);
+        let error = api
+            .list_names_paged("contexts", 2)
+            .expect_err("a page that repeats the previous cursor must not loop forever");
+        assert!(error.contains("did not advance"), "{error}");
+    }
+
+    #[test]
+    fn list_names_refuses_a_page_without_names() {
+        let base = respond_once(
+            "HTTP/1.1 200 OK",
+            json!({"result": {"total": 1, "contexts": [{"description": "no name field"}]}}),
+        );
+        let api = Api::new(base);
+        let error = api
+            .list_names_paged("contexts", 10)
+            .expect_err("a listing entry without a name must not be silently skipped");
+        assert!(error.contains("missing its name"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_collection_lists_as_no_names() {
+        let base = respond_once(
+            "HTTP/1.1 200 OK",
+            json!({"result": {"total": 0, "groups": []}}),
+        );
+        let api = Api::new(base);
+        assert_eq!(api.list_names("groups"), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_userinfo_url_is_rejected_and_a_bare_host_is_not() {
+        assert!(reject_userinfo("https://user:tok@h").is_err());
+        // password-only userinfo (`https://:tok@h`) is still userinfo
+        assert!(reject_userinfo("https://:tok@h").is_err());
+        assert!(reject_userinfo("https://h").is_ok());
+        // left for `Api::url`'s own "not a usable base URL" message
+        assert!(reject_userinfo("not a url").is_ok());
     }
 
     #[test]

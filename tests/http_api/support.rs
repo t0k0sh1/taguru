@@ -335,6 +335,31 @@ pub fn run_import(data_dir: &std::path::Path, args: &[&str]) -> (i32, String, St
     )
 }
 
+/// Runs any `taguru` subcommand hermetically — nothing from the
+/// developer's own shell environment reaches the child. A more general
+/// version of [`run_import`] (which fixes the subcommand and
+/// `TAGURU_DATA_DIR` itself) for callers that need to pass the
+/// subcommand and every flag themselves — e.g. `export --url`.
+pub fn run_cli(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    common::scrub_taguru_env(&mut command)
+        // import-only vars scrub_taguru_env doesn't know about — see
+        // run_import's own copy of this list.
+        .env_remove("TAGURU_WAL")
+        .env_remove("TAGURU_WAL_MAX_BYTES")
+        .env_remove("TAGURU_CACHE_BYTES")
+        .args(args);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("CLI must run");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
 /// A scratch directory for batch files, separate from any data dir.
 pub fn batch_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("taguru-batches-{tag}-{}", std::process::id()));

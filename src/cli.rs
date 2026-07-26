@@ -77,7 +77,8 @@ USAGE:
                                         export --help); a running server
                                         serves the same at
                                         GET /contexts/{name}/export and
-                                        GET /groups/{name}/export
+                                        GET /groups/{name}/export, or point
+                                        export itself at one with --url
   taguru compact [CONTEXT...]           rewrite context images without the
                                         dead weight the append-only format
                                         accumulates (see: taguru compact
