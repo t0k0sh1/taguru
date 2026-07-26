@@ -1,12 +1,13 @@
-//! `taguru benchmark`: ADR 0003's model-matrix harness (issue #256).
-//! `taguru benchmark extract` spawns one `taguru extract
-//! --diagnostics-out` child process per (model, run) cell against a
-//! model matrix (`models.json`), every cell reading the same corpus
-//! under the same task settings, and assembles `manifest.json` (the
-//! reproduction record) plus `runs/<model_id>.run<NN>.jsonl` (the
-//! `AttemptRecord` superset) from what each child reports. Downstream
-//! aggregation (`taguru benchmark compare`, #257) is not implemented
-//! here.
+//! `taguru benchmark`: ADR 0003's model-matrix harness (issue #256)
+//! plus its aggregation stage (issue #257). `taguru benchmark extract`
+//! spawns one `taguru extract --diagnostics-out` child process per
+//! (model, run) cell against a model matrix (`models.json`), every
+//! cell reading the same corpus under the same task settings, and
+//! assembles `manifest.json` (the reproduction record) plus
+//! `runs/<model_id>.run<NN>.jsonl` (the `AttemptRecord` superset) from
+//! what each child reports. `taguru benchmark compare` (see
+//! [`compare`]) then reads a finished results directory and derives
+//! `measurements.json`/`measurements.csv`.
 //!
 //! R1-R4 (ADR 0003 §4): a cell runs the exact `extract` an operator
 //! runs (R1); every setting reaching a child is set explicitly, never
@@ -27,6 +28,8 @@ use serde_json::{Map, Value};
 
 use crate::api::{MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES, MAX_QUESTIONS_PER_PARAGRAPH};
 use crate::config::subcommand_usage_error;
+
+mod compare;
 
 const USAGE: &str = "\
 usage: taguru benchmark extract --models FILE --context NAME --out DIR
@@ -85,11 +88,15 @@ pub fn run(args: &[String]) -> i32 {
             0
         }
         Some("extract") => run_extract(&args[1..]),
+        Some("compare") => compare::run_compare(&args[1..]),
         Some(other) => subcommand_usage_error(
             "benchmark",
-            &format!("unknown subcommand '{other}' (expected 'extract')"),
+            &format!("unknown subcommand '{other}' (expected 'extract' or 'compare')"),
         ),
-        None => subcommand_usage_error("benchmark", "expected a subcommand ('extract')"),
+        None => subcommand_usage_error(
+            "benchmark",
+            "expected a subcommand ('extract' or 'compare')",
+        ),
     }
 }
 

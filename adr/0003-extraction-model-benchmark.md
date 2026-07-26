@@ -930,9 +930,19 @@ a divide-by-zero `NaN` and never a silently misleading `0.0`.
     }
   },
   "models": {"qwen25-7b-q4": {"…": "same metric keys, aggregated over that model's cells"}},
-  "documents": {"qwen25-7b-q4": {"brewery": {"…": "…"}}}
+  "documents": {"qwen25-7b-q4": {"brewery": {"run01": {"…": "…"}}}}
 }
 ```
+
+`documents` keys down to **run granularity** (`model_id` → `document_id`
+→ `run_label`, matching `cell_id`'s own `"run01"` spelling): a document's
+metrics are themselves per-run individual results, not yet pooled across
+a model's runs the way `models` is — #189's acceptance criterion 3
+("distributions, individual trials, and raw extraction results are
+retained") would otherwise lose exactly the per-run document detail the
+`measurements.csv` example below already keeps in its own `document` row
+(which carries a `run_index`, not a blank one — the CSV's own shape is
+the authority this JSON sketch follows, not the reverse).
 
 `measurements.csv` is one tidy file, not eight:
 

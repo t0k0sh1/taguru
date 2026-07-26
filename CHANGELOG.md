@@ -8,6 +8,24 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- New top-level verb `taguru benchmark compare` (#257, implementing ADR
+  0003 §9.3/§10): reads a finished `taguru benchmark extract` results
+  directory — `manifest.json`, `runs/*.jsonl`, and the written
+  `cells/**` batches — and derives `measurements.json`/
+  `measurements.csv`, calling no model and touching no network. Covers
+  latency/token/throughput distributions, attempt state and finish-
+  reason rates, document outcome rates, and extraction-shape counts
+  (association/alias/question volume, positive/negative weight split,
+  distinct subjects/relations, paragraph attribution, relation reuse,
+  and batch-writer health checks), each with a machine-readable
+  `unit`/`statistic`/`source`/`caveat` embedded in the artifact's own
+  `definitions` block. No single score or ranking is possible by
+  construction: every per-model/per-cell map is key-ordered
+  (`BTreeMap`), a unit test asserts the emitted key set never contains
+  `rank`/`score`/`winner`/`best`/`recommended`/`overall`/`delta_vs_*`,
+  and `measurements.csv` is one tidy file with `model_id` always a
+  data column. Percentiles are nearest-rank, never interpolated. See
+  `docs/benchmark.html#compare` for the full metric catalog.
 - New top-level verb `taguru benchmark extract` (#256, implementing ADR
   0003 §5/§6/§8/§9.1/§9.2/§10, depending on #262): runs `taguru extract
   --diagnostics-out` across a matrix of models named by a `models.json`
