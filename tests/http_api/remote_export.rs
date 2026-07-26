@@ -11,6 +11,8 @@
 //! provisioning cheaper would be surface added for the tests' sake
 //! alone.
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
 
 use serde_json::json;
@@ -155,6 +157,17 @@ fn a_subset_remote_export_skips_enumeration_and_writes_no_groups() {
     assert_eq!(contents.len(), 1, "{contents:?}");
     assert!(contents.contains_key("sake.jsonl"), "{contents:?}");
 
+    // The output alone cannot tell "never enumerated" apart from
+    // "enumerated, then discarded" — the request-count counter can.
+    let (_, metrics_body) = server.call("GET", "/metrics", None);
+    let metrics_text = metrics_body
+        .as_str()
+        .expect("metrics body is text, not JSON");
+    assert!(
+        !metrics_text.contains("route=\"/groups\""),
+        "a subset export must never call GET /groups: {metrics_text}"
+    );
+
     let _ = std::fs::remove_dir_all(&out);
 }
 
@@ -288,4 +301,61 @@ fn a_userinfo_url_or_a_valueless_url_flag_is_a_usage_error() {
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("TAGURU_API_TOKEN"), "{stderr}");
+}
+
+/// A minimal stub answering exactly two requests in order: `GET
+/// /health` (a deliberately mismatched version, to trigger the ADR
+/// 0002 §10 skew warning) then a 500 for whatever comes next. This
+/// test only needs to prove the warning fires — `warn_on_version_skew`
+/// runs before any real request the export makes — not that a
+/// mismatched-version stub can complete a whole export, which would
+/// need a far larger fake server for no extra coverage.
+fn spawn_mismatched_health_stub() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            ("HTTP/1.1 200 OK", r#"{"status":"ok","version":"0.1.0"}"#),
+            (
+                "HTTP/1.1 500 Internal Server Error",
+                r#"{"status":"error","code":"internal","error":"stub"}"#,
+            ),
+        ];
+        for (status_line, body) in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// A server whose `/health` names a different minor version prints
+/// the skew warning exactly once, on stderr — the positive case the
+/// other tests' "no warning on a matching build" assertions cannot
+/// exercise (the unit-level `skew_warning` tests already cover the
+/// warning text itself; this proves `export --url` actually calls it).
+#[test]
+fn a_mismatched_server_version_prints_the_skew_warning_once() {
+    let base = spawn_mismatched_health_stub();
+    let out =
+        std::env::temp_dir().join(format!("taguru-remote-export-skew-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let (_code, _stdout, stderr) = run_cli(
+        &["export", "--url", &base, "--out", out.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(
+        stderr.matches("warning:").count(),
+        1,
+        "a version mismatch must warn exactly once: {stderr}"
+    );
+    assert!(stderr.contains("0.1.0"), "{stderr}");
 }

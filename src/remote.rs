@@ -223,8 +223,15 @@ impl Api {
                 page_names.push(name.to_string());
             }
             let page_len = page_names.len();
-            if let (Some(cursor), Some(last)) = (after.as_deref(), page_names.last())
-                && last.as_str() <= cursor
+            // Checked against the FIRST name, not the last: a page is
+            // internally sorted ascending (the server keyset-pages a
+            // name-sorted directory), so first > cursor already proves
+            // every name in the page cleared it. Checking only the
+            // last name would miss a page that partially overlaps the
+            // previous one (cursor "b", page ["a", "c"]) — first > cursor
+            // fails there, catching the would-be duplicate "a".
+            if let (Some(cursor), Some(first)) = (after.as_deref(), page_names.first())
+                && first.as_str() <= cursor
             {
                 return Err(format!(
                     "the server's {collection} page did not advance past '{cursor}'"

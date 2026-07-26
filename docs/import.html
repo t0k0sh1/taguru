@@ -341,14 +341,15 @@ curl -X POST localhost:8248/import \
     <p>
       <code>taguru export --url URL --out DIR [CONTEXT...]</code> automates the same walk against a
       <b>running</b> server instead of a local data directory: it enumerates <code>GET /contexts</code>
-      and <code>GET /groups</code> (keyset-paged) and fetches each item from its own export endpoint,
-      writing the identical files a local export would. Auth rides <code>TAGURU_API_TOKEN</code> (or
+      — and, without <code>CONTEXT</code> arguments (a full export), <code>GET /groups</code> too,
+      both keyset-paged — fetching each item from its own export endpoint and writing the identical
+      files a local export would. Auth rides <code>TAGURU_API_TOKEN</code> (or
       the first <code>name:token</code> entry of <code>TAGURU_API_TOKENS</code>), the same variables
       the server reads; a URL carrying <code>user:password@</code> is refused. This is <b>not</b> a
       point-in-time snapshot across contexts — each context's own stream is internally consistent,
-      but contexts are fetched one request at a time, so two fetched seconds apart may not reflect
-      the same instant. An operator who needs a true point-in-time snapshot across the whole server
-      already has one: the replication bucket (<code>TAGURU_REPLICATE_URL</code>) plus
+      but contexts are fetched one request at a time, so two contexts fetched seconds apart may not
+      reflect the same instant. An operator who needs a true point-in-time snapshot across the whole
+      server already has one: the replication bucket (<code>TAGURU_REPLICATE_URL</code>) plus
       <code>taguru restore</code>.
     </p>
     <ul>

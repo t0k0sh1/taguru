@@ -788,11 +788,15 @@ fn remote_export_one(api: &Api, name: &str, out: &std::path::Path) -> Result<Str
 /// remote twin of [`export_group_file`].
 fn remote_export_group(api: &Api, name: &str, out: &std::path::Path) -> Result<String, String> {
     let stream = api.get_raw(&["groups", name, "export"])?;
+    // Validated before it touches disk: write_atomic's whole point is
+    // that a crash mid-write must never shred a previously-good
+    // backup, which a malformed response would defeat if it landed
+    // first and only then failed to parse.
+    let record: Value = serde_json::from_str(stream.trim_end())
+        .map_err(|error| format!("group '{name}': not a taguru group record: {error}"))?;
     let path = out.join(format!("{}.group.jsonl", crate::registry::file_stem(name)));
     crate::storage::write_atomic(&path, stream.as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-    let record: Value = serde_json::from_str(stream.trim_end())
-        .map_err(|error| format!("{}: not a taguru group record: {error}", path.display()))?;
     let contexts = record["contexts"].as_array().map_or(0, Vec::len);
     let groups = record["groups"].as_array().map_or(0, Vec::len);
     Ok(format!(

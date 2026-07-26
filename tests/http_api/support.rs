@@ -342,7 +342,13 @@ pub fn run_import(data_dir: &std::path::Path, args: &[&str]) -> (i32, String, St
 /// subcommand and every flag themselves — e.g. `export --url`.
 pub fn run_cli(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
-    common::scrub_taguru_env(&mut command).args(args);
+    common::scrub_taguru_env(&mut command)
+        // import-only vars scrub_taguru_env doesn't know about — see
+        // run_import's own copy of this list.
+        .env_remove("TAGURU_WAL")
+        .env_remove("TAGURU_WAL_MAX_BYTES")
+        .env_remove("TAGURU_CACHE_BYTES")
+        .args(args);
     for (key, value) in extra_env {
         command.env(key, value);
     }

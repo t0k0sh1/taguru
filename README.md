@@ -390,9 +390,10 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   filesystem snapshots are safe at any instant; back up each context's
   file family as a set) — or take the portable JSONL stream with
   `taguru export` (or `taguru export --url` against a live server,
-  which enumerates and streams every context/group in one run — not a
-  cross-context point-in-time snapshot, but internally consistent per
-  context) and restore anywhere through `taguru import` /
+  which — without `CONTEXT` arguments — enumerates and streams every
+  context and group in one run; not a cross-context point-in-time
+  snapshot, but internally consistent per context) and restore
+  anywhere through `taguru import` /
   `POST /import`. Verify any of them with `taguru inspect` — images,
   passage snapshots, and WAL records carry CRC-32C checksums, so "ok"
   means the bytes were proven intact, not just parseable.
