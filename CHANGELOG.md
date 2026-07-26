@@ -8,6 +8,24 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru compact` gains `--url URL [--parallel N]` (#246, implementing
+  ADR 0002 §6/§8, depending on #243's shared `src/remote.rs` client):
+  pointed at a running server instead of `TAGURU_DATA_DIR`, CONTEXT
+  arguments each call their own `POST /contexts/{name}/compact`; with
+  none, it calls the server's `POST /maintenance/compact` sweep
+  instead — the server picks its own candidates, worst dead ratio
+  first, rather than the CLI enumerating every context first.
+  `--parallel` parallelizes the per-context HTTP calls the same way it
+  parallelizes the local path, reordering the report back to the
+  sequential run's output byte for byte; it has no effect on the
+  single-request sweep. Every remote, mutating invocation prints its
+  target to stderr before sending anything (ADR §5), and a 503 (the
+  heavy-op ceiling, or a sweep already in progress) is shown exactly
+  as the server reported it, `Retry-After` included when present —
+  never retried automatically, since compaction is safe to re-run
+  (ADR §8). Auth and the version-skew preflight are the same
+  `src/remote.rs` machinery `export --url` uses. Without `--url`,
+  behavior is byte-for-byte unchanged (ADR §12.2).
 - `taguru export` gains `--url URL` (#245, implementing ADR 0002 §6/§9,
   depending on #243's shared `src/remote.rs` client): pointed at a
   running server instead of `TAGURU_DATA_DIR`, it enumerates `GET
