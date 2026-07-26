@@ -660,6 +660,241 @@ fn estimate_requires_the_association_count() {
     );
 }
 
+// ============================== benchmark compare ==============================
+
+/// A minimal but complete `taguru benchmark extract` results
+/// directory: one model, one run, one written document with a batch
+/// and one failed document — enough for `taguru benchmark compare` to
+/// exercise every artifact section without a real model endpoint.
+fn write_benchmark_results_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-cli-benchmark-compare-{tag}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("runs")).unwrap();
+    std::fs::create_dir_all(dir.join("cells/m/run01")).unwrap();
+
+    std::fs::write(
+        dir.join("cells/m/run01/brewery.jsonl"),
+        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/brewery.md\"}\n\
+         {\"passage\":\"text\"}\n\
+         {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":1.0,\"paragraph\":0}\n",
+    )
+    .unwrap();
+
+    let runs_lines = [
+        serde_json::json!({
+            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-1",
+            "cell_id": "m.run01", "model_id": "m", "model_name": "m-model",
+            "run_index": 1, "prompt_version": 1,
+        }),
+        serde_json::json!({
+            "kind": "document", "ts": 100.0, "cell_id": "m.run01",
+            "document_id": "brewery", "source": "corpus/brewery.md",
+            "document_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
+        }),
+        serde_json::json!({
+            "kind": "attempt", "source": "corpus/brewery.md", "stage": "item",
+            "chunk_index": 0, "attempt": 1, "max_attempts": 2, "state": "stop_valid",
+            "length_limited": false, "elapsed_seconds": 4.0,
+            "provider_metadata": {"finish_reason": "stop", "input_tokens": 1000,
+                "output_tokens": 200, "total_tokens": 1200},
+            "parse_error": null, "validation_issues": null,
+            "ts": 101.0, "cell_id": "m.run01", "model_id": "m", "run_index": 1,
+            "document_id": "brewery", "document_sha256": "sha-brewery",
+            "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
+        }),
+        serde_json::json!({
+            "kind": "document", "ts": 110.0, "cell_id": "m.run01",
+            "document_id": "brewery", "source": "corpus/brewery.md",
+            "document_sha256": "sha-brewery", "phase": "end", "outcome": "written",
+            "associations": 1, "concepts": 0, "labels": 0, "questions": 0,
+            "duplicates": 0, "dropped": 0, "batch_path": "cells/m/run01/brewery.jsonl",
+        }),
+        serde_json::json!({
+            "kind": "cell", "ts": 111.0, "cell_id": "m.run01", "outcome": "complete",
+            "documents_written": 1, "attempts_total": 1, "exit_code": 0,
+        }),
+    ];
+    let runs_text = runs_lines
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(dir.join("runs/m.run01.jsonl"), runs_text).unwrap();
+
+    let manifest = serde_json::json!({
+        "taguru_benchmark_manifest": 1,
+        "run_id": "run-1",
+        "started_at": "2026-07-26T09:00:00Z",
+        "finished_at": "2026-07-26T09:05:00Z",
+        "taguru_version": "0.0.0",
+        "sdk_versions": {},
+        "harness": {},
+        "extraction_settings": {},
+        "documents": [
+            {
+                "document_id": "brewery", "path": "corpus/brewery.md", "bytes": 100,
+                "sha256": "sha-brewery", "paragraph_count": 5, "chunk_total": 1, "chunks": [],
+            },
+        ],
+        "models": [
+            {
+                "model_id": "m", "model_name": "m-model", "endpoint": "http://x",
+                "digest": null, "quantization": null, "context_window": null,
+                "structured_output_requested": "auto", "timeout_secs": 60,
+                "provider_probe": {"attempted": [], "ok": true, "note": null},
+            },
+        ],
+        "cells": [
+            {
+                "cell_id": "m.run01", "model_id": "m", "run_index": 1,
+                "runs_file": "runs/m.run01.jsonl", "cell_dir": "cells/m/run01",
+                "structured_output_resolved": "json_schema",
+                "started_at": "2026-07-26T09:00:01Z",
+                "finished_at": "2026-07-26T09:04:00Z", "outcome": "complete",
+            },
+        ],
+        "environment": {"os": "linux", "arch": "x86_64"},
+    });
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    dir
+}
+
+/// Checks object *keys* only, never string values — `percentile_method:
+/// "nearest-rank"` legitimately contains "rank" as a value, which must
+/// not trip this check the way a `rank` key would.
+fn assert_no_banned_keys(value: &serde_json::Value) {
+    const BANNED: [&str; 7] = [
+        "rank",
+        "score",
+        "winner",
+        "best",
+        "recommended",
+        "overall",
+        "delta_vs",
+    ];
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, v) in map {
+                for banned in BANNED {
+                    assert!(
+                        !key.to_lowercase().contains(banned),
+                        "banned key fragment '{banned}' found in key '{key}'"
+                    );
+                }
+                assert_no_banned_keys(v);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                assert_no_banned_keys(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn benchmark_compare_derives_measurements_from_a_results_directory() {
+    let dir = write_benchmark_results_dir("smoke");
+
+    let output = run(&["benchmark", "compare", &dir.display().to_string()]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json_text = std::fs::read_to_string(dir.join("measurements.json")).unwrap();
+    let measurements: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+    assert_eq!(measurements["taguru_benchmark_measurements"], 1);
+    assert_eq!(measurements["percentile_method"], "nearest-rank");
+    assert!(measurements["cells"]["m.run01"].is_object());
+    assert!(measurements["models"]["m"].is_object());
+    assert!(measurements["documents"]["m"]["brewery"]["run01"].is_object());
+    assert_no_banned_keys(&measurements);
+
+    let csv_text = std::fs::read_to_string(dir.join("measurements.csv")).unwrap();
+    assert_eq!(
+        csv_text.lines().next(),
+        Some("scope,model_id,run_index,document_id,metric,stat,value,unit,n")
+    );
+
+    // Re-running is a pure function of the (unchanged) results
+    // directory: same bytes out, generated_at aside.
+    let output2 = run(&["benchmark", "compare", &dir.display().to_string()]);
+    assert_eq!(output2.status.code(), Some(0));
+    let csv_text2 = std::fs::read_to_string(dir.join("measurements.csv")).unwrap();
+    assert_eq!(
+        csv_text, csv_text2,
+        "measurements.csv must be byte-identical across reruns"
+    );
+
+    let json_text2 = std::fs::read_to_string(dir.join("measurements.json")).unwrap();
+    let measurements2: serde_json::Value = serde_json::from_str(&json_text2).unwrap();
+    let mut a = measurements.clone();
+    let mut b = measurements2.clone();
+    a.as_object_mut().unwrap().remove("generated_at");
+    b.as_object_mut().unwrap().remove("generated_at");
+    assert_eq!(
+        a, b,
+        "measurements.json must match across reruns aside from generated_at"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn benchmark_compare_requires_exactly_one_results_dir_argument() {
+    let output = run(&["benchmark", "compare"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("RESULTS_DIR"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = run(&["benchmark", "compare", "a", "b"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn benchmark_compare_rejects_a_directory_missing_a_manifest() {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-cli-benchmark-compare-no-manifest-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let output = run(&["benchmark", "compare", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("manifest.json"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn benchmark_reports_both_subcommands_on_an_unknown_one() {
+    let output = run(&["benchmark", "bogus"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("'extract' or 'compare'"), "{stderr}");
+}
+
 #[test]
 fn the_mcp_bridge_answers_initialize_despite_a_stalled_protocol_probe() {
     use std::io::Write;

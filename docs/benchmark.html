@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Extraction benchmark (benchmark) — Taguru</title>
-  <meta name="description" content="The complete reference for taguru benchmark extract: the models.json schema, the results-directory layout, manifest.json/runs/*.jsonl, resume, and the fairness invariant.">
+  <meta name="description" content="The complete reference for taguru benchmark extract and taguru benchmark compare: the models.json schema, the results-directory layout, manifest.json/runs/*.jsonl, resume, the fairness invariant, and the measurements.json/csv metric catalog.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -68,7 +68,7 @@
       Runs <a href="extract.html"><code>taguru extract</code></a> across a matrix of models,
       one <code>taguru extract --diagnostics-out</code> subprocess per (model, run) cell, every
       cell over the same corpus under the same task settings. Writes a reproducible
-      results directory a later <code>taguru benchmark compare</code> (not yet shipped) — or any
+      results directory <a href="#compare"><code>taguru benchmark compare</code></a> — or any
       external tool — can derive measurements from without spending model time again. The design
       is fixed by
       <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0003-extraction-model-benchmark.md">ADR 0003</a>;
@@ -218,13 +218,14 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       .extract-checkpoints/              #   written by extract
       &lt;batch files&gt;                      #   raw extraction output
       diagnostics.jsonl                  #   passed as --diagnostics-out
-      stdout.log  stderr.log  exit_code  #   the cell's own record</code></pre>
+      stdout.log  stderr.log  exit_code  #   the cell's own record
+  measurements.json  measurements.csv    # written by `taguru benchmark compare` (below)</code></pre>
     <p>
       <code>run&lt;NN&gt;</code> is zero-padded (<code>run01</code>, <code>run12</code>) so lexical
       order is run order. Nothing outside <code>cells/</code> is written by a child process, and
       nothing inside <code>cells/</code> is edited by the harness — everything downstream of the
-      models (a future <code>taguru benchmark compare</code>, or any external tool) is a pure
-      function of the results directory alone.
+      models (<a href="#compare"><code>taguru benchmark compare</code></a>, or any external tool)
+      is a pure function of the results directory alone.
     </p>
   </section>
 
@@ -330,6 +331,147 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       directory was created. A mismatch is a usage error naming what changed, pointing at a new
       <code>--out</code> — two differently-configured runs must never share a directory
       (the same reasoning behind giving every cell its own fresh directory in the first place).
+    </p>
+  </section>
+
+  <section id="compare">
+    <h2>taguru benchmark compare</h2>
+    <pre><code>taguru benchmark compare results/</code></pre>
+    <p>
+      Reads a finished results directory — <code>manifest.json</code>, <code>runs/*.jsonl</code>,
+      and the written <code>cells/**</code> batches — and writes <code>measurements.json</code>
+      and <code>measurements.csv</code> into it. A <b>pure function of the results directory</b>:
+      no model is called, no network is touched (ADR 0003's R4), so re-running it costs nothing
+      and always reflects exactly what is on disk right now — including a directory that a
+      resumed <code>taguru benchmark extract</code> has since grown more cells into. Exit codes:
+      <code>0</code> written · <code>1</code> the directory is missing or its
+      <code>manifest.json</code>/<code>runs/*.jsonl</code> could not be read · <code>2</code>
+      usage error.
+    </p>
+    <p class="section-sub">measurements.json</p>
+    <pre><code>{
+  "taguru_benchmark_measurements": 1,
+  "run_id": "...",
+  "generated_at": "2026-07-26T10:05:12Z",
+  "percentile_method": "nearest-rank",
+  "inputs": { "runs": ["runs/qwen25-7b-q4.run01.jsonl"], "cells": "cells/" },
+  "definitions": { "latency.attempt_seconds": { "unit": "second", "statistic": "distribution",
+      "scopes": ["cell", "model", "document"], "description": "...", "source": "...",
+      "caveat": null }, ... },
+  "cells": { "qwen25-7b-q4.run01": { "model_id": "qwen25-7b-q4", "run_index": 1,
+      "latency.attempt_seconds": { "n": 31, "min": 4.12, "p50": 12.44, "p90": 31.87,
+        "p99": 58.10, "max": 61.02, "mean": 15.23, "sum": 472.1 }, ... } },
+  "models": { "qwen25-7b-q4": { "...": "same metric keys, pooled over that model's cells" } },
+  "documents": { "qwen25-7b-q4": { "brewery": { "run01": { "...": "the same document's own
+        metrics at run granularity" } } } }
+}</code></pre>
+    <p>
+      Every distribution metric is <code>{n, min, p50, p90, p99, max, mean, sum}</code>.
+      Percentiles are <b>nearest-rank, never interpolated</b>: for ascending
+      <code>x[0..n-1]</code>, the <code>p</code>th percentile is <code>x[⌈p/100·n⌉ − 1]</code> —
+      always an observed value, exactly reproducible by an external re-aggregator reading the same
+      <code>runs/*.jsonl</code>. A metric with zero qualifying samples still emits its key, with
+      <code>n: 0</code> and every statistic <code>null</code> — never omitted, so a reader can
+      tell "measured, zero samples" from "this metric does not apply here" by key presence alone.
+      A ratio metric (<code>{value, n, numerator}</code>) follows the same rule: <code>n: 0</code>
+      pairs with <code>value: null</code> and <code>numerator: null</code>, never a
+      divide-by-zero <code>NaN</code> and never a silently misleading <code>0.0</code>.
+    </p>
+    <p>
+      <code>runs/*.jsonl</code> alone cannot supply the extraction-shape metrics that need a
+      batch's full item list (the association weight split, distinct subjects/relations, alias
+      orphans, out-of-range paragraph locators) — <code>compare</code> re-reads the
+      <code>cells/**</code> batch a written document's own <code>kind: "document"</code> record
+      names, classifying each line leniently rather than with <code>taguru import</code>'s
+      fail-fast batch reader, since counting malformed lines requires reading past the first one.
+      <code>measurements.json</code>'s own <code>inputs</code> block names both sources, so the
+      derivation stays auditable.
+    </p>
+    <p class="section-sub">No single score or ranking</p>
+    <p>
+      This is structural, not a convention <code>compare</code> merely follows: per-model and
+      per-cell results are keyed maps in lexicographic order, never arrays a position in could be
+      read as a rank; the emitted key set is asserted (by a unit test) to never contain
+      <code>rank</code>, <code>score</code>, <code>winner</code>, <code>best</code>,
+      <code>recommended</code>, <code>overall</code>, or <code>delta_vs_*</code>; and
+      <code>measurements.csv</code> is <b>tidy</b> — <code>model_id</code> is always a data
+      column, never a header column a model's name could sort by. There is simply no field
+      anywhere in either artifact to put a rank in.
+    </p>
+    <p class="section-sub">measurements.csv</p>
+    <pre><code>scope,model_id,run_index,document_id,metric,stat,value,unit,n
+cell,qwen25-7b-q4,1,,latency.attempt_seconds,p50,12.44,second,31
+model,qwen25-7b-q4,,,latency.attempt_seconds,p50,12.91,second,93
+document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</code></pre>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>scope</code></td><td><code>cell</code> | <code>model</code> | <code>document</code></td></tr>
+          <tr><td><code>model_id</code>, <code>run_index</code>, <code>document_id</code></td><td>the key that scope needs; blank where a scope has no such axis (a <code>model</code> row has no <code>run_index</code>)</td></tr>
+          <tr><td><code>metric</code></td><td>a dotted name keying <code>definitions</code></td></tr>
+          <tr><td><code>stat</code></td><td><code>value</code> | <code>min</code> | <code>p50</code> | <code>p90</code> | <code>p99</code> | <code>max</code> | <code>mean</code> | <code>sum</code> | <code>n</code> | <code>numerator</code> — whichever fields that metric's shape has</td></tr>
+          <tr><td><code>value</code></td><td>empty exactly where the corresponding JSON field is <code>null</code></td></tr>
+          <tr><td><code>unit</code>, <code>n</code></td><td>copied from <code>definitions</code> and from the metric's own sample size, so a spreadsheet never needs the JSON open to interpret a row</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <code>measurements.csv</code> is a <b>value projection</b> of <code>measurements.json</code>,
+      not a lossless flattening of it: every numeric field of every distribution and ratio becomes
+      one row, but <code>definitions</code> — unit, statistic, description, source,
+      <code>caveat</code> — and the <code>inputs</code>/<code>run_id</code>/<code>generated_at</code>
+      metadata stay JSON-only. A tool that needs a metric's caveat reads
+      <code>measurements.json</code>; the CSV is for spreadsheets and <code>pandas</code>/
+      <code>sqlite</code>. It carries no version stamp of its own — its version is
+      <code>measurements.json</code>'s, and the harness writes the two atomically, one
+      stage-then-rename each, CSV first.
+    </p>
+    <p class="section-sub">Metric catalog</p>
+    <p>
+      This table mirrors <code>measurements.json</code>'s own <code>definitions</code> block —
+      the artifact carries the authoritative, machine-readable copy; this is a human-readable
+      index into it, not a second source of truth.
+    </p>
+    <div class="tbl">
+      <table>
+      <thead><tr><th>Metric family</th><th>Scopes</th><th>What it measures</th></tr></thead>
+      <tbody>
+        <tr><td><code>latency.attempt_seconds</code></td><td>cell, model, document</td><td>Wall time of one completion call.</td></tr>
+        <tr><td><code>latency.chunk_seconds</code></td><td>cell, model, document</td><td>One chunk's total time across every retry (cross-chunk correction excluded).</td></tr>
+        <tr><td><code>latency.document_wall_seconds</code></td><td>cell, model, document</td><td>A document's <code>phase: "start"</code> to <code>phase: "end"</code> span.</td></tr>
+        <tr><td><code>latency.seconds_per_association</code></td><td>cell, model, document</td><td>A written document's total attempt time per association produced.</td></tr>
+        <tr><td><code>throughput.output_tokens_per_second</code></td><td>cell, model, document</td><td>One attempt's output tokens over its elapsed time.</td></tr>
+        <tr><td><code>tokens.input_per_attempt</code>, <code>tokens.output_per_attempt</code>, <code>tokens.total_per_attempt</code></td><td>cell, model, document</td><td>Provider-reported token counts per completion call.</td></tr>
+        <tr><td><code>extraction.associations_per_1k_input_tokens</code></td><td>cell, model, document</td><td>Associations produced per 1,000 input tokens spent, retries included.</td></tr>
+        <tr><td><code>attempt.state_rate.*</code></td><td>cell, model</td><td>Share of attempts in each of ADR 0001 §7's terminal states (<code>stop_valid</code>, <code>stop_malformed</code>, <code>length_limited</code>, <code>empty</code>, <code>refusal</code>, <code>timeout</code>, <code>transport</code>).</td></tr>
+        <tr><td><code>attempt.length_limited_rate</code>, <code>attempt.retry_rate</code>, <code>attempt.parse_error_rate</code>, <code>attempt.validation_rejected_rate</code>, <code>attempt.provider_metadata_missing_rate</code></td><td>cell, model</td><td>Attempt-level failure/retry signals independent of, or complementary to, <code>state</code>.</td></tr>
+        <tr><td><code>attempt.finish_reason_rate.&lt;reason&gt;</code></td><td>cell, model</td><td>Share of attempts reporting each provider-specific finish reason actually observed in this run.</td></tr>
+        <tr><td><code>document.written_rate</code>, <code>document.failed_rate</code></td><td>cell, model</td><td>Share of started documents that reached each terminal outcome.</td></tr>
+        <tr><td><code>cell.complete_rate</code></td><td>model</td><td>Share of a model's cells that completed, read from <code>manifest.json</code>.</td></tr>
+        <tr><td><code>extraction.associations</code>, <code>.concepts</code>, <code>.labels</code>, <code>.questions</code>, <code>.duplicates</code>, <code>.dropped</code></td><td>cell, model, document</td><td>Per-document extraction volume, from <code>kind: "document"</code>'s own counts.</td></tr>
+        <tr><td><code>extraction.weight_positive</code>, <code>.weight_negative</code></td><td>cell, model, document</td><td>Association lines with positive vs. negative <code>weight</code>.</td></tr>
+        <tr><td><code>extraction.subjects_distinct</code>, <code>.relations_distinct</code></td><td>cell, model, document</td><td>Distinct <code>subject</code>/<code>label</code> values within a document's own batch.</td></tr>
+        <tr><td><code>extraction.paragraph_attributed_rate</code></td><td>cell, model, document</td><td>Share of association lines carrying a paragraph locator.</td></tr>
+        <tr><td><code>extraction.relation_reuse_ratio</code></td><td>cell, model, document</td><td>Share of association lines whose label was not that document's first use of it.</td></tr>
+        <tr><td><code>extraction.alias_orphans</code>, <code>.paragraph_out_of_range</code>, <code>.batch_lines_invalid</code></td><td>cell, model, document</td><td>Batch-writer health checks: aliases with no matching canonical, locators past a document's paragraph count, and lines matching none of the batch format's known shapes.</td></tr>
+      </tbody>
+      </table>
+    </div>
+    <p class="section-sub">Known limitations</p>
+    <p>
+      Carried forward as <code>caveat</code> strings in <code>measurements.json</code>'s own
+      <code>definitions</code>, not hidden: <code>attempt.state_rate.stop_malformed</code>
+      conflates a JSON syntax failure with a Stage 1 validation rejection —
+      <code>attempt.validation_rejected_rate</code> separates them (ADR 0001 §7). The legacy
+      (non-ladder) extraction path never reports <code>length_limited</code> or
+      <code>refusal</code> as a <code>state</code>, folding both into <code>stop_valid</code>
+      instead — <code>attempt.length_limited_rate</code> reads the flag directly and is not
+      subject to that gap. With <code>--no-passage</code>,
+      <code>extraction.paragraph_attributed_rate</code> is structurally <code>0</code>, since
+      <code>taguru extract</code>'s own batch writer strips every paragraph locator before writing
+      when there is no passage line left to locate into — this reflects the flag, not model
+      behavior.
     </p>
   </section>
 
