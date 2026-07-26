@@ -69,7 +69,8 @@ USAGE:
                                         directory offline — bulk/initial
                                         loads (see: taguru import --help);
                                         the directory lock refuses to run
-                                        beside a live server
+                                        beside a live server, or point
+                                        import itself at one with --url
   taguru export --out DIR [CONTEXT...]  write contexts — and, on a full
                                         export, groups — back out of the data
                                         directory as import batch streams,

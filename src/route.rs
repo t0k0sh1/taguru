@@ -2171,7 +2171,7 @@ async fn route_import(
         Ok(stream) => stream,
         Err(message) => return api::error(ErrorCode::MalformedRequest, message, started_at),
     };
-    let slices = split_batches(&body);
+    let slices = crate::ingest::split_batches(&body);
     debug_assert_eq!(slices.len(), stream.batches.len());
     // Route every batch before anything ships: a stream naming an
     // unroutable context refuses whole, like any other invalid stream.
@@ -2463,50 +2463,6 @@ fn rewrap_import_refusal(
         .into_response()
 }
 
-/// Byte ranges of each batch in a stream `parse_stream` already
-/// validated: a batch runs from its `taguru_batch` header line to the
-/// next stream-level record (header or `taguru_group` line) or EOF.
-/// Group-record bytes belong to no batch — they are re-rendered from
-/// the parsed records instead of sliced.
-fn split_batches(body: &[u8]) -> Vec<std::ops::Range<usize>> {
-    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut current_start: Option<usize> = None;
-    let mut offset = 0usize;
-    for line in body.split_inclusive(|byte| *byte == b'\n') {
-        let start = offset;
-        offset += line.len();
-        let mut text = line;
-        if start == 0 && text.starts_with(&[0xEF, 0xBB, 0xBF]) {
-            text = &text[3..];
-        }
-        let Ok(text) = std::str::from_utf8(text) else {
-            continue;
-        };
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        let Some(object) = value.as_object() else {
-            continue;
-        };
-        if object.contains_key("taguru_batch") || object.contains_key("taguru_group") {
-            if let Some(batch_start) = current_start.take() {
-                ranges.push(batch_start..start);
-            }
-            if object.contains_key("taguru_batch") {
-                current_start = Some(start);
-            }
-        }
-    }
-    if let Some(batch_start) = current_start {
-        ranges.push(batch_start..body.len());
-    }
-    ranges
-}
-
 // ---------------------------------------------------------------------------
 // Router-owned endpoints
 
@@ -2653,30 +2609,6 @@ mod tests {
         // Without a fallback, unmapped contexts have no shard at all.
         let map = RouteMap::parse("sake = http://a:1\n").unwrap();
         assert_eq!(map.shard_of("unmapped"), None);
-    }
-
-    #[test]
-    fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
-        let body = concat!(
-            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}\n",
-            "{\"assoc\": [\"a\", \"likes\", \"b\"]}\n",
-            "\n",
-            "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"sake\"]}\n",
-            "{\"taguru_batch\": 1, \"context\": \"beer\", \"source\": \"s2\"}\n",
-            "{\"assoc\": [\"c\", \"likes\", \"d\"]}",
-        )
-        .as_bytes();
-        let ranges = split_batches(body);
-        assert_eq!(ranges.len(), 2);
-        let first = std::str::from_utf8(&body[ranges[0].clone()]).unwrap();
-        assert!(first.starts_with("{\"taguru_batch\": 1, \"context\": \"sake\""));
-        // The batch's ops (and the blank line) ride along; the group
-        // record between the batches belongs to neither.
-        assert!(first.contains("likes"));
-        assert!(!first.contains("taguru_group"));
-        let second = std::str::from_utf8(&body[ranges[1].clone()]).unwrap();
-        assert!(second.starts_with("{\"taguru_batch\": 1, \"context\": \"beer\""));
-        assert!(second.ends_with("\"d\"]}"), "EOF closes the last batch");
     }
 
     #[test]

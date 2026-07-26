@@ -46,12 +46,13 @@
 //! order; a member that still does not exist at that point refuses
 //! the whole group set, with every batch already durably landed.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde_json::Value;
 use taguru::context::{AliasError, Context};
 use taguru::deadline::Deadline;
 
@@ -59,28 +60,52 @@ use crate::api::{
     MAX_ASSOCIATION_WEIGHT, MAX_ASSOCIATIONS_PER_REQUEST, MAX_CONTEXT_NAME_BYTES,
     MAX_DESCRIPTION_BYTES, MAX_NAME_BYTES,
 };
+use crate::env::DEFAULT_MAX_BODY_BYTES;
 use crate::groups::{GroupRecord, MAX_GROUP_MEMBERS};
 use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
+use crate::remote::{Api, ImportFailure};
 
 const USAGE: &str = "\
-usage: taguru import [--dry-run] [--no-embed] [--config FILE] FILE|DIR...
+usage: taguru import [--dry-run] [--no-embed] [--config FILE] [--url URL] FILE|DIR...
 
 Applies JSONL batch files to TAGURU_DATA_DIR offline (the server must
-not be running — the directory lock enforces it). One batch = one
-source's complete truth: import retracts the source, then applies the
-batch, so re-importing is idempotent. A file carries one batch or a
-whole stream of them (each `taguru_batch` header line starts the
-next) — `taguru export` writes such streams. A `taguru_group` line
-states one group's complete truth the same way; groups restore AFTER
-every batch of the run (create-or-replace of the whole record), so
-group files re-apply in any order. A directory expands to its *.jsonl
-files, sorted by name. Format: docs/import.html. A running server
-accepts the same bodies at POST /import (authenticated), one file per
-request — live systems need no downtime window.
+not be running — the directory lock enforces it), or to a RUNNING
+server with --url. One batch = one source's complete truth: import
+retracts the source, then applies the batch, so re-importing is
+idempotent. A file carries one batch or a whole stream of them (each
+`taguru_batch` header line starts the next) — `taguru export` writes
+such streams. A `taguru_group` line states one group's complete truth
+the same way; groups restore AFTER every batch of the run
+(create-or-replace of the whole record), so group files re-apply in
+any order. A directory expands to its *.jsonl files, sorted by name.
+Format: docs/import.html.
 
-  --dry-run    validate every file and report; touch nothing
+  --dry-run    validate every file and report; touch nothing (with
+               --url, POSTs every chunk as ?dry_run=true instead)
   --no-embed   skip the embedding refresh TAGURU_EMBED_URL would enable
+               (offline only — combined with --url this is a usage
+               error, since the server's own configuration decides
+               once the request lands there)
   --config F   read KEY=VALUE environment from F (same dialect as serve)
+
+  --url URL    import into a RUNNING server instead of TAGURU_DATA_DIR
+               directly: POST /import, one request per chunk. The
+               input is split on batch boundaries only — never
+               mid-batch — into chunks under the server's body cap
+               (TAGURU_MAX_BODY_BYTES, 8 MiB by default), starting at
+               a 4 MiB budget and halved (never crossing a batch
+               boundary) and resent on a 413. A single batch that
+               alone exceeds the cap is a hard error naming the
+               source: raise TAGURU_MAX_BODY_BYTES on the server, or
+               split that source's content upstream of import. A lost
+               connection names which chunk landed and points at
+               --dry-run to confirm before resuming — nothing past
+               that is retried automatically (import's
+               retract-then-apply contract makes any resend exact).
+               Auth rides TAGURU_API_TOKEN (or the first name:token
+               entry of TAGURU_API_TOKENS), the admin role the server
+               requires. In CI, name the target per invocation:
+                 taguru import --url \"$TAGURU_URL\" backups/
 ";
 
 /// The one format version this build reads and docs/import.html
@@ -108,10 +133,18 @@ pub(crate) const MAX_PASSAGE_BYTES: usize = 8 * 1024 * 1024;
 /// from `TAGURU_WAL_MAX_BYTES` (past which writes are refused).
 const FLUSH_EVERY_OPS: usize = 100_000;
 
+/// The starting byte budget `import --url` packs each chunk up to
+/// (ADR 0002 §9) — half the server's default body cap, leaving
+/// headroom for a server configured lower. A 413 still hit at this
+/// budget halves it further (never below one unit) rather than
+/// retrying at the same size.
+const REMOTE_IMPORT_BUDGET_BYTES: usize = DEFAULT_MAX_BODY_BYTES / 2;
+
 pub fn run(args: &[String]) -> i32 {
     let mut dry_run = false;
     let mut no_embed = false;
     let mut config: Option<PathBuf> = None;
+    let mut url: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -131,6 +164,18 @@ pub fn run(args: &[String]) -> i32 {
                     );
                 }
             },
+            // Trailing '/' trimmed the same way export/compact/calibrate/
+            // communities already do — a joined path segment must not
+            // double up.
+            "--url" => match rest.next() {
+                Some(value) => url = Some(value.trim_end_matches('/').to_string()),
+                None => {
+                    return crate::config::subcommand_usage_error(
+                        "import",
+                        "--url needs a server URL",
+                    );
+                }
+            },
             other if other.starts_with('-') => {
                 return crate::config::subcommand_usage_error(
                     "import",
@@ -144,8 +189,22 @@ pub fn run(args: &[String]) -> i32 {
         eprint!("{USAGE}");
         return 2;
     }
+    // ADR 0002 §5: a flag that only makes sense offline, combined with
+    // --url, is a usage error rather than a silent no-op — the
+    // server's own embedding configuration decides once the request
+    // lands there, so --no-embed has nothing left to control remotely.
+    if no_embed && url.is_some() {
+        return crate::config::subcommand_usage_error(
+            "import",
+            "--no-embed cannot be combined with --url — the server's own embedding \
+             configuration decides",
+        );
+    }
     // SAFETY (same contract as serve): applied while the process is
     // still single-threaded — import never starts a runtime at all.
+    // Loaded before the --url dispatch below, too: a config file is
+    // the usual place a deployment's TAGURU_API_TOKEN lives, and
+    // Api::new reads the bearer from the environment at construction.
     if let Some(path) = &config {
         crate::config::load_config(path);
     }
@@ -155,6 +214,18 @@ pub fn run(args: &[String]) -> i32 {
         Err(message) => return crate::config::subcommand_usage_error("import", &message),
     };
 
+    match url {
+        // ADR 0002 §5/§6: `--url` is the only way `import` goes
+        // remote — no positional URL argument, no TAGURU_URL or
+        // default_base_url() fallback the way `health`/`calibrate`/
+        // `communities` have one. Absent, this is exactly the local
+        // path that ran before this flag existed.
+        Some(base) => run_remote(&base, &files, dry_run),
+        None => run_local(&files, dry_run, no_embed),
+    }
+}
+
+fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool) -> i32 {
     // Pass 1 — every file parses, or nothing applies. Apply-stage
     // refusals can strand a half-written source; a malformed line is
     // knowable up front, so it must never cost a write. A file may
@@ -165,7 +236,7 @@ pub fn run(args: &[String]) -> i32 {
     let mut broken = 0;
     let mut owners: HashSet<(String, String)> = HashSet::new();
     let mut group_owners: HashSet<String> = HashSet::new();
-    for path in &files {
+    for path in files {
         let parsed = fs::File::open(path)
             .map_err(|error| error.to_string())
             .and_then(|file| parse_stream(std::io::BufReader::new(file)));
@@ -178,11 +249,9 @@ pub fn run(args: &[String]) -> i32 {
                 for batch in stream.batches {
                     if !owners.insert((batch.context.clone(), batch.source.clone())) {
                         eprintln!(
-                            "taguru: import: {}: source '{}' in context '{}' is already \
-                             stated by an earlier file — one file owns one source's truth",
+                            "taguru: import: {}: {}",
                             path.display(),
-                            batch.source,
-                            batch.context
+                            duplicate_source_message(&batch.context, &batch.source)
                         );
                         file_broken = true;
                         continue;
@@ -192,9 +261,9 @@ pub fn run(args: &[String]) -> i32 {
                 for (name, record) in stream.groups {
                     if !group_owners.insert(name.clone()) {
                         eprintln!(
-                            "taguru: import: {}: group '{name}' is already stated by an \
-                             earlier file — one record owns one group's truth",
-                            path.display()
+                            "taguru: import: {}: {}",
+                            path.display(),
+                            duplicate_group_message(&name)
                         );
                         file_broken = true;
                         continue;
@@ -255,6 +324,17 @@ pub fn run(args: &[String]) -> i32 {
         Ok(state) => state,
         Err(error) => {
             eprintln!("taguru: import: {error}");
+            // ADR 0002 §5: the directory-lock refusal gains one added
+            // sentence pointing at the way out — importing into a
+            // RUNNING server is a different command, not a second
+            // offline process racing the first for the same lock.
+            if error.to_string().contains("held by another taguru process") {
+                eprintln!(
+                    "taguru: import: importing into a *running* server is `taguru import \
+                     --url http://127.0.0.1:8248 FILE...`, not a second offline process \
+                     racing the first"
+                );
+            }
             return 1;
         }
     };
@@ -371,6 +451,465 @@ fn describe_group(name: &str, record: &GroupRecord) -> String {
         record.contexts.len(),
         record.groups.len()
     )
+}
+
+/// The cross-file "already claimed" refusal — shared by the local and
+/// remote import passes' duplicate-source checks so the wording can
+/// never drift between the two entrances.
+fn duplicate_source_message(context: &str, source: &str) -> String {
+    format!(
+        "source '{source}' in context '{context}' is already stated by an earlier file \
+         — one file owns one source's truth"
+    )
+}
+
+/// [`duplicate_source_message`]'s group-record twin.
+fn duplicate_group_message(name: &str) -> String {
+    format!(
+        "group '{name}' is already stated by an earlier file — one record owns one \
+         group's truth"
+    )
+}
+
+/// One batch's or group's rendered bytes, packed into a [`Chunk`] for
+/// `import --url`'s wire chunking (ADR 0002 §9) — `label` names the
+/// source (or group) for the hard-error and progress messages, `is_group`
+/// tells [`run_remote`]'s "batches not yet sent" tally apart from group
+/// records, which restore separately and are never counted as a batch.
+struct Unit {
+    text: String,
+    label: String,
+    is_group: bool,
+}
+
+impl Unit {
+    fn len(&self) -> usize {
+        self.text.len()
+    }
+}
+
+/// One `POST /import` request's worth of units, in stream order — a
+/// prefix of whole batch units followed (only in the last chunk that
+/// carries any) by whole group units, since groups restore after
+/// every batch of the run.
+struct Chunk {
+    units: Vec<Unit>,
+}
+
+impl Chunk {
+    fn size(&self) -> usize {
+        self.units.iter().map(Unit::len).sum()
+    }
+
+    /// The wire body: every unit's text concatenated, each guaranteed
+    /// to end in its own newline — a unit sliced off the last batch of
+    /// a file (or EOF) may not already carry one.
+    fn body(&self) -> String {
+        let mut body = String::with_capacity(self.size() + self.units.len());
+        for unit in &self.units {
+            body.push_str(&unit.text);
+            if !unit.text.ends_with('\n') {
+                body.push('\n');
+            }
+        }
+        body
+    }
+
+    /// Splits this chunk in two at the unit boundary closest to half
+    /// its accumulated bytes, both halves non-empty — the ADR 0002 §9
+    /// 413 adaptation, and the same halving the pre-send budget check
+    /// below uses. Only ever called on a chunk carrying more than one
+    /// unit: a lone oversized unit is refused before it ever reaches a
+    /// chunk (splitting a batch's own record set client-side would
+    /// break the retract-then-apply contract's atomicity boundary).
+    fn halve(mut self) -> (Chunk, Chunk) {
+        debug_assert!(self.units.len() > 1, "a lone unit cannot be halved further");
+        let total = self.size();
+        let mut running = 0usize;
+        let mut split_at = 1;
+        for (index, unit) in self.units.iter().enumerate() {
+            running += unit.len();
+            if running * 2 >= total {
+                split_at = (index + 1).clamp(1, self.units.len() - 1);
+                break;
+            }
+        }
+        let tail = self.units.split_off(split_at);
+        (Chunk { units: self.units }, Chunk { units: tail })
+    }
+}
+
+/// Greedily packs units, in order, into whole-unit chunks under
+/// `budget` bytes — a chunk always carries at least one unit even if
+/// that unit alone exceeds `budget` (the caller refuses that case
+/// before this ever runs; see [`run_remote`]'s pre-send check). Pulled
+/// out of [`run_remote`] so the packing rule has a unit test
+/// independent of any network call.
+fn pack_chunks(units: Vec<Unit>, budget: usize) -> VecDeque<Chunk> {
+    let mut queue: VecDeque<Chunk> = VecDeque::new();
+    let mut pending: Vec<Unit> = Vec::new();
+    let mut pending_size = 0usize;
+    for unit in units {
+        if !pending.is_empty() && pending_size + unit.len() > budget {
+            queue.push_back(Chunk {
+                units: std::mem::take(&mut pending),
+            });
+            pending_size = 0;
+        }
+        pending_size += unit.len();
+        pending.push(unit);
+    }
+    if !pending.is_empty() {
+        queue.push_back(Chunk { units: pending });
+    }
+    queue
+}
+
+/// The hard failure for a single batch (or group record) that alone
+/// exceeds the byte budget — reported and refused before the network
+/// is ever touched, naming the two real fixes (ADR 0002 §9).
+fn oversized_unit_error(label: &str, size: usize, budget: usize) -> i32 {
+    eprintln!(
+        "taguru: import: {label} alone is {size} byte(s), over the {budget}-byte chunk \
+         budget — splitting a batch's own record set client-side would break the \
+         retract-then-apply contract's atomicity boundary, so this cannot be packed \
+         automatically; reduce what this source's batch carries (split the source \
+         upstream of import) — raising the server's TAGURU_MAX_BODY_BYTES alone will \
+         not help, since this budget is fixed client-side regardless of the server's cap"
+    );
+    1
+}
+
+/// One chunk's landed `ImportOutcome` array (`POST /import`'s response
+/// shape, src/api/import.rs), summarized into the same vocabulary
+/// [`report`] uses for the local path's per-batch line — one line per
+/// chunk instead of one per batch, since a remote chunk can carry many.
+fn summarize_chunk_outcomes(outcomes: &[Value]) -> String {
+    let created = outcomes
+        .iter()
+        .filter(|outcome| outcome["created"].as_bool() == Some(true))
+        .count();
+    let retracted: u64 = outcomes
+        .iter()
+        .filter_map(|o| o["retracted"].as_u64())
+        .sum();
+    let associations: u64 = outcomes
+        .iter()
+        .filter_map(|o| o["associations"].as_u64())
+        .sum();
+    let aliases: u64 = outcomes.iter().filter_map(|o| o["aliases"].as_u64()).sum();
+    let passages = outcomes
+        .iter()
+        .filter(|outcome| outcome["passage_stored"].as_bool() == Some(true))
+        .count();
+    format!(
+        "{} batch(es){} ({retracted} association(s) retracted): +{associations} \
+         association(s), +{aliases} alias(es){}",
+        outcomes.len(),
+        match created {
+            0 => String::new(),
+            created => format!(", {created} created"),
+        },
+        match passages {
+            0 => String::new(),
+            passages => format!(", {passages} passage(s) stored"),
+        },
+    )
+}
+
+/// The remote twin of [`run_local`]: validates every file the same
+/// way, then packs whole batches (and, after them, whole group
+/// records) into chunks under a byte budget and POSTs each to a
+/// running server's `/import`, adapting to a 413 by halving the chunk
+/// and resending — never splitting a batch's own record set, never
+/// crossing into the next batch (ADR 0002 §9). `--dry-run` sends every
+/// chunk as `?dry_run=true` instead of touching anything.
+fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
+    // ADR 0002 §7: caught before any request leaves the process.
+    if let Err(message) = crate::remote::reject_userinfo(base) {
+        return crate::config::subcommand_usage_error("import", &message);
+    }
+
+    // Pass 1 — every file parses, or nothing applies (same contract as
+    // run_local's own Pass 1). File bytes are held past this point
+    // (unlike the local path's streaming parse) because split_batches
+    // needs them: the chunk packer below slices each batch straight
+    // out of its source file rather than re-serializing it.
+    let mut units: Vec<Unit> = Vec::new();
+    let mut group_units: Vec<Unit> = Vec::new();
+    let mut batch_count = 0usize;
+    let mut group_count = 0usize;
+    let mut broken = 0usize;
+    let mut owners: HashSet<(String, String)> = HashSet::new();
+    let mut group_owners: HashSet<String> = HashSet::new();
+    for path in files {
+        let mut bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("taguru: import: {}: {error}", path.display());
+                broken += 1;
+                continue;
+            }
+        };
+        // A UTF-8 BOM only ever means anything at byte 0 of the WHOLE
+        // stream (parse_stream's own note): stripped here, before
+        // split_batches runs, so a batch sliced mid-stream can never
+        // carry one riding into a wire chunk that isn't the first.
+        if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            bytes.drain(0..3);
+        }
+        let mut file_broken = false;
+        match parse_stream(&bytes[..]) {
+            Ok(stream) => {
+                let ranges = split_batches(&bytes);
+                debug_assert_eq!(
+                    ranges.len(),
+                    stream.batches.len(),
+                    "split_batches must slice exactly one range per parsed batch"
+                );
+                for (batch, range) in stream.batches.iter().zip(ranges) {
+                    if !owners.insert((batch.context.clone(), batch.source.clone())) {
+                        eprintln!(
+                            "taguru: import: {}: {}",
+                            path.display(),
+                            duplicate_source_message(&batch.context, &batch.source)
+                        );
+                        file_broken = true;
+                        continue;
+                    }
+                    let text = String::from_utf8(bytes[range].to_vec())
+                        .expect("parse_stream already proved this range is UTF-8");
+                    units.push(Unit {
+                        text,
+                        label: format!(
+                            "{}: context '{}' source '{}'",
+                            path.display(),
+                            batch.context,
+                            batch.source
+                        ),
+                        is_group: false,
+                    });
+                    batch_count += 1;
+                }
+                for (name, record) in &stream.groups {
+                    if !group_owners.insert(name.clone()) {
+                        eprintln!(
+                            "taguru: import: {}: {}",
+                            path.display(),
+                            duplicate_group_message(name)
+                        );
+                        file_broken = true;
+                        continue;
+                    }
+                    group_units.push(Unit {
+                        text: crate::export::render_group(name, record),
+                        label: format!("{}: group '{name}'", path.display()),
+                        is_group: true,
+                    });
+                    group_count += 1;
+                }
+            }
+            Err(message) => {
+                eprintln!("taguru: import: {}: {message}", path.display());
+                file_broken = true;
+            }
+        }
+        if file_broken {
+            broken += 1;
+        }
+    }
+    if broken > 0 {
+        eprintln!(
+            "taguru: import: {broken} of {} file(s) refused during validation; \
+             nothing was applied",
+            files.len()
+        );
+        return 1;
+    }
+
+    // Groups restore only after every batch of the run — the same
+    // rule run_local's Pass 2 keeps — so a group naming a context an
+    // earlier chunk's batch creates must always be sent after it.
+    units.append(&mut group_units);
+
+    // A single unit that alone exceeds the byte budget cannot be
+    // packed into any chunk, however the packer below runs — refused
+    // before the network is ever touched (ADR 0002 §9).
+    if let Some(oversized) = units
+        .iter()
+        .find(|unit| unit.len() > REMOTE_IMPORT_BUDGET_BYTES)
+    {
+        return oversized_unit_error(
+            &oversized.label,
+            oversized.len(),
+            REMOTE_IMPORT_BUDGET_BYTES,
+        );
+    }
+
+    let api = Api::new(base.to_string());
+    // ADR 0002 §5: every remote, mutating invocation prints its target
+    // before sending anything.
+    eprintln!("import → {base}");
+    api.warn_on_version_skew("import");
+
+    let mut queue = pack_chunks(units, REMOTE_IMPORT_BUDGET_BYTES);
+
+    let mut total = queue.len();
+    let mut landed_chunks = 0usize;
+    let mut budget = REMOTE_IMPORT_BUDGET_BYTES;
+    let mut batches_landed = 0usize;
+    let mut group_records_landed = 0usize;
+    let mut contexts: BTreeSet<String> = BTreeSet::new();
+
+    while let Some(chunk) = queue.pop_front() {
+        if chunk.size() > budget && chunk.units.len() > 1 {
+            let (first, second) = chunk.halve();
+            queue.push_front(second);
+            queue.push_front(first);
+            total += 1;
+            continue;
+        }
+        match api.import_chunk(&chunk.body(), dry_run) {
+            Ok(result) => {
+                landed_chunks += 1;
+                let outcomes = result
+                    .get("batches")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for outcome in &outcomes {
+                    if let Some(context) = outcome.get("context").and_then(Value::as_str) {
+                        contexts.insert(context.to_string());
+                    }
+                }
+                batches_landed += outcomes.len();
+                if !outcomes.is_empty() {
+                    println!(
+                        "chunk {landed_chunks}/{total}: {}",
+                        summarize_chunk_outcomes(&outcomes)
+                    );
+                }
+                if let Some(groups) = result.get("groups").and_then(Value::as_array) {
+                    for group in groups {
+                        let name = group.get("name").and_then(Value::as_str).unwrap_or("?");
+                        let outcome = group.get("outcome").and_then(Value::as_str).unwrap_or("?");
+                        let member_contexts =
+                            group.get("contexts").and_then(Value::as_u64).unwrap_or(0);
+                        let child_groups = group.get("groups").and_then(Value::as_u64).unwrap_or(0);
+                        println!(
+                            "group '{name}': {member_contexts} member context(s), \
+                             {child_groups} child group(s) — {outcome}"
+                        );
+                        group_records_landed += 1;
+                    }
+                }
+            }
+            Err(ImportFailure::TooLarge(message)) => {
+                if chunk.units.len() == 1 {
+                    eprintln!("taguru: import: {message}");
+                    return oversized_unit_error(
+                        &chunk.units[0].label,
+                        chunk.units[0].len(),
+                        budget,
+                    );
+                }
+                // Pre-application rejection (ADR 0002 §8): safe to
+                // adapt to and resend automatically — repeatedly, if
+                // a further 413 keeps arriving, until this chunk is
+                // a single batch (oversized_unit_error) or lands.
+                budget = (chunk.size() / 2).max(1);
+                let (first, second) = chunk.halve();
+                queue.push_front(second);
+                queue.push_front(first);
+                total += 1;
+            }
+            Err(ImportFailure::InvalidUrl(message)) => {
+                // No request was ever sent — nothing landed, nothing
+                // to resume; this is a usage problem, not a partial
+                // apply.
+                eprintln!("taguru: import: {message}");
+                return 1;
+            }
+            Err(ImportFailure::Transport(message)) => {
+                eprintln!("taguru: import: {message}");
+                if dry_run {
+                    eprintln!(
+                        "taguru: import: connection lost after chunk \
+                         {landed_chunks}/{total} of the dry run — nothing was applied"
+                    );
+                } else {
+                    eprintln!(
+                        "taguru: import: connection lost after chunk {landed_chunks}/{total} \
+                         — re-run `--dry-run` to confirm what would change, then resume"
+                    );
+                }
+                return 1;
+            }
+            Err(ImportFailure::Refused {
+                status,
+                message,
+                body,
+            }) => {
+                eprintln!(
+                    "taguru: import: chunk {}/{total} refused: {message}",
+                    landed_chunks + 1
+                );
+                if matches!(status, 401 | 403) {
+                    eprintln!(
+                        "taguru: import: /import requires the admin role — check that \
+                         TAGURU_API_TOKEN (or TAGURU_API_TOKENS) names a key with it"
+                    );
+                }
+                if let Some(integrity) = body.get("integrity").and_then(Value::as_str) {
+                    eprintln!("taguru: import: integrity: {integrity}");
+                }
+                let unsent_batches: usize = queue
+                    .iter()
+                    .flat_map(|chunk| &chunk.units)
+                    .filter(|unit| !unit.is_group)
+                    .count();
+                if unsent_batches > 0 {
+                    eprintln!(
+                        "taguru: import: {unsent_batches} batch(es) after this chunk were \
+                         never sent"
+                    );
+                }
+                if dry_run {
+                    eprintln!(
+                        "taguru: import: {landed_chunks} chunk(s) of the dry run \
+                         previewed cleanly before this refusal; nothing was applied"
+                    );
+                } else {
+                    eprintln!(
+                        "taguru: import: {landed_chunks} chunk(s) already landed durably; \
+                         re-running the corrected stream is exact (each batch replaces its \
+                         own source)"
+                    );
+                }
+                return 1;
+            }
+        }
+    }
+
+    if dry_run {
+        println!(
+            "dry run: {batch_count} batch(es){} valid, nothing applied",
+            match group_count {
+                0 => String::new(),
+                count => format!(" and {count} group record(s)"),
+            }
+        );
+    } else {
+        println!(
+            "import: {batches_landed} batch(es) applied across {} context(s) in {total} \
+             chunk(s)",
+            contexts.len()
+        );
+        if group_count > 0 {
+            println!("import: {group_records_landed} of {group_count} group record(s) restored");
+        }
+    }
+    0
 }
 
 /// Explicit files are taken as given; a directory contributes its
@@ -787,6 +1326,54 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
         None => {}
     }
     Ok(Stream { batches, groups })
+}
+
+/// Byte ranges of each batch in a stream [`parse_stream`] already
+/// validated: a batch runs from its `taguru_batch` header line to the
+/// next stream-level record (header or `taguru_group` line) or EOF.
+/// Group-record bytes belong to no batch — they are re-rendered from
+/// the parsed records instead of sliced. Lives beside the parser
+/// because the boundary rule is a property of the stream FORMAT, not
+/// of either caller: `route`'s cross-shard import scatter-gather and
+/// `import --url`'s chunk packer both need the same ranges and must
+/// never compute them two different ways.
+pub(crate) fn split_batches(body: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut current_start: Option<usize> = None;
+    let mut offset = 0usize;
+    for line in body.split_inclusive(|byte| *byte == b'\n') {
+        let start = offset;
+        offset += line.len();
+        let mut text = line;
+        if start == 0 && text.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            text = &text[3..];
+        }
+        let Ok(text) = std::str::from_utf8(text) else {
+            continue;
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        if object.contains_key("taguru_batch") || object.contains_key("taguru_group") {
+            if let Some(batch_start) = current_start.take() {
+                ranges.push(batch_start..start);
+            }
+            if object.contains_key("taguru_batch") {
+                current_start = Some(start);
+            }
+        }
+    }
+    if let Some(batch_start) = current_start {
+        ranges.push(batch_start..body.len());
+    }
+    ranges
 }
 
 /// The end-of-batch validations that need the whole batch in hand.
@@ -1639,6 +2226,30 @@ mod tests {
     }
 
     const HEADER: &str = r#"{"taguru_batch": 1, "context": "sake", "source": "doc-1"}"#;
+
+    #[test]
+    fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
+        let body = concat!(
+            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}\n",
+            "{\"assoc\": [\"a\", \"likes\", \"b\"]}\n",
+            "\n",
+            "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"sake\"]}\n",
+            "{\"taguru_batch\": 1, \"context\": \"beer\", \"source\": \"s2\"}\n",
+            "{\"assoc\": [\"c\", \"likes\", \"d\"]}",
+        )
+        .as_bytes();
+        let ranges = split_batches(body);
+        assert_eq!(ranges.len(), 2);
+        let first = std::str::from_utf8(&body[ranges[0].clone()]).unwrap();
+        assert!(first.starts_with("{\"taguru_batch\": 1, \"context\": \"sake\""));
+        // The batch's ops (and the blank line) ride along; the group
+        // record between the batches belongs to neither.
+        assert!(first.contains("likes"));
+        assert!(!first.contains("taguru_group"));
+        let second = std::str::from_utf8(&body[ranges[1].clone()]).unwrap();
+        assert!(second.starts_with("{\"taguru_batch\": 1, \"context\": \"beer\""));
+        assert!(second.ends_with("\"d\"]}"), "EOF closes the last batch");
+    }
 
     #[test]
     fn a_batch_parses_and_the_header_source_stamps_every_association() {
@@ -2623,5 +3234,112 @@ mod tests {
         let error = expand(&[empty.to_string_lossy().into_owned()]).unwrap_err();
         assert!(error.contains("no .jsonl files"), "{error}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn unit(label: &str, bytes: usize) -> Unit {
+        Unit {
+            text: "x".repeat(bytes),
+            label: label.to_string(),
+            is_group: false,
+        }
+    }
+
+    #[test]
+    fn pack_chunks_fills_each_chunk_up_to_the_budget_without_splitting_a_unit() {
+        let units = vec![unit("a", 40), unit("b", 40), unit("c", 40), unit("d", 5)];
+        let queue = pack_chunks(units, 100);
+        // a+b = 80 (fits); +c = 120 (over 100) → c starts the next
+        // chunk; c+d = 45 (fits, and nothing follows).
+        let sizes: Vec<usize> = queue.iter().map(Chunk::size).collect();
+        assert_eq!(sizes, vec![80, 45], "{sizes:?}");
+        assert_eq!(queue[0].units.len(), 2);
+        assert_eq!(queue[1].units.len(), 2);
+    }
+
+    #[test]
+    fn pack_chunks_never_splits_a_single_oversized_unit_across_two_chunks() {
+        // A unit alone over budget still rides whole in its own chunk
+        // — pack_chunks never refuses; the caller checks this case
+        // before packing (run_remote's pre-send hard-error).
+        let units = vec![unit("small", 10), unit("huge", 500)];
+        let queue = pack_chunks(units, 100);
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].units.len(), 1);
+        assert_eq!(queue[1].units.len(), 1);
+        assert_eq!(queue[1].units[0].label, "huge");
+    }
+
+    #[test]
+    fn pack_chunks_on_an_empty_input_is_an_empty_queue() {
+        assert!(pack_chunks(Vec::new(), 100).is_empty());
+    }
+
+    #[test]
+    fn chunk_halve_splits_at_the_unit_boundary_closest_to_half_the_bytes() {
+        let chunk = Chunk {
+            units: vec![unit("one", 10), unit("two", 10), unit("three", 80)],
+        };
+        let (first, second) = chunk.halve();
+        assert_eq!(
+            first.units.len(),
+            2,
+            "{:?}",
+            first.units.iter().map(|u| &u.label).collect::<Vec<_>>()
+        );
+        assert_eq!(second.units.len(), 1);
+        assert_eq!(second.units[0].label, "three");
+    }
+
+    #[test]
+    fn chunk_halve_never_produces_an_empty_half_on_two_units() {
+        // Even a lopsided two-unit chunk (one unit far bigger than the
+        // other) must still split into one unit per half — the split
+        // point is clamped to 1..len-1, never 0 or len.
+        let chunk = Chunk {
+            units: vec![unit("big", 90), unit("small", 10)],
+        };
+        let (first, second) = chunk.halve();
+        assert_eq!(first.units.len(), 1);
+        assert_eq!(second.units.len(), 1);
+        assert_eq!(first.units[0].label, "big");
+        assert_eq!(second.units[0].label, "small");
+    }
+
+    #[test]
+    fn chunk_body_guarantees_a_trailing_newline_per_unit() {
+        let chunk = Chunk {
+            units: vec![
+                Unit {
+                    text: "{\"a\":1}".to_string(),
+                    label: "no-newline".to_string(),
+                    is_group: false,
+                },
+                Unit {
+                    text: "{\"b\":2}\n".to_string(),
+                    label: "has-newline".to_string(),
+                    is_group: false,
+                },
+            ],
+        };
+        assert_eq!(chunk.body(), "{\"a\":1}\n{\"b\":2}\n");
+    }
+
+    /// [`run_remote`]'s Pass 1 strips a leading BOM before
+    /// `split_batches` runs — proven here at the byte level, matching
+    /// the local path's own `a_leading_bom_does_not_break_the_first_line`
+    /// pin. Without the strip, the BOM's three bytes would ride inside
+    /// `split_batches`' very first range and be sent to the server as
+    /// part of the wire chunk.
+    #[test]
+    fn a_leading_bom_is_stripped_before_split_batches_runs() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s\"}\n");
+        assert!(bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+        bytes.drain(0..3);
+        let ranges = split_batches(&bytes);
+        assert_eq!(ranges.len(), 1);
+        let first = std::str::from_utf8(&bytes[ranges[0].clone()]).unwrap();
+        assert!(first.starts_with("{\"taguru_batch\""), "{first}");
+        assert!(!first.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]));
     }
 }

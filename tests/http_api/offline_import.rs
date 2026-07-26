@@ -583,6 +583,10 @@ fn import_refuses_a_data_directory_a_live_server_holds() {
     let (code, _, stderr) = run_import(&server.data_dir, &[file.to_str().unwrap()]);
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("another taguru process"), "{stderr}");
+    // ADR 0002 §5: the refusal gains one added line pointing at the
+    // way out — importing into a RUNNING server is `import --url`,
+    // not a second offline process racing the first.
+    assert!(stderr.contains("import --url"), "{stderr}");
     let _ = std::fs::remove_dir_all(&batches);
 }
 

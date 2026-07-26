@@ -8,6 +8,42 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru import` gains `--url URL` (#247, implementing ADR 0002
+  §6/§8/§9, depending on #243's shared `src/remote.rs` client):
+  pointed at a running server instead of `TAGURU_DATA_DIR`, the input
+  is split on batch boundaries only — never mid-batch, reusing the
+  exact range `taguru route`'s own cross-shard import splitting
+  already computes (`split_batches`, moved from `src/route.rs` into
+  `src/ingest.rs` so both callers share it) — and packed into whole
+  chunks under a byte budget starting at 4 MiB (half the 8 MiB default
+  `TAGURU_MAX_BODY_BYTES`), each POSTed to `/import` in turn. A single
+  batch that alone exceeds this fixed client-side budget is a hard
+  error naming the source and the one real fix — split that source's
+  content upstream of import — since raising the server's cap alone
+  cannot help (the budget check happens before the server is ever
+  asked), and splitting client-side would reimplement the
+  retract-then-apply contract's atomicity boundary outside the
+  server. A `413` on a chunk still oversized only because the cap is
+  configured lower than assumed halves that chunk (never crossing a
+  batch boundary) and resends, halving again on every further `413`
+  until the chunk lands or hits a single batch — safe to automate
+  since the server refuses a `413` before applying anything.
+  `taguru_group`
+  records ride after every batch chunk of the run, matching the local
+  path's own group-after-every-batch order. `--dry-run` sends every
+  chunk as `?dry_run=true` to preview before applying for real. A lost
+  connection reports which chunk landed and points at `--dry-run` to
+  confirm before resuming — nothing past that point is retried
+  automatically; import's retract-then-apply contract already makes
+  any resend exact (ADR §8). Combining `--no-embed` with `--url` is a
+  usage error: the server's own embedding configuration decides once
+  the request lands there. The existing directory-lock refusal (a
+  local server already running against the same data directory) gains
+  one added line pointing at `taguru import --url` as the way in
+  instead. Auth, the target-line print, and the version-skew preflight
+  are the same `src/remote.rs` machinery `export --url`/`compact --url`
+  use. Without `--url`, behavior is byte-for-byte unchanged (ADR
+  §12.2).
 - `taguru compact` gains `--url URL [--parallel N]` (#246, implementing
   ADR 0002 §6/§8, depending on #243's shared `src/remote.rs` client):
   pointed at a running server instead of `TAGURU_DATA_DIR`, CONTEXT
