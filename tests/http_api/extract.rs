@@ -3425,14 +3425,16 @@ fn diagnostics_is_written_incrementally_and_survives_a_kill() {
         !saved.trim().is_empty(),
         "no diagnostics record landed before the run was killed"
     );
+    // The poll above tolerates an unparseable trailing line (the run
+    // may still be mid-write when `saved` is captured) — this second
+    // pass over the same snapshot must too, or a torn last line fails
+    // the test spuriously instead of exercising the ordering invariant.
     let records: Vec<Value> = saved
         .lines()
         .filter(|line| !line.is_empty())
-        .map(|line| {
-            serde_json::from_str(line)
-                .unwrap_or_else(|error| panic!("the surviving line must parse: {error}\n{line}"))
-        })
+        .filter_map(|line| serde_json::from_str(line).ok())
         .collect();
+    assert!(!records.is_empty(), "no complete diagnostics line survived");
     assert_eq!(
         records[0]["kind"], "chunk",
         "the chunk record lands before that chunk's first attempt: {records:?}"
