@@ -27,6 +27,7 @@ mod offline_import;
 mod passages;
 mod quotas;
 mod reload;
+mod remote_export;
 mod replication;
 mod resolve_match;
 mod retrieval_cache;

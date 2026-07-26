@@ -8,6 +8,25 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru export` gains `--url URL` (#245, implementing ADR 0002 §6/§9,
+  depending on #243's shared `src/remote.rs` client): pointed at a
+  running server instead of `TAGURU_DATA_DIR`, it enumerates `GET
+  /contexts` and `GET /groups` (keyset-paged) and fetches each item
+  from `GET /contexts/{name}/export` / `GET /groups/{name}/export`,
+  writing the exact files a local export would under `--out` — groups
+  only on a full export, exactly as offline. Auth rides
+  `TAGURU_API_TOKEN` (or the first `name:token` entry of
+  `TAGURU_API_TOKENS`), the same variables the server itself reads; no
+  `--token` flag is added, and a URL carrying `user:password@` is
+  refused (ADR §7). Every run prints the version-skew warning #244
+  prepared (`src/remote.rs`'s `warn_on_version_skew`, now wired up)
+  and a stderr note that this is **not** a point-in-time snapshot
+  across contexts — each context's own stream is internally
+  consistent, but contexts are fetched one request at a time; an
+  operator needing a whole-server point-in-time snapshot already has
+  one in the replication bucket (`TAGURU_REPLICATE_URL`) plus `taguru
+  restore`. Without `--url`, behavior is byte-for-byte unchanged
+  (ADR §12.2).
 - `taguru extract` gains an opt-in `--diagnostics-out FILE` /
   `TAGURU_EXTRACT_DIAGNOSTICS` JSONL sidecar (#200, implementing ADR
   0001 §10) — the follow-up to #188's motivating failure, where a

@@ -55,6 +55,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use taguru::context::{Association, UNSOURCED_SOURCE};
 use taguru::deadline::{Deadline, DeadlineExceeded};
@@ -62,25 +63,45 @@ use taguru::deadline::{Deadline, DeadlineExceeded};
 use crate::groups::GroupRecord;
 use crate::passages::PassageRecord;
 use crate::registry::{AccessError, AppState, ContextMeta};
+use crate::remote::Api;
 
 const USAGE: &str = "\
-usage: taguru export [--config FILE] --out DIR [CONTEXT...]
+usage: taguru export [--config FILE] [--url URL] --out DIR [CONTEXT...]
 
-Writes each context back out of TAGURU_DATA_DIR as a JSONL batch
-stream — {out}/{context}.jsonl, the exact format `taguru import` and
-POST /import apply — offline (the server must not be running; the
-directory lock enforces it). No CONTEXT arguments means every context
-in the directory, plus every group as {out}/{group}.group.jsonl (one
-taguru_group record each; import restores groups after every batch,
-so the files re-apply in any order). Naming CONTEXTs exports just
-those, groups omitted. A running server serves the same streams at
-GET /contexts/{name}/export and GET /groups/{name}/export.
+Writes each context back out as a JSONL batch stream —
+{out}/{context}.jsonl, the exact format `taguru import` and POST
+/import apply. No CONTEXT arguments means every context, plus every
+group as {out}/{group}.group.jsonl (one taguru_group record each;
+import restores groups after every batch, so the files re-apply in
+any order). Naming CONTEXTs exports just those, groups omitted.
 Re-importing a stream is idempotent (per-source retract-then-apply;
 per-group replace); `taguru import --dry-run` validates an exported
 file without touching anything.
 
+Without --url: reads TAGURU_DATA_DIR directly, offline (the server
+must not be running; the directory lock enforces it).
+
   --out DIR    where the streams land (created if missing)
   --config F   read KEY=VALUE environment from F (same dialect as serve)
+
+  --url URL    export from a RUNNING server instead of the local data
+               directory: GET /contexts and GET /groups are enumerated
+               (keyset-paged) and each item is fetched from
+               GET /contexts/{name}/export / GET /groups/{name}/export
+               — the same files land in --out. Auth rides
+               TAGURU_API_TOKEN (or the first name:token entry of
+               TAGURU_API_TOKENS), the same variables the server
+               itself reads; a URL carrying user:password@ is refused.
+               Each context's own stream is internally consistent, but
+               the run is NOT a point-in-time snapshot across
+               contexts — two contexts fetched seconds apart may not
+               reflect the same instant. An operator needing a true
+               point-in-time snapshot across the whole server already
+               has one: the replication bucket (TAGURU_REPLICATE_URL)
+               plus `taguru restore`, which this flag does not
+               replace. In CI, name the target per invocation rather
+               than reading it from the environment inside the CLI:
+                 taguru export --url \"$TAGURU_URL\" --out backups/
 ";
 
 /// Reserved source id for the header-only batch an otherwise-empty
@@ -497,6 +518,7 @@ fn push_line(stream: &mut String, line: &impl Serialize) {
 pub(crate) fn run(args: &[String]) -> i32 {
     let mut out: Option<PathBuf> = None;
     let mut config: Option<PathBuf> = None;
+    let mut url: Option<String> = None;
     let mut names: Vec<String> = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -523,6 +545,17 @@ pub(crate) fn run(args: &[String]) -> i32 {
                     );
                 }
             },
+            // Trailing '/' trimmed the same way calibrate/communities
+            // already do — a joined path segment must not double up.
+            "--url" => match rest.next() {
+                Some(value) => url = Some(value.trim_end_matches('/').to_string()),
+                None => {
+                    return crate::config::subcommand_usage_error(
+                        "export",
+                        "--url needs a server URL",
+                    );
+                }
+            },
             other if other.starts_with('-') => {
                 return crate::config::subcommand_usage_error(
                     "export",
@@ -539,11 +572,27 @@ pub(crate) fn run(args: &[String]) -> i32 {
         );
     };
     // SAFETY (same contract as serve/import): applied while the
-    // process is still single-threaded — export never starts a runtime.
+    // process is still single-threaded — export never starts a
+    // runtime. Loaded before the --url dispatch below, too: a config
+    // file is the usual place a deployment's TAGURU_API_TOKEN lives,
+    // and Api::new reads the bearer from the environment at
+    // construction — the token must already be in place by then.
     if let Some(path) = &config {
         crate::config::load_config(path);
     }
 
+    match url {
+        // ADR 0002 §5/§6: `--url` is the only way `export` goes
+        // remote — no positional URL argument, no TAGURU_URL or
+        // default_base_url() fallback the way `health`/`calibrate`/
+        // `communities` have one. Absent, this is exactly the local
+        // path that ran before this flag existed (§12.2).
+        Some(base) => run_remote(&base, &out, names),
+        None => run_local(&out, names),
+    }
+}
+
+fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
     // Registry warnings (WAL replay notes, load errors) must reach the
     // operator; stdout stays reserved for the report lines.
     crate::ingest::init_logging();
@@ -572,14 +621,14 @@ pub(crate) fn run(args: &[String]) -> i32 {
         all
     };
 
-    if let Err(error) = fs::create_dir_all(&out) {
+    if let Err(error) = fs::create_dir_all(out) {
         eprintln!("taguru: export: cannot create {}: {error}", out.display());
         return 1;
     }
 
     let mut failures = 0usize;
     for name in &names {
-        match export_one(&state, name, &out) {
+        match export_one(&state, name, out) {
             Ok(report) => println!("{report}"),
             Err(message) => {
                 eprintln!("taguru: export: context '{name}': {message}");
@@ -597,7 +646,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         let (_, all_groups) = state.group_page(None, usize::MAX);
         group_count = all_groups.len();
         for (name, record) in &all_groups {
-            match export_group_file(name, record, &out) {
+            match export_group_file(name, record, out) {
                 Ok(report) => println!("{report}"),
                 Err(message) => {
                     eprintln!("taguru: export: group '{name}': {message}");
@@ -608,16 +657,190 @@ pub(crate) fn run(args: &[String]) -> i32 {
     }
 
     println!(
-        "export: {} of {} context(s){} written to {}",
-        names.len() - failures,
-        names.len(),
+        "{}",
+        summary_line(
+            names.len() - failures,
+            names.len(),
+            group_count,
+            group_failures,
+            out,
+        )
+    );
+    if failures + group_failures > 0 { 1 } else { 0 }
+}
+
+/// The remote twin of [`run_local`]: enumerates a running server's
+/// contexts and groups instead of reading `TAGURU_DATA_DIR`, and
+/// fetches each item's stream from its own export endpoint instead of
+/// rendering it in-process. Writes land under `out` in the identical
+/// layout `run_local` uses, so the two are interchangeable inputs to
+/// `taguru import` (ADR 0002 §9).
+fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
+    // ADR 0002 §7: caught before any request leaves the process.
+    if let Err(message) = crate::remote::reject_userinfo(base) {
+        return crate::config::subcommand_usage_error("export", &message);
+    }
+    let api = Api::new(base.to_string());
+    api.warn_on_version_skew("export");
+
+    // ADR 0002 §9: printed once, before the loop, so it still reaches
+    // the operator on a run that fails partway through. stdout stays
+    // reserved for report lines, matching run_local's own convention.
+    eprintln!(
+        "taguru: export: note: each context's stream is internally consistent, but contexts \
+         are fetched one request at a time — this is not a point-in-time snapshot across \
+         contexts; for one, replicate with TAGURU_REPLICATE_URL and restore it with \
+         `taguru restore`"
+    );
+
+    let explicit = !names.is_empty();
+    let names = if explicit {
+        names
+    } else {
+        match api.list_names("contexts") {
+            Ok(names) if names.is_empty() => {
+                eprintln!("taguru: export: the server at {base} holds no contexts");
+                return 1;
+            }
+            Ok(names) => names,
+            Err(error) => {
+                eprintln!("taguru: export: {error}");
+                return 1;
+            }
+        }
+    };
+
+    if let Err(error) = fs::create_dir_all(out) {
+        eprintln!("taguru: export: cannot create {}: {error}", out.display());
+        return 1;
+    }
+
+    let mut failures = 0usize;
+    for name in &names {
+        match remote_export_one(&api, name, out) {
+            Ok(report) => println!("{report}"),
+            Err(message) => {
+                eprintln!("taguru: export: context '{name}': {message}");
+                failures += 1;
+            }
+        }
+    }
+
+    // Same rule as run_local: groups ride the FULL export only.
+    let mut group_count = 0usize;
+    let mut group_failures = 0usize;
+    if !explicit {
+        match api.list_names("groups") {
+            Ok(group_names) => {
+                group_count = group_names.len();
+                for name in &group_names {
+                    match remote_export_group(&api, name, out) {
+                        Ok(report) => println!("{report}"),
+                        Err(message) => {
+                            eprintln!("taguru: export: group '{name}': {message}");
+                            group_failures += 1;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                // A full export that cannot even learn its group list
+                // is incomplete, whatever the context loop above did —
+                // reported the same way any other failure is.
+                eprintln!("taguru: export: groups: {error}");
+                group_failures += 1;
+            }
+        }
+    }
+
+    println!(
+        "{}",
+        summary_line(
+            names.len() - failures,
+            names.len(),
+            group_count,
+            group_failures,
+            out,
+        )
+    );
+    if failures + group_failures > 0 { 1 } else { 0 }
+}
+
+/// One context's stream, fetched whole from `GET
+/// /contexts/{name}/export` and written exactly like the local path
+/// writes its own render. A request that outlives `Api`'s 35s budget,
+/// or a context deleted between enumeration and this fetch, surfaces
+/// as an `Err` here and is counted as a per-item failure by the
+/// caller — never a reason to abort the rest of the run.
+fn remote_export_one(api: &Api, name: &str, out: &std::path::Path) -> Result<String, String> {
+    let stream = api.get_raw(&["contexts", name, "export"])?;
+    let path = out.join(format!("{}.jsonl", crate::registry::file_stem(name)));
+    crate::storage::write_atomic(&path, stream.as_bytes())
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    let (batches, lines) = stream_counts(&stream);
+    Ok(format!(
+        "{}: context '{name}' → {batches} batch(es), {lines} line(s)",
+        path.display()
+    ))
+}
+
+/// One group's record, fetched from `GET /groups/{name}/export` — the
+/// remote twin of [`export_group_file`].
+fn remote_export_group(api: &Api, name: &str, out: &std::path::Path) -> Result<String, String> {
+    let stream = api.get_raw(&["groups", name, "export"])?;
+    let path = out.join(format!("{}.group.jsonl", crate::registry::file_stem(name)));
+    crate::storage::write_atomic(&path, stream.as_bytes())
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    let record: Value = serde_json::from_str(stream.trim_end())
+        .map_err(|error| format!("{}: not a taguru group record: {error}", path.display()))?;
+    let contexts = record["contexts"].as_array().map_or(0, Vec::len);
+    let groups = record["groups"].as_array().map_or(0, Vec::len);
+    Ok(format!(
+        "{}: group '{name}' → {contexts} member context(s), {groups} child group(s)",
+        path.display()
+    ))
+}
+
+/// (batches, lines) counted back out of a fetched context stream — the
+/// counts a remote fetch can honestly claim, since (unlike the local
+/// render) there is no in-process [`Rendered`] to report from. A
+/// batch is any line whose object carries `taguru_batch`; the key
+/// check (rather than a text prefix match) survives field reordering.
+fn stream_counts(stream: &str) -> (usize, usize) {
+    let mut batches = 0usize;
+    let mut lines = 0usize;
+    for line in stream.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        lines += 1;
+        if let Ok(Value::Object(object)) = serde_json::from_str::<Value>(line)
+            && object.contains_key("taguru_batch")
+        {
+            batches += 1;
+        }
+    }
+    (batches, lines)
+}
+
+/// The final report line, identical whether the streams came from the
+/// local data directory ([`run_local`]) or a running server
+/// ([`run_remote`]) — one summary shape for both.
+fn summary_line(
+    context_ok: usize,
+    context_total: usize,
+    group_count: usize,
+    group_failures: usize,
+    out: &std::path::Path,
+) -> String {
+    format!(
+        "export: {context_ok} of {context_total} context(s){} written to {}",
         match group_count {
             0 => String::new(),
             count => format!(" and {} of {count} group(s)", count - group_failures),
         },
         out.display()
-    );
-    if failures + group_failures > 0 { 1 } else { 0 }
+    )
 }
 
 /// Writes one group's `taguru_group` record beside the context
@@ -1181,5 +1404,26 @@ mod tests {
         assert_eq!(bare, "{\"taguru_group\":1,\"name\":\"kid\"}\n");
         let stream = ingest::parse_stream(bare.as_bytes()).unwrap();
         assert_eq!(stream.groups[0].1, GroupRecord::default());
+    }
+
+    /// `stream_counts` is what a remote fetch has to report from
+    /// instead of an in-process [`Rendered`]: two headers plus their
+    /// association/alias lines count as 2 batches, 5 lines total.
+    #[test]
+    fn stream_counts_reads_batches_and_lines_back_out_of_a_stream() {
+        let stream = concat!(
+            "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"a.md\"}\n",
+            "{\"subject\":\"s\",\"label\":\"l\",\"object\":\"o\",\"weight\":1.0}\n",
+            "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"b.md\"}\n",
+            "{\"subject\":\"s2\",\"label\":\"l2\",\"object\":\"o2\",\"weight\":2.0}\n",
+            "{\"alias\":\"a\",\"canonical\":\"b\",\"kind\":\"concept\"}\n",
+        );
+        assert_eq!(stream_counts(stream), (2, 5));
+    }
+
+    #[test]
+    fn stream_counts_ignores_blank_lines_and_non_object_lines() {
+        let stream = "\n{\"taguru_batch\":1}\n\n\"just a string\"\n";
+        assert_eq!(stream_counts(stream), (1, 2));
     }
 }

@@ -338,6 +338,19 @@ curl -X POST localhost:8248/import \
       Restore is a normal import — per-source replacement makes it idempotent; to match a snapshot
       exactly, delete the context first, then stream it in.
     </p>
+    <p>
+      <code>taguru export --url URL --out DIR [CONTEXT...]</code> automates the same walk against a
+      <b>running</b> server instead of a local data directory: it enumerates <code>GET /contexts</code>
+      and <code>GET /groups</code> (keyset-paged) and fetches each item from its own export endpoint,
+      writing the identical files a local export would. Auth rides <code>TAGURU_API_TOKEN</code> (or
+      the first <code>name:token</code> entry of <code>TAGURU_API_TOKENS</code>), the same variables
+      the server reads; a URL carrying <code>user:password@</code> is refused. This is <b>not</b> a
+      point-in-time snapshot across contexts — each context's own stream is internally consistent,
+      but contexts are fetched one request at a time, so two fetched seconds apart may not reflect
+      the same instant. An operator who needs a true point-in-time snapshot across the whole server
+      already has one: the replication bucket (<code>TAGURU_REPLICATE_URL</code>) plus
+      <code>taguru restore</code>.
+    </p>
     <ul>
       <li><b>Fidelity</b>: a fact the same source asserted n times reproduces as n association lines (corroboration <code>count</code> survives the round trip). Paragraph locators ride the first assertion line (reproducing first-write-wins).</li>
       <li><b>Sourceless weight</b> (entered via the API with <code>source</code> omitted) rides a batch under the reserved source <code>export:unsourced</code> — the numbers are preserved and the attribution tells the story. If a real source collides with this reserved id, export refuses rather than silently mixing.</li>
@@ -351,7 +364,9 @@ curl -H 'Authorization: Bearer &lt;key&gt;' \
   localhost:8248/contexts/sake/export &gt; sake.jsonl
 curl -X POST other-host:8248/import \
   -H 'Authorization: Bearer &lt;key&gt;' --data-binary @sake.jsonl
-<span class="c"># offline:  taguru export --out backups/ ; taguru import backups/</span></code></pre>
+<span class="c"># offline:  taguru export --out backups/ ; taguru import backups/</span>
+<span class="c"># whole server, live — the loop above, automated:</span>
+taguru export --url "$TAGURU_URL" --out backups/</code></pre>
   </section>
 
   <section id="producing">
