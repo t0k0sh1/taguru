@@ -124,12 +124,19 @@ Contract and discipline: docs/extract.html.
 /// Stamped into every manifest entry; bump when the system prompt
 /// changes so already-extracted documents re-extract under the new
 /// discipline.
-const PROMPT_VERSION: u32 = 2;
+///
+/// `pub(crate)` so `benchmark`'s manifest can record the same prompt
+/// version a cell actually ran under (ADR 0003 §9.1) without
+/// re-declaring it.
+pub(crate) const PROMPT_VERSION: u32 = 2;
 
 /// Document bytes per model call. Chunks split at paragraph
 /// boundaries; facts spanning a boundary can be missed, so the cap
 /// leans large.
-const CHUNK_BYTES: usize = 24 * 1024;
+///
+/// `pub(crate)` so `benchmark`'s manifest can record the cap a cell
+/// actually ran under (ADR 0003 §9.1) without re-declaring it.
+pub(crate) const CHUNK_BYTES: usize = 24 * 1024;
 
 /// Relation labels offered back to the model, capped so the prompt
 /// stays bounded however long the run gets.
@@ -139,7 +146,10 @@ const VOCABULARY_CAP: usize = 200;
 /// than any cloud default assumes — thinking-mode models
 /// pathologically so — hence the knob (TAGURU_EXTRACT_TIMEOUT_SECS,
 /// 0 = no limit).
-const DEFAULT_TIMEOUT_SECS: usize = 300;
+///
+/// `pub(crate)` so `benchmark`'s `models.json` can fold this in as a
+/// per-model default (ADR 0003 §8) without re-declaring it.
+pub(crate) const DEFAULT_TIMEOUT_SECS: usize = 300;
 
 /// Total attempts (1 initial + retries) at one chat completion before
 /// a chunk fails. `--parallel` multiplies 429 pressure, so this leans
@@ -160,12 +170,19 @@ const RETRY_MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// something other than the JSON object," resolved from
 /// TAGURU_EXTRACT_MAX_ATTEMPTS. Today's fixed 0..2 loop is this value
 /// at its default.
-const DEFAULT_MAX_ATTEMPTS: usize = 2;
+///
+/// `pub(crate)` so `benchmark`'s `--max-attempts` flag shares
+/// `extract`'s own default instead of a second constant that could
+/// drift from it.
+pub(crate) const DEFAULT_MAX_ATTEMPTS: usize = 2;
 
 /// Hard ceiling on TAGURU_EXTRACT_MAX_ATTEMPTS: a misconfigured value
 /// must not be able to turn one stubborn chunk into an unbounded
 /// number of model calls.
-const MAX_EXTRACT_ATTEMPTS: usize = 10;
+///
+/// `pub(crate)` so `benchmark`'s `--max-attempts` flag enforces the
+/// same ceiling `extract` itself does.
+pub(crate) const MAX_EXTRACT_ATTEMPTS: usize = 10;
 
 /// The ladder's split rung halves a length-limited piece's cap, but
 /// never below this floor: a pathological single-line document (a
@@ -443,7 +460,7 @@ pub fn run(args: &[String]) -> i32 {
         parallel,
         lossy,
         diagnostics,
-        stop: StopSignal::install(),
+        stop: StopSignal::install("extract"),
     };
 
     let mut written = 0usize;
@@ -823,8 +840,13 @@ struct CorrectionPolicy {
 /// §6's fallback ladder the run may put on the wire. `Off` — the
 /// default — sends today's plain request and keeps the legacy
 /// corrective loop.
+///
+/// `pub(crate)` so `benchmark` validates a `models.json` entry's
+/// `structured_output` string against the exact same closed vocabulary
+/// `extract` itself enforces (ADR 0003 §8), rather than a second,
+/// possibly-drifting copy of the match arms.
 #[derive(Clone, Copy)]
-enum StructuredOutputMode {
+pub(crate) enum StructuredOutputMode {
     /// Probe the endpoint once at startup and keep the strongest rung
     /// it verifies: json_schema, then json_object, then bare prompted
     /// JSON.
@@ -839,7 +861,7 @@ enum StructuredOutputMode {
 }
 
 impl StructuredOutputMode {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "auto" => Some(Self::Auto),
             "json-schema" => Some(Self::JsonSchema),
@@ -895,8 +917,12 @@ struct LadderConfig {
 /// against a stub that holds the retried connection open: without this
 /// fix the process hangs on the retry indefinitely instead of finishing
 /// the original chunk and stopping cleanly (issue #213).
+/// `pub(crate)` so `benchmark`'s own main thread — which spawns
+/// [`StopSignal`]'s listener exactly as `extract` does — clears the
+/// same signal mask before any child process or other thread exists,
+/// instead of reimplementing this call.
 #[cfg(unix)]
-fn block_stop_signals_on_this_thread() {
+pub(crate) fn block_stop_signals_on_this_thread() {
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
@@ -907,7 +933,7 @@ fn block_stop_signals_on_this_thread() {
 }
 
 #[cfg(not(unix))]
-fn block_stop_signals_on_this_thread() {}
+pub(crate) fn block_stop_signals_on_this_thread() {}
 
 /// Undoes [`block_stop_signals_on_this_thread`] for the calling thread
 /// only — [`StopSignal::install`]'s dedicated listener thread calls
@@ -945,12 +971,19 @@ fn unblock_stop_signals_on_this_thread() {}
 /// bare Ctrl+C still terminates the process the old way, just without
 /// the cooperative message or a chance to checkpoint the in-flight
 /// chunk.
-struct StopSignal {
+///
+/// `pub(crate)` so `benchmark::run` — a second, longer-running command
+/// that spawns `extract` children of its own and needs the identical
+/// checked-between-units stop discipline (ADR 0003 §6) — installs the
+/// same listener instead of a second implementation. `prefix` (e.g.
+/// `"extract"`, `"benchmark"`) names the caller in every message this
+/// prints, so a mixed-process log tells the two apart.
+pub(crate) struct StopSignal {
     requested: Arc<AtomicBool>,
 }
 
 impl StopSignal {
-    fn install() -> Self {
+    pub(crate) fn install(prefix: &'static str) -> Self {
         let requested = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&requested);
         std::thread::spawn(move || {
@@ -968,15 +1001,15 @@ impl StopSignal {
                 // instead of guessing a startup margin before sending a
                 // signal — a signal sent earlier hits the process's
                 // default disposition rather than this cooperative path.
-                eprintln!("taguru: extract: stop signal handlers installed");
+                eprintln!("taguru: {prefix}: stop signal handlers installed");
                 signals.recv().await;
                 flag.store(true, Ordering::SeqCst);
                 eprintln!(
-                    "taguru: extract: stopping after the current chunk — press Ctrl+C again \
+                    "taguru: {prefix}: stopping after the current chunk — press Ctrl+C again \
                      to stop immediately"
                 );
                 signals.recv().await;
-                eprintln!("taguru: extract: second stop signal received — exiting immediately");
+                eprintln!("taguru: {prefix}: second stop signal received — exiting immediately");
                 // 128 + SIGINT(2), the shell convention for
                 // signal-terminated — same as shutdown_signal's.
                 std::process::exit(130);
@@ -987,7 +1020,7 @@ impl StopSignal {
 
     /// Never blocks: a plain atomic load, safe to call between every
     /// chunk and every document without measurable overhead.
-    fn check(&self) -> bool {
+    pub(crate) fn check(&self) -> bool {
         self.requested.load(Ordering::SeqCst)
     }
 }
@@ -1870,7 +1903,14 @@ fn leading_paragraph_number(block: &str) -> u32 {
 /// also bounded: at most one byte over the cap is ever buffered, just
 /// enough to detect an overflow the stat missed without letting an
 /// unbounded stream through.
-fn read_document(path: &Path) -> Result<String, String> {
+///
+/// `pub(crate)` so `benchmark`'s preflight hashes a document's text the
+/// exact same way `extract`'s own manifest does (BOM-stripped, size-
+/// capped, UTF-8-validated) — the document dictionary in
+/// `manifest.json` (ADR 0003 §9.1) must agree with what a cell's own
+/// `.extract-manifest.json` records, or a resumed matrix could not tell
+/// "unchanged" from "drifted."
+pub(crate) fn read_document(path: &Path) -> Result<String, String> {
     let size = fs::metadata(path).map_err(|error| error.to_string())?.len();
     if size > MAX_PASSAGE_BYTES as u64 {
         return Err(format!(
@@ -1901,7 +1941,12 @@ fn read_document(path: &Path) -> Result<String, String> {
 /// Explicit files are taken as given; a directory contributes its
 /// `.md` and `.txt` files in name order — the same shape as import's
 /// expansion, and an empty directory is likewise a mistake.
-fn expand_documents(paths: &[String]) -> Result<Vec<PathBuf>, String> {
+///
+/// `pub(crate)` so `benchmark` enumerates a corpus directory the exact
+/// same way the `extract` child process it spawns will (ADR 0003 §6:
+/// "the corpus must reach every cell in identical order"), rather than
+/// re-deriving the same sort rule a second time.
+pub(crate) fn expand_documents(paths: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     for raw in paths {
         let path = Path::new(raw);
@@ -2596,7 +2641,12 @@ fn conforms_to_model_output_shape(content: &str) -> bool {
 /// instead of silently weakening the constraint, and `auto` then
 /// falls one rung (docs/extract.html notes this for OpenAI's strict
 /// mode).
-fn json_schema_response_format() -> serde_json::Value {
+///
+/// `pub(crate)` so `benchmark` can hash this exact canonical
+/// `response_format` into `manifest.json`'s `extraction_settings.
+/// schema_sha256` (ADR 0003 §9.1) instead of re-deriving the schema
+/// shape a second time.
+pub(crate) fn json_schema_response_format() -> serde_json::Value {
     serde_json::json!({
         "type": "json_schema",
         "json_schema": {
@@ -4898,7 +4948,10 @@ impl Manifest {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+/// `pub(crate)` so `benchmark` hashes documents/configs/hostnames with
+/// the exact same primitive `extract`'s own manifest and checkpoints
+/// use, rather than a second implementation that could drift.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write;
     Sha256::digest(bytes)

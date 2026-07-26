@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Extraction benchmark (benchmark) — Taguru</title>
+  <meta name="description" content="The complete reference for taguru benchmark extract: the models.json schema, the results-directory layout, manifest.json/runs/*.jsonl, resume, and the fairness invariant.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="benchmark.html" aria-current="page">Extraction benchmark</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">reference · extraction benchmark</div>
+    <h1>Extraction benchmark — <code>taguru benchmark extract</code></h1>
+    <p class="lede">
+      Runs <a href="extract.html"><code>taguru extract</code></a> across a matrix of models,
+      one <code>taguru extract --diagnostics-out</code> subprocess per (model, run) cell, every
+      cell over the same corpus under the same task settings. Writes a reproducible
+      results directory a later <code>taguru benchmark compare</code> (not yet shipped) — or any
+      external tool — can derive measurements from without spending model time again. The design
+      is fixed by
+      <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0003-extraction-model-benchmark.md">ADR 0003</a>;
+      this page documents the shape it produces.
+    </p>
+  </header>
+
+  <section id="cli">
+    <h2>The CLI shape</h2>
+    <pre><code>taguru benchmark extract --models models.json --context bench \
+  --out results/ --runs 3 corpus/</code></pre>
+    <pre><code>--models FILE        model matrix (schema below)
+--context NAME       the context every cell's batch files target
+--out DIR            results directory; re-running the same --out resumes —
+                    a cell already recorded complete or failed is never re-run
+--runs N             runs per model, 1-99 (default 1)
+--questions N        forwarded to every cell's --questions
+--fact-budget N      forwarded to every cell's --fact-budget
+--no-passage         forwarded to every cell's --no-passage
+--lossy              forwarded to every cell's --lossy
+--description TEXT   forwarded to every cell's --description
+--parallel N         forwarded to every cell's --parallel (default 1)
+--max-output-tokens N  forwarded to every cell's --max-output-tokens
+--max-attempts N     forwarded to every cell's TAGURU_EXTRACT_MAX_ATTEMPTS,
+                    1-10 (default 2)
+CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
+                    cell sees the same document order, since a document's
+                    relation-label vocabulary is offered to the next
+                    document's prompt (see <a href="extract.html#chunking">chunking</a>)</code></pre>
+    <p>
+      Every one of these settings is <b>global to the matrix</b>, never per model — the fairness
+      invariant below is why. Only what a provider <i>is</i> or <i>can do</i> — its endpoint,
+      credential, name, and structured-output rung — lives in <code>models.json</code>. Exit
+      codes match <code>taguru extract</code>'s own convention: <code>0</code> every cell
+      completed · <code>1</code> a harness failure (a cell's own document failures still count as
+      <code>0</code> at this level — see <a href="#outcomes">cell outcomes</a> below) ·
+      <code>2</code> usage error · <code>130</code> stopped (Ctrl+C), resumable.
+    </p>
+  </section>
+
+  <section id="one-binary">
+    <h2>One binary, one path</h2>
+    <p>
+      A cell runs the exact <code>taguru extract</code> binary an operator runs, selected the
+      exact same way (<code>TAGURU_EXTRACT_*</code> in the child's environment) — a measurement is
+      evidence about the product, not about a benchmark harness's own reimplementation of it. The
+      child is spawned via <code>std::env::current_exe()</code>, so it is always this same build.
+    </p>
+    <p>
+      The cell owns its environment: before every spawn, every <code>TAGURU_EXTRACT_*</code>
+      variable is removed from the inherited environment, then the cell's own resolved values are
+      set explicitly — including ones left at their defaults. A stray
+      <code>TAGURU_EXTRACT_LOSSY=1</code> in the operator's own shell cannot silently make one
+      cell unfair, and no <code>TAGURU_EXTRACT_*</code> value a cell runs under is "whatever
+      happened to be inherited." This scrub is scoped to that one namespace — proxy, locale, and
+      TLS-trust variables pass through unscrubbed, since <code>extract</code> itself reads none of
+      them.
+    </p>
+    <p>
+      Every cell gets a fresh <code>cells/&lt;model_id&gt;/run&lt;NN&gt;/</code> directory — never
+      <code>--force</code>, which would discard <code>extract</code>'s own chunk-checkpoint resume
+      (its <a href="extract.html#checkpoints">checkpoints</a> guide). Two cells never share a
+      directory, so <code>extract</code>'s own manifest/checkpoint skip logic — which does not key
+      on endpoint URL, timeout, or <code>--parallel</code> — cannot cross-skip between them even
+      when two models happen to share a wire name.
+    </p>
+  </section>
+
+  <section id="models-json">
+    <h2>models.json: the model matrix</h2>
+    <pre><code>{
+  "taguru_benchmark_models": 1,
+  "defaults": {
+    "timeout_secs": 300,
+    "structured_output": "auto"
+  },
+  "models": [
+    {
+      "id": "qwen25-7b-q4",
+      "label": "Qwen2.5 7B Instruct (Q4_K_M, local Ollama)",
+      "model": "qwen2.5:7b",
+      "url": "http://localhost:11434/v1/chat/completions",
+      "api_key_env": null,
+      "structured_output": "auto",
+      "timeout_secs": 300,
+      "note": "baseline"
+    },
+    {
+      "id": "hosted-120b",
+      "label": "gpt-oss-120b (hosted, OpenAI-compatible)",
+      "model": "gpt-oss-120b",
+      "url": "https://example.internal/v1/chat/completions",
+      "api_key_env": "BENCH_KEY_HOSTED",
+      "structured_output": "json-schema"
+    }
+  ]
+}</code></pre>
+    <p>
+      <code>taguru_benchmark_models</code> must equal <code>1</code> exactly — unlike
+      <code>manifest.json</code> below, this file is authored by hand, not written and re-read by
+      taguru itself, so a shape this build was not built for is refused rather than silently
+      defaulted. <code>id</code> matches <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>, must be unique,
+      and is the only value used as a path component (model names carry <code>:</code>/<code>/</code>
+      that are not portable, e.g. <code>qwen2.5:7b</code>). <code>defaults</code> supplies any key
+      an entry omits; the resolved record (defaults folded in) is what <code>models.lock.json</code>
+      and <code>manifest.json</code> record, so no reader has to re-apply defaults. An unknown
+      top-level or per-model key earns a warning naming it, never a hard failure — a hand-edited
+      file is exactly where a misspelled knob silently becomes a no-op.
+    </p>
+    <p class="section-sub">The fairness invariant</p>
+    <p>
+      A per-model record may describe only what the provider <i>is</i> or <i>can do</i>. Everything
+      that shapes the task — the corpus, <code>--context</code>, <code>--questions</code>,
+      <code>--fact-budget</code>, <code>--no-passage</code>, <code>--lossy</code>,
+      <code>--description</code>, <code>--parallel</code>, <code>--max-output-tokens</code>,
+      <code>--max-attempts</code>, the run count — is global to the matrix, a flag on
+      <code>taguru benchmark extract</code>, never a per-model key. Stated as an invariant, not a
+      convention: <code>models.json</code> has no field where a task setting could even go, so it
+      cannot encode a comparison <code>measurements.json</code> would show as one model simply
+      being more productive when it was really just given a larger budget.
+      <code>structured_output</code> is the one deliberate per-model exception — the rung a
+      backend can actually honor is a capability, not a task setting, and <code>auto</code> probes
+      the live endpoint per cell regardless of what the file says.
+    </p>
+    <p class="section-sub">Secrets</p>
+    <p>
+      No API key value ever appears in <code>models.json</code>, in <code>models.lock.json</code>,
+      or in any artifact under the results directory. <code>api_key_env</code> names an environment
+      variable; the harness reads it in its own process and passes the value to the child's
+      environment only, never to a file. A named variable that is unset is a usage error at
+      startup, before any model is called. A <code>models.json</code> carrying a key-shaped value
+      where <code>api_key_env</code> belongs, or a <code>url</code> whose authority carries inline
+      <code>user:password@</code> userinfo, is a hard usage error at parse time — naming the
+      correct field and refusing to run any cell — rather than a value silently redacted on the
+      way out.
+    </p>
+  </section>
+
+  <section id="layout">
+    <h2>Results directory layout</h2>
+    <pre><code>&lt;out&gt;/
+  manifest.json                          # reproduction record, document/chunk dictionary
+  models.lock.json                       # models.json fully resolved, no secrets
+  runs/&lt;model_id&gt;.run&lt;NN&gt;.jsonl          # one file per cell, the AttemptRecord superset
+  cells/&lt;model_id&gt;/run&lt;NN&gt;/              # passed verbatim as `taguru extract --out`
+      .extract-manifest.json             #   written by extract, untouched by the harness
+      .extract-checkpoints/              #   written by extract
+      &lt;batch files&gt;                      #   raw extraction output
+      diagnostics.jsonl                  #   passed as --diagnostics-out
+      stdout.log  stderr.log  exit_code  #   the cell's own record</code></pre>
+    <p>
+      <code>run&lt;NN&gt;</code> is zero-padded (<code>run01</code>, <code>run12</code>) so lexical
+      order is run order. Nothing outside <code>cells/</code> is written by a child process, and
+      nothing inside <code>cells/</code> is edited by the harness — everything downstream of the
+      models (a future <code>taguru benchmark compare</code>, or any external tool) is a pure
+      function of the results directory alone.
+    </p>
+  </section>
+
+  <section id="manifest">
+    <h2>manifest.json</h2>
+    <p>
+      Written once after preflight (models validated, corpus enumerated and hashed, every model
+      probed) and updated after every cell concludes. Carries: <code>run_id</code>,
+      <code>started_at</code>/<code>finished_at</code> (the latter <code>null</code> until every
+      cell in the matrix has run), <code>taguru_version</code>, <code>harness</code> (execution
+      mode, runs per model, the corpus root, the resolved document order, the models file's path
+      and hash), <code>extraction_settings</code> (every task setting above, plus
+      <code>prompt_version</code>/<code>chunk_bytes</code> and a hash of the canonical structured-
+      output schema), the <code>documents[]</code> dictionary (one entry per corpus document: its
+      id, path, byte length, content hash, paragraph count, and its chunk-by-chunk provenance —
+      hash and paragraph range per chunk, computed once here and reused verbatim by every cell),
+      <code>models[]</code> (each model's provider-probe facts — digest/quantization/context
+      window when an Ollama-shaped <code>/api/show</code> answers, absent with a note for a plain
+      OpenAI-compatible endpoint), and <code>cells[]</code> (one entry per concluded cell: its
+      directory, its resolved structured-output rung, and its outcome).
+    </p>
+    <p>
+      A probe-dependent field (a model's digest, an environment's CPU model) is present and
+      <code>null</code> when unavailable, never omitted — a reader can tell "asked, nothing came
+      back" from "this build never records such a field." The document dictionary lives here and
+      only here: chunking depends on the document and <code>chunk_bytes</code> alone, never on the
+      model, so repeating it per cell would be N×M copies of one fact.
+    </p>
+    <p>
+      <code>taguru_benchmark_manifest</code> accepts any version from <code>1</code> through the
+      current one — unlike <code>models.json</code>, this file is written <i>and later re-read</i>
+      by taguru itself (on resume), and compatibility across the tool's own evolution is the point
+      of keeping one on disk.
+    </p>
+  </section>
+
+  <section id="runs">
+    <h2>runs/&lt;model_id&gt;.run&lt;NN&gt;.jsonl</h2>
+    <p>
+      One file per cell — the cell is the unit of execution, failure, and resume. Every line is a
+      tagged JSON object; <code>kind</code> discriminates:
+    </p>
+    <ul>
+      <li><code>header</code> — line 1 only: version stamp, <code>run_id</code>, cell identity.</li>
+      <li><code>document</code> — two per document attempted: <code>phase: "start"</code> (identity
+        only, written the moment the document's first record is seen) and
+        <code>phase: "end"</code> (counts once it finishes — <code>outcome: "written"</code> from
+        <code>extract</code>'s own successful-completion record, or a synthesized
+        <code>outcome: "failed"</code> with every count <code>null</code> when the cell concludes
+        with that document still open). A <code>start</code> with no matching <code>end</code>
+        marks a document abandoned mid-cell — the same signal one level down from
+        <code>kind: "cell"</code>'s own absence.</li>
+      <li><code>chunk</code> — one per chunk, <code>extract</code>'s own provenance record
+        (<a href="extract.html#diagnostics">chunk_sha256, paragraph_first/paragraph_last</a>)
+        carried through with a harness envelope added.</li>
+      <li><code>attempt</code> — one per completion call, built from three layers: every
+        <code>AttemptRecord</code> field <a href="extract.html#diagnostics">extract's own sidecar</a>
+        would have written, unrenamed and unmodified; the harness envelope
+        (<code>ts</code>, <code>cell_id</code>, <code>model_id</code>, <code>run_index</code>,
+        <code>document_id</code>); and, denormalized from the document dictionary,
+        <code>document_sha256</code>/<code>chunk_sha256</code>/<code>paragraph_first</code>/
+        <code>paragraph_last</code> — so any single line is dereferenceable without a
+        cross-<code>kind</code> join. <code>ts</code> is the harness's own observation time (the
+        sidecar carries no wall clock); an attempt's true duration is
+        <code>elapsed_seconds</code>.</li>
+      <li><code>cell</code> — the last line, written only when the cell concludes cleanly (exit
+        code 0 or 1): totals and the cell's outcome. <b>Its absence marks an interrupted
+        cell</b> — the top-level "was this cell actually finished" signal.</li>
+    </ul>
+    <p>
+      Every consumer joins by key — <code>(document_id, chunk_index)</code> — never by line
+      position: <code>--parallel &gt; 1</code> interleaves a document's own chunk lines, and a
+      resumed cell's retry segment is appended after whatever the interrupted attempt already
+      wrote.
+    </p>
+  </section>
+
+  <section id="outcomes">
+    <h2>Cell outcomes and resume</h2>
+    <p>
+      A cell's outcome comes straight from its child's exit code: <code>0</code> →
+      <code>complete</code>, <code>1</code> → <code>failed</code> (the cell ran the whole corpus;
+      some documents did not extract — that failure rate is itself a measurement, not a
+      harness error), <code>130</code> or a signal → <code>interrupted</code>. <code>complete</code>
+      and <code>failed</code> are both terminal: re-running the same <code>--out</code> skips
+      every cell already recorded as either, so a rerun costs nothing for work already done.
+    </p>
+    <p>
+      An <code>interrupted</code> cell is retried on the next invocation, into the exact same
+      <code>cells/&lt;model_id&gt;/run&lt;NN&gt;/</code> directory, never with <code>--force</code>
+      — <code>extract</code>'s own <code>.extract-manifest.json</code>/
+      <code>.extract-checkpoints/</code> then resume at the document and chunk level exactly as
+      they would for a bare rerun of <code>taguru extract</code> (see
+      <a href="extract.html#checkpoints">chunk checkpoints</a>). The accepted cost: a document
+      that was in flight at the moment of interruption may show a second <code>start</code> record
+      on retry, and a chunk that was already checkpointed may repeat its own <code>chunk</code>
+      line — both harmless, since every join is by key, never by line position.
+    </p>
+    <p>
+      Resuming an existing results directory re-validates that nothing about the matrix definition
+      has drifted: the hash of <code>models.json</code>, every task setting, and the corpus'
+      document dictionary must all still match what <code>manifest.json</code> recorded when the
+      directory was created. A mismatch is a usage error naming what changed, pointing at a new
+      <code>--out</code> — two differently-configured runs must never share a directory
+      (the same reasoning behind giving every cell its own fresh directory in the first place).
+    </p>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>

@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod benchmark;
 mod bm25;
 mod calibrate;
 mod cli;

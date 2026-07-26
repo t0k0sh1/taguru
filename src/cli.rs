@@ -95,6 +95,12 @@ USAGE:
                                         decompose documents into batch files
                                         through an OpenAI-compatible chat
                                         model (see: taguru extract --help)
+  taguru benchmark extract --models FILE --context NAME --out DIR CORPUS_DIR
+                                        run taguru extract across a model
+                                        matrix, one subprocess per (model,
+                                        run) cell, and assemble manifest.json/
+                                        runs/*.jsonl (ADR 0003; see: taguru
+                                        benchmark extract --help)
   taguru calibrate --context NAME --probes FILE [--json] [URL]
                                         measure the semantic-floor bands of a
                                         running server's embedding model with
@@ -307,6 +313,7 @@ pub fn dispatch() -> Command {
             print!("{USAGE}");
             exit(0)
         }
+        Some("benchmark") => exit(crate::benchmark::run(&args[1..])),
         Some("health") => exit(health(&args[1..])),
         Some("inspect") => exit(crate::inspect::run(&args[1..])),
         Some("estimate") => exit(crate::estimate::run(&args[1..])),
