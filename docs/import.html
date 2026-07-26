@@ -348,16 +348,19 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
         for a server configured lower).
       </li>
       <li>
-        A single batch that alone exceeds the budget is a <b>hard error</b> naming the source and
-        the two real fixes: raise the server's <code>TAGURU_MAX_BODY_BYTES</code>, or reduce what
-        that source's batch carries (split the source upstream of import). Splitting a batch's own
-        record set client-side is not an option — it would reimplement the retract-then-apply
-        contract's atomicity boundary outside the server that owns it.
+        A single batch that alone exceeds this <b>fixed, client-side</b> budget is a
+        <b>hard error</b> naming the source and the one real fix: reduce what that source's batch
+        carries (split the source upstream of import). Raising the server's
+        <code>TAGURU_MAX_BODY_BYTES</code> alone does not help — this budget check happens before
+        the server is ever asked. Splitting a batch's own record set client-side is not an option
+        either — it would reimplement the retract-then-apply contract's atomicity boundary outside
+        the server that owns it.
       </li>
       <li>
         A <code>413</code> on a chunk still oversized only because the cap is configured lower than
-        assumed halves that chunk (never crossing a batch boundary) and resends — safe because the
-        server refuses a <code>413</code> before applying anything.
+        assumed halves that chunk (never crossing a batch boundary) and resends, halving again on
+        every further <code>413</code> until the chunk lands or hits a single batch — safe to
+        automate since the server refuses a <code>413</code> before applying anything.
       </li>
       <li>
         <code>taguru_group</code> records ride after every batch chunk of the run, the same order

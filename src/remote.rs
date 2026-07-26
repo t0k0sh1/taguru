@@ -68,13 +68,15 @@ impl ApiFailure {
     }
 }
 
-/// One `POST /import` chunk's failure, with the three shapes `import
-/// --url` (#247) must tell apart, ADR 0002 §9: a 413 is a
-/// pre-application refusal safe to adapt to (halve and resend); a
-/// transport failure leaves which chunk landed ambiguous (§8's "connection
-/// lost after chunk N/M" message); anything else is the server's own
-/// refusal, whose envelope may carry `integrity`/`durable_batches`
-/// (issue #182) worth surfacing verbatim.
+/// One `POST /import` chunk's failure, with the shapes `import --url`
+/// (#247) must tell apart, ADR 0002 §9: a 413 is a pre-application
+/// refusal safe to adapt to (halve and resend); a transport failure
+/// leaves which chunk landed ambiguous (§8's "connection lost after
+/// chunk N/M" message); a malformed base URL means no request was
+/// ever attempted, so it must not read like a lost connection either;
+/// anything else is the server's own refusal, whose envelope may
+/// carry `integrity`/`durable_batches` (issue #182) worth surfacing
+/// verbatim.
 #[cfg_attr(test, derive(Debug))]
 pub(crate) enum ImportFailure {
     /// 413 — refused before applying anything (src/api/import.rs:371),
@@ -83,6 +85,10 @@ pub(crate) enum ImportFailure {
     /// The request itself did not complete — which chunk (if any)
     /// landed is unknown, not merely "assume it failed."
     Transport(String),
+    /// The URL could never be built (a malformed base) — no request
+    /// was ever attempted, so this must not read to the caller as a
+    /// lost connection with some ambiguous chunk left to resume.
+    InvalidUrl(String),
     /// Any other non-200: the parsed envelope rides along so the
     /// caller can read `code`/`integrity`/`durable_batches` without a
     /// second round trip.
@@ -96,7 +102,9 @@ pub(crate) enum ImportFailure {
 impl ImportFailure {
     pub(crate) fn into_message(self) -> String {
         match self {
-            Self::TooLarge(message) | Self::Transport(message) => message,
+            Self::TooLarge(message) | Self::Transport(message) | Self::InvalidUrl(message) => {
+                message
+            }
             Self::Refused { message, .. } => message,
         }
     }
@@ -307,7 +315,7 @@ impl Api {
         let query: &[(&str, &str)] = if dry_run { &[("dry_run", "true")] } else { &[] };
         let url = self
             .url_with_query(&["import"], query)
-            .map_err(ImportFailure::Transport)?;
+            .map_err(ImportFailure::InvalidUrl)?;
         let request = self.bearer(
             self.agent
                 .post(&url)

@@ -17,15 +17,18 @@ Entries that change an on-disk format or a response shape say so.
   `src/ingest.rs` so both callers share it) — and packed into whole
   chunks under a byte budget starting at 4 MiB (half the 8 MiB default
   `TAGURU_MAX_BODY_BYTES`), each POSTed to `/import` in turn. A single
-  batch that alone exceeds the budget is a hard error naming the
-  source and the two real fixes (raise the server's cap, or split that
-  source's content upstream of import) rather than being split
-  client-side, which would reimplement the retract-then-apply
-  contract's atomicity boundary outside the server. A `413` on a chunk
-  still oversized only because the cap is configured lower than
-  assumed halves that chunk (never crossing a batch boundary) and
-  resends — the one automatic resend this path performs, since the
-  server refuses a `413` before applying anything. `taguru_group`
+  batch that alone exceeds this fixed client-side budget is a hard
+  error naming the source and the one real fix — split that source's
+  content upstream of import — since raising the server's cap alone
+  cannot help (the budget check happens before the server is ever
+  asked), and splitting client-side would reimplement the
+  retract-then-apply contract's atomicity boundary outside the
+  server. A `413` on a chunk still oversized only because the cap is
+  configured lower than assumed halves that chunk (never crossing a
+  batch boundary) and resends, halving again on every further `413`
+  until the chunk lands or hits a single batch — safe to automate
+  since the server refuses a `413` before applying anything.
+  `taguru_group`
   records ride after every batch chunk of the run, matching the local
   path's own group-after-every-batch order. `--dry-run` sends every
   chunk as `?dry_run=true` to preview before applying for real. A lost

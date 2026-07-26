@@ -573,8 +573,9 @@ fn oversized_unit_error(label: &str, size: usize, budget: usize) -> i32 {
         "taguru: import: {label} alone is {size} byte(s), over the {budget}-byte chunk \
          budget — splitting a batch's own record set client-side would break the \
          retract-then-apply contract's atomicity boundary, so this cannot be packed \
-         automatically; raise the server's TAGURU_MAX_BODY_BYTES, or reduce what this \
-         source's batch carries (split the source upstream of import)"
+         automatically; reduce what this source's batch carries (split the source \
+         upstream of import) — raising the server's TAGURU_MAX_BODY_BYTES alone will \
+         not help, since this budget is fixed client-side regardless of the server's cap"
     );
     1
 }
@@ -813,20 +814,35 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
                     );
                 }
                 // Pre-application rejection (ADR 0002 §8): safe to
-                // adapt to and resend, the one automatic resend this
-                // loop performs.
+                // adapt to and resend automatically — repeatedly, if
+                // a further 413 keeps arriving, until this chunk is
+                // a single batch (oversized_unit_error) or lands.
                 budget = (chunk.size() / 2).max(1);
                 let (first, second) = chunk.halve();
                 queue.push_front(second);
                 queue.push_front(first);
                 total += 1;
             }
+            Err(ImportFailure::InvalidUrl(message)) => {
+                // No request was ever sent — nothing landed, nothing
+                // to resume; this is a usage problem, not a partial
+                // apply.
+                eprintln!("taguru: import: {message}");
+                return 1;
+            }
             Err(ImportFailure::Transport(message)) => {
                 eprintln!("taguru: import: {message}");
-                eprintln!(
-                    "taguru: import: connection lost after chunk {landed_chunks}/{total} — \
-                     re-run `--dry-run` to confirm what would change, then resume"
-                );
+                if dry_run {
+                    eprintln!(
+                        "taguru: import: connection lost after chunk \
+                         {landed_chunks}/{total} of the dry run — nothing was applied"
+                    );
+                } else {
+                    eprintln!(
+                        "taguru: import: connection lost after chunk {landed_chunks}/{total} \
+                         — re-run `--dry-run` to confirm what would change, then resume"
+                    );
+                }
                 return 1;
             }
             Err(ImportFailure::Refused {
@@ -858,11 +874,18 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
                          never sent"
                     );
                 }
-                eprintln!(
-                    "taguru: import: {landed_chunks} chunk(s) already landed durably; \
-                     re-running the corrected stream is exact (each batch replaces its \
-                     own source)"
-                );
+                if dry_run {
+                    eprintln!(
+                        "taguru: import: {landed_chunks} chunk(s) of the dry run \
+                         previewed cleanly before this refusal; nothing was applied"
+                    );
+                } else {
+                    eprintln!(
+                        "taguru: import: {landed_chunks} chunk(s) already landed durably; \
+                         re-running the corrected stream is exact (each batch replaces its \
+                         own source)"
+                    );
+                }
                 return 1;
             }
         }
