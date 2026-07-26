@@ -290,7 +290,9 @@ fn stray_batch_files(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
 }
 
 /// Parses a `--diagnostics-out` sidecar into its records, in file
-/// order — one JSON object per line (issue #200).
+/// order — one JSON object per line (issue #200). The sidecar is a
+/// tagged stream since issue #262 (`kind`: `chunk`/`attempt`/
+/// `document`); most callers want [`read_attempt_records`] instead.
 fn read_diagnostics(path: &std::path::Path) -> Vec<Value> {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("reading diagnostics file {}: {error}", path.display()));
@@ -300,6 +302,17 @@ fn read_diagnostics(path: &std::path::Path) -> Vec<Value> {
             serde_json::from_str(line)
                 .unwrap_or_else(|error| panic!("bad diagnostics JSONL line {line:?}: {error}"))
         })
+        .collect()
+}
+
+/// The `kind == "attempt"` records of a sidecar, in file order — the
+/// issue #200 tests predate issue #262's `chunk`/`document` kinds and
+/// reason about attempts alone, exactly as `--diagnostics-out` wrote
+/// them before this issue.
+fn read_attempt_records(path: &std::path::Path) -> Vec<Value> {
+    read_diagnostics(path)
+        .into_iter()
+        .filter(|record| record["kind"] == "attempt")
         .collect()
 }
 
@@ -2828,7 +2841,7 @@ fn diagnostics_out_writes_one_record_per_attempt_with_the_shared_state_vocabular
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 written"), "{stdout}");
 
-    let records = read_diagnostics(&diag);
+    let records = read_attempt_records(&diag);
     assert_eq!(records.len(), 2, "{records:?}");
 
     assert_eq!(records[0]["kind"], "attempt");
@@ -2933,7 +2946,7 @@ fn diagnostics_env_var_alone_opens_the_sidecar() {
         &["--context", "c", doc.to_str().unwrap()],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    let records = read_diagnostics(&diag);
+    let records = read_attempt_records(&diag);
     assert_eq!(records.len(), 1, "{records:?}");
 
     let _ = std::fs::remove_dir_all(&docs);
@@ -3010,7 +3023,7 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
             ],
         );
         assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-        let records = read_diagnostics(&diag);
+        let records = read_attempt_records(&diag);
         assert_eq!(records.len(), 2, "{records:?}");
         assert_eq!(records[0]["state"], "length_limited");
         assert_eq!(records[0]["length_limited"], true);
@@ -3051,7 +3064,12 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
             ],
         );
         assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
-        let records = read_diagnostics(&diag);
+        let all = read_diagnostics(&diag);
+        assert!(
+            !all.iter().any(|record| record["kind"] == "document"),
+            "a document that never lands earns no summary record: {all:?}"
+        );
+        let records = read_attempt_records(&diag);
         assert_eq!(records.len(), 2, "{records:?}");
         assert_eq!(records[0]["state"], "empty");
         assert_eq!(records[1]["state"], "empty");
@@ -3085,7 +3103,12 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
             ],
         );
         assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
-        let records = read_diagnostics(&diag);
+        let all = read_diagnostics(&diag);
+        assert!(
+            !all.iter().any(|record| record["kind"] == "document"),
+            "a document that never lands earns no summary record: {all:?}"
+        );
+        let records = read_attempt_records(&diag);
         assert_eq!(records.len(), 1, "{records:?}");
         assert_eq!(records[0]["state"], "refusal");
         assert!(!records[0]["parse_error"].is_null());
@@ -3141,7 +3164,7 @@ fn diagnostics_records_a_timeout_as_a_single_attempt_with_no_provider_metadata()
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
 
-    let records = read_diagnostics(&diag);
+    let records = read_attempt_records(&diag);
     assert_eq!(
         records.len(),
         1,
@@ -3185,7 +3208,7 @@ fn diagnostics_records_a_non_retryable_http_error_as_transport() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
 
-    let records = read_diagnostics(&diag);
+    let records = read_attempt_records(&diag);
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(records[0]["state"], "transport");
     assert!(records[0]["provider_metadata"].is_null());
@@ -3229,7 +3252,7 @@ fn diagnostics_reports_provider_token_usage_when_present() {
         ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    let records = read_diagnostics(&diag);
+    let records = read_attempt_records(&diag);
     assert_eq!(records.len(), 1, "{records:?}");
     let metadata = &records[0]["provider_metadata"];
     assert_eq!(metadata["input_tokens"], 123);
@@ -3273,7 +3296,7 @@ fn diagnostics_raw_bytes_attaches_a_capped_response_text() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
 
-    let records = read_diagnostics(&diag);
+    let records = read_attempt_records(&diag);
     assert_eq!(records.len(), 1, "{records:?}");
     let text = records[0]["response_text"]
         .as_str()
@@ -3313,7 +3336,7 @@ fn diagnostics_omits_response_text_when_raw_bytes_is_unset() {
         ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    let records = read_diagnostics(&diag);
+    let records = read_attempt_records(&diag);
     assert_eq!(records.len(), 1, "{records:?}");
     assert!(
         records[0].get("response_text").is_none(),
@@ -3378,11 +3401,18 @@ fn diagnostics_is_written_incrementally_and_survives_a_kill() {
         .stderr(Stdio::null());
     let mut child = command.spawn().expect("extract must spawn");
 
+    // The first line to land is now a "chunk" provenance record (issue
+    // #262) — poll until an "attempt" record has landed too, not merely
+    // until the file is non-empty.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut saved = String::new();
     while std::time::Instant::now() < deadline {
         if let Ok(text) = std::fs::read_to_string(&diag)
-            && !text.trim().is_empty()
+            && text.lines().filter(|line| !line.is_empty()).any(|line| {
+                serde_json::from_str::<Value>(line)
+                    .map(|value| value["kind"] == "attempt")
+                    .unwrap_or(false)
+            })
         {
             saved = text;
             break;
@@ -3395,8 +3425,22 @@ fn diagnostics_is_written_incrementally_and_survives_a_kill() {
         !saved.trim().is_empty(),
         "no diagnostics record landed before the run was killed"
     );
-    let record: Value = serde_json::from_str(saved.lines().next().unwrap())
-        .unwrap_or_else(|error| panic!("the surviving line must parse: {error}\n{saved}"));
+    let records: Vec<Value> = saved
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("the surviving line must parse: {error}\n{line}"))
+        })
+        .collect();
+    assert_eq!(
+        records[0]["kind"], "chunk",
+        "the chunk record lands before that chunk's first attempt: {records:?}"
+    );
+    let record = records
+        .iter()
+        .find(|value| value["kind"] == "attempt")
+        .expect("an attempt record must have landed");
     assert_eq!(record["state"], "stop_valid");
     assert_eq!(record["source"], fast_src.as_str());
 
@@ -3485,7 +3529,7 @@ fn diagnostics_records_the_stage_two_cross_chunk_correction() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
-    let records = read_diagnostics(&diag);
+    let records = read_attempt_records(&diag);
     assert_eq!(records.len(), 2, "{records:?}");
     assert_eq!(records[0]["stage"], "item");
     assert_eq!(records[0]["state"], "stop_valid");
@@ -3531,7 +3575,7 @@ fn diagnostics_records_every_chunk_attempt_under_parallel() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let request_count = captured.lock().unwrap().len();
-    let records = read_diagnostics(&diag);
+    let records = read_attempt_records(&diag);
     assert_eq!(records.len(), request_count, "{records:?}");
     assert!(
         records.len() > 1,
@@ -3541,6 +3585,176 @@ fn diagnostics_records_every_chunk_attempt_under_parallel() {
         assert_eq!(record["state"], "stop_valid");
         assert_eq!(record["stage"], "item");
     }
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// Issue #262, ADR 0003 §7: one `kind: "chunk"` record per chunk,
+/// written before that chunk's first attempt — with correct paragraph
+/// provenance a reader can join against the canonical document without
+/// re-implementing `chunk()`'s packing rule.
+#[test]
+fn diagnostics_writes_one_chunk_record_per_chunk_before_any_attempt() {
+    let docs = batch_dir("extract-diag-chunkrec-docs");
+    let doc = docs.join("big.md");
+    std::fs::write(&doc, multi_chunk_document(20)).unwrap();
+    let out = batch_dir("extract-diag-chunkrec-out");
+    let diag_dir = batch_dir("extract-diag-chunkrec-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, _attempt| {
+        chat_ok(&json!({"associations": []}).to_string())
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let all = read_diagnostics(&diag);
+    let last_chunk_position = all.iter().rposition(|record| record["kind"] == "chunk");
+    let first_attempt_position = all.iter().position(|record| record["kind"] == "attempt");
+    assert!(
+        last_chunk_position < first_attempt_position,
+        "every chunk record must land before any attempt record: {all:?}"
+    );
+
+    let chunks: Vec<&Value> = all
+        .iter()
+        .filter(|record| record["kind"] == "chunk")
+        .collect();
+    let request_count = captured.lock().unwrap().len();
+    assert_eq!(
+        chunks.len(),
+        request_count,
+        "one chunk record per chunk sent: {chunks:?}"
+    );
+    assert!(
+        chunks.len() > 1,
+        "the document must actually split into multiple chunks"
+    );
+    for (index, record) in chunks.iter().enumerate() {
+        assert_eq!(record["source"], doc.to_str().unwrap());
+        assert_eq!(record["chunk_index"], index);
+        assert_eq!(record["chunk_total"], chunks.len());
+        let sha = record["chunk_sha256"].as_str().unwrap();
+        assert_eq!(sha.len(), 64, "{sha:?} must be a sha256 hex digest");
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+        let bytes = record["chunk_bytes"].as_u64().unwrap();
+        assert!(
+            (1..=24576).contains(&bytes),
+            "{bytes} out of CHUNK_BYTES range"
+        );
+        let first = record["paragraph_first"].as_u64().unwrap();
+        let last = record["paragraph_last"].as_u64().unwrap();
+        assert!(first <= last);
+    }
+    // No oversized paragraph in this document, so ranges never overlap
+    // and cover every canonical paragraph exactly once, in order.
+    assert_eq!(chunks[0]["paragraph_first"], 0);
+    for pair in chunks.windows(2) {
+        assert_eq!(
+            pair[1]["paragraph_first"].as_u64().unwrap(),
+            pair[0]["paragraph_last"].as_u64().unwrap() + 1,
+            "{:?} must pick up exactly where {:?} left off",
+            pair[1],
+            pair[0]
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// Issue #262, ADR 0003 §7: one `kind: "document"` record per document
+/// written, a structured twin of `Run::report`'s human-readable line —
+/// `concepts`/`labels` counted separately rather than combined into one
+/// "alias(es)" figure.
+#[test]
+fn diagnostics_writes_a_document_record_whose_counts_match_the_written_batch() {
+    let docs = batch_dir("extract-diag-docrec-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-docrec-out");
+    let diag_dir = batch_dir("extract-diag-docrec-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    // Two exact-duplicate triples fold into one association, plus one
+    // concept alias — association(s)=1, concepts=1, labels=0,
+    // duplicates=1, dropped=0.
+    let reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b", "weight": 1.0},
+            {"subject": "a", "label": "l", "object": "b", "weight": 1.0}
+        ],
+        "aliases": [
+            {"alias": "X", "canonical": "a", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("1 association(s), 1 alias(es)")
+            && stdout.contains("1 duplicate(s) folded"),
+        "{stdout}"
+    );
+
+    let all = read_diagnostics(&diag);
+    let documents: Vec<&Value> = all
+        .iter()
+        .filter(|record| record["kind"] == "document")
+        .collect();
+    assert_eq!(documents.len(), 1, "{all:?}");
+    assert_eq!(
+        all.last().unwrap()["kind"],
+        "document",
+        "the document record lands only once its document is fully written: {all:?}"
+    );
+    let record = documents[0];
+    assert_eq!(record["source"], doc.to_str().unwrap());
+    assert_eq!(record["associations"], 1);
+    assert_eq!(record["concepts"], 1);
+    assert_eq!(record["labels"], 0);
+    assert_eq!(record["questions"], 0);
+    assert_eq!(record["duplicates"], 1);
+    assert_eq!(record["dropped"], 0);
+
+    let written = stray_batch_files(&out);
+    assert_eq!(written.len(), 1, "{written:?}");
+    let expected_path = out.join(&written[0]);
+    assert_eq!(
+        record["batch_path"].as_str().unwrap(),
+        expected_path.display().to_string()
+    );
+    assert!(expected_path.is_file());
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

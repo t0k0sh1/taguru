@@ -125,10 +125,12 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
 --lossy             restore the pre-#199 behavior: drop a business-rule-invalid
                     item (bad weight, dangling alias, out-of-range question, …)
                     and count it instead of correcting or failing (see below)
---diagnostics-out FILE  write one JSONL record per LLM attempt — source,
+--diagnostics-out FILE  write a JSONL sidecar of tagged records (see below):
+                    one per chunk (provenance), one per LLM attempt (source,
                     chunk, attempt, terminal state, finish_reason, token
-                    usage, latency, parse/validation issues (see below);
-                    off by default, ignored under --dry-run
+                    usage, latency, parse/validation issues), one per
+                    document written (association/alias/duplicate/dropped
+                    counts); off by default, ignored under --dry-run
 --context NAME      the context every batch file targets
 --description TEXT  attach a create block (used only when the context is absent)
 --config F          read KEY=VALUE environment from F (same dialect as serve)</code></pre>
@@ -438,15 +440,23 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <i>that</i> a document failed, not enough to tell a truncated answer apart from a model
       syntax error or an empty-answer thinking burn. <code>--diagnostics-out FILE</code> (or
       <code>TAGURU_EXTRACT_DIAGNOSTICS</code>; the flag wins when both are set) opts into a JSONL
-      sidecar, one record per LLM attempt, written incrementally — a killed run keeps every
-      record already flushed. It is off by default, and without it stdout/stderr are unchanged
-      byte for byte: the sidecar is purely additive.
+      sidecar, written incrementally — a killed run keeps every record already flushed. It is off
+      by default, and without it stdout/stderr are unchanged byte for byte: the sidecar is purely
+      additive.
     </p>
     <p>
-      Every record carries: <code>source</code>, <code>chunk_index</code>, <code>attempt</code>
-      (one-based), <code>max_attempts</code>, <code>stage</code> (<code>item</code> for the
-      per-chunk loop, <code>cross_chunk</code> for the Stage 2 alias correction above),
-      <code>state</code> — the
+      The sidecar is a tagged stream: a <code>kind</code> field discriminates
+      <code>"chunk"</code>, <code>"attempt"</code>, and <code>"document"</code> records, described
+      below. A consumer written before <code>"chunk"</code>/<code>"document"</code> existed keeps
+      working unmodified as long as it filters on <code>kind == "attempt"</code> — the same
+      discriminator it already needed to read the sidecar at all — since an <code>attempt</code>
+      record's own shape has not changed.
+    </p>
+    <p>
+      Every <code>attempt</code> record carries: <code>source</code>, <code>chunk_index</code>,
+      <code>attempt</code> (one-based), <code>max_attempts</code>, <code>stage</code>
+      (<code>item</code> for the per-chunk loop, <code>cross_chunk</code> for the Stage 2 alias
+      correction above), <code>state</code> — the
       <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0001-structured-extraction-reliability.md">ADR
       0001 §7</a> vocabulary this producer classifies every attempt into before any parsing
       happens: <code>stop_valid</code>, <code>stop_malformed</code>, <code>length_limited</code>,
@@ -464,13 +474,40 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       matches, so tooling built against one producer's diagnostics reads the other's.
     </p>
     <p>
+      One <code>chunk</code> record is written per chunk, before that chunk's first attempt:
+      <code>source</code>, <code>chunk_index</code>, <code>chunk_total</code>,
+      <code>chunk_sha256</code> (the chunk text as sent to the model), <code>chunk_bytes</code>,
+      and <code>paragraph_first</code>/<code>paragraph_last</code> (inclusive) — the range of the
+      server's own canonical paragraph numbering (the same locator a batch's <code>paragraph</code>
+      field, passage store, BM25 lane, and vector lane all already share) that chunk covers. This
+      is a paragraph-index range, never a byte offset: chunking runs on a relabeled rendering of
+      the document, not the original bytes, so a byte offset into it would not resolve to
+      anything a reader has on disk. Given <code>(source, paragraph)</code> and the document's own
+      bytes, a byte range and the verbatim text follow from one deterministic, offline call to the
+      server's own paragraph splitter — see
+      <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0003-extraction-model-benchmark.md">ADR
+      0003 §7</a>. An oversized paragraph that itself straddles more than one chunk repeats its
+      number across each one, rather than guessing at a boundary that was never byte-addressable
+      to begin with.
+    </p>
+    <p>
+      One <code>document</code> record is written per document, once it lands successfully — a
+      structured counterpart to the single human-readable summary line every run already prints:
+      <code>source</code>, <code>batch_path</code>, <code>associations</code>, <code>concepts</code>,
+      <code>labels</code> (counted separately, unlike the summary line's combined "alias(es)"
+      figure), <code>questions</code>, <code>duplicates</code>, and <code>dropped</code>. A
+      document that fails never reaches this record — its absence marks exactly that, the same
+      "absence marks incomplete" convention <code>--diagnostics-out</code> consumers should apply
+      to any record kind this sidecar might add in the future.
+    </p>
+    <p>
       Raw model text is <b>never</b> captured by default — metadata only. Chain-of-thought is
       never captured at all, under any setting. <code>TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES</code>
-      opts into the model's final answer text on each record, byte-capped <b>at capture</b>
-      (the same treatment <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code> gives a replayed
-      bad answer above) — because a raw response can embed the source document's own content, an
-      uncapped default would leak document text into a file meant for troubleshooting model
-      behavior.
+      opts into the model's final answer text on each <code>attempt</code> record (the only kind
+      that carries one at all), byte-capped <b>at capture</b> (the same treatment
+      <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code> gives a replayed bad answer above) —
+      because a raw response can embed the source document's own content, an uncapped default
+      would leak document text into a file meant for troubleshooting model behavior.
     </p>
     <p>
       The sidecar is truncated fresh on every run — it describes <i>this</i> run, never a log
