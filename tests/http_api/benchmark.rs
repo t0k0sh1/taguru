@@ -234,7 +234,7 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
 }
 
 #[test]
-fn resuming_a_complete_matrix_calls_the_stub_zero_times() {
+fn resuming_a_complete_matrix_makes_no_further_calls() {
     let (url, captured) = stub_provider(vec![r#"{"associations":[],"aliases":[]}"#.to_string()]);
     let corpus = corpus_dir("resume", &[("only.md", "内容だけの文書。")]);
     let out = results_dir("resume");
@@ -268,6 +268,64 @@ fn resuming_a_complete_matrix_calls_the_stub_zero_times() {
     let manifest: Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["cells"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn resuming_with_a_wider_runs_count_adds_cells_and_widens_the_recorded_count() {
+    let (url, _captured) = stub_provider(vec![
+        r#"{"associations":[],"aliases":[]}"#.to_string(),
+        r#"{"associations":[],"aliases":[]}"#.to_string(),
+    ]);
+    let corpus = corpus_dir("widerruns", &[("only.md", "内容だけの文書。")]);
+    let out = results_dir("widerruns");
+    let models = write_models_json(&out, &[("stub-e", &url)]);
+
+    let (code, stdout, stderr) = run_benchmark(&[
+        "--models",
+        models.to_str().unwrap(),
+        "--context",
+        "bench",
+        "--out",
+        out.to_str().unwrap(),
+        "--runs",
+        "1",
+        corpus.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "first run — stdout: {stdout}\nstderr: {stderr}");
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["harness"]["runs_per_model"], 1);
+    assert_eq!(manifest["cells"].as_array().unwrap().len(), 1);
+
+    // Resume the same directory, but ask for a second run this time —
+    // this must add a run02 cell and widen the recorded run count
+    // rather than leaving the manifest claiming only 1 run exists.
+    let (code, stdout, stderr) = run_benchmark(&[
+        "--models",
+        models.to_str().unwrap(),
+        "--context",
+        "bench",
+        "--out",
+        out.to_str().unwrap(),
+        "--runs",
+        "2",
+        corpus.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        code, 0,
+        "widened resume — stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["harness"]["runs_per_model"], 2,
+        "the manifest must record the widest matrix it actually holds cells for"
+    );
+    let cells = manifest["cells"].as_array().unwrap();
+    assert_eq!(cells.len(), 2, "run01 kept, run02 added");
+    assert!(cells.iter().any(|c| c["cell_id"] == "stub-e.run02"));
+    assert!(out.join("runs/stub-e.run02.jsonl").is_file());
 }
 
 #[test]

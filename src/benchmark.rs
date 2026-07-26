@@ -544,37 +544,44 @@ fn load_models_file(path: &Path) -> Result<LoadedModelsFile, String> {
             path.display()
         ));
     }
+    let label = path.display();
     let mut warnings = Vec::new();
     for key in parsed.extra.keys() {
         warnings.push(format!(
-            "models.json: '{key}' is not a key taguru reads (typo?)"
+            "{label}: '{key}' is not a key taguru reads (typo?)"
         ));
     }
     for key in parsed.defaults.extra.keys() {
         warnings.push(format!(
-            "models.json: defaults.'{key}' is not a key taguru reads (typo?)"
+            "{label}: defaults.'{key}' is not a key taguru reads (typo?)"
         ));
     }
 
     let mut seen_ids = BTreeSet::new();
     let mut resolved = Vec::with_capacity(parsed.models.len());
     for entry in &parsed.models {
-        validate_model_id(&entry.id)?;
+        validate_model_id(path, &entry.id)?;
         if !seen_ids.insert(entry.id.clone()) {
-            return Err(format!("models.json: duplicate model id '{}'", entry.id));
+            return Err(format!("{label}: duplicate model id '{}'", entry.id));
         }
         for key in entry.extra.keys() {
             warnings.push(format!(
-                "models.json: model '{}': '{key}' is not a key taguru reads (typo?)",
+                "{label}: model '{}': '{key}' is not a key taguru reads (typo?)",
                 entry.id
             ));
         }
-        validate_model_url(&entry.id, &entry.url)?;
+        if entry.model.is_empty() {
+            return Err(format!(
+                "{label}: model '{}': 'model' must not be empty",
+                entry.id
+            ));
+        }
+        validate_model_url(path, &entry.id, &entry.url)?;
         if let Some(name) = &entry.api_key_env {
-            validate_api_key_env_name(&entry.id, name)?;
+            validate_api_key_env_name(path, &entry.id, name)?;
             if std::env::var_os(name).is_none() {
                 return Err(format!(
-                    "models.json: model '{}': api_key_env '{name}' is not set in the environment",
+                    "{label}: model '{}': api_key_env '{name}' is not set in the environment",
                     entry.id
                 ));
             }
@@ -586,7 +593,7 @@ fn load_models_file(path: &Path) -> Result<LoadedModelsFile, String> {
             .unwrap_or_else(|| "off".to_string());
         if crate::extract::StructuredOutputMode::parse(&structured_output).is_none() {
             return Err(format!(
-                "models.json: model '{}': structured_output must be auto, json-schema, \
+                "{label}: model '{}': structured_output must be auto, json-schema, \
                  json-object, or off, got '{structured_output}'",
                 entry.id
             ));
@@ -609,17 +616,18 @@ fn load_models_file(path: &Path) -> Result<LoadedModelsFile, String> {
     Ok((bytes, resolved, warnings))
 }
 
-fn validate_model_id(id: &str) -> Result<(), String> {
+fn validate_model_id(path: &Path, id: &str) -> Result<(), String> {
+    let label = path.display();
     if id.is_empty() || id.len() > MAX_MODEL_ID_BYTES {
         return Err(format!(
-            "models.json: model id '{id}' must be 1..={MAX_MODEL_ID_BYTES} bytes"
+            "{label}: model id '{id}' must be 1..={MAX_MODEL_ID_BYTES} bytes"
         ));
     }
     let mut chars = id.chars();
     let first = chars.next().expect("non-empty checked above");
     if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
         return Err(format!(
-            "models.json: model id '{id}' must start with a lowercase letter or digit"
+            "{label}: model id '{id}' must start with a lowercase letter or digit"
         ));
     }
     if !id
@@ -627,7 +635,7 @@ fn validate_model_id(id: &str) -> Result<(), String> {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
     {
         return Err(format!(
-            "models.json: model id '{id}' may only contain lowercase letters, digits, '.', \
+            "{label}: model id '{id}' may only contain lowercase letters, digits, '.', \
              '_', '-'"
         ));
     }
@@ -638,18 +646,18 @@ fn validate_model_id(id: &str) -> Result<(), String> {
 /// §8's Secrets rule): a credential belongs in `api_key_env`, never
 /// embedded in the endpoint URL where it would ride into every artifact
 /// that records `url` verbatim.
-fn validate_model_url(model_id: &str, url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|error| {
-        format!("models.json: model '{model_id}': url '{url}' is invalid: {error}")
-    })?;
+fn validate_model_url(path: &Path, model_id: &str, url: &str) -> Result<(), String> {
+    let label = path.display();
+    let parsed = url::Url::parse(url)
+        .map_err(|error| format!("{label}: model '{model_id}': url '{url}' is invalid: {error}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!(
-            "models.json: model '{model_id}': url '{url}' must be http or https"
+            "{label}: model '{model_id}': url '{url}' must be http or https"
         ));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(format!(
-            "models.json: model '{model_id}': url '{url}' carries inline credentials \
+            "{label}: model '{model_id}': url '{url}' carries inline credentials \
              (user:password@) — use api_key_env instead"
         ));
     }
@@ -660,7 +668,8 @@ fn validate_model_url(model_id: &str, url: &str) -> Result<(), String> {
 /// credential's value. A value that cannot be a variable name (a `sk-…`
 /// key, for instance) is refused here rather than silently forwarded as
 /// a literal env-var name that will never resolve.
-fn validate_api_key_env_name(model_id: &str, name: &str) -> Result<(), String> {
+fn validate_api_key_env_name(path: &Path, model_id: &str, name: &str) -> Result<(), String> {
+    let label = path.display();
     let mut chars = name.chars();
     let ok_first = chars
         .next()
@@ -668,7 +677,7 @@ fn validate_api_key_env_name(model_id: &str, name: &str) -> Result<(), String> {
     let ok_rest = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !ok_first || !ok_rest {
         return Err(format!(
-            "models.json: model '{model_id}': api_key_env '{name}' does not look like an \
+            "{label}: model '{model_id}': api_key_env '{name}' does not look like an \
              environment variable name (it names a variable, never the key's value)"
         ));
     }
@@ -717,11 +726,12 @@ mod models_json_tests {
 
     #[test]
     fn model_ids_are_validated_and_deduplicated() {
-        assert!(validate_model_id("qwen25-7b_q4.a").is_ok());
-        assert!(validate_model_id("-bad").is_err());
-        assert!(validate_model_id("Bad").is_err());
-        assert!(validate_model_id("").is_err());
-        assert!(validate_model_id(&"a".repeat(65)).is_err());
+        let dummy = Path::new("models.json");
+        assert!(validate_model_id(dummy, "qwen25-7b_q4.a").is_ok());
+        assert!(validate_model_id(dummy, "-bad").is_err());
+        assert!(validate_model_id(dummy, "Bad").is_err());
+        assert!(validate_model_id(dummy, "").is_err());
+        assert!(validate_model_id(dummy, &"a".repeat(65)).is_err());
 
         let path = write_temp(
             "dup",
@@ -789,6 +799,34 @@ mod models_json_tests {
         );
         let error = load_models_file(&path).unwrap_err();
         assert!(error.contains("structured_output"), "{error}");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_empty_model_name_is_refused() {
+        let path = write_temp(
+            "emptymodel",
+            r#"{"taguru_benchmark_models":1,"models":[
+                {"id":"m","model":"","url":"http://h/v1/chat/completions"}
+            ]}"#,
+        );
+        let error = load_models_file(&path).unwrap_err();
+        assert!(error.contains("'model' must not be empty"), "{error}");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validation_errors_and_warnings_name_the_actual_configured_path_not_a_fixed_literal() {
+        let path = write_temp(
+            "custompath",
+            r#"{"taguru_benchmark_models":1,"models":[{"id":"Bad","model":"x","url":"http://h/v1/chat/completions"}]}"#,
+        );
+        let error = load_models_file(&path).unwrap_err();
+        assert!(
+            error.contains(path.to_str().unwrap()),
+            "error must name the file actually given via --models, not a hardcoded \
+             'models.json': {error}"
+        );
         let _ = fs::remove_file(&path);
     }
 
@@ -1296,16 +1334,28 @@ fn probe_model(model: &ResolvedModel) -> ManifestModel {
         .http_status_as_error(false)
         .build()
         .into();
+    // Built once, applied to every probe request — a gated Ollama-
+    // compatible proxy that requires auth on /api/show and /api/tags
+    // too must not see those two answer 401 while only the /v1/models
+    // fallback carries the credential.
+    let auth: Option<String> = model
+        .api_key_env
+        .as_ref()
+        .and_then(|name| std::env::var(name).ok())
+        .map(|key| format!("Bearer {key}"));
 
     attempted.push("POST /api/show".to_string());
     let show_body = serde_json::json!({ "model": model.model }).to_string();
     let mut quantization = None;
     let mut context_window = None;
     let mut show_ok = false;
-    if let Ok(mut response) = agent
+    let mut show_request = agent
         .post(&format!("{origin}/api/show"))
-        .header("Content-Type", "application/json")
-        .send(&show_body)
+        .header("Content-Type", "application/json");
+    if let Some(auth) = &auth {
+        show_request = show_request.header("Authorization", auth);
+    }
+    if let Ok(mut response) = show_request.send(&show_body)
         && response.status().as_u16() == 200
         && let Ok(text) = response.body_mut().read_to_string()
         && let Ok(value) = serde_json::from_str::<Value>(&text)
@@ -1324,10 +1374,8 @@ fn probe_model(model: &ResolvedModel) -> ManifestModel {
     if !show_ok {
         attempted.push("GET /v1/models".to_string());
         let mut request = agent.get(&format!("{origin}/v1/models"));
-        if let Some(env_name) = &model.api_key_env
-            && let Ok(key) = std::env::var(env_name)
-        {
-            request = request.header("Authorization", format!("Bearer {key}"));
+        if let Some(auth) = &auth {
+            request = request.header("Authorization", auth);
         }
         return match request.call() {
             Ok(response) if response.status().as_u16() == 200 => ManifestModel {
@@ -1362,7 +1410,11 @@ fn probe_model(model: &ResolvedModel) -> ManifestModel {
     }
     attempted.push("GET /api/tags".to_string());
     let mut digest = None;
-    if let Ok(mut response) = agent.get(&format!("{origin}/api/tags")).call()
+    let mut tags_request = agent.get(&format!("{origin}/api/tags"));
+    if let Some(auth) = &auth {
+        tags_request = tags_request.header("Authorization", auth);
+    }
+    if let Ok(mut response) = tags_request.call()
         && response.status().as_u16() == 200
         && let Ok(text) = response.body_mut().read_to_string()
         && let Ok(value) = serde_json::from_str::<Value>(&text)
@@ -1962,6 +2014,26 @@ fn synthesize_failed_ends(
     }
 }
 
+/// Maps a concluded child's exit status to a cell outcome. `2` is
+/// `extract`'s own usage-error code — reachable not only from a
+/// benchmark-constructed command line (a real harness bug) but from a
+/// `models.json` entry that parses here yet `extract` itself rejects at
+/// startup (`ChatClient::from_env`'s own validation). Recording the
+/// cell as `failed`, exit code included, keeps the rest of the matrix
+/// running instead of one misconfigured model aborting every other
+/// cell.
+fn outcome_for_exit_code(exit_code: Option<i32>, cell_id: &str) -> Result<&'static str, String> {
+    match exit_code {
+        Some(0) => Ok("complete"),
+        Some(1) | Some(2) => Ok("failed"),
+        Some(130) | None => Ok("interrupted"),
+        Some(other) => Err(format!(
+            "extract exited with an unexpected code ({other}) for cell {cell_id} — this is a \
+             benchmark harness bug, not a usage error"
+        )),
+    }
+}
+
 /// Builds and runs one (model, run) cell's `taguru extract` subprocess
 /// (ADR 0003 §5/§6): the `TAGURU_EXTRACT_*` namespace is scrubbed from
 /// the child's inherited environment, then set explicitly (every
@@ -2150,17 +2222,7 @@ fn run_cell(
         exit_code.map(|code| code.to_string()).unwrap_or_default(),
     );
 
-    let outcome = match exit_code {
-        Some(0) => "complete",
-        Some(1) => "failed",
-        Some(130) | None => "interrupted",
-        Some(other) => {
-            return Err(format!(
-                "extract exited with an unexpected code ({other}) for cell {cell_id} — \
-                 this is a benchmark harness bug, not a usage error"
-            ));
-        }
-    };
+    let outcome = outcome_for_exit_code(exit_code, &cell_id)?;
     if outcome != "interrupted" {
         synthesize_failed_ends(&open, dictionary, &mut writer, &cell_id);
         writer.write_value(&serde_json::json!({
@@ -2199,6 +2261,23 @@ fn run_cell(
 #[cfg(test)]
 mod cell_runs_tests {
     use super::*;
+
+    #[test]
+    fn exit_code_2_is_recorded_failed_not_a_harness_bug() {
+        assert_eq!(outcome_for_exit_code(Some(0), "m.run01"), Ok("complete"));
+        assert_eq!(outcome_for_exit_code(Some(1), "m.run01"), Ok("failed"));
+        assert_eq!(
+            outcome_for_exit_code(Some(2), "m.run01"),
+            Ok("failed"),
+            "extract's own usage-error code must not abort the whole matrix"
+        );
+        assert_eq!(
+            outcome_for_exit_code(Some(130), "m.run01"),
+            Ok("interrupted")
+        );
+        assert_eq!(outcome_for_exit_code(None, "m.run01"), Ok("interrupted"));
+        assert!(outcome_for_exit_code(Some(42), "m.run01").is_err());
+    }
 
     #[test]
     fn structured_output_rung_lines_parse_the_first_token_only() {
@@ -2414,7 +2493,7 @@ fn run_extract(args: &[String]) -> i32 {
     let lock_path = args.out.join("models.lock.json");
 
     let mut manifest = if manifest_path.is_file() {
-        let existing = match load_bench_manifest(&manifest_path) {
+        let mut existing = match load_bench_manifest(&manifest_path) {
             Ok(manifest) => manifest,
             Err(message) => {
                 eprintln!("taguru: benchmark: {message}");
@@ -2442,6 +2521,12 @@ fn run_extract(args: &[String]) -> i32 {
                 env!("CARGO_PKG_VERSION")
             );
         }
+        // Resuming with a wider --runs than the directory was created
+        // with is allowed (it only adds cells); the manifest must keep
+        // describing the widest matrix it actually holds cells for, or
+        // a reader computing per-model coverage from this field alone
+        // would undercount.
+        existing.harness.runs_per_model = existing.harness.runs_per_model.max(args.runs);
         existing
     } else {
         let manifest_models: Vec<ManifestModel> = models.iter().map(probe_model).collect();
