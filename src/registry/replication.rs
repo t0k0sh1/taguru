@@ -70,7 +70,7 @@ impl AppState {
         // the counters pinned by the `max` while the content switches
         // lineage. A fresh identity makes every key minted against the
         // old bytes unreachable (see `EntryInner::cache_identity`).
-        inner.cache_identity = next_cache_identity();
+        inner.invalidate_cache_identity();
         inner.load_failure = None;
         if matches!(inner.slot, Slot::Hot(_)) {
             inner.slot = Slot::Cold;

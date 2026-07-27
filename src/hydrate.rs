@@ -203,8 +203,13 @@ pub(crate) async fn prepare(
     // this is its very first boot, then record cache mode durably
     // before touching anything else, so a crash mid-hydration resumes
     // as cache mode (re-verify everything) instead of booting a
-    // half-materialized directory as truth.
+    // half-materialized directory as truth. The directory's own entry
+    // in ITS parent needs the same durability: every file this
+    // hydration writes later fsyncs its own directory, but a fresh
+    // `data_dir` never existed until this call, and power loss right
+    // after can still drop its directory entry wholesale.
     std::fs::create_dir_all(data_dir)?;
+    crate::storage::fsync_parent_dir(data_dir)?;
     ship::write_replication_record(
         data_dir,
         &ship::ReplicationRecord {
@@ -358,6 +363,7 @@ pub(crate) async fn prepare_replica(
                 "no complete generation to replicate yet; serving until one appears"
             );
             std::fs::create_dir_all(data_dir)?;
+            crate::storage::fsync_parent_dir(data_dir)?;
             ship::write_replication_record(
                 data_dir,
                 &ship::ReplicationRecord {
@@ -396,6 +402,7 @@ pub(crate) async fn prepare_replica(
     // the bucket is unreachable, and a demoted writer's un-shipped
     // tail cannot leak through a half-converted directory.
     std::fs::create_dir_all(data_dir)?;
+    crate::storage::fsync_parent_dir(data_dir)?;
     ship::write_replication_record(
         data_dir,
         &ship::ReplicationRecord {
