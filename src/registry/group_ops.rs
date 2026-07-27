@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -316,24 +317,33 @@ impl AppState {
         // children-first order whenever no prerequisite applies. The
         // standing map is already acyclic (every prior write validated
         // it), and `dependents` only ever adds edges drawn from that
-        // same acyclic graph, so a ready record always exists and this
-        // terminates having placed every record exactly once.
+        // same acyclic graph, so every record eventually becomes ready
+        // and this terminates having placed each exactly once. A
+        // min-heap of ready records (rather than rescanning all of
+        // `records` for the lowest-depth one every placement) keeps
+        // this O(n log n) instead of O(n²) on a batch this large — the
+        // whole pass runs under the exclusive `groups` lock, blocking
+        // every other group operation for as long as it takes.
+        let mut ready: BinaryHeap<Reverse<(usize, usize)>> = (0..records.len())
+            .filter(|&index| pending[index] == 0)
+            .map(|index| Reverse((depths[records[index].0.as_str()], index)))
+            .collect();
         let mut order: Vec<usize> = Vec::with_capacity(records.len());
-        let mut placed = vec![false; records.len()];
-        while order.len() < records.len() {
-            let next = (0..records.len())
-                .filter(|&index| !placed[index] && pending[index] == 0)
-                .min_by_key(|&index| (depths[records[index].0.as_str()], index))
-                .expect(
-                    "the standing map's acyclicity bounds `dependents` the same way, \
-                     so a record with no pending prerequisite always remains",
-                );
-            placed[next] = true;
+        while let Some(Reverse((_, next))) = ready.pop() {
             order.push(next);
             for &dependent in &dependents[next] {
                 pending[dependent] -= 1;
+                if pending[dependent] == 0 {
+                    ready.push(Reverse((depths[records[dependent].0.as_str()], dependent)));
+                }
             }
         }
+        assert_eq!(
+            order.len(),
+            records.len(),
+            "the standing map's acyclicity bounds `dependents` the same way, \
+             so every record eventually becomes ready"
+        );
         let mut applied = 0usize;
         for &index in &order {
             // Bound the fsync-per-record storm to the request budget. A

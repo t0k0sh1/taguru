@@ -223,9 +223,17 @@ pub(crate) fn fsync_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// [`fsync_dir`] on `path`'s parent — the common case, a single file
-/// rename or creation.
+/// rename or creation. A single-component relative `path` (`"mydata"`,
+/// no leading `./`) makes `Path::parent()` answer `Some("")`, not
+/// `None` — an empty path `fs::File::open` refuses with `ENOENT`, even
+/// though the parent this call actually means is the current
+/// directory. Treat that one shape as `"."` rather than skipping it:
+/// skipping would silently drop the fsync for exactly the relative,
+/// single-segment paths a caller (a bare `--data-dir mydata`, a bare
+/// `--out mydata`) is likely to pass.
 pub(crate) fn fsync_parent_dir(path: &Path) -> io::Result<()> {
     match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => fsync_dir(Path::new(".")),
         Some(parent) => fsync_dir(parent),
         None => Ok(()),
     }
@@ -247,5 +255,24 @@ pub(crate) fn offload<T>(work: impl FnOnce() -> T) -> T {
             tokio::task::block_in_place(work)
         }
         _ => work(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A single-component relative path (`"mydata"`, no leading `./`)
+    /// makes `Path::parent()` answer `Some("")` — the exact shape
+    /// `taguru serve --data-dir mydata` or `taguru restore --out
+    /// mydata` produces. `fs::File::open("")` refuses with `ENOENT`,
+    /// so this must not go through `fsync_dir` unchanged; it must
+    /// resolve to the current directory instead. No file named
+    /// "mydata" needs to exist — only its parent (".") does, and every
+    /// process has one.
+    #[test]
+    fn fsync_parent_dir_resolves_a_single_component_relative_paths_empty_parent() {
+        fsync_parent_dir(Path::new("taguru-test-fsync-parent-dir-need-not-exist"))
+            .expect("an empty Path::parent() must resolve to the current directory, not ENOENT");
     }
 }

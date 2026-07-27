@@ -985,7 +985,10 @@ impl Shipper {
         // the bucket forever.
         if self.lanes.contains_key(name) {
             let prefix = generation_root.join("wal").join(name);
-            delete_prefix(self.store.as_ref(), &prefix).await?;
+            if let Err(error) = delete_prefix(self.store.as_ref(), &prefix).await {
+                self.state.metrics().record_replication_error();
+                return Err(error);
+            }
             self.lanes.remove(name);
             self.manifest_dirty = true;
             self.progress.forget(&self.data_dir.join(name));
@@ -2001,10 +2004,10 @@ mod tests {
         }
     }
 
-    fn injected(store: &str, what: &'static str) -> object_store::Error {
+    fn injected(operation: &'static str) -> object_store::Error {
         object_store::Error::Generic {
             store: "flaky",
-            source: format!("injected transient {what} failure ({store})").into(),
+            source: format!("injected transient {operation} failure").into(),
         }
     }
 
@@ -2020,7 +2023,7 @@ mod tests {
                 let mut remaining = self.fail_puts.lock().unwrap();
                 if *remaining > 0 {
                     *remaining -= 1;
-                    return Err(injected("put", "put"));
+                    return Err(injected("put"));
                 }
             }
             self.inner.put_opts(location, payload, opts).await
@@ -2058,7 +2061,7 @@ mod tests {
                             let mut remaining = fail_deletes.lock().unwrap();
                             if *remaining > 0 {
                                 *remaining -= 1;
-                                return Err(injected("delete", "delete"));
+                                return Err(injected("delete"));
                             }
                         }
                         inner.delete(&location).await?;
@@ -2399,6 +2402,60 @@ mod tests {
         assert!(
             !names.iter().any(|name| name.contains("ctx_a")),
             "the retry must finish retiring the object: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same guarantee as the published-file case above, but for a
+    /// log lane: `retire_file`'s two branches (published file, lane)
+    /// must behave identically on a failed remote delete — retryable,
+    /// not orphaned. A lane's delete goes through `delete_prefix`
+    /// (segment-by-segment), a different code path from the file
+    /// branch's single `store.delete`, so this needs its own case.
+    #[tokio::test]
+    async fn a_failed_lane_retire_delete_is_retried_not_orphaned() {
+        let dir = scratch_dir("retire-lane-flaky");
+        let state = state_for(&dir);
+        let progress = Arc::new(ShipProgress::new());
+        let inner = Arc::new(InMemory::new());
+        let fail_deletes = Arc::new(Mutex::new(0usize));
+        let store: Arc<dyn ObjectStore> = Arc::new(FlakyStore {
+            inner: Arc::clone(&inner) as Arc<dyn ObjectStore>,
+            fail_puts: Arc::new(Mutex::new(0)),
+            fail_deletes: Arc::clone(&fail_deletes),
+        });
+
+        let wal_path = dir.join("ctx_a.wal.jsonl");
+        wal::append_batch(&wal_path, 1, &[associate("a")]).unwrap();
+        let mut shipper = claimed_dyn(Arc::clone(&store), &dir, &state, &progress).await;
+        shipper.cycle().await.unwrap();
+        assert!(
+            object_names(&inner)
+                .await
+                .iter()
+                .any(|name| name.contains("ctx_a")),
+            "the lane must have shipped before this test deletes it locally"
+        );
+
+        std::fs::remove_file(&wal_path).unwrap();
+        *fail_deletes.lock().unwrap() = 1;
+        let error = shipper.cycle().await.unwrap_err();
+        assert!(matches!(error, ShipError::Io(_)), "{error}");
+        assert!(
+            object_names(&inner)
+                .await
+                .iter()
+                .any(|name| name.contains("ctx_a")),
+            "the lane's segments must still be in the bucket after the failed delete"
+        );
+
+        // The next cycle retries — nothing local changed, but the
+        // vanished lane must still be there to retire.
+        shipper.cycle().await.unwrap();
+        let names = object_names(&inner).await;
+        assert!(
+            !names.iter().any(|name| name.contains("ctx_a")),
+            "the retry must finish retiring the lane: {names:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
