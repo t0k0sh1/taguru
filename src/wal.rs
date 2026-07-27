@@ -798,6 +798,15 @@ fn parse_log<Op: DeserializeOwned + Serialize>(
             }
         }
         top = top.max(record.seq);
+        // Known limitation: this only catches an OVERLAPPING seq. The
+        // double-fault it defends against (an append's sync failed AND
+        // the rollback's own `set_len` also failed, leaving a complete,
+        // checksummed, un-rolled-back batch on disk) can leave ghost
+        // seqs ABOVE the retried batch's range if the retry is smaller
+        // than the leaked one — those never collide here, so they
+        // replay as if acknowledged. Both failures on the same batch is
+        // already a rare double-fault; accepted rather than chasing
+        // full disjoint-range detection for it.
         if record.seq > watermark && pending.insert(record.seq, record.op).is_some() {
             tracing::warn!(
                 "WAL {} carries a duplicate seq {} — keeping the later record \
@@ -869,9 +878,11 @@ pub(crate) fn shippable_records(bytes: &[u8]) -> io::Result<Vec<ShippableRecord<
     segments.pop();
     let mut records = Vec::new();
     for (index, line) in segments.iter().enumerate() {
-        if line.is_empty() {
-            continue;
-        }
+        // No special case for an empty line: `parse_log` has none
+        // either (an interior empty segment simply fails to parse as
+        // a record below, the same fatal corruption a torn field
+        // produces) — shipping something replay would refuse is
+        // exactly what this function's doc rules out.
         let parsed: SeqOnly = serde_json::from_slice(line).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1019,6 +1030,35 @@ mod tests {
         let error = shippable_records(rotted.as_bytes())
             .expect_err("a flipped byte with an intact crc field must refuse");
         assert!(error.to_string().contains("checksum mismatch"), "{error}");
+    }
+
+    /// An interior empty line is the same fatal corruption `parse_log`
+    /// (replay) already refuses — never a shape `shippable_records`
+    /// may skip past. Before the fix, this function silently skipped
+    /// it while replay would refuse the identical bytes, so a lane
+    /// with this exact corruption would ship "successfully" and brick
+    /// every restore's later replay.
+    #[test]
+    fn shippable_records_refuses_an_interior_empty_line_exactly_as_replay_does() {
+        let path = scratch_wal("interior-empty-line");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        append_batch(&path, 2, &[associate("b")]).unwrap();
+
+        let mut bytes = fs::read(&path).unwrap();
+        // Splice an extra bare newline between the two records — the
+        // same "interior empty segment" shape `parse_log` (replay)
+        // already refuses: an empty line can never parse as a
+        // `WalRecord`, deterministically, so no replay sanity check is
+        // needed here.
+        let first_newline = bytes.iter().position(|&b| b == b'\n').unwrap();
+        bytes.insert(first_newline + 1, b'\n');
+
+        let ship_error = shippable_records(&bytes)
+            .expect_err("shipping must refuse exactly what replay refuses, not skip past it");
+        assert!(
+            ship_error.to_string().contains("corrupt WAL record"),
+            "{ship_error}"
+        );
     }
 
     #[test]

@@ -72,7 +72,7 @@ impl AppState {
         if !entry.dirty.load(Ordering::Relaxed) {
             return false;
         }
-        let (bytes, meta, stats, watermark, generation) = {
+        let (bytes, meta, stats, watermark, generation, staged_graph_revision) = {
             let mut guard = entry.inner.write();
             let inner = &mut *guard;
             // Claim the flush UNDER the lock. `flushing` gates concurrent
@@ -110,6 +110,21 @@ impl AppState {
                 stats,
                 watermark,
                 inner.image_generation,
+                // Captured HERE, not at publish time: `graph_revision`
+                // describes how many landed writes THESE BYTES reflect,
+                // same as `watermark`/`stats` above. With the WAL on, a
+                // write racing the stage-to-publish window is harmless —
+                // its WAL record still replays on top of the (older)
+                // published image next load, reconstructing content
+                // that matches whatever revision the sidecar names. With
+                // the WAL off there is no such record: publishing a
+                // LIVE (post-race) revision next to a STAGED (pre-race)
+                // image would claim a write the image does not hold,
+                // and nothing ever floors it back down (`ensure_hot`
+                // only floors graph_revision UP to the replay watermark,
+                // never down to it) — permanently overstating content
+                // that a crash right after would actually lose.
+                inner.graph_revision,
             )
         };
 
@@ -176,12 +191,18 @@ impl AppState {
             &meta,
             &stats,
             &entry.usage.snapshot(),
-            // Snapshot NOW, under the publication lock, not at staging:
-            // counters that moved while the image staged are exactly the
-            // sidecar-ahead-of-image posture the write order already
-            // tolerates, and the WAL replay re-derives the graph value
-            // on the next load either way.
-            entry.revision_snapshot(inner),
+            // `passages`/`config` snapshot NOW, under the publication
+            // lock, not at staging: neither lives in the image bytes
+            // (passages are their own store; config is re-applied on
+            // every load, never baked in) so a counter that moved while
+            // the image staged is exactly the sidecar-ahead-of-image
+            // posture the write order already tolerates. `graph`,
+            // unlike those two, IS a claim about the image's own
+            // content — so it comes from the staging-time snapshot
+            // (`staged_graph_revision`), not a fresh read here; see the
+            // staging block's comment for why publishing a live value
+            // instead would overstate content the WAL cannot cover.
+            entry.revision_snapshot_with_graph(inner, staged_graph_revision),
         )
         .and_then(|()| commit_staged(&staged, &image));
         let published = match outcome {
@@ -2190,6 +2211,109 @@ mod tests {
              what the eviction had already made durable"
         );
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// With the WAL off, a write landing between `flush_entry`'s
+    /// staging snapshot and its publish used to make the sidecar's
+    /// persisted `graph_revision` claim more than the published image
+    /// actually holds — nothing else records that write (no WAL, and
+    /// the image already staged) so a reload from this exact disk
+    /// state would have no way to earn the credit the sidecar hands
+    /// it. Driven directly (`flush_entry`, the same `flushing`-spin
+    /// trick as the race test above) so the racing write reliably
+    /// lands inside the staging window instead of hoping a thrash loop
+    /// finds it.
+    #[test]
+    fn a_write_racing_a_wal_off_flushs_staging_window_does_not_inflate_the_persisted_revision() {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let dir = scratch_dir("wal-off-revision-race");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                wal_enabled: false,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        // Big enough that `flush_entry`'s serialize-under-lock and
+        // stage-unlocked steps together take long enough for the
+        // racing write below to land before it re-locks to publish —
+        // see the eviction/reload race test above for why a tiny graph
+        // never opens this window.
+        let seed: Vec<_> = (0..50_000)
+            .map(|index| {
+                assoc_op(
+                    &format!("seed-subject-{index}-xxxxxxxxxxxxxxxxxxxx"),
+                    "seed-label-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                    &format!("seed-object-{index}-xxxxxxxxxxxxxxxxxxxx"),
+                    1.0,
+                    None,
+                )
+            })
+            .collect();
+        const SEEDED: usize = 50_000;
+        state
+            .add_associations("sake", seed, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        let flusher = {
+            let state = state.clone();
+            let entry = Arc::clone(&entry);
+            thread::spawn(move || state.flush_entry("sake", &entry))
+        };
+        let spun_since = Instant::now();
+        while !entry.flushing.load(Ordering::Relaxed) {
+            assert!(
+                spun_since.elapsed() < Duration::from_secs(5),
+                "flusher never reached its claim section"
+            );
+            thread::yield_now();
+        }
+        // Lands after the flush's claim (watermark + staged revision
+        // captured) but — thanks to the seed's size — well before it
+        // re-locks to publish: exactly the window the fix closes.
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("racer", "l", "o", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        flusher.join().unwrap();
+
+        let stem = file_stem("sake");
+        let sidecar = read_meta_file(&dir, &stem);
+        let image_bytes = fs::read(image_path(&dir, &stem)).unwrap();
+        let published_count = Context::from_bytes(&image_bytes)
+            .unwrap()
+            .association_count();
+        assert_eq!(
+            published_count, SEEDED,
+            "the racing write must not have been staged into this flush's own image"
+        );
+        assert_eq!(
+            sidecar.revision.graph as usize, published_count,
+            "the sidecar's graph revision claims {} landed writes, but the published \
+             image it sits beside only holds {published_count} — with the WAL off, \
+             nothing else records the difference, so a reload from this exact disk \
+             state can never earn the credit the sidecar hands it",
+            sidecar.revision.graph,
+        );
+
+        drop(state);
         let _ = fs::remove_dir_all(dir);
     }
 

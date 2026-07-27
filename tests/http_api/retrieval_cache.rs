@@ -341,6 +341,55 @@ fn a_recreated_context_never_serves_the_old_incarnations_results() {
     assert_eq!(cache_misses(&server, "recall"), 2);
 }
 
+/// Compaction physically drops retracted edges from the context it
+/// rebuilds, but no write accompanies it — nothing bumps the graph
+/// lane. A cache entry filled just before a compact must not go on
+/// answering with content compaction just removed.
+#[test]
+fn compaction_invalidates_cache_entries_filled_before_it() {
+    let server = Server::start("rcache-compact");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(assoc("蔵", "廃止銘柄", "旧銘")),
+    );
+
+    let recall = || server.ok("POST", "/contexts/sake/recall", Some(json!({"cue": "蔵"})));
+    let filled = recall();
+    assert_eq!(
+        filled["matches"][0]["object"], "旧銘",
+        "the live edge is visible before retraction"
+    );
+    recall();
+    assert_eq!(cache_hits(&server, "recall"), 1);
+
+    // Retracting the source zeroes the edge (recall keeps serving it,
+    // by contract, until compaction sheds it) and moves the graph
+    // lane, so the cache recomputes and caches the zeroed-but-still-
+    // present edge.
+    server.ok(
+        "POST",
+        "/contexts/sake/sources/retract",
+        Some(json!({"source": "a.md"})),
+    );
+    let retracted = recall();
+    assert_eq!(retracted["matches"][0]["weight"], 0.0);
+    recall();
+    assert_eq!(cache_hits(&server, "recall"), 2);
+
+    // Compaction removes the dead edge outright, with no accompanying
+    // write to move the graph lane. The identical recall must not go
+    // on serving the pre-compaction (cached) page.
+    let outcome = server.ok("POST", "/contexts/sake/compact", None);
+    assert_eq!(outcome["dead_edges"], 1, "{outcome}");
+    let after = recall();
+    assert!(
+        after["matches"].as_array().unwrap().is_empty(),
+        "the compacted-away edge must not still be served from cache: {after}"
+    );
+}
+
 /// `TAGURU_RETRIEVAL_CACHE_BYTES=0` is the operator escape hatch:
 /// every request computes fresh, and the cache families stay silent —
 /// no fake misses from a cache nobody is running.

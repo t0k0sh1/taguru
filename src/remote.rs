@@ -27,8 +27,7 @@ const HEALTH_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// The page size the enumeration walk requests explicitly — matches
 /// the server's own ceiling (`MAX_MATCH_LIMIT`, src/api.rs), named
-/// here so the short-page termination rule has a known number to
-/// compare against instead of guessing at the server's default.
+/// here instead of guessing at the server's default.
 const LIST_PAGE_LIMIT: usize = 1000;
 
 /// ADR 0002 §7: a URL carrying userinfo (`https://user:token@host/`)
@@ -244,9 +243,10 @@ impl Api {
     }
 
     /// [`Api::list_names`] with an explicit page size, split out so a
-    /// test can walk several pages (including the short-page
-    /// termination and the non-advancing-cursor guard) without
-    /// provisioning thousands of contexts to cross the real ceiling.
+    /// test can walk several pages (including a short-but-nonempty
+    /// page that must NOT end the walk, only an empty one does — and
+    /// the non-advancing-cursor guard) without provisioning thousands
+    /// of contexts to cross the real ceiling.
     ///
     /// The collection name doubles as the envelope's array key — both
     /// `GET /contexts` and `GET /groups` answer `{total, <collection>:
@@ -288,7 +288,17 @@ impl Api {
             }
             after = page_names.last().cloned();
             names.extend(page_names);
-            if page_len < page || after.is_none() {
+            // Only an EMPTY page marks the end — `after.is_none()` is
+            // exactly that condition, since a non-empty page always
+            // leaves a last name behind. A page shorter than `limit`
+            // is not a signal to stop: the server's own contract
+            // (`directory_page`) allows a short-but-nonempty page when
+            // a delete races the seek, and re-seeks internally only
+            // when the whole window comes up empty — so a short page
+            // here can still have more names after it. Stopping on
+            // `page_len < page` silently truncated the walk on that
+            // race; `export --url`'s enumeration must not drop names.
+            if page_len == 0 {
                 break;
             }
         }
@@ -710,26 +720,26 @@ mod tests {
     }
 
     #[test]
-    fn list_names_walks_after_cursors_until_a_short_page() {
+    fn list_names_walks_after_cursors_until_an_empty_page() {
         let (base, requests) = respond_in_order_capturing(vec![
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 5, "contexts": [{"name": "a"}, {"name": "b"}]}}),
+                json!({"result": {"total": 4, "contexts": [{"name": "a"}, {"name": "b"}]}}),
             ),
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 5, "contexts": [{"name": "c"}, {"name": "d"}]}}),
+                json!({"result": {"total": 4, "contexts": [{"name": "c"}, {"name": "d"}]}}),
             ),
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 5, "contexts": [{"name": "e"}]}}),
+                json!({"result": {"total": 4, "contexts": []}}),
             ),
         ]);
         let api = Api::new(base);
         let names = api
             .list_names_paged("contexts", 2)
-            .expect("three pages should walk cleanly to a short-page end");
-        assert_eq!(names, vec!["a", "b", "c", "d", "e"]);
+            .expect("three pages should walk cleanly to an empty-page end");
+        assert_eq!(names, vec!["a", "b", "c", "d"]);
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 3, "{requests:?}");
@@ -740,6 +750,46 @@ mod tests {
         );
         assert!(requests[1].contains("after=b"), "{}", requests[1]);
         assert!(requests[2].contains("after=d"), "{}", requests[2]);
+    }
+
+    /// The server's own contract (`registry::context_io::directory_page`)
+    /// allows a page shorter than `limit` to come back non-empty — a
+    /// delete racing the seek — without that meaning the directory is
+    /// exhausted. Only an empty page marks the end; a short-but-nonempty
+    /// one must not truncate the walk (this is what `page_len < page`
+    /// used to do wrong).
+    #[test]
+    fn a_short_nonempty_page_does_not_end_the_walk() {
+        let (base, requests) = respond_in_order_capturing(vec![
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 3, "contexts": [{"name": "a"}, {"name": "b"}]}}),
+            ),
+            // Short (1 < limit 2) but non-empty: a delete raced the
+            // seek on the server side. The walk must keep going.
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 3, "contexts": [{"name": "c"}]}}),
+            ),
+            // Only this empty page is the real end.
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 3, "contexts": []}}),
+            ),
+        ]);
+        let api = Api::new(base);
+        let names = api
+            .list_names_paged("contexts", 2)
+            .expect("a short-but-nonempty page must not truncate enumeration");
+        assert_eq!(names, vec!["a", "b", "c"]);
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            3,
+            "the short page at position 2 must not stop the walk: {requests:?}"
+        );
+        assert!(requests[2].contains("after=c"), "{}", requests[2]);
     }
 
     #[test]

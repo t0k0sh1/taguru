@@ -2409,6 +2409,7 @@ dependencies = [
 name = "taguru"
 version = "0.4.0"
 dependencies = [
+ "async-trait",
  "axum",
  "futures-util",
  "getrandom 0.4.3",

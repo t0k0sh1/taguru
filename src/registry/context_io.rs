@@ -241,6 +241,16 @@ impl AppState {
             let bytes_after = fresh.footprint();
             inner.slot = Slot::Hot(Box::new(fresh));
             inner.image_generation += 1;
+            // Compaction physically drops what `graph_revision` alone
+            // cannot express: retracted edges and orphaned aliases stop
+            // appearing in query_any's output, but the revision counter
+            // does not move (nothing was written). Without a fresh
+            // identity, a retrieval-cache key minted before this compact
+            // stays valid and keeps answering with content this context
+            // no longer holds — the same "content switches lineage under
+            // an unmoved revision" shape a replica refresh guards against
+            // (see `replication.rs`'s `cache_identity` bump).
+            inner.invalidate_cache_identity();
             let Slot::Hot(context) = &inner.slot else {
                 unreachable!("just installed");
             };

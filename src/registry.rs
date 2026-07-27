@@ -580,6 +580,18 @@ impl Entry {
         }
     }
 
+    /// [`Self::revision_snapshot`] with `graph` overridden — for the
+    /// one caller (`flush_entry`) whose `graph` must name a value
+    /// captured earlier than `inner`'s current one: `passages`/`config`
+    /// never live in the image bytes, so reading them fresh here is
+    /// still exactly right.
+    fn revision_snapshot_with_graph(&self, inner: &EntryInner, graph: u64) -> ContextRevision {
+        ContextRevision {
+            graph,
+            ..self.revision_snapshot(inner)
+        }
+    }
+
     /// The entry's write lock, or `None` if a delete beat the caller to
     /// it — a handle that predates the removal must not touch the files
     /// the delete just removed, let alone recreate them. Every
@@ -712,6 +724,18 @@ struct EntryInner {
     /// compaction while I staged" — this generation is what makes the
     /// two distinguishable.
     image_generation: u64,
+}
+
+impl EntryInner {
+    /// Mints a fresh [`cache_identity`](Self::cache_identity) — the
+    /// one step every "content switched lineage under an unmoved
+    /// revision" path (a replica's tailed refresh, a compaction that
+    /// rebuilds the resident image) must take, so a retrieval-cache
+    /// key minted against the old bytes becomes unreachable instead of
+    /// colliding with the new ones.
+    fn invalidate_cache_identity(&mut self) {
+        self.cache_identity = next_cache_identity();
+    }
 }
 
 /// Mints [`EntryInner::cache_identity`] values. A process-global

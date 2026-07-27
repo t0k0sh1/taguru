@@ -291,14 +291,17 @@ impl AppState {
         if to.is_empty() {
             return Err(RenameContextError::InvalidName);
         }
-        if from == to {
-            return Ok(());
-        }
         let entry = {
             let registry = self.0.registry.read();
             let Some(entry) = registry.get(from) else {
                 return Err(RenameContextError::NotFound);
             };
+            // Checked AFTER existence, not before: a self-rename of a
+            // name that does not exist is still a `NotFound`, not a
+            // silent no-op success.
+            if from == to {
+                return Ok(());
+            }
             if registry.contains_key(to) {
                 return Err(RenameContextError::AlreadyExists);
             }
@@ -1440,6 +1443,12 @@ mod tests {
             "renaming a name to itself is a no-op, not an error"
         );
         assert!(state.directory_entry("sake").is_some());
+        // The `from == to` short-circuit must not mask a NotFound: a
+        // self-rename of a name that never existed is still a refusal.
+        assert!(matches!(
+            state.rename_context("missing", "missing"),
+            Err(RenameContextError::NotFound)
+        ));
 
         let _ = fs::remove_dir_all(dir);
     }

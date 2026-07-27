@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -262,11 +263,87 @@ impl AppState {
                 (name.clone(), outcome)
             })
             .collect();
-        let mut order: Vec<usize> = (0..records.len()).collect();
-        // Every record's name sits in `prospective`, so the settled
-        // map has its depth — indexing panics loudly if that invariant
-        // ever breaks, where a fallback would silently misorder.
-        order.sort_by_key(|&index| depths[records[index].0.as_str()]);
+        // Depth order over the PROSPECTIVE map alone is not enough: it
+        // proves the FINAL state (every record landed) is safe, but says
+        // nothing about a partial landing. If record P's STANDING
+        // (current, pre-batch) children include record C, and P's own
+        // batch update drops that reference, then C landing before P —
+        // exactly what plain children-first depth order would do when
+        // the two tie — leaves the OLD (still-referencing) P pointing at
+        // the NEW (now deeper) C the instant C's write succeeds. A
+        // failure on P's own write right after (`Io`/`Timeout`) then
+        // strands that combination, which `nesting_depths(&prospective)`
+        // above never validated — it assumed P's update, which drops C,
+        // also landed. Forcing P before C in exactly this case closes
+        // the gap; it never fights the existing children-first rule
+        // because that rule reasons over each record's NEW children
+        // (dangling-safety), while this reasons over OLD children the
+        // batch is dropping — the two only ever disagree on a pair
+        // whose edge is unchanged, and an unchanged edge needs no
+        // ordering help here (the prospective check already covers it).
+        let index_of: BTreeMap<&str, usize> = records
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| (name.as_str(), index))
+            .collect();
+        // `dependents[p]` lists every record that must land AFTER `p` —
+        // the successor direction, built directly (rather than as a
+        // predecessor list rescanned per placement below) so resolving
+        // "what does landing `p` unblock" is a lookup, not a full-batch
+        // scan.
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
+        let mut pending = vec![0usize; records.len()];
+        for (parent_index, (parent_name, new_record)) in records.iter().enumerate() {
+            let Some(standing_parent) = groups.get(parent_name) else {
+                continue;
+            };
+            for old_child in &standing_parent.groups {
+                // Only a DROPPED reference needs the ordering help: a
+                // KEPT one is exactly what `nesting_depths(&prospective)`
+                // above already validated (parent's edge, unchanged,
+                // combined with the child's new depth) regardless of
+                // which of the two lands first.
+                if !new_record.groups.contains(old_child)
+                    && let Some(&child_index) = index_of.get(old_child.as_str())
+                {
+                    dependents[parent_index].push(child_index);
+                    pending[child_index] += 1;
+                }
+            }
+        }
+        // Kahn's algorithm: repeatedly take the not-yet-ordered record
+        // with the fewest still-pending prerequisites (none) and the
+        // lowest prospective depth — the latter recovers the original
+        // children-first order whenever no prerequisite applies. The
+        // standing map is already acyclic (every prior write validated
+        // it), and `dependents` only ever adds edges drawn from that
+        // same acyclic graph, so every record eventually becomes ready
+        // and this terminates having placed each exactly once. A
+        // min-heap of ready records (rather than rescanning all of
+        // `records` for the lowest-depth one every placement) keeps
+        // this O(n log n) instead of O(n²) on a batch this large — the
+        // whole pass runs under the exclusive `groups` lock, blocking
+        // every other group operation for as long as it takes.
+        let mut ready: BinaryHeap<Reverse<(usize, usize)>> = (0..records.len())
+            .filter(|&index| pending[index] == 0)
+            .map(|index| Reverse((depths[records[index].0.as_str()], index)))
+            .collect();
+        let mut order: Vec<usize> = Vec::with_capacity(records.len());
+        while let Some(Reverse((_, next))) = ready.pop() {
+            order.push(next);
+            for &dependent in &dependents[next] {
+                pending[dependent] -= 1;
+                if pending[dependent] == 0 {
+                    ready.push(Reverse((depths[records[dependent].0.as_str()], dependent)));
+                }
+            }
+        }
+        assert_eq!(
+            order.len(),
+            records.len(),
+            "the standing map's acyclicity bounds `dependents` the same way, \
+             so every record eventually becomes ready"
+        );
         let mut applied = 0usize;
         for &index in &order {
             // Bound the fsync-per-record storm to the request budget. A
@@ -359,12 +436,15 @@ impl AppState {
         if to.is_empty() {
             return Err(RenameGroupError::InvalidName);
         }
-        if from == to {
-            return Ok(());
-        }
         let mut groups = self.0.groups.write();
         if !groups.contains_key(from) {
             return Err(RenameGroupError::NotFound);
+        }
+        // Checked AFTER existence, not before: a self-rename of a name
+        // that does not exist is still a `NotFound`, not a silent
+        // no-op success.
+        if from == to {
+            return Ok(());
         }
         if groups.contains_key(to) {
             return Err(RenameGroupError::AlreadyExists);
@@ -896,6 +976,92 @@ mod tests {
             state.group("a").is_some(),
             "\"a\"'s successful write must not be rolled back"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The scenario a plain depth-tie-break order gets wrong: "a"
+    /// currently points at "b" (standing, depth 2). This batch deepens
+    /// "b" to a fresh depth-3 chain AND, in the same batch, moves "a"
+    /// off "b" onto an unrelated depth-3 chain — so both records tie at
+    /// prospective depth 3, same as the finding that motivated this
+    /// test. Sorting purely by that tied depth (stable, so list order
+    /// wins the tie) would write "b" first; if "a"'s own write then
+    /// fails, the standing map is left with the OLD "a" (still -> "b")
+    /// beside the NEW "b" (now depth 3) — combined depth 4, over
+    /// `MAX_GROUP_DEPTH` (3), and never validated because the
+    /// prospective check assumed "a" also landed, dropping the "b"
+    /// reference entirely. The fix orders "a" before "b" whenever "a"
+    /// is dropping a standing reference to it, so failing "a"'s write
+    /// (forced here via the persistence fault injector, on the very
+    /// first op) leaves the untouched, still-valid standing state
+    /// instead — "b" is never even attempted.
+    #[test]
+    fn restore_groups_never_stitches_an_old_parent_to_a_freshly_deepened_child() {
+        let dir = scratch_dir("groups-restore-depth-race");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let record = |children: &[&str]| GroupRecord {
+            description: String::new(),
+            contexts: BTreeSet::new(),
+            groups: children.iter().map(|name| name.to_string()).collect(),
+        };
+        let child_set = |names: &[&str]| -> BTreeSet<String> {
+            names.iter().map(|name| name.to_string()).collect()
+        };
+
+        // Two independent depth-2 chains standing, plus "a" -> "b" —
+        // everything comfortably within the depth cap before the batch.
+        state
+            .create_group("leaf", String::new(), BTreeSet::new(), BTreeSet::new())
+            .unwrap();
+        state
+            .create_group("mid", String::new(), BTreeSet::new(), child_set(&["leaf"]))
+            .unwrap();
+        state
+            .create_group("z", String::new(), BTreeSet::new(), BTreeSet::new())
+            .unwrap();
+        state
+            .create_group("y", String::new(), BTreeSet::new(), child_set(&["z"]))
+            .unwrap();
+        state
+            .create_group("b", String::new(), BTreeSet::new(), BTreeSet::new())
+            .unwrap();
+        state
+            .create_group("a", String::new(), BTreeSet::new(), child_set(&["b"]))
+            .unwrap();
+
+        // "b" first in the list — the order a plain depth sort would
+        // keep on a tie, since it matches the finding's own scenario.
+        let batch = [
+            ("b".to_string(), record(&["mid"])), // b -> mid -> leaf: depth 3
+            ("a".to_string(), record(&["y"])),   // a -> y -> z: depth 3, drops "b"
+        ];
+
+        fail_persistence_ops_after(0);
+        let error = state
+            .restore_groups(&batch, Deadline::unbounded())
+            .unwrap_err();
+        assert!(
+            !clear_persistence_fault(),
+            "the fault must have fired, not run out of persistence steps first"
+        );
+        assert!(
+            matches!(&error, RestoreGroupsError::Io { group, .. } if group == "a"),
+            "the fix orders \"a\" first, so it is \"a\"'s write that hits the fault: {error:?}"
+        );
+        assert_eq!(error.applied(), 0, "\"a\" failed before anything landed");
+
+        // Nothing changed: "b" must never have been attempted, so the
+        // pre-batch (valid, depth <= 3 everywhere) standing state
+        // stands exactly as it was.
+        assert_eq!(state.group("a").unwrap().groups, child_set(&["b"]));
+        assert_eq!(state.group("b").unwrap().groups, BTreeSet::new());
+        let standing = {
+            let groups = state.0.groups.read();
+            groups.clone()
+        };
+        groups::nesting_depths(&standing)
+            .expect("the untouched standing map must still be within the depth cap");
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1464,6 +1630,12 @@ mod tests {
         ));
         assert!(state.rename_group("drinks", "drinks").is_ok());
         assert!(state.group("drinks").is_some());
+        // The `from == to` short-circuit must not mask a NotFound: a
+        // self-rename of a name that never existed is still a refusal.
+        assert!(matches!(
+            state.rename_group("missing", "missing"),
+            Err(RenameGroupError::NotFound)
+        ));
 
         let _ = fs::remove_dir_all(dir);
     }

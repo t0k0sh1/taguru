@@ -669,6 +669,18 @@ pub(crate) struct Shipper {
     hydration: Option<Arc<crate::hydrate::Hydrator>>,
     baseline_complete: bool,
     last_heartbeat: Option<Instant>,
+    /// Set the instant `self.files`/`self.lanes` changes underneath
+    /// the manifest (`complete`) — a file/lane ships, or a name
+    /// retires — and cleared only once `put_manifest` actually lands.
+    /// `shipped` alone (whether THIS cycle uploaded anything) is not
+    /// enough: a manifest PUT can fail after everything else in the
+    /// cycle succeeded, and with no other signal that it is stale, a
+    /// server that goes idle right after would never retry it — the
+    /// bucket's manifest would describe a state that no longer exists
+    /// (an object it still lists as retired, or a segment it never
+    /// learned about) until an unrelated write came along to re-trip
+    /// `shipped`.
+    manifest_dirty: bool,
 }
 
 impl Shipper {
@@ -752,6 +764,7 @@ impl Shipper {
             hydration,
             baseline_complete: false,
             last_heartbeat: None,
+            manifest_dirty: false,
         })
     }
 
@@ -779,7 +792,12 @@ impl Shipper {
         let dirty = (!self.baseline_complete && hydration_drained)
             || !scan.changed.is_empty()
             || !scan.vanished.is_empty()
-            || !scan.lanes.is_empty();
+            || !scan.lanes.is_empty()
+            // A manifest PUT that failed on an earlier cycle needs its
+            // own retry even when THIS scan finds nothing changed —
+            // otherwise an idle server (no lanes, no vanished/changed
+            // names) never re-enters the block below that retries it.
+            || self.manifest_dirty;
         let heartbeat_due = self
             .last_heartbeat
             .is_none_or(|at| at.elapsed() >= HEARTBEAT_INTERVAL);
@@ -807,6 +825,7 @@ impl Shipper {
                 // them here.
                 let file = self.ship_published(name).await?;
                 self.files.insert(name.clone(), file);
+                self.manifest_dirty = true;
                 shipped = true;
             }
             for name in &scan.lanes {
@@ -816,8 +835,12 @@ impl Shipper {
             // so it always describes the bucket's current state — but
             // never before a lazy hydration has drained (the field doc
             // explains why an early `complete` would be a lie).
-            if (!self.baseline_complete || shipped) && hydration_drained {
+            // `manifest_dirty` (not just `shipped`) gates this: a PUT
+            // that failed on an earlier cycle must retry here even if
+            // THIS cycle uploaded nothing new — see the field's doc.
+            if (!self.baseline_complete || shipped || self.manifest_dirty) && hydration_drained {
                 self.put_manifest().await?;
+                self.manifest_dirty = false;
                 shipped = true;
                 if !self.baseline_complete {
                     self.baseline_complete = true;
@@ -954,16 +977,26 @@ impl Shipper {
     /// records on restore.
     async fn retire_file(&mut self, name: &str) -> Result<(), ShipError> {
         let generation_root = gen_root(&self.root, self.generation);
-        if self.lanes.remove(name).is_some() {
+        // Bookkeeping is dropped only AFTER the remote delete succeeds:
+        // `scan.vanished` (the next cycle's retry list) is computed
+        // from `self.lanes`/`self.files`, so removing the entry first
+        // and then failing the delete would make the object an orphan
+        // — gone from every future scan, never retried, and left in
+        // the bucket forever.
+        if self.lanes.contains_key(name) {
+            let prefix = generation_root.join("wal").join(name);
+            if let Err(error) = delete_prefix(self.store.as_ref(), &prefix).await {
+                self.state.metrics().record_replication_error();
+                return Err(error);
+            }
+            self.lanes.remove(name);
+            self.manifest_dirty = true;
             self.progress.forget(&self.data_dir.join(name));
             let (context, lane_kind) = lane_metric_labels(name);
             self.state
                 .metrics()
                 .forget_replication_lane(&context, lane_kind);
-            let prefix = generation_root.join("wal").join(name);
-            delete_prefix(self.store.as_ref(), &prefix).await?;
         } else {
-            self.files.remove(name);
             let key = generation_root.join("files").join(name);
             match self.store.delete(&key).await {
                 Ok(()) => {}
@@ -976,6 +1009,8 @@ impl Shipper {
                     return Err(store_error("retiring a replicated file", error));
                 }
             }
+            self.files.remove(name);
+            self.manifest_dirty = true;
         }
         Ok(())
     }
@@ -1008,6 +1043,18 @@ impl Shipper {
         // the lag metric below still needs a beat every cycle
         // (`age_secs` is elapsed time, not file content), and the
         // cached `local_seq` answers that without touching the file.
+        //
+        // Known limitation: unlike a published file (a new version is
+        // always a new inode via rename), a lane mutates IN PLACE —
+        // same inode, same length possible after a rollback that
+        // rewrites an identical byte count within one mtime granule.
+        // On a filesystem with second-level mtime resolution (some
+        // NFS/HFS+/ext3 configurations), that specific rewrite could
+        // share this file's `FileSig` with the pre-rollback one and be
+        // skipped for one cycle. Accepted: every target this project
+        // ships to (APFS, ext4) carries sub-second mtimes, and the very
+        // next append (any length change) forces a fresh signature
+        // regardless.
         let shipped = if lane.last_seen_sig == Some(sig) {
             false
         } else {
@@ -1045,6 +1092,7 @@ impl Shipper {
                         {
                             let file = self.ship_published(&parent).await?;
                             self.files.insert(parent, file);
+                            self.manifest_dirty = true;
                         }
                     }
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1058,6 +1106,10 @@ impl Shipper {
                     Err(error) => return Err(ShipError::Io(error)),
                 }
                 lane = LaneState::fresh(lane.series + 1);
+                // The series bump alone makes the manifest stale even
+                // if this cycle ends up shipping no new segment below
+                // (an empty or torn-only file right after the reset).
+                self.manifest_dirty = true;
             }
 
             // Ship only complete lines: a torn tail (crash or mid-write
@@ -1094,6 +1146,7 @@ impl Shipper {
                         lane.shipped_seq = last_seq;
                         lane.next_seg += 1;
                         self.progress.note_shipped(&path, last_seq);
+                        self.manifest_dirty = true;
                         true
                     }
                 }
@@ -1454,6 +1507,19 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 eprintln!("taguru: restore: cannot create {}: {error}", out.display());
                 return 1;
             }
+            // Every file this restore writes below fsyncs its own
+            // directory (`write_atomic`'s rename), but that directory's
+            // OWN entry in ITS parent was never synced — without this,
+            // "restored generation N" printed on success could still
+            // have power loss drop `out`'s directory entry wholesale,
+            // even though every file inside it landed durably.
+            if let Err(error) = crate::storage::fsync_parent_dir(&out) {
+                eprintln!(
+                    "taguru: restore: cannot durably create {}: {error}",
+                    out.display()
+                );
+                return 1;
+            }
         }
         Err(error) => {
             eprintln!("taguru: restore: cannot read {}: {error}", out.display());
@@ -1630,9 +1696,27 @@ pub(crate) async fn restore_into(
     Ok(report)
 }
 
+/// A manifest-supplied name must land as exactly one ordinary path
+/// component under a local directory — never an absolute path, `..`,
+/// or a name carrying its own separator. `verify_file_bytes` catches
+/// rotted or swapped CONTENT, but an attacker with bucket-write access
+/// computes the CRC over their own bytes, so a hostile NAME needs its
+/// own check: without one, `out.join(name)` (restore) or
+/// `data_dir.join(name)` (hydrate) would happily write outside the
+/// target directory for a name like `"/home/user/.ssh/authorized_keys"`
+/// or `"../../etc/x"`.
+fn safe_manifest_name(name: &str) -> bool {
+    let mut components = FsPath::new(name).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
 /// Reads the generation's manifest out of its `complete` marker.
 /// `None` for the pre-manifest (empty) marker; an error for a
-/// non-empty body that does not parse — that is rot, not age.
+/// non-empty body that does not parse, OR that carries a file/lane
+/// name [`safe_manifest_name`] refuses — that is rot (or tampering),
+/// not age. Checked once, here, so every caller (restore, hydrate,
+/// replica tailing) inherits the guarantee without its own check.
 pub(crate) async fn read_manifest(
     store: &dyn ObjectStore,
     generation_root: &StorePath,
@@ -1641,12 +1725,23 @@ pub(crate) async fn read_manifest(
     if bytes.is_empty() {
         return Ok(None);
     }
-    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("the generation's manifest (complete) does not parse: {error}"),
         )
-    })
+    })?;
+    for name in manifest.files.keys().chain(manifest.lanes.keys()) {
+        if !safe_manifest_name(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{name}: not a safe file name — the manifest (complete) may be tampered with"
+                ),
+            ));
+        }
+    }
+    Ok(Some(manifest))
 }
 
 /// Refuses downloaded bytes that do not match what the manifest says
@@ -1843,8 +1938,23 @@ mod tests {
         state: &AppState,
         progress: &Arc<ShipProgress>,
     ) -> Shipper {
-        Shipper::claim(
+        claimed_dyn(
             Arc::clone(store) as Arc<dyn ObjectStore>,
+            dir,
+            state,
+            progress,
+        )
+        .await
+    }
+
+    async fn claimed_dyn(
+        store: Arc<dyn ObjectStore>,
+        dir: &FsPath,
+        state: &AppState,
+        progress: &Arc<ShipProgress>,
+    ) -> Shipper {
+        Shipper::claim(
+            store,
             StorePath::default(),
             "mem://test".to_string(),
             dir.to_path_buf(),
@@ -1873,6 +1983,117 @@ mod tests {
         }
         names.sort();
         names
+    }
+
+    /// A store that delegates every call to `inner` except two dials
+    /// this test module turns: `fail_puts` and `fail_deletes` each
+    /// count down by one on a matching call, answering a transient I/O
+    /// error while `> 0` and falling through to the real store once
+    /// they hit zero — "the bucket flaked N times, then came back",
+    /// the shape a retry-on-next-cycle fix needs proof against.
+    #[derive(Debug)]
+    struct FlakyStore {
+        inner: Arc<dyn ObjectStore>,
+        fail_puts: Arc<Mutex<usize>>,
+        fail_deletes: Arc<Mutex<usize>>,
+    }
+
+    impl std::fmt::Display for FlakyStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "FlakyStore({})", self.inner)
+        }
+    }
+
+    fn injected(operation: &'static str) -> object_store::Error {
+        object_store::Error::Generic {
+            store: "flaky",
+            source: format!("injected transient {operation} failure").into(),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for FlakyStore {
+        async fn put_opts(
+            &self,
+            location: &StorePath,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            {
+                let mut remaining = self.fail_puts.lock().unwrap();
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    return Err(injected("put"));
+                }
+            }
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &StorePath,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &StorePath,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<StorePath>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<StorePath>> {
+            let inner = Arc::clone(&self.inner);
+            let fail_deletes = Arc::clone(&self.fail_deletes);
+            locations
+                .then(move |location| {
+                    let inner = Arc::clone(&inner);
+                    let fail_deletes = Arc::clone(&fail_deletes);
+                    async move {
+                        let location = location?;
+                        {
+                            let mut remaining = fail_deletes.lock().unwrap();
+                            if *remaining > 0 {
+                                *remaining -= 1;
+                                return Err(injected("delete"));
+                            }
+                        }
+                        inner.delete(&location).await?;
+                        Ok(location)
+                    }
+                })
+                .boxed()
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &StorePath,
+            to: &StorePath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
     }
 
     #[tokio::test]
@@ -2132,6 +2353,177 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A retire whose remote delete fails transiently must leave the
+    /// name retryable — not silently orphan the object in the bucket.
+    /// Before the fix, `retire_file` dropped `self.lanes`/`self.files`
+    /// before the delete's result was known, so a failed delete still
+    /// erased the only record (`scan.vanished`) that would have asked
+    /// for a retry.
+    #[tokio::test]
+    async fn a_failed_retire_delete_is_retried_not_orphaned() {
+        let dir = scratch_dir("retire-flaky");
+        let state = state_for(&dir);
+        let progress = Arc::new(ShipProgress::new());
+        let inner = Arc::new(InMemory::new());
+        let fail_deletes = Arc::new(Mutex::new(0usize));
+        let store: Arc<dyn ObjectStore> = Arc::new(FlakyStore {
+            inner: Arc::clone(&inner) as Arc<dyn ObjectStore>,
+            fail_puts: Arc::new(Mutex::new(0)),
+            fail_deletes: Arc::clone(&fail_deletes),
+        });
+
+        std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
+        let mut shipper = claimed_dyn(Arc::clone(&store), &dir, &state, &progress).await;
+        shipper.cycle().await.unwrap();
+        assert!(
+            object_names(&inner)
+                .await
+                .iter()
+                .any(|name| name.contains("ctx_a")),
+            "the file must have shipped before this test deletes it locally"
+        );
+
+        std::fs::remove_file(dir.join("ctx_a.ctx")).unwrap();
+        *fail_deletes.lock().unwrap() = 1;
+        let error = shipper.cycle().await.unwrap_err();
+        assert!(matches!(error, ShipError::Io(_)), "{error}");
+        assert!(
+            object_names(&inner)
+                .await
+                .iter()
+                .any(|name| name.contains("ctx_a")),
+            "the object must still be in the bucket after the failed delete"
+        );
+
+        // The next cycle retries — nothing local changed, but the
+        // vanished name must still be there to retire.
+        shipper.cycle().await.unwrap();
+        let names = object_names(&inner).await;
+        assert!(
+            !names.iter().any(|name| name.contains("ctx_a")),
+            "the retry must finish retiring the object: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same guarantee as the published-file case above, but for a
+    /// log lane: `retire_file`'s two branches (published file, lane)
+    /// must behave identically on a failed remote delete — retryable,
+    /// not orphaned. A lane's delete goes through `delete_prefix`
+    /// (segment-by-segment), a different code path from the file
+    /// branch's single `store.delete`, so this needs its own case.
+    #[tokio::test]
+    async fn a_failed_lane_retire_delete_is_retried_not_orphaned() {
+        let dir = scratch_dir("retire-lane-flaky");
+        let state = state_for(&dir);
+        let progress = Arc::new(ShipProgress::new());
+        let inner = Arc::new(InMemory::new());
+        let fail_deletes = Arc::new(Mutex::new(0usize));
+        let store: Arc<dyn ObjectStore> = Arc::new(FlakyStore {
+            inner: Arc::clone(&inner) as Arc<dyn ObjectStore>,
+            fail_puts: Arc::new(Mutex::new(0)),
+            fail_deletes: Arc::clone(&fail_deletes),
+        });
+
+        let wal_path = dir.join("ctx_a.wal.jsonl");
+        wal::append_batch(&wal_path, 1, &[associate("a")]).unwrap();
+        let mut shipper = claimed_dyn(Arc::clone(&store), &dir, &state, &progress).await;
+        shipper.cycle().await.unwrap();
+        assert!(
+            object_names(&inner)
+                .await
+                .iter()
+                .any(|name| name.contains("ctx_a")),
+            "the lane must have shipped before this test deletes it locally"
+        );
+
+        std::fs::remove_file(&wal_path).unwrap();
+        *fail_deletes.lock().unwrap() = 1;
+        let error = shipper.cycle().await.unwrap_err();
+        assert!(matches!(error, ShipError::Io(_)), "{error}");
+        assert!(
+            object_names(&inner)
+                .await
+                .iter()
+                .any(|name| name.contains("ctx_a")),
+            "the lane's segments must still be in the bucket after the failed delete"
+        );
+
+        // The next cycle retries — nothing local changed, but the
+        // vanished lane must still be there to retire.
+        shipper.cycle().await.unwrap();
+        let names = object_names(&inner).await;
+        assert!(
+            !names.iter().any(|name| name.contains("ctx_a")),
+            "the retry must finish retiring the lane: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `put_manifest` that fails on its own — every file/lane upload
+    /// in the cycle already succeeded — must not go unretried. Before
+    /// the fix, the retry condition was `shipped` (this cycle's own
+    /// upload activity), which a context deletion clears from
+    /// `self.files`/`self.lanes` before the next cycle even looks —
+    /// so a manifest describing already-deleted objects would stand
+    /// forever once the server went idle.
+    #[tokio::test]
+    async fn a_failed_manifest_put_is_retried_on_the_next_idle_cycle() {
+        let dir = scratch_dir("manifest-flaky");
+        let state = state_for(&dir);
+        let progress = Arc::new(ShipProgress::new());
+        let inner = Arc::new(InMemory::new());
+        let fail_puts = Arc::new(Mutex::new(0usize));
+        let store: Arc<dyn ObjectStore> = Arc::new(FlakyStore {
+            inner: Arc::clone(&inner) as Arc<dyn ObjectStore>,
+            fail_puts: Arc::clone(&fail_puts),
+            fail_deletes: Arc::new(Mutex::new(0)),
+        });
+
+        std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
+        let mut shipper = claimed_dyn(Arc::clone(&store), &dir, &state, &progress).await;
+        shipper.cycle().await.unwrap();
+        assert!(
+            !read_object(&inner, "gen-00000000000000000001/complete")
+                .await
+                .is_empty(),
+            "the baseline manifest must land on the first cycle"
+        );
+
+        // Delete the context locally — the shipper retires the object
+        // and, in the same cycle, tries to republish the manifest
+        // without it. Fail only that manifest PUT.
+        std::fs::remove_file(dir.join("ctx_a.ctx")).unwrap();
+        *fail_puts.lock().unwrap() = 1;
+        let error = shipper.cycle().await.unwrap_err();
+        assert!(matches!(error, ShipError::Io(_)), "{error}");
+        assert!(
+            !object_names(&inner)
+                .await
+                .iter()
+                .any(|name| name.contains("ctx_a") && name.contains("files/")),
+            "the retire itself must still have landed"
+        );
+        let stale = read_object(&inner, "gen-00000000000000000001/complete").await;
+        let stale: Manifest = serde_json::from_slice(&stale).unwrap();
+        assert!(
+            stale.files.contains_key("ctx_a.ctx"),
+            "the manifest is still the pre-retire one: {stale:?}"
+        );
+
+        // Nothing local changed, so an old (buggy) `shipped`-only gate
+        // would see this cycle as having nothing to do and skip the
+        // manifest PUT forever. The fix must retry it here.
+        shipper.cycle().await.unwrap();
+        let fresh = read_object(&inner, "gen-00000000000000000001/complete").await;
+        let fresh: Manifest = serde_json::from_slice(&fresh).unwrap();
+        assert!(
+            !fresh.files.contains_key("ctx_a.ctx"),
+            "the manifest must catch up to the retire on the very next cycle: {fresh:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn restore_refuses_a_gapped_segment_run() {
         let dir = scratch_dir("gap");
@@ -2274,6 +2666,78 @@ mod tests {
         assert!(error.to_string().contains("manifest"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&restored_dir);
+    }
+
+    /// A manifest is bucket data, not the writer's own local state —
+    /// bucket-write access lets an attacker add a file entry under a
+    /// name like `"../escaped.txt"`, with the CRC computed over their
+    /// own uploaded bytes (so [`verify_file_bytes`] alone would pass
+    /// it). Restore must refuse the whole manifest before ever
+    /// `out.join`-ing that name, not just refuse the content mismatch.
+    #[tokio::test]
+    async fn restore_refuses_a_manifest_naming_a_path_outside_the_target_directory() {
+        let dir = scratch_dir("manifest-traversal");
+        let state = state_for(&dir);
+        let progress = Arc::new(ShipProgress::new());
+        let store = Arc::new(InMemory::new());
+
+        std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
+        let mut shipper = claimed(&store, &dir, &state, &progress).await;
+        shipper.cycle().await.unwrap();
+
+        // Tamper with the manifest itself, not just an object's bytes:
+        // add an entry naming a path outside the restore target, with
+        // its CRC computed over the attacker's own payload so content
+        // verification alone would accept it.
+        let generation_root = gen_root(&StorePath::default(), 1);
+        let traversal_name = "../taguru-test-escaped-payload.txt";
+        let payload = b"hijacked!".to_vec();
+        let key = generation_root.clone().join("files").join(traversal_name);
+        (store.as_ref() as &dyn ObjectStore)
+            .put(&key, PutPayload::from(payload.clone()))
+            .await
+            .unwrap();
+        let bytes = read_object(&store, "gen-00000000000000000001/complete").await;
+        let mut manifest: Manifest = serde_json::from_slice(&bytes).unwrap();
+        manifest.files.insert(
+            traversal_name.to_string(),
+            ManifestFile {
+                len: payload.len() as u64,
+                crc: crate::crc32c::crc32c(&payload),
+            },
+        );
+        (store.as_ref() as &dyn ObjectStore)
+            .put(
+                &generation_root.clone().join(COMPLETE_MARKER),
+                PutPayload::from(serde_json::to_vec(&manifest).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let restored_dir = scratch_dir("manifest-traversal-out");
+        let escape_target = restored_dir
+            .parent()
+            .expect("scratch dirs always have a parent")
+            .join("taguru-test-escaped-payload.txt");
+        let _ = std::fs::remove_file(&escape_target);
+        let error = restore_into(
+            store.as_ref() as &dyn ObjectStore,
+            &StorePath::default(),
+            &restored_dir,
+        )
+        .await
+        .expect_err("a manifest naming a path outside the target must refuse");
+        assert!(
+            error.to_string().contains("not a safe file name"),
+            "{error}"
+        );
+        assert!(
+            !escape_target.exists(),
+            "the traversal name must never be written outside the restore target"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&restored_dir);
+        let _ = std::fs::remove_file(&escape_target);
     }
 
     #[tokio::test]

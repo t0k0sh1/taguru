@@ -97,6 +97,12 @@ gungraun = "0.19.4"
 # tls-aws-lc-rs for remote $ref resolution the self-contained schema never
 # needs.
 jsonschema = { version = "0.48.2", default-features = false }
+# Already in the tree transitively (object_store implements
+# `ObjectStore` with it); made a direct dev-dependency so ship.rs's
+# tests can wrap a store in a thin failing proxy — object_store's
+# `ObjectStore` trait is itself `#[async_trait]`, so any impl of it
+# needs the same macro.
+async-trait = "0.1.89"
 
 [[bench]]
 name = "context"
