@@ -131,7 +131,7 @@ fn parse_args(args: &[String]) -> Result<CompareArgs, i32> {
 /// never an omitted key, so a reader tells "measured, zero samples"
 /// from "this metric does not apply here" by key presence alone.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct Distribution {
+pub(super) struct Distribution {
     n: u64,
     min: Option<f64>,
     p50: Option<f64>,
@@ -158,7 +158,10 @@ impl Distribution {
     /// sorts once, and applies nearest-rank (ADR 0003 §9.3) with no
     /// interpolation — always an observed value, exactly reproducible
     /// by an external re-aggregator reading the same `runs/*.jsonl`.
-    fn from_samples(mut samples: Vec<f64>) -> Self {
+    /// `pub(super)`: `benchmark::search` (#260) builds the same shape
+    /// for its own per-model distributions (hit counts, source
+    /// diversity) rather than hand-copying this struct.
+    pub(super) fn from_samples(mut samples: Vec<f64>) -> Self {
         samples.retain(|v| v.is_finite());
         let n = samples.len();
         if n == 0 {
@@ -193,13 +196,15 @@ fn nearest_rank(sorted: &[f64], p: usize) -> f64 {
 /// `n: 0` pairs with `value: None` and `numerator: None` — never a
 /// divide-by-zero `NaN`, never a silently misleading `0.0`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct Ratio {
+pub(super) struct Ratio {
     value: Option<f64>,
     n: u64,
     numerator: Option<u64>,
 }
 
-fn ratio_metric(numerator: u64, n: u64) -> Ratio {
+/// `pub(super)`: `benchmark::search` (#260) reuses this for its own
+/// rate metrics (empty-result rate, per-lane hit rate).
+pub(super) fn ratio_metric(numerator: u64, n: u64) -> Ratio {
     if n == 0 {
         Ratio {
             value: None,
@@ -221,14 +226,14 @@ fn ratio_metric(numerator: u64, n: u64) -> Ratio {
 /// fit (a cross-unit rate) or where the value is not itself a share
 /// (a union size, a summed count).
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct Count {
+pub(super) struct Count {
     value: Option<f64>,
     n: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
-enum MetricValue {
+pub(super) enum MetricValue {
     Distribution(Distribution),
     Ratio(Ratio),
     Count(Count),
@@ -249,7 +254,7 @@ impl MetricValue {
 /// embedded in the artifact itself, not only documented in prose
 /// elsewhere.
 #[derive(Debug, Clone, Serialize)]
-struct MetricDef {
+pub(super) struct MetricDef {
     unit: &'static str,
     statistic: &'static str,
     scopes: &'static [&'static str],
@@ -1528,7 +1533,9 @@ fn document_scope_metrics(doc: &DocRow, attempts_for_doc: &[&AttemptRow]) -> Met
 
 // ============================== Definitions ==============================
 
-fn def(
+/// `pub(super)`: `benchmark::search` (#260) uses this to build its own
+/// `retrieval.json` `definitions` block in the same shape.
+pub(super) fn def(
     unit: &'static str,
     statistic: &'static str,
     scopes: &'static [&'static str],

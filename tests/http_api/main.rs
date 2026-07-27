@@ -11,6 +11,7 @@ mod support;
 
 mod auth;
 mod benchmark;
+mod benchmark_search;
 mod calibrate;
 mod communities;
 mod directory;

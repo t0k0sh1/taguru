@@ -897,11 +897,14 @@ fn benchmark_compare_rejects_a_directory_missing_a_manifest() {
 }
 
 #[test]
-fn benchmark_reports_both_subcommands_on_an_unknown_one() {
+fn benchmark_reports_all_subcommands_on_an_unknown_one() {
     let output = run(&["benchmark", "bogus"]);
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("'extract' or 'compare'"), "{stderr}");
+    assert!(
+        stderr.contains("'extract', 'compare', or 'search'"),
+        "{stderr}"
+    );
 }
 
 // ============================== benchmark compare: differences.jsonl (issue #259) ==============================

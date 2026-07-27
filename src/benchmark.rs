@@ -30,15 +30,20 @@ use crate::api::{MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES, MAX_QUESTIONS_PE
 use crate::config::subcommand_usage_error;
 
 mod compare;
+mod evalset;
 mod identity;
+mod search;
 
 const TOP_USAGE: &str = "\
-usage: taguru benchmark <extract|compare> ...
+usage: taguru benchmark <extract|compare|search> ...
 
   extract   run `taguru extract` across a model matrix, writing a
             results directory — see `taguru benchmark extract --help`
   compare   derive measurements.json/measurements.csv from a finished
             results directory — see `taguru benchmark compare --help`
+  search    build per-model corpora from a finished results directory
+            and compare their search results — see `taguru benchmark
+            search --help`
 
 Contract and discipline: docs/benchmark.html,
 adr/0003-extraction-model-benchmark.md.
@@ -102,13 +107,14 @@ pub fn run(args: &[String]) -> i32 {
         }
         Some("extract") => run_extract(&args[1..]),
         Some("compare") => compare::run_compare(&args[1..]),
+        Some("search") => search::run_search(&args[1..]),
         Some(other) => subcommand_usage_error(
             "benchmark",
-            &format!("unknown subcommand '{other}' (expected 'extract' or 'compare')"),
+            &format!("unknown subcommand '{other}' (expected 'extract', 'compare', or 'search')"),
         ),
         None => subcommand_usage_error(
             "benchmark",
-            "expected a subcommand ('extract' or 'compare')",
+            "expected a subcommand ('extract', 'compare', or 'search')",
         ),
     }
 }

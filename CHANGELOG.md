@@ -8,6 +8,25 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- New top-level verb `taguru benchmark search` (#260, implementing ADR
+  0003 §11): builds one context per model (`PREFIX::MODEL_ID`) from a
+  finished `taguru benchmark extract` results directory's own batch
+  files, runs a shared `eval.jsonl` question set against every one of
+  them over `POST /contexts/{name}/sources/search`, and writes
+  `results/retrieval.json` — per-case/per-model hit counts, lane
+  evidence, and model-pair hit-set overlap (empty-result rate, source
+  diversity, `(source, paragraph)` Jaccard, mean rank difference),
+  gold-data-free and judgment-free by construction like
+  `differences.jsonl`. When a case carries `expected_sources` or
+  `expected_concepts`, recall@k and MRR are also computed from them —
+  the one thing this shares with #215's own quality gate; `eval.jsonl`
+  is deliberately the shared dataset format between the two. Corpus
+  import is idempotent (a per-source create-or-replace) and refuses to
+  overwrite a context this run did not itself create. A server this
+  run cannot reach is a hard failure; an older server's response
+  missing `plan`/lane fields degrades those fields to `null` without
+  failing the case. See `docs/benchmark.html#search` for the full
+  schema and metric catalog.
 - New top-level verb `taguru benchmark compare` (#257, implementing ADR
   0003 §9.3/§10): reads a finished `taguru benchmark extract` results
   directory — `manifest.json`, `runs/*.jsonl`, and the written

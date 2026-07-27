@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Extraction benchmark (benchmark) — Taguru</title>
-  <meta name="description" content="The complete reference for taguru benchmark extract and taguru benchmark compare: the models.json schema, the results-directory layout, manifest.json/runs/*.jsonl, resume, the fairness invariant, the measurements.json/csv metric catalog, and the differences.jsonl model-pair diff.">
+  <meta name="description" content="The complete reference for taguru benchmark extract, taguru benchmark compare, and taguru benchmark search: the models.json schema, the results-directory layout, manifest.json/runs/*.jsonl, resume, the fairness invariant, the measurements.json/csv metric catalog, the differences.jsonl model-pair diff, and the eval.jsonl/retrieval.json search-impact comparison.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -69,8 +69,9 @@
       one <code>taguru extract --diagnostics-out</code> subprocess per (model, run) cell, every
       cell over the same corpus under the same task settings. Writes a reproducible
       results directory <a href="#compare"><code>taguru benchmark compare</code></a> — or any
-      external tool — can derive measurements from without spending model time again. The design
-      is fixed by
+      external tool — can derive measurements from without spending model time again, and
+      <a href="#search"><code>taguru benchmark search</code></a> can build a per-model corpus from
+      and compare its live search results against. The design is fixed by
       <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0003-extraction-model-benchmark.md">ADR 0003</a>;
       this page documents the shape it produces.
     </p>
@@ -591,6 +592,196 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
       written) if the file is unreadable or the hash no longer matches, since text the models never
       saw must never be embedded silently. Embedded text is capped at 4096 bytes (floored to a
       character boundary), with <code>text_truncated: true</code> marking the cut.
+    </p>
+  </section>
+
+  <section id="search">
+    <h2>taguru benchmark search</h2>
+    <pre><code>taguru benchmark search --eval eval.jsonl --url http://localhost:8248 \
+  results/</code></pre>
+    <pre><code>--eval FILE            eval.jsonl (the shared dataset below)
+--url URL              server to import into and search; default resolves the
+                      same way `taguru health` does (TAGURU_ADDR, or
+                      --config/TAGURU_CONFIG)
+--config FILE          load before resolving --url
+--run N                which extract run to import from, 1-based (default 1)
+--context-prefix NAME  corpus context names are NAME::MODEL_ID (default: the
+                      extraction context manifest.json recorded)
+--skip-import          search existing PREFIX::MODEL_ID contexts instead of
+                      importing fresh ones
+RESULTS_DIR             a directory `taguru benchmark extract` wrote</code></pre>
+    <p>
+      Extraction-model choice does not only change what a graph <i>contains</i> — it changes what a
+      search finds. <code>taguru benchmark search</code> (issue #260, ADR 0003 §11) builds one
+      context per model from a finished results directory's already-written batch files, runs one
+      shared question set against every one of them over the exact retrieval path a real client
+      uses (<code>POST /contexts/{name}/sources/search</code>), and writes
+      <code>results/retrieval.json</code>: per-case, per-model hit counts, lane evidence, and
+      model-pair hit-set overlap. Like <a href="#differences"><code>differences.jsonl</code></a>,
+      it is <b>gold-data-free and judgment-free by construction</b> — with no expectations supplied
+      it reports only differences between corpora, never which model's results are better. Unlike
+      <a href="#compare"><code>taguru benchmark compare</code></a>, it is not a pure function of
+      the results directory: it imports into and queries a <b>running server</b>, so a reachable
+      server is required, and re-running is idempotent (a per-source create-or-replace) rather than
+      a byte-identical rewrite.
+    </p>
+    <p>
+      Exit codes: <code>0</code> written · <code>1</code> the server is unreachable, or every
+      model's corpus failed to build or search · <code>2</code> usage error, an unreadable
+      <code>eval.jsonl</code>, a <code>--run</code> the manifest never recorded, or a corpus
+      context name over 64 bytes.
+    </p>
+    <p class="section-sub">Per-model corpora</p>
+    <p>
+      For the requested <code>--run</code>, every model whose cell recorded <code>outcome:
+      "complete"</code> has its <code>cells/&lt;model_id&gt;/run&lt;NN&gt;/*.jsonl</code> batch
+      files (<code>diagnostics.jsonl</code> excluded) imported into a context named
+      <code>PREFIX::MODEL_ID</code>. Each batch's header line is rewritten before import — its
+      <code>context</code> replaced, and its <code>create.description</code> stamped with an
+      ownership marker naming this run's <code>run_id</code> and the model — every other line rides
+      through byte-for-byte, <code>source</code> included. Re-running the same results directory is
+      safe: import is a per-<code>(context, source)</code> create-or-replace, so a second run
+      neither duplicates associations nor loses them. Before importing into an existing context,
+      its current description is checked against the marker this run would stamp; a mismatch
+      refuses that one model (<code>corpus.&lt;model_id&gt;.outcome: "rejected"</code>) rather than
+      overwriting a context this run did not create — pick a different <code>--context-prefix</code>
+      if that happens. <code>--skip-import</code> searches whatever already lives under
+      <code>PREFIX::MODEL_ID</code> instead, useful for re-running only the search-and-measure half
+      after a corpus was built once.
+    </p>
+    <p class="section-sub">eval.jsonl: the dataset shared with #215</p>
+    <pre><code>{"taguru_eval":1,"name":"sake retrieval cases","default_target":{"context":"sake"}}
+{"case_id":"brand-origin-001","query":"青嶺はどこの蔵の酒か","cues":["青嶺"],
+ "expected_sources":[{"source":"corpus/brewery.md","paragraphs":[0],"relevance":3}],
+ "expected_concepts":["青嶺酒造"],"options":{"limit":10}}</code></pre>
+    <p>
+      One <code>taguru_eval</code> header (equality-checked — this file is hand-authored, so a
+      version this build was not built for is refused rather than silently reinterpreted, the same
+      posture <a href="import.html">batch import's</a> <code>taguru_batch</code> takes), then one
+      case per line. Every case field this command does not know is still declared and accepted —
+      never rejected as a typo — since <code>eval.jsonl</code> is the one artifact this reference
+      shares with #215's own quality gate over an already-populated corpus: <code>expected_labels</code>,
+      <code>expected_associations</code>, <code>expected_citations</code>, and
+      <code>options.floor</code>/<code>sources</code>/<code>since</code> are #215-only and ride
+      through untouched, earning one warning per run (never once per case) if seen. The fields this
+      command reads: <code>case_id</code> (a stable, unique join key), <code>query</code> (sent to
+      <code>sources/search</code> verbatim), <code>expected_sources[]</code> (<code>source</code>
+      matched against the results directory's own document dictionary — an exact path, then a
+      <code>document_id</code>, then a unique path suffix, in that order; empty
+      <code>paragraphs</code> means any paragraph of that source counts; <code>relevance 0</code>
+      excludes the entry), <code>expected_concepts[]</code>, and <code>options.limit</code> (the
+      per-case search limit; omitted means <code>10</code>). <code>cues</code> and
+      <code>target</code> are echoed into <code>retrieval.json</code>'s own per-case block for a
+      reader's reference but not otherwise used — this command always overrides the search target
+      with its own per-model corpus, one context per model, so a shared dataset naming no target at
+      all is the normal case.
+    </p>
+    <p class="section-sub">retrieval.json</p>
+    <pre><code>{
+  "taguru_benchmark_retrieval": 1,
+  "run_id": "...", "generated_at": "2026-07-26T10:05:12Z",
+  "matching": { "module": "benchmark::identity", "case_fold": true,
+      "unicode_normalization": "NFKC", "alias_expansion": "batch-local", "weight_tolerance": 0.0 },
+  "inputs": { "results_dir": "results/", "eval": { "path": "eval.jsonl",
+      "name": "sake retrieval cases", "cases": 12 }, "url": "http://localhost:8248",
+      "run_index": 1, "default_limit": 10 },
+  "definitions": { "hits.count": { "unit": "count", "statistic": "distribution", "...": "..." }, ... },
+  "warnings": [],
+  "corpus": { "qwen25-7b-q4": { "context": "sake::qwen25-7b-q4", "outcome": "built",
+      "documents_imported": 5, "documents_failed": 0,
+      "passage_vectors": { "model": null, "rows": 0 } } },
+  "cases": [ { "case_id": "brand-origin-001", "query": "青嶺はどこの蔵の酒か", "cues": ["青嶺"],
+      "limit": 10, "has_expectations": true,
+      "models": { "qwen25-7b-q4": { "outcome": "searched", "hit_count": 3, "empty": false,
+          "distinct_sources": 2, "lanes": { "bm25_only": 1, "vector_only": 0, "both": 2,
+            "neither": 0, "unknown": 0 },
+          "plan": { "bm25": { "ran": true }, "vector": { "ran": false,
+            "reason": "no embedding provider is configured" } },
+          "hits": [ { "rank": 1, "source": "corpus/brewery.md", "paragraph": 0 } ],
+          "recall": { "recall_at_k": 1.0, "mrr": 1.0, "expected_total": 2, "matched": 2 } } },
+      "pairs": { "hosted-120b__qwen25-7b-q4": { "outcome": "compared", "jaccard": 0.33,
+          "shared_hits": 1, "mean_rank_difference": 1.0 } } } ],
+  "models": { "qwen25-7b-q4": { "hits.count": { "n": 12, "...": "..." }, "...": "..." } },
+  "pairs": { "hosted-120b__qwen25-7b-q4": { "overlap.jaccard": { "n": 12, "...": "..." }, "...": "..." } }
+}</code></pre>
+    <p>
+      <code>taguru_benchmark_retrieval</code> accepts any version from <code>1</code> through the
+      current one, like <code>manifest.json</code> — this is taguru's own written-and-re-readable
+      artifact, not a hand-authored input. No CSV is written; a static
+      <code>report.html</code> (issue #261, optional) is where visualization belongs.
+    </p>
+    <p class="section-sub">recall@k and MRR: the one thing shared with #215</p>
+    <p>
+      When a case carries <code>expected_sources</code> or <code>expected_concepts</code>, both are
+      folded into <b>one</b> recall@k/MRR computation, computed from the very
+      <code>sources/search</code> hits already fetched for that case — never a second retrieval
+      call. A hit satisfies an <code>expected_sources</code> entry when its <code>source</code>
+      matches (resolved against the document dictionary as above) and, when <code>paragraphs</code>
+      is non-empty, its <code>paragraph</code> is among them. A hit satisfies an
+      <code>expected_concepts</code> entry when a case-folded, NFKC-normalized copy of the concept
+      string is a substring of a case-folded, NFKC-normalized copy of the hit's own <code>text</code>.
+      <code>recall_at_k</code> is the fraction of a case's expected entries (source and concept,
+      together) satisfied by at least one hit; <code>mrr</code> is <code>1 / rank</code> of the
+      first hit that satisfies <i>any</i> expected entry, <code>0</code> if none does. Cases with no
+      expectations at all carry no <code>recall</code> block — this reference reports only
+      differences for them, exactly as ADR 0003 §11 frames the gold-data-free tier.
+    </p>
+    <p class="section-sub">Why not POST /contexts/{name}/recall</p>
+    <p>
+      <code>expected_concepts</code> is checked against hit text, not driven through the graph's own
+      <code>recall</code> endpoint, on purpose: <code>Context::recall(cue)</code> requires
+      <code>cue</code> to equal a stored concept or label id <i>exactly</i> — it performs no fuzzy
+      or semantic resolution — so a hand-written <code>eval.jsonl</code>'s natural-language
+      <code>cues[]</code> would silently miss almost everything. ADR 0003 §11 names exactly one
+      retrieval endpoint for this command, <code>sources/search</code>, and this keeps to it: one
+      search call per case per model, never two.
+    </p>
+    <p class="section-sub">Lane evidence and the embeddings/refresh gap</p>
+    <p>
+      <code>plan</code> and per-hit lane accounting are read straight off <code>sources/search</code>'s
+      own response (<a href="#compare">the same <code>SearchPlan</code>/<code>PassageLanes</code>
+      shape every client sees</a>) — this command never calls
+      <code>POST /contexts/{name}/embeddings/refresh</code>, because that endpoint only re-embeds
+      concept and label <i>glosses</i> (what <code>resolve</code>'s semantic fallback reads), never
+      the passage vectors <code>sources/search</code>'s vector lane actually reads. Passage
+      embeddings refresh only from the server's own background flush tick, gated on
+      <code>TAGURU_EMBED_PASSAGES</code>, and have no on-demand HTTP endpoint at all — so whether the
+      vector lane runs for a given corpus is outside this command's control. <code>corpus.*.passage_vectors</code>
+      is a best-effort, read-only <code>GET /contexts/{name}/embeddings</code> snapshot taken once
+      per corpus, offered purely as evidence for why a case's <code>plan.vector.reason</code> reads
+      the way it does. A response missing <code>plan</code>/lane fields entirely (an older server)
+      degrades to lane fields recorded <code>null</code> — every non-lane comparison for that case
+      is still written.
+    </p>
+    <p class="section-sub">Metric catalog</p>
+    <div class="tbl">
+      <table>
+      <thead><tr><th>Metric family</th><th>Scope</th><th>What it measures</th></tr></thead>
+      <tbody>
+        <tr><td><code>hits.count</code></td><td>model</td><td>Passage hits <code>sources/search</code> returned for a case, truncated to that case's limit.</td></tr>
+        <tr><td><code>hits.empty_rate</code></td><td>model</td><td>Share of successfully searched cases whose search returned zero hits.</td></tr>
+        <tr><td><code>hits.distinct_sources</code></td><td>model</td><td>Distinct source documents among a case's hits — a coarse diversity signal.</td></tr>
+        <tr><td><code>lanes.bm25_only</code>, <code>.vector_only</code>, <code>.both</code></td><td>model</td><td>Hits a case's search found via the lexical lane only, the semantic lane only, or both agreeing.</td></tr>
+        <tr><td><code>cases.error_rate</code></td><td>model</td><td>Share of cases whose search request failed outright — a network/HTTP failure, or the model's corpus was never available.</td></tr>
+        <tr><td><code>recall.recall_at_k</code>, <code>.mrr</code></td><td>model</td><td>As defined above, over cases carrying at least one expectation.</td></tr>
+        <tr><td><code>overlap.jaccard</code></td><td>pair</td><td>Jaccard similarity of two models' hit <code>(source, paragraph)</code> sets for the same case — <code>None</code>, not a vacuous <code>1.0</code>, when both sides returned zero hits.</td></tr>
+        <tr><td><code>overlap.shared_hits</code></td><td>pair</td><td>Locators both models' hits agreed on, for one case.</td></tr>
+        <tr><td><code>overlap.mean_rank_difference</code></td><td>pair</td><td>Mean absolute difference in hit position (1-based) among locators both models found.</td></tr>
+        <tr><td><code>pairs.unavailable_rate</code></td><td>pair</td><td>Share of cases where at least one side of the pair could not be searched.</td></tr>
+      </tbody>
+      </table>
+    </div>
+    <p class="section-sub">No verdict vocabulary</p>
+    <p>
+      A model-pair's key is its two model ids joined in sorted order (<code>"m1__m2"</code>), never
+      <code>baseline</code>/<code>candidate</code> — <a href="#compare">the same posture
+      <code>measurements.json</code>/<code>differences.jsonl</code> hold</a>. <code>winner</code>,
+      <code>best</code>, <code>recommended</code>, <code>overall</code>, and <code>delta_vs_*</code>
+      never appear anywhere in this artifact. <code>hits[].rank</code> is the one deliberate
+      exception to the wider <code>rank</code>/<code>score</code> key-fragment ban
+      <code>measurements.json</code> carries: it names a hit's own position in one model's result
+      list — the same ordinary IR sense <code>LaneEvidence.rank</code> already uses on the wire — not
+      a cross-model ranking, so it is not treated as a banned word here.
     </p>
   </section>
 

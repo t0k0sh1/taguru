@@ -477,8 +477,9 @@ pub(crate) fn attribution_varies(presence: &KeyPresence) -> bool {
 /// synthesized for an empty-over-empty comparison, matching this
 /// module's neighbors' "measured, zero samples is not the same as a
 /// value" posture (ADR 0003 §9.3) rather than reporting a vacuous
-/// `1.0`.
-pub(crate) fn jaccard(a: &BTreeSet<AssocKey>, b: &BTreeSet<AssocKey>) -> Option<f64> {
+/// `1.0`. Generic over the element type so `benchmark::search` (#260)
+/// can reuse it for `(source, paragraph)` overlap, not just `AssocKey`.
+pub(crate) fn jaccard<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>) -> Option<f64> {
     if a.is_empty() && b.is_empty() {
         return None;
     }

@@ -33,7 +33,10 @@ mod groups;
 mod import;
 mod recall;
 mod resolve;
-mod sources;
+// pub(crate): `taguru benchmark search` (the CLI) deserializes search
+// responses into the real `SearchPlan`/`PassageLanes`/`LaneEvidence`
+// types instead of hand-copied mirrors that would drift silently.
+pub(crate) mod sources;
 mod vocabulary;
 
 pub use aliases::{add_aliases, list_aliases, remove_aliases};
