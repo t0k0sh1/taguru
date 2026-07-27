@@ -30,6 +30,7 @@ use crate::api::{MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES, MAX_QUESTIONS_PE
 use crate::config::subcommand_usage_error;
 
 mod compare;
+mod identity;
 
 const TOP_USAGE: &str = "\
 usage: taguru benchmark <extract|compare> ...
