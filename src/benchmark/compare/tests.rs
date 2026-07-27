@@ -697,10 +697,21 @@ fn parse_args_requires_exactly_one_positional() {
     assert!(parse_args(&[]).is_err());
     assert!(parse_args(&["a".to_string(), "b".to_string()]).is_err());
     assert!(parse_args(&["--bogus".to_string()]).is_err());
-    assert_eq!(
-        parse_args(&["dir".to_string()]).unwrap(),
-        PathBuf::from("dir")
-    );
+    let args = parse_args(&["dir".to_string()]).unwrap();
+    assert_eq!(args.dir, PathBuf::from("dir"));
+    assert!(!args.with_text);
+}
+
+#[test]
+fn parse_args_recognizes_with_text() {
+    let args = parse_args(&["--with-text".to_string(), "dir".to_string()]).unwrap();
+    assert_eq!(args.dir, PathBuf::from("dir"));
+    assert!(args.with_text);
+
+    // Flag order does not matter.
+    let args = parse_args(&["dir".to_string(), "--with-text".to_string()]).unwrap();
+    assert_eq!(args.dir, PathBuf::from("dir"));
+    assert!(args.with_text);
 }
 
 // ============================== end-to-end synthetic fixture ==============================
@@ -1389,19 +1400,822 @@ fn a_manifest_naming_an_unreadable_runs_file_is_an_error() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// ============================== differences.jsonl (issue #259) ==============================
+
+/// Builds a two-model results directory — `alpha` (2 runs) and `beta`
+/// (1 run) — engineered so `differences::compute_differences` exercises
+/// every record kind exactly where named, against hand-computable
+/// values:
+///
+/// Document `brewery` completes for both models (`alpha` in both its
+/// runs, `beta` in its one), so it is eligible for association-level
+/// records. Its keys:
+/// - `beer co`/`brews`/`ale`: identical weight, paragraph, and spelling
+///   on both sides — a control key that must fire nothing but its own
+///   `association_shared`.
+/// - `beer co`/`brews`/`lager`: `alpha` always positive, `beta` always
+///   negative — disjoint sign sets, `polarity_difference`.
+/// - `beer co`/`founded in`/`1990`: `alpha` always paragraph 2, `beta`
+///   always paragraph 7 — disjoint paragraph sets, both `Some`,
+///   `attribution_difference`.
+/// - `cafe co`/`brews`/`latte` (case-folds identically): `alpha` always
+///   spells it `Cafe Co`, `beta` always `CAFE CO` — 2 distinct raw
+///   spellings, `surface_form_variation` on a *shared* key.
+/// - `tea house`/`brews`/`matcha`: only `alpha` ever writes it (`beta`
+///   never does), and `alpha` itself spells it two ways across its own
+///   two runs (`Tea House` / `TEA HOUSE`) — `association_single_side`
+///   *and* `surface_form_variation`, proving the latter fires on a
+///   single-side key too.
+/// - `town hall`/`hosts`/`meeting`: `alpha` never attributes a
+///   paragraph (the field is omitted, `None`), `beta` always attributes
+///   paragraph 5 — `{None}` vs. `{Some(5)}` are disjoint sets,
+///   `attribution_difference` (proving `None` is its own category, not
+///   "no signal").
+/// - `library`/`hosts`/`reading`: neither side ever attributes a
+///   paragraph — `{None}` vs. `{None}` are *not* disjoint, a control key
+///   that must show no attribution difference despite neither side
+///   locating it.
+///
+/// The `BrewCo Group` concept alias resolves to `beer co` in every
+/// `alpha` run but to `brewer` in `beta`'s — disjoint canonicals,
+/// `alias_resolution_difference`.
+///
+/// Document `sake` completes only for `alpha` (`beta` has no cell entry
+/// for it at all) — `document_coverage` with `present_in: ["alpha"]`
+/// and no association-level records, the coverage-exclusion case.
+fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
+    let dir = temp_dir(tag);
+    fs::create_dir_all(dir.join("runs")).unwrap();
+    fs::create_dir_all(dir.join("cells/alpha/run01")).unwrap();
+    fs::create_dir_all(dir.join("cells/alpha/run02")).unwrap();
+    fs::create_dir_all(dir.join("cells/beta/run01")).unwrap();
+
+    fs::write(
+        dir.join("cells/alpha/run01/brewery.jsonl"),
+        "\
+{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/brewery.md\"}
+{\"passage\":\"text\"}
+{\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"ale\",\"weight\":1.0,\"paragraph\":0}
+{\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":1.0,\"paragraph\":1}
+{\"subject\":\"beer co\",\"label\":\"founded in\",\"object\":\"1990\",\"weight\":1.0,\"paragraph\":2}
+{\"subject\":\"Cafe Co\",\"label\":\"brews\",\"object\":\"latte\",\"weight\":1.0,\"paragraph\":3}
+{\"subject\":\"Tea House\",\"label\":\"brews\",\"object\":\"matcha\",\"weight\":1.0,\"paragraph\":4}
+{\"subject\":\"Town Hall\",\"label\":\"hosts\",\"object\":\"meeting\",\"weight\":1.0}
+{\"subject\":\"Library\",\"label\":\"hosts\",\"object\":\"reading\",\"weight\":1.0}
+{\"alias\":\"BrewCo Group\",\"canonical\":\"beer co\",\"kind\":\"concept\"}
+",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("cells/alpha/run01/sake.jsonl"),
+        "\
+{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/sake.md\"}
+{\"passage\":\"text\"}
+{\"subject\":\"sake co\",\"label\":\"brews\",\"object\":\"junmai\",\"weight\":1.0,\"paragraph\":0}
+",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("cells/alpha/run02/brewery.jsonl"),
+        "\
+{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/brewery.md\"}
+{\"passage\":\"text\"}
+{\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"ale\",\"weight\":1.0,\"paragraph\":0}
+{\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":1.0,\"paragraph\":1}
+{\"subject\":\"beer co\",\"label\":\"founded in\",\"object\":\"1990\",\"weight\":1.0,\"paragraph\":2}
+{\"subject\":\"Cafe Co\",\"label\":\"brews\",\"object\":\"latte\",\"weight\":1.0,\"paragraph\":3}
+{\"subject\":\"TEA HOUSE\",\"label\":\"brews\",\"object\":\"matcha\",\"weight\":1.0,\"paragraph\":4}
+{\"subject\":\"Town Hall\",\"label\":\"hosts\",\"object\":\"meeting\",\"weight\":1.0}
+{\"subject\":\"Library\",\"label\":\"hosts\",\"object\":\"reading\",\"weight\":1.0}
+{\"alias\":\"BrewCo Group\",\"canonical\":\"beer co\",\"kind\":\"concept\"}
+",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("cells/beta/run01/brewery.jsonl"),
+        "\
+{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/brewery.md\"}
+{\"passage\":\"text\"}
+{\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"ale\",\"weight\":1.0,\"paragraph\":0}
+{\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":-1.0,\"paragraph\":1}
+{\"subject\":\"beer co\",\"label\":\"founded in\",\"object\":\"1990\",\"weight\":1.0,\"paragraph\":7}
+{\"subject\":\"CAFE CO\",\"label\":\"brews\",\"object\":\"latte\",\"weight\":1.0,\"paragraph\":3}
+{\"subject\":\"Town Hall\",\"label\":\"hosts\",\"object\":\"meeting\",\"weight\":1.0,\"paragraph\":5}
+{\"subject\":\"Library\",\"label\":\"hosts\",\"object\":\"reading\",\"weight\":1.0}
+{\"alias\":\"BrewCo Group\",\"canonical\":\"brewer\",\"kind\":\"concept\"}
+",
+    )
+    .unwrap();
+
+    fn doc_start(cell_id: &str, document_id: &str, source: &str, document_sha256: &str) -> Value {
+        serde_json::json!({
+            "kind": "document", "ts": 0.0, "cell_id": cell_id,
+            "document_id": document_id, "source": source,
+            "document_sha256": document_sha256, "chunk_total": 1, "phase": "start",
+        })
+    }
+    fn doc_end_written(
+        cell_id: &str,
+        document_id: &str,
+        source: &str,
+        document_sha256: &str,
+        batch_path: &str,
+    ) -> Value {
+        serde_json::json!({
+            "kind": "document", "ts": 1.0, "cell_id": cell_id,
+            "document_id": document_id, "source": source,
+            "document_sha256": document_sha256, "phase": "end", "outcome": "written",
+            "associations": 1, "concepts": 0, "labels": 0, "questions": 0,
+            "duplicates": 0, "dropped": 0, "batch_path": batch_path,
+        })
+    }
+
+    let alpha_run01_lines = [
+        serde_json::json!({
+            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-diff",
+            "cell_id": "alpha.run01", "model_id": "alpha", "model_name": "alpha-model",
+            "run_index": 1, "prompt_version": 1,
+        }),
+        doc_start("alpha.run01", "brewery", "corpus/brewery.md", "sha-brewery"),
+        doc_end_written(
+            "alpha.run01",
+            "brewery",
+            "corpus/brewery.md",
+            "sha-brewery",
+            "cells/alpha/run01/brewery.jsonl",
+        ),
+        doc_start("alpha.run01", "sake", "corpus/sake.md", "sha-sake"),
+        doc_end_written(
+            "alpha.run01",
+            "sake",
+            "corpus/sake.md",
+            "sha-sake",
+            "cells/alpha/run01/sake.jsonl",
+        ),
+        serde_json::json!({
+            "kind": "cell", "ts": 2.0, "cell_id": "alpha.run01", "outcome": "complete",
+            "documents_written": 2, "attempts_total": 0, "exit_code": 0,
+        }),
+    ];
+    fs::write(
+        dir.join("runs/alpha.run01.jsonl"),
+        alpha_run01_lines
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let alpha_run02_lines = [
+        serde_json::json!({
+            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-diff",
+            "cell_id": "alpha.run02", "model_id": "alpha", "model_name": "alpha-model",
+            "run_index": 2, "prompt_version": 1,
+        }),
+        doc_start("alpha.run02", "brewery", "corpus/brewery.md", "sha-brewery"),
+        doc_end_written(
+            "alpha.run02",
+            "brewery",
+            "corpus/brewery.md",
+            "sha-brewery",
+            "cells/alpha/run02/brewery.jsonl",
+        ),
+        serde_json::json!({
+            "kind": "cell", "ts": 2.0, "cell_id": "alpha.run02", "outcome": "complete",
+            "documents_written": 1, "attempts_total": 0, "exit_code": 0,
+        }),
+    ];
+    fs::write(
+        dir.join("runs/alpha.run02.jsonl"),
+        alpha_run02_lines
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let beta_run01_lines = [
+        serde_json::json!({
+            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-diff",
+            "cell_id": "beta.run01", "model_id": "beta", "model_name": "beta-model",
+            "run_index": 1, "prompt_version": 1,
+        }),
+        doc_start("beta.run01", "brewery", "corpus/brewery.md", "sha-brewery"),
+        doc_end_written(
+            "beta.run01",
+            "brewery",
+            "corpus/brewery.md",
+            "sha-brewery",
+            "cells/beta/run01/brewery.jsonl",
+        ),
+        serde_json::json!({
+            "kind": "cell", "ts": 2.0, "cell_id": "beta.run01", "outcome": "complete",
+            "documents_written": 1, "attempts_total": 0, "exit_code": 0,
+        }),
+    ];
+    fs::write(
+        dir.join("runs/beta.run01.jsonl"),
+        beta_run01_lines
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let manifest = serde_json::json!({
+        "taguru_benchmark_manifest": 1,
+        "run_id": "run-diff",
+        "started_at": "2026-07-26T09:00:00Z",
+        "finished_at": "2026-07-26T09:10:00Z",
+        "taguru_version": "0.0.0",
+        "sdk_versions": {},
+        "harness": {},
+        "extraction_settings": {},
+        "documents": [
+            {
+                "document_id": "brewery", "path": "corpus/brewery.md", "bytes": 500,
+                "sha256": "sha-brewery", "paragraph_count": 10, "chunk_total": 2,
+                "chunks": [
+                    {"chunk_index": 0, "chunk_sha256": "sha-chunk0", "chunk_bytes": 200,
+                     "paragraph_first": 0, "paragraph_last": 4},
+                    {"chunk_index": 1, "chunk_sha256": "sha-chunk1", "chunk_bytes": 200,
+                     "paragraph_first": 5, "paragraph_last": 9},
+                ],
+            },
+            {
+                "document_id": "sake", "path": "corpus/sake.md", "bytes": 50,
+                "sha256": "sha-sake", "paragraph_count": 3, "chunk_total": 1, "chunks": [],
+            },
+        ],
+        "models": [
+            {
+                "model_id": "alpha", "model_name": "alpha-model", "endpoint": "http://x",
+                "digest": null, "quantization": null, "context_window": null,
+                "structured_output_requested": "auto", "timeout_secs": 60,
+                "provider_probe": {"attempted": [], "ok": true, "note": null},
+            },
+            {
+                "model_id": "beta", "model_name": "beta-model", "endpoint": "http://y",
+                "digest": null, "quantization": null, "context_window": null,
+                "structured_output_requested": "auto", "timeout_secs": 60,
+                "provider_probe": {"attempted": [], "ok": true, "note": null},
+            },
+        ],
+        "cells": [
+            {
+                "cell_id": "alpha.run01", "model_id": "alpha", "run_index": 1,
+                "runs_file": "runs/alpha.run01.jsonl", "cell_dir": "cells/alpha/run01",
+                "structured_output_resolved": "json_schema",
+                "started_at": "2026-07-26T09:00:01Z",
+                "finished_at": "2026-07-26T09:04:00Z", "outcome": "complete",
+            },
+            {
+                "cell_id": "alpha.run02", "model_id": "alpha", "run_index": 2,
+                "runs_file": "runs/alpha.run02.jsonl", "cell_dir": "cells/alpha/run02",
+                "structured_output_resolved": "json_schema",
+                "started_at": "2026-07-26T09:05:00Z",
+                "finished_at": "2026-07-26T09:09:00Z", "outcome": "complete",
+            },
+            {
+                "cell_id": "beta.run01", "model_id": "beta", "run_index": 1,
+                "runs_file": "runs/beta.run01.jsonl", "cell_dir": "cells/beta/run01",
+                "structured_output_resolved": "json_schema",
+                "started_at": "2026-07-26T09:00:01Z",
+                "finished_at": "2026-07-26T09:04:00Z", "outcome": "complete",
+            },
+        ],
+        "environment": {"os": "linux", "arch": "x86_64"},
+    });
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    dir
+}
+
+/// Loads `manifest.json` + `runs/*.jsonl` + `cells/**` for a results
+/// directory and returns the parsed differences.jsonl lines as `Value`s
+/// (line 0 is the header) — the test-side equivalent of
+/// `compute_measurements`, going through the same `load_results` this
+/// module's production code shares between both artifacts.
+fn compute_differences_lines(dir: &Path, with_text: bool) -> Result<Vec<Value>, String> {
+    let manifest = super::super::load_bench_manifest(&dir.join("manifest.json"))?;
+    let loaded = load_results(dir, &manifest)?;
+    let text = differences::compute_differences(
+        &manifest,
+        &loaded.doc_rows,
+        &differences::DifferencesOptions { with_text },
+    )?;
+    text.lines()
+        .map(|line| serde_json::from_str(line).map_err(|e| e.to_string()))
+        .collect()
+}
+
+fn records_of_kind<'a>(lines: &'a [Value], kind: &str) -> Vec<&'a Value> {
+    lines
+        .iter()
+        .filter(|v| v["kind"] == kind)
+        .collect::<Vec<_>>()
+}
+
+#[test]
+fn differences_header_matches_the_adr_shape() {
+    let dir = synthetic_two_model_results_dir("differences-header");
+    let lines = compute_differences_lines(&dir, false).expect("computes");
+    let header = &lines[0];
+    assert_eq!(header["kind"], "header");
+    assert_eq!(header["taguru_benchmark_differences"], 1);
+    assert_eq!(header["run_id"], "run-diff");
+    assert_eq!(header["text_included"], false);
+    assert_eq!(
+        header["pairs"],
+        serde_json::json!([{"pair_id": "alpha__beta", "a": "alpha", "b": "beta"}])
+    );
+    assert_eq!(
+        header["matching"],
+        serde_json::json!({
+            "module": "benchmark::identity",
+            "case_fold": true,
+            "unicode_normalization": "NFKC",
+            "alias_expansion": "batch-local",
+            "weight_tolerance": 0.0,
+        }),
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differences_document_coverage_marks_a_document_only_one_side_completed() {
+    let dir = synthetic_two_model_results_dir("differences-coverage");
+    let lines = compute_differences_lines(&dir, false).expect("computes");
+    let coverage = records_of_kind(&lines, "document_coverage");
+    assert_eq!(coverage.len(), 2, "brewery and sake, one record each");
+
+    let brewery = coverage
+        .iter()
+        .find(|r| r["sides"]["a"]["n_present"] == 2 && r["sides"]["b"]["n_present"] == 1)
+        .expect("brewery: alpha completed 2 runs, beta 1");
+    assert_eq!(brewery["present_in"], serde_json::json!(["alpha", "beta"]));
+    assert_eq!(brewery["sides"]["a"]["runs"], serde_json::json!([1, 2]));
+    assert_eq!(brewery["sides"]["b"]["runs"], serde_json::json!([1]));
+
+    let sake = coverage
+        .iter()
+        .find(|r| r["present_in"] == serde_json::json!(["alpha"]))
+        .expect("sake: alpha only");
+    assert!(sake["sides"]["b"].is_null());
+    assert_eq!(sake["sides"]["a"]["n_present"], 1);
+
+    // sake is excluded from every key-level record (association_shared,
+    // single_side, and every difference kind), since it is not eligible
+    // (beta never completed it).
+    for kind in [
+        "association_shared",
+        "association_single_side",
+        "polarity_difference",
+        "attribution_difference",
+        "surface_form_variation",
+    ] {
+        for record in records_of_kind(&lines, kind) {
+            assert_ne!(record["locator"]["document_id"], "sake", "kind={kind}");
+        }
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differences_control_key_fires_nothing_but_association_shared() {
+    let dir = synthetic_two_model_results_dir("differences-control");
+    let lines = compute_differences_lines(&dir, false).expect("computes");
+    let shared = records_of_kind(&lines, "association_shared");
+    // "beer co" also keys lager and founded-in/1990 — disambiguate on object.
+    let ale = shared
+        .iter()
+        .find(|r| r["key"]["object"] == "ale")
+        .expect("ale is a shared key");
+    assert_eq!(ale["present_in"], serde_json::json!(["alpha", "beta"]));
+    assert_eq!(
+        ale["sides"]["a"],
+        serde_json::json!({"runs": [1, 2], "n_present": 2})
+    );
+    assert_eq!(
+        ale["sides"]["b"],
+        serde_json::json!({"runs": [1], "n_present": 1})
+    );
+
+    for kind in [
+        "polarity_difference",
+        "attribution_difference",
+        "surface_form_variation",
+    ] {
+        assert!(
+            records_of_kind(&lines, kind)
+                .iter()
+                .all(|r| r["key"]["object"] != "ale"),
+            "the control key must not fire {kind}"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differences_polarity_difference_fires_only_on_disjoint_sign_sets() {
+    let dir = synthetic_two_model_results_dir("differences-polarity");
+    let lines = compute_differences_lines(&dir, false).expect("computes");
+    let polarity = records_of_kind(&lines, "polarity_difference");
+    assert_eq!(polarity.len(), 1, "only lager disagrees in sign");
+    let record = polarity[0];
+    assert_eq!(record["key"]["object"], "lager");
+    assert_eq!(record["present_in"], serde_json::json!(["alpha", "beta"]));
+    assert_eq!(record["sides"]["a"]["weight_signs"], serde_json::json!([1]));
+    assert_eq!(
+        record["sides"]["b"]["weight_signs"],
+        serde_json::json!([-1])
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differences_attribution_difference_treats_none_as_its_own_category() {
+    let dir = synthetic_two_model_results_dir("differences-attribution");
+    let lines = compute_differences_lines(&dir, false).expect("computes");
+    let attribution = records_of_kind(&lines, "attribution_difference");
+    // founded-in/1990 (Some(2) vs Some(7)) and town hall/meeting (None
+    // vs Some(5)) both fire; library/reading (None vs None) must not.
+    assert_eq!(attribution.len(), 2);
+
+    let founded_in = attribution
+        .iter()
+        .find(|r| r["key"]["label"] == "founded in")
+        .expect("founded-in fires");
+    assert_eq!(
+        founded_in["sides"]["a"]["paragraphs"],
+        serde_json::json!([2])
+    );
+    assert_eq!(
+        founded_in["sides"]["b"]["paragraphs"],
+        serde_json::json!([7])
+    );
+
+    let town_hall = attribution
+        .iter()
+        .find(|r| r["key"]["subject"] == "town hall")
+        .expect("town hall fires: {None} vs {Some(5)} are disjoint");
+    assert_eq!(
+        town_hall["sides"]["a"]["paragraphs"],
+        serde_json::json!([null])
+    );
+    assert_eq!(
+        town_hall["sides"]["b"]["paragraphs"],
+        serde_json::json!([5])
+    );
+
+    assert!(
+        attribution.iter().all(|r| r["key"]["subject"] != "library"),
+        "library must not fire: {{None}} vs {{None}} are not disjoint"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differences_surface_form_variation_fires_on_shared_and_single_side_keys() {
+    let dir = synthetic_two_model_results_dir("differences-surface");
+    let lines = compute_differences_lines(&dir, false).expect("computes");
+    let surface = records_of_kind(&lines, "surface_form_variation");
+    assert_eq!(
+        surface.len(),
+        2,
+        "cafe co (shared) and tea house (single-side)"
+    );
+
+    let cafe = surface
+        .iter()
+        .find(|r| r["key"]["subject"] == "cafe co")
+        .expect("cafe co: alpha spells it differently from beta");
+    assert_eq!(cafe["present_in"], serde_json::json!(["alpha", "beta"]));
+    assert_eq!(
+        cafe["sides"]["a"]["surface_forms"],
+        serde_json::json!([{"subject": "Cafe Co", "label": "brews", "object": "latte"}]),
+    );
+    assert_eq!(
+        cafe["sides"]["b"]["surface_forms"],
+        serde_json::json!([{"subject": "CAFE CO", "label": "brews", "object": "latte"}]),
+    );
+
+    let tea_house = surface
+        .iter()
+        .find(|r| r["key"]["subject"] == "tea house")
+        .expect("tea house: alpha alone spelled it two ways across its own 2 runs");
+    assert_eq!(tea_house["present_in"], serde_json::json!(["alpha"]));
+    assert!(tea_house["sides"]["b"].is_null());
+    assert_eq!(
+        tea_house["sides"]["a"]["surface_forms"],
+        serde_json::json!([
+            {"subject": "TEA HOUSE", "label": "brews", "object": "matcha"},
+            {"subject": "Tea House", "label": "brews", "object": "matcha"},
+        ]),
+        "sorted (BTreeSet) order of the two raw spellings"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differences_association_single_side_has_a_null_absent_side() {
+    let dir = synthetic_two_model_results_dir("differences-single-side");
+    let lines = compute_differences_lines(&dir, false).expect("computes");
+    let single_side = records_of_kind(&lines, "association_single_side");
+    assert_eq!(single_side.len(), 1);
+    let record = single_side[0];
+    assert_eq!(record["key"]["subject"], "tea house");
+    assert_eq!(record["present_in"], serde_json::json!(["alpha"]));
+    assert!(
+        record["sides"]["b"].is_null(),
+        "absent side is null, never a count"
+    );
+    assert_eq!(record["sides"]["a"]["n_present"], 2);
+    assert_eq!(record["sides"]["a"]["runs"], serde_json::json!([1, 2]));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differences_alias_resolution_difference_requires_both_sides_and_disjoint_canonicals() {
+    let dir = synthetic_two_model_results_dir("differences-alias");
+    let lines = compute_differences_lines(&dir, false).expect("computes");
+    let alias = records_of_kind(&lines, "alias_resolution_difference");
+    assert_eq!(alias.len(), 1);
+    let record = alias[0];
+    assert_eq!(record["alias_kind"], "concept");
+    assert_eq!(record["spelling"], "brewco group");
+    assert_eq!(record["present_in"], serde_json::json!(["alpha", "beta"]));
+    assert_eq!(
+        record["sides"]["a"]["canonicals"],
+        serde_json::json!(["beer co"])
+    );
+    assert_eq!(record["sides"]["a"]["n_present"], 2);
+    assert_eq!(
+        record["sides"]["b"]["canonicals"],
+        serde_json::json!(["brewer"])
+    );
+    assert_eq!(record["sides"]["b"]["n_present"], 1);
+    // Alias lines carry no paragraph locator of their own.
+    assert!(record["locator"]["paragraph"].is_null());
+    assert!(record["locator"]["chunk_index"].is_null());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differences_locator_selects_the_minimum_paragraph_and_derives_its_chunk() {
+    let dir = synthetic_two_model_results_dir("differences-locator");
+    let lines = compute_differences_lines(&dir, false).expect("computes");
+
+    // founded-in/1990: alpha's paragraph is 2, beta's is 7 — the
+    // locator must point at the minimum (2), inside chunk 0
+    // (paragraph_first=0, paragraph_last=4), not chunk 1.
+    let attribution = records_of_kind(&lines, "attribution_difference");
+    let founded_in = attribution
+        .iter()
+        .find(|r| r["key"]["label"] == "founded in")
+        .unwrap();
+    let locator = &founded_in["locator"];
+    assert_eq!(locator["document_id"], "brewery");
+    assert_eq!(locator["source"], "corpus/brewery.md");
+    assert_eq!(locator["document_sha256"], "sha-brewery");
+    assert_eq!(locator["paragraph"], 2);
+    assert_eq!(locator["chunk_index"], 0);
+    assert_eq!(locator["chunk_sha256"], "sha-chunk0");
+    assert!(locator["text"].is_null(), "--with-text was not given");
+    assert_eq!(locator["text_truncated"], false);
+
+    // town hall/meeting: alpha never attributes a paragraph, beta
+    // attributes 5 — the union is {None, Some(5)}, so the minimum
+    // Some(.) is 5, inside chunk 1.
+    let town_hall = attribution
+        .iter()
+        .find(|r| r["key"]["subject"] == "town hall")
+        .unwrap();
+    assert_eq!(town_hall["locator"]["paragraph"], 5);
+    assert_eq!(town_hall["locator"]["chunk_index"], 1);
+    assert_eq!(town_hall["locator"]["chunk_sha256"], "sha-chunk1");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differences_lexicon_test_bans_the_adr_0003_9_4_vocabulary_everywhere() {
+    let dir = synthetic_two_model_results_dir("differences-lexicon");
+    let lines = compute_differences_lines(&dir, false).expect("computes");
+    let extended_lexicon: Vec<&str> = ADR_9_4_LEXICON
+        .iter()
+        .copied()
+        .chain(["false_positive", "falsepositive"])
+        .collect();
+    for (i, line) in lines.iter().enumerate() {
+        assert_no_banned_keys(line, &format!("differences.jsonl[{i}]"));
+        for banned in BANNED_KEYS {
+            let kind = line["kind"].as_str().unwrap_or("");
+            assert!(
+                !kind.to_lowercase().contains(banned),
+                "banned key fragment '{banned}' found in kind '{kind}'"
+            );
+        }
+        for banned in &extended_lexicon {
+            let kind = line["kind"].as_str().unwrap_or("");
+            assert!(
+                !kind.to_lowercase().contains(*banned),
+                "banned ADR §9.4 lexicon fragment '{banned}' found in kind '{kind}'"
+            );
+            fn walk_values(value: &Value, banned: &str, path: &str) {
+                match value {
+                    Value::Object(map) => {
+                        for (k, v) in map {
+                            assert!(
+                                !k.to_lowercase().contains(banned),
+                                "banned ADR §9.4 lexicon fragment '{banned}' found in key '{k}' at {path}"
+                            );
+                            walk_values(v, banned, &format!("{path}.{k}"));
+                        }
+                    }
+                    Value::Array(items) => {
+                        for (idx, v) in items.iter().enumerate() {
+                            walk_values(v, banned, &format!("{path}[{idx}]"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            walk_values(line, banned, &format!("differences.jsonl[{i}]"));
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differences_a_single_model_directory_yields_a_header_with_no_pairs() {
+    let dir = synthetic_results_dir("differences-single-model");
+    let lines = compute_differences_lines(&dir, false).expect("computes");
+    assert_eq!(lines.len(), 1, "header only — no pair to compare");
+    assert_eq!(lines[0]["pairs"], serde_json::json!([]));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn compute_differences_is_deterministic_across_two_runs() {
+    let dir = synthetic_two_model_results_dir("differences-determinism");
+    let first = compute_differences_lines(&dir, false).expect("computes");
+    let second = compute_differences_lines(&dir, false).expect("computes");
+    assert_eq!(first, second);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn with_text_embeds_the_exact_paragraph_bytes() {
+    let dir = synthetic_two_model_results_dir("differences-with-text");
+    // The corpus file compare will actually read for --with-text: its
+    // sha256 must match manifest.json's pinned "sha-brewery" — since
+    // that fixture uses a placeholder hash, point the manifest at a
+    // real file and recompute a real hash for this one test.
+    fs::create_dir_all(dir.join("corpus")).unwrap();
+    let paragraphs = "para0\n\npara1\n\npara2 is this one\n\npara3\n\npara4\n\npara5\n\npara6\n\npara7\n\npara8\n\npara9";
+    fs::write(dir.join("corpus/brewery.md"), paragraphs).unwrap();
+    let real_sha = crate::extract::sha256_hex(paragraphs.as_bytes());
+
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["documents"][0]["path"] =
+        serde_json::json!(dir.join("corpus/brewery.md").to_string_lossy());
+    manifest["documents"][0]["sha256"] = serde_json::json!(real_sha);
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let lines = compute_differences_lines(&dir, true).expect("computes");
+    assert_eq!(lines[0]["text_included"], true);
+
+    let attribution = records_of_kind(&lines, "attribution_difference");
+    let founded_in = attribution
+        .iter()
+        .find(|r| r["key"]["label"] == "founded in")
+        .unwrap();
+    // paragraph 2 (0-indexed, blank-line separated) is "para2 is this one".
+    assert_eq!(founded_in["locator"]["text"], "para2 is this one");
+    assert_eq!(founded_in["locator"]["text_truncated"], false);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn with_text_truncates_at_the_cap_on_a_char_boundary() {
+    let dir = synthetic_two_model_results_dir("differences-with-text-truncate");
+    fs::create_dir_all(dir.join("corpus")).unwrap();
+    // founded-in/1990's locator resolves to paragraph 2 (alpha's value,
+    // the minimum of {2, 7}) — put the oversized paragraph there,
+    // blank-line separated from 9 short filler paragraphs so the
+    // document still has 10 paragraphs (matching paragraph_count: 10)
+    // and every OTHER locator in this fixture keeps resolving to a
+    // short paragraph as usual. Each "あ" is 3 bytes, so 2000 of them
+    // is 6000 bytes, and 4096 does not land on a character boundary
+    // (4096 % 3 != 0), exercising the char-boundary floor.
+    let long_paragraph = "あ".repeat(2000);
+    let text = format!("p0\n\np1\n\n{long_paragraph}\n\np3\n\np4\n\np5\n\np6\n\np7\n\np8\n\np9");
+    fs::write(dir.join("corpus/brewery.md"), &text).unwrap();
+    let real_sha = crate::extract::sha256_hex(text.as_bytes());
+
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["documents"][0]["path"] =
+        serde_json::json!(dir.join("corpus/brewery.md").to_string_lossy());
+    manifest["documents"][0]["sha256"] = serde_json::json!(real_sha);
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let lines = compute_differences_lines(&dir, true).expect("computes");
+    let attribution = records_of_kind(&lines, "attribution_difference");
+    let founded_in = attribution
+        .iter()
+        .find(|r| r["key"]["label"] == "founded in")
+        .unwrap();
+    let text = founded_in["locator"]["text"].as_str().unwrap();
+    assert!(text.len() <= 4096);
+    assert!(text.chars().all(|c| c == 'あ'), "no partial character");
+    assert_eq!(founded_in["locator"]["text_truncated"], true);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn with_text_refuses_a_document_sha256_drift() {
+    let dir = synthetic_two_model_results_dir("differences-with-text-drift");
+    fs::create_dir_all(dir.join("corpus")).unwrap();
+    fs::write(dir.join("corpus/brewery.md"), "drifted content").unwrap();
+    // manifest.json still pins the placeholder "sha-brewery" — deliberately
+    // left unmatched, standing in for a corpus that changed after the
+    // results directory was created.
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["documents"][0]["path"] =
+        serde_json::json!(dir.join("corpus/brewery.md").to_string_lossy());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let error = compute_differences_lines(&dir, true).unwrap_err();
+    assert!(error.contains("brewery.md"), "{error}");
+    assert!(error.contains("sha-brewery"), "{error}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn with_text_refuses_an_unreadable_corpus_file() {
+    let dir = synthetic_two_model_results_dir("differences-with-text-unreadable");
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["documents"][0]["path"] =
+        serde_json::json!(dir.join("corpus/does-not-exist.md").to_string_lossy());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let error = compute_differences_lines(&dir, true).unwrap_err();
+    assert!(error.contains("does-not-exist.md"), "{error}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
 // ============================== atomic write cleanup ==============================
 
 #[test]
-fn write_measurements_cleans_up_staged_files_when_a_later_commit_fails() {
-    // Persistence op sequence: stage(csv), stage(json), commit(csv),
-    // commit(json) — allowing the first 2 through and failing the 3rd
-    // exercises the exact case where `staged_csv` was already staged
-    // and its own commit is what fails.
+fn write_artifacts_cleans_up_staged_files_when_a_later_commit_fails() {
+    // Persistence op sequence: stage(differences), stage(csv),
+    // stage(json), commit(differences), commit(csv), commit(json) —
+    // allowing the first 3 through and failing the 4th exercises the
+    // case where every artifact was already staged and the first
+    // commit is what fails.
     let dir = synthetic_results_dir("write-cleanup");
     let measurements = compute_measurements(&dir).expect("computes");
 
-    crate::storage::fail_persistence_ops_after(2);
-    let result = write_measurements(&dir, &measurements);
+    crate::storage::fail_persistence_ops_after(3);
+    let result = write_artifacts(&dir, &measurements, "differences-fixture\n");
     let past_end = crate::storage::clear_persistence_fault();
 
     assert!(result.is_err(), "the injected commit failure must surface");
@@ -1409,6 +2223,7 @@ fn write_measurements_cleans_up_staged_files_when_a_later_commit_fails() {
         !past_end,
         "the fault must have fired for this test to be meaningful"
     );
+    assert!(!dir.join("differences.jsonl").exists());
     assert!(!dir.join("measurements.csv").exists());
     assert!(!dir.join("measurements.json").exists());
 
