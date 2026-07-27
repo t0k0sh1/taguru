@@ -67,10 +67,10 @@ use crate::api::MAX_CONTEXT_NAME_BYTES;
 use crate::api::sources::{PassageHit, PassageLanes, PassagePage, SearchContextPlan};
 use crate::cli::default_base_url;
 use crate::config::{load_config, subcommand_usage_error};
+use crate::evalset::{self, EvalCase, ExpectedSource};
+use crate::measure::{Distribution, MetricDef, MetricValue, MetricsMap, def, ratio_metric};
 use crate::remote::{Api, ApiFailure};
 
-use super::compare::{Distribution, MetricDef, MetricValue, def, ratio_metric};
-use super::evalset::{self, EvalCase, ExpectedSource};
 use super::identity;
 use super::{BenchManifest, DocumentInfo, ManifestModel, load_bench_manifest};
 
@@ -1091,8 +1091,6 @@ fn pair_overlap(a: &[HitLocator], b: &[HitLocator]) -> (Option<f64>, usize, Opti
 }
 
 // ============================== Aggregation ==============================
-
-type MetricsMap = BTreeMap<String, MetricValue>;
 
 fn aggregate(cases: &[CaseBlock]) -> (BTreeMap<String, MetricsMap>, BTreeMap<String, MetricsMap>) {
     let mut model_ids: BTreeSet<String> = BTreeSet::new();
