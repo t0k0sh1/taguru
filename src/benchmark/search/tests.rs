@@ -143,6 +143,21 @@ fn pair_key_is_sorted_and_symmetric() {
     assert_eq!(pair_key("a", "b"), "a__b");
 }
 
+// ============================== Ownership marker ==============================
+
+#[test]
+fn ownership_marker_differs_across_run_index_for_the_same_run_id_and_model() {
+    // run_id names the whole extract invocation, constant across every
+    // --run N within it — without run_index in the marker, two
+    // different runs of the same results directory would produce the
+    // same marker and silently merge into one corpus.
+    let run1 = ownership_marker("run-abc", "m1", 1);
+    let run2 = ownership_marker("run-abc", "m1", 2);
+    assert_ne!(run1, run2, "{run1} vs {run2}");
+    assert!(run1.contains("run_index 1"), "{run1}");
+    assert!(run2.contains("run_index 2"), "{run2}");
+}
+
 // ============================== Batch header rewriting ==============================
 
 #[test]
@@ -459,6 +474,36 @@ fn compute_recall_is_zero_when_nothing_matches() {
     assert_eq!(result.mrr, 0.0);
 }
 
+#[test]
+fn resolve_expected_items_runs_once_and_score_recall_reuses_it_across_models() {
+    // The regression this guards: resolving expectations must happen
+    // once per case, not once per model — resolve_expected_items is
+    // the only place a resolution warning is produced, so calling it
+    // once and scoring each model's hits against the same items is
+    // what keeps an unresolvable source from warning N times for N
+    // models. Two models' hits, scored from the one resolved list,
+    // must each get their own independent recall result.
+    let matching = identity::Matching::default();
+    let expected = vec![ExpectedSource {
+        source: "corpus/does-not-exist.md".to_string(),
+        paragraphs: vec![],
+        relevance: 1,
+    }];
+    let docs = [doc("d1", "corpus/a.md")];
+    let (items, warnings) = resolve_expected_items(&matching, "c1", &expected, &[], &docs);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+
+    let hits_m1 = [hit("corpus/does-not-exist.md", 0, "")];
+    let hits_m2 = [hit("corpus/a.md", 0, "")];
+    let result_m1 = score_recall(&matching, &items, &hits_m1);
+    let result_m2 = score_recall(&matching, &items, &hits_m2);
+    assert_eq!(
+        result_m1.matched, 1,
+        "m1's hit matches the literal fallback path"
+    );
+    assert_eq!(result_m2.matched, 0, "m2's hit does not");
+}
+
 // ============================== Pair overlap ==============================
 
 #[test]
@@ -493,6 +538,55 @@ fn pair_overlap_of_disjoint_hit_sets_has_no_shared_locators() {
     assert_eq!(jaccard, Some(0.0));
     assert_eq!(shared, 0);
     assert_eq!(mean_rank_difference, None);
+}
+
+// ============================== Aggregation ==============================
+
+#[test]
+fn aggregate_model_keeps_unknown_lanes_apart_from_genuine_zero_hit_lanes() {
+    // A case whose lanes could not be recovered (the legacy fallback
+    // in extract_hits) must not be indistinguishable, in the
+    // aggregate, from a case whose lanes genuinely evidenced nothing
+    // — bm25_only/vector_only/both are 0 in both situations, so
+    // lanes.unknown is what tells them apart.
+    let mut models = BTreeMap::new();
+    models.insert(
+        "m1".to_string(),
+        SearchOutcome::Searched {
+            hit_count: 2,
+            empty: false,
+            distinct_sources: 1,
+            lanes: LaneHitCounts {
+                bm25_only: 0,
+                vector_only: 0,
+                both: 0,
+                neither: 0,
+                unknown: 2,
+            },
+            plan: None,
+            hits: vec![],
+            recall: None,
+        },
+    );
+    let cases = vec![CaseBlock {
+        case_id: "c1".to_string(),
+        query: "q".to_string(),
+        cues: vec![],
+        limit: 10,
+        has_expectations: false,
+        models,
+        pairs: BTreeMap::new(),
+    }];
+
+    let metrics = aggregate_model(&cases, "m1");
+    let value = serde_json::to_value(&metrics).unwrap();
+    assert_eq!(value["lanes.unknown"]["n"], 1, "{value}");
+    assert_eq!(value["lanes.unknown"]["sum"], 2.0, "{value}");
+    assert_eq!(
+        value["lanes.bm25_only"]["sum"], 0.0,
+        "still recorded, but lanes.unknown is what marks this case's zeros as \
+         unrecoverable rather than observed — {value}"
+    );
 }
 
 // ============================== No cross-model verdict vocabulary ==============================

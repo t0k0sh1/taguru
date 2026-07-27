@@ -108,6 +108,73 @@ fn write_eval_file(dir: &Path) -> PathBuf {
     path
 }
 
+/// A two-run, two-model results directory. `m1` has both `run01` and
+/// `run02` recorded — the fixture the ownership-marker regression
+/// needs (a marker without `run_index` would let `--run 2` merge into
+/// the corpus `--run 1` built, instead of being refused). `m2` has
+/// `run02` only, so it is untouched by a `--run 1` invocation and
+/// still builds cleanly at `--run 2` — without it, `--run 2` would
+/// reject its only model (`m1`) and exit before `retrieval.json` is
+/// ever written, short-circuiting the assertion this fixture exists
+/// to make.
+fn write_two_run_results_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-benchmark-search-two-run-{tag}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (model, run) in [("m1", "run01"), ("m1", "run02"), ("m2", "run02")] {
+        std::fs::create_dir_all(dir.join(format!("cells/{model}/{run}"))).unwrap();
+        std::fs::write(
+            dir.join(format!("cells/{model}/{run}/brewery.jsonl")),
+            "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"corpus/brewery.md\"}\n\
+             {\"passage\":\"青嶺は青嶺酒造が造る銘柄です。\"}\n\
+             {\"subject\":\"青嶺\",\"label\":\"醸造元\",\"object\":\"青嶺酒造\",\"weight\":1.0,\"paragraph\":0}\n",
+        )
+        .unwrap();
+    }
+
+    let cell = |model: &str, run_index: u32| {
+        json!({"cell_id": format!("{model}.run{run_index:02}"), "model_id": model,
+            "run_index": run_index, "runs_file": format!("runs/{model}.run{run_index:02}.jsonl"),
+            "cell_dir": format!("cells/{model}/run{run_index:02}"),
+            "structured_output_resolved": "json_schema",
+            "started_at": "2026-07-26T09:00:01Z", "finished_at": "2026-07-26T09:04:00Z",
+            "outcome": "complete"})
+    };
+    let model_entry = |model_id: &str, model_name: &str| {
+        json!({"model_id": model_id, "model_name": model_name, "endpoint": "http://x",
+            "digest": null, "quantization": null, "context_window": null,
+            "structured_output_requested": "auto", "timeout_secs": 60,
+            "provider_probe": {"attempted": [], "ok": true, "note": null}})
+    };
+
+    let manifest = json!({
+        "taguru_benchmark_manifest": 1,
+        "run_id": "run-search-two-run",
+        "started_at": "2026-07-26T09:00:00Z",
+        "finished_at": "2026-07-26T09:05:00Z",
+        "taguru_version": "0.0.0",
+        "sdk_versions": {},
+        "harness": {},
+        "extraction_settings": {"context": "sake"},
+        "documents": [
+            {"document_id": "brewery", "path": "corpus/brewery.md", "bytes": 10,
+             "sha256": "sha-brewery", "paragraph_count": 1, "chunk_total": 1, "chunks": []},
+        ],
+        "models": [model_entry("m1", "m1-model"), model_entry("m2", "m2-model")],
+        "cells": [cell("m1", 1), cell("m1", 2), cell("m2", 2)],
+        "environment": {"os": "linux", "arch": "x86_64"},
+    });
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    dir
+}
+
 fn associations_count(server: &Server, context: &str) -> u64 {
     server.ok("GET", &format!("/contexts/{context}"), None)["stats"]["associations"]
         .as_u64()
@@ -227,6 +294,70 @@ fn benchmark_search_rejects_a_run_the_manifest_never_recorded() {
     );
     assert_eq!(code, 2);
     assert!(stderr.contains("no cell recorded for run 2"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&results_dir);
+}
+
+#[test]
+fn benchmark_search_refuses_to_merge_a_second_run_into_a_corpus_the_first_run_built() {
+    let server = Server::start("search-cross-run");
+    let results_dir = write_two_run_results_dir("cross-run");
+    let eval_path = write_eval_file(&results_dir);
+
+    let run = |run_index: &str| {
+        run_cli(
+            &[
+                "benchmark",
+                "search",
+                "--eval",
+                eval_path.to_str().unwrap(),
+                "--url",
+                &server.base,
+                "--run",
+                run_index,
+                results_dir.to_str().unwrap(),
+            ],
+            &[],
+        )
+    };
+
+    let (code1, _out1, stderr1) = run("1");
+    assert_eq!(code1, 0, "{stderr1}");
+    let retrieval1: Value =
+        serde_json::from_str(&std::fs::read_to_string(results_dir.join("retrieval.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        retrieval1["corpus"]["m1"]["outcome"], "built",
+        "{retrieval1}"
+    );
+    // m2 has no run01 cell — skipped this round, not built.
+    assert_eq!(
+        retrieval1["corpus"]["m2"]["outcome"], "skipped",
+        "{retrieval1}"
+    );
+
+    // A second invocation against a DIFFERENT --run must not silently
+    // fold into the corpus --run 1 already built — the ownership
+    // marker includes run_index precisely so this is refused instead.
+    // m2 is untouched by --run 1 (its context was never created), so
+    // it builds cleanly at --run 2 — proof that one model's rejection
+    // does not block the rest of the matrix, and that retrieval.json
+    // still gets written when at least one model succeeds.
+    let (code2, _out2, stderr2) = run("2");
+    assert_eq!(code2, 0, "{stderr2}");
+    let retrieval2: Value =
+        serde_json::from_str(&std::fs::read_to_string(results_dir.join("retrieval.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        retrieval2["corpus"]["m1"]["outcome"], "rejected",
+        "{retrieval2}"
+    );
+    let reason = retrieval2["corpus"]["m1"]["reason"].as_str().unwrap_or("");
+    assert!(reason.contains("ownership marker"), "{reason}");
+    assert_eq!(
+        retrieval2["corpus"]["m2"]["outcome"], "built",
+        "{retrieval2}"
+    );
 
     let _ = std::fs::remove_dir_all(&results_dir);
 }

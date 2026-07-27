@@ -407,8 +407,15 @@ fn corpus_context_name(prefix: &str, model_id: &str) -> String {
 
 const OWNER_DESCRIPTION_PREFIX: &str = "taguru benchmark search corpus";
 
-fn ownership_marker(run_id: &str, model_id: &str) -> String {
-    format!("{OWNER_DESCRIPTION_PREFIX}: run {run_id}, model {model_id}")
+/// `run_id` alone is not enough: it names the whole `taguru benchmark
+/// extract` invocation, not one `--run N` within it, so a marker
+/// without `run_index` would pass the ownership check unchanged
+/// across `--run 1` then `--run 2` against the same results
+/// directory — silently mixing two runs' documents into one corpus,
+/// since import never removes a source absent from the current
+/// import's batch set.
+fn ownership_marker(run_id: &str, model_id: &str, run_index: usize) -> String {
+    format!("{OWNER_DESCRIPTION_PREFIX}: run {run_id}, model {model_id}, run_index {run_index}")
 }
 
 fn corpus_block(context: &str, outcome: &str, reason: Option<String>) -> CorpusBlock {
@@ -436,7 +443,7 @@ fn build_corpus(
     model: &ManifestModel,
     context: &str,
 ) -> CorpusBlock {
-    let marker = ownership_marker(&manifest.run_id, &model.model_id);
+    let marker = ownership_marker(&manifest.run_id, &model.model_id, run_index);
     match api.get_envelope(&["contexts", context]) {
         Ok(entry) => {
             let existing = entry
@@ -652,6 +659,21 @@ fn build_case_block(context: &SearchContext, case: &EvalCase) -> (CaseBlock, Vec
     let mut models: BTreeMap<String, SearchOutcome> = BTreeMap::new();
     let mut hit_locators: BTreeMap<String, Vec<HitLocator>> = BTreeMap::new();
 
+    // Resolved once per case — never once per model — so an
+    // unresolvable or ambiguous expected_sources entry warns exactly
+    // once no matter how many models this case searches.
+    let expected_items = case.has_expectations().then(|| {
+        let (items, mut resolve_warnings) = resolve_expected_items(
+            context.matching,
+            &case.case_id,
+            &case.expected_sources,
+            &case.expected_concepts,
+            context.documents,
+        );
+        warnings.append(&mut resolve_warnings);
+        items
+    });
+
     for (model_id, (model_context, available)) in context.availability {
         if !available {
             models.insert(
@@ -676,20 +698,10 @@ fn build_case_block(context: &SearchContext, case: &EvalCase) -> (CaseBlock, Vec
                     })
                     .collect();
                 let lanes = lane_hit_counts(&hits, plan.is_some());
-                let recall = if case.has_expectations() {
-                    let (result, mut recall_warnings) = compute_recall(
-                        context.matching,
-                        &case.case_id,
-                        &case.expected_sources,
-                        &case.expected_concepts,
-                        context.documents,
-                        &hits,
-                    );
-                    warnings.append(&mut recall_warnings);
+                let recall = expected_items.as_ref().and_then(|items| {
+                    let result = score_recall(context.matching, items, &hits);
                     (result.expected_total > 0).then_some(result)
-                } else {
-                    None
-                };
+                });
                 let distinct_sources = hits
                     .iter()
                     .map(|hit| hit.source.as_str())
@@ -932,14 +944,20 @@ fn resolve_expected_source_path(
     }
 }
 
-fn compute_recall(
+/// Resolves a case's `expected_sources`/`expected_concepts` into one
+/// item list, with the resolution warnings — depends only on the
+/// case and the results directory's document dictionary, never on any
+/// model's hits, so a caller searching several models for one case
+/// must call this exactly once and reuse the result (matching this
+/// module's own "warn once per case, not once per model" posture) —
+/// see [`score_recall`], the per-model half that does depend on hits.
+fn resolve_expected_items(
     matching: &identity::Matching,
     case_id: &str,
     expected_sources: &[ExpectedSource],
     expected_concepts: &[String],
     documents: &[DocumentInfo],
-    hits: &[PassageHit],
-) -> (RecallResult, Vec<String>) {
+) -> (Vec<ExpectedItem>, Vec<String>) {
     let mut warnings = Vec::new();
     let mut items = Vec::new();
     for expected in expected_sources {
@@ -960,7 +978,18 @@ fn compute_recall(
             normalized: identity::normalize_term(matching, concept),
         });
     }
+    (items, warnings)
+}
 
+/// Scores one model's hits against a case's already-resolved expected
+/// items (see [`resolve_expected_items`]) — generates no warnings of
+/// its own, so it is safe to call once per model without duplicating
+/// the resolution warnings that many models would otherwise repeat.
+fn score_recall(
+    matching: &identity::Matching,
+    items: &[ExpectedItem],
+    hits: &[PassageHit],
+) -> RecallResult {
     let normalized_texts: Vec<String> = hits
         .iter()
         .map(|hit| identity::normalize_term(matching, &hit.text))
@@ -989,15 +1018,39 @@ fn compute_recall(
     } else {
         matched as f64 / expected_total as f64
     };
-    (
-        RecallResult {
-            recall_at_k,
-            mrr,
-            expected_total,
-            matched,
-        },
-        warnings,
-    )
+    RecallResult {
+        recall_at_k,
+        mrr,
+        expected_total,
+        matched,
+    }
+}
+
+/// [`resolve_expected_items`] then [`score_recall`] in one call — a
+/// test convenience for exercising one model's recall against a case
+/// in a single call. No production caller has this shape:
+/// [`build_case_block`] always calls the two halves separately,
+/// resolving once per case and scoring once per model, to avoid
+/// exactly the duplicate-warning bug a combined call would invite for
+/// more than one model.
+#[cfg(test)]
+fn compute_recall(
+    matching: &identity::Matching,
+    case_id: &str,
+    expected_sources: &[ExpectedSource],
+    expected_concepts: &[String],
+    documents: &[DocumentInfo],
+    hits: &[PassageHit],
+) -> (RecallResult, Vec<String>) {
+    let (items, warnings) = resolve_expected_items(
+        matching,
+        case_id,
+        expected_sources,
+        expected_concepts,
+        documents,
+    );
+    let result = score_recall(matching, &items, hits);
+    (result, warnings)
 }
 
 /// `(source, paragraph)` overlap between two models' hit lists for one
@@ -1072,6 +1125,8 @@ fn aggregate_model(cases: &[CaseBlock], model_id: &str) -> MetricsMap {
     let mut bm25_only = Vec::new();
     let mut vector_only = Vec::new();
     let mut both = Vec::new();
+    let mut neither = Vec::new();
+    let mut unknown = Vec::new();
     let mut recall_values = Vec::new();
     let mut mrr_values = Vec::new();
 
@@ -1095,9 +1150,17 @@ fn aggregate_model(cases: &[CaseBlock], model_id: &str) -> MetricsMap {
                     empties += 1;
                 }
                 distinct_sources.push(*sources as f64);
+                // `neither`/`unknown` get their own samples too, not
+                // just `bm25_only`/`vector_only`/`both` — a case whose
+                // lanes could not be recovered (the legacy fallback in
+                // `extract_hits`) pushes 0 into every one of the first
+                // three, which would otherwise be indistinguishable
+                // from a lane that genuinely evidenced nothing.
                 bm25_only.push(lanes.bm25_only as f64);
                 vector_only.push(lanes.vector_only as f64);
                 both.push(lanes.both as f64);
+                neither.push(lanes.neither as f64);
+                unknown.push(lanes.unknown as f64);
                 if let Some(result) = recall {
                     recall_values.push(result.recall_at_k);
                     mrr_values.push(result.mrr);
@@ -1131,6 +1194,14 @@ fn aggregate_model(cases: &[CaseBlock], model_id: &str) -> MetricsMap {
     metrics.insert(
         "lanes.both".to_string(),
         MetricValue::Distribution(Distribution::from_samples(both)),
+    );
+    metrics.insert(
+        "lanes.neither".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(neither)),
+    );
+    metrics.insert(
+        "lanes.unknown".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(unknown)),
     );
     metrics.insert(
         "cases.error_rate".to_string(),
@@ -1269,6 +1340,32 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             &["model"],
             "Hits both lanes agreed on.",
             "POST /contexts/{name}/sources/search response plan.lanes",
+            None,
+        ),
+    );
+    d.insert(
+        "lanes.neither".to_string(),
+        def(
+            "count",
+            "distribution",
+            &["model"],
+            "Hits whose per-hit lane evidence was readable but named neither lane — expected to \
+             be 0 in practice; tracked so a genuine occurrence is visible rather than silently \
+             folded into bm25_only/vector_only.",
+            "POST /contexts/{name}/sources/search response hits[].lanes",
+            None,
+        ),
+    );
+    d.insert(
+        "lanes.unknown".to_string(),
+        def(
+            "count",
+            "distribution",
+            &["model"],
+            "Hits whose per-hit lane evidence could not be read at all — an older or otherwise \
+             non-conforming server's response. Kept apart from bm25_only/vector_only/both/neither \
+             so a legacy response's hits are never misread as evidencing zero lane activity.",
+            "taguru benchmark search's legacy response fallback",
             None,
         ),
     );

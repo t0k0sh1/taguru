@@ -601,15 +601,15 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
   results/</code></pre>
     <pre><code>--eval FILE            eval.jsonl (the shared dataset below)
 --url URL              server to import into and search; default resolves the
-                      same way `taguru health` does (TAGURU_ADDR, or
-                      --config/TAGURU_CONFIG)
+                       same way `taguru health` does (TAGURU_ADDR, or
+                       --config/TAGURU_CONFIG)
 --config FILE          load before resolving --url
 --run N                which extract run to import from, 1-based (default 1)
 --context-prefix NAME  corpus context names are NAME::MODEL_ID (default: the
-                      extraction context manifest.json recorded)
+                       extraction context manifest.json recorded)
 --skip-import          search existing PREFIX::MODEL_ID contexts instead of
-                      importing fresh ones
-RESULTS_DIR             a directory `taguru benchmark extract` wrote</code></pre>
+                       importing fresh ones
+RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
     <p>
       Extraction-model choice does not only change what a graph <i>contains</i> — it changes what a
       search finds. <code>taguru benchmark search</code> (issue #260, ADR 0003 §11) builds one
@@ -638,14 +638,23 @@ RESULTS_DIR             a directory `taguru benchmark extract` wrote</code></pre
       files (<code>diagnostics.jsonl</code> excluded) imported into a context named
       <code>PREFIX::MODEL_ID</code>. Each batch's header line is rewritten before import — its
       <code>context</code> replaced, and its <code>create.description</code> stamped with an
-      ownership marker naming this run's <code>run_id</code> and the model — every other line rides
-      through byte-for-byte, <code>source</code> included. Re-running the same results directory is
-      safe: import is a per-<code>(context, source)</code> create-or-replace, so a second run
-      neither duplicates associations nor loses them. Before importing into an existing context,
-      its current description is checked against the marker this run would stamp; a mismatch
-      refuses that one model (<code>corpus.&lt;model_id&gt;.outcome: "rejected"</code>) rather than
-      overwriting a context this run did not create — pick a different <code>--context-prefix</code>
-      if that happens. <code>--skip-import</code> searches whatever already lives under
+      ownership marker naming this run's <code>run_id</code>, the model, and <code>--run</code>'s
+      own index — every other line rides through byte-for-byte, <code>source</code> included.
+      <code>run_index</code> is part of the marker, not just <code>run_id</code>, because a results
+      directory's <code>run_id</code> names the whole <code>taguru benchmark extract</code>
+      invocation, the same across every <code>--run N</code> within it — without
+      <code>run_index</code> in the marker, running <code>--run 1</code> then <code>--run 2</code>
+      against the same directory would pass the ownership check unchanged and silently mix both
+      runs' documents into one corpus (import never removes a source absent from the current
+      import's own batch set). Re-running the exact same <code>--run</code> against the same
+      results directory is safe: import is a per-<code>(context, source)</code> create-or-replace,
+      so a second run neither duplicates associations nor loses them. Before importing into an
+      existing context, its current description is checked against the marker this run would
+      stamp; a mismatch — including a different <code>--run</code> — refuses that one model
+      (<code>corpus.&lt;model_id&gt;.outcome: "rejected"</code>) rather than overwriting a context
+      this run did not create or merging a different run into it — pick a different
+      <code>--context-prefix</code> if that happens. <code>--skip-import</code> searches whatever
+      already lives under
       <code>PREFIX::MODEL_ID</code> instead, useful for re-running only the search-and-measure half
       after a corpus was built once.
     </p>
@@ -739,8 +748,9 @@ RESULTS_DIR             a directory `taguru benchmark extract` wrote</code></pre
     <p class="section-sub">Lane evidence and the embeddings/refresh gap</p>
     <p>
       <code>plan</code> and per-hit lane accounting are read straight off <code>sources/search</code>'s
-      own response (<a href="#compare">the same <code>SearchPlan</code>/<code>PassageLanes</code>
-      shape every client sees</a>) — this command never calls
+      own response (the same <code>plan</code>/<code>lanes</code> shape every client sees —
+      documented in full, with a worked example, under <code>POST /contexts/{name}/sources/search</code>
+      in the LLM-facing protocol manual served at <code>GET /protocol</code>) — this command never calls
       <code>POST /contexts/{name}/embeddings/refresh</code>, because that endpoint only re-embeds
       concept and label <i>glosses</i> (what <code>resolve</code>'s semantic fallback reads), never
       the passage vectors <code>sources/search</code>'s vector lane actually reads. Passage
@@ -761,7 +771,8 @@ RESULTS_DIR             a directory `taguru benchmark extract` wrote</code></pre
         <tr><td><code>hits.count</code></td><td>model</td><td>Passage hits <code>sources/search</code> returned for a case, truncated to that case's limit.</td></tr>
         <tr><td><code>hits.empty_rate</code></td><td>model</td><td>Share of successfully searched cases whose search returned zero hits.</td></tr>
         <tr><td><code>hits.distinct_sources</code></td><td>model</td><td>Distinct source documents among a case's hits — a coarse diversity signal.</td></tr>
-        <tr><td><code>lanes.bm25_only</code>, <code>.vector_only</code>, <code>.both</code></td><td>model</td><td>Hits a case's search found via the lexical lane only, the semantic lane only, or both agreeing.</td></tr>
+        <tr><td><code>lanes.bm25_only</code>, <code>.vector_only</code>, <code>.both</code>, <code>.neither</code></td><td>model</td><td>Hits a case's search found via the lexical lane only, the semantic lane only, both agreeing, or (readable but) neither.</td></tr>
+        <tr><td><code>lanes.unknown</code></td><td>model</td><td>Hits whose per-hit lane evidence could not be read at all (an older or otherwise non-conforming server) — kept apart from the four above so a legacy response's hits are never misread as evidencing zero lane activity.</td></tr>
         <tr><td><code>cases.error_rate</code></td><td>model</td><td>Share of cases whose search request failed outright — a network/HTTP failure, or the model's corpus was never available.</td></tr>
         <tr><td><code>recall.recall_at_k</code>, <code>.mrr</code></td><td>model</td><td>As defined above, over cases carrying at least one expectation.</td></tr>
         <tr><td><code>overlap.jaccard</code></td><td>pair</td><td>Jaccard similarity of two models' hit <code>(source, paragraph)</code> sets for the same case — <code>None</code>, not a vacuous <code>1.0</code>, when both sides returned zero hits.</td></tr>
