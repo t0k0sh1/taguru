@@ -35,12 +35,18 @@ use serde::Serialize;
 
 // ============================== Matching parameters ==============================
 
-/// ADR 0003 §9.4's `matching.unicode_normalization` values.
+/// ADR 0003 §9.4's `matching.unicode_normalization` values. `Nfkc` is
+/// the only value `Matching::default()` ever produces today; `None`
+/// rounds out the parameter surface the ADR defines (a future caller —
+/// #259, or a config path this module doesn't have yet — can disable
+/// NFKC outright) and is only constructed by this module's own tests
+/// until one exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum UnicodeNormalization {
     #[serde(rename = "NFKC")]
     Nfkc,
     #[serde(rename = "none")]
+    #[allow(dead_code)]
     None,
 }
 
@@ -78,39 +84,49 @@ impl Default for Matching {
     }
 }
 
-/// Trim, then fold under `matching`'s own flags. Idempotent for every
-/// flag combination `Matching` can express:
+/// Trim, then fold under `matching`'s own flags, then trim again.
+/// Idempotent for every flag combination `Matching` can express:
 ///
 /// - neither flag set: trimming alone is idempotent on already-trimmed
 ///   text.
 /// - `case_fold` only: Unicode case folding is idempotent on its own
 ///   (`char::to_lowercase` never produces text that lowercases
-///   differently the second time).
-/// - `unicode_normalization: NFKC` only: NFKC is idempotent by
-///   definition — normalizing already-normalized text is a no-op.
-/// - both: lowercasing must run both before AND after `nfkc()`, for the
-///   same reason `crate::context`'s `normalize` does — NFKC's
-///   decomposition can introduce fresh uppercase text (its own doc
-///   comment at src/context.rs:900 walks the counterexamples), and only
-///   a trailing lowercase re-folds that back to a fixed point.
+///   differently the second time), and never introduces boundary
+///   whitespace, so the leading trim already leaves a fixed point.
+/// - `unicode_normalization: NFKC` involved (alone or with
+///   `case_fold`): several spacing modifier letters — `¨` (U+00A8),
+///   `¯` (U+00AF), `´` (U+00B4), `¸` (U+00B8), and U+02D8–U+02DD among
+///   them — have a compatibility decomposition of `SPACE` plus a
+///   combining mark, so NFKC can introduce a *fresh* leading space that
+///   was never there for the leading trim to remove. Composition never
+///   re-collapses `SPACE` + combining mark back to the original
+///   character (that direction only exists as a compatibility mapping,
+///   which canonical composition does not reverse), so the trailing
+///   trim below is what actually converges this to a fixed point, not
+///   NFKC's own idempotence. With `case_fold` also set, lowercasing
+///   must run both before AND after `nfkc()` regardless, for the same
+///   reason `crate::context`'s `normalize` does — NFKC's decomposition
+///   can introduce fresh uppercase text too (its own doc comment at
+///   src/context.rs:900 walks the counterexamples).
 pub(crate) fn normalize_term(matching: &Matching, raw: &str) -> String {
-    let trimmed = raw.trim();
-    if !matching.case_fold && matching.unicode_normalization == UnicodeNormalization::None {
-        return trimmed.to_string();
+    let mut folded = raw.trim().to_string();
+    if matching.case_fold {
+        folded = folded.chars().flat_map(char::to_lowercase).collect();
     }
-    let mut folded: String = if matching.case_fold {
-        trimmed.chars().flat_map(char::to_lowercase).collect()
-    } else {
-        trimmed.to_string()
-    };
-    if matching.unicode_normalization == UnicodeNormalization::Nfkc {
-        use unicode_normalization::UnicodeNormalization as _;
-        folded = folded.nfkc().collect();
-        if matching.case_fold {
-            folded = folded.chars().flat_map(char::to_lowercase).collect();
+    match matching.unicode_normalization {
+        UnicodeNormalization::Nfkc => {
+            use unicode_normalization::UnicodeNormalization as _;
+            folded = folded.nfkc().collect();
+            if matching.case_fold {
+                folded = folded.chars().flat_map(char::to_lowercase).collect();
+            }
         }
+        // Exhaustive, not just the `Nfkc` arm's fallthrough — a future
+        // third normalization form must pick a branch here rather than
+        // silently taking `None`'s.
+        UnicodeNormalization::None => {}
     }
-    folded
+    folded.trim().to_string()
 }
 
 // ============================== Alias resolution (batch-local) ==============================
@@ -506,11 +522,36 @@ mod tests {
         // NFKC-then-lowercase alone is idempotent; both orders combined
         // (as normalize_term does) must be.
         let m = Matching::default();
-        for raw in ["J\u{030C}", "\u{1F110}", "Ａｐｐｌｅ", "  trim me  "] {
+        for raw in [
+            "J\u{030C}",
+            "\u{1F110}",
+            "Ａｐｐｌｅ",
+            "  trim me  ",
+            // Spacing modifier letters whose NFKC compatibility
+            // decomposition is SPACE + a combining mark — a fresh
+            // leading space the initial trim() never saw. Composition
+            // never reverses a compatibility decomposition, so only
+            // normalize_term's own trailing trim closes this gap.
+            "\u{00A8}",
+            "\u{00AF}",
+            "\u{00B4}",
+            "\u{00B8}",
+            "\u{02D8}",
+            "\u{02DD}",
+        ] {
             let once = normalize_term(&m, raw);
             let twice = normalize_term(&m, &once);
             assert_eq!(once, twice, "not idempotent for {raw:?}");
         }
+    }
+
+    #[test]
+    fn normalize_term_trims_a_leading_space_that_nfkc_itself_introduced() {
+        // U+00A8 DIAERESIS decomposes under NFKC to SPACE +
+        // COMBINING DIAERESIS (U+0308) — a space that was never in the
+        // input for the leading trim() to remove.
+        let m = Matching::default();
+        assert_eq!(normalize_term(&m, "\u{00A8}"), "\u{0308}");
     }
 
     #[test]
@@ -523,10 +564,45 @@ mod tests {
         assert_eq!(normalize_term(&m, "  Apple  "), "Apple");
     }
 
+    /// A curated pool of code points chosen for their NFKC
+    /// decomposition, not their appearance: full-width Latin, a
+    /// precomposed-only special form, a combining mark with no
+    /// canonical precomposition, and the space-producing spacing
+    /// modifier letters this module's idempotence fix exists for.
+    /// Plain `".*"` under-samples all of these, since proptest's
+    /// default `char` strategy skews toward common Unicode ranges —
+    /// mixing this pool in is what makes the property below actually
+    /// exercise `normalize_term`'s NFKC edge cases.
+    fn raw_input_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            ".*",
+            prop::collection::vec(
+                prop_oneof![
+                    Just('\u{00A8}'),  // DIAERESIS -> SPACE + COMBINING DIAERESIS
+                    Just('\u{00AF}'),  // MACRON -> SPACE + COMBINING MACRON
+                    Just('\u{00B4}'),  // ACUTE ACCENT -> SPACE + COMBINING ACUTE
+                    Just('\u{00B8}'),  // CEDILLA -> SPACE + COMBINING CEDILLA
+                    Just('\u{02D8}'),  // BREVE -> SPACE + COMBINING BREVE
+                    Just('\u{02D9}'),  // DOT ABOVE -> SPACE + COMBINING DOT ABOVE
+                    Just('\u{02DA}'),  // RING ABOVE -> SPACE + COMBINING RING ABOVE
+                    Just('\u{02DB}'),  // OGONEK -> SPACE + COMBINING OGONEK
+                    Just('\u{02DC}'),  // SMALL TILDE -> SPACE + COMBINING TILDE
+                    Just('\u{02DD}'),  // DOUBLE ACUTE ACCENT -> SPACE + COMBINING DOUBLE ACUTE
+                    Just('\u{030C}'),  // COMBINING CARON (src/context.rs's own counterexample)
+                    Just('\u{1F110}'), // PARENTHESIZED LATIN CAPITAL LETTER A
+                    Just('Ａ'),        // FULLWIDTH LATIN CAPITAL LETTER A
+                    Just(' '),
+                ],
+                0..8,
+            )
+            .prop_map(|chars| chars.into_iter().collect()),
+        ]
+    }
+
     proptest! {
         #[test]
         fn normalize_term_is_idempotent_for_every_flag_combination(
-            raw in ".*",
+            raw in raw_input_strategy(),
             case_fold in any::<bool>(),
             nfkc in any::<bool>(),
         ) {
