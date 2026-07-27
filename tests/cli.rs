@@ -904,6 +904,307 @@ fn benchmark_reports_both_subcommands_on_an_unknown_one() {
     assert!(stderr.contains("'extract' or 'compare'"), "{stderr}");
 }
 
+// ============================== benchmark compare: differences.jsonl (issue #259) ==============================
+
+/// A two-model results directory: `m1` and `m2`, one run each, one
+/// document (`brewery`) both complete. `beer co`/`brews`/`lager`
+/// disagrees in weight sign between the two models — enough to exercise
+/// `differences.jsonl`'s `association_shared` and `polarity_difference`
+/// records without duplicating `benchmark::compare::tests`' much larger
+/// synthetic fixture (every record kind, every fire condition) that
+/// already covers the module's logic in depth.
+fn write_two_model_benchmark_results_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-cli-benchmark-differences-{tag}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("runs")).unwrap();
+    std::fs::create_dir_all(dir.join("cells/m1/run01")).unwrap();
+    std::fs::create_dir_all(dir.join("cells/m2/run01")).unwrap();
+
+    std::fs::write(
+        dir.join("cells/m1/run01/brewery.jsonl"),
+        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/brewery.md\"}\n\
+         {\"passage\":\"text\"}\n\
+         {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":1.0,\"paragraph\":0}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("cells/m2/run01/brewery.jsonl"),
+        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/brewery.md\"}\n\
+         {\"passage\":\"text\"}\n\
+         {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":-1.0,\"paragraph\":0}\n",
+    )
+    .unwrap();
+
+    fn cell_lines(cell_id: &str, model_id: &str, batch_path: &str) -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({
+                "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-diff-cli",
+                "cell_id": cell_id, "model_id": model_id, "model_name": format!("{model_id}-model"),
+                "run_index": 1, "prompt_version": 1,
+            }),
+            serde_json::json!({
+                "kind": "document", "ts": 100.0, "cell_id": cell_id,
+                "document_id": "brewery", "source": "corpus/brewery.md",
+                "document_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
+            }),
+            serde_json::json!({
+                "kind": "document", "ts": 110.0, "cell_id": cell_id,
+                "document_id": "brewery", "source": "corpus/brewery.md",
+                "document_sha256": "sha-brewery", "phase": "end", "outcome": "written",
+                "associations": 1, "concepts": 0, "labels": 0, "questions": 0,
+                "duplicates": 0, "dropped": 0, "batch_path": batch_path,
+            }),
+            serde_json::json!({
+                "kind": "cell", "ts": 111.0, "cell_id": cell_id, "outcome": "complete",
+                "documents_written": 1, "attempts_total": 0, "exit_code": 0,
+            }),
+        ]
+    }
+    for (cell_id, model_id, batch_path) in [
+        ("m1.run01", "m1", "cells/m1/run01/brewery.jsonl"),
+        ("m2.run01", "m2", "cells/m2/run01/brewery.jsonl"),
+    ] {
+        let text = cell_lines(cell_id, model_id, batch_path)
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(dir.join(format!("runs/{cell_id}.jsonl")), text).unwrap();
+    }
+
+    let manifest = serde_json::json!({
+        "taguru_benchmark_manifest": 1,
+        "run_id": "run-diff-cli",
+        "started_at": "2026-07-26T09:00:00Z",
+        "finished_at": "2026-07-26T09:05:00Z",
+        "taguru_version": "0.0.0",
+        "sdk_versions": {},
+        "harness": {},
+        "extraction_settings": {},
+        "documents": [
+            {
+                "document_id": "brewery", "path": "corpus/brewery.md", "bytes": 100,
+                "sha256": "sha-brewery", "paragraph_count": 5, "chunk_total": 1, "chunks": [],
+            },
+        ],
+        "models": [
+            {
+                "model_id": "m1", "model_name": "m1-model", "endpoint": "http://x",
+                "digest": null, "quantization": null, "context_window": null,
+                "structured_output_requested": "auto", "timeout_secs": 60,
+                "provider_probe": {"attempted": [], "ok": true, "note": null},
+            },
+            {
+                "model_id": "m2", "model_name": "m2-model", "endpoint": "http://y",
+                "digest": null, "quantization": null, "context_window": null,
+                "structured_output_requested": "auto", "timeout_secs": 60,
+                "provider_probe": {"attempted": [], "ok": true, "note": null},
+            },
+        ],
+        "cells": [
+            {
+                "cell_id": "m1.run01", "model_id": "m1", "run_index": 1,
+                "runs_file": "runs/m1.run01.jsonl", "cell_dir": "cells/m1/run01",
+                "structured_output_resolved": "json_schema",
+                "started_at": "2026-07-26T09:00:01Z",
+                "finished_at": "2026-07-26T09:04:00Z", "outcome": "complete",
+            },
+            {
+                "cell_id": "m2.run01", "model_id": "m2", "run_index": 1,
+                "runs_file": "runs/m2.run01.jsonl", "cell_dir": "cells/m2/run01",
+                "structured_output_resolved": "json_schema",
+                "started_at": "2026-07-26T09:00:01Z",
+                "finished_at": "2026-07-26T09:04:00Z", "outcome": "complete",
+            },
+        ],
+        "environment": {"os": "linux", "arch": "x86_64"},
+    });
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    dir
+}
+
+fn read_differences_lines(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("differences.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn benchmark_compare_derives_differences_for_each_model_pair() {
+    let dir = write_two_model_benchmark_results_dir("pair");
+
+    let output = run(&["benchmark", "compare", &dir.display().to_string()]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lines = read_differences_lines(&dir);
+    assert_eq!(lines[0]["kind"], "header");
+    assert_eq!(lines[0]["taguru_benchmark_differences"], 1);
+    assert_eq!(lines[0]["text_included"], false);
+    assert_eq!(
+        lines[0]["pairs"],
+        serde_json::json!([{"pair_id": "m1__m2", "a": "m1", "b": "m2"}])
+    );
+    for line in &lines {
+        assert_no_banned_keys(line);
+    }
+    assert!(
+        lines
+            .iter()
+            .any(|l| l["kind"] == "association_shared" && l["key"]["object"] == "lager"),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l["kind"] == "polarity_difference" && l["key"]["object"] == "lager"),
+        "{lines:?}"
+    );
+
+    // Re-running is a pure function of the (unchanged) results
+    // directory: differences.jsonl carries no generated_at, so it must
+    // be byte-identical across reruns, not merely equal aside from one
+    // field.
+    let differences_text = std::fs::read_to_string(dir.join("differences.jsonl")).unwrap();
+    let output2 = run(&["benchmark", "compare", &dir.display().to_string()]);
+    assert_eq!(output2.status.code(), Some(0));
+    let differences_text2 = std::fs::read_to_string(dir.join("differences.jsonl")).unwrap();
+    assert_eq!(
+        differences_text, differences_text2,
+        "differences.jsonl must be byte-identical across reruns"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn benchmark_compare_with_text_embeds_paragraph_text() {
+    let dir = write_two_model_benchmark_results_dir("with-text");
+    std::fs::create_dir_all(dir.join("corpus")).unwrap();
+    let text = "para0 is the one lager points at";
+    std::fs::write(dir.join("corpus/brewery.md"), text).unwrap();
+    let real_sha = {
+        // Mirrors `crate::extract::sha256_hex` (src/extract.rs) without
+        // depending on the library crate from an integration test —
+        // sha2 is already a direct dependency (Cargo.toml).
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write;
+        Sha256::digest(text.as_bytes())
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
+    };
+
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["documents"][0]["path"] =
+        serde_json::json!(dir.join("corpus/brewery.md").to_string_lossy());
+    manifest["documents"][0]["sha256"] = serde_json::json!(real_sha);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let output = run(&[
+        "benchmark",
+        "compare",
+        "--with-text",
+        &dir.display().to_string(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = read_differences_lines(&dir);
+    assert_eq!(lines[0]["text_included"], true);
+    let polarity = lines
+        .iter()
+        .find(|l| l["kind"] == "polarity_difference")
+        .expect("lager fires polarity_difference");
+    assert_eq!(polarity["locator"]["text"], text);
+    assert_eq!(polarity["locator"]["text_truncated"], false);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn benchmark_compare_with_text_refuses_corpus_drift() {
+    let dir = write_two_model_benchmark_results_dir("with-text-drift");
+    std::fs::create_dir_all(dir.join("corpus")).unwrap();
+    std::fs::write(dir.join("corpus/brewery.md"), "drifted since the run").unwrap();
+
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["documents"][0]["path"] =
+        serde_json::json!(dir.join("corpus/brewery.md").to_string_lossy());
+    // sha256 stays the fixture's placeholder — deliberately not
+    // matching the corpus file written above.
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let output = run(&[
+        "benchmark",
+        "compare",
+        "--with-text",
+        &dir.display().to_string(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("brewery.md"), "{stderr}");
+    // A refused --with-text run must publish none of the three
+    // artifacts — measurements.json/.csv included, since one shared
+    // `load_results` call feeds both and the refusal happens before any
+    // artifact is staged.
+    assert!(!dir.join("differences.jsonl").exists());
+    assert!(!dir.join("measurements.json").exists());
+    assert!(!dir.join("measurements.csv").exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn benchmark_compare_with_text_flag_is_accepted_alongside_the_positional() {
+    let dir = write_benchmark_results_dir("with-text-flag-order");
+    let output = run(&[
+        "benchmark",
+        "compare",
+        "--with-text",
+        &dir.display().to_string(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn the_mcp_bridge_answers_initialize_despite_a_stalled_protocol_probe() {
     use std::io::Write;

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Extraction benchmark (benchmark) — Taguru</title>
-  <meta name="description" content="The complete reference for taguru benchmark extract and taguru benchmark compare: the models.json schema, the results-directory layout, manifest.json/runs/*.jsonl, resume, the fairness invariant, and the measurements.json/csv metric catalog.">
+  <meta name="description" content="The complete reference for taguru benchmark extract and taguru benchmark compare: the models.json schema, the results-directory layout, manifest.json/runs/*.jsonl, resume, the fairness invariant, the measurements.json/csv metric catalog, and the differences.jsonl model-pair diff.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -219,7 +219,8 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       &lt;batch files&gt;                      #   raw extraction output
       diagnostics.jsonl                  #   passed as --diagnostics-out
       stdout.log  stderr.log  exit_code  #   the cell's own record
-  measurements.json  measurements.csv    # written by `taguru benchmark compare` (below)</code></pre>
+  measurements.json  measurements.csv    # written by `taguru benchmark compare` (below)
+  differences.jsonl                      # written by `taguru benchmark compare` (below)</code></pre>
     <p>
       <code>run&lt;NN&gt;</code> is zero-padded (<code>run01</code>, <code>run12</code>) so lexical
       order is run order. Nothing outside <code>cells/</code> is written by a child process, and
@@ -336,17 +337,19 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
 
   <section id="compare">
     <h2>taguru benchmark compare</h2>
-    <pre><code>taguru benchmark compare results/</code></pre>
+    <pre><code>taguru benchmark compare [--with-text] results/</code></pre>
     <p>
       Reads a finished results directory — <code>manifest.json</code>, <code>runs/*.jsonl</code>,
-      and the written <code>cells/**</code> batches — and writes <code>measurements.json</code>
-      and <code>measurements.csv</code> into it. A <b>pure function of the results directory</b>:
-      no model is called, no network is touched (ADR 0003's R4), so re-running it costs nothing
-      and always reflects exactly what is on disk right now — including a directory that a
-      resumed <code>taguru benchmark extract</code> has since grown more cells into. Exit codes:
-      <code>0</code> written · <code>1</code> the directory is missing or its
-      <code>manifest.json</code>/<code>runs/*.jsonl</code> could not be read · <code>2</code>
-      usage error.
+      and the written <code>cells/**</code> batches — and writes <code>measurements.json</code>,
+      <code>measurements.csv</code>, and <a href="#differences"><code>differences.jsonl</code></a>
+      into it, from one shared read of the directory. A <b>pure function of the results
+      directory</b>: no model is called, no network is touched (ADR 0003's R4), so re-running it
+      costs nothing and always reflects exactly what is on disk right now — including a directory
+      that a resumed <code>taguru benchmark extract</code> has since grown more cells into. Exit
+      codes: <code>0</code> written · <code>1</code> the directory is missing, its
+      <code>manifest.json</code>/<code>runs/*.jsonl</code> could not be read, or (with
+      <code>--with-text</code>) a corpus file named by the manifest is unreadable or has changed
+      since the results directory was created · <code>2</code> usage error.
     </p>
     <p class="section-sub">measurements.json</p>
     <pre><code>{
@@ -489,10 +492,10 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
       source. A document only ever contributes to these metrics through a run in which it
       <i>completed</i> (<code>outcome: "written"</code> and its batch was readable); a harness or
       model completion failure is <code>document.written_rate</code>'s concern, not folded into
-      extraction instability here. #259's model-pair <code>differences.jsonl</code> reuses this
-      same module and records the identical <code>matching</code> block in its own header (ADR
-      0003 §9.4), so a same-ness judgment about "did two runs agree" and "did two models agree"
-      is always traceable to one parameter set.
+      extraction instability here. <a href="#differences"><code>differences.jsonl</code></a>'s
+      model-pair diff reuses this same module and records the identical <code>matching</code>
+      block in its own header (ADR 0003 §9.4), so a same-ness judgment about "did two runs agree"
+      and "did two models agree" is always traceable to one parameter set.
     </p>
     <p class="section-sub">Known limitations</p>
     <p>
@@ -508,6 +511,86 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
       <code>taguru extract</code>'s own batch writer strips every paragraph locator before writing
       when there is no passage line left to locate into — this reflects the flag, not model
       behavior.
+    </p>
+  </section>
+
+  <section id="differences">
+    <h2>differences.jsonl</h2>
+    <p>
+      A <b>paired diff between every pair of models</b> in the matrix (issue #259, ADR 0003 §9.4):
+      what both models extracted in common, what only one of them extracted, and where the two
+      disagreed on polarity, paragraph attribution, or an alias's resolved canonical. There is no
+      gold data anywhere in this pipeline, so <code>differences.jsonl</code> makes no correctness
+      judgment — it reports <i>differences</i>, never errors, omissions, or which side is right.
+      A mechanical lexicon test asserts no emitted key name or <code>kind</code> value ever
+      matches <code>miss</code>/<code>error</code>/<code>wrong</code>/<code>incorrect</code>/
+      <code>fail</code>/<code>omit</code>/<code>expected</code>/<code>gold</code>/
+      <code>truth</code>/<code>false positive</code>/<code>recall</code>/<code>precision</code>/
+      <code>better</code>/<code>worse</code>, on top of <a href="#compare">the rank-word
+      ban</a> <code>measurements.json</code> already carries. Sides are named <code>a</code>/
+      <code>b</code>, bound to a <code>model_id</code> — never <code>baseline</code>/
+      <code>candidate</code> — and an absent side serializes <code>null</code>, never a count.
+    </p>
+    <pre><code>{"kind":"header","taguru_benchmark_differences":1,"run_id":"...",
+ "pairs":[{"pair_id":"hosted-120b__qwen25-7b-q4","a":"hosted-120b","b":"qwen25-7b-q4"}],
+ "matching":{"module":"benchmark::identity","case_fold":true,"unicode_normalization":"NFKC",
+   "alias_expansion":"batch-local","weight_tolerance":0.0},
+ "text_included":false}
+{"kind":"association_shared","pair_id":"hosted-120b__qwen25-7b-q4",
+ "present_in":["hosted-120b","qwen25-7b-q4"],
+ "key":{"subject":"beer co","label":"brews","object":"lager"},
+ "sides":{"a":{"runs":[1,2,3],"n_present":3},"b":{"runs":[1,2],"n_present":2}},
+ "locator":{"document_id":"brewery","source":"corpus/brewery.md","document_sha256":"9c2e...",
+   "paragraph":1,"chunk_index":0,"chunk_sha256":"41ab...","text":null,"text_truncated":false}}</code></pre>
+    <p>
+      One file covers every model pair — each record carries its own <code>pair_id</code>, and the
+      header's <code>pairs</code> array plus <code>matching</code> block make the file
+      re-derivable without reading <code>benchmark::identity</code>'s source: a difference set is
+      uninterpretable without knowing whether case folding, NFKC, and batch-local alias expansion
+      were applied before "present in one side only" was decided. The <code>matching</code> block
+      is byte-identical to <a href="#compare"><code>measurements.json</code>'s own</a> — the same
+      same-ness judgment underlies both.
+    </p>
+    <p class="section-sub">Record kinds</p>
+    <div class="tbl">
+      <table>
+      <thead><tr><th>kind</th><th>Fires when</th></tr></thead>
+      <tbody>
+        <tr><td><code>document_coverage</code></td><td>Once per (pair, document) either side attempted. Marks whether a document is eligible for the record kinds below at all — a document only one side ever completed a run for is excluded from every one of them, since a harness or model completion failure is <code>document.written_rate</code>'s fact, not an extraction difference.</td></tr>
+        <tr><td><code>association_shared</code></td><td>An association key both sides observed in at least one completed run, for a document both sides completed.</td></tr>
+        <tr><td><code>association_single_side</code></td><td>A key only one side ever observed, on a document both sides completed.</td></tr>
+        <tr><td><code>polarity_difference</code></td><td>A shared key whose two sides' observed weight-sign sets share no element — e.g. side <code>a</code> always positive, side <code>b</code> always negative. Within-side sign disagreement across a model's own runs is <code>stability.polarity_variation_ratio</code>'s concern, not this.</td></tr>
+        <tr><td><code>attribution_difference</code></td><td>A shared key whose two sides' observed paragraph-locator sets (<code>None</code> counts as its own value, not "no signal") share no element.</td></tr>
+        <tr><td><code>alias_resolution_difference</code></td><td>A (document, alias-kind, spelling) triple both sides declared in at least one completed run, whose resolved-canonical sets share no element.</td></tr>
+        <tr><td><code>surface_form_variation</code></td><td>A key (shared or single-side) that two or more distinct raw <code>subject</code>/<code>label</code>/<code>object</code> spellings folded into — a normalization candidate, surfaced whether the variation is between the two models or entirely within one model's own runs.</td></tr>
+      </tbody>
+      </table>
+    </div>
+    <p>
+      Every difference kind fires on <b>set disjointness</b>, never on inequality: two sides whose
+      observations merely overlap (side <code>a</code> attributed paragraph 3 in one run and
+      paragraph 5 in another, side <code>b</code> attributed only paragraph 3) are not reported as
+      differing, since that overlap already contains agreement — the record only exists for the
+      claim that is purely <i>between</i> models, with within-model variation left to
+      <code>stability.*</code>. Both sides' complete observed sets are always carried on the
+      record, so a reader wanting a weaker "disagreed at least once" relation can derive it without
+      re-reading <code>cells/**</code>.
+    </p>
+    <p class="section-sub">locator: no byte span, ever</p>
+    <p>
+      <code>locator.paragraph</code> is a <code>crate::paragraph::split</code> index — the minimum
+      paragraph either side observed for that key — never a byte offset. Byte spans are not
+      persisted anywhere in this pipeline; <code>chunk_index</code>/<code>chunk_sha256</code> are
+      derived from the paragraph index via <code>manifest.json</code>'s own chunk dictionary at
+      diff time, and are <code>null</code> whenever no chunk covers it (an older manifest, or
+      <code>--no-passage</code> having stripped every locator upstream). <code>text</code> stays
+      <code>null</code> unless <code>--with-text</code> was given; when it is,
+      <code>compare</code> re-reads the corpus file <code>manifest.json</code> names, verifies it
+      against the pinned <code>document_sha256</code>, and slices out the paragraph — a <b>loud
+      refusal</b> (naming the file and the mismatched hash, exit code <code>1</code>, nothing
+      written) if the file is unreadable or the hash no longer matches, since text the models never
+      saw must never be embedded silently. Embedded text is capped at 4096 bytes (floored to a
+      character boundary), with <code>text_truncated: true</code> marking the cut.
     </p>
   </section>
 

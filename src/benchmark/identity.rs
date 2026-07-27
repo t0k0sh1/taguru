@@ -134,9 +134,11 @@ pub(crate) fn normalize_term(matching: &Matching, raw: &str) -> String {
 /// The two alias namespaces `render_batch` (src/extract.rs) ever
 /// writes — kept independent, since a concept spelling and a label
 /// spelling can coincide without meaning the same thing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub(crate) enum AliasKind {
+    #[serde(rename = "concept")]
     Concept,
+    #[serde(rename = "label")]
     Label,
 }
 
@@ -300,12 +302,19 @@ pub(crate) struct BatchRows {
 
 /// What was actually observed at one key within one run: every raw
 /// weight that folded into this key (almost always one, unless
-/// normalization merged distinct spellings), and the distinct
-/// paragraph locators attached to it.
+/// normalization merged distinct spellings), the distinct paragraph
+/// locators attached to it, and the distinct raw `(subject, label,
+/// object)` spellings — exactly as the model wrote them, before
+/// normalization or alias resolution — that folded into this key.
+/// `surfaces` is what #259's `surface_form_variation` records read: a
+/// key with two or more distinct raw spellings across the two sides of
+/// a model pair (or even within one side's own runs) is a normalization
+/// candidate worth surfacing, not something to fold away silently.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct KeyObservation {
     pub(crate) weights: Vec<f64>,
     pub(crate) paragraphs: BTreeSet<Option<u64>>,
+    pub(crate) surfaces: BTreeSet<(String, String, String)>,
 }
 
 /// Keys one document's raw associations under `matching`'s rules,
@@ -334,6 +343,11 @@ pub(crate) fn keyed_associations(
         let observation = out.entry(key).or_default();
         observation.weights.push(assoc.weight);
         observation.paragraphs.insert(assoc.paragraph);
+        observation.surfaces.insert((
+            assoc.subject.clone(),
+            assoc.label.clone(),
+            assoc.object.clone(),
+        ));
     }
     out
 }
@@ -353,7 +367,7 @@ impl KeyPresence {
         self.by_run.len()
     }
 
-    #[allow(dead_code)] // ADR 0003 §9.4's sides.{a,b}.runs — consumed once #259 writes differences.jsonl
+    /// ADR 0003 §9.4's `sides.{a,b}.runs`.
     pub(crate) fn runs(&self) -> impl Iterator<Item = usize> + '_ {
         self.by_run.keys().copied()
     }
@@ -393,6 +407,13 @@ impl PresenceTable {
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
+
+    /// One key's presence, or `None` if this table has no entry for it —
+    /// the lookup #259's model-pair union-of-keys walk needs, alongside
+    /// [`Self::iter`]'s full-table walk stability metrics already use.
+    pub(crate) fn get(&self, key: &AssocKey) -> Option<&KeyPresence> {
+        self.entries.get(key)
+    }
 }
 
 // ============================== Variation & overlap ==============================
@@ -400,8 +421,11 @@ impl PresenceTable {
 /// `> 0` / `== 0` / `< 0`, independent categories — the same three-way
 /// split `crate::benchmark::compare::analyze_batch` already uses for
 /// `weight_positive`/`weight_negative` (a weight of exactly 0 counts
-/// toward neither polarity).
-fn weight_sign(weight: f64) -> i8 {
+/// toward neither polarity). `pub(crate)` because #259's
+/// `polarity_difference` records compute each side's own sign set
+/// directly from this, not only through [`polarity_varies`]'s
+/// single-table variation check.
+pub(crate) fn weight_sign(weight: f64) -> i8 {
     if weight > 0.0 {
         1
     } else if weight < 0.0 {
@@ -809,6 +833,7 @@ mod tests {
                 KeyObservation {
                     weights,
                     paragraphs: paragraphs.into_iter().collect(),
+                    surfaces: BTreeSet::new(),
                 },
             );
         }
@@ -880,6 +905,22 @@ mod tests {
         let observation = keyed.values().next().unwrap();
         assert_eq!(observation.weights, vec![1.0, -1.0]);
         assert_eq!(observation.paragraphs, BTreeSet::from([Some(0), Some(1)]));
+        assert_eq!(
+            observation.surfaces,
+            BTreeSet::from([
+                (
+                    "Apple".to_string(),
+                    "grows in".to_string(),
+                    "Orchard".to_string()
+                ),
+                (
+                    "apple".to_string(),
+                    "grows in".to_string(),
+                    "orchard".to_string()
+                ),
+            ]),
+            "raw pre-normalization spellings are retained, not just the folded key"
+        );
     }
 
     #[test]
@@ -892,6 +933,7 @@ mod tests {
             KeyObservation {
                 weights: vec![1.0],
                 paragraphs: BTreeSet::new(),
+                surfaces: BTreeSet::new(),
             },
         );
         table.insert_run(1, first);
@@ -901,6 +943,7 @@ mod tests {
             KeyObservation {
                 weights: vec![1.0],
                 paragraphs: BTreeSet::new(),
+                surfaces: BTreeSet::new(),
             },
         );
         table.insert_run(3, third);
@@ -909,5 +952,8 @@ mod tests {
         let presence = &table.iter().next().unwrap().1;
         assert_eq!(presence.n_present(), 2);
         assert_eq!(presence.runs().collect::<Vec<_>>(), vec![1, 3]);
+
+        assert!(table.get(&k).is_some());
+        assert!(table.get(&key("doc", "other", "l", "o")).is_none());
     }
 }

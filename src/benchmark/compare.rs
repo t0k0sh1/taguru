@@ -26,19 +26,27 @@ use crate::config::subcommand_usage_error;
 
 use super::identity;
 
+mod differences;
+
 const BENCHMARK_MEASUREMENTS_VERSION: u64 = 1;
 
 const USAGE: &str = "\
-usage: taguru benchmark compare RESULTS_DIR
+usage: taguru benchmark compare [--with-text] RESULTS_DIR
 
 Reads a finished results directory (manifest.json, runs/*.jsonl,
-cells/**) and derives measurements.json/measurements.csv — the
-distributions, rates, and extraction-shape counts ADR 0003 §9.3
-defines. A pure function of RESULTS_DIR: no model is called, no
-network is touched, and re-running always overwrites with a fresh
-computation from what is on disk right now.
+cells/**) and derives measurements.json/measurements.csv (ADR 0003
+§9.3's distributions, rates, and extraction-shape counts) and
+differences.jsonl (ADR 0003 §9.4's model-pair paired diff — every
+association each pair of models shares or disagrees on, gold-data-free
+and judgment-free by construction). A pure function of RESULTS_DIR: no
+model is called, no network is touched, and re-running always
+overwrites with a fresh computation from what is on disk right now.
 
   RESULTS_DIR   a directory `taguru benchmark extract` wrote
+  --with-text   embed each differences.jsonl locator's paragraph text
+                (default: text omitted). Reads the pinned corpus files
+                from disk and refuses loudly if a file is unreadable or
+                its sha256 no longer matches manifest.json.
 
 Contract and discipline: docs/benchmark.html,
 adr/0003-extraction-model-benchmark.md.
@@ -52,13 +60,11 @@ pub(super) fn run_compare(args: &[String]) -> i32 {
         print!("{USAGE}");
         return 0;
     }
-    let dir = match parse_args(args) {
-        Ok(dir) => dir,
+    let compare_args = match parse_args(args) {
+        Ok(compare_args) => compare_args,
         Err(code) => return code,
     };
-    match compute_measurements(&dir)
-        .and_then(|measurements| write_measurements(&dir, &measurements))
-    {
+    match run_compare_inner(&compare_args) {
         Ok(()) => 0,
         Err(message) => {
             eprintln!("taguru: benchmark: compare: {message}");
@@ -67,9 +73,37 @@ pub(super) fn run_compare(args: &[String]) -> i32 {
     }
 }
 
-fn parse_args(args: &[String]) -> Result<PathBuf, i32> {
+/// One `load_results` call feeds both artifacts (ADR 0003 §9.4: `#259`
+/// writes `differences.jsonl` alongside `#257`'s `measurements.*`) so a
+/// results directory with a large `runs/*.jsonl`/`cells/**` is never
+/// read twice for one `compare` invocation.
+fn run_compare_inner(args: &CompareArgs) -> Result<(), String> {
+    let manifest = super::load_bench_manifest(&args.dir.join("manifest.json"))?;
+    let loaded = load_results(&args.dir, &manifest)?;
+    let measurements = measurements_from(&manifest, &loaded);
+    let differences_text = differences::compute_differences(
+        &manifest,
+        &loaded.doc_rows,
+        &differences::DifferencesOptions {
+            with_text: args.with_text,
+        },
+    )?;
+    write_artifacts(&args.dir, &measurements, &differences_text)
+}
+
+struct CompareArgs {
+    dir: PathBuf,
+    with_text: bool,
+}
+
+fn parse_args(args: &[String]) -> Result<CompareArgs, i32> {
     let mut positional: Option<&str> = None;
+    let mut with_text = false;
     for arg in args {
+        if arg == "--with-text" {
+            with_text = true;
+            continue;
+        }
         if arg.starts_with("--") {
             return Err(subcommand_usage_error(
                 "benchmark",
@@ -84,9 +118,10 @@ fn parse_args(args: &[String]) -> Result<PathBuf, i32> {
         }
         positional = Some(arg.as_str());
     }
-    positional.map(PathBuf::from).ok_or_else(|| {
+    let dir = positional.map(PathBuf::from).ok_or_else(|| {
         subcommand_usage_error("benchmark", "compare requires a RESULTS_DIR argument")
-    })
+    })?;
+    Ok(CompareArgs { dir, with_text })
 }
 
 // ============================== Value shapes ==============================
@@ -483,9 +518,19 @@ fn analyze_batch(text: &str, paragraph_count: usize) -> BatchStats {
 
 // ============================== Aggregation ==============================
 
-fn compute_measurements(dir: &Path) -> Result<MeasurementsFile, String> {
-    let matching = identity::Matching::default();
-    let manifest = super::load_bench_manifest(&dir.join("manifest.json"))?;
+/// Everything read off disk for one results directory, before any
+/// metric is computed from it: owned, not borrowed, so it can be
+/// handed to both [`measurements_from`] and
+/// [`differences::compute_differences`] without re-reading
+/// `runs/*.jsonl`/`cells/**` a second time per `compare` invocation.
+struct LoadedResults {
+    inputs_runs: Vec<String>,
+    all_attempts: Vec<AttemptRow>,
+    doc_rows: Vec<DocRow>,
+    observed_finish_reasons: BTreeSet<String>,
+}
+
+fn load_results(dir: &Path, manifest: &super::BenchManifest) -> Result<LoadedResults, String> {
     let documents_by_id: BTreeMap<&str, &super::DocumentInfo> = manifest
         .documents
         .iter()
@@ -699,11 +744,23 @@ fn compute_measurements(dir: &Path) -> Result<MeasurementsFile, String> {
         all_attempts.extend(cell_attempts);
     }
 
-    // ---- pools (borrow the now-fixed owned rows above) ----
+    Ok(LoadedResults {
+        inputs_runs,
+        all_attempts,
+        doc_rows,
+        observed_finish_reasons,
+    })
+}
+
+fn measurements_from(manifest: &super::BenchManifest, loaded: &LoadedResults) -> MeasurementsFile {
+    let matching = identity::Matching::default();
+    let doc_rows = &loaded.doc_rows;
+
+    // ---- pools (borrow the loaded, owned rows) ----
     let mut attempts_by_cell: BTreeMap<String, Vec<&AttemptRow>> = BTreeMap::new();
     let mut attempts_by_model: BTreeMap<String, Vec<&AttemptRow>> = BTreeMap::new();
     let mut attempts_by_cell_doc: BTreeMap<(String, String), Vec<&AttemptRow>> = BTreeMap::new();
-    for a in &all_attempts {
+    for a in &loaded.all_attempts {
         attempts_by_cell
             .entry(a.cell_id.clone())
             .or_default()
@@ -719,7 +776,7 @@ fn compute_measurements(dir: &Path) -> Result<MeasurementsFile, String> {
     }
     let mut docs_by_cell: BTreeMap<String, Vec<&DocRow>> = BTreeMap::new();
     let mut docs_by_model: BTreeMap<String, Vec<&DocRow>> = BTreeMap::new();
-    for d in &doc_rows {
+    for d in doc_rows {
         docs_by_cell.entry(d.cell_id.clone()).or_default().push(d);
         docs_by_model.entry(d.model_id.clone()).or_default().push(d);
     }
@@ -787,7 +844,7 @@ fn compute_measurements(dir: &Path) -> Result<MeasurementsFile, String> {
 
     // ---- documents (run-level granularity: model -> document -> run_label) ----
     let mut documents: DocumentsSection = BTreeMap::new();
-    for doc in &doc_rows {
+    for doc in doc_rows {
         let attempts_for_doc = attempts_by_cell_doc
             .get(&(doc.cell_id.clone(), doc.document_id.clone()))
             .cloned()
@@ -801,10 +858,11 @@ fn compute_measurements(dir: &Path) -> Result<MeasurementsFile, String> {
             .insert(super::run_label(doc.run_index), metrics);
     }
 
+    let mut inputs_runs = loaded.inputs_runs.clone();
     inputs_runs.sort();
-    let definitions = build_definitions(&observed_finish_reasons);
+    let definitions = build_definitions(&loaded.observed_finish_reasons);
 
-    Ok(MeasurementsFile {
+    MeasurementsFile {
         taguru_benchmark_measurements: BENCHMARK_MEASUREMENTS_VERSION,
         run_id: manifest.run_id.clone(),
         generated_at: super::iso8601_utc(super::now_unix_secs()),
@@ -818,7 +876,20 @@ fn compute_measurements(dir: &Path) -> Result<MeasurementsFile, String> {
         cells,
         models,
         documents,
-    })
+    }
+}
+
+/// Test-only convenience: production code calls [`load_results`] once
+/// and shares it between [`measurements_from`] and
+/// [`differences::compute_differences`] (see [`run_compare_inner`]) —
+/// this wrapper exists only so the ~15 unit tests below that predate
+/// `differences.jsonl` can keep asking for a `MeasurementsFile` in one
+/// call, without caring about the doc-row split that `#259` needed.
+#[cfg(test)]
+fn compute_measurements(dir: &Path) -> Result<MeasurementsFile, String> {
+    let manifest = super::load_bench_manifest(&dir.join("manifest.json"))?;
+    let loaded = load_results(dir, &manifest)?;
+    Ok(measurements_from(&manifest, &loaded))
 }
 
 fn distribution_metric(values: impl Iterator<Item = Option<f64>>) -> Distribution {
@@ -2243,35 +2314,60 @@ fn render_csv(measurements: &MeasurementsFile) -> String {
 
 // ============================== Writing ==============================
 
-/// Writes `measurements.csv` then `measurements.json`, each via
-/// stage-then-rename (`crate::storage`). `measurements.json` carries
-/// the version stamp and `generated_at`, so it is the commit a
-/// consumer should treat as authoritative; committing the CSV first
-/// means a crash between the two renames leaves a stale-but-consistent
-/// CSV that the next `compare` run overwrites, rather than a fresh
-/// JSON paired with a stale CSV. ADR 0003 §9.3 calls the pair "written
-/// atomically together" — two independent renames can only approximate
-/// that on a POSIX filesystem, not guarantee it.
-fn write_measurements(dir: &Path, measurements: &MeasurementsFile) -> Result<(), String> {
+/// Writes `differences.jsonl`, then `measurements.csv`, then
+/// `measurements.json` — each via stage-then-rename (`crate::storage`).
+/// `measurements.json` carries the version stamp and `generated_at`, so
+/// it stays the commit a consumer should treat as authoritative;
+/// committing the other two first means a crash mid-sequence leaves
+/// only stale-but-consistent artifacts that the next `compare` run
+/// overwrites, never a fresh `measurements.json` paired with a stale
+/// sibling. ADR 0003 §9.3 calls the set "written atomically together"
+/// — three independent renames can only approximate that on a POSIX
+/// filesystem, not guarantee it. Every staged temp file is cleaned up
+/// on any later failure, however far the sequence got.
+fn write_artifacts(
+    dir: &Path,
+    measurements: &MeasurementsFile,
+    differences_text: &str,
+) -> Result<(), String> {
+    let differences_path = dir.join("differences.jsonl");
     let json_path = dir.join("measurements.json");
     let csv_path = dir.join("measurements.csv");
     let json_text = serde_json::to_string_pretty(measurements)
         .map_err(|error| format!("serializing measurements.json: {error}"))?;
     let csv_text = render_csv(measurements);
 
-    let staged_csv = crate::storage::stage_bytes(&csv_path, csv_text.as_bytes(), false)
-        .map_err(|error| format!("staging {}: {error}", csv_path.display()))?;
-    // Every branch below already has `staged_csv` on disk under its
-    // temporary name, and some also have `staged_json` — a later
-    // failure must not leave either behind, since `stage_bytes` only
+    let staged_differences =
+        crate::storage::stage_bytes(&differences_path, differences_text.as_bytes(), false)
+            .map_err(|error| format!("staging {}: {error}", differences_path.display()))?;
+    // Every branch below already has one or more of `staged_differences`/
+    // `staged_csv`/`staged_json` on disk under their temporary names — a
+    // later failure must not leave any behind, since `stage_bytes` only
     // ever cleans up its own partial write, not a sibling call's.
+    let staged_csv = match crate::storage::stage_bytes(&csv_path, csv_text.as_bytes(), false) {
+        Ok(staged) => staged,
+        Err(error) => {
+            let _ = crate::storage::remove_persisted_file(&staged_differences);
+            return Err(format!("staging {}: {error}", csv_path.display()));
+        }
+    };
     let staged_json = match crate::storage::stage_bytes(&json_path, json_text.as_bytes(), false) {
         Ok(staged) => staged,
         Err(error) => {
+            let _ = crate::storage::remove_persisted_file(&staged_differences);
             let _ = crate::storage::remove_persisted_file(&staged_csv);
             return Err(format!("staging {}: {error}", json_path.display()));
         }
     };
+    if let Err(error) = crate::storage::commit_staged(&staged_differences, &differences_path) {
+        let _ = crate::storage::remove_persisted_file(&staged_differences);
+        let _ = crate::storage::remove_persisted_file(&staged_csv);
+        let _ = crate::storage::remove_persisted_file(&staged_json);
+        return Err(format!(
+            "publishing {}: {error}",
+            differences_path.display()
+        ));
+    }
     if let Err(error) = crate::storage::commit_staged(&staged_csv, &csv_path) {
         let _ = crate::storage::remove_persisted_file(&staged_csv);
         let _ = crate::storage::remove_persisted_file(&staged_json);
