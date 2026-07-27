@@ -26,7 +26,7 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::Value;
 
-pub(super) const EVAL_VERSION: u64 = 1;
+const EVAL_VERSION: u64 = 1;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,13 +47,13 @@ struct EvalHeader {
 /// nDCG extension reads in full — #260 only checks `relevance >= 1`.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ExpectedSource {
-    pub(super) source: String,
+pub(crate) struct ExpectedSource {
+    pub(crate) source: String,
     /// Empty means "any paragraph of this source answers the case."
     #[serde(default)]
-    pub(super) paragraphs: Vec<u32>,
+    pub(crate) paragraphs: Vec<u32>,
     #[serde(default = "default_relevance")]
-    pub(super) relevance: u8,
+    pub(crate) relevance: u8,
 }
 
 fn default_relevance() -> u8 {
@@ -66,8 +66,8 @@ fn default_relevance() -> u8 {
 /// [`EvalOptions::carries_215_extension`].
 #[derive(Debug, Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields, default)]
-pub(super) struct EvalOptions {
-    pub(super) limit: Option<usize>,
+pub(crate) struct EvalOptions {
+    pub(crate) limit: Option<usize>,
     floor: Option<Value>,
     sources: Option<Value>,
     since: Option<Value>,
@@ -82,21 +82,21 @@ impl EvalOptions {
 /// One case record (ADR 0003 §11).
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
-pub(super) struct EvalCase {
-    pub(super) case_id: String,
-    pub(super) query: String,
+pub(crate) struct EvalCase {
+    pub(crate) case_id: String,
+    pub(crate) query: String,
     /// #260 does not drive retrieval from cues (its only search entry
     /// point is `POST /contexts/{name}/sources/search`, over `query`
     /// — ADR 0003 §11); this rides along and is only echoed back in
     /// `retrieval.json`'s per-case block for a reader's own reference.
     #[serde(default)]
-    pub(super) cues: Vec<String>,
+    pub(crate) cues: Vec<String>,
     #[serde(default)]
-    pub(super) expected_sources: Vec<ExpectedSource>,
+    pub(crate) expected_sources: Vec<ExpectedSource>,
     #[serde(default)]
-    pub(super) expected_concepts: Vec<String>,
+    pub(crate) expected_concepts: Vec<String>,
     #[serde(default)]
-    pub(super) options: EvalOptions,
+    pub(crate) options: EvalOptions,
     // #215-only extensions: never interpreted, only detected for the
     // once-per-run warning.
     #[serde(default)]
@@ -117,7 +117,7 @@ impl EvalCase {
 
     /// Whether this case carries any expectation at all — the switch
     /// that turns recall@k/MRR on (ADR 0003 §11).
-    pub(super) fn has_expectations(&self) -> bool {
+    pub(crate) fn has_expectations(&self) -> bool {
         !self.expected_sources.is_empty() || !self.expected_concepts.is_empty()
     }
 }
@@ -126,16 +126,16 @@ impl EvalCase {
 /// `retrieval.json`'s `inputs` block), every case, and warnings to
 /// print once — never once per case (ADR 0003 §11).
 #[derive(Debug)]
-pub(super) struct LoadedEvalSet {
-    pub(super) name: Option<String>,
-    pub(super) cases: Vec<EvalCase>,
-    pub(super) warnings: Vec<String>,
+pub(crate) struct LoadedEvalSet {
+    pub(crate) name: Option<String>,
+    pub(crate) cases: Vec<EvalCase>,
+    pub(crate) warnings: Vec<String>,
 }
 
 /// Parses and validates `path`. Every check that can be caught before
 /// any HTTP request runs here — a malformed dataset must never surface
 /// mid-run as a confusing per-case failure.
-pub(super) fn load_eval_file(path: &Path) -> Result<LoadedEvalSet, String> {
+pub(crate) fn load_eval_file(path: &Path) -> Result<LoadedEvalSet, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let label = path.display().to_string();

@@ -10,76 +10,12 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-// ============================== nearest-rank ==============================
-
-#[test]
-fn nearest_rank_matches_the_adr_formula() {
-    let one = vec![7.0];
-    assert_eq!(nearest_rank(&one, 50), 7.0);
-    assert_eq!(nearest_rank(&one, 99), 7.0);
-
-    let two = vec![1.0, 2.0];
-    assert_eq!(nearest_rank(&two, 50), 1.0, "ceil(50/100*2)=1 -> x[0]");
-    assert_eq!(nearest_rank(&two, 90), 2.0, "ceil(90/100*2)=2 -> x[1]");
-
-    let four = vec![1.0, 2.0, 3.0, 4.0];
-    assert_eq!(nearest_rank(&four, 50), 2.0, "ceil(50/100*4)=2 -> x[1]");
-
-    let ten: Vec<f64> = (1..=10).map(f64::from).collect();
-    assert_eq!(nearest_rank(&ten, 90), 9.0, "ceil(90/100*10)=9 -> x[8]");
-
-    let hundred: Vec<f64> = (1..=100).map(f64::from).collect();
-    assert_eq!(
-        nearest_rank(&hundred, 99),
-        99.0,
-        "ceil(99/100*100)=99 -> x[98]"
-    );
-
-    let all_same = vec![5.0, 5.0, 5.0, 5.0, 5.0];
-    assert_eq!(nearest_rank(&all_same, 50), 5.0);
-    assert_eq!(nearest_rank(&all_same, 99), 5.0);
-}
-
-#[test]
-fn distribution_from_samples_sorts_first() {
-    let d = Distribution::from_samples(vec![3.0, 1.0, 2.0]);
-    assert_eq!(d.min, Some(1.0));
-    assert_eq!(d.max, Some(3.0));
-    assert_eq!(d.n, 3);
-}
-
-// ============================== n == 0 shapes ==============================
-
-#[test]
-fn distribution_with_zero_samples_serializes_all_stats_null() {
-    let d = Distribution::from_samples(vec![]);
-    let value = serde_json::to_value(&d).unwrap();
-    let obj = value.as_object().unwrap();
-    assert_eq!(obj["n"], 0);
-    for key in ["min", "p50", "p90", "p99", "max", "mean", "sum"] {
-        assert!(obj.contains_key(key), "{key} must be present");
-        assert!(obj[key].is_null(), "{key} must be null, got {:?}", obj[key]);
-    }
-}
-
-#[test]
-fn ratio_with_zero_denominator_serializes_value_and_numerator_null() {
-    let r = ratio_metric(0, 0);
-    let value = serde_json::to_value(&r).unwrap();
-    assert!(value["value"].is_null());
-    assert!(value["numerator"].is_null());
-    assert_eq!(value["n"], 0);
-}
-
-#[test]
-fn ratio_with_a_denominator_computes_the_share() {
-    let r = ratio_metric(3, 31);
-    assert!((r.value.unwrap() - 3.0 / 31.0).abs() < 1e-12);
-    assert_eq!(r.n, 31);
-    assert_eq!(r.numerator, Some(3));
-}
-
 // ============================== ordering & banned keys ==============================
+//
+// nearest-rank and Distribution/Ratio n==0-shape tests moved to
+// `crate::measure`'s own test module (issue #280) — they exercise
+// `nearest_rank`/`Distribution::from_samples`/`ratio_metric` directly
+// and belong beside the types they test.
 
 #[test]
 fn per_model_maps_serialize_in_lexicographic_order() {
@@ -253,7 +189,7 @@ fn every_emitted_metric_keys_definitions_and_units_match_csv() {
         let fields: Vec<&str> = line.split(',').collect();
         let metric = fields[4];
         let unit = fields[7];
-        let expected = measurements.definitions.get(metric).unwrap().unit;
+        let expected = measurements.definitions.get(metric).unwrap().unit();
         assert_eq!(unit, expected, "unit mismatch for {metric}");
     }
     let _ = fs::remove_dir_all(&dir);
@@ -265,16 +201,14 @@ fn known_caveats_mention_what_they_conflate() {
     let stop_malformed = d.get("attempt.state_rate.stop_malformed").unwrap();
     assert!(
         stop_malformed
-            .caveat
-            .as_ref()
+            .caveat()
             .unwrap()
             .contains("validation_issues")
     );
     let length_limited = d.get("attempt.state_rate.length_limited").unwrap();
     assert!(
         length_limited
-            .caveat
-            .as_ref()
+            .caveat()
             .unwrap()
             .contains("length_limited: true")
     );
@@ -458,15 +392,19 @@ fn chunk_seconds_sums_retries_and_excludes_cross_chunk() {
     ];
     let refs: Vec<&AttemptRow> = attempts.iter().collect();
     let d = chunk_seconds_distribution(&refs);
-    assert_eq!(d.n, 1, "one chunk, two item-stage retries summed");
-    assert_eq!(d.sum, Some(5.0), "2.0 + 3.0, cross_chunk's 100.0 excluded");
+    assert_eq!(d.n(), 1, "one chunk, two item-stage retries summed");
+    assert_eq!(
+        d.sum(),
+        Some(5.0),
+        "2.0 + 3.0, cross_chunk's 100.0 excluded"
+    );
 
     let retry_rate = attempt_rate_metrics(&refs);
     let MetricValue::Ratio(r) = &retry_rate["attempt.retry_rate"] else {
         panic!()
     };
     assert_eq!(
-        r.numerator,
+        r.numerator(),
         Some(1),
         "only the second item-stage attempt is a retry"
     );
@@ -529,12 +467,12 @@ fn document_outcome_rates_counts_interrupted_in_the_denominator_only() {
     let MetricValue::Ratio(written) = &rates["document.written_rate"] else {
         panic!()
     };
-    assert_eq!(written.n, 3);
-    assert_eq!(written.numerator, Some(1));
+    assert_eq!(written.n(), 3);
+    assert_eq!(written.numerator(), Some(1));
     let MetricValue::Ratio(failed) = &rates["document.failed_rate"] else {
         panic!()
     };
-    assert_eq!(failed.numerator, Some(1));
+    assert_eq!(failed.numerator(), Some(1));
 }
 
 // ============================== batch analysis ==============================
@@ -658,15 +596,19 @@ fn attempts_with_no_provider_metadata_are_excluded_from_token_metrics() {
     let MetricValue::Distribution(d) = &metrics["tokens.input_per_attempt"] else {
         panic!()
     };
-    assert_eq!(d.n, 1, "the timeout attempt is excluded, not counted as 0");
-    assert_eq!(d.sum, Some(100.0));
+    assert_eq!(
+        d.n(),
+        1,
+        "the timeout attempt is excluded, not counted as 0"
+    );
+    assert_eq!(d.sum(), Some(100.0));
 
     let missing = attempt_rate_metrics(&refs);
     let MetricValue::Ratio(r) = &missing["attempt.provider_metadata_missing_rate"] else {
         panic!()
     };
-    assert_eq!(r.numerator, Some(1));
-    assert_eq!(r.n, 2);
+    assert_eq!(r.numerator(), Some(1));
+    assert_eq!(r.n(), 2);
 }
 
 fn clone_attempt(a: &AttemptRow) -> AttemptRow {
@@ -1119,8 +1061,8 @@ fn stability_metrics_over_two_runs_match_hand_computed_values() {
     let MetricValue::Distribution(jaccard) = &model["stability.run_pair_jaccard"] else {
         panic!()
     };
-    assert_eq!(jaccard.n, 1);
-    assert!((jaccard.sum.unwrap() - 2.0 / 3.0).abs() < 1e-9);
+    assert_eq!(jaccard.n(), 1);
+    assert!((jaccard.sum().unwrap() - 2.0 / 3.0).abs() < 1e-9);
 
     // 5 distinct keys: brewery's {lager, ale, founded in/1990}, sake's
     // {junmai, ginjo} — over 3 completed (run, document) batches
@@ -1128,8 +1070,8 @@ fn stability_metrics_over_two_runs_match_hand_computed_values() {
     let MetricValue::Count(keys_distinct) = &model["stability.keys_distinct"] else {
         panic!()
     };
-    assert_eq!(keys_distinct.value, Some(5.0));
-    assert_eq!(keys_distinct.n, 3);
+    assert_eq!(keys_distinct.value(), Some(5.0));
+    assert_eq!(keys_distinct.n(), 3);
 
     // Eligible keys (document completed in 2+ runs) are brewery's 3
     // keys only — sake completed in just 1 run. lager/ale are in both
@@ -1138,39 +1080,39 @@ fn stability_metrics_over_two_runs_match_hand_computed_values() {
     let MetricValue::Ratio(in_all) = &model["stability.keys_in_all_runs_ratio"] else {
         panic!()
     };
-    assert_eq!(in_all.n, 3);
-    assert_eq!(in_all.numerator, Some(2));
+    assert_eq!(in_all.n(), 3);
+    assert_eq!(in_all.numerator(), Some(2));
     let MetricValue::Ratio(in_single) = &model["stability.keys_in_single_run_ratio"] else {
         panic!()
     };
-    assert_eq!(in_single.n, 3);
-    assert_eq!(in_single.numerator, Some(1));
+    assert_eq!(in_single.n(), 3);
+    assert_eq!(in_single.numerator(), Some(1));
 
     let MetricValue::Distribution(presence) = &model["stability.key_presence_ratio"] else {
         panic!()
     };
-    assert_eq!(presence.n, 3);
-    assert_eq!(presence.min, Some(0.5));
-    assert_eq!(presence.max, Some(1.0));
-    assert!((presence.sum.unwrap() - 2.5).abs() < 1e-9);
+    assert_eq!(presence.n(), 3);
+    assert_eq!(presence.min(), Some(0.5));
+    assert_eq!(presence.max(), Some(1.0));
+    assert!((presence.sum().unwrap() - 2.5).abs() < 1e-9);
 
     // Keys observed in 2+ runs: lager (polarity + weight + attribution
     // all vary) and ale (nothing varies) — 2 keys, 1 of each variation.
     let MetricValue::Ratio(polarity) = &model["stability.polarity_variation_ratio"] else {
         panic!()
     };
-    assert_eq!(polarity.n, 2);
-    assert_eq!(polarity.numerator, Some(1));
+    assert_eq!(polarity.n(), 2);
+    assert_eq!(polarity.numerator(), Some(1));
     let MetricValue::Ratio(weight) = &model["stability.weight_variation_ratio"] else {
         panic!()
     };
-    assert_eq!(weight.n, 2);
-    assert_eq!(weight.numerator, Some(1));
+    assert_eq!(weight.n(), 2);
+    assert_eq!(weight.numerator(), Some(1));
     let MetricValue::Ratio(attribution) = &model["stability.attribution_variation_ratio"] else {
         panic!()
     };
-    assert_eq!(attribution.n, 2);
-    assert_eq!(attribution.numerator, Some(1));
+    assert_eq!(attribution.n(), 2);
+    assert_eq!(attribution.numerator(), Some(1));
 
     // 4 alias spellings declared in both runs (beer co, lager, ale,
     // brewco group); only "BrewCo Group" resolves to a different
@@ -1179,34 +1121,34 @@ fn stability_metrics_over_two_runs_match_hand_computed_values() {
     else {
         panic!()
     };
-    assert_eq!(alias_variation.n, 4);
-    assert_eq!(alias_variation.numerator, Some(1));
+    assert_eq!(alias_variation.n(), 4);
+    assert_eq!(alias_variation.numerator(), Some(1));
 
     // run.*: one sample per run (run_indexes come from manifest.cells,
     // not from which documents happened to complete).
     let MetricValue::Distribution(run_assoc) = &model["run.associations_total"] else {
         panic!()
     };
-    assert_eq!(run_assoc.n, 2);
+    assert_eq!(run_assoc.n(), 2);
     assert_eq!(
-        run_assoc.min,
+        run_assoc.min(),
         Some(3.0),
         "run02: 3 (brewery) + 0 (sake failed)"
     );
-    assert_eq!(run_assoc.max, Some(4.0), "run01: 2 (brewery) + 2 (sake)");
+    assert_eq!(run_assoc.max(), Some(4.0), "run01: 2 (brewery) + 2 (sake)");
 
     let MetricValue::Distribution(run_written) = &model["run.documents_written"] else {
         panic!()
     };
-    assert_eq!(run_written.min, Some(1.0), "run02: only brewery written");
-    assert_eq!(run_written.max, Some(2.0), "run01: both written");
+    assert_eq!(run_written.min(), Some(1.0), "run02: only brewery written");
+    assert_eq!(run_written.max(), Some(2.0), "run01: both written");
 
     let MetricValue::Distribution(run_elapsed) = &model["run.elapsed_seconds_total"] else {
         panic!()
     };
-    assert_eq!(run_elapsed.n, 2);
-    assert_eq!(run_elapsed.min, Some(9.0), "run01: 4.0 + 5.0");
-    assert_eq!(run_elapsed.max, Some(13.0), "run02: 6.0 + 7.0");
+    assert_eq!(run_elapsed.n(), 2);
+    assert_eq!(run_elapsed.min(), Some(9.0), "run01: 4.0 + 5.0");
+    assert_eq!(run_elapsed.max(), Some(13.0), "run02: 6.0 + 7.0");
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1231,41 +1173,47 @@ fn compute_measurements_over_a_synthetic_results_directory() {
         panic!()
     };
     assert_eq!(
-        latency.n, 2,
+        latency.n(),
+        2,
         "both the written and the timed-out attempt count"
     );
 
     let MetricValue::Ratio(written_rate) = &cell.metrics["document.written_rate"] else {
         panic!()
     };
-    assert_eq!(written_rate.n, 2);
-    assert_eq!(written_rate.numerator, Some(1));
+    assert_eq!(written_rate.n(), 2);
+    assert_eq!(written_rate.numerator(), Some(1));
 
     let model = &measurements.models["m"];
     let MetricValue::Ratio(complete_rate) = &model["cell.complete_rate"] else {
         panic!()
     };
-    assert_eq!(complete_rate.value, Some(1.0));
+    assert_eq!(complete_rate.value(), Some(1.0));
 
     let brewery_run01 = &measurements.documents["m"]["brewery"]["run01"];
     let MetricValue::Count(associations) = &brewery_run01["extraction.associations"] else {
         panic!()
     };
-    assert_eq!(associations.value, Some(2.0));
+    assert_eq!(associations.value(), Some(2.0));
     let MetricValue::Count(subjects) = &brewery_run01["extraction.subjects_distinct"] else {
         panic!()
     };
-    assert_eq!(subjects.value, Some(1.0), "one distinct subject: 'beer co'");
+    assert_eq!(
+        subjects.value(),
+        Some(1.0),
+        "one distinct subject: 'beer co'"
+    );
 
     let sake_run01 = &measurements.documents["m"]["sake"]["run01"];
     let MetricValue::Count(sake_associations) = &sake_run01["extraction.associations"] else {
         panic!()
     };
     assert_eq!(
-        sake_associations.value, None,
+        sake_associations.value(),
+        None,
         "sake failed — no associations"
     );
-    assert_eq!(sake_associations.n, 0);
+    assert_eq!(sake_associations.n(), 0);
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1283,17 +1231,17 @@ fn stability_metrics_with_a_single_run_are_the_defined_zero_shape() {
     let MetricValue::Distribution(jaccard) = &model["stability.run_pair_jaccard"] else {
         panic!()
     };
-    assert_eq!(jaccard.n, 0, "a single run has no pair to compare");
+    assert_eq!(jaccard.n(), 0, "a single run has no pair to compare");
 
     let MetricValue::Count(keys_distinct) = &model["stability.keys_distinct"] else {
         panic!()
     };
     assert_eq!(
-        keys_distinct.value,
+        keys_distinct.value(),
         Some(2.0),
         "brewery's 2 associations are 2 distinct keys"
     );
-    assert_eq!(keys_distinct.n, 1, "one completed (run, document) batch");
+    assert_eq!(keys_distinct.n(), 1, "one completed (run, document) batch");
 
     for ratio_metric_name in [
         "stability.keys_in_all_runs_ratio",
@@ -1307,24 +1255,25 @@ fn stability_metrics_with_a_single_run_are_the_defined_zero_shape() {
             panic!("{ratio_metric_name} is not a Ratio")
         };
         assert_eq!(
-            r.n, 0,
+            r.n(),
+            0,
             "{ratio_metric_name}: no key has a second run to compare against"
         );
-        assert_eq!(r.value, None);
-        assert_eq!(r.numerator, None);
+        assert_eq!(r.value(), None);
+        assert_eq!(r.numerator(), None);
     }
 
     let MetricValue::Distribution(presence) = &model["stability.key_presence_ratio"] else {
         panic!()
     };
-    assert_eq!(presence.n, 0);
+    assert_eq!(presence.n(), 0);
 
     let MetricValue::Distribution(run_assoc) = &model["run.associations_total"] else {
         panic!()
     };
-    assert_eq!(run_assoc.n, 1, "one run this model has a cell for");
+    assert_eq!(run_assoc.n(), 1, "one run this model has a cell for");
     assert_eq!(
-        run_assoc.sum,
+        run_assoc.sum(),
         Some(2.0),
         "brewery's 2 associations; sake failed and contributes 0"
     );
@@ -1332,7 +1281,7 @@ fn stability_metrics_with_a_single_run_are_the_defined_zero_shape() {
     let MetricValue::Distribution(run_written) = &model["run.documents_written"] else {
         panic!()
     };
-    assert_eq!(run_written.sum, Some(1.0), "only brewery was written");
+    assert_eq!(run_written.sum(), Some(1.0), "only brewery was written");
 
     let _ = fs::remove_dir_all(&dir);
 }

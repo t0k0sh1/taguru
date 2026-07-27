@@ -23,6 +23,10 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::config::subcommand_usage_error;
+use crate::measure::{
+    Distribution, MetricDef, MetricValue, MetricsMap, count_metric, def, metric_csv_rows,
+    ratio_metric,
+};
 
 use super::identity;
 
@@ -125,145 +129,12 @@ fn parse_args(args: &[String]) -> Result<CompareArgs, i32> {
 }
 
 // ============================== Value shapes ==============================
+//
+// `Distribution` / `Ratio` / `Count` / `MetricValue` / `MetricDef` and
+// their constructors moved to `crate::measure` (issue #280, ADR 0004
+// §10) — `benchmark::search` (#260) and `taguru evaluate` (#215) are
+// peer consumers, not owned by `benchmark::compare`.
 
-/// `{n, min, p50, p90, p99, max, mean, sum}` (ADR 0003 §9.3). Every
-/// field always serializes — `n: 0` pairs with every statistic `null`,
-/// never an omitted key, so a reader tells "measured, zero samples"
-/// from "this metric does not apply here" by key presence alone.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(super) struct Distribution {
-    n: u64,
-    min: Option<f64>,
-    p50: Option<f64>,
-    p90: Option<f64>,
-    p99: Option<f64>,
-    max: Option<f64>,
-    mean: Option<f64>,
-    sum: Option<f64>,
-}
-
-impl Distribution {
-    const EMPTY: Self = Self {
-        n: 0,
-        min: None,
-        p50: None,
-        p90: None,
-        p99: None,
-        max: None,
-        mean: None,
-        sum: None,
-    };
-
-    /// Builds from a sample set: drops non-finite values defensively,
-    /// sorts once, and applies nearest-rank (ADR 0003 §9.3) with no
-    /// interpolation — always an observed value, exactly reproducible
-    /// by an external re-aggregator reading the same `runs/*.jsonl`.
-    /// `pub(super)`: `benchmark::search` (#260) builds the same shape
-    /// for its own per-model distributions (hit counts, source
-    /// diversity) rather than hand-copying this struct.
-    pub(super) fn from_samples(mut samples: Vec<f64>) -> Self {
-        samples.retain(|v| v.is_finite());
-        let n = samples.len();
-        if n == 0 {
-            return Self::EMPTY;
-        }
-        samples.sort_by(f64::total_cmp);
-        let sum: f64 = samples.iter().sum();
-        Self {
-            n: n as u64,
-            min: Some(samples[0]),
-            p50: Some(nearest_rank(&samples, 50)),
-            p90: Some(nearest_rank(&samples, 90)),
-            p99: Some(nearest_rank(&samples, 99)),
-            max: Some(samples[n - 1]),
-            mean: Some(sum / n as f64),
-            sum: Some(sum),
-        }
-    }
-}
-
-/// `x[ceil(p/100 * n) - 1]` — nearest-rank, no interpolation (ADR 0003
-/// §9.3): always an observed value, never a synthesized one between two
-/// samples. `sorted` must already be ascending and non-empty.
-fn nearest_rank(sorted: &[f64], p: usize) -> f64 {
-    let n = sorted.len();
-    let rank = (p * n).div_ceil(100).clamp(1, n);
-    sorted[rank - 1]
-}
-
-/// `{value, n, numerator}` (ADR 0003 §9.3): `numerator` attempts/
-/// documents/lines matched some predicate, out of `n` total in scope.
-/// `n: 0` pairs with `value: None` and `numerator: None` — never a
-/// divide-by-zero `NaN`, never a silently misleading `0.0`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(super) struct Ratio {
-    value: Option<f64>,
-    n: u64,
-    numerator: Option<u64>,
-}
-
-/// `pub(super)`: `benchmark::search` (#260) reuses this for its own
-/// rate metrics (empty-result rate, per-lane hit rate).
-pub(super) fn ratio_metric(numerator: u64, n: u64) -> Ratio {
-    if n == 0 {
-        Ratio {
-            value: None,
-            n: 0,
-            numerator: None,
-        }
-    } else {
-        Ratio {
-            value: Some(numerator as f64 / n as f64),
-            n,
-            numerator: Some(numerator),
-        }
-    }
-}
-
-/// `{value, n}`: a pooled total, union size, or derived rate, alongside
-/// the number of documents/attempts it was pooled from. Used where
-/// `Ratio`'s numerator-over-n-of-the-same-population shape does not
-/// fit (a cross-unit rate) or where the value is not itself a share
-/// (a union size, a summed count).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(super) struct Count {
-    value: Option<f64>,
-    n: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-pub(super) enum MetricValue {
-    Distribution(Distribution),
-    Ratio(Ratio),
-    Count(Count),
-}
-
-impl MetricValue {
-    fn sample_size(&self) -> u64 {
-        match self {
-            MetricValue::Distribution(d) => d.n,
-            MetricValue::Ratio(r) => r.n,
-            MetricValue::Count(c) => c.n,
-        }
-    }
-}
-
-/// One `definitions` entry (ADR 0003 §9.3): unit, statistic shape,
-/// applicable scopes, description, source pointer, and known caveat —
-/// embedded in the artifact itself, not only documented in prose
-/// elsewhere.
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct MetricDef {
-    unit: &'static str,
-    statistic: &'static str,
-    scopes: &'static [&'static str],
-    description: String,
-    source: &'static str,
-    caveat: Option<String>,
-}
-
-type MetricsMap = BTreeMap<String, MetricValue>;
 type DocumentsSection = BTreeMap<String, BTreeMap<String, BTreeMap<String, MetricsMap>>>;
 
 #[derive(Debug, Clone, Serialize)]
@@ -1033,10 +904,10 @@ fn extraction_count_metrics_document(doc: &DocRow) -> MetricsMap {
         ($name:expr, $field:ident) => {
             m.insert(
                 $name.to_string(),
-                MetricValue::Count(Count {
-                    value: doc.$field.map(|v| v as f64),
-                    n: u64::from(doc.$field.is_some()),
-                }),
+                MetricValue::Count(count_metric(
+                    doc.$field.map(|v| v as f64),
+                    u64::from(doc.$field.is_some()),
+                )),
             );
         };
     }
@@ -1109,10 +980,10 @@ fn vocabulary_metrics_document(doc: &DocRow) -> MetricsMap {
         ($name:expr, $field:expr) => {
             m.insert(
                 $name.to_string(),
-                MetricValue::Count(Count {
-                    value: doc.batch.as_ref().map(|b| $field(b) as f64),
-                    n: u64::from(doc.batch.is_some()),
-                }),
+                MetricValue::Count(count_metric(
+                    doc.batch.as_ref().map(|b| $field(b) as f64),
+                    u64::from(doc.batch.is_some()),
+                )),
             );
         };
     }
@@ -1171,12 +1042,12 @@ fn rate_and_ratio_metrics_over_docs(docs: &[&DocRow]) -> MetricsMap {
         MetricValue::Ratio(ratio_metric(reuse_numerator, assoc_lines_total)),
     );
     let rate = if rate_docs == 0 || tokens_for_rate == 0 {
-        Count { value: None, n: 0 }
+        count_metric(None, 0)
     } else {
-        Count {
-            value: Some(assoc_for_rate as f64 / (tokens_for_rate as f64 / 1000.0)),
-            n: rate_docs,
-        }
+        count_metric(
+            Some(assoc_for_rate as f64 / (tokens_for_rate as f64 / 1000.0)),
+            rate_docs,
+        )
     };
     m.insert(
         "extraction.associations_per_1k_input_tokens".to_string(),
@@ -1336,12 +1207,9 @@ fn stability_metrics(
 
     // stability.keys_distinct
     let keys_distinct = if completed_batches == 0 {
-        Count { value: None, n: 0 }
+        count_metric(None, 0)
     } else {
-        Count {
-            value: Some(presence_table.len() as f64),
-            n: completed_batches,
-        }
+        count_metric(Some(presence_table.len() as f64), completed_batches)
     };
     m.insert(
         "stability.keys_distinct".to_string(),
@@ -1532,26 +1400,10 @@ fn document_scope_metrics(doc: &DocRow, attempts_for_doc: &[&AttemptRow]) -> Met
 }
 
 // ============================== Definitions ==============================
-
-/// `pub(super)`: `benchmark::search` (#260) uses this to build its own
-/// `retrieval.json` `definitions` block in the same shape.
-pub(super) fn def(
-    unit: &'static str,
-    statistic: &'static str,
-    scopes: &'static [&'static str],
-    description: impl Into<String>,
-    source: &'static str,
-    caveat: Option<&str>,
-) -> MetricDef {
-    MetricDef {
-        unit,
-        statistic,
-        scopes,
-        description: description.into(),
-        source,
-        caveat: caveat.map(str::to_string),
-    }
-}
+//
+// `def` moved to `crate::measure` (issue #280) — `benchmark::search`
+// (#260) builds its own `retrieval.json` `definitions` block from the
+// same function.
 
 const CMD_SCOPES: &[&str] = &["cell", "model", "document"];
 const CM_SCOPES: &[&str] = &["cell", "model"];
@@ -2211,27 +2063,6 @@ fn csv_field(s: &str) -> String {
     }
 }
 
-fn metric_csv_rows(value: &MetricValue) -> Vec<(&'static str, Option<f64>)> {
-    match value {
-        MetricValue::Distribution(d) => vec![
-            ("n", Some(d.n as f64)),
-            ("min", d.min),
-            ("p50", d.p50),
-            ("p90", d.p90),
-            ("p99", d.p99),
-            ("max", d.max),
-            ("mean", d.mean),
-            ("sum", d.sum),
-        ],
-        MetricValue::Ratio(r) => vec![
-            ("value", r.value),
-            ("n", Some(r.n as f64)),
-            ("numerator", r.numerator.map(|v| v as f64)),
-        ],
-        MetricValue::Count(c) => vec![("value", c.value), ("n", Some(c.n as f64))],
-    }
-}
-
 fn run_index_from_label(label: &str) -> Option<usize> {
     label.strip_prefix("run")?.parse().ok()
 }
@@ -2247,7 +2078,7 @@ fn append_metric_rows(
     value: &MetricValue,
     definitions: &BTreeMap<String, MetricDef>,
 ) {
-    let unit = definitions.get(metric).map_or("", |d| d.unit);
+    let unit = definitions.get(metric).map_or("", |d| d.unit());
     let n = value.sample_size();
     for (stat, v) in metric_csv_rows(value) {
         out.push_str(&format!(
