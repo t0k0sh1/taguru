@@ -354,9 +354,11 @@ pub(crate) fn load_eval_file(path: &Path, mode: Extensions) -> Result<LoadedEval
 
 pub(crate) enum Extensions {
     /// #260: extension fields stay opaque `Value`s; a case carrying any
-    /// of them adds one line to `warnings`, once per run, worded by the
-    /// caller (never hard-coded to one verb's name).
-    CarryThrough,
+    /// of them adds one line to `warnings`, once per run. `consumer` is
+    /// the caller's own verb name (e.g. `"taguru benchmark search"`),
+    /// substituted into the warning text so the loader itself never
+    /// hard-codes one verb's name.
+    CarryThrough { consumer: &'static str },
     /// #215: extension fields are typed and validated; a malformed one
     /// is a reported parse error like any other field. No warning is
     /// emitted — this loader call is the interpreter the extensions
@@ -366,8 +368,10 @@ pub(crate) enum Extensions {
 ```
 
 This also retires `evalset.rs:212-220`'s hard-coded `"taguru benchmark
-search"` string — `CarryThrough` callers supply their own verb name for
-the warning text.
+search"` string — the warning text is built from `CarryThrough`'s own
+`consumer` field, so each `CarryThrough` caller supplies its own verb
+name at the call site (`Extensions::CarryThrough { consumer: "taguru
+benchmark search" }`) instead of the loader assuming one.
 
 **Source resolution is a per-consumer concern, not the loader's.**
 `benchmark search`'s `resolve_expected_source_path`
@@ -413,6 +417,25 @@ since: options.since, until: options.until}`.
    failure but is a paging artifact. `query` pins the exact triple,
    returns `total`, and its cost does not grow with the subject's
    degree.
+
+   **Multi-candidate resolution policy.** `/resolve`/`/resolve_label` can
+   return more than one same-tier candidate for a subject, object, or
+   label cue — `query`, unlike the coverage check in step 1, needs
+   exactly one stored name per position to pin a triple, so step 1's
+   "expand every candidate in the top tier" rule cannot carry over
+   unchanged. The rule for this step is stricter: resolution must yield
+   **exactly one** candidate in the highest tier present for a position
+   to be pinned. Zero candidates is `not_found`; two or more same-tier
+   candidates is `ambiguous` — in both cases `query` is **not called**
+   for that entry, and no combination is guessed at or fanned out over
+   (fanning out over every subject×label×object combination multiplies
+   call count unpredictably and turns "did this hit" into an
+   under-specified question the dataset author never actually asked).
+   The per-entry outcome — `resolved` / `not_found` / `ambiguous`, with
+   the candidate names when ambiguous — is recorded in `evaluation.json`
+   (§9.1), so an ambiguous expectation is a visible, reproducible
+   diagnostic that tells a dataset author to write a more specific cue,
+   not a silent skip or an arbitrarily chosen pin.
 
 **`activate`, `explore`, and `describe` are not called.** `activate`'s
 and `explore`'s results depend on `decay`/`max_depth`, which no eval
@@ -524,10 +547,21 @@ rather than decorative.
 
 Per-case block carries: `case_id`, `query`, `cues` (echoed, never used to
 drive retrieval directly — see §7), `limit`, structural-lane fields
-(`resolved_names`, `resolve_tier`), the passage-lane `hits[]` (full,
-bounded only by `limit` itself — see §11), the structural-lane matches,
-citation recall and locator-validity results, and a `missed[]` list of
-unmet expectations, capped and counted per §11.
+(`resolved_names`, `resolve_tier` for concept/label coverage;
+per-`expected_associations[]`-entry `resolution: "resolved" |
+"not_found" | "ambiguous"` plus candidate names when ambiguous, per §7
+step 2's policy), the passage-lane `hits[]` (full, bounded only by
+`limit` itself — see §11), the structural-lane matches, citation recall
+and locator-validity results, and a `missed[]` list of unmet
+expectations, capped and counted per §11.
+
+The header also carries a **threshold identity**: when `--thresholds
+FILE` was given, a hash of the threshold file's canonical byte content
+(never its path, which is a local filesystem detail with no meaning
+across machines) — `null` when the run was report-only. This is what
+§9.2's comparison mode checks to warn on a threshold-file mismatch
+between two runs without needing either original file on disk at
+compare time.
 
 ### 9.2 `changes.jsonl`
 
@@ -546,9 +580,13 @@ accompanies the machine-readable file. Verdict vocabulary (`improved`,
 `benchmark`'s artifacts — this is the one place in the tree whose whole
 job is to say which run was better.
 
-Mismatched `context`, `corpus.revision`, threshold file, or stamp
-version between `BASE.json` and `HEAD.json` produce a loud warning, never
-a refusal — matching ADR 0002 §10's "the warning never blocks" rule.
+Mismatched `context`, `corpus.revision`, threshold-file hash (§9.1's
+persisted identity — `compare` only ever reads the two
+`evaluation.json` files, never the original threshold file, so the
+comparison is hash-equality, not a byte-for-byte file diff), or stamp
+version between `BASE.json` and `HEAD.json` produce a loud warning,
+never a refusal — matching ADR 0002 §10's "the warning never blocks"
+rule.
 
 ### 9.3 The thresholds file
 
