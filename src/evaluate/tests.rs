@@ -321,9 +321,9 @@ fn every_metric_key_has_a_matching_definition_and_vice_versa() {
 
 #[test]
 fn evaluate_module_never_names_an_extraction_or_embedding_seam() {
-    // Read straight from disk rather than `include_str!`, so this
-    // check's own source text is never itself scanned (it lives in a
-    // sibling file, tests.rs, which this assertion does not touch).
+    // Scans evaluate.rs only, so this check's own source text is never
+    // itself scanned — the assertion lives in a sibling file (tests.rs)
+    // that `include_str!` here does not pull in.
     let source = include_str!("../evaluate.rs");
     // Built by concatenation so this assertion's own literals never
     // accidentally match themselves.
