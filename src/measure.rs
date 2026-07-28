@@ -193,6 +193,20 @@ impl MetricValue {
             MetricValue::Count(c) => c.n,
         }
     }
+
+    /// A single number to compare against a `{"min"|"max": f64}`
+    /// threshold (ADR 0004 §9.3): `Distribution` compares by `mean`,
+    /// `Ratio`/`Count` by `value`. `None` whenever the metric has no
+    /// samples (`n: 0`, every variant) — a threshold treats that as a
+    /// violation, not a silent pass, so this stays `None` rather than
+    /// coercing to `0.0`.
+    pub(crate) fn scalar(&self) -> Option<f64> {
+        match self {
+            MetricValue::Distribution(d) => d.mean,
+            MetricValue::Ratio(r) => r.value,
+            MetricValue::Count(c) => c.value,
+        }
+    }
 }
 
 /// One `definitions` entry (ADR 0003 §9.3): unit, statistic shape,
