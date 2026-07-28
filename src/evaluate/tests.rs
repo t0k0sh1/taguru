@@ -347,6 +347,439 @@ fn evaluate_module_never_names_an_extraction_or_embedding_seam() {
     );
 }
 
+// ========================= Scoring test fixtures (#274) =========================
+
+fn base_case(case_id: &str) -> EvalCase {
+    EvalCase {
+        case_id: case_id.to_string(),
+        query: "q".to_string(),
+        cues: Vec::new(),
+        expected_sources: Vec::new(),
+        expected_concepts: Vec::new(),
+        options: evalset::EvalOptions::default(),
+        expected_labels: Vec::new(),
+        expected_associations: Vec::new(),
+        expected_citations: Vec::new(),
+    }
+}
+
+fn expected_source(source: &str, paragraphs: &[u32], relevance: u8) -> ExpectedSource {
+    ExpectedSource {
+        source: source.to_string(),
+        paragraphs: paragraphs.to_vec(),
+        relevance,
+    }
+}
+
+fn hit_with_score(source: &str, paragraph: u32, score: f32) -> HitLocator {
+    HitLocator {
+        source: source.to_string(),
+        paragraph,
+        score,
+        lanes: PassageLanes {
+            bm25: None,
+            vector: None,
+        },
+    }
+}
+
+fn hit(source: &str, paragraph: u32) -> HitLocator {
+    hit_with_score(source, paragraph, 0.0)
+}
+
+fn cue_resolution(kind: &'static str, names: &[&str]) -> CueResolution {
+    CueResolution {
+        cue: "cue".to_string(),
+        kind,
+        resolved_names: names.iter().map(|s| s.to_string()).collect(),
+        tier: Some("lexical".to_string()),
+        limit: RESOLVE_LIMIT,
+        latency_ms: 1,
+        error: None,
+    }
+}
+
+fn position_resolved(name: &str) -> PositionOutcome {
+    PositionOutcome::Resolved {
+        name: name.to_string(),
+        tier: "lexical".to_string(),
+        latency_ms: 1,
+    }
+}
+
+fn association_probe(query: Option<QueryProbe>) -> AssociationProbe {
+    AssociationProbe {
+        subject_cue: "s".to_string(),
+        label_cue: "l".to_string(),
+        object_cue: "o".to_string(),
+        subject: position_resolved("s"),
+        label: position_resolved("l"),
+        object: position_resolved("o"),
+        query,
+    }
+}
+
+// ========================= score_recall: recall@k / MRR / graded nDCG =========================
+
+#[test]
+fn score_recall_matches_the_worked_example_from_the_274_design_discussion() {
+    // A(rel=3, no paragraph restriction) matched at rank 0; B(rel=1)
+    // matched at rank 2 — the plan's own worked example.
+    let expected = vec![
+        expected_source("corpus/a.md", &[], 3),
+        expected_source("corpus/b.md", &[], 1),
+    ];
+    let hits = vec![
+        hit("corpus/a.md", 0),
+        hit("corpus/a.md", 1),
+        hit("corpus/b.md", 4),
+    ];
+    let recall = score_recall(&expected, &hits).expect("a relevance >= 1 entry exists");
+    assert_eq!(recall.expected_total, 2);
+    assert_eq!(recall.matched, 2);
+    assert!((recall.recall_at_k - 1.0).abs() < 1e-9, "{recall:?}");
+    assert!((recall.mrr - 1.0).abs() < 1e-9, "{recall:?}");
+    // DCG = 3/log2(2) + 1/log2(4) = 3.5; IDCG = 3/log2(2) + 1/log2(3) ≈ 3.6309
+    assert!((recall.ndcg - 0.9639).abs() < 1e-3, "{recall:?}");
+}
+
+#[test]
+fn score_recall_is_one_when_hits_arrive_in_ideal_relevance_order() {
+    let expected = vec![
+        expected_source("corpus/a.md", &[], 3),
+        expected_source("corpus/b.md", &[], 1),
+    ];
+    let hits = vec![hit("corpus/a.md", 0), hit("corpus/b.md", 0)];
+    let recall = score_recall(&expected, &hits).unwrap();
+    assert!((recall.ndcg - 1.0).abs() < 1e-9, "{recall:?}");
+}
+
+#[test]
+fn score_recall_drops_below_one_when_the_higher_relevance_hit_ranks_lower() {
+    let expected = vec![
+        expected_source("corpus/a.md", &[], 3),
+        expected_source("corpus/b.md", &[], 1),
+    ];
+    // Reversed from ideal: the low-relevance source now outranks the
+    // high-relevance one.
+    let hits = vec![hit("corpus/b.md", 0), hit("corpus/a.md", 0)];
+    let recall = score_recall(&expected, &hits).unwrap();
+    assert!(recall.ndcg < 1.0, "{recall:?}");
+}
+
+#[test]
+fn score_recall_drops_a_relevance_zero_entry_from_the_denominator() {
+    let expected = vec![
+        expected_source("corpus/a.md", &[], 1),
+        expected_source("corpus/ignored.md", &[], 0),
+    ];
+    let hits = vec![hit("corpus/a.md", 0)];
+    let recall = score_recall(&expected, &hits).unwrap();
+    assert_eq!(recall.expected_total, 1);
+}
+
+#[test]
+fn score_recall_is_none_when_every_entry_has_relevance_zero() {
+    let expected = vec![expected_source("corpus/ignored.md", &[], 0)];
+    assert!(score_recall(&expected, &[]).is_none());
+}
+
+#[test]
+fn score_recall_honors_a_paragraph_restricted_expectation() {
+    let expected = vec![expected_source("corpus/a.md", &[2], 1)];
+    let wrong_paragraph = vec![hit("corpus/a.md", 0)];
+    assert_eq!(
+        score_recall(&expected, &wrong_paragraph).unwrap().matched,
+        0
+    );
+    let right_paragraph = vec![hit("corpus/a.md", 2)];
+    assert_eq!(
+        score_recall(&expected, &right_paragraph).unwrap().matched,
+        1
+    );
+}
+
+#[test]
+fn score_recall_ignores_a_hit_locators_own_score_field() {
+    let expected = vec![expected_source("corpus/a.md", &[], 2)];
+    let low = vec![hit_with_score("corpus/a.md", 0, 0.01)];
+    let high = vec![hit_with_score("corpus/a.md", 0, 99.0)];
+    let low_result = score_recall(&expected, &low).unwrap();
+    let high_result = score_recall(&expected, &high).unwrap();
+    assert_eq!(low_result.recall_at_k, high_result.recall_at_k);
+    assert_eq!(low_result.mrr, high_result.mrr);
+    assert_eq!(low_result.ndcg, high_result.ndcg);
+}
+
+#[test]
+fn score_recall_clamps_ndcg_to_one_when_two_expectations_share_a_hit() {
+    // Both a wildcard (`paragraphs: []`) entry and a second entry on
+    // the same source are satisfied by the single hit at rank 0 — DCG
+    // credits both at that one rank, while IDCG spreads them across
+    // ranks 0 and 1, so the raw ratio would exceed 1.0 without a
+    // clamp.
+    let expected = vec![
+        expected_source("corpus/a.md", &[], 3),
+        expected_source("corpus/a.md", &[], 2),
+    ];
+    let hits = vec![hit("corpus/a.md", 0)];
+    let recall = score_recall(&expected, &hits).unwrap();
+    assert!((recall.ndcg - 1.0).abs() < 1e-9, "{recall:?}");
+}
+
+// ========================= coverage_counts / resolved_contains =========================
+
+#[test]
+fn coverage_counts_folds_katakana_and_hiragana_via_normalize_entry() {
+    let resolutions = [cue_resolution("concept", &["りんご"])];
+    let refs: Vec<&CueResolution> = resolutions.iter().collect();
+    let expected = vec!["リンゴ".to_string()];
+    let coverage = coverage_counts(&expected, &refs).expect("a non-empty expectation list");
+    assert_eq!(coverage.expected, 1);
+    assert_eq!(coverage.matched, 1);
+    assert!((coverage.value - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn coverage_counts_folds_full_width_romaji_via_normalize_entry() {
+    let resolutions = [cue_resolution("label", &["apple"])];
+    let refs: Vec<&CueResolution> = resolutions.iter().collect();
+    let expected = vec!["Ａｐｐｌｅ".to_string()];
+    let coverage = coverage_counts(&expected, &refs).unwrap();
+    assert_eq!(coverage.matched, 1);
+}
+
+#[test]
+fn coverage_counts_is_none_when_the_expectation_list_is_empty() {
+    assert!(coverage_counts(&[], &[]).is_none());
+}
+
+#[test]
+fn coverage_counts_reports_a_partial_match() {
+    let resolutions = [cue_resolution("concept", &["青嶺酒造"])];
+    let refs: Vec<&CueResolution> = resolutions.iter().collect();
+    let expected = vec!["青嶺酒造".to_string(), "存在しない".to_string()];
+    let coverage = coverage_counts(&expected, &refs).unwrap();
+    assert_eq!(coverage.expected, 2);
+    assert_eq!(coverage.matched, 1);
+    assert!((coverage.value - 0.5).abs() < 1e-9);
+}
+
+// ========================= association_coverage =========================
+
+#[test]
+fn association_coverage_counts_only_queried_entries_with_a_hit() {
+    let associations = vec![
+        association_probe(Some(QueryProbe::Queried {
+            total: 1,
+            matches: 1,
+            latency_ms: 1,
+        })),
+        association_probe(Some(QueryProbe::Queried {
+            total: 0,
+            matches: 0,
+            latency_ms: 1,
+        })),
+        association_probe(None),
+    ];
+    let coverage = association_coverage(&associations).expect("a non-empty association list");
+    assert_eq!(coverage.expected, 3);
+    assert_eq!(coverage.matched, 1);
+}
+
+#[test]
+fn association_coverage_is_none_when_there_are_no_associations() {
+    assert!(association_coverage(&[]).is_none());
+}
+
+// ========================= missed[] capping (ADR §11) =========================
+
+#[test]
+fn build_missed_caps_at_three_and_counts_the_rest_as_truncated() {
+    let mut case = base_case("c1");
+    case.expected_sources = vec![
+        expected_source("a.md", &[], 1),
+        expected_source("b.md", &[], 1),
+    ];
+    case.expected_concepts = vec!["x".to_string(), "y".to_string()];
+    let hits: Vec<HitLocator> = Vec::new();
+    let (missed, truncated) = build_missed(&case, Some(&hits), &[], &[], None);
+    assert_eq!(missed.len(), 3, "{missed:?}");
+    assert_eq!(truncated, 1, "4 misses total, 3 kept, 1 dropped");
+}
+
+#[test]
+fn build_missed_distinguishes_a_queried_zero_from_a_never_run_query() {
+    let case = base_case("c1");
+    let structural = StructuralBlock {
+        cues: Vec::new(),
+        associations: vec![
+            association_probe(Some(QueryProbe::Queried {
+                total: 0,
+                matches: 0,
+                latency_ms: 1,
+            })),
+            association_probe(None),
+        ],
+    };
+    let (missed, _) = build_missed(&case, None, &[], &[], Some(&structural));
+    assert_eq!(missed.len(), 2, "{missed:?}");
+    assert!(
+        missed[0].contains("query returned no association"),
+        "{missed:?}"
+    );
+    assert!(
+        missed[1].contains("query never ran (a position did not pin)"),
+        "{missed:?}"
+    );
+    assert_ne!(
+        missed[0], missed[1],
+        "the two failure modes must not collapse into the same message"
+    );
+}
+
+#[test]
+fn build_missed_is_silent_about_sources_when_the_passage_lane_failed() {
+    let mut case = base_case("c1");
+    case.expected_sources = vec![expected_source("a.md", &[], 1)];
+    let (missed, truncated) = build_missed(&case, None, &[], &[], None);
+    assert!(missed.is_empty(), "{missed:?}");
+    assert_eq!(truncated, 0);
+}
+
+// ========================= score_case: lane cross-tab denominator (ADR §7) =========================
+
+#[test]
+fn score_case_recall_and_lane_cross_are_none_when_the_passage_lane_failed() {
+    let mut case = base_case("c1");
+    case.expected_sources = vec![expected_source("a.md", &[], 1)];
+    case.expected_concepts = vec!["x".to_string()];
+    let passage = PassageOutcome::Failed {
+        message: "boom".to_string(),
+        latency_ms: 1,
+    };
+    let structural = StructuralBlock {
+        cues: vec![cue_resolution("concept", &["x"])],
+        associations: Vec::new(),
+    };
+    let scores = score_case(&case, &passage, Some(&structural));
+    assert!(scores.recall.is_none());
+    assert!(scores.lane_cross.is_none());
+    assert!(
+        scores.coverage.is_some(),
+        "structural coverage does not depend on the passage lane"
+    );
+}
+
+#[test]
+fn score_case_reports_lane_cross_only_when_both_expectation_kinds_are_declared() {
+    let mut case = base_case("c1");
+    case.expected_sources = vec![expected_source("a.md", &[], 1)];
+    case.expected_concepts = vec!["x".to_string()];
+    let passage = PassageOutcome::Searched {
+        plan: None,
+        hits: vec![hit("a.md", 0)],
+        latency_ms: 1,
+    };
+    let structural = StructuralBlock {
+        cues: vec![cue_resolution("concept", &["x"])],
+        associations: Vec::new(),
+    };
+    let scores = score_case(&case, &passage, Some(&structural));
+    let cross = scores
+        .lane_cross
+        .expect("both a structural and a source expectation were declared");
+    assert!(cross.structural_hit);
+    assert!(cross.passage_hit);
+}
+
+#[test]
+fn score_case_lane_cross_is_none_with_only_a_source_expectation() {
+    let mut case = base_case("c1");
+    case.expected_sources = vec![expected_source("a.md", &[], 1)];
+    let passage = PassageOutcome::Searched {
+        plan: None,
+        hits: vec![hit("a.md", 0)],
+        latency_ms: 1,
+    };
+    let scores = score_case(&case, &passage, None);
+    assert!(scores.lane_cross.is_none());
+    assert!(scores.recall.is_some());
+}
+
+// ========================= No fused cross-lane scale (#215's own requirement) =========================
+
+/// Words that would imply a case's/run's outcome folds graph, BM25, and
+/// vector scores into one invented scale — banned from every metric key
+/// and its own `MetricDef`. `rank`/`score` are not banned: a hit's own
+/// position and a `HitLocator`'s own per-lane evidence are ordinary IR
+/// concepts, never a cross-lane composite.
+const FUSED_SCALE_WORDS: [&str; 6] = [
+    "fused",
+    "combined",
+    "unified",
+    "composite",
+    "blended",
+    "normalized_score",
+];
+
+fn assert_no_fused_scale_words(value: &Value, path: &str) {
+    match value {
+        Value::Object(map) => {
+            for (key, v) in map {
+                for banned in FUSED_SCALE_WORDS {
+                    assert!(
+                        !key.to_lowercase().contains(banned),
+                        "fused-scale word '{banned}' found in key '{key}' at {path}"
+                    );
+                }
+                assert_no_fused_scale_words(v, &format!("{path}.{key}"));
+            }
+        }
+        Value::String(text) => {
+            for banned in FUSED_SCALE_WORDS {
+                assert!(
+                    !text.to_lowercase().contains(banned),
+                    "fused-scale word '{banned}' found in a string at {path}: {text}"
+                );
+            }
+        }
+        Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                assert_no_fused_scale_words(v, &format!("{path}[{i}]"));
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn no_fused_scale_word_appears_in_a_metric_key_or_definition() {
+    let metrics = build_metrics(&[]);
+    let definitions = build_definitions();
+    assert_no_fused_scale_words(&serde_json::to_value(&metrics).unwrap(), "$.metrics");
+    assert_no_fused_scale_words(
+        &serde_json::to_value(&definitions).unwrap(),
+        "$.definitions",
+    );
+}
+
+// ========================= matching block accuracy =========================
+
+#[test]
+fn matching_block_does_not_claim_a_normalize_entry_comparison_for_associations() {
+    // association_coverage never runs a client-side string comparison
+    // — coverage is decided by the server's own /resolve+/query round
+    // trip (ADR 0004 §7 step 2) — so `normalized` must not list
+    // expected_associations alongside the two fields that really are
+    // folded through normalize_entry.
+    let matching = MatchingBlock::default();
+    assert_eq!(
+        matching.normalized,
+        &["expected_concepts", "expected_labels"]
+    );
+}
+
 // ========================= Endpoint role (ADR §11) =========================
 
 #[test]

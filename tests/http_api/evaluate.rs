@@ -156,6 +156,28 @@ fn evaluate_runs_both_lanes_and_writes_evaluation_json() {
     assert_eq!(assoc["query"]["outcome"], "queried", "{assoc}");
     assert_eq!(assoc["query"]["total"], 1, "{assoc}");
 
+    // #274: recall@k/MRR/nDCG against expected_sources, and structural
+    // coverage against expected_concepts/expected_associations — the
+    // fixture's one hit and one queried association both fully satisfy
+    // this case's single expectation of each kind.
+    assert_eq!(case["recall"]["recall_at_k"], 1.0, "{case}");
+    assert_eq!(case["recall"]["mrr"], 1.0, "{case}");
+    assert_eq!(case["recall"]["ndcg"], 1.0, "{case}");
+    assert_eq!(case["coverage"]["concepts"]["value"], 1.0, "{case}");
+    assert_eq!(case["coverage"]["associations"]["value"], 1.0, "{case}");
+    assert_eq!(case["lane_cross"]["structural_hit"], true, "{case}");
+    assert_eq!(case["lane_cross"]["passage_hit"], true, "{case}");
+    assert!(case["missed"].as_array().unwrap().is_empty(), "{case}");
+
+    let metrics = &evaluation["metrics"];
+    assert_eq!(metrics["recall.recall_at_k"]["n"], 1, "{metrics}");
+    assert_eq!(metrics["lanes.both"]["numerator"], 1, "{metrics}");
+    assert_eq!(metrics["lanes.both"]["n"], 1, "{metrics}");
+    assert_eq!(
+        evaluation["matching"]["normalization"], "taguru::context::normalize_entry",
+        "{evaluation}"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
