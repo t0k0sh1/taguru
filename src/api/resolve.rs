@@ -35,18 +35,18 @@ pub struct ResolveRequest {
 /// One resolve candidate plus the tier that produced it. Lexical scores
 /// are coverage/Dice, semantic scores are cosine similarities — ordinal
 /// within a tier, never comparable across tiers.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct TieredResolution {
     pub name: String,
     pub score: f64,
-    pub tier: &'static str,
+    pub tier: String,
     /// The lexical string relation behind the score (exact / alias /
     /// containment / fuzzy) — the caller's warning that a high score
     /// may be a lookalike, not the thing (possible inside impossible
     /// scores 0.8). Absent on semantic candidates, whose score is a
     /// cosine, not a string overlap.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<&'static str>,
+    pub kind: Option<String>,
     /// The candidate's own gloss — its name plus its heaviest facts,
     /// the same text the semantic tier embeds. This is the evidence
     /// that tells lookalike candidates apart: string overlap says
@@ -62,8 +62,8 @@ fn lexical_tier(resolutions: Vec<Resolution>) -> Vec<TieredResolution> {
         .map(|resolution| TieredResolution {
             name: resolution.name,
             score: resolution.score,
-            tier: "lexical",
-            kind: Some(resolution.kind.as_str()),
+            tier: "lexical".to_string(),
+            kind: Some(resolution.kind.as_str().to_string()),
             gloss: None,
         })
         .collect()
@@ -94,7 +94,7 @@ pub(super) fn merge_tiers(
         merged.push(TieredResolution {
             name: name.clone(),
             score: f64::from(*score),
-            tier: "semantic",
+            tier: "semantic".to_string(),
             kind: None,
             gloss: None,
         });
@@ -449,7 +449,7 @@ pub struct ResolveRanking {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rank: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tier: Option<&'static str>,
+    pub tier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
     pub limit: usize,
@@ -911,7 +911,7 @@ fn explain_resolve_verdict(
         semantic: Some(semantic),
         ranking: Some(ResolveRanking {
             rank: merged_at.map(|at| at + 1),
-            tier: merged_at.map(|at| merged[at].tier),
+            tier: merged_at.map(|at| merged[at].tier.clone()),
             score: merged_at.map(|at| merged[at].score),
             limit,
             served: served_at.is_some(),

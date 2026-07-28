@@ -32,7 +32,10 @@ mod explore;
 mod groups;
 mod import;
 mod recall;
-mod resolve;
+// pub(crate): `taguru evaluate` (the CLI) deserializes resolve
+// responses into the real `TieredResolution` instead of a hand-copied
+// mirror that would drift silently.
+pub(crate) mod resolve;
 // pub(crate): `taguru benchmark search` (the CLI) deserializes search
 // responses into the real `SearchPlan`/`PassageLanes`/`LaneEvidence`
 // types instead of hand-copied mirrors that would drift silently.
@@ -1172,7 +1175,7 @@ pub(crate) fn clamp(value: Option<usize>, default: usize, ceiling: usize) -> usi
 /// A bounded set of matches. `total` is the full match count before the
 /// limit was applied, so a client can see that it is looking at a
 /// truncated view and narrow the query (or raise the limit).
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct MatchPage {
     pub total: usize,
     pub matches: Vec<AssociationOut>,
@@ -1924,7 +1927,7 @@ mod tests {
         let candidate = |score: f64, tier: &'static str| TieredResolution {
             name: "n".to_string(),
             score,
-            tier,
+            tier: tier.to_string(),
             kind: None,
             gloss: None,
         };
@@ -1956,7 +1959,7 @@ mod tests {
         let candidate = |name: &str, tier: &'static str| TieredResolution {
             name: name.to_string(),
             score: 0.2,
-            tier,
+            tier: tier.to_string(),
             kind: None,
             gloss: None,
         };
@@ -2278,7 +2281,7 @@ mod tests {
         let merged = merge_tiers(lexical, &semantic);
         let view: Vec<(&str, &str)> = merged
             .iter()
-            .map(|candidate| (candidate.name.as_str(), candidate.tier))
+            .map(|candidate| (candidate.name.as_str(), candidate.tier.as_str()))
             .collect();
         assert_eq!(
             view,

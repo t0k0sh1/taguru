@@ -80,7 +80,7 @@ pub struct CitationRequest {
 /// paragraph falls outside every section the source has stored, or when
 /// it stored none at all; the key is never omitted, so callers can
 /// rely on it always being present.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Citation {
     pub text: String,
     pub source: String,
