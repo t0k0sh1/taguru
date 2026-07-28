@@ -824,7 +824,6 @@ speculative.
 |---|---|---|
 | relocate `src/benchmark/evalset.rs` → `src/evalset.rs` and `benchmark::compare`'s metric types → `src/measure.rs`, both `pub(crate)`; add `Count`'s missing constructor | none | §6, §10 |
 | fix `benchmark search`'s unmasked `--url` credential leak: call `reject_userinfo`, mask `InputsBlock.url` | none | §2.4, §11 |
-| add `Deserialize` to `MatchPage`/`TieredResolution`/`Citation`; `pub(crate) mod resolve;` in `src/api.rs` | none | §2.2, §7, §8 |
 | #272 — evaluate: shared loader in `Interpret` mode, typed extension fields | this ADR | §6, §8 |
 | #273 — evaluate: execution harness and `evaluation.json` skeleton | #272 | §5, §7, §9.1, §11, §12 |
 | #274 — evaluate: rank metrics and concept/association coverage | #273 | §7, §8, §9.1 |
@@ -863,8 +862,10 @@ completion condition.
   str>` to `String`/`Option<String>`, the field type `Deserialize`
   needs — the wire format is identical either way. None of these are
   wire-format changes — existing HTTP responses are unaffected; only
-  in-binary reachability changes, mirroring the exact
-  precedent `pub(crate) mod sources;` already set.
+  in-binary reachability and the borrowed-vs-owned string
+  representation change, mirroring the exact precedent
+  `pub(crate) mod sources;` already set. (#282, implemented alongside
+  this ADR.)
 - `eval.jsonl` gains `options.tags` and `options.until`, both
   `#[serde(default)]`; `options.sources` is retired as a documented key
   (unknown-field rejection under `deny_unknown_fields` means any dataset
