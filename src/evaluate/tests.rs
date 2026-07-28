@@ -511,6 +511,22 @@ fn score_recall_ignores_a_hit_locators_own_score_field() {
     assert_eq!(low_result.ndcg, high_result.ndcg);
 }
 
+#[test]
+fn score_recall_clamps_ndcg_to_one_when_two_expectations_share_a_hit() {
+    // Both a wildcard (`paragraphs: []`) entry and a second entry on
+    // the same source are satisfied by the single hit at rank 0 — DCG
+    // credits both at that one rank, while IDCG spreads them across
+    // ranks 0 and 1, so the raw ratio would exceed 1.0 without a
+    // clamp.
+    let expected = vec![
+        expected_source("corpus/a.md", &[], 3),
+        expected_source("corpus/a.md", &[], 2),
+    ];
+    let hits = vec![hit("corpus/a.md", 0)];
+    let recall = score_recall(&expected, &hits).unwrap();
+    assert!((recall.ndcg - 1.0).abs() < 1e-9, "{recall:?}");
+}
+
 // ========================= coverage_counts / resolved_contains =========================
 
 #[test]
@@ -590,6 +606,36 @@ fn build_missed_caps_at_three_and_counts_the_rest_as_truncated() {
     let (missed, truncated) = build_missed(&case, Some(&hits), &[], &[], None);
     assert_eq!(missed.len(), 3, "{missed:?}");
     assert_eq!(truncated, 1, "4 misses total, 3 kept, 1 dropped");
+}
+
+#[test]
+fn build_missed_distinguishes_a_queried_zero_from_a_never_run_query() {
+    let case = base_case("c1");
+    let structural = StructuralBlock {
+        cues: Vec::new(),
+        associations: vec![
+            association_probe(Some(QueryProbe::Queried {
+                total: 0,
+                matches: 0,
+                latency_ms: 1,
+            })),
+            association_probe(None),
+        ],
+    };
+    let (missed, _) = build_missed(&case, None, &[], &[], Some(&structural));
+    assert_eq!(missed.len(), 2, "{missed:?}");
+    assert!(
+        missed[0].contains("query returned no association"),
+        "{missed:?}"
+    );
+    assert!(
+        missed[1].contains("query never ran (a position did not pin)"),
+        "{missed:?}"
+    );
+    assert_ne!(
+        missed[0], missed[1],
+        "the two failure modes must not collapse into the same message"
+    );
 }
 
 #[test]
@@ -715,6 +761,22 @@ fn no_fused_scale_word_appears_in_a_metric_key_or_definition() {
     assert_no_fused_scale_words(
         &serde_json::to_value(&definitions).unwrap(),
         "$.definitions",
+    );
+}
+
+// ========================= matching block accuracy =========================
+
+#[test]
+fn matching_block_does_not_claim_a_normalize_entry_comparison_for_associations() {
+    // association_coverage never runs a client-side string comparison
+    // — coverage is decided by the server's own /resolve+/query round
+    // trip (ADR 0004 §7 step 2) — so `normalized` must not list
+    // expected_associations alongside the two fields that really are
+    // folded through normalize_entry.
+    let matching = MatchingBlock::default();
+    assert_eq!(
+        matching.normalized,
+        &["expected_concepts", "expected_labels"]
     );
 }
 

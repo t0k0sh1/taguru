@@ -812,6 +812,17 @@ fn build_association_probe(
 /// `relevance == 0` means "not evidence for this case," dropped from
 /// the denominator like `benchmark::search`'s own `resolve_expected_items`
 /// (`search.rs:1014-1016`).
+/// Whether `hit` satisfies `expected`: same `source`, and either
+/// `expected.paragraphs` is empty (any paragraph of this source
+/// answers the case) or it names `hit.paragraph` explicitly. The one
+/// place this policy lives — [`score_recall`] and [`build_missed`]
+/// both call it, so a future change to source matching cannot diverge
+/// between "how a case scores" and "why a case says it missed."
+fn source_matches(expected: &ExpectedSource, hit: &HitLocator) -> bool {
+    hit.source == expected.source
+        && (expected.paragraphs.is_empty() || expected.paragraphs.contains(&hit.paragraph))
+}
+
 fn score_recall(expected_sources: &[ExpectedSource], hits: &[HitLocator]) -> Option<RecallBlock> {
     let items: Vec<&ExpectedSource> = expected_sources
         .iter()
@@ -821,19 +832,14 @@ fn score_recall(expected_sources: &[ExpectedSource], hits: &[HitLocator]) -> Opt
         return None;
     }
 
-    let matches = |item: &ExpectedSource, hit: &HitLocator| {
-        hit.source == item.source
-            && (item.paragraphs.is_empty() || item.paragraphs.contains(&hit.paragraph))
-    };
-
     let matched = items
         .iter()
-        .filter(|item| hits.iter().any(|hit| matches(item, hit)))
+        .filter(|item| hits.iter().any(|hit| source_matches(item, hit)))
         .count();
 
     let mut mrr = 0.0;
     for (rank, hit) in hits.iter().enumerate() {
-        if items.iter().any(|item| matches(item, hit)) {
+        if items.iter().any(|item| source_matches(item, hit)) {
             mrr = 1.0 / (rank as f64 + 1.0);
             break;
         }
@@ -848,7 +854,7 @@ fn score_recall(expected_sources: &[ExpectedSource], hits: &[HitLocator]) -> Opt
         .iter()
         .filter_map(|item| {
             hits.iter()
-                .position(|hit| matches(item, hit))
+                .position(|hit| source_matches(item, hit))
                 .map(|rank| item.relevance as f64 / (rank as f64 + 2.0).log2())
         })
         .sum();
@@ -860,7 +866,16 @@ fn score_recall(expected_sources: &[ExpectedSource], hits: &[HitLocator]) -> Opt
         .enumerate()
         .map(|(rank, relevance)| *relevance as f64 / (rank as f64 + 2.0).log2())
         .sum();
-    let ndcg = if idcg > 0.0 { dcg / idcg } else { 0.0 };
+    // IDCG assigns each expectation its own distinct rank, but DCG does
+    // not: two expectations satisfied by the same hit (e.g. a wildcard
+    // `paragraphs: []` entry and a paragraph-restricted entry on the
+    // same source) both credit at that hit's one rank, so DCG can
+    // exceed IDCG. Clamped to keep this a well-formed 0..=1 ratio.
+    let ndcg = if idcg > 0.0 {
+        (dcg / idcg).min(1.0)
+    } else {
+        0.0
+    };
 
     Some(RecallBlock {
         recall_at_k: matched as f64 / items.len() as f64,
@@ -944,11 +959,7 @@ fn build_missed(
             if expected.relevance == 0 {
                 continue;
             }
-            let hit = hits.iter().any(|h| {
-                h.source == expected.source
-                    && (expected.paragraphs.is_empty()
-                        || expected.paragraphs.contains(&h.paragraph))
-            });
+            let hit = hits.iter().any(|h| source_matches(expected, h));
             if !hit {
                 all.push(format!(
                     "expected_sources: '{}' not found among passage hits",
@@ -970,13 +981,15 @@ fn build_missed(
     }
     if let Some(structural) = structural {
         for assoc in &structural.associations {
-            let hit = matches!(
-                &assoc.query,
-                Some(QueryProbe::Queried { total, .. }) if *total >= 1
-            );
-            if !hit {
+            let why = match &assoc.query {
+                Some(QueryProbe::Queried { total, .. }) if *total >= 1 => None,
+                Some(QueryProbe::Queried { .. }) => Some("query returned no association"),
+                Some(QueryProbe::Errored { .. }) => Some("query errored"),
+                None => Some("query never ran (a position did not pin)"),
+            };
+            if let Some(why) = why {
                 all.push(format!(
-                    "expected_associations: ({}, {}, {}) not queried",
+                    "expected_associations: ({}, {}, {}) {why}",
                     assoc.subject_cue, assoc.label_cue, assoc.object_cue
                 ));
             }
@@ -1578,8 +1591,12 @@ struct MatchingBlock {
     normalization: &'static str,
     /// What `normalization` is applied to, both sides, before an exact
     /// match: `expected_concepts`/`expected_labels` against a cue's
-    /// `resolved_names[]`, and `expected_associations`' subject/label/
-    /// object cues against a resolved position's stored name.
+    /// `resolved_names[]`. `expected_associations` is deliberately
+    /// absent — its coverage never does a client-side string
+    /// comparison at all; `/resolve`/`/resolve_label` pin each
+    /// position server-side (ADR 0004 §7 step 2), and coverage is then
+    /// just whether the pinned `/query` call returned `total >= 1`
+    /// (see [`association_coverage`]).
     normalized: &'static [&'static str],
     /// `expected_sources` match by exact `(source, paragraph)` instead
     /// — the source preflight already requires an exact manifest path
@@ -1591,11 +1608,7 @@ impl Default for MatchingBlock {
     fn default() -> Self {
         Self {
             normalization: "taguru::context::normalize_entry",
-            normalized: &[
-                "expected_concepts",
-                "expected_labels",
-                "expected_associations",
-            ],
+            normalized: &["expected_concepts", "expected_labels"],
             sources: "exact (source, paragraph) match — no normalization",
         }
     }
