@@ -331,6 +331,40 @@ fn benchmark_search_rejects_a_url_carrying_userinfo() {
     let _ = std::fs::remove_dir_all(&results_dir);
 }
 
+/// Review follow-up on issue #281: `reject_userinfo` deliberately
+/// tolerates a `base` that fails to parse as a URL (it leaves that
+/// fault for `Api::url` to report later), but `benchmark search`
+/// writes `base` into `retrieval.json` before any request is made —
+/// so an unparsable string, which is not proven free of
+/// credential-shaped text, must be refused here rather than reaching
+/// `mask_url`.
+#[test]
+fn benchmark_search_rejects_an_unparsable_url() {
+    let results_dir = write_results_dir("unparsable-url");
+    let eval_path = write_eval_file(&results_dir);
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "benchmark",
+            "search",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--url",
+            "not a url",
+            results_dir.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("could not be parsed"), "{stderr}");
+    assert!(
+        !results_dir.join("retrieval.json").exists(),
+        "no retrieval.json should be written on a rejected URL"
+    );
+
+    let _ = std::fs::remove_dir_all(&results_dir);
+}
+
 #[test]
 fn benchmark_search_refuses_to_merge_a_second_run_into_a_corpus_the_first_run_built() {
     let server = Server::start("search-cross-run");

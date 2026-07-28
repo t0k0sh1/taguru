@@ -141,8 +141,8 @@ fn mask_url_without_a_port_omits_it() {
 }
 
 #[test]
-fn mask_url_tolerates_an_unparsable_base() {
-    assert_eq!(mask_url("not a url"), "not a url");
+fn mask_url_redacts_an_unparsable_base_instead_of_echoing_it() {
+    assert_eq!(mask_url("not a url"), "<unparseable-url>");
 }
 
 // ============================== Limit validation ==============================
