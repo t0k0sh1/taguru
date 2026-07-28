@@ -210,6 +210,27 @@ pub(super) fn run_search(args: &[String]) -> i32 {
             }
         },
     };
+    // ADR 0002 §7 / ADR 0004 §2.4, §11: caught before any request
+    // leaves the process, matching `export`/`compact` (issue #281 —
+    // `benchmark search` was the one `Api` consumer that skipped
+    // this).
+    if let Err(message) = crate::remote::reject_userinfo(&base) {
+        eprintln!("taguru: benchmark: search: {message}");
+        return 2;
+    }
+    // `reject_userinfo` deliberately leaves an unparsable `base` alone
+    // (`remote.rs`'s own doc comment) so `Api::url` can report it once,
+    // on the first real request — safe for every other consumer, none
+    // of which write `base` anywhere first. `benchmark search` writes
+    // it into `retrieval.json` before any request is made, and a
+    // string that fails to parse as a URL can still be, or contain,
+    // `user:pass@host` text (e.g. a malformed host); refuse it here
+    // instead of letting `mask_url` decide what to do with it (issue
+    // #281 review).
+    if url::Url::parse(&base).is_err() {
+        eprintln!("taguru: benchmark: search: the --url value could not be parsed as a URL");
+        return 2;
+    }
     let api = Api::new(base.clone());
 
     // ADR 0003 §11's own degradation only covers a response that
@@ -288,7 +309,7 @@ pub(super) fn run_search(args: &[String]) -> i32 {
                 name: loaded.name.clone(),
                 cases: loaded.cases.len(),
             },
-            url: base,
+            url: mask_url(&base),
             run_index: search_args.run,
             default_limit: DEFAULT_LIMIT,
         },
@@ -305,6 +326,30 @@ pub(super) fn run_search(args: &[String]) -> i32 {
         return 1;
     }
     0
+}
+
+// ============================== URL masking ==============================
+
+/// scheme + host + port only — no userinfo, path, or query. Matches
+/// `evaluate`'s own `mask_url` (`src/evaluate.rs`) and ADR 0004 §11's
+/// masking rule for values written into a shareable artifact.
+/// `run_search` already refuses userinfo and an unparsable `base`
+/// before this runs, but `mask_url` redacts an unparsable input to a
+/// fixed placeholder rather than echoing it back regardless — a
+/// string that fails to parse as a URL is not proven free of
+/// credential-shaped text, and this artifact is shared and archived
+/// (issue #281 review).
+fn mask_url(base: &str) -> String {
+    match url::Url::parse(base) {
+        Ok(url) => {
+            let mut masked = format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""));
+            if let Some(port) = url.port() {
+                masked.push_str(&format!(":{port}"));
+            }
+            masked
+        }
+        Err(_) => "<unparseable-url>".to_string(),
+    }
 }
 
 // ============================== Arguments ==============================
