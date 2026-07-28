@@ -41,6 +41,12 @@ beforeAll(async () => {
   server = await spawnServer(binary, {
     TAGURU_API_TOKENS: `admin:${ADMIN_TOKEN},reader:${READER_TOKEN}`,
     TAGURU_KEY_SCOPES: '{"reader": "read"}',
+    // The default 1s auto-flush (spawn_flusher in src/main.rs) can race
+    // "compacts and flushes" below: if a background tick lands between
+    // seed() and flush(), it clears the dirty flag first and the explicit
+    // flush() correctly reports nothing dirty, failing toContain(name).
+    // Pin the interval well beyond the suite's runtime so it never fires.
+    TAGURU_FLUSH_SECS: "3600",
   });
   client = new Taguru({ base_url: server.baseUrl, api_key: ADMIN_TOKEN });
   reader = new Taguru({ base_url: server.baseUrl, api_key: READER_TOKEN });
