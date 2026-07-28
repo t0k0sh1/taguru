@@ -105,8 +105,14 @@ derives `Serialize` only; `TieredResolution` (`resolve.rs:39`) derives
 `Serialize` only; `Citation` (`sources.rs:84`) derives `Serialize` only.
 `mod resolve` is private in `src/api.rs`. None of the four is reachable
 today from anywhere outside the axum handler that produces it — §13.3
-lists the one-line fix each needs, following the exact precedent
+lists the fix each needs, following the exact precedent
 `pub(crate) mod sources;` already set for `PassagePage`/`PassageLanes`.
+`MatchPage` and `Citation` are one-line derive additions; `TieredResolution`
+also carries `tier: &'static str` and `kind: Option<&'static str>`
+(`resolve.rs:42,49`), which `#[derive(Deserialize)]` cannot produce for —
+those fields become `String`/`Option<String>` (the wire format is
+unchanged either way), with `ResolveRanking.tier` (`resolve.rs:452`)
+following suit since it borrows a `TieredResolution` field.
 
 `Context::recall(cue)` returns every edge incident on a concept, and the
 HTTP layer pages it at `clamp(limit, 100, 1000)`
@@ -818,7 +824,6 @@ speculative.
 |---|---|---|
 | relocate `src/benchmark/evalset.rs` → `src/evalset.rs` and `benchmark::compare`'s metric types → `src/measure.rs`, both `pub(crate)`; add `Count`'s missing constructor | none | §6, §10 |
 | fix `benchmark search`'s unmasked `--url` credential leak: call `reject_userinfo`, mask `InputsBlock.url` | none | §2.4, §11 |
-| add `Deserialize` to `MatchPage`/`TieredResolution`/`Citation`; `pub(crate) mod resolve;` in `src/api.rs` | none | §2.2, §7, §8 |
 | #272 — evaluate: shared loader in `Interpret` mode, typed extension fields | this ADR | §6, §8 |
 | #273 — evaluate: execution harness and `evaluation.json` skeleton | #272 | §5, §7, §9.1, §11, §12 |
 | #274 — evaluate: rank metrics and concept/association coverage | #273 | §7, §8, §9.1 |
@@ -851,10 +856,16 @@ completion condition.
 - `src/cli.rs:6-7`'s documented exit-code contract gains a fourth line
   (`3` — threshold violation) in the same PR that implements it.
 - `MatchPage`, `TieredResolution`, and `Citation` gain `Deserialize`;
-  `mod resolve` in `src/api.rs` becomes `pub(crate) mod resolve;`. None
-  of these are wire-format changes — existing HTTP responses are
-  unaffected; only in-binary reachability changes, mirroring the exact
-  precedent `pub(crate) mod sources;` already set.
+  `mod resolve` in `src/api.rs` becomes `pub(crate) mod resolve;`.
+  `TieredResolution.tier`/`.kind` (and the dependent
+  `ResolveRanking.tier`) change from `&'static str`/`Option<&'static
+  str>` to `String`/`Option<String>`, the field type `Deserialize`
+  needs — the wire format is identical either way. None of these are
+  wire-format changes — existing HTTP responses are unaffected; only
+  in-binary reachability and the borrowed-vs-owned string
+  representation change, mirroring the exact precedent
+  `pub(crate) mod sources;` already set. (#282, implemented alongside
+  this ADR.)
 - `eval.jsonl` gains `options.tags` and `options.until`, both
   `#[serde(default)]`; `options.sources` is retired as a documented key
   (unknown-field rejection under `deny_unknown_fields` means any dataset
