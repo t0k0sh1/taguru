@@ -741,7 +741,7 @@ fn measurements_from(manifest: &super::BenchManifest, loaded: &LoadedResults) ->
     MeasurementsFile {
         taguru_benchmark_measurements: BENCHMARK_MEASUREMENTS_VERSION,
         run_id: manifest.run_id.clone(),
-        generated_at: super::iso8601_utc(super::now_unix_secs()),
+        generated_at: crate::clock::iso8601_utc(crate::clock::now_unix_secs()),
         percentile_method: "nearest-rank",
         matching,
         inputs: InputsBlock {

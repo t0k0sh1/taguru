@@ -279,7 +279,7 @@ pub(super) fn run_search(args: &[String]) -> i32 {
     let retrieval = RetrievalFile {
         taguru_benchmark_retrieval: BENCHMARK_RETRIEVAL_VERSION,
         run_id: manifest.run_id.clone(),
-        generated_at: super::iso8601_utc(super::now_unix_secs()),
+        generated_at: crate::clock::iso8601_utc(crate::clock::now_unix_secs()),
         matching,
         inputs: InputsBlock {
             results_dir: search_args.dir.display().to_string(),

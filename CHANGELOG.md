@@ -8,6 +8,34 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- New top-level verb `taguru evaluate` (#273, implementing ADR 0004
+  §5/§7/§9.1/§11/§12), the execution harness and `evaluation.json`
+  skeleton for #215's retrieval-and-citation quality gate over one
+  already-populated context — driven entirely over HTTP, like `taguru
+  benchmark search`, and calling no answer-generation LLM anywhere on
+  this path (asserted by a source-level test, not merely claimed). Per
+  case, two independent lanes run with no fusion: the passage lane
+  always calls `POST /contexts/{name}/sources/search`; the structural
+  lane (only when a case declares `expected_concepts`/
+  `expected_labels`/`expected_associations`) resolves coverage cues via
+  `/resolve`/`/resolve_label`, then pins each `expected_associations[]`
+  entry via `/query` — but only when every position resolves to
+  exactly one candidate; zero is `not_found`, two or more is
+  `ambiguous`, and neither ever guesses at or fans out over a
+  combination. `recall`/`activate`/`explore`/`describe` are
+  deliberately never called. Preflights an unreachable server and any
+  `expected_sources[]` entry the context does not carry before any case
+  runs. `evaluation.json` records lane/plan echoes and per-hit locators
+  (never corpus body text), latency distributions, a corpus-revision
+  bracket (`revision_before`/`revision_after`/`stable`, plus
+  `last_write_epoch`) that detects a write landing mid-run, and the
+  resolved (masked — scheme/host/port only, never userinfo or a
+  bearer) target. Runs to completion on a read-only API key. This build
+  has no `--thresholds`: every run is report-only and exits 0 (a stderr
+  line says so); recall@k/MRR and concept/association coverage (#274),
+  citation recall and locator validity (#275), configurable thresholds
+  and exit 3 (#276), and `taguru evaluate compare` (#277) land as
+  separate follow-up changes on top of this skeleton.
 - New top-level verb `taguru benchmark search` (#260, implementing ADR
   0003 §11): builds one context per model (`PREFIX::MODEL_ID`) from a
   finished `taguru benchmark extract` results directory's own batch

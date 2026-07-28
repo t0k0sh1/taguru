@@ -206,15 +206,11 @@ impl WireCase {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct EvalOptions {
     pub(crate) limit: Option<usize>,
-    // `evaluate` (#215) is what reads these; unread dead code in this
-    // tree until #215 lands.
-    #[allow(dead_code)]
+    // `evaluate` (#273) reads these for the passage lane's
+    // SearchPassagesRequest.
     pub(crate) floor: Option<f32>,
-    #[allow(dead_code)]
     pub(crate) tags: Vec<String>,
-    #[allow(dead_code)]
     pub(crate) since: Option<u64>,
-    #[allow(dead_code)]
     pub(crate) until: Option<u64>,
 }
 
@@ -231,12 +227,12 @@ pub(crate) struct EvalCase {
     pub(crate) expected_sources: Vec<ExpectedSource>,
     pub(crate) expected_concepts: Vec<String>,
     pub(crate) options: EvalOptions,
-    // `evaluate` (#215) is what reads these; unread dead code in this
-    // tree until #215 lands.
-    #[allow(dead_code)]
+    // `evaluate` (#273) reads these for the structural lane's coverage
+    // cues and expected_associations[] probes.
     pub(crate) expected_labels: Vec<String>,
-    #[allow(dead_code)]
     pub(crate) expected_associations: Vec<ExpectedAssociation>,
+    // `evaluate`'s citation lane (#275) is what reads this; unread dead
+    // code in this tree until #275 lands.
     #[allow(dead_code)]
     pub(crate) expected_citations: Vec<ExpectedCitation>,
 }
@@ -259,9 +255,7 @@ pub(crate) enum Extensions {
     CarryThrough { consumer: &'static str },
     /// #215: extension fields are typed and validated; a malformed one
     /// is a reported parse error like any other field. No warning is
-    /// emitted. `evaluate` (#215) is what constructs this; unconstructed
-    /// dead code in this tree until #215 lands.
-    #[allow(dead_code)]
+    /// emitted. `evaluate` (#273) constructs this.
     Interpret,
 }
 
