@@ -22,12 +22,14 @@
 //! is `Role::Read` and equally tempting to reach for; it is named here
 //! explicitly so a future reader does not assume it was overlooked.
 //!
-//! This module writes the execution harness and `evaluation.json`'s
-//! skeleton only — recall@k/MRR and concept/association coverage
-//! (#274), citation recall and locator validity (#275, the only reason
+//! Recall@k/MRR/nDCG (graded relevance, ADR 0004 §274) and
+//! concept/label/association retrieval coverage are scored here, from
+//! rank and label alone — no lane's raw graph/BM25/vector score is
+//! ever folded into another's (#215's own requirement). Citation
+//! recall and locator validity (#275, the only reason
 //! `POST /contexts/{name}/citations` is not called here), configurable
 //! thresholds and exit 3 (#276), and `taguru evaluate compare` (#277)
-//! all land as separate, focused changes on top of this one.
+//! land as separate, focused changes on top of this one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -35,13 +37,14 @@ use std::time::Instant;
 
 use serde::Serialize;
 use serde_json::Value;
+use taguru::context::normalize_entry;
 
 use crate::api::MatchPage;
 use crate::api::resolve::TieredResolution;
 use crate::api::sources::{PassageHit, PassageLanes, PassagePage, SearchContextPlan};
 use crate::cli::default_base_url;
 use crate::config::{load_config, subcommand_usage_error};
-use crate::evalset::{self, EvalCase, ExpectedAssociation};
+use crate::evalset::{self, EvalCase, ExpectedAssociation, ExpectedSource};
 use crate::measure::{Distribution, MetricDef, MetricValue, MetricsMap, def, ratio_metric};
 use crate::registry::{ContextRevision, DirectoryEntry};
 use crate::remote::{self, Api, ApiFailure};
@@ -73,11 +76,11 @@ usage: taguru evaluate --eval FILE --context NAME [--url URL]
 Runs eval.jsonl's cases (ADR 0003 §11's shared dataset, #215's own
 extension fields) against one already-populated context's live
 retrieval endpoints and writes evaluation.json: per-case passage-lane
-hits and structural-lane resolve/query outcomes, corpus revision
-bracketing, and run metadata — a report-only quality gate (this build
-has no --thresholds; every completed run exits 0). Recall@k/MRR,
-concept/association coverage, citation checks, and configurable
-thresholds land in follow-up issues on top of this skeleton.
+hits and structural-lane resolve/query outcomes, recall@k/MRR/nDCG,
+concept/label/association coverage, corpus revision bracketing, and
+run metadata — a report-only quality gate (this build has no
+--thresholds; every completed run exits 0). Citation checks and
+configurable thresholds land in follow-up issues on top of this build.
 
   --eval FILE            eval.jsonl (ADR 0003 §11's shared dataset)
   --context NAME          the already-populated context to evaluate
@@ -793,12 +796,292 @@ fn build_association_probe(
     }
 }
 
+// ================================ Scoring ==================================
+//
+// Everything below reads only rank (a hit's position in `hits[]`, a
+// cue's own resolved-name list, a query's `total`) and label
+// (`expected_sources`' `relevance`, `expected_concepts`/
+// `expected_labels`/`expected_associations`) — never a `HitLocator`'s
+// or `TieredResolution`'s own `score` field (#215's "do not collapse
+// incomparable raw scores from graph, BM25, and vector lanes into one
+// invented scale" requirement). Pure functions, no network access, so
+// every rule here is unit-testable without a server.
+
+/// One case's recall@k/MRR/nDCG against `expected_sources` (ADR 0004
+/// §274). `None` when the case declares no `relevance >= 1` source —
+/// `relevance == 0` means "not evidence for this case," dropped from
+/// the denominator like `benchmark::search`'s own `resolve_expected_items`
+/// (`search.rs:1014-1016`).
+fn score_recall(expected_sources: &[ExpectedSource], hits: &[HitLocator]) -> Option<RecallBlock> {
+    let items: Vec<&ExpectedSource> = expected_sources
+        .iter()
+        .filter(|expected| expected.relevance >= 1)
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+
+    let matches = |item: &ExpectedSource, hit: &HitLocator| {
+        hit.source == item.source
+            && (item.paragraphs.is_empty() || item.paragraphs.contains(&hit.paragraph))
+    };
+
+    let matched = items
+        .iter()
+        .filter(|item| hits.iter().any(|hit| matches(item, hit)))
+        .count();
+
+    let mut mrr = 0.0;
+    for (rank, hit) in hits.iter().enumerate() {
+        if items.iter().any(|item| matches(item, hit)) {
+            mrr = 1.0 / (rank as f64 + 1.0);
+            break;
+        }
+    }
+
+    // One credit per expectation, at the rank of the first hit that
+    // satisfies it — not one credit per matching hit. A wildcard entry
+    // (`paragraphs` empty) that lands on several hits is not double
+    // counted, so IDCG is well-defined from the label multiset alone
+    // regardless of how many hits happen to carry one label.
+    let dcg: f64 = items
+        .iter()
+        .filter_map(|item| {
+            hits.iter()
+                .position(|hit| matches(item, hit))
+                .map(|rank| item.relevance as f64 / (rank as f64 + 2.0).log2())
+        })
+        .sum();
+
+    let mut ideal: Vec<u8> = items.iter().map(|item| item.relevance).collect();
+    ideal.sort_unstable_by(|a, b| b.cmp(a));
+    let idcg: f64 = ideal
+        .iter()
+        .enumerate()
+        .map(|(rank, relevance)| *relevance as f64 / (rank as f64 + 2.0).log2())
+        .sum();
+    let ndcg = if idcg > 0.0 { dcg / idcg } else { 0.0 };
+
+    Some(RecallBlock {
+        recall_at_k: matched as f64 / items.len() as f64,
+        mrr,
+        ndcg,
+        expected_total: items.len(),
+        matched,
+    })
+}
+
+/// Whether `expected` (case-declared) appears among `resolutions`'
+/// `resolved_names[]`, matched with `normalize_entry` on both sides
+/// (ADR 0004 §8) — `normalize_entry` does not trim, so both sides are
+/// trimmed first.
+fn resolved_contains(resolutions: &[&CueResolution], expected: &str) -> bool {
+    let target = normalize_entry(expected.trim());
+    resolutions
+        .iter()
+        .flat_map(|resolution| &resolution.resolved_names)
+        .any(|name| normalize_entry(name.trim()) == target)
+}
+
+/// Coverage of one expectation list (`expected_concepts` or
+/// `expected_labels`) against the matching-kind `CueResolution`s.
+/// `None` when the case declares none — coverage does not apply, as
+/// distinct from applying and finding zero.
+fn coverage_counts(expected: &[String], resolutions: &[&CueResolution]) -> Option<CoverageCounts> {
+    if expected.is_empty() {
+        return None;
+    }
+    let matched = expected
+        .iter()
+        .filter(|item| resolved_contains(resolutions, item))
+        .count();
+    Some(CoverageCounts {
+        expected: expected.len(),
+        matched,
+        value: matched as f64 / expected.len() as f64,
+    })
+}
+
+/// Coverage of `expected_associations`: an entry counts as covered
+/// only when its `/query` call ran and returned `total >= 1` — the
+/// same "exactly one candidate pins a position, otherwise `query` is
+/// never called" policy (ADR 0004 §7 step 2) means `not_found`/
+/// `ambiguous`/`Errored` positions and a never-run `query` are all
+/// uncovered, never guessed at.
+fn association_coverage(associations: &[AssociationProbe]) -> Option<CoverageCounts> {
+    if associations.is_empty() {
+        return None;
+    }
+    let matched = associations
+        .iter()
+        .filter(
+            |probe| matches!(&probe.query, Some(QueryProbe::Queried { total, .. }) if *total >= 1),
+        )
+        .count();
+    Some(CoverageCounts {
+        expected: associations.len(),
+        matched,
+        value: matched as f64 / associations.len() as f64,
+    })
+}
+
+/// `missed[]`, capped at 3 entries with a count of the entries
+/// *dropped* — not the total (ADR 0004 §11). Order: sources, concepts,
+/// labels, associations. Silent when the passage lane failed — its own
+/// `Failed` outcome and `passage.failure_rate` already record that;
+/// guessing at which sources it would have missed adds no information.
+fn build_missed(
+    case: &EvalCase,
+    hits: Option<&[HitLocator]>,
+    concept_resolutions: &[&CueResolution],
+    label_resolutions: &[&CueResolution],
+    structural: Option<&StructuralBlock>,
+) -> (Vec<String>, usize) {
+    let mut all = Vec::new();
+
+    if let Some(hits) = hits {
+        for expected in &case.expected_sources {
+            if expected.relevance == 0 {
+                continue;
+            }
+            let hit = hits.iter().any(|h| {
+                h.source == expected.source
+                    && (expected.paragraphs.is_empty()
+                        || expected.paragraphs.contains(&h.paragraph))
+            });
+            if !hit {
+                all.push(format!(
+                    "expected_sources: '{}' not found among passage hits",
+                    expected.source
+                ));
+            }
+        }
+    }
+
+    for concept in &case.expected_concepts {
+        if !resolved_contains(concept_resolutions, concept) {
+            all.push(format!("expected_concepts: '{concept}' not resolved"));
+        }
+    }
+    for label in &case.expected_labels {
+        if !resolved_contains(label_resolutions, label) {
+            all.push(format!("expected_labels: '{label}' not resolved"));
+        }
+    }
+    if let Some(structural) = structural {
+        for assoc in &structural.associations {
+            let hit = matches!(
+                &assoc.query,
+                Some(QueryProbe::Queried { total, .. }) if *total >= 1
+            );
+            if !hit {
+                all.push(format!(
+                    "expected_associations: ({}, {}, {}) not queried",
+                    assoc.subject_cue, assoc.label_cue, assoc.object_cue
+                ));
+            }
+        }
+    }
+
+    let truncated = all.len().saturating_sub(3);
+    all.truncate(3);
+    (all, truncated)
+}
+
+/// Everything [`build_case_block`] needs beyond the two lanes' own raw
+/// observations — computed by pure functions over what the lanes
+/// already returned, so this never makes a network call of its own.
+struct CaseScores {
+    recall: Option<RecallBlock>,
+    coverage: Option<CoverageBlock>,
+    lane_cross: Option<LaneCrossBlock>,
+    missed: Vec<String>,
+    missed_truncated: usize,
+}
+
+fn score_case(
+    case: &EvalCase,
+    passage: &PassageOutcome,
+    structural: Option<&StructuralBlock>,
+) -> CaseScores {
+    let hits: Option<&[HitLocator]> = match passage {
+        PassageOutcome::Searched { hits, .. } => Some(hits),
+        PassageOutcome::Failed { .. } => None,
+    };
+
+    let recall = hits.and_then(|hits| score_recall(&case.expected_sources, hits));
+
+    let concept_resolutions: Vec<&CueResolution> = structural
+        .map(|s| s.cues.iter().filter(|cue| cue.kind == "concept").collect())
+        .unwrap_or_default();
+    let label_resolutions: Vec<&CueResolution> = structural
+        .map(|s| s.cues.iter().filter(|cue| cue.kind == "label").collect())
+        .unwrap_or_default();
+
+    let concepts_coverage = coverage_counts(&case.expected_concepts, &concept_resolutions);
+    let labels_coverage = coverage_counts(&case.expected_labels, &label_resolutions);
+    let associations_coverage = structural.and_then(|s| association_coverage(&s.associations));
+
+    // "Structural hit" for the lane cross-tab: any structural
+    // expectation this case declared was covered — concept, label, or
+    // association alike, mirroring `runs_structural_lane`'s own
+    // three-way OR.
+    let structural_hit = concepts_coverage
+        .iter()
+        .chain(labels_coverage.iter())
+        .chain(associations_coverage.iter())
+        .any(|counts| counts.matched > 0);
+
+    let coverage = (concepts_coverage.is_some()
+        || labels_coverage.is_some()
+        || associations_coverage.is_some())
+    .then_some(CoverageBlock {
+        concepts: concepts_coverage,
+        labels: labels_coverage,
+        associations: associations_coverage,
+    });
+
+    // Lane cross-tab (ADR 0004 §7): computed only over cases declaring
+    // BOTH a structural expectation and a `relevance >= 1` source
+    // expectation, and only when the passage lane actually completed —
+    // a failed passage lane cannot honestly report `passage_hit`
+    // either way, so it is excluded from the denominator just like it
+    // is excluded from `recall`.
+    let has_structural_expectation = runs_structural_lane(case);
+    let has_source_expectation = case.expected_sources.iter().any(|e| e.relevance >= 1);
+    let lane_cross = if has_structural_expectation && has_source_expectation && hits.is_some() {
+        Some(LaneCrossBlock {
+            structural_hit,
+            passage_hit: recall.as_ref().is_some_and(|r| r.matched > 0),
+        })
+    } else {
+        None
+    };
+
+    let (missed, missed_truncated) = build_missed(
+        case,
+        hits,
+        &concept_resolutions,
+        &label_resolutions,
+        structural,
+    );
+
+    CaseScores {
+        recall,
+        coverage,
+        lane_cross,
+        missed,
+        missed_truncated,
+    }
+}
+
 // ================================ Per case ================================
 
 fn build_case_block(api: &Api, context: &str, case: &EvalCase, default_limit: usize) -> CaseBlock {
     let limit = case.options.limit.unwrap_or(default_limit);
     let passage = run_passage_lane(api, context, case, limit);
     let structural = runs_structural_lane(case).then(|| build_structural_block(api, context, case));
+    let scores = score_case(case, &passage, structural.as_ref());
 
     CaseBlock {
         case_id: case.case_id.clone(),
@@ -807,11 +1090,11 @@ fn build_case_block(api: &Api, context: &str, case: &EvalCase, default_limit: us
         limit,
         passage,
         structural,
-        // #274/#275 populate this from recall/coverage/citation
-        // checks; this issue's own harness never fails a case against
-        // an expectation, only records what the two lanes observed.
-        missed: Vec::new(),
-        missed_truncated: 0,
+        recall: scores.recall,
+        coverage: scores.coverage,
+        lane_cross: scores.lane_cross,
+        missed: scores.missed,
+        missed_truncated: scores.missed_truncated,
     }
 }
 
@@ -827,6 +1110,18 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
     let mut query_latencies = Vec::new();
     let mut passage_failures = 0u64;
     let mut structural_cases = 0u64;
+
+    let mut recall_at_k = Vec::new();
+    let mut mrr = Vec::new();
+    let mut ndcg = Vec::new();
+    let mut coverage_concepts = Vec::new();
+    let mut coverage_labels = Vec::new();
+    let mut coverage_associations = Vec::new();
+    let mut lane_cross_n = 0u64;
+    let mut structural_hit_n = 0u64;
+    let mut passage_hit_n = 0u64;
+    let mut both_n = 0u64;
+    let mut neither_n = 0u64;
 
     for case in cases {
         match &case.passage {
@@ -852,6 +1147,30 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
                 }
             }
         }
+
+        if let Some(recall) = &case.recall {
+            recall_at_k.push(recall.recall_at_k);
+            mrr.push(recall.mrr);
+            ndcg.push(recall.ndcg);
+        }
+        if let Some(coverage) = &case.coverage {
+            if let Some(concepts) = &coverage.concepts {
+                coverage_concepts.push(concepts.value);
+            }
+            if let Some(labels) = &coverage.labels {
+                coverage_labels.push(labels.value);
+            }
+            if let Some(associations) = &coverage.associations {
+                coverage_associations.push(associations.value);
+            }
+        }
+        if let Some(cross) = &case.lane_cross {
+            lane_cross_n += 1;
+            structural_hit_n += u64::from(cross.structural_hit);
+            passage_hit_n += u64::from(cross.passage_hit);
+            both_n += u64::from(cross.structural_hit && cross.passage_hit);
+            neither_n += u64::from(!cross.structural_hit && !cross.passage_hit);
+        }
     }
 
     let total = cases.len() as u64;
@@ -875,6 +1194,46 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
     metrics.insert(
         "structural.case_rate".to_string(),
         MetricValue::Ratio(ratio_metric(structural_cases, total)),
+    );
+    metrics.insert(
+        "recall.recall_at_k".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(recall_at_k)),
+    );
+    metrics.insert(
+        "recall.mrr".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(mrr)),
+    );
+    metrics.insert(
+        "recall.ndcg".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(ndcg)),
+    );
+    metrics.insert(
+        "coverage.concepts".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(coverage_concepts)),
+    );
+    metrics.insert(
+        "coverage.labels".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(coverage_labels)),
+    );
+    metrics.insert(
+        "coverage.associations".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(coverage_associations)),
+    );
+    metrics.insert(
+        "lanes.structural_hit".to_string(),
+        MetricValue::Ratio(ratio_metric(structural_hit_n, lane_cross_n)),
+    );
+    metrics.insert(
+        "lanes.passage_hit".to_string(),
+        MetricValue::Ratio(ratio_metric(passage_hit_n, lane_cross_n)),
+    );
+    metrics.insert(
+        "lanes.both".to_string(),
+        MetricValue::Ratio(ratio_metric(both_n, lane_cross_n)),
+    );
+    metrics.insert(
+        "lanes.neither".to_string(),
+        MetricValue::Ratio(ratio_metric(neither_n, lane_cross_n)),
     );
     metrics
 }
@@ -946,6 +1305,153 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             None,
         ),
     );
+    d.insert(
+        "recall.recall_at_k".to_string(),
+        def(
+            "ratio",
+            "distribution",
+            &["case"],
+            "Fraction of a case's expected_sources (relevance >= 1) found \
+             among the passage lane's hits, up to the case's own limit.",
+            "eval.jsonl expected_sources, POST /contexts/{name}/sources/search",
+            Some(
+                "empty when no case declares a relevance >= 1 expected_sources \
+                 entry, or the passage lane failed outright",
+            ),
+        ),
+    );
+    d.insert(
+        "recall.mrr".to_string(),
+        def(
+            "ratio",
+            "distribution",
+            &["case"],
+            "1 / rank of the first passage hit that satisfies any of a \
+             case's expected_sources entries, 0 if none does.",
+            "eval.jsonl expected_sources, POST /contexts/{name}/sources/search",
+            Some(
+                "empty when no case declares a relevance >= 1 expected_sources \
+                 entry, or the passage lane failed outright",
+            ),
+        ),
+    );
+    d.insert(
+        "recall.ndcg".to_string(),
+        def(
+            "ratio",
+            "distribution",
+            &["case"],
+            "Graded-relevance nDCG over expected_sources: each expectation \
+             contributes its own relevance (0..=3) once, at the rank of the \
+             first hit that satisfies it; IDCG orders the case's own \
+             expected relevances descending.",
+            "eval.jsonl expected_sources.relevance, POST /contexts/{name}/sources/search",
+            Some(
+                "empty when no case declares a relevance >= 1 expected_sources \
+                 entry, or the passage lane failed outright",
+            ),
+        ),
+    );
+    d.insert(
+        "coverage.concepts".to_string(),
+        def(
+            "ratio",
+            "distribution",
+            &["case"],
+            "Fraction of a case's expected_concepts found, after \
+             normalize_entry folding, among the structural lane's \
+             concept-cue resolved_names[].",
+            "eval.jsonl expected_concepts, POST /contexts/{name}/resolve",
+            Some("empty when no case declares expected_concepts"),
+        ),
+    );
+    d.insert(
+        "coverage.labels".to_string(),
+        def(
+            "ratio",
+            "distribution",
+            &["case"],
+            "Fraction of a case's expected_labels found, after \
+             normalize_entry folding, among the structural lane's \
+             label-cue resolved_names[].",
+            "eval.jsonl expected_labels, POST /contexts/{name}/resolve_label",
+            Some("empty when no case declares expected_labels"),
+        ),
+    );
+    d.insert(
+        "coverage.associations".to_string(),
+        def(
+            "ratio",
+            "distribution",
+            &["case"],
+            "Fraction of a case's expected_associations whose /query call \
+             ran (all three positions pinned) and returned total >= 1.",
+            "eval.jsonl expected_associations, POST /contexts/{name}/query",
+            Some(
+                "empty when no case declares expected_associations; a \
+                 not_found/ambiguous position never runs query and so \
+                 counts as uncovered, never guessed at",
+            ),
+        ),
+    );
+    d.insert(
+        "lanes.structural_hit".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Share of cases declaring BOTH a structural expectation and a \
+             relevance >= 1 source expectation whose structural coverage \
+             matched at least one expectation (ADR 0004 §7).",
+            "derived from coverage.* and recall.recall_at_k",
+            Some(
+                "denominator excludes cases with only a structural or only a \
+                 source expectation, and any case whose passage lane failed",
+            ),
+        ),
+    );
+    d.insert(
+        "lanes.passage_hit".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Share of cases declaring BOTH a structural expectation and a \
+             relevance >= 1 source expectation whose passage lane matched \
+             at least one expected_sources entry (ADR 0004 §7).",
+            "derived from coverage.* and recall.recall_at_k",
+            Some(
+                "denominator excludes cases with only a structural or only a \
+                 source expectation, and any case whose passage lane failed",
+            ),
+        ),
+    );
+    d.insert(
+        "lanes.both".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Share of the same denominator as lanes.structural_hit/ \
+             lanes.passage_hit where both lanes hit (ADR 0004 §7).",
+            "derived from coverage.* and recall.recall_at_k",
+            None,
+        ),
+    );
+    d.insert(
+        "lanes.neither".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Share of the same denominator as lanes.structural_hit/ \
+             lanes.passage_hit where neither lane hit (ADR 0004 §7). A \
+             case counts here purely by rank/label outcome, never by a \
+             graph/BM25/vector score value.",
+            "derived from coverage.* and recall.recall_at_k",
+            None,
+        ),
+    );
     d
 }
 
@@ -984,12 +1490,50 @@ fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
         .filter(|outcome| matches!(outcome, PositionOutcome::NotFound { .. }))
         .count();
 
+    let recalls: Vec<&RecallBlock> = evaluation
+        .cases
+        .iter()
+        .filter_map(|c| c.recall.as_ref())
+        .collect();
+    let cross: Vec<&LaneCrossBlock> = evaluation
+        .cases
+        .iter()
+        .filter_map(|c| c.lane_cross.as_ref())
+        .collect();
+
     println!("taguru evaluate: {masked_url} / context '{context}'");
     println!(
         "  {total} case(s) — passage: {} ok, {passage_failed} failed; structural lane ran on \
          {structural_cases} case(s) ({ambiguous} ambiguous, {not_found} not-found position(s))",
         total - passage_failed
     );
+    if !recalls.is_empty() {
+        let mean = |pick: fn(&&RecallBlock) -> f64| {
+            recalls.iter().map(pick).sum::<f64>() / recalls.len() as f64
+        };
+        println!(
+            "  recall over {} case(s): mean recall@k {:.3}, mean MRR {:.3}, mean nDCG {:.3}",
+            recalls.len(),
+            mean(|r| r.recall_at_k),
+            mean(|r| r.mrr),
+            mean(|r| r.ndcg)
+        );
+    }
+    if !cross.is_empty() {
+        let both = cross
+            .iter()
+            .filter(|c| c.structural_hit && c.passage_hit)
+            .count();
+        let neither = cross
+            .iter()
+            .filter(|c| !c.structural_hit && !c.passage_hit)
+            .count();
+        println!(
+            "  lane cross-tab over {} case(s) declaring both a structural and a source \
+             expectation: {both} both, {neither} neither",
+            cross.len()
+        );
+    }
     if !evaluation.corpus.stable {
         println!(
             "  WARNING: the context's revision changed during this run — a write landed \
@@ -1032,12 +1576,27 @@ struct EvaluationFile {
 #[derive(Debug, Clone, Serialize)]
 struct MatchingBlock {
     normalization: &'static str,
+    /// What `normalization` is applied to, both sides, before an exact
+    /// match: `expected_concepts`/`expected_labels` against a cue's
+    /// `resolved_names[]`, and `expected_associations`' subject/label/
+    /// object cues against a resolved position's stored name.
+    normalized: &'static [&'static str],
+    /// `expected_sources` match by exact `(source, paragraph)` instead
+    /// — the source preflight already requires an exact manifest path
+    /// match, and a paragraph index is not text to fold.
+    sources: &'static str,
 }
 
 impl Default for MatchingBlock {
     fn default() -> Self {
         Self {
             normalization: "taguru::context::normalize_entry",
+            normalized: &[
+                "expected_concepts",
+                "expected_labels",
+                "expected_associations",
+            ],
+            sources: "exact (source, paragraph) match — no normalization",
         }
     }
 }
@@ -1100,10 +1659,67 @@ struct CaseBlock {
     passage: PassageOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     structural: Option<StructuralBlock>,
-    /// Placeholder — #274/#275 give this its real per-expectation
-    /// shape. Always empty in this build.
+    /// `Some` only when the case declares at least one `relevance >= 1`
+    /// `expected_sources` entry and the passage lane completed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recall: Option<RecallBlock>,
+    /// `Some` only when the case declares at least one of
+    /// `expected_concepts`/`expected_labels`/`expected_associations`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<CoverageBlock>,
+    /// The ADR 0004 §7 lane cross-tab input for this one case — `Some`
+    /// only when the case declares both a structural and a source
+    /// expectation and the passage lane completed; aggregated into
+    /// `metrics`' `lanes.*` ratios (§9.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lane_cross: Option<LaneCrossBlock>,
+    /// Unmet expectations (ADR 0004 §11): sources, then concepts, then
+    /// labels, then associations, capped at 3 entries. Citation misses
+    /// (#275) are not this issue's own scope and stay absent until
+    /// then. Silent (empty) when the passage lane failed outright — see
+    /// [`build_missed`].
     missed: Vec<String>,
     missed_truncated: usize,
+}
+
+/// Recall@k/MRR/nDCG against `expected_sources`' graded relevance (ADR
+/// 0004 §274) — see [`score_recall`].
+#[derive(Debug, Clone, Serialize)]
+struct RecallBlock {
+    recall_at_k: f64,
+    mrr: f64,
+    ndcg: f64,
+    expected_total: usize,
+    matched: usize,
+}
+
+/// One expectation category's coverage count — see [`coverage_counts`]/
+/// [`association_coverage`].
+#[derive(Debug, Clone, Serialize)]
+struct CoverageCounts {
+    expected: usize,
+    matched: usize,
+    value: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CoverageBlock {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    concepts: Option<CoverageCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    labels: Option<CoverageCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    associations: Option<CoverageCounts>,
+}
+
+/// One case's contribution to the ADR 0004 §7 lane cross-tab —
+/// aggregated across every case that has one into `metrics`'
+/// `lanes.structural_hit`/`lanes.passage_hit`/`lanes.both`/
+/// `lanes.neither`.
+#[derive(Debug, Clone, Serialize)]
+struct LaneCrossBlock {
+    structural_hit: bool,
+    passage_hit: bool,
 }
 
 #[derive(Serialize)]
