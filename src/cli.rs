@@ -101,6 +101,14 @@ USAGE:
                                         run) cell, and assemble manifest.json/
                                         runs/*.jsonl (ADR 0003; see: taguru
                                         benchmark extract --help)
+  taguru evaluate --eval FILE --context NAME [--url URL] [--config FILE]
+                                        run eval.jsonl's cases against one
+                                        context's live retrieval endpoints
+                                        (passage search, then resolve/query)
+                                        and write evaluation.json — a
+                                        report-only quality gate that calls no
+                                        answer-generation LLM (ADR 0004; see:
+                                        taguru evaluate --help)
   taguru calibrate --context NAME --probes FILE [--json] [URL]
                                         measure the semantic-floor bands of a
                                         running server's embedding model with
@@ -314,6 +322,7 @@ pub fn dispatch() -> Command {
             exit(0)
         }
         Some("benchmark") => exit(crate::benchmark::run(&args[1..])),
+        Some("evaluate") => exit(crate::evaluate::run(&args[1..])),
         Some("health") => exit(health(&args[1..])),
         Some("inspect") => exit(crate::inspect::run(&args[1..])),
         Some("estimate") => exit(crate::estimate::run(&args[1..])),

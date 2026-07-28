@@ -17,6 +17,7 @@ mod communities;
 mod directory;
 mod directory_labels_compact;
 mod errors;
+mod evaluate;
 mod explore_audit;
 mod extract;
 mod groups;

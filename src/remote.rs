@@ -228,7 +228,17 @@ impl Api {
     }
 
     /// [`Api::get`] with query pairs appended to the request.
-    fn get_with_query(&self, segments: &[&str], query: &[(&str, &str)]) -> Result<Value, String> {
+    ///
+    /// `pub(crate)`: `evaluate` (#273) keyset-walks
+    /// `GET /contexts/{name}/sources` itself — its `limit`/`after` shape
+    /// does not fit [`Api::list_names`], which assumes each page item is
+    /// an object carrying a `name` field; `sources` pages a bare string
+    /// array instead. No new HTTP client code, per ADR 0004 §11.
+    pub(crate) fn get_with_query(
+        &self,
+        segments: &[&str],
+        query: &[(&str, &str)],
+    ) -> Result<Value, String> {
         let url = self.url_with_query(segments, query)?;
         let request = self.bearer(self.agent.get(&url));
         finish(request.call(), &url).map_err(ApiFailure::into_message)
