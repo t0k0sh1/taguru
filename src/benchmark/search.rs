@@ -126,7 +126,12 @@ pub(super) fn run_search(args: &[String]) -> i32 {
         Err(code) => return code,
     };
 
-    let loaded = match evalset::load_eval_file(&search_args.eval) {
+    let loaded = match evalset::load_eval_file(
+        &search_args.eval,
+        evalset::Extensions::CarryThrough {
+            consumer: "taguru benchmark search",
+        },
+    ) {
         Ok(loaded) => loaded,
         Err(message) => {
             eprintln!("taguru: benchmark: search: {message}");

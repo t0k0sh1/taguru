@@ -1,4 +1,5 @@
 use super::*;
+use crate::evalset::EvalOptions;
 
 fn args(words: &[&str]) -> Result<SearchArgs, i32> {
     parse_args(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -34,11 +35,20 @@ fn doc(document_id: &str, path: &str) -> DocumentInfo {
 }
 
 fn case_with_limit(limit: Option<usize>) -> EvalCase {
-    let json = match limit {
-        Some(n) => format!(r#"{{"case_id":"c","query":"q","options":{{"limit":{n}}}}}"#),
-        None => r#"{"case_id":"c","query":"q"}"#.to_string(),
-    };
-    serde_json::from_str(&json).expect("valid fixture")
+    EvalCase {
+        case_id: "c".to_string(),
+        query: "q".to_string(),
+        cues: Vec::new(),
+        expected_sources: Vec::new(),
+        expected_concepts: Vec::new(),
+        options: EvalOptions {
+            limit,
+            ..EvalOptions::default()
+        },
+        expected_labels: Vec::new(),
+        expected_associations: Vec::new(),
+        expected_citations: Vec::new(),
+    }
 }
 
 // ============================== Argument parsing ==============================
