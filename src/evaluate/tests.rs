@@ -419,6 +419,46 @@ fn association_probe(query: Option<QueryProbe>) -> AssociationProbe {
     }
 }
 
+fn expected_citation(
+    source: &str,
+    paragraph: u32,
+    section: Option<Option<&str>>,
+    quote: Option<&str>,
+) -> ExpectedCitation {
+    ExpectedCitation {
+        source: source.to_string(),
+        paragraph,
+        section: section.map(|inner| inner.map(str::to_string)),
+        quote: quote.map(str::to_string),
+    }
+}
+
+fn resolved_outcome(section: SectionCheck, quote: Option<QuoteCheck>) -> CitationOutcome {
+    CitationOutcome::Resolved { section, quote }
+}
+
+fn unresolved_outcome(code: Option<&str>) -> CitationOutcome {
+    CitationOutcome::Unresolved {
+        code: code.map(str::to_string),
+        message: "boom".to_string(),
+    }
+}
+
+fn citation_check(
+    source: &str,
+    paragraph: u32,
+    served: bool,
+    outcome: CitationOutcome,
+) -> CitationCheck {
+    CitationCheck {
+        source: source.to_string(),
+        paragraph,
+        served,
+        outcome,
+        latency_ms: 1,
+    }
+}
+
 // ========================= score_recall: recall@k / MRR / graded nDCG =========================
 
 #[test]
@@ -573,11 +613,13 @@ fn association_coverage_counts_only_queried_entries_with_a_hit() {
         association_probe(Some(QueryProbe::Queried {
             total: 1,
             matches: 1,
+            attributions: Vec::new(),
             latency_ms: 1,
         })),
         association_probe(Some(QueryProbe::Queried {
             total: 0,
             matches: 0,
+            attributions: Vec::new(),
             latency_ms: 1,
         })),
         association_probe(None),
@@ -592,6 +634,319 @@ fn association_coverage_is_none_when_there_are_no_associations() {
     assert!(association_coverage(&[]).is_none());
 }
 
+// ========================= Citation lane (ADR §8) =========================
+
+#[test]
+fn check_section_is_not_checked_when_the_key_is_absent() {
+    assert!(matches!(
+        check_section(&None, &Some("沿革".to_string())),
+        SectionCheck::NotChecked
+    ));
+}
+
+#[test]
+fn check_section_matches_an_explicit_null_against_no_stored_section() {
+    // `Some(None)` asserts "outside every stored section" — a real,
+    // checkable claim (ADR 0004 §8), not a serde artifact.
+    assert!(matches!(
+        check_section(&Some(None), &None),
+        SectionCheck::Matched { expected: None }
+    ));
+}
+
+#[test]
+fn check_section_flags_an_explicit_null_mismatched_against_a_real_section() {
+    assert!(matches!(
+        check_section(&Some(None), &Some("沿革".to_string())),
+        SectionCheck::Mismatched { expected: None }
+    ));
+}
+
+#[test]
+fn check_section_matches_an_equal_declared_value() {
+    let expected = Some(Some("沿革".to_string()));
+    assert!(matches!(
+        check_section(&expected, &Some("沿革".to_string())),
+        SectionCheck::Matched { .. }
+    ));
+}
+
+#[test]
+fn check_section_flags_a_differing_declared_value() {
+    let expected = Some(Some("沿革".to_string()));
+    assert!(matches!(
+        check_section(&expected, &Some("製品ラインナップ".to_string())),
+        SectionCheck::Mismatched { .. }
+    ));
+}
+
+#[test]
+fn quote_matches_a_plain_substring() {
+    assert!(quote_matches(
+        "1897年に創業",
+        "青嶺は1897年に創業した蔵元です。"
+    ));
+}
+
+#[test]
+fn quote_matches_folds_katakana_hiragana_and_width_via_normalize_entry() {
+    assert!(quote_matches("ｱｯﾌﾟﾙ", "りんご、あっぷる、青嶺"));
+}
+
+#[test]
+fn quote_matches_is_false_for_unrelated_text() {
+    assert!(!quote_matches(
+        "存在しない引用",
+        "青嶺は1897年に創業した蔵元です。"
+    ));
+}
+
+#[test]
+fn quote_matches_never_succeeds_across_a_paragraph_boundary() {
+    // `Citation.text` is exactly one paragraph (`sources.rs:84-88`); a
+    // quote that spans two paragraphs cannot be a substring of either
+    // one alone. ADR 0004 §8's documented workaround is splitting it
+    // into two `expected_citations` entries.
+    let paragraph_one = "青嶺は1897年に創業した蔵元";
+    let paragraph_two = "です。醸造元は青嶺酒造。";
+    let spanning_quote = "創業した蔵元です";
+    assert!(!quote_matches(spanning_quote, paragraph_one));
+    assert!(!quote_matches(spanning_quote, paragraph_two));
+}
+
+#[test]
+fn citation_is_valid_requires_resolution_and_no_section_mismatch_and_a_matched_quote() {
+    let resolved_clean = citation_check(
+        "corpus/a.md",
+        3,
+        true,
+        resolved_outcome(SectionCheck::NotChecked, None),
+    );
+    assert!(citation_is_valid(&resolved_clean));
+
+    let section_mismatch = citation_check(
+        "corpus/a.md",
+        3,
+        true,
+        resolved_outcome(
+            SectionCheck::Mismatched {
+                expected: Some("沿革".to_string()),
+            },
+            None,
+        ),
+    );
+    assert!(!citation_is_valid(&section_mismatch));
+
+    let quote_mismatch = citation_check(
+        "corpus/a.md",
+        3,
+        true,
+        resolved_outcome(
+            SectionCheck::NotChecked,
+            Some(QuoteCheck {
+                declared: "存在しない".to_string(),
+                matched: false,
+            }),
+        ),
+    );
+    assert!(!citation_is_valid(&quote_mismatch));
+
+    let unresolved = citation_check(
+        "corpus/a.md",
+        3,
+        false,
+        unresolved_outcome(Some("no_source")),
+    );
+    assert!(!citation_is_valid(&unresolved));
+}
+
+#[test]
+fn score_citation_recall_counts_only_served_checks() {
+    let checks = vec![
+        citation_check(
+            "a.md",
+            0,
+            true,
+            resolved_outcome(SectionCheck::NotChecked, None),
+        ),
+        citation_check(
+            "b.md",
+            1,
+            false,
+            resolved_outcome(SectionCheck::NotChecked, None),
+        ),
+    ];
+    let recall = score_citation_recall(&checks);
+    assert_eq!(recall.expected_total, 2);
+    assert_eq!(recall.matched, 1);
+    assert!((recall.value - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn score_citation_validity_counts_only_valid_checks_independent_of_served() {
+    let checks = vec![
+        // Not served, but a perfectly valid locator — recall and
+        // validity are independent, never merged into one score.
+        citation_check(
+            "a.md",
+            0,
+            false,
+            resolved_outcome(SectionCheck::NotChecked, None),
+        ),
+        citation_check("b.md", 1, true, unresolved_outcome(Some("no_paragraph"))),
+    ];
+    let validity = score_citation_validity(&checks);
+    assert_eq!(validity.expected_total, 2);
+    assert_eq!(validity.valid, 1);
+    assert!((validity.value - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn served_locators_unions_passage_hits_and_structural_attributions() {
+    let passage = PassageOutcome::Searched {
+        plan: None,
+        hits: vec![hit("a.md", 0)],
+        latency_ms: 1,
+    };
+    let structural = StructuralBlock {
+        cues: Vec::new(),
+        associations: vec![association_probe(Some(QueryProbe::Queried {
+            total: 1,
+            matches: 1,
+            attributions: vec![AttributionLocator {
+                source: "b.md".to_string(),
+                paragraph: Some(2),
+            }],
+            latency_ms: 1,
+        }))],
+    };
+    let served = served_locators(&passage, Some(&structural));
+    assert!(served.contains(&("a.md".to_string(), 0)));
+    assert!(served.contains(&("b.md".to_string(), 2)));
+    assert_eq!(served.len(), 2);
+}
+
+#[test]
+fn served_locators_ignores_an_attribution_with_no_paragraph() {
+    let passage = PassageOutcome::Failed {
+        message: "boom".to_string(),
+        latency_ms: 1,
+    };
+    let structural = StructuralBlock {
+        cues: Vec::new(),
+        associations: vec![association_probe(Some(QueryProbe::Queried {
+            total: 1,
+            matches: 1,
+            attributions: vec![AttributionLocator {
+                source: "b.md".to_string(),
+                paragraph: None,
+            }],
+            latency_ms: 1,
+        }))],
+    };
+    assert!(served_locators(&passage, Some(&structural)).is_empty());
+}
+
+#[test]
+fn score_case_recall_is_computed_from_citation_checks_even_when_the_passage_lane_failed() {
+    // ADR 0004 §8: citation recall and locator validity are computed
+    // independent of whether that case's own search happened to
+    // surface anything — a failed passage lane still yields a
+    // (well-defined, zero) citation recall, unlike expected_sources
+    // recall, which is `None` in that situation.
+    let mut case = base_case("c1");
+    case.expected_citations = vec![expected_citation("a.md", 0, None, None)];
+    let passage = PassageOutcome::Failed {
+        message: "boom".to_string(),
+        latency_ms: 1,
+    };
+    let checks = vec![citation_check(
+        "a.md",
+        0,
+        false,
+        resolved_outcome(SectionCheck::NotChecked, None),
+    )];
+    let scores = score_case(&case, &passage, None, &checks);
+    let citations = scores.citations.expect("expected_citations was declared");
+    assert_eq!(citations.recall.matched, 0);
+    assert_eq!(citations.validity.valid, 1);
+}
+
+#[test]
+fn score_case_citations_is_none_when_no_expected_citations_are_declared() {
+    let case = base_case("c1");
+    let passage = PassageOutcome::Searched {
+        plan: None,
+        hits: Vec::new(),
+        latency_ms: 1,
+    };
+    let scores = score_case(&case, &passage, None, &[]);
+    assert!(scores.citations.is_none());
+}
+
+#[test]
+fn build_missed_reports_a_missed_citation_recall_and_a_failed_locator_validity_separately() {
+    let case = base_case("c1");
+    let checks = vec![
+        // Not served, but a valid locator: only a recall miss.
+        citation_check(
+            "a.md",
+            0,
+            false,
+            resolved_outcome(SectionCheck::NotChecked, None),
+        ),
+    ];
+    let (missed, _) = build_missed(&case, None, &[], &[], None, &checks);
+    assert_eq!(missed.len(), 1, "{missed:?}");
+    assert!(
+        missed[0].contains("not found among served results"),
+        "{missed:?}"
+    );
+}
+
+#[test]
+fn build_missed_reports_both_failure_modes_for_a_check_that_is_neither_served_nor_valid() {
+    let case = base_case("c1");
+    let checks = vec![citation_check(
+        "a.md",
+        0,
+        false,
+        unresolved_outcome(Some("no_source")),
+    )];
+    let (missed, _) = build_missed(&case, None, &[], &[], None, &checks);
+    assert_eq!(missed.len(), 2, "{missed:?}");
+    assert!(
+        missed[0].contains("not found among served results"),
+        "{missed:?}"
+    );
+    assert!(missed[1].contains("failed locator validity"), "{missed:?}");
+}
+
+/// The one ADR 0004 §11 exception to "no corpus body text": even a
+/// `quote` mismatch records only the user's own declared quote and a
+/// boolean, never the served paragraph body.
+#[test]
+fn citation_check_never_carries_the_served_paragraph_text() {
+    let check = citation_check(
+        "corpus/brewery.md",
+        0,
+        true,
+        resolved_outcome(
+            SectionCheck::NotChecked,
+            Some(QuoteCheck {
+                declared: "存在しない引用".to_string(),
+                matched: false,
+            }),
+        ),
+    );
+    let value = serde_json::to_value(&check).unwrap();
+    assert_no_body_text(&value, "TOP-SECRET-PASSAGE-BODY-TEXT", "$");
+    // The served text itself is never on `CitationCheck` at all — this
+    // is a schema check, not a string-scan for a placeholder that was
+    // never constructed with any served text to begin with.
+    assert!(value.get("text").is_none(), "{value}");
+}
+
 // ========================= missed[] capping (ADR §11) =========================
 
 #[test]
@@ -603,7 +958,7 @@ fn build_missed_caps_at_three_and_counts_the_rest_as_truncated() {
     ];
     case.expected_concepts = vec!["x".to_string(), "y".to_string()];
     let hits: Vec<HitLocator> = Vec::new();
-    let (missed, truncated) = build_missed(&case, Some(&hits), &[], &[], None);
+    let (missed, truncated) = build_missed(&case, Some(&hits), &[], &[], None, &[]);
     assert_eq!(missed.len(), 3, "{missed:?}");
     assert_eq!(truncated, 1, "4 misses total, 3 kept, 1 dropped");
 }
@@ -617,12 +972,13 @@ fn build_missed_distinguishes_a_queried_zero_from_a_never_run_query() {
             association_probe(Some(QueryProbe::Queried {
                 total: 0,
                 matches: 0,
+                attributions: Vec::new(),
                 latency_ms: 1,
             })),
             association_probe(None),
         ],
     };
-    let (missed, _) = build_missed(&case, None, &[], &[], Some(&structural));
+    let (missed, _) = build_missed(&case, None, &[], &[], Some(&structural), &[]);
     assert_eq!(missed.len(), 2, "{missed:?}");
     assert!(
         missed[0].contains("query returned no association"),
@@ -642,7 +998,7 @@ fn build_missed_distinguishes_a_queried_zero_from_a_never_run_query() {
 fn build_missed_is_silent_about_sources_when_the_passage_lane_failed() {
     let mut case = base_case("c1");
     case.expected_sources = vec![expected_source("a.md", &[], 1)];
-    let (missed, truncated) = build_missed(&case, None, &[], &[], None);
+    let (missed, truncated) = build_missed(&case, None, &[], &[], None, &[]);
     assert!(missed.is_empty(), "{missed:?}");
     assert_eq!(truncated, 0);
 }
@@ -662,7 +1018,7 @@ fn score_case_recall_and_lane_cross_are_none_when_the_passage_lane_failed() {
         cues: vec![cue_resolution("concept", &["x"])],
         associations: Vec::new(),
     };
-    let scores = score_case(&case, &passage, Some(&structural));
+    let scores = score_case(&case, &passage, Some(&structural), &[]);
     assert!(scores.recall.is_none());
     assert!(scores.lane_cross.is_none());
     assert!(
@@ -685,7 +1041,7 @@ fn score_case_reports_lane_cross_only_when_both_expectation_kinds_are_declared()
         cues: vec![cue_resolution("concept", &["x"])],
         associations: Vec::new(),
     };
-    let scores = score_case(&case, &passage, Some(&structural));
+    let scores = score_case(&case, &passage, Some(&structural), &[]);
     let cross = scores
         .lane_cross
         .expect("both a structural and a source expectation were declared");
@@ -702,7 +1058,7 @@ fn score_case_lane_cross_is_none_with_only_a_source_expectation() {
         hits: vec![hit("a.md", 0)],
         latency_ms: 1,
     };
-    let scores = score_case(&case, &passage, None);
+    let scores = score_case(&case, &passage, None, &[]);
     assert!(scores.lane_cross.is_none());
     assert!(scores.recall.is_some());
 }
@@ -789,6 +1145,7 @@ fn evaluate_only_touches_read_role_endpoints() {
         (Method::POST, "/contexts/{name}/resolve"),
         (Method::POST, "/contexts/{name}/resolve_label"),
         (Method::POST, "/contexts/{name}/query"),
+        (Method::POST, "/contexts/{name}/citations"),
         (Method::GET, "/contexts/{name}"),
         (Method::GET, "/contexts/{name}/sources"),
         (Method::GET, "/contexts/{name}/embeddings"),

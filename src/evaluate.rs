@@ -11,6 +11,10 @@
 //!   `/resolve`/`/resolve_label` for coverage, then `/query` for each
 //!   `expected_associations[]` entry whose three positions all resolve
 //!   to exactly one name apiece.
+//! - **Citation lane** (only when a case declares `expected_citations`):
+//!   one `POST /contexts/{name}/citations` call per entry, always run —
+//!   independent of whether the passage lane found anything at all (ADR
+//!   0004 §8).
 //!
 //! `recall`, `activate`, `explore`, and `describe` are deliberately
 //! never called. `recall`'s HTTP layer pages a hub concept's incident
@@ -25,11 +29,12 @@
 //! Recall@k/MRR/nDCG (graded relevance, ADR 0004 §274) and
 //! concept/label/association retrieval coverage are scored here, from
 //! rank and label alone — no lane's raw graph/BM25/vector score is
-//! ever folded into another's (#215's own requirement). Citation
-//! recall and locator validity (#275, the only reason
-//! `POST /contexts/{name}/citations` is not called here), configurable
-//! thresholds and exit 3 (#276), and `taguru evaluate compare` (#277)
-//! land as separate, focused changes on top of this one.
+//! ever folded into another's (#215's own requirement). Citation recall
+//! and locator validity (ADR 0004 §8) are two measurements that are
+//! never merged into one score — see the `Citation lane` and
+//! `citations.*`/`missed` scoring below. Configurable thresholds and
+//! exit 3 (#276), and `taguru evaluate compare` (#277), land as separate,
+//! focused changes on top of this one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -41,10 +46,10 @@ use taguru::context::normalize_entry;
 
 use crate::api::MatchPage;
 use crate::api::resolve::TieredResolution;
-use crate::api::sources::{PassageHit, PassageLanes, PassagePage, SearchContextPlan};
+use crate::api::sources::{Citation, PassageHit, PassageLanes, PassagePage, SearchContextPlan};
 use crate::cli::default_base_url;
 use crate::config::{load_config, subcommand_usage_error};
-use crate::evalset::{self, EvalCase, ExpectedAssociation, ExpectedSource};
+use crate::evalset::{self, EvalCase, ExpectedAssociation, ExpectedCitation, ExpectedSource};
 use crate::measure::{Distribution, MetricDef, MetricValue, MetricsMap, def, ratio_metric};
 use crate::registry::{ContextRevision, DirectoryEntry};
 use crate::remote::{self, Api, ApiFailure};
@@ -77,10 +82,11 @@ Runs eval.jsonl's cases (ADR 0003 §11's shared dataset, #215's own
 extension fields) against one already-populated context's live
 retrieval endpoints and writes evaluation.json: per-case passage-lane
 hits and structural-lane resolve/query outcomes, recall@k/MRR/nDCG,
-concept/label/association coverage, corpus revision bracketing, and
-run metadata — a report-only quality gate (this build has no
---thresholds; every completed run exits 0). Citation checks and
-configurable thresholds land in follow-up issues on top of this build.
+concept/label/association coverage, citation recall and locator
+validity, corpus revision bracketing, and run metadata — a report-only
+quality gate (this build has no --thresholds; every completed run exits
+0). Configurable thresholds land in a follow-up issue on top of this
+build.
 
   --eval FILE            eval.jsonl (ADR 0003 §11's shared dataset)
   --context NAME          the already-populated context to evaluate
@@ -180,7 +186,7 @@ fn run_evaluate(args: &[String]) -> i32 {
     let context = &eval_args.context;
     let entry_before_value = match api.get_envelope(&["contexts", context]) {
         Ok(value) => value,
-        Err(ApiFailure::NotFound(message)) => {
+        Err(ApiFailure::NotFound { message, .. }) => {
             eprintln!("taguru: evaluate: {message}");
             return 2;
         }
@@ -728,7 +734,11 @@ fn position_latency_ms(outcome: &PositionOutcome) -> u64 {
 }
 
 /// `query` pins all three positions exactly (ADR 0004 §7 step 2) —
-/// `limit: 1` is enough since a pinned triple's `total` is 0 or 1.
+/// `limit: 1` is enough since a pinned triple's `total` is 0 or 1; a
+/// single match can still carry several `attributions[]` (the same
+/// triple asserted from more than one source), which citation recall
+/// (ADR 0004 §8) reads as served `(source, paragraph)` locators
+/// alongside the passage lane's own hits.
 fn run_query(api: &Api, context: &str, subject: &str, label: &str, object: &str) -> QueryProbe {
     let body = serde_json::json!({
         "subject": subject,
@@ -741,11 +751,23 @@ fn run_query(api: &Api, context: &str, subject: &str, label: &str, object: &str)
         Ok(value) => {
             let latency_ms = elapsed_ms(started_at);
             match serde_json::from_value::<MatchPage>(value) {
-                Ok(page) => QueryProbe::Queried {
-                    total: page.total,
-                    matches: page.matches.len(),
-                    latency_ms,
-                },
+                Ok(page) => {
+                    let attributions = page
+                        .matches
+                        .iter()
+                        .flat_map(|matched| matched.attributions.iter())
+                        .map(|attribution| AttributionLocator {
+                            source: attribution.source.clone(),
+                            paragraph: attribution.paragraph,
+                        })
+                        .collect();
+                    QueryProbe::Queried {
+                        total: page.total,
+                        matches: page.matches.len(),
+                        attributions,
+                        latency_ms,
+                    }
+                }
                 Err(error) => QueryProbe::Errored {
                     message: format!("query response did not parse: {error}"),
                     latency_ms,
@@ -793,6 +815,79 @@ fn build_association_probe(
         label,
         object,
         query,
+    }
+}
+
+// ============================ Citation lane ============================
+
+fn runs_citation_lane(case: &EvalCase) -> bool {
+    !case.expected_citations.is_empty()
+}
+
+/// One `POST /contexts/{name}/citations` call per `expected_citations[]`
+/// entry, strictly sequential — the endpoint takes exactly one locator
+/// per request (`src/api/sources.rs:67-74`), never a batch, so N
+/// expectations cost N round trips. Deliberately NOT preflighted the
+/// way `expected_sources` is (`run_evaluate`'s missing-source check
+/// above): a citation naming a source or paragraph the corpus does not
+/// carry is exactly the failure ADR 0004 §8's locator-validity
+/// measurement exists to catch, so it must run to completion and be
+/// recorded — never abort the whole run. This also means the lane runs
+/// even on a case whose passage-lane search missed entirely: citation
+/// recall and locator validity are measured independently.
+fn run_citation_lane(
+    api: &Api,
+    context: &str,
+    case: &EvalCase,
+    served: &BTreeSet<(String, u32)>,
+) -> Vec<CitationCheck> {
+    case.expected_citations
+        .iter()
+        .map(|expected| check_citation(api, context, expected, served))
+        .collect()
+}
+
+fn check_citation(
+    api: &Api,
+    context: &str,
+    expected: &ExpectedCitation,
+    served: &BTreeSet<(String, u32)>,
+) -> CitationCheck {
+    let body = serde_json::json!({
+        "source": expected.source,
+        "paragraph": expected.paragraph,
+    });
+    let started_at = Instant::now();
+    let outcome = match api.post_envelope(&["contexts", context, "citations"], &body) {
+        Ok(value) => match serde_json::from_value::<Citation>(value) {
+            Ok(citation) => {
+                let section = check_section(&expected.section, &citation.section);
+                let quote = expected.quote.as_ref().map(|quote| QuoteCheck {
+                    matched: quote_matches(quote, &citation.text),
+                    declared: quote.clone(),
+                });
+                CitationOutcome::Resolved { section, quote }
+            }
+            Err(error) => CitationOutcome::Unresolved {
+                code: None,
+                message: truncate_message(&format!("citation response did not parse: {error}")),
+            },
+        },
+        Err(ApiFailure::NotFound { code, message }) => CitationOutcome::Unresolved {
+            code,
+            message: truncate_message(&message),
+        },
+        Err(ApiFailure::Other(message)) => CitationOutcome::Unresolved {
+            code: None,
+            message: truncate_message(&message),
+        },
+    };
+    CitationCheck {
+        source: expected.source.clone(),
+        paragraph: expected.paragraph,
+        served: served.contains(&(expected.source.clone(), expected.paragraph)),
+        outcome,
+        latency_ms: elapsed_ms(started_at),
     }
 }
 
@@ -886,6 +981,112 @@ fn score_recall(expected_sources: &[ExpectedSource], hits: &[HitLocator]) -> Opt
     })
 }
 
+/// Every `(source, paragraph)` this case's served results carry (ADR
+/// 0004 §8's citation recall): the passage lane's hits up to its own
+/// `limit`, plus the structural lane's `AttributionOut` locators when
+/// it ran — never one lane's own raw score, only rank-independent
+/// membership. An attribution with no `paragraph` locator at all
+/// contributes nothing, since `expected_citations` always names one.
+fn served_locators(
+    passage: &PassageOutcome,
+    structural: Option<&StructuralBlock>,
+) -> BTreeSet<(String, u32)> {
+    let mut served = BTreeSet::new();
+    if let PassageOutcome::Searched { hits, .. } = passage {
+        served.extend(hits.iter().map(|hit| (hit.source.clone(), hit.paragraph)));
+    }
+    if let Some(structural) = structural {
+        served.extend(
+            structural
+                .associations
+                .iter()
+                .filter_map(|assoc| assoc.query.as_ref())
+                .flat_map(|query| {
+                    let attributions: &[AttributionLocator] = match query {
+                        QueryProbe::Queried { attributions, .. } => attributions,
+                        QueryProbe::Errored { .. } => &[],
+                    };
+                    attributions.iter()
+                })
+                .filter_map(|locator| locator.paragraph.map(|p| (locator.source.clone(), p))),
+        );
+    }
+    served
+}
+
+/// [`ExpectedCitation::section`]'s three-valued check (ADR 0004 §8): an
+/// absent key (`None`) means "don't check section" and never runs a
+/// comparison; a present key — including an explicit `null` — is
+/// compared against the server's `Citation.section` as-is, so
+/// `Some(None)` correctly asserts "outside every stored section."
+fn check_section(expected: &Option<Option<String>>, actual: &Option<String>) -> SectionCheck {
+    match expected {
+        None => SectionCheck::NotChecked,
+        Some(expected) if expected == actual => SectionCheck::Matched {
+            expected: expected.clone(),
+        },
+        Some(expected) => SectionCheck::Mismatched {
+            expected: expected.clone(),
+        },
+    }
+}
+
+/// Whether `quote` is a substring of `text` after both sides go through
+/// `normalize_entry` (ADR 0004 §8 — the same folding the passage index
+/// itself uses, trimmed first since `normalize_entry` does not trim,
+/// matching [`resolved_contains`]'s own preprocessing). `text` is
+/// always exactly one paragraph (`Citation.text`, `src/api/sources.rs:
+/// 84-88`), so a `quote` spanning a paragraph boundary can never match
+/// here — ADR 0004 §8's documented workaround is splitting it into two
+/// `expected_citations` entries.
+fn quote_matches(quote: &str, text: &str) -> bool {
+    let target = normalize_entry(quote.trim());
+    normalize_entry(text.trim()).contains(&target)
+}
+
+/// A [`CitationCheck`] is valid (ADR 0004 §8's locator-validity
+/// measurement) when it resolved, its `section` check never mismatched
+/// (an absent expectation or a match both count), and its `quote` check
+/// — when the case declared one — matched.
+fn citation_is_valid(check: &CitationCheck) -> bool {
+    match &check.outcome {
+        CitationOutcome::Resolved { section, quote } => {
+            !matches!(section, SectionCheck::Mismatched { .. })
+                && quote.as_ref().is_none_or(|quote| quote.matched)
+        }
+        CitationOutcome::Unresolved { .. } => false,
+    }
+}
+
+/// Citation recall (ADR 0004 §8): the fraction of `checks` whose
+/// `(source, paragraph)` appeared among this case's served results.
+/// Callers only call this on a non-empty `checks` — an empty
+/// `expected_citations` means the citation lane never ran at all, so
+/// there is nothing here to divide by.
+fn score_citation_recall(checks: &[CitationCheck]) -> CitationRecallBlock {
+    let matched = checks.iter().filter(|check| check.served).count();
+    CitationRecallBlock {
+        expected_total: checks.len(),
+        matched,
+        value: matched as f64 / checks.len() as f64,
+    }
+}
+
+/// Locator validity (ADR 0004 §8): the fraction of `checks` that
+/// resolved with a matching `section` (when declared) and `quote` (when
+/// declared) — never merged with [`score_citation_recall`]'s own ratio.
+fn score_citation_validity(checks: &[CitationCheck]) -> CitationValidityBlock {
+    let valid = checks
+        .iter()
+        .filter(|check| citation_is_valid(check))
+        .count();
+    CitationValidityBlock {
+        expected_total: checks.len(),
+        valid,
+        value: valid as f64 / checks.len() as f64,
+    }
+}
+
 /// Whether `expected` (case-declared) appears among `resolutions`'
 /// `resolved_names[]`, matched with `normalize_entry` on both sides
 /// (ADR 0004 §8) — `normalize_entry` does not trim, so both sides are
@@ -942,15 +1143,19 @@ fn association_coverage(associations: &[AssociationProbe]) -> Option<CoverageCou
 
 /// `missed[]`, capped at 3 entries with a count of the entries
 /// *dropped* — not the total (ADR 0004 §11). Order: sources, concepts,
-/// labels, associations. Silent when the passage lane failed — its own
-/// `Failed` outcome and `passage.failure_rate` already record that;
-/// guessing at which sources it would have missed adds no information.
+/// labels, associations, citations. Silent about sources when the
+/// passage lane failed — its own `Failed` outcome and
+/// `passage.failure_rate` already record that; guessing at which
+/// sources it would have missed adds no information. Citation checks
+/// run regardless of the passage lane's own outcome (ADR 0004 §8), so
+/// they are never silenced that way.
 fn build_missed(
     case: &EvalCase,
     hits: Option<&[HitLocator]>,
     concept_resolutions: &[&CueResolution],
     label_resolutions: &[&CueResolution],
     structural: Option<&StructuralBlock>,
+    citation_checks: &[CitationCheck],
 ) -> (Vec<String>, usize) {
     let mut all = Vec::new();
 
@@ -996,6 +1201,25 @@ fn build_missed(
         }
     }
 
+    // ADR 0004 §8's two citation measurements are never merged into one
+    // score, so a bad check can add up to two distinct entries here —
+    // one for recall (not served), one for validity (locator itself
+    // wrong) — never collapsed into a single ambiguous message.
+    for check in citation_checks {
+        if !check.served {
+            all.push(format!(
+                "expected_citations: ({}, {}) not found among served results",
+                check.source, check.paragraph
+            ));
+        }
+        if !citation_is_valid(check) {
+            all.push(format!(
+                "expected_citations: ({}, {}) failed locator validity",
+                check.source, check.paragraph
+            ));
+        }
+    }
+
     let truncated = all.len().saturating_sub(3);
     all.truncate(3);
     (all, truncated)
@@ -1008,6 +1232,7 @@ struct CaseScores {
     recall: Option<RecallBlock>,
     coverage: Option<CoverageBlock>,
     lane_cross: Option<LaneCrossBlock>,
+    citations: Option<CitationsBlock>,
     missed: Vec<String>,
     missed_truncated: usize,
 }
@@ -1016,6 +1241,7 @@ fn score_case(
     case: &EvalCase,
     passage: &PassageOutcome,
     structural: Option<&StructuralBlock>,
+    citation_checks: &[CitationCheck],
 ) -> CaseScores {
     let hits: Option<&[HitLocator]> = match passage {
         PassageOutcome::Searched { hits, .. } => Some(hits),
@@ -1077,12 +1303,24 @@ fn score_case(
         &concept_resolutions,
         &label_resolutions,
         structural,
+        citation_checks,
     );
+
+    // `Some` only when the case actually declared expected_citations —
+    // an empty `citation_checks` always means the lane never ran, never
+    // "ran and found zero," so there is nothing to divide by (ADR 0004
+    // §8's two measurements are undefined, not zero, on an empty set).
+    let citations = (!citation_checks.is_empty()).then(|| CitationsBlock {
+        recall: score_citation_recall(citation_checks),
+        validity: score_citation_validity(citation_checks),
+        checks: citation_checks.to_vec(),
+    });
 
     CaseScores {
         recall,
         coverage,
         lane_cross,
+        citations,
         missed,
         missed_truncated,
     }
@@ -1094,7 +1332,17 @@ fn build_case_block(api: &Api, context: &str, case: &EvalCase, default_limit: us
     let limit = case.options.limit.unwrap_or(default_limit);
     let passage = run_passage_lane(api, context, case, limit);
     let structural = runs_structural_lane(case).then(|| build_structural_block(api, context, case));
-    let scores = score_case(case, &passage, structural.as_ref());
+    // Citation recall needs to know what the first two lanes already
+    // served BEFORE the citation lane's own network calls run, so the
+    // per-check `served` bit can be set at request time rather than
+    // reconciled afterward.
+    let served = served_locators(&passage, structural.as_ref());
+    let citation_checks = if runs_citation_lane(case) {
+        run_citation_lane(api, context, case, &served)
+    } else {
+        Vec::new()
+    };
+    let scores = score_case(case, &passage, structural.as_ref(), &citation_checks);
 
     CaseBlock {
         case_id: case.case_id.clone(),
@@ -1106,6 +1354,7 @@ fn build_case_block(api: &Api, context: &str, case: &EvalCase, default_limit: us
         recall: scores.recall,
         coverage: scores.coverage,
         lane_cross: scores.lane_cross,
+        citations: scores.citations,
         missed: scores.missed,
         missed_truncated: scores.missed_truncated,
     }
@@ -1135,6 +1384,22 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
     let mut passage_hit_n = 0u64;
     let mut both_n = 0u64;
     let mut neither_n = 0u64;
+
+    let mut citation_latencies = Vec::new();
+    let mut citation_recall = Vec::new();
+    let mut citation_validity = Vec::new();
+    // Denominator for resolved/no_source/no_paragraph: every citation
+    // call actually made, across every case. section/quote each have
+    // their own narrower denominator — only checks where that
+    // particular field was declared at all.
+    let mut citation_total = 0u64;
+    let mut citation_resolved_n = 0u64;
+    let mut citation_no_source_n = 0u64;
+    let mut citation_no_paragraph_n = 0u64;
+    let mut citation_section_checked = 0u64;
+    let mut citation_section_matched = 0u64;
+    let mut citation_quote_checked = 0u64;
+    let mut citation_quote_matched = 0u64;
 
     for case in cases {
         match &case.passage {
@@ -1184,6 +1449,38 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
             both_n += u64::from(cross.structural_hit && cross.passage_hit);
             neither_n += u64::from(!cross.structural_hit && !cross.passage_hit);
         }
+        if let Some(citations) = &case.citations {
+            citation_recall.push(citations.recall.value);
+            citation_validity.push(citations.validity.value);
+            for check in &citations.checks {
+                citation_total += 1;
+                citation_latencies.push(check.latency_ms as f64);
+                match &check.outcome {
+                    CitationOutcome::Resolved { section, quote } => {
+                        citation_resolved_n += 1;
+                        match section {
+                            SectionCheck::NotChecked => {}
+                            SectionCheck::Matched { .. } => {
+                                citation_section_checked += 1;
+                                citation_section_matched += 1;
+                            }
+                            SectionCheck::Mismatched { .. } => {
+                                citation_section_checked += 1;
+                            }
+                        }
+                        if let Some(quote) = quote {
+                            citation_quote_checked += 1;
+                            citation_quote_matched += u64::from(quote.matched);
+                        }
+                    }
+                    CitationOutcome::Unresolved { code, .. } => match code.as_deref() {
+                        Some("no_source") => citation_no_source_n += 1,
+                        Some("no_paragraph") => citation_no_paragraph_n += 1,
+                        _ => {}
+                    },
+                }
+            }
+        }
     }
 
     let total = cases.len() as u64;
@@ -1231,6 +1528,41 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
     metrics.insert(
         "coverage.associations".to_string(),
         MetricValue::Distribution(Distribution::from_samples(coverage_associations)),
+    );
+    metrics.insert(
+        "citations.recall".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(citation_recall)),
+    );
+    metrics.insert(
+        "citations.locator_validity".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(citation_validity)),
+    );
+    metrics.insert(
+        "citations.resolved".to_string(),
+        MetricValue::Ratio(ratio_metric(citation_resolved_n, citation_total)),
+    );
+    metrics.insert(
+        "citations.no_source".to_string(),
+        MetricValue::Ratio(ratio_metric(citation_no_source_n, citation_total)),
+    );
+    metrics.insert(
+        "citations.no_paragraph".to_string(),
+        MetricValue::Ratio(ratio_metric(citation_no_paragraph_n, citation_total)),
+    );
+    metrics.insert(
+        "citations.section_match".to_string(),
+        MetricValue::Ratio(ratio_metric(
+            citation_section_matched,
+            citation_section_checked,
+        )),
+    );
+    metrics.insert(
+        "citations.quote_match".to_string(),
+        MetricValue::Ratio(ratio_metric(citation_quote_matched, citation_quote_checked)),
+    );
+    metrics.insert(
+        "latency.citation_ms".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(citation_latencies)),
     );
     metrics.insert(
         "lanes.structural_hit".to_string(),
@@ -1408,6 +1740,117 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
         ),
     );
     d.insert(
+        "citations.recall".to_string(),
+        def(
+            "ratio",
+            "distribution",
+            &["case"],
+            "Fraction of a case's expected_citations whose (source, \
+             paragraph) appeared among that case's served results — \
+             passage hits up to limit, plus the structural lane's \
+             AttributionOut locators when it ran (ADR 0004 §8). Never \
+             merged with citations.locator_validity.",
+            "eval.jsonl expected_citations, POST /contexts/{name}/sources/search, \
+             POST /contexts/{name}/query",
+            Some("empty when no case declares expected_citations"),
+        ),
+    );
+    d.insert(
+        "citations.locator_validity".to_string(),
+        def(
+            "ratio",
+            "distribution",
+            &["case"],
+            "Fraction of a case's expected_citations whose \
+             POST /contexts/{name}/citations call resolved with a \
+             matching section (when declared) and quote (when declared) \
+             — computed even for a case whose passage lane missed \
+             outright (ADR 0004 §8). Never merged with citations.recall.",
+            "POST /contexts/{name}/citations",
+            Some("empty when no case declares expected_citations"),
+        ),
+    );
+    d.insert(
+        "citations.resolved".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Share of every POST /contexts/{name}/citations call made \
+             across all cases that resolved (neither no_source nor \
+             no_paragraph).",
+            "POST /contexts/{name}/citations",
+            None,
+        ),
+    );
+    d.insert(
+        "citations.no_source".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Share of every citation call that failed with ErrorCode \
+             no_source — the expected_citations entry names a source \
+             this context does not carry.",
+            "POST /contexts/{name}/citations",
+            None,
+        ),
+    );
+    d.insert(
+        "citations.no_paragraph".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Share of every citation call that failed with ErrorCode \
+             no_paragraph — the expected_citations entry names a \
+             paragraph index out of range for its source.",
+            "POST /contexts/{name}/citations",
+            None,
+        ),
+    );
+    d.insert(
+        "citations.section_match".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Of the resolved citation calls whose expected_citations \
+             entry declared a section key (an explicit null included), \
+             the share whose declared value matched the server's own \
+             Citation.section.",
+            "eval.jsonl expected_citations.section, POST /contexts/{name}/citations",
+            Some("n is 0 when no expected_citations entry declares section"),
+        ),
+    );
+    d.insert(
+        "citations.quote_match".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Of the resolved citation calls whose expected_citations \
+             entry declared a quote, the share whose declared quote was \
+             a normalize_entry-folded substring of the returned text. A \
+             quote spanning a paragraph boundary can never match here, \
+             since Citation.text is exactly one paragraph.",
+            "eval.jsonl expected_citations.quote, POST /contexts/{name}/citations",
+            Some("n is 0 when no expected_citations entry declares quote"),
+        ),
+    );
+    d.insert(
+        "latency.citation_ms".to_string(),
+        def(
+            "ms",
+            "distribution",
+            &["case"],
+            "Wall-clock round trip of each expected_citations[] entry's \
+             own POST /contexts/{name}/citations call.",
+            "POST /contexts/{name}/citations",
+            Some("empty when no case declares expected_citations"),
+        ),
+    );
+    d.insert(
         "lanes.structural_hit".to_string(),
         def(
             "ratio",
@@ -1546,6 +1989,40 @@ fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
              expectation: {both} both, {neither} neither",
             cross.len()
         );
+    }
+    let citations: Vec<&CitationsBlock> = evaluation
+        .cases
+        .iter()
+        .filter_map(|c| c.citations.as_ref())
+        .collect();
+    if !citations.is_empty() {
+        let mean = |pick: fn(&&CitationsBlock) -> f64| {
+            citations.iter().map(pick).sum::<f64>() / citations.len() as f64
+        };
+        println!(
+            "  citations over {} case(s): mean recall {:.3}, mean locator validity {:.3}",
+            citations.len(),
+            mean(|c| c.recall.value),
+            mean(|c| c.validity.value)
+        );
+        // ADR 0004 §11: the artifact never carries served paragraph
+        // text, so a reader who wants to see why a locator is invalid
+        // re-runs this exact call themselves.
+        let invalid: Vec<&CitationCheck> = citations
+            .iter()
+            .flat_map(|block| block.checks.iter())
+            .filter(|check| !citation_is_valid(check))
+            .collect();
+        for check in invalid.iter().take(3) {
+            println!(
+                "    invalid locator — reproduce with: POST /contexts/{context}/citations \
+                 {{\"source\": \"{}\", \"paragraph\": {}}}",
+                check.source, check.paragraph
+            );
+        }
+        if invalid.len() > 3 {
+            println!("    ... and {} more invalid locator(s)", invalid.len() - 3);
+        }
     }
     if !evaluation.corpus.stable {
         println!(
@@ -1686,10 +2163,15 @@ struct CaseBlock {
     /// `metrics`' `lanes.*` ratios (§9.1).
     #[serde(skip_serializing_if = "Option::is_none")]
     lane_cross: Option<LaneCrossBlock>,
+    /// ADR 0004 §8's two citation measurements — `Some` only when the
+    /// case declares at least one `expected_citations` entry. Runs
+    /// independent of every other lane, including a passage lane that
+    /// missed outright.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    citations: Option<CitationsBlock>,
     /// Unmet expectations (ADR 0004 §11): sources, then concepts, then
-    /// labels, then associations, capped at 3 entries. Citation misses
-    /// (#275) are not this issue's own scope and stay absent until
-    /// then. Silent (empty) when the passage lane failed outright — see
+    /// labels, then associations, then citations, capped at 3 entries.
+    /// Silent (empty) when the passage lane failed outright — see
     /// [`build_missed`].
     missed: Vec<String>,
     missed_truncated: usize,
@@ -1733,6 +2215,98 @@ struct CoverageBlock {
 struct LaneCrossBlock {
     structural_hit: bool,
     passage_hit: bool,
+}
+
+/// ADR 0004 §8's two, deliberately un-merged citation measurements for
+/// one case, plus the per-entry checks both are computed from.
+#[derive(Debug, Clone, Serialize)]
+struct CitationsBlock {
+    /// Citation recall: the fraction of `checks` whose `(source,
+    /// paragraph)` appeared among this case's served results (passage
+    /// hits, plus the structural lane's `AttributionOut` locators when
+    /// it ran) — see [`served_locators`]. Independent of `validity`.
+    recall: CitationRecallBlock,
+    /// Locator validity: the fraction of `checks` whose
+    /// `POST /contexts/{name}/citations` call resolved with a matching
+    /// `section` (when declared) and `quote` (when declared) — see
+    /// [`citation_is_valid`]. Computed even for a case whose passage
+    /// lane missed outright.
+    validity: CitationValidityBlock,
+    /// One entry per `expected_citations[]`, in request order (the
+    /// endpoint does not echo `paragraph` back, so requests and
+    /// responses correlate positionally).
+    checks: Vec<CitationCheck>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CitationRecallBlock {
+    expected_total: usize,
+    matched: usize,
+    value: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CitationValidityBlock {
+    expected_total: usize,
+    valid: usize,
+    value: f64,
+}
+
+/// One `expected_citations[]` entry's outcome from both measurements:
+/// `served` is citation recall's own per-entry bit, `outcome` is
+/// locator validity's `POST /contexts/{name}/citations` result.
+#[derive(Debug, Clone, Serialize)]
+struct CitationCheck {
+    source: String,
+    paragraph: u32,
+    served: bool,
+    #[serde(flatten)]
+    outcome: CitationOutcome,
+    latency_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum CitationOutcome {
+    Resolved {
+        section: SectionCheck,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quote: Option<QuoteCheck>,
+    },
+    /// `code` is the server's stable `ErrorCode` string (`no_source`/
+    /// `no_paragraph`/etc., `src/api.rs`) when the failure carried one
+    /// — `None` for a transport failure or an unparseable response.
+    /// `message` is truncated to [`MAX_ERROR_BYTES`] (ADR 0004 §11).
+    Unresolved {
+        code: Option<String>,
+        message: String,
+    },
+}
+
+/// [`ExpectedCitation::section`]'s three-valued check (ADR 0004 §8):
+/// absent stays [`SectionCheck::NotChecked`]; present — including an
+/// explicit `null` — is checked against the server's `Citation.section`
+/// and comes back `Matched`/`Mismatched`. The server's own `section`
+/// value is never recorded on a mismatch (ADR 0004 §11's no-corpus-text
+/// posture) — only the user's own declared `expected` rides along, so a
+/// reader diagnoses the miss by re-running the printed reproduction
+/// command, never by reading served text out of the artifact.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "check", rename_all = "snake_case")]
+enum SectionCheck {
+    NotChecked,
+    Matched { expected: Option<String> },
+    Mismatched { expected: Option<String> },
+}
+
+/// [`ExpectedCitation::quote`]'s check result (ADR 0004 §8). ADR 0004
+/// §11's one documented exception to "no corpus body text": even on a
+/// mismatch this records only the user's own declared `quote` and a
+/// boolean, never the served paragraph body.
+#[derive(Debug, Clone, Serialize)]
+struct QuoteCheck {
+    declared: String,
+    matched: bool,
 }
 
 #[derive(Serialize)]
@@ -1834,12 +2408,29 @@ enum QueryProbe {
     Queried {
         total: usize,
         matches: usize,
+        /// The structural lane's own served citation locators (ADR 0004
+        /// §8) — every `attributions[]` entry off every matched
+        /// association, `source` + `paragraph` only. No corpus body
+        /// text (ADR 0004 §11): `AttributionOut` never carries any.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        attributions: Vec<AttributionLocator>,
         latency_ms: u64,
     },
     Errored {
         message: String,
         latency_ms: u64,
     },
+}
+
+/// One served `(source, paragraph)` locator read off an `AttributionOut`
+/// (`src/api.rs:1453-1462`) — stripped of `weight`/`count`/`section`,
+/// which citation recall does not need. `paragraph: None` (an
+/// attribution with no paragraph locator at all) never satisfies an
+/// `expected_citations` entry, which always names one.
+#[derive(Debug, Clone, Serialize)]
+struct AttributionLocator {
+    source: String,
+    paragraph: Option<u32>,
 }
 
 #[cfg(test)]

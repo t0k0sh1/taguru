@@ -512,7 +512,7 @@ fn build_corpus(
                 );
             }
         }
-        Err(ApiFailure::NotFound(_)) => {
+        Err(ApiFailure::NotFound { .. }) => {
             // Fine — the first batch's `create` block below makes it.
         }
         Err(ApiFailure::Other(message)) => {
@@ -591,7 +591,7 @@ fn search_only_probe(api: &Api, context: &str) -> CorpusBlock {
             documents_failed: 0,
             passage_vectors: fetch_passage_vectors(api, context),
         },
-        Err(ApiFailure::NotFound(_)) => corpus_block(
+        Err(ApiFailure::NotFound { .. }) => corpus_block(
             context,
             "failed",
             Some("--skip-import given but this context does not exist".to_string()),

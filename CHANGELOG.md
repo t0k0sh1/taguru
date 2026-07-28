@@ -22,20 +22,34 @@ Entries that change an on-disk format or a response shape say so.
   entry via `/query` — but only when every position resolves to
   exactly one candidate; zero is `not_found`, two or more is
   `ambiguous`, and neither ever guesses at or fans out over a
-  combination. `recall`/`activate`/`explore`/`describe` are
+  combination. A third, citation lane (#275, ADR 0004 §8) runs whenever
+  a case declares `expected_citations[]`, independent of whether the
+  passage lane found anything for that case: one
+  `POST /contexts/{name}/citations` call per entry (never batched),
+  checking that it resolves (`no_source`/`no_paragraph` recorded
+  separately), that `section` matches when the eval case declares the
+  key (an explicit `null` included), and that `quote`, when declared, is
+  a `normalize_entry`-folded substring of the returned text — never a
+  match across a paragraph boundary, since `Citation.text` is exactly
+  one paragraph. `recall`/`activate`/`explore`/`describe` are
   deliberately never called. Preflights an unreachable server and any
   `expected_sources[]` entry the context does not carry before any case
-  runs. `evaluation.json` records lane/plan echoes and per-hit locators
-  (never corpus body text), latency distributions, a corpus-revision
-  bracket (`revision_before`/`revision_after`/`stable`, plus
-  `last_write_epoch`) that detects a write landing mid-run, and the
-  resolved (masked — scheme/host/port only, never userinfo or a
-  bearer) target. Runs to completion on a read-only API key. This build
-  has no `--thresholds`: every run is report-only and exits 0 (a stderr
-  line says so); recall@k/MRR and concept/association coverage (#274),
-  citation recall and locator validity (#275), configurable thresholds
-  and exit 3 (#276), and `taguru evaluate compare` (#277) land as
-  separate follow-up changes on top of this skeleton.
+  runs — `expected_citations[]` is deliberately NOT preflighted, since a
+  citation naming a source or paragraph the corpus lacks is exactly the
+  failure the citation lane exists to detect. `evaluation.json` records
+  lane/plan echoes and per-hit locators (never corpus body text),
+  recall@k/MRR/nDCG and concept/label/association coverage (#274/#292),
+  citation recall and locator validity as two measurements that are
+  never merged into one score (#275; a `quote` mismatch records only the
+  user's own declared quote and a match boolean, never the served text),
+  latency distributions, a corpus-revision bracket
+  (`revision_before`/`revision_after`/`stable`, plus `last_write_epoch`)
+  that detects a write landing mid-run, and the resolved (masked —
+  scheme/host/port only, never userinfo or a bearer) target. Runs to
+  completion on a read-only API key. This build has no `--thresholds`:
+  every run is report-only and exits 0 (a stderr line says so);
+  configurable thresholds and exit 3 (#276), and `taguru evaluate
+  compare` (#277), land as separate follow-up changes on top of this.
 - New top-level verb `taguru benchmark search` (#260, implementing ADR
   0003 §11): builds one context per model (`PREFIX::MODEL_ID`) from a
   finished `taguru benchmark extract` results directory's own batch
