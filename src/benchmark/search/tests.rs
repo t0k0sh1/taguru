@@ -125,6 +125,26 @@ fn help_short_circuits_with_exit_zero() {
     assert_eq!(args(&["--help"]).unwrap_err(), 0);
 }
 
+// ============================== URL masking ==============================
+
+#[test]
+fn mask_url_drops_userinfo_path_and_query_but_keeps_scheme_host_port() {
+    assert_eq!(
+        mask_url("https://user:token@host:8443/x?y=1"),
+        "https://host:8443"
+    );
+}
+
+#[test]
+fn mask_url_without_a_port_omits_it() {
+    assert_eq!(mask_url("http://example.com/a"), "http://example.com");
+}
+
+#[test]
+fn mask_url_tolerates_an_unparsable_base() {
+    assert_eq!(mask_url("not a url"), "not a url");
+}
+
 // ============================== Limit validation ==============================
 
 #[test]

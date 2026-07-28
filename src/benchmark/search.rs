@@ -210,6 +210,14 @@ pub(super) fn run_search(args: &[String]) -> i32 {
             }
         },
     };
+    // ADR 0002 §7 / ADR 0004 §2.4, §11: caught before any request
+    // leaves the process, matching `export`/`compact` (issue #281 —
+    // `benchmark search` was the one `Api` consumer that skipped
+    // this).
+    if let Err(message) = crate::remote::reject_userinfo(&base) {
+        eprintln!("taguru: benchmark: search: {message}");
+        return 2;
+    }
     let api = Api::new(base.clone());
 
     // ADR 0003 §11's own degradation only covers a response that
@@ -288,7 +296,7 @@ pub(super) fn run_search(args: &[String]) -> i32 {
                 name: loaded.name.clone(),
                 cases: loaded.cases.len(),
             },
-            url: base,
+            url: mask_url(&base),
             run_index: search_args.run,
             default_limit: DEFAULT_LIMIT,
         },
@@ -305,6 +313,27 @@ pub(super) fn run_search(args: &[String]) -> i32 {
         return 1;
     }
     0
+}
+
+// ============================== URL masking ==============================
+
+/// scheme + host + port only — no userinfo, path, or query. Matches
+/// `evaluate`'s own `mask_url` (`src/evaluate.rs`) and ADR 0004 §11's
+/// masking rule for values written into a shareable artifact.
+/// `reject_userinfo` already refused a URL carrying credentials before
+/// this runs; an unparsable `base` is echoed back verbatim rather than
+/// dropped, since it carries no secret to begin with (issue #281).
+fn mask_url(base: &str) -> String {
+    match url::Url::parse(base) {
+        Ok(url) => {
+            let mut masked = format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""));
+            if let Some(port) = url.port() {
+                masked.push_str(&format!(":{port}"));
+            }
+            masked
+        }
+        Err(_) => base.to_string(),
+    }
 }
 
 // ============================== Arguments ==============================

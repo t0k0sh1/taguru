@@ -298,6 +298,39 @@ fn benchmark_search_rejects_a_run_the_manifest_never_recorded() {
     let _ = std::fs::remove_dir_all(&results_dir);
 }
 
+/// ADR 0004 §2.4, §11 / issue #281: `benchmark search` used to be the
+/// one `crate::remote::Api` consumer that skipped `reject_userinfo`,
+/// writing a credential straight into a shareable `retrieval.json`. No
+/// `Server` is started here — a userinfo-carrying `--url` must be
+/// refused before any request leaves the process, so an unreachable
+/// host is enough to prove the rejection happens first.
+#[test]
+fn benchmark_search_rejects_a_url_carrying_userinfo() {
+    let results_dir = write_results_dir("userinfo");
+    let eval_path = write_eval_file(&results_dir);
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "benchmark",
+            "search",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--url",
+            "https://user:token@example.invalid",
+            results_dir.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("must not carry credentials"), "{stderr}");
+    assert!(
+        !results_dir.join("retrieval.json").exists(),
+        "no retrieval.json should be written on a rejected URL"
+    );
+
+    let _ = std::fs::remove_dir_all(&results_dir);
+}
+
 #[test]
 fn benchmark_search_refuses_to_merge_a_second_run_into_a_corpus_the_first_run_built() {
     let server = Server::start("search-cross-run");
