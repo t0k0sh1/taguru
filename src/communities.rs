@@ -549,7 +549,7 @@ fn read_manifest(api: &Api, derived: &str) -> Result<Option<CommunitiesManifest>
     let body = json!({"sources": [MANIFEST_SOURCE]});
     let result = match api.post_envelope(&["contexts", derived, "sources", "lookup"], &body) {
         Ok(result) => result,
-        Err(ApiFailure::NotFound(_)) => return Ok(None),
+        Err(ApiFailure::NotFound { .. }) => return Ok(None),
         Err(ApiFailure::Other(error)) => return Err(error),
     };
     let Some(text) = result["passages"][MANIFEST_SOURCE].as_str() else {

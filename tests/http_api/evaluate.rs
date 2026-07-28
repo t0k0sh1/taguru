@@ -78,7 +78,13 @@ fn seed_context_with_token(server: &Server, context: &str, token: &str) {
 
 /// One case: `expected_sources`/`expected_concepts` exercise the
 /// passage lane's coverage echo, `expected_associations` exercises the
-/// structural lane's query pin — matching [`seed_context`]'s fixture.
+/// structural lane's query pin, `expected_citations` exercises the
+/// citation lane (#275) — matching [`seed_context`]'s fixture. The
+/// citation's `quote` is a substring of the fixture's own paragraph 0
+/// text ("青嶺は青嶺酒造が造る銘柄です。"), so both citation recall
+/// (the (source, paragraph) is among the passage lane's own hits) and
+/// locator validity (the citations endpoint resolves it and the quote
+/// matches) are expected to be perfect for this case.
 fn write_smoke_eval(dir: &Path) -> PathBuf {
     write_eval_file(
         dir,
@@ -87,6 +93,7 @@ fn write_smoke_eval(dir: &Path) -> PathBuf {
          \"expected_sources\":[{\"source\":\"corpus/brewery.md\",\"relevance\":3}],\
          \"expected_concepts\":[\"青嶺酒造\"],\
          \"expected_associations\":[{\"subject\":\"青嶺酒造\",\"label\":\"醸造元\",\"object\":\"蔵元\"}],\
+         \"expected_citations\":[{\"source\":\"corpus/brewery.md\",\"paragraph\":0,\"quote\":\"青嶺酒造\"}],\
          \"options\":{\"limit\":10}}\n",
     )
 }
@@ -169,10 +176,31 @@ fn evaluate_runs_both_lanes_and_writes_evaluation_json() {
     assert_eq!(case["lane_cross"]["passage_hit"], true, "{case}");
     assert!(case["missed"].as_array().unwrap().is_empty(), "{case}");
 
+    // #275: citation recall (the locator is among the passage lane's
+    // own hits) and locator validity (the citations endpoint resolves
+    // it and the declared quote matches) — never merged into one score.
+    assert_eq!(case["citations"]["recall"]["value"], 1.0, "{case}");
+    assert_eq!(case["citations"]["validity"]["value"], 1.0, "{case}");
+    let check = &case["citations"]["checks"][0];
+    assert_eq!(check["source"], "corpus/brewery.md", "{check}");
+    assert_eq!(check["paragraph"], 0, "{check}");
+    assert_eq!(check["served"], true, "{check}");
+    assert_eq!(check["outcome"], "resolved", "{check}");
+    assert_eq!(check["quote"]["matched"], true, "{check}");
+    // ADR 0004 §11: never the served paragraph body, even alongside a
+    // matched quote.
+    assert!(check.get("text").is_none(), "{check}");
+
     let metrics = &evaluation["metrics"];
     assert_eq!(metrics["recall.recall_at_k"]["n"], 1, "{metrics}");
     assert_eq!(metrics["lanes.both"]["numerator"], 1, "{metrics}");
     assert_eq!(metrics["lanes.both"]["n"], 1, "{metrics}");
+    assert_eq!(metrics["citations.recall"]["n"], 1, "{metrics}");
+    assert_eq!(metrics["citations.resolved"]["numerator"], 1, "{metrics}");
+    assert_eq!(
+        metrics["citations.quote_match"]["numerator"], 1,
+        "{metrics}"
+    );
     assert_eq!(
         evaluation["matching"]["normalization"], "taguru::context::normalize_entry",
         "{evaluation}"
@@ -308,6 +336,80 @@ fn evaluate_marks_an_ambiguous_position_and_never_calls_query_for_it() {
     // Neither guessed at nor fanned out over (ADR 0004 §7 step 2):
     // query is simply never called for an ambiguous position.
     assert!(assoc["query"].is_null(), "{assoc}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn evaluate_runs_the_citation_lane_without_preflighting_it_and_distinguishes_no_source_from_no_paragraph()
+ {
+    let server = Server::start("evaluate-citations");
+    seed_context(&server, "sake");
+    let dir = eval_dir("citations");
+    // No `expected_sources` at all — the passage-lane search for this
+    // query surfaces nothing relevant, exercising ADR 0004 §8's
+    // orthogonality claim: the citation lane runs and is scored
+    // regardless of what (if anything) the passage lane found. Neither
+    // expected_citations entry names a source/paragraph declared in
+    // `expected_sources`, so the startup preflight (which only reads
+    // expected_sources) never sees them and never aborts the run.
+    let eval_path = write_eval_file(
+        &dir,
+        "{\"taguru_eval\":1,\"name\":\"citation lane\"}\n\
+         {\"case_id\":\"citations-001\",\"query\":\"存在しないクエリ\",\
+         \"expected_citations\":[\
+           {\"source\":\"corpus/does-not-exist.md\",\"paragraph\":0},\
+           {\"source\":\"corpus/brewery.md\",\"paragraph\":99}\
+         ]}\n",
+    );
+    let out_path = dir.join("evaluation.json");
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "evaluate",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--context",
+            "sake",
+            "--url",
+            &server.base,
+            "--out",
+            out_path.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        out_path.exists(),
+        "an expected_citations entry naming a source the corpus lacks must not abort the run"
+    );
+
+    let evaluation: Value =
+        serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
+    let checks = &evaluation["cases"][0]["citations"]["checks"];
+    assert_eq!(checks[0]["source"], "corpus/does-not-exist.md", "{checks}");
+    assert_eq!(checks[0]["outcome"], "unresolved", "{checks}");
+    assert_eq!(checks[0]["code"], "no_source", "{checks}");
+    assert_eq!(checks[1]["source"], "corpus/brewery.md", "{checks}");
+    assert_eq!(checks[1]["outcome"], "unresolved", "{checks}");
+    assert_eq!(checks[1]["code"], "no_paragraph", "{checks}");
+    assert_eq!(
+        evaluation["cases"][0]["citations"]["validity"]["value"], 0.0,
+        "{evaluation}"
+    );
+    assert_eq!(
+        evaluation["cases"][0]["citations"]["recall"]["value"], 0.0,
+        "{evaluation}"
+    );
+
+    let metrics = &evaluation["metrics"];
+    assert_eq!(metrics["citations.no_source"]["numerator"], 1, "{metrics}");
+    assert_eq!(
+        metrics["citations.no_paragraph"]["numerator"], 1,
+        "{metrics}"
+    );
+    assert_eq!(metrics["citations.resolved"]["numerator"], 0, "{metrics}");
+    assert_eq!(metrics["citations.resolved"]["n"], 2, "{metrics}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

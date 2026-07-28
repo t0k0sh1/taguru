@@ -100,15 +100,13 @@ pub(crate) struct ExpectedAssociation {
 }
 
 /// One `expected_citations[]` entry (ADR 0004 §8). `paragraph` matches
-/// `CitationRequest.paragraph` (`src/api/sources.rs:68-74`). `evaluate`
-/// (#215) is what reads `paragraph`/`section`/`quote` — this loader
-/// only types and validates them, so they are unread dead code in this
-/// tree until #215 lands.
+/// `CitationRequest.paragraph` (`src/api/sources.rs:68-74`). `evaluate`'s
+/// citation lane (#275) reads `paragraph`/`section`/`quote` — this
+/// loader only types and validates them.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExpectedCitation {
     pub(crate) source: String,
-    #[allow(dead_code)]
     pub(crate) paragraph: u32,
     /// Three-valued: an absent key means "don't check section," an
     /// explicit `null` means "assert this paragraph is outside every
@@ -117,10 +115,8 @@ pub(crate) struct ExpectedCitation {
     /// `null` into "absent" under serde's derive, so this goes through
     /// [`double_option`] instead.
     #[serde(default, deserialize_with = "double_option")]
-    #[allow(dead_code)]
     pub(crate) section: Option<Option<String>>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub(crate) quote: Option<String>,
 }
 
@@ -231,9 +227,8 @@ pub(crate) struct EvalCase {
     // cues and expected_associations[] probes.
     pub(crate) expected_labels: Vec<String>,
     pub(crate) expected_associations: Vec<ExpectedAssociation>,
-    // `evaluate`'s citation lane (#275) is what reads this; unread dead
-    // code in this tree until #275 lands.
-    #[allow(dead_code)]
+    // `evaluate`'s citation lane (#275) reads this for its per-entry
+    // POST /contexts/{name}/citations checks.
     pub(crate) expected_citations: Vec<ExpectedCitation>,
 }
 

@@ -55,14 +55,23 @@ pub(crate) fn reject_userinfo(base: &str) -> Result<(), String> {
 /// A failure from the envelope surface, with 404 told apart — "no
 /// artifact yet" is a first-run state, not an error.
 pub(crate) enum ApiFailure {
-    NotFound(String),
+    /// `code` is the envelope's own stable `ErrorCode` string
+    /// (`src/api.rs`'s wire vocabulary) when the body carried one.
+    /// `evaluate`'s citation locator check (#275) needs to tell
+    /// `no_source` apart from `no_paragraph` — both answer 404
+    /// (`src/api.rs:199-203`), so a caller reading only `message` cannot
+    /// distinguish them without fragile prose matching.
+    NotFound {
+        code: Option<String>,
+        message: String,
+    },
     Other(String),
 }
 
 impl ApiFailure {
     pub(crate) fn into_message(self) -> String {
         match self {
-            ApiFailure::NotFound(message) | ApiFailure::Other(message) => message,
+            ApiFailure::NotFound { message, .. } | ApiFailure::Other(message) => message,
         }
     }
 }
@@ -509,7 +518,10 @@ fn finish(
     if status != 200 {
         let message = status_error(status, &parsed, &text, url, retry_after.as_deref());
         return Err(if status == 404 {
-            ApiFailure::NotFound(message)
+            ApiFailure::NotFound {
+                code: parsed["code"].as_str().map(str::to_string),
+                message,
+            }
         } else {
             ApiFailure::Other(message)
         });
