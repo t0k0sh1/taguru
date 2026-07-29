@@ -261,6 +261,21 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_EXTRACT_TIMEOUT_SECS  extract's per-completion budget; local models
                                may need more; 0 = no limit (300)
   TAGURU_EXTRACT_PARALLEL      concurrent chunk completions per document (1)
+  TAGURU_EXTRACT_FACT_BUDGET   default for --fact-budget (0, off)
+  TAGURU_EXTRACT_MAX_ATTEMPTS  total attempts at valid JSON per chunk, 1-10
+                               (2)
+  TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
+                               the model's own prior bad answer to this many
+                               bytes; 0 omits it entirely (unset: replay it
+                               in full)
+  TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (off)
+  TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (unset)
+  TAGURU_EXTRACT_LOSSY         default for --lossy (0/false)
+  TAGURU_EXTRACT_DIAGNOSTICS   default for --diagnostics-out (unset, off)
+  TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text
+                               to each diagnostics record, capped to this
+                               many bytes; unset or 0 = never attach it
+                               (metadata only)
   RUST_LOG                     log filter, EnvFilter syntax (info)
   TAGURU_LOG_FORMAT            json for JSON log lines (pretty)
   TAGURU_LOG_SEARCHES          1 = per-search event log; cues are memory
@@ -584,6 +599,48 @@ mod tests {
             if name.starts_with("TAGURU_") {
                 assert!(KNOWN_KEYS.contains(&name), "{name} missing from KNOWN_KEYS");
             }
+        }
+    }
+
+    /// Whether `name` occurs in `haystack` as a whole `TAGURU_*`
+    /// identifier — a plain substring search would let e.g.
+    /// `TAGURU_WAL` pass merely because `TAGURU_WAL_MAX_BYTES` appears
+    /// somewhere, even if `TAGURU_WAL` itself were never documented on
+    /// its own.
+    fn documented_as_whole_word(haystack: &str, name: &str) -> bool {
+        fn is_ident_byte(b: u8) -> bool {
+            b.is_ascii_alphanumeric() || b == b'_'
+        }
+        let bytes = haystack.as_bytes();
+        let mut start = 0;
+        while let Some(offset) = haystack[start..].find(name) {
+            let index = start + offset;
+            let before_ok = index == 0 || !is_ident_byte(bytes[index - 1]);
+            let after = index + name.len();
+            let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+            if before_ok && after_ok {
+                return true;
+            }
+            start = index + 1;
+        }
+        false
+    }
+
+    #[test]
+    fn every_known_key_is_documented() {
+        // The reverse of `every_documented_variable_is_a_known_key`: the
+        // ENVIRONMENT section claims to list "every knob", so a key added
+        // to KNOWN_KEYS without a matching --help entry must fail here
+        // instead of silently going undocumented. `TAGURU_CONFIG` is
+        // documented in the CONFIGURATION FILE section as prose
+        // (`TAGURU_CONFIG=FILE`), not an `ENVIRONMENT` line, so this
+        // checks for the identifier anywhere in `USAGE` rather than
+        // restricting to a line's first token like the reverse test does.
+        for name in KNOWN_KEYS {
+            assert!(
+                documented_as_whole_word(USAGE, name),
+                "{name} is in KNOWN_KEYS but not documented in --help"
+            );
         }
     }
 }

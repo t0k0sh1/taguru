@@ -200,6 +200,7 @@ fn scoped_group_refusal<'r, 'd>(
 pub async fn list_groups(
     State(state): State<AppState>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
@@ -207,10 +208,20 @@ pub async fn list_groups(
         query.after.as_deref(),
         clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT),
     );
-    let groups: Vec<_> = page
-        .into_iter()
-        .map(|(name, record)| group_entry(&state, name, record, &scope))
-        .collect();
+    // Each row's fingerprint walks its transitive member closure and
+    // takes a per-context revision lock — cost that scales with group
+    // nesting/membership, not with the page size alone. Gate it on the
+    // deadline like `list_contexts`' whole-directory path (35f5ead) and
+    // keep it off the async worker, the same shape as every other
+    // fsync/scan-bearing handler here.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
+    let groups: Vec<_> = tokio::task::block_in_place(|| {
+        page.into_iter()
+            .map(|(name, record)| group_entry(&state, name, record, &scope))
+            .collect()
+    });
     ok(GroupPage { total, groups }, started_at)
 }
 

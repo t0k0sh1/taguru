@@ -245,6 +245,21 @@ pub async fn remove_aliases(
             started_at,
         );
     }
+    // Same per-spelling caps as add_aliases: a removal request is read
+    // input just like a registration one, and an oversized or empty
+    // entry here can never match a stored alias anyway — refused
+    // up front rather than treated as a harmless no-op.
+    for (namespace, aliases) in [("concepts", &request.concepts), ("labels", &request.labels)] {
+        let what = format!("a {namespace} alias");
+        for alias in aliases {
+            if let Some(refusal) = oversized(&what, alias, MAX_NAME_BYTES, started_at) {
+                return refusal;
+            }
+            if let Some(refusal) = empty(&what, alias, started_at) {
+                return refusal;
+            }
+        }
+    }
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
