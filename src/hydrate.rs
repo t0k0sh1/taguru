@@ -1663,6 +1663,51 @@ mod tests {
         }
     }
 
+    /// The writer-boot counterpart of
+    /// `a_replica_with_nothing_to_tail_serves_what_it_has_and_waits`'s
+    /// "UNVERIFIED conversion" case: a crash between `prepare`'s two
+    /// phases leaves a replication record naming no verified
+    /// generation (`hydrated_from: None`) sitting beside a nonempty,
+    /// half-materialized directory. `cache_mode` must key on the
+    /// record existing at all — not on `hydrated_from` being set — so
+    /// this state still refuses to boot the partial files as
+    /// independent truth when the bucket cannot be reached to
+    /// re-verify them.
+    #[tokio::test]
+    async fn a_phase_one_record_with_no_verified_generation_refuses_an_unreachable_bucket() {
+        let target = scratch("writer-phase-one-unreachable");
+        std::fs::write(target.join("ctx_a.ctx"), b"a partially-hydrated file").unwrap();
+        let url = url_of("writer-phase-one-gone");
+        ship::write_replication_record(
+            &target,
+            &ship::ReplicationRecord {
+                url: url.clone(),
+                claimed_generation: None,
+                hydrated_from: None,
+            },
+        )
+        .unwrap();
+
+        let gone = scratch("writer-phase-one-gone-bucket");
+        let unreachable = local_store(&gone);
+        std::fs::remove_dir_all(&gone).unwrap();
+        std::fs::write(&gone, b"not a directory").unwrap();
+
+        let error = prepare(&unreachable, &StorePath::default(), &url, &target, false)
+            .await
+            .expect_err(
+                "an unverified phase-one record with an unreachable bucket must not \
+                 boot the half-materialized directory as independent truth",
+            );
+        assert!(
+            error.to_string().contains("no independent truth to serve"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_file(&gone);
+        let _ = std::fs::remove_dir_all(target);
+    }
+
     #[tokio::test]
     async fn a_warm_restart_boots_local_and_a_moved_lineage_reverifies_the_cache() {
         let (bucket, _writer) = shipped_bucket("warm", true).await;
