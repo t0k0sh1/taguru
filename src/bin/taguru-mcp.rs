@@ -244,19 +244,35 @@ fn main() {
                 // this reuse can never erase a cancellation already
                 // recorded against it.
                 active_by_id.lock().insert(response_id.clone(), seq);
-                // Blocks (see `queue_capacity` above) once the queue is
-                // full — the intended backpressure, not a bug. No
-                // receiver ever drops before `job_tx` does (every
-                // worker holds its own clone of `job_rx` until this
-                // loop drops the sender below), so this send cannot
-                // fail during normal operation.
-                let _ = job_tx.send(ToolJob {
+                // Non-blocking, not `send`: this loop is also the only
+                // reader of `notifications/cancelled` for every already-
+                // queued call, so blocking here for queue room would
+                // make cancellation unresponsive for exactly the slow
+                // calls it exists to interrupt. A full queue rolls this
+                // job's tracking back — it never actually queued — and
+                // tells the client to retry instead of leaving it
+                // waiting on a reply that will never come.
+                match job_tx.try_send(ToolJob {
                     id,
-                    response_id,
+                    response_id: response_id.clone(),
                     seq,
                     name,
                     arguments,
-                });
+                }) {
+                    Ok(()) => {}
+                    Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => {
+                        tracked_calls.lock().remove(&seq);
+                        clear_active(&active_by_id, &response_id, seq);
+                        emit(
+                            &stdout,
+                            &mcp::error_response(
+                                job.id,
+                                -32000,
+                                "tool queue is full; retry the call".to_string(),
+                            ),
+                        );
+                    }
+                }
             }
             classified => {
                 if let Some(response) = dispatch(&bridge, &instructions, classified) {
@@ -621,16 +637,17 @@ impl Bridge {
         let mut response = response
             .map_err(|error| format!("request assembly failed: {error}"))
             .map_err(mcp::ToolError::from)?
-            .map_err(|error| {
-                // The full URL and raw transport error are operator
-                // diagnostics — logged here, on stderr, the same
-                // channel every other startup/transport note in this
-                // binary uses — but never handed to the MCP client:
-                // `self.base` is this bridge's internal wiring, not
-                // something the agent on the other end of stdio should
-                // see, and the raw error can carry OS/library detail
-                // with no actionable meaning to it either.
-                eprintln!("taguru-mcp: request to {} failed: {error}", self.base);
+            .map_err(|_error| {
+                // Neither `self.base` nor the raw transport error goes
+                // to the client OR the log: `self.base` comes straight
+                // from `TAGURU_URL` with no userinfo-stripping (unlike
+                // the HTTP API's `reject_userinfo`), so a
+                // `user:pass@host` configuration would otherwise leak
+                // the credential to stderr; the raw error can carry
+                // OS/library detail (which may itself embed the
+                // request URI) with no actionable meaning to an
+                // operator anyway.
+                eprintln!("taguru-mcp: request to the configured taguru server failed");
                 "failed to reach the taguru server".to_string()
             })
             .map_err(mcp::ToolError::from)?;

@@ -422,6 +422,11 @@ impl Oauth {
                 client_name.len()
             ));
         }
+        // Read before `clients` is even locked: once the eviction loop
+        // below starts removing entries, a clock failure from `?` must
+        // not abandon those removals mid-registration — a failed
+        // registration must leave every existing client untouched.
+        let created_at = now_secs()?;
         let client = {
             // A `refresh` grant exists only once a human has approved a
             // client_id on the consent page (see `issue_code`/`mint`), so
@@ -464,7 +469,7 @@ impl Oauth {
                 client_id: random_token(),
                 client_name: client_name.to_string(),
                 redirect_uris,
-                created_at: now_secs()?,
+                created_at,
             };
             clients.push(client.clone());
             client

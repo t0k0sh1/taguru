@@ -452,22 +452,28 @@ impl AppState {
         if let Err(error) = write_rename_marker(&marker, from, to) {
             return RenameOutcome::RolledBack(RenameContextError::Io(error));
         }
-        if let Err(error) = self.drain_entry_for_rename(from, entry) {
-            let _ = fs::remove_file(&marker);
-            return RenameOutcome::RolledBack(RenameContextError::Io(error));
-        }
         // A half-finished delete or rename may have left stale markers
         // (or leftover files) sitting at `to_stem` — the same hazard
         // `create_files` guards against for a brand new generation. A
         // `.deleted` marker there would have boot's resume-sweep erase
         // the family we are about to move in; a `.renaming` marker
         // would have it resumed onto (and overwrite) what we land here.
-        // Sweep before the move, while failure can still cleanly roll
-        // back — `from` has not been forgotten yet.
+        // Swept BEFORE `drain_entry_for_rename` tombstones `from`'s
+        // entry (`Slot::Deleted`, in memory — not yet reflected in the
+        // registry map): a sweep failure here only rolls back the
+        // marker, since `from`'s entry has not been touched yet either.
+        // Ordered the other way, a sweep failure after the tombstone
+        // would still report `RolledBack` and free both name
+        // reservations, but leave `from`'s entry tombstoned forever —
+        // registered under its old name, yet permanently unusable.
         let sweep_mode = StemSweep::RenameDestination {
             exclude_marker: marker.as_path(),
         };
         if let Err(error) = self.sweep_stale_stem_files(to, &to_stem, sweep_mode) {
+            let _ = fs::remove_file(&marker);
+            return RenameOutcome::RolledBack(RenameContextError::Io(error));
+        }
+        if let Err(error) = self.drain_entry_for_rename(from, entry) {
             let _ = fs::remove_file(&marker);
             return RenameOutcome::RolledBack(RenameContextError::Io(error));
         }

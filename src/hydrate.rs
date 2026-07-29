@@ -108,9 +108,16 @@ pub(crate) async fn prepare(
         }
         true
     });
-    let cache_mode = record
-        .as_ref()
-        .is_some_and(|record| record.hydrated_from.is_some());
+    // A replication record for this bucket already existing — even one
+    // still mid-hydration (`hydrated_from: None`, phase one of the
+    // two-phase write below) — is enough to mark this directory as the
+    // bucket's cache, not independent local truth. Gating on
+    // `hydrated_from.is_some()` instead would let a crash between
+    // phase one and phase two boot a half-materialized directory as
+    // truth at line ~171: nonempty, no verified generation recorded,
+    // and under that stricter gate indistinguishable from a directory
+    // hydration never touched at all.
+    let cache_mode = record.is_some();
     let empty = essentially_empty(data_dir)?;
 
     let fence = match ship::newest_fence(store, root).await {
@@ -242,7 +249,14 @@ pub(crate) async fn prepare(
         data_dir,
         &ship::ReplicationRecord {
             url: url.to_string(),
-            claimed_generation: record.as_ref().and_then(|record| record.claimed_generation),
+            // Cleared, not carried forward: this directory has just
+            // become a verified cache of `generation`, so whatever
+            // generation it may have claimed as a writer in some
+            // earlier lifetime (the warm-restart check above already
+            // ruled out the current fence's generation) no longer
+            // describes this directory's role — carrying it forward
+            // would misidentify this cache as that prior writer.
+            claimed_generation: None,
             hydrated_from: Some(generation),
         },
     )?;

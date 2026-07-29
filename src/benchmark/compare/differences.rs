@@ -41,7 +41,12 @@ use serde::Serialize;
 
 use super::identity;
 
-const BENCHMARK_DIFFERENCES_VERSION: u64 = 1;
+// Bumped from 1: `pair_id` changed shape from `"{a}__{b}"` to a
+// length-prefixed `"{len}:{a}__{b}"` to close a collision between
+// differently-split underscored model ids — a reader keyed on the old
+// format would otherwise silently fail to match a pair record it
+// should have found.
+const BENCHMARK_DIFFERENCES_VERSION: u64 = 2;
 
 /// `locator.text`'s cap (ADR 0003 §9.4 names no number; this module
 /// picks one so a single pathological paragraph cannot inflate the
@@ -501,10 +506,17 @@ pub(super) fn compute_differences(
     let mut pairs: Vec<PairInfo> = Vec::new();
     for i in 0..model_order.len() {
         for j in (i + 1)..model_order.len() {
+            // `a`/`b` must land in the same canonical order `pair_key`
+            // itself now applies — otherwise a manifest that declares
+            // its models out of lexicographic order would emit an
+            // `a`/`b` pair that visibly disagrees with its own
+            // `pair_id` (and with `search`'s output for the same
+            // unordered pair).
+            let (a, b) = super::super::canonical_pair(&model_order[i], &model_order[j]);
             pairs.push(PairInfo {
-                pair_id: super::super::pair_key(&model_order[i], &model_order[j]),
-                a: model_order[i].clone(),
-                b: model_order[j].clone(),
+                pair_id: super::super::pair_key(a, b),
+                a: a.to_string(),
+                b: b.to_string(),
             });
         }
     }

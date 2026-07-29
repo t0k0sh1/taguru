@@ -221,7 +221,7 @@ fn benchmark_search_builds_corpora_searches_them_and_writes_retrieval_json() {
     let retrieval: Value =
         serde_json::from_str(&std::fs::read_to_string(results_dir.join("retrieval.json")).unwrap())
             .unwrap();
-    assert_eq!(retrieval["taguru_benchmark_retrieval"], 1);
+    assert_eq!(retrieval["taguru_benchmark_retrieval"], 2);
     assert_eq!(retrieval["run_id"], "run-search-1");
     assert_eq!(retrieval["corpus"]["m1"]["outcome"], "built", "{retrieval}");
     assert_eq!(retrieval["corpus"]["m2"]["outcome"], "built", "{retrieval}");

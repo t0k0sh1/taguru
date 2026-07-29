@@ -122,6 +122,11 @@ pub fn run_retrieve_bounded(
     let fetch_citations = optional_bool(arguments, "fetch_citations", true)?;
     let text_fallback_only_if_empty =
         optional_bool(arguments, "text_fallback_only_if_empty", true)?;
+    // Validated here, alongside the other options, not down at Step 5
+    // where it's used: a wrong-typed value must be refused before this
+    // function pays for any of Steps 1-4's resolve/describe/query/
+    // citation calls, not after.
+    let text_fallback_query = optional_string(arguments, "text_fallback_query")?;
 
     // Step 1: resolve each origin cue, auto-picking the top candidate
     // (or falling back to the cue itself verbatim when auto_pick is
@@ -287,7 +292,6 @@ pub fn run_retrieve_bounded(
     // answer, the one failure mode worse than an error.
     let mut passage_hits = Value::Array(Vec::new());
     let mut search_plan = Value::Null;
-    let text_fallback_query = optional_string(arguments, "text_fallback_query")?;
     if let Some(text_fallback_query) = text_fallback_query
         && (!text_fallback_only_if_empty || associations.is_empty())
     {

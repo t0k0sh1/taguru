@@ -169,8 +169,8 @@ fn corpus_context_name_joins_prefix_and_model_with_a_double_colon() {
 
 #[test]
 fn pair_key_is_sorted_and_symmetric() {
-    assert_eq!(pair_key("b", "a"), "1:a__b");
-    assert_eq!(pair_key("a", "b"), "1:a__b");
+    assert_eq!(super::super::pair_key("b", "a"), "1:a__b");
+    assert_eq!(super::super::pair_key("a", "b"), "1:a__b");
 }
 
 #[test]
@@ -178,7 +178,10 @@ fn pair_key_does_not_collide_across_differently_split_underscored_ids() {
     // Both `("a", "b__c")` and `("a__b", "c")` would format identically
     // under a naive `format!("{a}__{b}")` — the length prefix must keep
     // them distinct.
-    assert_ne!(pair_key("a", "b__c"), pair_key("a__b", "c"));
+    assert_ne!(
+        super::super::pair_key("a", "b__c"),
+        super::super::pair_key("a__b", "c")
+    );
 }
 
 // ============================== Ownership marker ==============================

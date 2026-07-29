@@ -445,9 +445,16 @@ pub async fn update_group(
         )
     }) {
         Ok(record) => {
-            // Re-checks the deadline since the write above may have
-            // spent a while — see `deadline_gated_group_entry`.
-            deadline_gated_group_entry(&state, name, record, &scope, &deadline, started_at)
+            // The write above already committed (fsync + rename) — a
+            // deadline expiring from here on must not turn a durable
+            // mutation into an apparent failure. Returning a timeout
+            // here (as `deadline_gated_group_entry` would) invites a
+            // client to retry a write that already landed; finish
+            // computing the fingerprint and report success instead,
+            // same as `get_group` would for the record `update_group`
+            // just wrote.
+            let entry = tokio::task::block_in_place(|| group_entry(&state, name, record, &scope));
+            ok(entry, started_at)
         }
         Err(UpdateGroupError::NotFound) => group_not_found(&name, started_at),
         Err(UpdateGroupError::NoSuchContext(context)) => error(
