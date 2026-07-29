@@ -159,7 +159,14 @@ fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> io::Result<()>
 fn staging_path(path: &Path) -> PathBuf {
     static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
     let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
-    path.with_extension(format!("tmp{}.{nonce}", std::process::id()))
+    // A `-`, not a `.`, between the pid and the nonce: `Path::extension()`
+    // only ever returns the bytes after the LAST dot, and boot's sweep
+    // (registry/boot.rs) matches leftover staging files by
+    // `extension().starts_with("tmp")`. A dot here would leave the
+    // `tmp{pid}` half outside the extension entirely — `extension()`
+    // would answer just `{nonce}`, which never starts with "tmp" — and
+    // a crash-orphaned staging file would silently stop being swept.
+    path.with_extension(format!("tmp{}-{nonce}", std::process::id()))
 }
 
 /// Bounded retries for [`stage_bytes`]'s `create_new` loop: enough to
@@ -346,6 +353,23 @@ mod tests {
     fn fsync_parent_dir_resolves_a_single_component_relative_paths_empty_parent() {
         fsync_parent_dir(Path::new("taguru-test-fsync-parent-dir-need-not-exist"))
             .expect("an empty Path::parent() must resolve to the current directory, not ENOENT");
+    }
+
+    /// `Path::extension()` only ever returns the bytes after the LAST
+    /// dot — boot's resume-sweep (registry/boot.rs's `scan_data_dir`)
+    /// matches leftover staging files by `extension().starts_with("tmp")`.
+    /// A `.` between the pid and nonce (instead of `staging_path`'s
+    /// actual `-`) would push the `tmp{pid}` half out of the extension
+    /// entirely, leaving crash-orphaned staging files unswept at every
+    /// later boot.
+    #[test]
+    fn staging_path_extension_still_starts_with_tmp_for_boots_sweep_to_find() {
+        let staged = staging_path(Path::new("output.txt"));
+        let extension = staged.extension().and_then(|e| e.to_str());
+        assert!(
+            extension.is_some_and(|e| e.starts_with("tmp")),
+            "boot's sweep would silently stop cleaning up this name: {staged:?}"
+        );
     }
 
     /// Simulates two independent allocators (two processes racing the
