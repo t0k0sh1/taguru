@@ -70,7 +70,10 @@ fn sighup_rotates_keys_and_scopes_and_audits_names_only() {
         "reload-sighup",
         &config,
         &stderr,
-        &[("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0")],
+        &[
+            ("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0"),
+            ("RUST_LOG", "info"),
+        ],
     );
 
     assert_eq!(
@@ -219,7 +222,10 @@ fn the_config_watch_picks_up_a_rotation_without_a_signal() {
         "reload-watch",
         &config,
         &stderr,
-        &[("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0")],
+        &[
+            ("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0"),
+            ("RUST_LOG", "info"),
+        ],
     );
 
     assert_eq!(
@@ -350,7 +356,10 @@ fn the_config_watch_picks_up_a_kubernetes_style_atomic_symlink_swap() {
         "reload-symlink",
         &config,
         &stderr,
-        &[("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0")],
+        &[
+            ("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0"),
+            ("RUST_LOG", "info"),
+        ],
     );
     assert_eq!(
         server
@@ -404,6 +413,7 @@ fn a_shell_set_variable_keeps_winning_over_the_file_across_reloads() {
         &[
             ("TAGURU_API_TOKENS", "ci:sekrit-shell"),
             ("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0"),
+            ("RUST_LOG", "info"),
         ],
     );
 

@@ -32,9 +32,26 @@ fn raw_call(base: &str, method: &str, path: &str, body: Option<Value>) -> u16 {
 /// parsed as JSON. The child has exited before the scan, so an absent
 /// line is a real absence, not a race.
 fn json_log_session(tag: &str, extra_env: &[(&str, &str)], drive: impl FnOnce(&str)) -> Vec<Value> {
+    json_log_session_with_inherited_rust_log(tag, None, extra_env, drive)
+}
+
+/// [`json_log_session`], but first sets `RUST_LOG` on the command as
+/// `inherited_rust_log` before `scrub_taguru_env` runs — standing in
+/// for a developer shell's own `RUST_LOG` reaching this spawn via
+/// inheritance, which `env_remove` blocks exactly the same way
+/// whether the value was set by the shell or by this call.
+fn json_log_session_with_inherited_rust_log(
+    tag: &str,
+    inherited_rust_log: Option<&str>,
+    extra_env: &[(&str, &str)],
+    drive: impl FnOnce(&str),
+) -> Vec<Value> {
     let data_dir = std::env::temp_dir().join(format!("taguru-log-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data_dir);
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    if let Some(value) = inherited_rust_log {
+        command.env("RUST_LOG", value);
+    }
     common::scrub_taguru_env(&mut command)
         .env("TAGURU_ADDR", "127.0.0.1:0")
         .env("TAGURU_DATA_DIR", &data_dir)
@@ -76,47 +93,51 @@ fn json_log_session(tag: &str, extra_env: &[(&str, &str)], drive: impl FnOnce(&s
 
 #[test]
 fn search_events_carry_cue_and_hits_when_opted_in() {
-    let lines = json_log_session("searchlog-on", &[("TAGURU_LOG_SEARCHES", "1")], |base| {
-        assert_eq!(
-            raw_call(
-                base,
-                "PUT",
-                "/contexts/s",
-                Some(json!({"description": "d"}))
-            ),
-            200
-        );
-        assert_eq!(
-            raw_call(
-                base,
-                "POST",
-                "/contexts/s/associations",
-                Some(json!([{
-                    "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
-                    "weight": 1.0, "source": "p1"
-                }]))
-            ),
-            200
-        );
-        assert_eq!(
-            raw_call(
-                base,
-                "POST",
-                "/contexts/s/recall",
-                Some(json!({"cue": "青嶺酒造"}))
-            ),
-            200
-        );
-        assert_eq!(
-            raw_call(
-                base,
-                "POST",
-                "/contexts/s/resolve",
-                Some(json!({"cue": "qqqq"}))
-            ),
-            200
-        );
-    });
+    let lines = json_log_session(
+        "searchlog-on",
+        &[("TAGURU_LOG_SEARCHES", "1"), ("RUST_LOG", "info")],
+        |base| {
+            assert_eq!(
+                raw_call(
+                    base,
+                    "PUT",
+                    "/contexts/s",
+                    Some(json!({"description": "d"}))
+                ),
+                200
+            );
+            assert_eq!(
+                raw_call(
+                    base,
+                    "POST",
+                    "/contexts/s/associations",
+                    Some(json!([{
+                        "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
+                        "weight": 1.0, "source": "p1"
+                    }]))
+                ),
+                200
+            );
+            assert_eq!(
+                raw_call(
+                    base,
+                    "POST",
+                    "/contexts/s/recall",
+                    Some(json!({"cue": "青嶺酒造"}))
+                ),
+                200
+            );
+            assert_eq!(
+                raw_call(
+                    base,
+                    "POST",
+                    "/contexts/s/resolve",
+                    Some(json!({"cue": "qqqq"}))
+                ),
+                200
+            );
+        },
+    );
 
     let searches: Vec<&Value> = lines
         .iter()
@@ -140,7 +161,7 @@ fn search_events_carry_cue_and_hits_when_opted_in() {
 
 #[test]
 fn search_events_stay_absent_without_the_opt_in() {
-    let lines = json_log_session("searchlog-off", &[], |base| {
+    let lines = json_log_session("searchlog-off", &[("RUST_LOG", "info")], |base| {
         assert_eq!(
             raw_call(
                 base,
@@ -176,5 +197,33 @@ fn search_events_stay_absent_without_the_opt_in() {
             .iter()
             .any(|line| line.to_string().contains("秘匿の合い言葉")),
         "cue content leaked into the default log stream"
+    );
+}
+
+/// Issue #310: a parent shell's `RUST_LOG=warn` must not reach the
+/// spawned server and silence the info-level access log this whole
+/// test file's assertions (and `scrub_taguru_env`'s own contract)
+/// depend on.
+#[test]
+fn access_log_survives_an_inherited_rust_log_warn() {
+    let lines = json_log_session_with_inherited_rust_log(
+        "searchlog-inherited-warn",
+        Some("warn"),
+        &[],
+        |base| {
+            assert_eq!(
+                raw_call(
+                    base,
+                    "PUT",
+                    "/contexts/s",
+                    Some(json!({"description": "d"}))
+                ),
+                200
+            );
+        },
+    );
+    assert!(
+        lines.iter().any(|line| line["fields"]["message"] == "http"),
+        "expected access-log lines despite an inherited RUST_LOG=warn: {lines:?}"
     );
 }
