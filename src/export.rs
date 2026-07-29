@@ -774,6 +774,16 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
 /// caller — never a reason to abort the rest of the run.
 fn remote_export_one(api: &Api, name: &str, out: &std::path::Path) -> Result<String, String> {
     let stream = api.get_raw(&["contexts", name, "export"])?;
+    // Validated before it touches disk: write_atomic's whole point is
+    // that a crash mid-write must never shred a previously-good
+    // backup, which a malformed response would defeat if it landed
+    // first and only then failed to parse (see remote_export_group,
+    // whose comment this one mirrors). `stream_counts` below is only a
+    // best-effort tally for the report line, not a validator — it
+    // never errors on malformed input, so real validation has to run
+    // through the same parser `taguru import` trusts.
+    crate::ingest::parse_stream(stream.as_bytes())
+        .map_err(|error| format!("context '{name}': not a taguru export stream: {error}"))?;
     let path = out.join(format!("{}.jsonl", crate::registry::file_stem(name)));
     crate::storage::write_atomic(&path, stream.as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
@@ -839,9 +849,15 @@ fn summary_line(
 ) -> String {
     format!(
         "export: {context_ok} of {context_total} context(s){} written to {}",
-        match group_count {
-            0 => String::new(),
-            count => format!(" and {} of {count} group(s)", count - group_failures),
+        match (group_count, group_failures) {
+            (0, 0) => String::new(),
+            // `group_count` stays 0 when `list_names("groups")` itself
+            // errored — the run still failed (the caller exits
+            // non-zero on any `group_failures`), so the summary must
+            // say so rather than silently dropping groups as if this
+            // were a subset export that never touched them.
+            (0, _) => " and groups: enumeration failed".to_string(),
+            (count, failures) => format!(" and {} of {count} group(s)", count - failures),
         },
         out.display()
     )

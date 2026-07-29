@@ -307,10 +307,15 @@ impl Tailer {
             if self.stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            self.state.replica_register(stem);
             let Some(name) = crate::registry::name_from_stem(stem) else {
+                // Undecodable: never registered, so it was never
+                // hydrated either — it must count as failed, or the
+                // per-lane metrics below (keyed on `failed`) would
+                // report this lane as fully caught up.
+                failed.insert(stem.as_str());
                 continue;
             };
+            self.state.replica_register(stem);
             if let Err(error) = self.hydrator.ensure_context(stem) {
                 tracing::warn!(
                     context = %name,

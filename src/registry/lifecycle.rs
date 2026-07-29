@@ -1,5 +1,33 @@
 use super::*;
 
+/// Which of the two callers [`AppState::sweep_stale_stem_files`] is
+/// clearing a stem for — the two never mix and match independently, so
+/// this collapses what used to be two positional flags into one
+/// self-documenting choice.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StemSweep<'a> {
+    /// A brand-new generation is about to land at `stem`: clear the
+    /// entire prior family, image (`.ctx`) included. There is no
+    /// pivot move to lean on here — removing the old image up front is
+    /// the only thing standing between an interrupted write and a
+    /// resurrected old generation.
+    FreshCreate,
+    /// `rename_context_locked`'s destination stem: leave the image
+    /// (`.ctx`) untouched — the pivot, the first `fs::rename` in
+    /// `move_context_files`, already replaces whatever sits at the
+    /// destination, and pre-clearing it here would turn a
+    /// deterministic pivot failure (destination occupied by something
+    /// `fs::rename` refuses to replace) into a sweep failure instead,
+    /// discarding the in-flight `.renaming` marker on rollback for a
+    /// case meant to leave it in place for boot to resume. That
+    /// marker — `exclude_marker`, the caller's own, just-written one —
+    /// is also excluded from the destination-targeting scan below, so
+    /// this sweep does not mistake the rename now in progress for a
+    /// stale, abandoned one and delete the marker out from under
+    /// itself.
+    RenameDestination { exclude_marker: &'a Path },
+}
+
 impl AppState {
     /// Registers an empty context and persists it immediately, so its
     /// existence (and description) survives a crash from the moment the
@@ -96,56 +124,8 @@ impl AppState {
         meta: &ContextMeta,
     ) -> Result<(ContextStats, ContextUsage, Context), CreateError> {
         let stem = file_stem(name);
-        for stale in [
-            image_path(&self.0.data_dir, &stem),
-            wal_path(&self.0.data_dir, &stem),
-            sources_path(&self.0.data_dir, &stem),
-            passages_path(&self.0.data_dir, &stem),
-            passages_wal_path(&self.0.data_dir, &stem),
-            pvectors_path(&self.0.data_dir, &stem),
-            bm25_path(&self.0.data_dir, &stem),
-            vectors_path(&self.0.data_dir, &stem),
-            // A leftover marker from an earlier delete that could not
-            // finish MUST go before this new generation of files
-            // lands — otherwise the next boot's resume-sweep sees the
-            // marker and deletes the context we are creating right now.
-            deleted_marker_path(&self.0.data_dir, &stem),
-            // The same hazard for a rename that half-finished with THIS
-            // name as its SOURCE: its `.renaming` marker sits at this
-            // stem, and boot's resume-sweep would otherwise move the
-            // generation we are about to write onto the rename's
-            // destination stem, losing it silently.
-            renaming_marker_path(&self.0.data_dir, &stem),
-        ] {
-            if let Err(error) = remove_persisted_file(&stale)
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                return Err(CreateError::Io(error));
-            }
-        }
-        // A rename that half-finished with THIS name as its DESTINATION
-        // left its marker under the SOURCE's stem — a stem we cannot
-        // derive from `name`. Boot's resume-sweep would move that source
-        // family onto the generation we are about to write, erasing it.
-        // Scan for any marker that names us as `to` and drop it; a fresh
-        // create abandons a stuck rename either way.
-        for stale in rename_markers_targeting(&self.0.data_dir, name, "renaming") {
-            if let Err(error) = remove_persisted_file(&stale)
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                return Err(CreateError::Io(error));
-            }
-        }
-        // Stale import markers are part of the same earlier generation:
-        // left beside the new files, boot would report the fresh
-        // context as carrying a torn import it never ran.
-        for stale in import_marker_paths(&self.0.data_dir, &stem) {
-            if let Err(error) = remove_persisted_file(&stale)
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                return Err(CreateError::Io(error));
-            }
-        }
+        self.sweep_stale_stem_files(name, &stem, StemSweep::FreshCreate)
+            .map_err(CreateError::Io)?;
         let mut context = Context::default();
         context.set_dice_floor(meta.dice_floor);
         let stats = ContextStats::of(&context);
@@ -165,6 +145,83 @@ impl AppState {
         )
         .map_err(CreateError::Io)?;
         Ok((stats, usage, context))
+    }
+
+    /// Clears every stale leftover a half-finished delete or rename may
+    /// have left sitting at `stem` (`name`'s own file family, plus its
+    /// `.deleted`/`.renaming` markers and any import markers) or naming
+    /// `name` as a rename's DESTINATION under a source stem this
+    /// function cannot derive from `name` alone. Shared by
+    /// [`AppState::create_files`] (clearing the slate before a brand
+    /// new generation's files land at `stem`) and
+    /// [`AppState::rename_context_locked`] (clearing the slate at
+    /// `to_stem` before the moved family lands there) — both put a
+    /// fresh generation at `stem` and both must not let an EARLIER
+    /// generation's leftovers bleed into it or survive to mislead a
+    /// later boot's resume-sweep. See [`StemSweep`] for how the two
+    /// callers differ.
+    fn sweep_stale_stem_files(&self, name: &str, stem: &str, mode: StemSweep) -> io::Result<()> {
+        let exclude = match mode {
+            StemSweep::RenameDestination { exclude_marker } => Some(exclude_marker),
+            StemSweep::FreshCreate => None,
+        };
+        let mut stale_paths = vec![
+            wal_path(&self.0.data_dir, stem),
+            sources_path(&self.0.data_dir, stem),
+            passages_path(&self.0.data_dir, stem),
+            passages_wal_path(&self.0.data_dir, stem),
+            pvectors_path(&self.0.data_dir, stem),
+            bm25_path(&self.0.data_dir, stem),
+            vectors_path(&self.0.data_dir, stem),
+            // A leftover marker from an earlier delete that could not
+            // finish MUST go before this new generation of files
+            // lands — otherwise the next boot's resume-sweep sees the
+            // marker and deletes the context we are creating right now.
+            deleted_marker_path(&self.0.data_dir, stem),
+            // The same hazard for a rename that half-finished with THIS
+            // name as its SOURCE: its `.renaming` marker sits at this
+            // stem, and boot's resume-sweep would otherwise move the
+            // generation we are about to write onto the rename's
+            // destination stem, losing it silently.
+            renaming_marker_path(&self.0.data_dir, stem),
+        ];
+        if mode == StemSweep::FreshCreate {
+            stale_paths.push(image_path(&self.0.data_dir, stem));
+        }
+        for stale in stale_paths {
+            if let Err(error) = remove_persisted_file(&stale)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(error);
+            }
+        }
+        // A rename that half-finished with THIS name as its DESTINATION
+        // left its marker under the SOURCE's stem — a stem we cannot
+        // derive from `name`. Boot's resume-sweep would move that source
+        // family onto the generation we are about to write, erasing it.
+        // Scan for any marker that names us as `to` and drop it; landing
+        // a fresh generation here abandons a stuck rename either way.
+        for stale in rename_markers_targeting(&self.0.data_dir, name, "renaming") {
+            if exclude.is_some_and(|excluded| excluded == stale) {
+                continue;
+            }
+            if let Err(error) = remove_persisted_file(&stale)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(error);
+            }
+        }
+        // Stale import markers are part of the same earlier generation:
+        // left beside the new files, boot would report the fresh
+        // context as carrying a torn import it never ran.
+        for stale in import_marker_paths(&self.0.data_dir, stem) {
+            if let Err(error) = remove_persisted_file(&stale)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     /// Removes a context from the registry and deletes its files. The
@@ -396,6 +453,21 @@ impl AppState {
             return RenameOutcome::RolledBack(RenameContextError::Io(error));
         }
         if let Err(error) = self.drain_entry_for_rename(from, entry) {
+            let _ = fs::remove_file(&marker);
+            return RenameOutcome::RolledBack(RenameContextError::Io(error));
+        }
+        // A half-finished delete or rename may have left stale markers
+        // (or leftover files) sitting at `to_stem` — the same hazard
+        // `create_files` guards against for a brand new generation. A
+        // `.deleted` marker there would have boot's resume-sweep erase
+        // the family we are about to move in; a `.renaming` marker
+        // would have it resumed onto (and overwrite) what we land here.
+        // Sweep before the move, while failure can still cleanly roll
+        // back — `from` has not been forgotten yet.
+        let sweep_mode = StemSweep::RenameDestination {
+            exclude_marker: marker.as_path(),
+        };
+        if let Err(error) = self.sweep_stale_stem_files(to, &to_stem, sweep_mode) {
             let _ = fs::remove_file(&marker);
             return RenameOutcome::RolledBack(RenameContextError::Io(error));
         }

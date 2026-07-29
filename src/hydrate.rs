@@ -210,12 +210,22 @@ pub(crate) async fn prepare(
     // after can still drop its directory entry wholesale.
     std::fs::create_dir_all(data_dir)?;
     crate::storage::fsync_parent_dir(data_dir)?;
+    // Written in TWO phases, exactly like `prepare_replica` below: a
+    // degraded `serve --replica` boot trusts `hydrated_from.is_some()`
+    // as proof this directory finished a verified hydration against
+    // that generation once. Claiming it before `hydrate_shared` even
+    // runs would let a crash or error mid-hydration leave a record
+    // that overclaims a cache no replica may actually trust — phase
+    // one only marks the directory as this URL's cache workspace
+    // (carrying forward whatever an EARLIER hydration verified), and
+    // phase two advances `hydrated_from` to this generation only after
+    // the shared hydration actually lands.
     ship::write_replication_record(
         data_dir,
         &ship::ReplicationRecord {
             url: url.to_string(),
             claimed_generation: record.as_ref().and_then(|record| record.claimed_generation),
-            hydrated_from: Some(generation),
+            hydrated_from: record.as_ref().and_then(|record| record.hydrated_from),
         },
     )?;
 
@@ -228,6 +238,14 @@ pub(crate) async fn prepare(
         LanePolicy::KeepAckedTail,
     ));
     let report = hydrator.hydrate_shared().await?;
+    ship::write_replication_record(
+        data_dir,
+        &ship::ReplicationRecord {
+            url: url.to_string(),
+            claimed_generation: record.as_ref().and_then(|record| record.claimed_generation),
+            hydrated_from: Some(generation),
+        },
+    )?;
     tracing::info!(
         generation,
         contexts = hydrator.context_stems().len(),
