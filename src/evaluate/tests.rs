@@ -319,32 +319,55 @@ fn every_metric_key_has_a_matching_definition_and_vice_versa() {
 
 // ========================= No answer-generation LLM seam (ADR §12, AC 8) =========================
 
+/// Cuts a `include_str!`-ed source at its first `#[cfg(test)]`, so a
+/// file whose test module lives inline (`thresholds.rs`, which embeds
+/// `mod tests { ... }` rather than declaring a sibling file) never has
+/// its own test fixtures scanned — only production code is asserted
+/// clean. Files whose tests live in a sibling module (`evaluate.rs`,
+/// `compare.rs`, both `mod tests;`) are untouched by this: the two
+/// lines declaring the sibling carry no banned literal themselves.
+fn production_only(source: &str) -> &str {
+    match source.find("#[cfg(test)]") {
+        Some(at) => &source[..at],
+        None => source,
+    }
+}
+
 #[test]
 fn evaluate_module_never_names_an_extraction_or_embedding_seam() {
-    // Scans evaluate.rs only, so this check's own source text is never
-    // itself scanned — the assertion lives in a sibling file (tests.rs)
-    // that `include_str!` here does not pull in.
-    let source = include_str!("../evaluate.rs");
+    // Scans evaluate.rs and its submodules — ADR 0004 §12's structural
+    // enforcement of AC 8 covers the whole `mod evaluate` tree, not
+    // just its top file, so a future submodule can't quietly grow the
+    // seam this check exists to rule out. None of these three
+    // `include_str!`s pulls in this file itself (tests.rs), so this
+    // check's own literals below are never scanned.
+    let sources = [
+        production_only(include_str!("../evaluate.rs")),
+        production_only(include_str!("../evaluate/compare.rs")),
+        production_only(include_str!("../evaluate/thresholds.rs")),
+    ];
     // Built by concatenation so this assertion's own literals never
     // accidentally match themselves.
     let extract_prefix = concat!("TAGURU_", "EXTRACT_");
     let embed_prefix = concat!("TAGURU_", "EMBED_");
-    assert!(
-        !source.contains(extract_prefix),
-        "found {extract_prefix} in evaluate.rs"
-    );
-    assert!(
-        !source.contains(embed_prefix),
-        "found {embed_prefix} in evaluate.rs"
-    );
-    assert!(
-        !source.contains("crate::extract"),
-        "found a crate::extract import in evaluate.rs"
-    );
-    assert!(
-        !source.contains("crate::embedding"),
-        "found a crate::embedding import in evaluate.rs"
-    );
+    for source in sources {
+        assert!(
+            !source.contains(extract_prefix),
+            "found {extract_prefix} in the evaluate module tree"
+        );
+        assert!(
+            !source.contains(embed_prefix),
+            "found {embed_prefix} in the evaluate module tree"
+        );
+        assert!(
+            !source.contains("crate::extract"),
+            "found a crate::extract import in the evaluate module tree"
+        );
+        assert!(
+            !source.contains("crate::embedding"),
+            "found a crate::embedding import in the evaluate module tree"
+        );
+    }
 }
 
 // ========================= Scoring test fixtures (#274) =========================

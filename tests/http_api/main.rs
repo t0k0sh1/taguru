@@ -18,6 +18,7 @@ mod directory;
 mod directory_labels_compact;
 mod errors;
 mod evaluate;
+mod evaluate_fixture;
 mod explore_audit;
 mod extract;
 mod groups;

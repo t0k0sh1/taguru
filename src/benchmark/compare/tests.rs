@@ -2035,7 +2035,7 @@ fn with_text_embeds_the_exact_paragraph_bytes() {
     fs::create_dir_all(dir.join("corpus")).unwrap();
     let paragraphs = "para0\n\npara1\n\npara2 is this one\n\npara3\n\npara4\n\npara5\n\npara6\n\npara7\n\npara8\n\npara9";
     fs::write(dir.join("corpus/brewery.md"), paragraphs).unwrap();
-    let real_sha = crate::extract::sha256_hex(paragraphs.as_bytes());
+    let real_sha = crate::sha256::sha256_hex(paragraphs.as_bytes());
 
     let manifest_path = dir.join("manifest.json");
     let mut manifest: Value =
@@ -2079,7 +2079,7 @@ fn with_text_truncates_at_the_cap_on_a_char_boundary() {
     let long_paragraph = "あ".repeat(2000);
     let text = format!("p0\n\np1\n\n{long_paragraph}\n\np3\n\np4\n\np5\n\np6\n\np7\n\np8\n\np9");
     fs::write(dir.join("corpus/brewery.md"), &text).unwrap();
-    let real_sha = crate::extract::sha256_hex(text.as_bytes());
+    let real_sha = crate::sha256::sha256_hex(text.as_bytes());
 
     let manifest_path = dir.join("manifest.json");
     let mut manifest: Value =

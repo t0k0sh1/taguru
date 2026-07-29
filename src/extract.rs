@@ -37,6 +37,7 @@ use crate::api::{
     MAX_ASSOCIATION_WEIGHT, MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES, MAX_NAME_BYTES,
 };
 use crate::ingest::MAX_PASSAGE_BYTES;
+use crate::sha256::sha256_hex;
 
 const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
@@ -4946,20 +4947,6 @@ impl Manifest {
         let text = serde_json::to_string_pretty(self).expect("a manifest serializes");
         crate::storage::write_atomic(path, text.as_bytes())
     }
-}
-
-/// `pub(crate)` so `benchmark` hashes documents/configs/hostnames with
-/// the exact same primitive `extract`'s own manifest and checkpoints
-/// use, rather than a second implementation that could drift.
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write;
-    Sha256::digest(bytes)
-        .iter()
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        })
 }
 
 /// Output name for a source path: separators flatten to `__` so the

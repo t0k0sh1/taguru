@@ -38,6 +38,7 @@ mod remote;
 mod remote_mcp;
 mod replica;
 mod route;
+mod sha256;
 mod ship;
 mod storage;
 mod trace;

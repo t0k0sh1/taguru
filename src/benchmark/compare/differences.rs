@@ -403,7 +403,7 @@ impl TextResolver {
                 document.path, document.document_id
             )
         })?;
-        let sha256 = crate::extract::sha256_hex(text.as_bytes());
+        let sha256 = crate::sha256::sha256_hex(text.as_bytes());
         if sha256 != document.sha256 {
             return Err(format!(
                 "--with-text: {} has changed since this results directory was created \
