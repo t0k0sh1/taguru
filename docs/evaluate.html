@@ -162,7 +162,7 @@
             <td>CLI</td>
             <td>A model matrix's extraction behavior over one corpus</td>
             <td><code>manifest.json</code>, <code>runs/*.jsonl</code>, <code>measurements.json</code>/<code>.csv</code>, <code>differences.jsonl</code></td>
-            <td>No — a banned-key test forbids <code>rank</code>/<code>score</code>/<code>winner</code>/<code>best</code>/<code>recommended</code>/<code>overall</code></td>
+            <td>No — a banned-key test forbids <code>rank</code>/<code>score</code>/<code>winner</code>/<code>best</code>/<code>recommended</code>/<code>overall</code>/<code>delta_vs_*</code></td>
           </tr>
           <tr>
             <td><a href="#benchmark-search"><code>benchmark search</code></a> (#260)</td>
@@ -182,7 +182,7 @@
       </table>
     </div>
 
-    <p class="section-sub" id="calibrate"><code>calibrate</code>: one model's semantic floor, not retrieval quality</p>
+    <h3 id="calibrate"><code>calibrate</code>: one model's semantic floor, not retrieval quality</h3>
     <p>
       <code>taguru calibrate --context NAME --probes FILE</code> measures the semantic-floor
       bands of a <i>running server's embedding model</i> and suggests a
@@ -198,7 +198,7 @@
       question set, actually retrieves.
     </p>
 
-    <p class="section-sub" id="explain"><code>explain_resolve</code> / <code>explain_search</code>: one query, always 200</p>
+    <h3 id="explain"><code>explain_resolve</code> / <code>explain_search</code>: one query, always 200</h3>
     <p>
       <code>POST /contexts/{name}/resolve/explain</code>,
       <code>/resolve_label/explain</code>, and <code>/sources/search/explain</code> — exposed to
@@ -217,7 +217,7 @@
       find out why.
     </p>
 
-    <p class="section-sub" id="ann-guard">The ANN recall guard: synthetic vectors, not your corpus</p>
+    <h3 id="ann-guard">The ANN recall guard: synthetic vectors, not your corpus</h3>
     <p>
       Once one context's passage vectors cross a compiled-in row threshold, the semantic lane
       switches from an exact cosine sweep to a small IVF (inverted-file) index for speed — a
@@ -235,7 +235,7 @@
       underneath might be exact or approximate, and evaluate does not know or care which.
     </p>
 
-    <p class="section-sub" id="benchmark-extract"><code>benchmark extract</code> / <code>compare</code> (#189): extraction, not retrieval</p>
+    <h3 id="benchmark-extract"><code>benchmark extract</code> / <code>compare</code> (#189): extraction, not retrieval</h3>
     <p>
       <a href="benchmark.html"><code>taguru benchmark extract</code></a> runs one
       <code>taguru extract</code> subprocess per (model, run) cell across a model matrix, and
@@ -251,7 +251,7 @@
       already-populated context and never touches an extraction model or a subprocess.
     </p>
 
-    <p class="section-sub" id="benchmark-search"><code>benchmark search</code> (#260): model A's corpus vs. model B's, not today vs. yesterday</p>
+    <h3 id="benchmark-search"><code>benchmark search</code> (#260): model A's corpus vs. model B's, not today vs. yesterday</h3>
     <p>
       <a href="benchmark.html#search"><code>taguru benchmark search</code></a> builds one
       per-model corpus from a <code>benchmark extract</code> results directory and searches the
@@ -344,7 +344,9 @@
       <code>evaluate</code> reports instead is a lane cross-tab
       (<code>lanes.structural_hit</code>/<code>passage_hit</code>/<code>both</code>/
       <code>neither</code>), computed only over cases that declare <b>both</b> a structural and
-      a source expectation.
+      a source expectation <b>and</b> whose passage lane completed — a failed passage lane
+      cannot honestly report <code>passage_hit</code> either way, so it is excluded from the
+      denominator just like it is excluded from <code>recall</code>.
     </p>
   </section>
 
@@ -496,10 +498,12 @@
       one.
     </p>
     <p>
-      <code>hits[]</code> is <b>not</b> capped below a case's own <code>limit</code> — the bound
-      is <code>limit</code> itself, so an external offline scorer building its own
-      <code>recall@50</code> from these locators has everything it needs. No corpus body text is
-      ever written into this artifact; on a <code>quote</code> mismatch, only the user's own
+      <code>hits[]</code> is <b>not</b> capped below a case's own <code>options.limit</code> —
+      the bound is exactly that case's configured limit, so an external offline scorer can build
+      a recall@<i>k</i> for any <i>k</i> up to it (a case wanting an offline
+      <code>recall@50</code> must set that case's own <code>options.limit</code> to 50 or
+      higher; the artifact never truncates below whatever limit was configured). No corpus body
+      text is ever written into this artifact; on a <code>quote</code> mismatch, only the user's own
       declared quote and a boolean match result are recorded, never the served paragraph body.
       <code>missed[]</code> is capped at 3 entries with a <code>missed_truncated</code> count of
       what was dropped (not the total). The resolved server URL is recorded as scheme + host +
@@ -628,10 +632,10 @@
       paragraph. The resolved server URL, scheme + host + port only, never userinfo or a bearer
       token. Server error messages truncated to 200 bytes on a UTF-8 character boundary.
       <code>missed[]</code> capped at 3 entries per case, with the dropped count recorded
-      separately. <code>hits[]</code> is not capped below a case's own <code>limit</code> — a
-      <code>HitLocator</code> is roughly 40 bytes, so even the ceiling is cheap, and capping
-      below it would break an external scorer building a wider recall window from the same
-      artifact.
+      separately. <code>hits[]</code> is not capped below a case's own <code>options.limit</code>
+      — a <code>HitLocator</code> is roughly 40 bytes, so even a limit of 1000 is cheap, and
+      capping below the case's own configured limit would prevent an external scorer from ever
+      seeing the full window that case asked for.
     </p>
   </section>
 

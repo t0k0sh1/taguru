@@ -659,7 +659,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       <code>PREFIX::MODEL_ID</code> instead, useful for re-running only the search-and-measure half
       after a corpus was built once.
     </p>
-    <p class="section-sub">eval.jsonl: the dataset shared with <a href="evaluate.html">#215's quality gate</a></p>
+    <p class="section-sub">eval.jsonl: the dataset shared with <a href="evaluate.html">the evaluate quality gate</a></p>
     <pre><code>{"taguru_eval":1,"name":"sake retrieval cases","default_target":{"context":"sake"}}
 {"case_id":"brand-origin-001","query":"青嶺はどこの蔵の酒か","cues":["青嶺"],
  "expected_sources":[{"source":"corpus/brewery.md","paragraphs":[0],"relevance":3}],
@@ -723,7 +723,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       artifact, not a hand-authored input. No CSV is written; a static
       <code>report.html</code> (issue #261, optional) is where visualization belongs.
     </p>
-    <p class="section-sub">recall@k and MRR: the one thing shared with <a href="evaluate.html">#215's quality gate</a></p>
+    <p class="section-sub">recall@k and MRR: the one thing shared with <a href="evaluate.html">the evaluate quality gate</a></p>
     <p>
       When a case carries <code>expected_sources</code> or <code>expected_concepts</code>, both are
       folded into <b>one</b> recall@k/MRR computation, computed from the very
