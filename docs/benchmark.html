@@ -37,6 +37,7 @@
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="benchmark.html" aria-current="page">Extraction benchmark</a>
+      <a href="evaluate.html">Retrieval quality gate</a>
       <a href="long-running.html">Long-running ingestion</a>
     </div>
     <div class="side-group">
@@ -658,7 +659,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       <code>PREFIX::MODEL_ID</code> instead, useful for re-running only the search-and-measure half
       after a corpus was built once.
     </p>
-    <p class="section-sub">eval.jsonl: the dataset shared with #215</p>
+    <p class="section-sub">eval.jsonl: the dataset shared with <a href="evaluate.html">#215's quality gate</a></p>
     <pre><code>{"taguru_eval":1,"name":"sake retrieval cases","default_target":{"context":"sake"}}
 {"case_id":"brand-origin-001","query":"青嶺はどこの蔵の酒か","cues":["青嶺"],
  "expected_sources":[{"source":"corpus/brewery.md","paragraphs":[0],"relevance":3}],
@@ -669,10 +670,13 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       posture <a href="import.html">batch import's</a> <code>taguru_batch</code> takes), then one
       case per line. Every case field this command does not know is still declared and accepted —
       never rejected as a typo — since <code>eval.jsonl</code> is the one artifact this reference
-      shares with #215's own quality gate over an already-populated corpus: <code>expected_labels</code>,
+      shares with <a href="evaluate.html"><code>taguru evaluate</code></a>'s own quality gate over
+      an already-populated corpus: <code>expected_labels</code>,
       <code>expected_associations</code>, <code>expected_citations</code>, and
       <code>options.floor</code>/<code>sources</code>/<code>since</code> are #215-only and ride
-      through untouched, earning one warning per run (never once per case) if seen. The fields this
+      through untouched, earning one warning per run (never once per case) if seen —
+      <a href="evaluate.html#dataset">evaluate.html</a> documents what those fields mean and how
+      <code>evaluate</code> itself interprets and validates them. The fields this
       command reads: <code>case_id</code> (a stable, unique join key), <code>query</code> (sent to
       <code>sources/search</code> verbatim), <code>expected_sources[]</code> (<code>source</code>
       matched against the results directory's own document dictionary — an exact path, then a
@@ -719,7 +723,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       artifact, not a hand-authored input. No CSV is written; a static
       <code>report.html</code> (issue #261, optional) is where visualization belongs.
     </p>
-    <p class="section-sub">recall@k and MRR: the one thing shared with #215</p>
+    <p class="section-sub">recall@k and MRR: the one thing shared with <a href="evaluate.html">#215's quality gate</a></p>
     <p>
       When a case carries <code>expected_sources</code> or <code>expected_concepts</code>, both are
       folded into <b>one</b> recall@k/MRR computation, computed from the very
@@ -734,6 +738,9 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       first hit that satisfies <i>any</i> expected entry, <code>0</code> if none does. Cases with no
       expectations at all carry no <code>recall</code> block — this reference reports only
       differences for them, exactly as ADR 0003 §11 frames the gold-data-free tier.
+      <a href="evaluate.html#metrics"><code>taguru evaluate</code></a> builds on exactly this pair
+      with graded-relevance nDCG and citation metrics on top, and — unlike this reference — turns
+      the result into a pass/fail gate.
     </p>
     <p class="section-sub">Why not POST /contexts/{name}/recall</p>
     <p>
