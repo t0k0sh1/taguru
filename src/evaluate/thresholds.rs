@@ -375,7 +375,7 @@ fn check_bound(
             bound: Some("min"),
             threshold: Some(min),
             actual: Some(value),
-            reason: format!("{value} < min {min}"),
+            reason: format!("{value:.6} < min {min:.6}"),
         });
         return;
     }
@@ -389,7 +389,7 @@ fn check_bound(
             bound: Some("max"),
             threshold: Some(max),
             actual: Some(value),
-            reason: format!("{value} > max {max}"),
+            reason: format!("{value:.6} > max {max:.6}"),
         });
     }
 }
@@ -517,14 +517,15 @@ mod tests {
         // Not `NaN`/`Infinity` — those are not legal JSON tokens, and
         // serde_json itself refuses a numeric literal that overflows f64
         // rather than silently producing `inf` — so this never reaches
-        // [`validate_bound`]'s own finiteness check at all.
+        // [`validate_bound`]'s own finiteness check at all. The exact
+        // wording is serde_json's own, so this only asserts that
+        // loading fails, not what it says.
         let path = write_temp(
             "overflow",
             "{\"taguru_evaluate_thresholds\":1,\
              \"aggregate\":{\"recall.recall_at_k\":{\"min\":1e400}}}",
         );
-        let error = load_thresholds(&path, &build_definitions(), &BTreeSet::new()).unwrap_err();
-        assert!(error.contains("out of range"), "{error}");
+        assert!(load_thresholds(&path, &build_definitions(), &BTreeSet::new()).is_err());
     }
 
     #[test]
@@ -767,6 +768,15 @@ mod tests {
     fn a_violation_never_carries_a_url_credential_or_passage_body_text() {
         let case = {
             let mut case = minimal_case("c1");
+            // Plant the needles in fields a regression would most
+            // plausibly copy into a `Violation` — the query text and
+            // the passage lane's own failure message — so this test
+            // actually fails if `Violation` starts echoing case fields.
+            case.query = "TOP-SECRET query".to_string();
+            case.passage = PassageOutcome::Failed {
+                message: "GET https://user:Bearer-token@host/search failed".to_string(),
+                latency_ms: 5,
+            };
             case.citations = Some(CitationsBlock {
                 recall: CitationRecallBlock {
                     expected_total: 1,

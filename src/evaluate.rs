@@ -162,7 +162,7 @@ fn run_evaluate(args: &[String]) -> i32 {
         .collect();
     let loaded_thresholds = match &eval_args.thresholds {
         Some(path) => match load_thresholds(path, &definitions, &case_ids) {
-            Ok(loaded) => Some(loaded),
+            Ok(thresholds) => Some(thresholds),
             Err(message) => {
                 eprintln!("taguru: evaluate: {message}");
                 return 2;
@@ -2114,7 +2114,8 @@ fn print_threshold_summary(report: &ThresholdReport) {
             violation.scope, violation.metric, violation.reason
         );
     }
-    for violation in case_scoped.iter().take(10) {
+    const MAX_CASE_LINES: usize = 10;
+    for violation in case_scoped.iter().take(MAX_CASE_LINES) {
         println!(
             "    [case {}] {}: {}",
             violation.case_id.as_deref().unwrap_or("?"),
@@ -2122,10 +2123,10 @@ fn print_threshold_summary(report: &ThresholdReport) {
             violation.reason
         );
     }
-    if case_scoped.len() > 10 {
+    if case_scoped.len() > MAX_CASE_LINES {
         println!(
             "    ... and {} more case-scoped violation(s)",
-            case_scoped.len() - 10
+            case_scoped.len() - MAX_CASE_LINES
         );
     }
     if !report.skipped.is_empty() {
