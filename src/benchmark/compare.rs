@@ -575,10 +575,22 @@ fn load_results(dir: &Path, manifest: &super::BenchManifest) -> Result<LoadedRes
             };
 
             let batch = if end.and_then(|e| e.outcome.as_deref()) == Some("written") {
+                // No manifest entry for this document (a stale or
+                // mismatched manifest.json): fall back to a bound
+                // `paragraph_out_of_range` can never trip, and say so
+                // loudly rather than let the check silently stop
+                // firing for this document.
                 let paragraph_count = documents_by_id
                     .get(document_id.as_str())
                     .map(|d| d.paragraph_count)
-                    .unwrap_or(usize::MAX);
+                    .unwrap_or_else(|| {
+                        eprintln!(
+                            "taguru: benchmark: compare: document {document_id} has no \
+                             manifest.json entry — extraction.paragraph_out_of_range cannot \
+                             be checked for it"
+                        );
+                        usize::MAX
+                    });
                 end.and_then(|e| e.batch_path.as_ref()).and_then(|rel| {
                     let batch_path = dir.join(rel);
                     match fs::read_to_string(&batch_path) {

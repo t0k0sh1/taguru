@@ -261,6 +261,21 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_EXTRACT_TIMEOUT_SECS  extract's per-completion budget; local models
                                may need more; 0 = no limit (300)
   TAGURU_EXTRACT_PARALLEL      concurrent chunk completions per document (1)
+  TAGURU_EXTRACT_FACT_BUDGET   default for --fact-budget (0, off)
+  TAGURU_EXTRACT_MAX_ATTEMPTS  total attempts at valid JSON per chunk, 1-10
+                               (2)
+  TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
+                               the model's own prior bad answer to this many
+                               bytes; 0 omits it entirely (unset: replay it
+                               in full)
+  TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (off)
+  TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (unset)
+  TAGURU_EXTRACT_LOSSY         default for --lossy (0/false)
+  TAGURU_EXTRACT_DIAGNOSTICS   default for --diagnostics-out (unset, off)
+  TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text
+                               to each diagnostics record, capped to this
+                               many bytes; unset or 0 = never attach it
+                               (metadata only)
   RUST_LOG                     log filter, EnvFilter syntax (info)
   TAGURU_LOG_FORMAT            json for JSON log lines (pretty)
   TAGURU_LOG_SEARCHES          1 = per-search event log; cues are memory
@@ -584,6 +599,20 @@ mod tests {
             if name.starts_with("TAGURU_") {
                 assert!(KNOWN_KEYS.contains(&name), "{name} missing from KNOWN_KEYS");
             }
+        }
+    }
+
+    #[test]
+    fn every_known_key_is_documented() {
+        // The reverse of `every_documented_variable_is_a_known_key`: the
+        // ENVIRONMENT section claims to list "every knob", so a key added
+        // to KNOWN_KEYS without a matching --help entry must fail here
+        // instead of silently going undocumented.
+        for name in KNOWN_KEYS {
+            assert!(
+                USAGE.contains(name),
+                "{name} is in KNOWN_KEYS but not documented in --help"
+            );
         }
     }
 }

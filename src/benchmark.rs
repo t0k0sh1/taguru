@@ -1750,6 +1750,14 @@ impl DiagnosticsTail {
 /// resumed document's records).
 struct RunsWriter {
     file: fs::File,
+    path: PathBuf,
+    /// Set once a write or flush fails, so a disk-full or permission
+    /// error is reported exactly once — `documents_written`/
+    /// `attempts_total` keep counting regardless (this sidecar is
+    /// advisory, not the durable record), but a silent desync between
+    /// those counters and the file's actual contents must not go
+    /// unreported.
+    warned: bool,
 }
 
 impl RunsWriter {
@@ -1761,7 +1769,11 @@ impl RunsWriter {
             .create(true)
             .append(true)
             .open(path)?;
-        let mut writer = Self { file };
+        let mut writer = Self {
+            file,
+            path: path.to_path_buf(),
+            warned: false,
+        };
         if let Some(header) = header {
             writer.write_value(header);
         }
@@ -1769,10 +1781,23 @@ impl RunsWriter {
     }
 
     fn write_value(&mut self, value: &Value) {
-        if let Ok(mut line) = serde_json::to_string(value) {
-            line.push('\n');
-            let _ = self.file.write_all(line.as_bytes());
-            let _ = self.file.flush();
+        let Ok(mut line) = serde_json::to_string(value) else {
+            return;
+        };
+        line.push('\n');
+        let result = self
+            .file
+            .write_all(line.as_bytes())
+            .and_then(|()| self.file.flush());
+        if let Err(error) = result
+            && !self.warned
+        {
+            self.warned = true;
+            eprintln!(
+                "taguru: benchmark: warning: {}: write failed ({error}) — \
+                 documents_written/attempts_total may now overcount what this file holds",
+                self.path.display()
+            );
         }
     }
 }

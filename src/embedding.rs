@@ -1371,10 +1371,20 @@ fn write_table(out: &mut Vec<u8>, table: &VectorTable) {
     }
 }
 
+/// Consumes `len` bytes at `*pos`, `checked_add`ed like every other
+/// arena/section reader in this codebase (`context::image`'s
+/// `checked_arena_str`/`Reader::take`) — `len` comes straight off the
+/// wire (a parsed `u32`), so it must never be added to `*pos` unchecked.
+fn take<'a>(bytes: &'a [u8], pos: &mut usize, len: usize) -> Option<&'a [u8]> {
+    let end = pos.checked_add(len)?;
+    let slice = bytes.get(*pos..end)?;
+    *pos = end;
+    Some(slice)
+}
+
 fn read_string(bytes: &[u8], pos: &mut usize) -> Option<String> {
     let len = read_u32(bytes, pos)? as usize;
-    let slice = bytes.get(*pos..*pos + len)?;
-    *pos += len;
+    let slice = take(bytes, pos, len)?;
     String::from_utf8(slice.to_vec()).ok()
 }
 
@@ -1383,14 +1393,12 @@ fn read_table(bytes: &[u8], pos: &mut usize) -> Option<VectorTable> {
     let mut table = HashMap::with_capacity(count.min(1 << 20));
     for _ in 0..count {
         let name = read_string(bytes, pos)?;
-        let hash_bytes = bytes.get(*pos..*pos + 8)?;
-        *pos += 8;
+        let hash_bytes = take(bytes, pos, 8)?;
         let hash = u64::from_le_bytes(hash_bytes.try_into().ok()?);
         let dim = read_u32(bytes, pos)? as usize;
         let mut vector = Vec::with_capacity(dim.min(1 << 16));
         for _ in 0..dim {
-            let slice = bytes.get(*pos..*pos + 4)?;
-            *pos += 4;
+            let slice = take(bytes, pos, 4)?;
             let value = f32::from_le_bytes(slice.try_into().ok()?);
             // Same guard as `PassageVectorStore::from_bytes`: a NaN or
             // infinite component poisons every `similarity` dot product
@@ -1407,8 +1415,7 @@ fn read_table(bytes: &[u8], pos: &mut usize) -> Option<VectorTable> {
 }
 
 fn read_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
-    let slice = bytes.get(*pos..*pos + 4)?;
-    *pos += 4;
+    let slice = take(bytes, pos, 4)?;
     Some(u32::from_le_bytes(slice.try_into().ok()?))
 }
 
