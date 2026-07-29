@@ -281,6 +281,10 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
 
+    // ADR 0002 §7: caught before any request leaves the process.
+    if let Err(message) = crate::remote::reject_userinfo(&base) {
+        return crate::config::subcommand_usage_error("calibrate", &message);
+    }
     let api = Api::new(base.clone());
     match calibrate(&api, &context, &probes, as_json) {
         Ok(report) => {

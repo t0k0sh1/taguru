@@ -164,6 +164,10 @@ pub fn run(args: &[String]) -> i32 {
             }
         },
     };
+    // ADR 0002 §7: caught before any request leaves the process.
+    if let Err(message) = crate::remote::reject_userinfo(&base) {
+        return crate::config::subcommand_usage_error("communities", &message);
+    }
     let api = Api::new(base);
 
     let contexts = match &group {

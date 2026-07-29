@@ -284,12 +284,18 @@ async fn approve(
             Some("that key was not accepted"),
         );
     };
+    let now = match now_secs() {
+        Ok(now) => now,
+        // Fail closed: a broken clock must not mint a code whose
+        // expiry cannot be trusted (RFC 6749 §4.1.2.1's catch-all).
+        Err(_) => return error_redirect(&params, "server_error"),
+    };
     let code = state.oauth.issue_code(
         &client,
         &params.redirect_uri,
         &params.code_challenge,
         &key,
-        now_secs(),
+        now,
     );
     let mut target = format!(
         "{}{}code={code}",
@@ -413,7 +419,18 @@ struct TokenParams {
 /// RFC 6749 token endpoint, form-encoded in, JSON out; refusals use
 /// the standard error codes with a 400.
 async fn token(State(state): State<OauthState>, Form(params): Form<TokenParams>) -> Response {
-    let now = now_secs();
+    let now = match now_secs() {
+        Ok(now) => now,
+        // Fail closed: a broken clock must not be trusted to grant or
+        // refuse a token on an expiry it cannot compute correctly.
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "server_error" })),
+            )
+                .into_response();
+        }
+    };
     // Both grant paths mint a token, which serializes and fsyncs the
     // OAuth store (via `persist`); wrap each in `block_in_place` so the
     // synchronous write never stalls the async worker.

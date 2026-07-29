@@ -1900,9 +1900,10 @@ pub async fn track_http(
     // this key delete" has no answer after the fact. "-" mirrors the
     // key convention below. The names are identifiers, not memory
     // content — the registry's own warnings already print them.
-    // Extracted by hand: `RawPathParams` rejects param-less routes, so
-    // it cannot ride the signature as an extractor the way MatchedPath
-    // (which supports optional extraction) does.
+    // Extracted by hand: a route's params can't ride the signature as
+    // an extractor the way MatchedPath (which supports optional
+    // extraction) does. `path_param` decodes the same way a handler's
+    // `AppPath` would, so a percent-encoded name logs decoded here too.
     let (mut parts, body) = request.into_parts();
     let name = crate::api::path_param(&mut parts, "name")
         .await
