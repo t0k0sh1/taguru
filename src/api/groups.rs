@@ -94,6 +94,27 @@ fn group_entry(
     }
 }
 
+/// A single group's [`group_entry`] response, gated on the deadline and
+/// kept off the async worker — the fingerprint walks the group's
+/// transitive member closure, cost that scales with nesting/membership
+/// rather than with this being a single row. Shared by every handler
+/// that returns one group's entry after `list_groups`' own inline
+/// (page-of-many) version of the same gate.
+fn deadline_gated_group_entry(
+    state: &AppState,
+    name: String,
+    record: GroupRecord,
+    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    deadline: &Deadline,
+    started_at: Instant,
+) -> Response {
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
+    let entry = tokio::task::block_in_place(|| group_entry(state, name, record, scope));
+    ok(entry, started_at)
+}
+
 /// The change token on one group row: FNV-1a over the scope-visible
 /// transitive context closure, each member as its length-prefixed name
 /// followed by the three revision counters — structurally unambiguous,
@@ -229,10 +250,13 @@ pub async fn get_group(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
     match state.group(&name) {
-        Some(record) => ok(group_entry(&state, name, record, &scope), started_at),
+        Some(record) => {
+            deadline_gated_group_entry(&state, name, record, &scope, &deadline, started_at)
+        }
         None => group_not_found(&name, started_at),
     }
 }
@@ -420,7 +444,11 @@ pub async fn update_group(
             request.remove_groups.into_iter().collect(),
         )
     }) {
-        Ok(record) => ok(group_entry(&state, name, record, &scope), started_at),
+        Ok(record) => {
+            // Re-checks the deadline since the write above may have
+            // spent a while — see `deadline_gated_group_entry`.
+            deadline_gated_group_entry(&state, name, record, &scope, &deadline, started_at)
+        }
         Err(UpdateGroupError::NotFound) => group_not_found(&name, started_at),
         Err(UpdateGroupError::NoSuchContext(context)) => error(
             ErrorCode::NoContext,

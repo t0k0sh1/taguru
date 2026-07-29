@@ -132,6 +132,14 @@ fn main() {
     // while its own call is in flight (inserted right before its job is
     // queued, removed the moment a worker claims a cancellation or
     // finishes normally).
+    // The queue's own depth cap, separate from `max_concurrent_tools`
+    // (which bounds how many jobs run at once, not how many may wait).
+    // Without this, a client pipelining `tools/call` requests without
+    // limit could grow the queue — each entry holding a full request
+    // body, e.g. an `import` stream — without bound. A small multiple
+    // of the worker count keeps every worker fed a few jobs ahead
+    // without letting the backlog run away.
+    let queue_capacity = max_concurrent_tools.saturating_mul(4).max(1);
     let tracked_calls: Arc<Mutex<HashMap<u64, bool>>> = Arc::new(Mutex::new(HashMap::new()));
     // Resolves a client response id to the sequence number of whichever
     // job is CURRENTLY tracked under it — the most recently queued call
@@ -141,7 +149,14 @@ fn main() {
     // erases — any earlier job's own entry in `tracked_calls` above.
     let active_by_id: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut next_seq: u64 = 0;
-    let (job_tx, job_rx) = mpsc::channel::<ToolJob>();
+    // Bounded, not `mpsc::channel`'s unbounded queue: `send` below
+    // blocks once `queue_capacity` jobs are already waiting, so a
+    // client that pipelines calls faster than the pool can drain them
+    // throttles the stdio read loop itself instead of growing the
+    // queue without bound. Blocking here is the right backpressure —
+    // this loop's only other job is reading the next line, which can
+    // wait; it must never buffer unboundedly on the client's behalf.
+    let (job_tx, job_rx) = mpsc::sync_channel::<ToolJob>(queue_capacity);
     // `mpsc::Receiver` isn't `Sync`; the mutex is what lets every
     // worker share the one queue instead of each needing its own.
     let job_rx = Arc::new(Mutex::new(job_rx));
@@ -229,7 +244,9 @@ fn main() {
                 // this reuse can never erase a cancellation already
                 // recorded against it.
                 active_by_id.lock().insert(response_id.clone(), seq);
-                // No receiver ever drops before `job_tx` does (every
+                // Blocks (see `queue_capacity` above) once the queue is
+                // full — the intended backpressure, not a bug. No
+                // receiver ever drops before `job_tx` does (every
                 // worker holds its own clone of `job_rx` until this
                 // loop drops the sender below), so this send cannot
                 // fail during normal operation.
@@ -604,7 +621,18 @@ impl Bridge {
         let mut response = response
             .map_err(|error| format!("request assembly failed: {error}"))
             .map_err(mcp::ToolError::from)?
-            .map_err(|error| format!("server unreachable at {}: {error}", self.base))
+            .map_err(|error| {
+                // The full URL and raw transport error are operator
+                // diagnostics — logged here, on stderr, the same
+                // channel every other startup/transport note in this
+                // binary uses — but never handed to the MCP client:
+                // `self.base` is this bridge's internal wiring, not
+                // something the agent on the other end of stdio should
+                // see, and the raw error can carry OS/library detail
+                // with no actionable meaning to it either.
+                eprintln!("taguru-mcp: request to {} failed: {error}", self.base);
+                "failed to reach the taguru server".to_string()
+            })
             .map_err(mcp::ToolError::from)?;
         let code = response.status().as_u16();
         if code < 400 {

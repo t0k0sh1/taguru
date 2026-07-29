@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-use super::args::{need, optional_bool, pick};
+use super::args::{need, optional_bool, optional_string, pick};
 use super::route::route_tool;
 
 /// Extracts `(subject, label, object)` from an `AssociationOut`-shaped
@@ -287,7 +287,8 @@ pub fn run_retrieve_bounded(
     // answer, the one failure mode worse than an error.
     let mut passage_hits = Value::Array(Vec::new());
     let mut search_plan = Value::Null;
-    if let Some(text_fallback_query) = arguments.get("text_fallback_query").and_then(Value::as_str)
+    let text_fallback_query = optional_string(arguments, "text_fallback_query")?;
+    if let Some(text_fallback_query) = text_fallback_query
         && (!text_fallback_only_if_empty || associations.is_empty())
     {
         let mut search_args = json!({ "context": context, "query": text_fallback_query });

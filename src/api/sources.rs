@@ -27,6 +27,17 @@ pub struct LookupPassagesRequest {
     pub sources: Vec<String>,
 }
 
+/// The `empty`/`oversized` gate every source-shaped field goes through
+/// before it reaches a lookup or write that would otherwise pay for a
+/// disk read (or fsync) before failing to find it. Shared by
+/// `lookup_passages`, `citation`, and `retract_source`.
+fn invalid_source(source: &str, started_at: Instant) -> Option<Response> {
+    if let Some(refusal) = empty("source", source, started_at) {
+        return Some(refusal);
+    }
+    oversized("source", source, MAX_NAME_BYTES, started_at)
+}
+
 /// The dereference half of "find with the graph, answer from the text":
 /// attributions name sources, this returns the original passages behind
 /// them (and which sources have none registered).
@@ -47,6 +58,11 @@ pub async fn lookup_passages(
     // scales with this list, so the list itself is what gets bounded.
     if let Some(refusal) = overlong("sources", request.sources.len(), started_at) {
         return refusal;
+    }
+    for source in &request.sources {
+        if let Some(refusal) = invalid_source(source, started_at) {
+            return refusal;
+        }
     }
     if deadline.expired() {
         return deadline_exceeded(started_at);
@@ -94,6 +110,9 @@ pub async fn citation(
     AppJson(request): AppJson<CitationRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = invalid_source(&request.source, started_at) {
+        return refusal;
+    }
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
@@ -260,10 +279,7 @@ pub async fn retract_source(
     // source, retract_association's subject/label/object): an empty or
     // oversized source would otherwise reach the lookup below unchecked,
     // paying for a marker fsync and a WAL fsync before failing to find it.
-    if let Some(refusal) = empty("source", &request.source, started_at) {
-        return refusal;
-    }
-    if let Some(refusal) = oversized("source", &request.source, MAX_NAME_BYTES, started_at) {
+    if let Some(refusal) = invalid_source(&request.source, started_at) {
         return refusal;
     }
     if deadline.expired() {

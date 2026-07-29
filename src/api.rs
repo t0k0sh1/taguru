@@ -687,26 +687,35 @@ pub(crate) fn key_name(key: &Option<axum::Extension<crate::auth::AuthKey>>) -> &
     key.as_ref().map_or("-", |extension| extension.0.0.as_ref())
 }
 
-/// Pulls a named path parameter out of request parts by hand —
-/// `RawPathParams` rejects param-less routes, so it cannot ride a
-/// handler's signature as an ordinary extractor the way `MatchedPath`
-/// (which supports optional extraction) does. Shared by the auth
-/// middleware's per-context grant check and the access-log middleware's
-/// logged name, both of which run ahead of routing proper and so must
-/// extract by hand from the parts they hold.
+/// Pulls a named path parameter out of request parts by hand — a
+/// route's params can't ride a handler's signature as an ordinary
+/// extractor the way `MatchedPath` (which supports optional
+/// extraction) does. Shared by the auth middleware's per-context grant
+/// check and the access-log middleware's logged name, both of which
+/// run ahead of routing proper and so must extract by hand from the
+/// parts they hold. Goes through [`axum::extract::Path`] (the same
+/// extractor [`AppPath`] wraps for handlers) rather than
+/// `RawPathParams`, so a percent-encoded segment decodes here exactly
+/// as it would in a handler — `RawPathParams` hands back the raw,
+/// still-encoded bytes, which would compare unequal to a handler's
+/// decoded value for a context name containing a percent-encoded
+/// character.
 pub(crate) async fn path_param(
     parts: &mut axum::http::request::Parts,
     name: &str,
 ) -> Option<String> {
     use axum::extract::FromRequestParts as _;
-    axum::extract::RawPathParams::from_request_parts(parts, &())
+    // A `Vec` of pairs decodes every route's (typically one or two)
+    // segments the same way a `HashMap` would, without paying for a
+    // map allocation on every call just to look up a single key.
+    axum::extract::Path::<Vec<(String, String)>>::from_request_parts(parts, &())
         .await
         .ok()
-        .and_then(|params| {
+        .and_then(|axum::extract::Path(params)| {
             params
-                .iter()
-                .find(|(param, _)| *param == name)
-                .map(|(_, value)| value.to_string())
+                .into_iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value)
         })
 }
 
