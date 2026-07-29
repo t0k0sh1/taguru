@@ -1681,12 +1681,12 @@ fn differences_header_matches_the_adr_shape() {
     let lines = compute_differences_lines(&dir, false).expect("computes");
     let header = &lines[0];
     assert_eq!(header["kind"], "header");
-    assert_eq!(header["taguru_benchmark_differences"], 1);
+    assert_eq!(header["taguru_benchmark_differences"], 2);
     assert_eq!(header["run_id"], "run-diff");
     assert_eq!(header["text_included"], false);
     assert_eq!(
         header["pairs"],
-        serde_json::json!([{"pair_id": "alpha__beta", "a": "alpha", "b": "beta"}])
+        serde_json::json!([{"pair_id": "5:alpha__beta", "a": "alpha", "b": "beta"}])
     );
     assert_eq!(
         header["matching"],

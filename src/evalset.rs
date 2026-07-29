@@ -352,6 +352,14 @@ fn interpret_case(
                  be empty"
             ));
         }
+        if let Some(quote) = &citation.quote
+            && quote.trim().is_empty()
+        {
+            return Err(format!(
+                "{label}: line {number}: case '{case_id}': expected_citations: quote must not \
+                 be empty"
+            ));
+        }
     }
 
     let floor: Option<f32> =
@@ -441,6 +449,13 @@ pub(crate) fn load_eval_file(path: &Path, mode: Extensions) -> Result<LoadedEval
             ));
         }
         for expected in &wire.expected_sources {
+            if expected.source.trim().is_empty() {
+                return Err(format!(
+                    "{label}: line {number}: case '{}': expected_sources: source must not be \
+                     empty",
+                    wire.case_id
+                ));
+            }
             if expected.relevance > 3 {
                 return Err(format!(
                     "{label}: line {number}: case '{}': expected_sources relevance must be \

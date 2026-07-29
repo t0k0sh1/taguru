@@ -1900,9 +1900,10 @@ pub async fn track_http(
     // this key delete" has no answer after the fact. "-" mirrors the
     // key convention below. The names are identifiers, not memory
     // content — the registry's own warnings already print them.
-    // Extracted by hand: `RawPathParams` rejects param-less routes, so
-    // it cannot ride the signature as an extractor the way MatchedPath
-    // (which supports optional extraction) does.
+    // Extracted by hand: a route's params can't ride the signature as
+    // an extractor the way MatchedPath (which supports optional
+    // extraction) does. `path_param` decodes the same way a handler's
+    // `AppPath` would, so a percent-encoded name logs decoded here too.
     let (mut parts, body) = request.into_parts();
     let name = crate::api::path_param(&mut parts, "name")
         .await
@@ -1940,8 +1941,19 @@ pub async fn track_http(
         Some(trace_id) => tracing::info!(
             method = %method,
             route = %route,
-            context = %context,
-            group = %group,
+            // `escape_debug`, not a bare Display: `context`/`group`
+            // decode straight from the URL path (`path_param`
+            // percent-decodes), so a segment carrying an encoded
+            // control character (e.g. `%0A`) would otherwise land in
+            // the log line raw. A plain `?context` (Debug) would
+            // escape it too, but ALSO wraps the whole value in an
+            // extra pair of quotes under `TAGURU_LOG_FORMAT=json`,
+            // double-encoding what JSON already escapes on its own —
+            // `escape_debug` gets the same control-character escaping
+            // with no format-dependent quoting either layer has to
+            // undo.
+            context = %context.escape_debug(),
+            group = %group.escape_debug(),
             status,
             key = %key,
             latency_ms = elapsed.as_secs_f64() * 1000.0,
@@ -1951,8 +1963,8 @@ pub async fn track_http(
         None => tracing::info!(
             method = %method,
             route = %route,
-            context = %context,
-            group = %group,
+            context = %context.escape_debug(),
+            group = %group.escape_debug(),
             status,
             key = %key,
             latency_ms = elapsed.as_secs_f64() * 1000.0,

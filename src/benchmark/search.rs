@@ -74,7 +74,12 @@ use crate::remote::{Api, ApiFailure};
 use super::identity;
 use super::{BenchManifest, DocumentInfo, ManifestModel, load_bench_manifest};
 
-const BENCHMARK_RETRIEVAL_VERSION: u64 = 1;
+// Bumped from 1: the `pairs` map's keys changed shape from
+// `"{a}__{b}"` to a length-prefixed `"{len}:{a}__{b}"` to close a
+// collision between differently-split underscored model ids — see
+// `compare::differences::BENCHMARK_DIFFERENCES_VERSION`, bumped for
+// the same reason.
+const BENCHMARK_RETRIEVAL_VERSION: u64 = 2;
 const DEFAULT_LIMIT: usize = 10;
 /// Mirrors the server's own `MAX_MATCH_LIMIT` (src/api.rs) — a
 /// `--limit`/`options.limit` above this could never be honored anyway.
@@ -782,7 +787,7 @@ fn build_case_block(context: &SearchContext, case: &EvalCase) -> (CaseBlock, Vec
     for i in 0..model_ids.len() {
         for j in (i + 1)..model_ids.len() {
             let (a, b) = (model_ids[i], model_ids[j]);
-            let key = pair_key(a, b);
+            let key = super::pair_key(a, b);
             let outcome = match (hit_locators.get(a), hit_locators.get(b)) {
                 (Some(hits_a), Some(hits_b)) => {
                     let (jaccard, shared_hits, mean_rank_difference) = pair_overlap(hits_a, hits_b);
@@ -813,14 +818,6 @@ fn build_case_block(context: &SearchContext, case: &EvalCase) -> (CaseBlock, Vec
         },
         warnings,
     )
-}
-
-fn pair_key(a: &str, b: &str) -> String {
-    if a <= b {
-        format!("{a}__{b}")
-    } else {
-        format!("{b}__{a}")
-    }
 }
 
 /// One case's search against one model's corpus: the hits (already

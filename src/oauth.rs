@@ -63,11 +63,19 @@ pub const CODE_CAP: usize = 100;
 pub const ACCESS_CAP: usize = 100;
 pub const REFRESH_CAP: usize = 100;
 
-pub fn now_secs() -> u64 {
+/// Wall-clock seconds since the Unix epoch. `Err` when the system
+/// clock reads before 1970 — a misconfigured or rolled-back clock.
+/// Every expiry check in this file is `expires_at > now`, so silently
+/// substituting `0` here (as `unwrap_or(0)` once did) would make every
+/// token look permanently unexpired: a fail-OPEN hiding behind a
+/// fail-closed-looking comparison. Callers must instead propagate this
+/// error, or — where no error path exists — fail closed explicitly by
+/// treating the token as already expired.
+pub fn now_secs() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
+        .map_err(|_| "system clock reads before the Unix epoch".to_string())
 }
 
 /// 32 bytes of CSPRNG output as base64url — token material, client
@@ -414,6 +422,11 @@ impl Oauth {
                 client_name.len()
             ));
         }
+        // Read before `clients` is even locked: once the eviction loop
+        // below starts removing entries, a clock failure from `?` must
+        // not abandon those removals mid-registration — a failed
+        // registration must leave every existing client untouched.
+        let created_at = now_secs()?;
         let client = {
             // A `refresh` grant exists only once a human has approved a
             // client_id on the consent page (see `issue_code`/`mint`), so
@@ -456,7 +469,7 @@ impl Oauth {
                 client_id: random_token(),
                 client_name: client_name.to_string(),
                 redirect_uris,
-                created_at: now_secs(),
+                created_at,
             };
             clients.push(client.clone());
             client
@@ -700,7 +713,9 @@ impl Oauth {
         let access = self.access.lock().unwrap();
         let mut matched = None;
         for token in access.iter() {
-            if token.expires_at > now && bool::from(token.hash.as_bytes().ct_eq(hash.as_bytes())) {
+            let unexpired = token.expires_at > now;
+            let hash_matches = bool::from(token.hash.as_bytes().ct_eq(hash.as_bytes()));
+            if unexpired && hash_matches {
                 matched = Some(Arc::clone(&token.key));
             }
         }

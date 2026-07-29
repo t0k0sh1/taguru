@@ -1057,11 +1057,11 @@ fn benchmark_compare_derives_differences_for_each_model_pair() {
 
     let lines = read_differences_lines(&dir);
     assert_eq!(lines[0]["kind"], "header");
-    assert_eq!(lines[0]["taguru_benchmark_differences"], 1);
+    assert_eq!(lines[0]["taguru_benchmark_differences"], 2);
     assert_eq!(lines[0]["text_included"], false);
     assert_eq!(
         lines[0]["pairs"],
-        serde_json::json!([{"pair_id": "m1__m2", "a": "m1", "b": "m2"}])
+        serde_json::json!([{"pair_id": "2:m1__m2", "a": "m1", "b": "m2"}])
     );
     for line in &lines {
         assert_no_banned_keys(line);

@@ -971,10 +971,14 @@ fn spawn_keyring_reload_tasks(
         // small KEY=VALUE table `reload_keyring` is about to read in
         // full the moment a change fires, so hashing it every tick
         // costs nothing close to a full parse.
+        // SHA-256, not the FNV-1a fold `hash.rs` owns for change
+        // detection elsewhere: rotation here gates a keyring reload, so
+        // the signature needs collision resistance FNV-1a does not
+        // offer, not just speed.
         let signature = |path: &std::path::Path| {
             std::fs::read(path)
                 .ok()
-                .map(|bytes| hash::fnv1a_fold(hash::FNV1A_OFFSET, bytes))
+                .map(|bytes| sha256::sha256_hex(&bytes))
         };
         let mut last = signature(&path);
         let mut ticker = tokio::time::interval(CONFIG_WATCH_INTERVAL);
@@ -986,7 +990,7 @@ fn spawn_keyring_reload_tasks(
             let Some(current) = signature(&path) else {
                 continue;
             };
-            if last != Some(current) {
+            if last.as_ref() != Some(&current) {
                 // Remember the state we ATTEMPTED, refusal included:
                 // one loud line per change, not one per tick. A
                 // reverted file hashes differently again and

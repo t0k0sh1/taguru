@@ -1265,11 +1265,45 @@ fn build_missed(
     }
     if let Some(structural) = structural {
         for assoc in &structural.associations {
-            let why = match &assoc.query {
+            let why: Option<String> = match &assoc.query {
                 Some(QueryProbe::Queried { total, .. }) if *total >= 1 => None,
-                Some(QueryProbe::Queried { .. }) => Some("query returned no association"),
-                Some(QueryProbe::Errored { .. }) => Some("query errored"),
-                None => Some("query never ran (a position did not pin)"),
+                Some(QueryProbe::Queried { .. }) => {
+                    Some("query returned no association".to_string())
+                }
+                Some(QueryProbe::Errored { .. }) => Some("query errored".to_string()),
+                None => {
+                    // A position's own `/resolve` call failing outright
+                    // (`PositionOutcome::Errored`, a transport-level
+                    // fault) is never the same fact as zero/multiple
+                    // candidates coming back cleanly — the former is
+                    // possibly-transient infra trouble, the latter a
+                    // data-quality miss. Keep them distinguishable in
+                    // `missed[]` rather than collapsing both into "a
+                    // position did not pin."
+                    let errored_positions: Vec<(&str, &str)> = [
+                        ("subject", &assoc.subject),
+                        ("label", &assoc.label),
+                        ("object", &assoc.object),
+                    ]
+                    .into_iter()
+                    .filter_map(|(name, outcome)| match outcome {
+                        PositionOutcome::Errored { message, .. } => Some((name, message.as_str())),
+                        _ => None,
+                    })
+                    .collect();
+                    if errored_positions.is_empty() {
+                        Some("query never ran (a position did not pin)".to_string())
+                    } else {
+                        Some(format!(
+                            "a position could not be resolved due to a transport error: {}",
+                            errored_positions
+                                .iter()
+                                .map(|(name, message)| format!("{name}: {message}"))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ))
+                    }
+                }
             };
             if let Some(why) = why {
                 all.push(format!(
@@ -1475,6 +1509,7 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
     let mut citation_resolved_n = 0u64;
     let mut citation_no_source_n = 0u64;
     let mut citation_no_paragraph_n = 0u64;
+    let mut citation_other_n = 0u64;
     let mut citation_section_checked = 0u64;
     let mut citation_section_matched = 0u64;
     let mut citation_quote_checked = 0u64;
@@ -1555,7 +1590,14 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
                     CitationOutcome::Unresolved { code, .. } => match code.as_deref() {
                         Some("no_source") => citation_no_source_n += 1,
                         Some("no_paragraph") => citation_no_paragraph_n += 1,
-                        _ => {}
+                        // An absent code (transport failure, unparsable
+                        // response) or any other ErrorCode this loader
+                        // does not special-case still counted toward
+                        // citation_total above — bucketed here so
+                        // resolved + no_source + no_paragraph + other
+                        // always sums to citation_total instead of
+                        // silently losing the record.
+                        _ => citation_other_n += 1,
                     },
                 }
             }
@@ -1627,6 +1669,10 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
     metrics.insert(
         "citations.no_paragraph".to_string(),
         MetricValue::Ratio(ratio_metric(citation_no_paragraph_n, citation_total)),
+    );
+    metrics.insert(
+        "citations.other".to_string(),
+        MetricValue::Ratio(ratio_metric(citation_other_n, citation_total)),
     );
     metrics.insert(
         "citations.section_match".to_string(),
@@ -1884,6 +1930,21 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             "Share of every citation call that failed with ErrorCode \
              no_paragraph — the expected_citations entry names a \
              paragraph index out of range for its source.",
+            "POST /contexts/{name}/citations",
+            None,
+        ),
+    );
+    d.insert(
+        "citations.other".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Share of every citation call that neither resolved nor \
+             failed with ErrorCode no_source/no_paragraph — a transport \
+             failure, an unparsable response, or any other ErrorCode. \
+             resolved + no_source + no_paragraph + other always sums \
+             to 1.0.",
             "POST /contexts/{name}/citations",
             None,
         ),

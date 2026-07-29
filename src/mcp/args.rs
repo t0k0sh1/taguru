@@ -52,6 +52,20 @@ pub(super) fn optional_bool(arguments: &Value, key: &str, default: bool) -> Resu
     }
 }
 
+/// Pulls an optional string argument, `None` when absent — but, like
+/// `need`/`optional_bool`, refusing to silently treat a present-but-
+/// wrong-typed value as absent.
+pub(super) fn optional_string<'a>(
+    arguments: &'a Value,
+    key: &str,
+) -> Result<Option<&'a str>, String> {
+    match arguments.get(key) {
+        Some(Value::String(text)) => Ok(Some(text)),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(format!("argument '{key}' must be a string")),
+    }
+}
+
 /// Copies the listed keys into a request body, skipping absent ones.
 pub(super) fn pick(arguments: &Value, keys: &[&str]) -> Value {
     let mut body = serde_json::Map::new();

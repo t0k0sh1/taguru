@@ -108,9 +108,16 @@ pub(crate) async fn prepare(
         }
         true
     });
-    let cache_mode = record
-        .as_ref()
-        .is_some_and(|record| record.hydrated_from.is_some());
+    // A replication record for this bucket already existing — even one
+    // still mid-hydration (`hydrated_from: None`, phase one of the
+    // two-phase write below) — is enough to mark this directory as the
+    // bucket's cache, not independent local truth. Gating on
+    // `hydrated_from.is_some()` instead would let a crash between
+    // phase one and phase two boot a half-materialized directory as
+    // truth at line ~171: nonempty, no verified generation recorded,
+    // and under that stricter gate indistinguishable from a directory
+    // hydration never touched at all.
+    let cache_mode = record.is_some();
     let empty = essentially_empty(data_dir)?;
 
     let fence = match ship::newest_fence(store, root).await {
@@ -210,12 +217,22 @@ pub(crate) async fn prepare(
     // after can still drop its directory entry wholesale.
     std::fs::create_dir_all(data_dir)?;
     crate::storage::fsync_parent_dir(data_dir)?;
+    // Written in TWO phases, exactly like `prepare_replica` below: a
+    // degraded `serve --replica` boot trusts `hydrated_from.is_some()`
+    // as proof this directory finished a verified hydration against
+    // that generation once. Claiming it before `hydrate_shared` even
+    // runs would let a crash or error mid-hydration leave a record
+    // that overclaims a cache no replica may actually trust — phase
+    // one only marks the directory as this URL's cache workspace
+    // (carrying forward whatever an EARLIER hydration verified), and
+    // phase two advances `hydrated_from` to this generation only after
+    // the shared hydration actually lands.
     ship::write_replication_record(
         data_dir,
         &ship::ReplicationRecord {
             url: url.to_string(),
             claimed_generation: record.as_ref().and_then(|record| record.claimed_generation),
-            hydrated_from: Some(generation),
+            hydrated_from: record.as_ref().and_then(|record| record.hydrated_from),
         },
     )?;
 
@@ -228,6 +245,21 @@ pub(crate) async fn prepare(
         LanePolicy::KeepAckedTail,
     ));
     let report = hydrator.hydrate_shared().await?;
+    ship::write_replication_record(
+        data_dir,
+        &ship::ReplicationRecord {
+            url: url.to_string(),
+            // Cleared, not carried forward: this directory has just
+            // become a verified cache of `generation`, so whatever
+            // generation it may have claimed as a writer in some
+            // earlier lifetime (the warm-restart check above already
+            // ruled out the current fence's generation) no longer
+            // describes this directory's role — carrying it forward
+            // would misidentify this cache as that prior writer.
+            claimed_generation: None,
+            hydrated_from: Some(generation),
+        },
+    )?;
     tracing::info!(
         generation,
         contexts = hydrator.context_stems().len(),
@@ -1629,6 +1661,51 @@ mod tests {
         for dir in [bucket, target, aged_target, retired_bucket, retired_target] {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    /// The writer-boot counterpart of
+    /// `a_replica_with_nothing_to_tail_serves_what_it_has_and_waits`'s
+    /// "UNVERIFIED conversion" case: a crash between `prepare`'s two
+    /// phases leaves a replication record naming no verified
+    /// generation (`hydrated_from: None`) sitting beside a nonempty,
+    /// half-materialized directory. `cache_mode` must key on the
+    /// record existing at all — not on `hydrated_from` being set — so
+    /// this state still refuses to boot the partial files as
+    /// independent truth when the bucket cannot be reached to
+    /// re-verify them.
+    #[tokio::test]
+    async fn a_phase_one_record_with_no_verified_generation_refuses_an_unreachable_bucket() {
+        let target = scratch("writer-phase-one-unreachable");
+        std::fs::write(target.join("ctx_a.ctx"), b"a partially-hydrated file").unwrap();
+        let url = url_of("writer-phase-one-gone");
+        ship::write_replication_record(
+            &target,
+            &ship::ReplicationRecord {
+                url: url.clone(),
+                claimed_generation: None,
+                hydrated_from: None,
+            },
+        )
+        .unwrap();
+
+        let gone = scratch("writer-phase-one-gone-bucket");
+        let unreachable = local_store(&gone);
+        std::fs::remove_dir_all(&gone).unwrap();
+        std::fs::write(&gone, b"not a directory").unwrap();
+
+        let error = prepare(&unreachable, &StorePath::default(), &url, &target, false)
+            .await
+            .expect_err(
+                "an unverified phase-one record with an unreachable bucket must not \
+                 boot the half-materialized directory as independent truth",
+            );
+        assert!(
+            error.to_string().contains("no independent truth to serve"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_file(&gone);
+        let _ = std::fs::remove_dir_all(target);
     }
 
     #[tokio::test]

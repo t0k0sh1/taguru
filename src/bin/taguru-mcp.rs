@@ -132,6 +132,14 @@ fn main() {
     // while its own call is in flight (inserted right before its job is
     // queued, removed the moment a worker claims a cancellation or
     // finishes normally).
+    // The queue's own depth cap, separate from `max_concurrent_tools`
+    // (which bounds how many jobs run at once, not how many may wait).
+    // Without this, a client pipelining `tools/call` requests without
+    // limit could grow the queue — each entry holding a full request
+    // body, e.g. an `import` stream — without bound. A small multiple
+    // of the worker count keeps every worker fed a few jobs ahead
+    // without letting the backlog run away.
+    let queue_capacity = max_concurrent_tools.saturating_mul(4).max(1);
     let tracked_calls: Arc<Mutex<HashMap<u64, bool>>> = Arc::new(Mutex::new(HashMap::new()));
     // Resolves a client response id to the sequence number of whichever
     // job is CURRENTLY tracked under it — the most recently queued call
@@ -141,7 +149,14 @@ fn main() {
     // erases — any earlier job's own entry in `tracked_calls` above.
     let active_by_id: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut next_seq: u64 = 0;
-    let (job_tx, job_rx) = mpsc::channel::<ToolJob>();
+    // Bounded, not `mpsc::channel`'s unbounded queue: `send` below
+    // blocks once `queue_capacity` jobs are already waiting, so a
+    // client that pipelines calls faster than the pool can drain them
+    // throttles the stdio read loop itself instead of growing the
+    // queue without bound. Blocking here is the right backpressure —
+    // this loop's only other job is reading the next line, which can
+    // wait; it must never buffer unboundedly on the client's behalf.
+    let (job_tx, job_rx) = mpsc::sync_channel::<ToolJob>(queue_capacity);
     // `mpsc::Receiver` isn't `Sync`; the mutex is what lets every
     // worker share the one queue instead of each needing its own.
     let job_rx = Arc::new(Mutex::new(job_rx));
@@ -229,17 +244,35 @@ fn main() {
                 // this reuse can never erase a cancellation already
                 // recorded against it.
                 active_by_id.lock().insert(response_id.clone(), seq);
-                // No receiver ever drops before `job_tx` does (every
-                // worker holds its own clone of `job_rx` until this
-                // loop drops the sender below), so this send cannot
-                // fail during normal operation.
-                let _ = job_tx.send(ToolJob {
+                // Non-blocking, not `send`: this loop is also the only
+                // reader of `notifications/cancelled` for every already-
+                // queued call, so blocking here for queue room would
+                // make cancellation unresponsive for exactly the slow
+                // calls it exists to interrupt. A full queue rolls this
+                // job's tracking back — it never actually queued — and
+                // tells the client to retry instead of leaving it
+                // waiting on a reply that will never come.
+                match job_tx.try_send(ToolJob {
                     id,
-                    response_id,
+                    response_id: response_id.clone(),
                     seq,
                     name,
                     arguments,
-                });
+                }) {
+                    Ok(()) => {}
+                    Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => {
+                        tracked_calls.lock().remove(&seq);
+                        clear_active(&active_by_id, &response_id, seq);
+                        emit(
+                            &stdout,
+                            &mcp::error_response(
+                                job.id,
+                                -32000,
+                                "tool queue is full; retry the call".to_string(),
+                            ),
+                        );
+                    }
+                }
             }
             classified => {
                 if let Some(response) = dispatch(&bridge, &instructions, classified) {
@@ -604,7 +637,19 @@ impl Bridge {
         let mut response = response
             .map_err(|error| format!("request assembly failed: {error}"))
             .map_err(mcp::ToolError::from)?
-            .map_err(|error| format!("server unreachable at {}: {error}", self.base))
+            .map_err(|_error| {
+                // Neither `self.base` nor the raw transport error goes
+                // to the client OR the log: `self.base` comes straight
+                // from `TAGURU_URL` with no userinfo-stripping (unlike
+                // the HTTP API's `reject_userinfo`), so a
+                // `user:pass@host` configuration would otherwise leak
+                // the credential to stderr; the raw error can carry
+                // OS/library detail (which may itself embed the
+                // request URI) with no actionable meaning to an
+                // operator anyway.
+                eprintln!("taguru-mcp: request to the configured taguru server failed");
+                "failed to reach the taguru server".to_string()
+            })
             .map_err(mcp::ToolError::from)?;
         let code = response.status().as_u16();
         if code < 400 {

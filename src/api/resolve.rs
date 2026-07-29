@@ -217,15 +217,20 @@ fn resolve_tiers(
         Ok(result) => result,
         Err(failure) => return Err(access_error(state, failure, name, started_at)),
     };
-    // Resolutions arrive best-first, so bounding the flood right here
-    // keeps the strongest candidates and spares everything downstream
-    // (the semantic dedup scan, gloss reads, serialization) the
-    // pathological tail. The confidence probe below reads only the
-    // first entry, which the bound never touches.
-    let overflow = bounded.split_off(bounded.len().min(limit));
+    // The confidence probe reads the untruncated list's own best
+    // (best-first) entry BEFORE the flood bound below removes it — a
+    // `limit` of 0 would otherwise move a confident top candidate into
+    // `overflow` first, making a lexically confident cue look
+    // unconfident and forcing a needless semantic round trip whose
+    // answer the final `limit=0` trim would discard anyway.
     let confident = bounded
         .first()
         .is_some_and(|best| best.score >= LEXICAL_CONFIDENCE);
+    // Resolutions arrive best-first, so bounding the flood right here
+    // keeps the strongest candidates and spares everything downstream
+    // (the semantic dedup scan, gloss reads, serialization) the
+    // pathological tail.
+    let overflow = bounded.split_off(bounded.len().min(limit));
     let semantic = if confident {
         Vec::new()
     } else {

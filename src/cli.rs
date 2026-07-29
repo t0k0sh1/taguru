@@ -337,7 +337,9 @@ pub fn dispatch() -> Command {
     match args.first().map(String::as_str) {
         None => Command::Serve(parse_serve(&[])),
         Some("serve") => Command::Serve(parse_serve(&args[1..])),
-        Some("--config") => Command::Serve(parse_serve(&args)),
+        Some("--config") | Some("--take-over") | Some("--replica") => {
+            Command::Serve(parse_serve(&args))
+        }
         Some("route") => Command::Route(parse_route(&args[1..])),
         Some("version") => {
             refuse_extras("version", &args[1..]);

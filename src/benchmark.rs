@@ -668,6 +668,36 @@ fn validate_model_id(path: &Path, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The lexicographically smaller id first — the canonical order
+/// [`pair_key`] and every caller that carries a parallel `a`/`b` pair
+/// (`compare::differences`'s `PairInfo`) must agree on, so the same
+/// unordered pair produces the same key and the same `(a, b)` display
+/// regardless of manifest declaration order or which side a caller's
+/// own iteration happened to visit first.
+pub(crate) fn canonical_pair<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+/// Builds a collision-safe string key identifying an unordered pair of
+/// model ids — shared by `search`'s `pairs` map (a `BTreeMap<String,
+/// _>` serialized as a JSON object, so the key must stay a plain
+/// string) and `compare::differences`'s `pair_id` output field. Always
+/// canonicalizes via [`canonical_pair`] first, so `pair_key(a, b)` and
+/// `pair_key(b, a)` produce the same key — callers that iterate model
+/// ids in different orders (manifest declaration order vs. a sorted
+/// `BTreeMap`'s keys) still land on one shared entry per pair.
+/// `validate_model_id` permits consecutive underscores in a model id,
+/// so a naive `format!("{a}__{b}")` is not injective: `(a, "b__c")`
+/// and `("a__b", c)` both format to `"a__b__c"`, silently colliding.
+/// Prefixing `a`'s byte length followed by `:` — a byte
+/// `validate_model_id` never allows in a model id — makes the split
+/// point between `a` and `b` unambiguous, so distinct pairs can never
+/// produce the same key.
+pub(crate) fn pair_key(a: &str, b: &str) -> String {
+    let (a, b) = canonical_pair(a, b);
+    format!("{}:{a}__{b}", a.len())
+}
+
 /// Rejects inline `user:password@` userinfo at parse time (ADR 0003
 /// §8's Secrets rule): a credential belongs in `api_key_env`, never
 /// embedded in the endpoint URL where it would ride into every artifact
@@ -1751,13 +1781,18 @@ impl DiagnosticsTail {
 struct RunsWriter {
     file: fs::File,
     path: PathBuf,
+    /// Set once a record fails to serialize, so that failure mode is
+    /// reported exactly once. Independent of `io_warned` below: a
+    /// serialization failure must not suppress a LATER, unrelated
+    /// disk-full or permission error from being reported too — both
+    /// are real desyncs between `documents_written`/`attempts_total`
+    /// (advisory counters that keep counting regardless) and the
+    /// file's actual contents, and neither may silently mask the
+    /// other.
+    serialize_warned: bool,
     /// Set once a write or flush fails, so a disk-full or permission
-    /// error is reported exactly once — `documents_written`/
-    /// `attempts_total` keep counting regardless (this sidecar is
-    /// advisory, not the durable record), but a silent desync between
-    /// those counters and the file's actual contents must not go
-    /// unreported.
-    warned: bool,
+    /// error is reported exactly once. See `serialize_warned` above.
+    io_warned: bool,
 }
 
 impl RunsWriter {
@@ -1772,7 +1807,8 @@ impl RunsWriter {
         let mut writer = Self {
             file,
             path: path.to_path_buf(),
-            warned: false,
+            serialize_warned: false,
+            io_warned: false,
         };
         if let Some(header) = header {
             writer.write_value(header);
@@ -1781,8 +1817,20 @@ impl RunsWriter {
     }
 
     fn write_value(&mut self, value: &Value) {
-        let Ok(mut line) = serde_json::to_string(value) else {
-            return;
+        let mut line = match serde_json::to_string(value) {
+            Ok(line) => line,
+            Err(error) => {
+                if !self.serialize_warned {
+                    self.serialize_warned = true;
+                    eprintln!(
+                        "taguru: benchmark: warning: {}: failed to serialize a record ({error}) \
+                         — it was dropped, so documents_written/attempts_total may now \
+                         overcount what this file holds",
+                        self.path.display()
+                    );
+                }
+                return;
+            }
         };
         line.push('\n');
         let result = self
@@ -1790,9 +1838,9 @@ impl RunsWriter {
             .write_all(line.as_bytes())
             .and_then(|()| self.file.flush());
         if let Err(error) = result
-            && !self.warned
+            && !self.io_warned
         {
-            self.warned = true;
+            self.io_warned = true;
             eprintln!(
                 "taguru: benchmark: warning: {}: write failed ({error}) — \
                  documents_written/attempts_total may now overcount what this file holds",

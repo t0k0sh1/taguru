@@ -634,8 +634,12 @@ pub async fn require_bearer(
         keyring
             .authenticate(token)
             .or_else(|| match (&gate.oauth, request.uri().path()) {
+                // Fail closed on a broken clock: treat every token as
+                // already expired (u64::MAX can exceed no real
+                // `expires_at`) rather than resurrecting the old
+                // fail-open `now_secs() == 0` behavior.
                 (Some(oauth), "/mcp") => oauth
-                    .authenticate(token, crate::oauth::now_secs())
+                    .authenticate(token, crate::oauth::now_secs().unwrap_or(u64::MAX))
                     .filter(|key| keyring.recognizes(key)),
                 _ => None,
             })
@@ -1036,7 +1040,7 @@ mod tests {
         let client = oauth
             .register_client("claude", vec!["https://claude.ai/cb".to_string()])
             .unwrap();
-        let now = crate::oauth::now_secs();
+        let now = crate::oauth::now_secs().unwrap();
         let verifier = "0123456789012345678901234567890123456789012345";
         let code = oauth.issue_code(
             &client,
@@ -1096,7 +1100,7 @@ mod tests {
         let client = oauth
             .register_client("claude", vec!["https://claude.ai/cb".to_string()])
             .unwrap();
-        let now = crate::oauth::now_secs();
+        let now = crate::oauth::now_secs().unwrap();
         let verifier = "0123456789012345678901234567890123456789012345";
         let code = oauth.issue_code(
             &client,
@@ -1189,7 +1193,7 @@ mod tests {
         let client = oauth
             .register_client("claude", vec!["https://claude.ai/cb".to_string()])
             .unwrap();
-        let now = crate::oauth::now_secs();
+        let now = crate::oauth::now_secs().unwrap();
         let verifier = "0123456789012345678901234567890123456789012345";
         let code = oauth.issue_code(
             &client,
@@ -1638,6 +1642,46 @@ mod tests {
             send("DELETE", "/contexts/sake", "tok-a").await.status(),
             200
         );
+    }
+
+    /// The scope check reads the path param through the same decoding
+    /// `AppPath`/`Path` give handlers, not the raw percent-encoded
+    /// segment — a context name split across a percent-encoded byte
+    /// must still match the grant it decodes to, not be refused for
+    /// comparing unequal to the still-encoded form.
+    #[tokio::test]
+    async fn scope_check_matches_a_percent_encoded_context_name() {
+        let mut keyring = Keyring::parse(None, Some("bot:tok-c".to_string())).unwrap();
+        keyring
+            .apply_scopes(Some(r#"{"bot": {"role": "write", "contexts": ["sake"]}}"#))
+            .unwrap();
+        let keyring = SharedKeyring::new(keyring);
+        let gate = Arc::new(Gate {
+            keyring,
+            oauth: None,
+            fail_limiter: Arc::new(crate::limits::RateLimiter::new(0)),
+        });
+        let app = Router::new()
+            .route(
+                "/contexts/{name}/associations",
+                axum::routing::post(|| async { "landed" }),
+            )
+            .layer(axum::middleware::from_fn(enforce_authorization))
+            .layer(axum::middleware::from_fn_with_state(gate, require_bearer));
+
+        // "sa%6be" decodes to "sake", exactly the granted context.
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/contexts/sa%6be/associations")
+                    .header("Authorization", "Bearer tok-c")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
     }
 
     /// RFC 7230 §3.2.2: a repeated Authorization header is malformed. Rather
