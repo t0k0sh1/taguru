@@ -65,6 +65,10 @@ fn write_thresholds(dir: &Path, contents: &str) -> PathBuf {
 /// query string), and body bytes (by `Content-Length`; 0 when absent,
 /// which handles the harness's bodyless GETs same as a POST).
 fn read_proxied_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)> {
+    // A stalled peer must surface as a fast `None` (and so a readable
+    // test failure), never an indefinite block that reads as an
+    // opaque CI hang.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
     let body_start = loop {
@@ -411,6 +415,7 @@ fn evaluate_fixture_covers_graph_bm25_filter_known_miss_and_citation_paths() {
     // expected_sources (ADR 0004 §8 orthogonality).
     let citations = &case("citations-005")["citations"]["checks"];
     let checks = citations.as_array().unwrap();
+    assert_eq!(checks.len(), 6, "{checks:?}");
     assert_eq!(checks[0]["outcome"], "resolved", "{checks:?}");
     assert_eq!(checks[0]["quote"]["matched"], true, "{checks:?}");
     assert_eq!(checks[1]["outcome"], "resolved", "{checks:?}");
@@ -781,6 +786,14 @@ fn evaluate_records_a_null_provider_model_when_no_provider_is_configured() {
     assert_eq!(code, 0, "{stderr}");
     let evaluation: Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
+    // `serde_json` indexing yields `Null` for an absent key too, which
+    // would not tell "block present with a null provider_model" apart
+    // from "no block at all" — the presence check below is what
+    // actually locks in this test's own claim.
+    assert!(
+        evaluation["corpus"]["embeddings"].is_object(),
+        "the corpus.embeddings block must be recorded: {evaluation}"
+    );
     assert_eq!(
         evaluation["corpus"]["embeddings"]["provider_model"],
         Value::Null,

@@ -333,6 +333,37 @@ fn production_only(source: &str) -> &str {
     }
 }
 
+/// Whether `source` references `crate::{module}` through any import
+/// shape: a plain `crate::{module}::...` path, or `module` appearing
+/// inside a single-level grouped import like `use crate::{extract,
+/// embedding};`. Not a full parser — no nested groups, no `as`-alias
+/// tracking — deliberately a step up from a pure substring search, not
+/// a syntax tree: this guard exists to catch an INADVERTENT seam, and
+/// matches the rest of this codebase's plain string-based source
+/// checks (`cli.rs`'s `every_documented_variable_is_a_known_key`)
+/// rather than pulling in a parser crate for one test.
+fn references_module(source: &str, module: &str) -> bool {
+    if source.contains(&format!("crate::{module}")) {
+        return true;
+    }
+    let mut rest = source;
+    while let Some(start) = rest.find("crate::{") {
+        let after = &rest[start + "crate::{".len()..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let group = &after[..end];
+        if group.split(',').any(|member| {
+            let member = member.trim();
+            member == module || member.starts_with(&format!("{module}::"))
+        }) {
+            return true;
+        }
+        rest = &after[end + 1..];
+    }
+    false
+}
+
 #[test]
 fn evaluate_module_never_names_an_extraction_or_embedding_seam() {
     // Scans evaluate.rs and its submodules — ADR 0004 §12's structural
@@ -360,14 +391,40 @@ fn evaluate_module_never_names_an_extraction_or_embedding_seam() {
             "found {embed_prefix} in the evaluate module tree"
         );
         assert!(
-            !source.contains("crate::extract"),
-            "found a crate::extract import in the evaluate module tree"
+            !references_module(source, "extract"),
+            "found a crate::extract reference (plain or grouped import) in the evaluate module \
+             tree"
         );
         assert!(
-            !source.contains("crate::embedding"),
-            "found a crate::embedding import in the evaluate module tree"
+            !references_module(source, "embedding"),
+            "found a crate::embedding reference (plain or grouped import) in the evaluate \
+             module tree"
         );
     }
+}
+
+#[test]
+fn references_module_catches_a_grouped_import_the_plain_substring_check_would_miss() {
+    assert!(references_module(
+        "use crate::{extract, embedding};",
+        "extract"
+    ));
+    assert!(references_module(
+        "use crate::{extract, embedding};",
+        "embedding"
+    ));
+    assert!(references_module(
+        "use crate::{other, extract::sha256_hex};",
+        "extract"
+    ));
+    assert!(references_module(
+        "use crate::extract::sha256_hex;",
+        "extract"
+    ));
+    assert!(!references_module("use crate::{sha256, hash};", "extract"));
+    // A name merely containing "extract" as a substring (e.g. a future
+    // `extraction` module) must not false-positive.
+    assert!(!references_module("use crate::{extraction};", "extract"));
 }
 
 // ========================= Scoring test fixtures (#274) =========================

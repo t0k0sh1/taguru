@@ -18,3 +18,21 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
             hex
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pinned against the published SHA-256 test vector for `"abc"`,
+    /// independent of `sha256_hex` itself — every other test in the
+    /// tree computes both sides through this same function, which
+    /// would not catch a regression in the digest algorithm or the
+    /// hex formatting.
+    #[test]
+    fn sha256_hex_matches_the_published_test_vector_for_abc() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+}
