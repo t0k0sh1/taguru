@@ -968,35 +968,46 @@ fn spawn_keyring_reload_tasks(
         // change. `std::fs::read` already follows the symlink hop a
         // Kubernetes secret volume performs, so the swapped target's
         // bytes are what get hashed either way. The file is the same
-        // small KEY=VALUE table `reload_keyring` is about to read in
-        // full the moment a change fires, so hashing it every tick
-        // costs nothing close to a full parse.
+        // small KEY=VALUE table a reload is about to parse in full the
+        // moment a change fires, so hashing it every tick costs
+        // nothing close to a full parse.
         // SHA-256, not the FNV-1a fold `hash.rs` owns for change
         // detection elsewhere: rotation here gates a keyring reload, so
         // the signature needs collision resistance FNV-1a does not
         // offer, not just speed.
-        let signature = |path: &std::path::Path| {
-            std::fs::read(path)
-                .ok()
-                .map(|bytes| sha256::sha256_hex(&bytes))
-        };
-        let mut last = signature(&path);
+        //
+        // This read is also THE read the reload itself uses: passing
+        // its bytes straight into `reload_keyring_with_bytes` below
+        // means change detection and the reload can never disagree
+        // about what the file said — there is no second, independent
+        // read of the file left to race a concurrent rewrite. (A
+        // second read used to exist here, and a transient miss on it
+        // could refuse a reload for content `last` had already
+        // recorded as seen, silently dropping it forever.)
+        let mut last: Option<String> = std::fs::read(&path)
+            .ok()
+            .map(|bytes| sha256::sha256_hex(&bytes));
         let mut ticker = tokio::time::interval(CONFIG_WATCH_INTERVAL);
         ticker.tick().await; // fires immediately; boot already read the file
         loop {
             ticker.tick().await;
             // An unreadable file is NOT a change: transient volume
             // states must neither trigger a reload nor poison `last`.
-            let Some(current) = signature(&path) else {
+            // This same read serves the reload below too — no second
+            // read of the file exists to race a concurrent rewrite
+            // anymore.
+            let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };
+            let current = sha256::sha256_hex(&bytes);
             if last.as_ref() != Some(&current) {
                 // Remember the state we ATTEMPTED, refusal included:
                 // one loud line per change, not one per tick. A
                 // reverted file hashes differently again and
                 // re-triggers.
                 last = Some(current);
-                let outcome = auth::reload_keyring(&keyring, &source, "config-watch");
+                let outcome =
+                    auth::reload_keyring_with_bytes(&keyring, &source, "config-watch", &bytes);
                 state
                     .metrics()
                     .record_keyring_reload(outcome != auth::ReloadOutcome::Refused);

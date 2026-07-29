@@ -478,15 +478,41 @@ impl AuthSource {
     /// file must keep the previous table, unlike boot where the same
     /// failure refuses to start.
     fn read_current(&self) -> Result<[Option<String>; AUTH_VARS.len()], String> {
-        let file: HashMap<String, String> = match &self.config {
+        let file_text = match &self.config {
+            None => None,
+            Some(path) => Some(
+                std::fs::read_to_string(path)
+                    .map_err(|error| format!("cannot read config {}: {error}", path.display()))?,
+            ),
+        };
+        self.table_from(file_text.as_deref())
+    }
+
+    /// Parses `file_text` (the config file's contents, already read by
+    /// the caller) into `read_current`'s table. Split out so a caller
+    /// that already has the file's bytes in hand — the config-watch loop,
+    /// which read them to compute this tick's change-detection digest —
+    /// can reuse them here instead of reading the file a second time,
+    /// closing the race where the file changes between two independent
+    /// reads: a transient miss on a second read would otherwise refuse a
+    /// reload whose content was already known-good, with no registered
+    /// change left to retry it on later.
+    fn table_from(
+        &self,
+        file_text: Option<&str>,
+    ) -> Result<[Option<String>; AUTH_VARS.len()], String> {
+        let file: HashMap<String, String> = match file_text {
             None => HashMap::new(),
-            Some(path) => {
-                let text = std::fs::read_to_string(path)
-                    .map_err(|error| format!("cannot read config {}: {error}", path.display()))?;
+            Some(text) => {
                 // Collecting in file order makes later duplicates win,
                 // exactly as `load_config` applies them at boot.
-                crate::config::parse_config(&text)
-                    .map_err(|message| format!("config {}: {message}", path.display()))?
+                crate::config::parse_config(text)
+                    .map_err(|message| {
+                        let path = self.config.as_deref().expect(
+                            "file_text is Some only when self.config names the file it came from",
+                        );
+                        format!("config {}: {message}", path.display())
+                    })?
                     .into_iter()
                     .collect()
             }
@@ -534,12 +560,36 @@ pub fn reload_keyring(
     source: &AuthSource,
     trigger: &'static str,
 ) -> ReloadOutcome {
+    apply_reload(shared, source.read_current(), trigger)
+}
+
+/// Like [`reload_keyring`], but for a caller that already has the
+/// config file's current bytes in hand — see `AuthSource::table_from`
+/// for why reusing them here (instead of reading the file again)
+/// matters.
+pub fn reload_keyring_with_bytes(
+    shared: &SharedKeyring,
+    source: &AuthSource,
+    trigger: &'static str,
+    bytes: &[u8],
+) -> ReloadOutcome {
+    let values = std::str::from_utf8(bytes)
+        .map_err(|error| format!("config is not valid UTF-8: {error}"))
+        .and_then(|text| source.table_from(Some(text)));
+    apply_reload(shared, values, trigger)
+}
+
+fn apply_reload(
+    shared: &SharedKeyring,
+    values: Result<[Option<String>; AUTH_VARS.len()], String>,
+    trigger: &'static str,
+) -> ReloadOutcome {
     let _serialized = shared.reload_serial.lock();
     let refused = |error: String| {
         tracing::error!(%error, trigger, "keyring reload refused; the previous table stays armed");
         ReloadOutcome::Refused
     };
-    let [single, named, scopes] = match source.read_current() {
+    let [single, named, scopes] = match values {
         Ok(values) => values,
         Err(error) => return refused(error),
     };
@@ -1177,6 +1227,60 @@ mod tests {
         scoped.apply_scopes(Some(r#"{"bot": "read"}"#)).unwrap();
         assert_eq!(scoped.diff(&unscoped).rescoped, vec!["bot"]);
         assert!(scoped.diff(&scoped).is_empty());
+    }
+
+    /// `table_from` fed the exact bytes on disk must agree with
+    /// `read_current`'s own read of that same file — the config-watch
+    /// loop passes pre-read bytes through `table_from` instead of
+    /// letting the reload read the file a second time, and that split
+    /// must not silently change what a reload sees. Covers a normal
+    /// file, a malformed one (both must refuse identically, same
+    /// message), and no config file at all (`table_from`'s `None`
+    /// branch, exercised the same way `read_current` hits it).
+    #[test]
+    fn table_from_pre_read_bytes_agrees_with_read_current() {
+        let dir = std::env::temp_dir().join(format!("taguru-tablefrom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("taguru.env");
+        std::fs::write(
+            &config,
+            "TAGURU_API_TOKENS=ci:tok-a,laptop:tok-b\nTAGURU_KEY_SCOPES={\"ci\": \"read\"}\n",
+        )
+        .unwrap();
+
+        // File-only source: from_shell all false, so every value comes
+        // from parsing the file.
+        let file_source = AuthSource {
+            config: Some(config.clone()),
+            from_shell: [false; AUTH_VARS.len()],
+        };
+        let via_read_current = file_source.read_current().unwrap();
+        let text = std::fs::read_to_string(&config).unwrap();
+        let via_table_from = file_source.table_from(Some(&text)).unwrap();
+        assert_eq!(via_read_current, via_table_from);
+
+        // A malformed file: both paths must refuse, with the identical
+        // message — `table_from` still owns the same error formatting
+        // `read_current` used to produce inline.
+        std::fs::write(&config, "not a valid line at all\n").unwrap();
+        let malformed_text = std::fs::read_to_string(&config).unwrap();
+        let read_current_error = file_source.read_current().unwrap_err();
+        let table_from_error = file_source.table_from(Some(&malformed_text)).unwrap_err();
+        assert_eq!(read_current_error, table_from_error);
+
+        // No config file at all: `read_current` never reads anything
+        // and `table_from(None)` is its exact stand-in.
+        let no_config = AuthSource {
+            config: None,
+            from_shell: [false; AUTH_VARS.len()],
+        };
+        assert_eq!(
+            no_config.read_current().unwrap(),
+            no_config.table_from(None).unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// One reload against a LIVE gate: the same `SharedKeyring` flips

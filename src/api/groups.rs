@@ -6,7 +6,7 @@ use axum::response::Response;
 
 use serde::{Deserialize, Serialize};
 
-use taguru::deadline::Deadline;
+use taguru::deadline::{Deadline, DeadlineExceeded};
 
 use crate::groups::GroupRecord;
 use crate::metrics::ErrorKind;
@@ -78,20 +78,25 @@ pub(super) fn scope_allows(
 /// the row would also hide it from the very key that may still add or
 /// remove its own contexts there. The members are what a grant is
 /// about, so the members are what gets filtered.
+///
+/// Propagates [`DeadlineExceeded`] straight from [`group_fingerprint`]:
+/// the fingerprint walk is the only expensive part of assembling a
+/// row, so there is nothing left worth finishing once it gives up.
 fn group_entry(
     state: &AppState,
     name: String,
     record: GroupRecord,
     scope: &Option<axum::Extension<crate::auth::KeyScope>>,
-) -> GroupEntry {
-    let fingerprint = group_fingerprint(state, &name, scope);
-    GroupEntry {
+    deadline: &Deadline,
+) -> Result<GroupEntry, DeadlineExceeded> {
+    let fingerprint = group_fingerprint(state, &name, scope, deadline)?;
+    Ok(GroupEntry {
         name,
         description: record.description,
         contexts: scoped_member_contexts(record.contexts, scope),
         groups: record.groups,
         fingerprint,
-    }
+    })
 }
 
 /// A single group's [`group_entry`] response, gated on the deadline and
@@ -111,8 +116,10 @@ fn deadline_gated_group_entry(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    let entry = tokio::task::block_in_place(|| group_entry(state, name, record, scope));
-    ok(entry, started_at)
+    match tokio::task::block_in_place(|| group_entry(state, name, record, scope, deadline)) {
+        Ok(entry) => ok(entry, started_at),
+        Err(DeadlineExceeded) => deadline_exceeded(started_at),
+    }
 }
 
 /// The change token on one group row: FNV-1a over the scope-visible
@@ -123,13 +130,27 @@ fn deadline_gated_group_entry(
 /// nested children, and sorted iteration (the closure is a `BTreeSet`)
 /// makes the hash deterministic. A member registered but mid-delete
 /// contributes nothing, exactly as it answers no search.
+///
+/// `deadline` is checked on EVERY iteration of the closure walk, not
+/// only once before the walk starts: each iteration takes a
+/// per-context revision lock, so cost scales with the group's nesting
+/// and membership rather than with this being "one row" — a deeply
+/// nested or large group could otherwise run well past the point
+/// where the HTTP client's own timeout gave up on the response,
+/// burning worker capacity on a result nobody will read (#318). A
+/// caller that must finish regardless (`update_group`, after its
+/// write already committed) passes `Deadline::unbounded()`.
 fn group_fingerprint(
     state: &AppState,
     name: &str,
     scope: &Option<axum::Extension<crate::auth::KeyScope>>,
-) -> String {
+    deadline: &Deadline,
+) -> Result<String, DeadlineExceeded> {
     let mut digest = crate::hash::FNV1A_OFFSET;
     for context in state.group_context_closures([name]) {
+        if deadline.expired() || injected_fingerprint_loop_expiry() {
+            return Err(DeadlineExceeded);
+        }
         if !scope_allows(scope, &context) {
             continue;
         }
@@ -142,7 +163,55 @@ fn group_fingerprint(
         digest = crate::hash::fnv1a_fold(digest, revision.passages.to_le_bytes());
         digest = crate::hash::fnv1a_fold(digest, revision.config.to_le_bytes());
     }
-    format!("{digest:016x}")
+    Ok(format!("{digest:016x}"))
+}
+
+// Test-only deterministic fault injection for `group_fingerprint`'s
+// per-iteration deadline check.
+#[cfg(test)]
+thread_local! {
+    static EXPIRE_FINGERPRINT_LOOP_AFTER: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Test-only deterministic fault injection for [`group_fingerprint`]'s
+/// per-iteration deadline check: mirrors
+/// [`crate::storage::injected_persistence_failure`]'s "counted successes,
+/// then fire" shape, but for a `Deadline` instead of an `io::Error`.
+/// Real wall-clock expiry inside a fingerprint walk is hard to land
+/// deterministically (each iteration is an in-memory lock read, done
+/// in well under a microsecond), so a regression test that needs the
+/// check to fire partway through — not before the walk starts, not
+/// after it finishes — arms this instead of racing a `Duration`.
+/// Thread-local, so parallel tests stay independent; self-clearing
+/// once it fires, so one arm never leaks into an unrelated later test
+/// on a reused thread.
+///
+/// Arms the fault: the next `remaining` per-iteration checks report
+/// "not yet expired" as usual, and the one after that reports expired.
+#[cfg(test)]
+fn expire_fingerprint_loop_after(remaining: u32) {
+    EXPIRE_FINGERPRINT_LOOP_AFTER.with(|cell| cell.set(Some(remaining)));
+}
+
+#[cfg(test)]
+fn injected_fingerprint_loop_expiry() -> bool {
+    EXPIRE_FINGERPRINT_LOOP_AFTER.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            true
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            false
+        }
+        None => false,
+    })
+}
+
+#[cfg(not(test))]
+fn injected_fingerprint_loop_expiry() -> bool {
+    false
 }
 
 /// [`group_entry`]'s member filter on its own — the one loop behind
@@ -231,19 +300,26 @@ pub async fn list_groups(
     );
     // Each row's fingerprint walks its transitive member closure and
     // takes a per-context revision lock — cost that scales with group
-    // nesting/membership, not with the page size alone. Gate it on the
-    // deadline like `list_contexts`' whole-directory path (35f5ead) and
-    // keep it off the async worker, the same shape as every other
-    // fsync/scan-bearing handler here.
+    // nesting/membership, not with the page size alone. This upfront
+    // check (like `list_contexts`' whole-directory path, 35f5ead) only
+    // catches a budget already spent before the page loop starts; the
+    // per-ROW gate lives inside `group_entry`/`group_fingerprint` now
+    // (#318), so a page of many groups stops promptly at whichever row
+    // is in flight when the deadline lands instead of finishing every
+    // row that happened to be queued first. Kept off the async worker,
+    // the same shape as every other fsync/scan-bearing handler here.
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    let groups: Vec<_> = tokio::task::block_in_place(|| {
+    let groups: Result<Vec<_>, DeadlineExceeded> = tokio::task::block_in_place(|| {
         page.into_iter()
-            .map(|(name, record)| group_entry(&state, name, record, &scope))
+            .map(|(name, record)| group_entry(&state, name, record, &scope, &deadline))
             .collect()
     });
-    ok(GroupPage { total, groups }, started_at)
+    match groups {
+        Ok(groups) => ok(GroupPage { total, groups }, started_at),
+        Err(DeadlineExceeded) => deadline_exceeded(started_at),
+    }
 }
 
 pub async fn get_group(
@@ -452,9 +528,22 @@ pub async fn update_group(
             // client to retry a write that already landed; finish
             // computing the fingerprint and report success instead,
             // same as `get_group` would for the record `update_group`
-            // just wrote.
-            let entry = tokio::task::block_in_place(|| group_entry(&state, name, record, &scope));
-            ok(entry, started_at)
+            // just wrote. `group_fingerprint`'s per-iteration deadline
+            // check (#318) would otherwise cut this short on the
+            // caller's now-possibly-spent request budget, so this
+            // deliberately hands it a fresh, unbounded one instead of
+            // the request's own — the only caller in this file that
+            // does, and only because the mutation is already durable.
+            let entry = tokio::task::block_in_place(|| {
+                group_entry(&state, name, record, &scope, &Deadline::unbounded())
+            });
+            match entry {
+                Ok(entry) => ok(entry, started_at),
+                // `Deadline::unbounded()` never expires; kept for
+                // exhaustiveness (same shape as `compact.rs`'s
+                // `report_outcome`).
+                Err(DeadlineExceeded) => deadline_exceeded(started_at),
+            }
         }
         Err(UpdateGroupError::NotFound) => group_not_found(&name, started_at),
         Err(UpdateGroupError::NoSuchContext(context)) => error(
@@ -609,5 +698,176 @@ pub async fn rename_group(
                 started_at,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::registry::ContextMeta;
+
+    use super::*;
+
+    /// A fresh, on-disk-backed [`AppState`] — same construction
+    /// [`crate::api`]'s own `restore_refusal_frames_a_spent_budget_as_a_resumable_timeout`
+    /// test uses, kept local rather than reaching into
+    /// `crate::registry::test_support` (a private module of `registry`
+    /// that this file, outside that module tree, cannot name).
+    fn scratch_state(tag: &str) -> AppState {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-groups-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        AppState::boot(dir, usize::MAX, None).unwrap()
+    }
+
+    /// A one-context group, ready for the deadline tests below.
+    fn one_context_group(state: &AppState, group: &str, context: &str) {
+        state.create(context, ContextMeta::default()).unwrap();
+        state
+            .create_group(
+                group,
+                "d".to_string(),
+                BTreeSet::from([context.to_string()]),
+                BTreeSet::new(),
+            )
+            .unwrap();
+    }
+
+    /// A deadline that has already elapsed by the time it is checked —
+    /// mirrors `deadline.rs`'s own `a_zero_budget_is_already_expired`:
+    /// the clock advances between construction and observation even
+    /// under load, so a zero budget cannot be observed as anything but
+    /// expired.
+    fn already_expired_deadline() -> Deadline {
+        let deadline = Deadline::after(Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(deadline.expired(), "a zero budget must read as expired");
+        deadline
+    }
+
+    /// Regression for #318: a deadline spent before `group_fingerprint`
+    /// is ever called must refuse without walking a single context —
+    /// covers both `list_groups`' and `deadline_gated_group_entry`'s
+    /// pre-loop gate (unchanged by this fix) and `group_fingerprint`
+    /// itself now returning the same `Err` a caller that skipped the
+    /// pre-check would need.
+    #[test]
+    fn group_fingerprint_refuses_immediately_once_the_deadline_has_already_expired() {
+        let state = scratch_state("fp-expired");
+        one_context_group(&state, "kura", "sake");
+
+        let deadline = already_expired_deadline();
+        let result = group_fingerprint(&state, "kura", &None, &deadline);
+        assert_eq!(result, Err(DeadlineExceeded));
+    }
+
+    /// Regression for #318: the per-context deadline check inside
+    /// `group_fingerprint`'s loop must fire on a LATER iteration, not
+    /// only once before the whole walk starts. A real
+    /// `Deadline::after(tiny duration)` cannot land this
+    /// deterministically — each iteration is an in-memory lock read
+    /// that completes in well under a microsecond, so a real clock
+    /// would need to race an unpredictable number of iterations. The
+    /// test instead arms `expire_fingerprint_loop_after`, the
+    /// thread-local fault this file defines for exactly this shape
+    /// (mirroring `crate::storage`'s `fail_persistence_ops_after`):
+    /// the deadline passed here never actually expires, so this can
+    /// only return `Err` if the loop consults the hook on more than
+    /// one iteration — the "before the pre-#318 fix, this hook did not
+    /// even exist" case that would otherwise return `Ok`.
+    #[test]
+    fn group_fingerprint_checks_the_deadline_on_a_later_iteration_not_only_before_the_walk_starts()
+    {
+        let state = scratch_state("fp-mid-loop");
+        for context in ["sake", "bunko", "cha"] {
+            state.create(context, ContextMeta::default()).unwrap();
+        }
+        state
+            .create_group(
+                "kura",
+                "d".to_string(),
+                BTreeSet::from(["sake".to_string(), "bunko".to_string(), "cha".to_string()]),
+                BTreeSet::new(),
+            )
+            .unwrap();
+
+        // The first per-iteration check reports "not yet expired"; the
+        // second reports expired — proof the check runs more than
+        // once across the three-context closure.
+        expire_fingerprint_loop_after(1);
+        let result = group_fingerprint(&state, "kura", &None, &Deadline::unbounded());
+        assert_eq!(result, Err(DeadlineExceeded));
+    }
+
+    /// Regression for #318: `get_group` with an already-expired
+    /// deadline answers the standard timeout envelope instead of
+    /// computing a fingerprint — the HTTP-handler-level twin of the
+    /// unit test above, exercised the same way `api.rs`'s own
+    /// `restore_refusal_frames_a_spent_budget_as_a_resumable_timeout`
+    /// calls a handler function directly and inspects the JSON body.
+    #[tokio::test]
+    async fn get_group_with_an_already_expired_deadline_answers_timeout() {
+        let state = scratch_state("get-expired");
+        one_context_group(&state, "kura", "sake");
+        let deadline = already_expired_deadline();
+
+        let response = get_group(
+            State(state),
+            AppPath("kura".to_string()),
+            None,
+            axum::Extension(deadline),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "error", "{body}");
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+    }
+
+    /// Regression for #318: on a page of several groups, a deadline
+    /// that lands MID-PAGE — after the first row's fingerprint has
+    /// already run to completion, before the second row's has even
+    /// started — must answer the standard timeout envelope rather than
+    /// a partial or a complete page. `list_groups`' own `Deadline`
+    /// never actually expires here; the injected fault fires inside
+    /// the second row's `group_fingerprint` call, standing in for a
+    /// real deadline landing between two rows of the same page — the
+    /// scenario the pre-#318 code (one check before the whole loop)
+    /// could not detect at all.
+    // `list_groups` runs its work under `tokio::task::block_in_place`,
+    // which panics off a single-threaded runtime — unlike the
+    // already-expired-deadline tests above, this one's deadline never
+    // actually expires, so it reaches that call.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_groups_answers_timeout_not_a_partial_or_complete_page_when_the_deadline_lands_mid_page()
+     {
+        let state = scratch_state("list-mid-page");
+        // Name order matters: "aaa" must be paged before "bbb" so its
+        // fingerprint is the one that completes before the fault
+        // fires on the row after it.
+        one_context_group(&state, "aaa", "ctx-a");
+        one_context_group(&state, "bbb", "ctx-b");
+
+        expire_fingerprint_loop_after(1);
+        let response = list_groups(
+            State(state),
+            None,
+            axum::Extension(Deadline::unbounded()),
+            AppQuery(KeysetQuery {
+                limit: None,
+                after: None,
+                prefix: None,
+            }),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "error", "{body}");
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
     }
 }
