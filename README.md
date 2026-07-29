@@ -23,10 +23,10 @@ playbook for clients itself: `GET /protocol` (the content of
 [src/llm-protocol.md](src/llm-protocol.md)).
 
 **Documentation: <https://t0k0sh1.github.io/taguru/>** — getting
-started, concepts, context & group modeling, the import/extract
-references, deployment guides (Docker Compose, Kubernetes, Amazon
-Bedrock), a compatibility and local-RAG troubleshooting guide, the
-internal architecture, and a walkthrough of an LLM retrieving over
+started, concepts, context & group modeling, the import/extract/
+evaluate references, deployment guides (Docker Compose, Kubernetes,
+Amazon Bedrock), a compatibility and local-RAG troubleshooting guide,
+the internal architecture, and a walkthrough of an LLM retrieving over
 MCP.
 
 ## Install
@@ -98,7 +98,7 @@ For the endpoint list and the ingest/retrieval discipline, ask the
 running server: `GET /protocol`. A guided tour is
 [Getting started](https://t0k0sh1.github.io/taguru/getting-started.html).
 
-Four entrances, depending on what you're building:
+Five entrances, depending on what you're building:
 
 | What you want | Start here |
 |---|---|
@@ -106,6 +106,7 @@ Four entrances, depending on what you're building:
 | Your own code, over HTTP or the Python/TypeScript SDKs | [Getting started](https://t0k0sh1.github.io/taguru/getting-started.html), then [SDKs and examples](#sdks-and-examples) |
 | A pile of documents, loaded all at once | [Loading knowledge in bulk](#loading-knowledge-in-bulk), below |
 | A fixed, fully local RAG corpus built with LangChain and Ollama | [Local RAG walkthrough](https://t0k0sh1.github.io/taguru/local-rag-walkthrough.html) |
+| Whether a config change improved or regressed retrieval over your own corpus | [Retrieval & citation quality gate](https://t0k0sh1.github.io/taguru/evaluate.html) |
 
 ## Using it from an LLM agent (MCP)
 
@@ -441,7 +442,12 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   top-match can land in the wrong cluster and get missed. Measured at
   the threshold: ~6–14ms of exact-sweep CPU per query against under a
   millisecond indexed; benchmarked recall@10 is ~100%, though the only
-  enforced regression guard is recall@50 at 80%.
+  enforced regression guard is recall@50 at 80% — a `cargo test`
+  assertion against synthetic vectors, not a measurement of your own
+  corpus's search or citation quality. Measuring that, and gating CI
+  on it, is
+  [`taguru evaluate`](https://t0k0sh1.github.io/taguru/evaluate.html)'s
+  job.
 - **A flaky embedding provider degrades instead of stalling every
   request.** Three consecutive failed provider calls open a circuit
   breaker; while it's open, every embedding attempt fails fast instead

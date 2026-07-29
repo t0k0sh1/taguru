@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Retrieval &amp; citation quality gate (evaluate) — Taguru</title>
+  <meta name="description" content="The complete reference for taguru evaluate and taguru evaluate compare: the eval.jsonl extension fields, the passage/structural/citation lane execution model, the recall@k/MRR/nDCG and citation metric catalog, the evaluation.json and changes.jsonl schemas, the thresholds file and exit 3 CI gate, and how this differs from calibrate, explain_resolve/explain_search, the ANN recall guard, and taguru benchmark.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="benchmark.html">Extraction benchmark</a>
+      <a href="evaluate.html" aria-current="page">Retrieval quality gate</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">reference · retrieval quality gate</div>
+    <h1>Retrieval &amp; citation quality gate — <code>taguru evaluate</code></h1>
+    <p class="lede">
+      Measures the public search and citation behavior of <b>one already-populated context</b>
+      against a labeled <code>eval.jsonl</code> and turns the result into a CI-suitable
+      <b>pass/fail gate</b> — the one verb in this tree that returns exit <code>3</code>. Every
+      call is HTTP, driven the same way any client reaches the server; no answer-generation LLM
+      appears anywhere on this path. The design is fixed by
+      <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0004-retrieval-citation-quality-gate.md">ADR 0004</a>;
+      this page documents the shape it produces.
+    </p>
+  </header>
+
+  <section id="cli">
+    <h2>The CLI shape</h2>
+    <pre><code>taguru evaluate --eval eval.jsonl --context sake \
+  --thresholds thresholds.json --out evaluation.json</code></pre>
+    <pre><code>--eval FILE          eval.jsonl (ADR 0003 §11's shared dataset, read under
+                    this verb's own #215 extension fields — see below)
+--context NAME       the already-populated context to evaluate
+--url URL            the server to query; default resolves the same way
+                    `taguru health` does (TAGURU_ADDR, or --config/
+                    TAGURU_CONFIG)
+--config FILE        load before resolving --url (same as --config
+                    everywhere else)
+--out FILE           where to write the artifact (default evaluation.json)
+--thresholds FILE     a checked-in JSON file of regression bounds (see
+                    <a href="#thresholds">below</a>); a completed run that violates one
+                    exits 3. Without it every completed run exits 0 and is
+                    report-only — a stderr line says so, so a CI job that
+                    forgot the flag does not pass silently.</code></pre>
+    <p>
+      This is a hand-rolled parser, like every other verb in this tree — no argument-parsing
+      library. Because the default mode has no subcommand name of its own,
+      <code>evaluate</code> has one rule the others don't: <b>a leading argument starting with
+      <code>--</code> selects the default (run) mode; a leading bare word selects a
+      subcommand</b> — today, only <code>compare</code>. <code>--eval</code> and
+      <code>--context</code> are required; every other flag is optional. Positional arguments
+      are refused in this mode. Exit codes:
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>0</code></td><td>Run completed, no <code>--thresholds</code> given (report-only), or every threshold satisfied.</td></tr>
+          <tr><td><code>1</code></td><td>The run could not complete — server unreachable at the <code>/health</code> preflight, a context-entry read failed before or after the run, listing the context's sources failed, or the artifact could not be written.</td></tr>
+          <tr><td><code>2</code></td><td>Usage or input error — bad/duplicate/unknown flag, missing <code>--eval</code>/<code>--context</code>, malformed <code>eval.jsonl</code> or <code>--thresholds</code> file, an <code>options.limit</code> outside <code>1..=1000</code>, an unresolvable or userinfo-bearing URL, an unknown context, or an <code>expected_sources</code> entry naming a source the corpus does not carry.</td></tr>
+          <tr><td><code>3</code></td><td>The run completed and a <code>--thresholds</code> bound was violated — the only exit code this tree assigns that meaning to, and the only verb that returns it.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      A CI job needs to tell "the corpus regressed, read the report" (<code>3</code>) apart from
+      "the run itself failed, retry" (<code>1</code>) and from "you passed a bad flag"
+      (<code>2</code>) — three different remediations, one exit code apiece. Without
+      <code>--thresholds</code>, a completed run is always <code>0</code> regardless of what the
+      metrics say; <code>evaluate</code> prints one stderr line noting the run is report-only so
+      that omission is never silent.
+    </p>
+  </section>
+
+  <section id="boundaries">
+    <h2>What this is not</h2>
+    <p class="section-sub">Five neighbors that measure something adjacent, and never a verdict</p>
+    <p>
+      <code>evaluate</code> is the only one of the following that produces a pass/fail judgment.
+      Everything else in this list either measures one thing in isolation or is explicitly
+      forbidden from ranking, scoring, or picking a winner.
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Feature</th><th>Surface</th><th>Scope</th><th>Output</th><th>Verdict?</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><a href="#calibrate"><code>calibrate</code></a></td>
+            <td>CLI, remote, read-only</td>
+            <td>One embedding model's semantic floor</td>
+            <td>stdout report / <code>--json</code> — no file</td>
+            <td>No — exit <code>0</code> even on an overlapping band</td>
+          </tr>
+          <tr>
+            <td><a href="#explain"><code>explain_resolve</code> / <code>explain_search</code></a></td>
+            <td>HTTP + MCP tool + SDK — <b>not a CLI command</b></td>
+            <td>One cue × one expected name, or one query × one source</td>
+            <td>JSON response, always HTTP 200</td>
+            <td>No — "a diagnosed miss is this endpoint's success"</td>
+          </tr>
+          <tr>
+            <td><a href="#ann-guard">The ANN recall guard</a></td>
+            <td><code>cargo test</code> in <code>src/embedding.rs</code></td>
+            <td>Synthetic in-process vectors, no corpus</td>
+            <td>A test assertion (and an ignored calibration sweep)</td>
+            <td>Test pass/fail only — ≥80% overlap@50 vs. an exact sweep</td>
+          </tr>
+          <tr>
+            <td><a href="#benchmark-extract"><code>benchmark extract</code> / <code>compare</code></a> (#189)</td>
+            <td>CLI</td>
+            <td>A model matrix's extraction behavior over one corpus</td>
+            <td><code>manifest.json</code>, <code>runs/*.jsonl</code>, <code>measurements.json</code>/<code>.csv</code>, <code>differences.jsonl</code></td>
+            <td>No — a banned-key test forbids <code>rank</code>/<code>score</code>/<code>winner</code>/<code>best</code>/<code>recommended</code>/<code>overall</code>/<code>delta_vs_*</code></td>
+          </tr>
+          <tr>
+            <td><a href="#benchmark-search"><code>benchmark search</code></a> (#260)</td>
+            <td>CLI, remote</td>
+            <td>N per-model corpora, the same question set</td>
+            <td><code>retrieval.json</code></td>
+            <td>No — gold-data-free and judgment-free by construction</td>
+          </tr>
+          <tr>
+            <td><b><code>evaluate</code></b> (this page)</td>
+            <td>CLI, remote</td>
+            <td>One labeled <code>eval.jsonl</code> against one populated corpus</td>
+            <td><code>evaluation.json</code> / <code>changes.jsonl</code></td>
+            <td><b>Yes — <code>--thresholds</code> exits 3 on a regression</b></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 id="calibrate"><code>calibrate</code>: one model's semantic floor, not retrieval quality</h3>
+    <p>
+      <code>taguru calibrate --context NAME --probes FILE</code> measures the semantic-floor
+      bands of a <i>running server's embedding model</i> and suggests a
+      <code>TAGURU_SEMANTIC_FLOOR</code>. That floor is a property of the model, not of the
+      corpus or the question set — a probe file is <code>cue&lt;TAB&gt;expected</code> pairs
+      where the cue is a spelling-free paraphrase, chosen precisely so the measurement stays
+      independent of any one corpus's content. It writes nothing to disk; the report is stdout
+      only (or <code>--json</code>), and even an overlapping band — "this model cannot separate
+      these two names at this dimension" — is exit <code>0</code>, because an honest overlap
+      finding is calibrate's success, not its failure. <code>evaluate</code> reads whatever floor
+      calibrate suggested (via <code>eval.jsonl</code>'s <code>options.floor</code>, or the
+      server's own configured default) and measures what that floor, applied to a labeled
+      question set, actually retrieves.
+    </p>
+
+    <h3 id="explain"><code>explain_resolve</code> / <code>explain_search</code>: one query, always 200</h3>
+    <p>
+      <code>POST /contexts/{name}/resolve/explain</code>,
+      <code>/resolve_label/explain</code>, and <code>/sources/search/explain</code> — exposed to
+      an LLM client as the <code>explain_resolve</code>, <code>explain_resolve_label</code>, and
+      <code>explain_search</code> MCP tools — diagnose exactly one cue against one expected name,
+      or one query against one source, for a human or agent debugging a single miss. Every
+      verdict is a 200: <code>not_in_vocabulary</code>, <code>below_floor</code>,
+      <code>below_cutoff</code>, and <code>served</code> are equally valid answers, because a
+      diagnosed miss is the endpoint's success, not its failure. There is no dataset, no
+      aggregation, and no CLI surface at all — these are single-call diagnostics, reachable over
+      HTTP, MCP, or the SDK. <code>evaluate</code> never calls them; it runs the same
+      <code>resolve</code>/<code>resolve_label</code>/<code>sources/search</code> endpoints these
+      explain routes diagnose, across an entire labeled dataset, and turns the aggregate into a
+      gate. When <code>evaluate</code> reports a coverage or recall miss, reaching for
+      <code>explain_resolve</code>/<code>explain_search</code> on that one case is exactly how you
+      find out why.
+    </p>
+
+    <h3 id="ann-guard">The ANN recall guard: synthetic vectors, not your corpus</h3>
+    <p>
+      Once one context's passage vectors cross a compiled-in row threshold, the semantic lane
+      switches from an exact cosine sweep to a small IVF (inverted-file) index for speed — a
+      microbenchmark decision, not a knob. Its regression guard lives entirely inside
+      <code>cargo test</code> (<code>src/embedding.rs</code>): a deterministic synthetic vector
+      store, a brute-force top-<i>k</i> as ground truth, and an assertion that the index's own
+      top-<i>k</i> overlaps it by at least 80% — "still high recall," never a brittle exact pin.
+      A second, <code>#[ignore]</code>d test compares wall-clock speed at scale, and a third,
+      also <code>#[ignore]</code>d, is the calibration sweep the threshold itself was picked
+      from. None of the three touch a real corpus, a labeled question, or a citation — they
+      guard one internal data structure's approximation quality against synthetic data.
+      <code>evaluate</code>'s <code>recall.recall_at_k</code>/<code>mrr</code>/<code>ndcg</code>
+      measure something categorically different: whether <i>your</i> corpus, searched with
+      <i>your</i> configuration, answers <i>your</i> labeled questions — the vector index
+      underneath might be exact or approximate, and evaluate does not know or care which.
+    </p>
+
+    <h3 id="benchmark-extract"><code>benchmark extract</code> / <code>compare</code> (#189): extraction, not retrieval</h3>
+    <p>
+      <a href="benchmark.html"><code>taguru benchmark extract</code></a> runs one
+      <code>taguru extract</code> subprocess per (model, run) cell across a model matrix, and
+      <a href="benchmark.html#compare"><code>taguru benchmark compare</code></a> is a pure,
+      network-free function of that results directory measuring extraction throughput,
+      volume, and run-to-run stability. Nothing here ever populates a live context or calls a
+      search endpoint — the whole pipeline is about what a model <i>extracts</i> from documents,
+      never about what a populated context <i>retrieves</i>. No single score or ranking is
+      possible by construction: a mechanical test asserts the emitted key set never contains
+      <code>rank</code>/<code>score</code>/<code>winner</code>/<code>best</code>/
+      <code>recommended</code>/<code>overall</code>/<code>delta_vs_*</code>. <code>evaluate</code>
+      shares no artifact and no code path with this pair at all — it starts from an
+      already-populated context and never touches an extraction model or a subprocess.
+    </p>
+
+    <h3 id="benchmark-search"><code>benchmark search</code> (#260): model A's corpus vs. model B's, not today vs. yesterday</h3>
+    <p>
+      <a href="benchmark.html#search"><code>taguru benchmark search</code></a> builds one
+      per-model corpus from a <code>benchmark extract</code> results directory and searches the
+      <b>same</b> question set against every one of them, reporting only differences between
+      models' result sets — gold-data-free and judgment-free by construction, exactly like
+      <code>compare</code> above. <code>evaluate</code> and <code>benchmark search</code> share
+      exactly <b>one</b> artifact — <a href="#dataset"><code>eval.jsonl</code></a> — and nothing
+      else: <code>benchmark search</code> reads it in <i>carry-through</i> mode (every #215
+      extension field rides through opaque and unvalidated, earning one warning per run if seen),
+      while <code>evaluate</code> reads it in <i>interpret</i> mode (typed, validated, no
+      warning). The two verbs answer different questions with the same file: <code>benchmark
+      search</code> asks <i>does model A's corpus retrieve differently from model B's, holding
+      the question set fixed</i>; <code>evaluate</code> asks <i>does this one corpus, today,
+      still answer its labeled questions the way it used to</i> — a quality gate over one corpus
+      across time, not a comparison across corpora. See
+      <a href="benchmark.html#search">the dataset section on <code>benchmark.html</code></a> for
+      the fields <code>benchmark search</code> itself reads.
+    </p>
+  </section>
+
+  <section id="execution">
+    <h2>Execution model: three lanes, fixed order, no fusion</h2>
+    <p>
+      Per case, up to three independent lanes run in a fixed order. No lane's result ever feeds
+      another, and no lane's raw score is folded into another lane's — recall/coverage scoring
+      reads only rank and label, never a hit's or a resolution's own <code>score</code> field.
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Lane</th><th>Runs when</th><th>Calls</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Passage</td>
+            <td>Always</td>
+            <td><code>POST /contexts/{name}/sources/search</code> with <code>{query, limit, semantic_floor, tags, since, until}</code></td>
+          </tr>
+          <tr>
+            <td>Structural</td>
+            <td>The case declares <code>expected_concepts</code>/<code>expected_labels</code>/<code>expected_associations</code></td>
+            <td><code>/resolve</code>, <code>/resolve_label</code> for coverage, then <code>/query</code> per association</td>
+          </tr>
+          <tr>
+            <td>Citation</td>
+            <td>The case declares <code>expected_citations</code></td>
+            <td>One <code>POST /contexts/{name}/citations</code> call per entry, strictly sequential</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="section-sub">Structural lane: coverage cues, then association probes</p>
+    <p>
+      <b>Coverage.</b> For each of the case's <code>cues[]</code> (falling back to
+      <code>query</code> when empty), <code>evaluate</code> calls <code>/resolve</code> and
+      <code>/resolve_label</code> with an <b>explicit <code>limit</code> of 5</b> — omitting it
+      means "the ceiling itself," up to 1000 candidates, which no case needs. Because tier scores
+      are not comparable across tiers, only the <b>highest tier present</b> is expanded — a
+      lexical candidate list and a semantic one are never mixed. <code>resolved_names[]</code>,
+      <code>resolve_tier</code>, and the <code>limit</code> used are recorded per cue, so a
+      structural miss is diagnosable as "resolution failed to find the name" versus "the graph
+      has no such edge."
+    </p>
+    <p>
+      <b>Association probes.</b> For each <code>expected_associations[]</code> entry,
+      <code>evaluate</code> resolves subject and object via <code>/resolve</code> and label via
+      <code>/resolve_label</code>, then calls <code>/query</code> with all three positions
+      pinned — but only if resolution yields <b>exactly one</b> candidate in the highest tier
+      present for every position. Zero candidates is <code>not_found</code>; two or more
+      same-tier candidates is <code>ambiguous</code>; in either case <code>/query</code> is
+      <b>never called</b> for that entry, and no combination is guessed at or fanned out over.
+      The per-entry outcome is recorded, so an ambiguous expectation reads as a visible,
+      reproducible diagnostic — "write a more specific cue" — never a silent skip.
+    </p>
+    <p class="section-sub">Why <code>/query</code>, not <code>/recall</code></p>
+    <p>
+      <code>Context::recall(cue)</code> returns every edge incident on a concept, and the HTTP
+      layer pages it at <code>clamp(limit, 100, 1000)</code> — a hub concept with more than 1000
+      incident edges can push the expected triple outside the page, a <b>silent false miss</b>
+      that looks like a retrieval failure but is a paging artifact. <code>/query</code> pins the
+      exact triple instead, returns <code>total</code>, and its cost does not grow with the
+      subject's degree.
+    </p>
+    <p class="section-sub"><code>activate</code>, <code>explore</code>, and <code>describe</code> are never called</p>
+    <p>
+      <code>activate</code>'s and <code>explore</code>'s results depend on
+      <code>decay</code>/<code>max_depth</code>, which no eval field declares — there is no
+      principled way to choose those parameters for a case that never asked for them.
+      <code>describe</code> is equally tempting to reach for and is named here explicitly so a
+      future reader does not assume it was overlooked rather than excluded. "Passage fallback"
+      names no server behavior either — no lane fuses into or falls back to the other. What
+      <code>evaluate</code> reports instead is a lane cross-tab
+      (<code>lanes.structural_hit</code>/<code>passage_hit</code>/<code>both</code>/
+      <code>neither</code>), computed only over cases that declare <b>both</b> a structural and
+      a source expectation <b>and</b> whose passage lane completed — a failed passage lane
+      cannot honestly report <code>passage_hit</code> either way, so it is excluded from the
+      denominator just like it is excluded from <code>recall</code>.
+    </p>
+  </section>
+
+  <section id="dataset">
+    <h2>eval.jsonl: the dataset shared with benchmark search</h2>
+    <pre><code>{"taguru_eval":1,"name":"sake retrieval cases","default_target":{"context":"sake"}}
+{"case_id":"brand-origin-001","query":"青嶺はどこの蔵の酒か","cues":["青嶺"],
+ "expected_sources":[{"source":"corpus/brewery.md","paragraphs":[0],"relevance":3}],
+ "expected_concepts":["青嶺酒造"],
+ "expected_citations":[{"source":"corpus/brewery.md","paragraph":0,"section":"沿革",
+   "quote":"1897年に創業"}],
+ "options":{"limit":10}}</code></pre>
+    <p>
+      One <code>taguru_eval</code> header (equality-checked — this file is hand-authored, so a
+      version this build was not built for is refused rather than silently reinterpreted), then
+      one case per line. This is the exact dataset
+      <a href="benchmark.html#search"><code>taguru benchmark search</code></a> reads — the one
+      artifact the two verbs share, and nothing else. <code>evaluate</code> loads it in
+      <b>interpret</b> mode: every field this page documents is typed and validated, and a
+      malformed value is a reported parse error like any other field (exit <code>2</code>) — no
+      warning, because nothing here is an unread extension for <code>evaluate</code>.
+      <code>benchmark search</code> loads the same file in <b>carry-through</b> mode: every field
+      below rides through opaque and unvalidated, earning one warning per run (never once per
+      case) if seen.
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>case_id</code></td><td>A stable, unique join key.</td></tr>
+          <tr><td><code>query</code></td><td>Sent to <code>sources/search</code> verbatim.</td></tr>
+          <tr><td><code>cues</code></td><td>Structural-lane resolve cues; falls back to <code>query</code> when empty.</td></tr>
+          <tr><td><code>expected_sources[]</code></td><td><code>{source, paragraphs, relevance}</code>. <code>paragraphs</code> empty means any paragraph of that source counts; <code>relevance</code> is graded <code>0..=3</code> (default 1) and feeds nDCG — <code>relevance 0</code> excludes the entry from every rank metric's denominator.</td></tr>
+          <tr><td><code>expected_concepts[]</code></td><td>Matched against a concept-kind cue's resolved names.</td></tr>
+          <tr><td><code>expected_labels[]</code></td><td>Matched against a label-kind cue's resolved names — <code>/resolve_label</code>'s own coverage check.</td></tr>
+          <tr><td><code>expected_associations[]</code></td><td><code>{subject, label, object}</code> — all three required; drives the association-probe/<code>/query</code> path above.</td></tr>
+          <tr><td><code>expected_citations[]</code></td><td><code>{source, paragraph, section?, quote?}</code> — drives the citation lane. See below for <code>section</code>'s three-valued semantics.</td></tr>
+          <tr><td><code>options.limit</code></td><td>Per-case search limit, <code>1..=1000</code>; omitted means 10. Also the <i>k</i> in this case's own <code>recall_at_k</code> — there is no fixed recall@1/@5/@10 family, one value per case at that case's own limit.</td></tr>
+          <tr><td><code>options.floor</code></td><td>Passage-lane <code>semantic_floor</code> override.</td></tr>
+          <tr><td><code>options.tags</code>, <code>.since</code>, <code>.until</code></td><td>Passage-lane filters, forwarded to <code>sources/search</code> verbatim.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <code>options.sources</code> is retired as a documented key: it never named a real server
+      field (<code>sources/search</code>'s own filter is by tag, not by source id), and no known
+      dataset ever used it, so it is simply absent from the schema — an unknown-field rejection
+      catches it in either mode.
+    </p>
+    <p class="section-sub"><code>expected_citations[].section</code>: three-valued, not a serde artifact</p>
+    <p>
+      An absent <code>section</code> key means "don't check section." An explicit
+      <code>"section": null</code> means "assert this paragraph is outside every stored
+      section" — a real, checkable claim, since the server's own citation locator never omits
+      the key on the wire. A string value is compared as-is. <code>quote</code>, when given, is
+      normalized-substring matched against the citation's own paragraph text — since a citation's
+      <code>text</code> is exactly one paragraph, <b>a quote spanning a paragraph boundary can
+      never match</b>; split it into two <code>expected_citations</code> entries instead.
+    </p>
+  </section>
+
+  <section id="metrics">
+    <h2>Metric catalog</h2>
+    <p>
+      Every metric below is computed purely from what the three lanes already returned — no
+      lane is ever called twice, and scoring never reads a hit's or a resolution's own
+      <code>score</code>/<code>cosine</code> field, only rank and label. Percentiles inside a
+      <code>Distribution</code> are nearest-rank, matching every other artifact in this tree.
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Metric key</th><th>Shape</th><th>What it measures</th></tr></thead>
+        <tbody>
+          <tr><td><code>recall.recall_at_k</code></td><td>distribution (per case)</td><td>Fraction of a case's <code>relevance &gt;= 1</code> <code>expected_sources</code> found among the passage lane's hits, at that case's own <code>k = options.limit</code>.</td></tr>
+          <tr><td><code>recall.mrr</code></td><td>distribution</td><td><code>1 / (rank + 1)</code> of the first hit satisfying any <code>expected_sources</code> entry; 0 if none does.</td></tr>
+          <tr><td><code>recall.ndcg</code></td><td>distribution</td><td>Graded-relevance nDCG over <code>expected_sources</code> — one credit per entry at the rank of its first satisfying hit, <code>DCG/IDCG</code> clamped to 1 (two entries can share one hit).</td></tr>
+          <tr><td><code>coverage.concepts</code>, <code>.labels</code></td><td>distribution</td><td>Fraction of <code>expected_concepts</code>/<code>expected_labels</code> present in the top-tier <code>resolved_names[]</code>, matched with normalized entry folding.</td></tr>
+          <tr><td><code>coverage.associations</code></td><td>distribution</td><td>Fraction of <code>expected_associations</code> whose <code>/query</code> call both ran (all three positions pinned) and returned <code>total &gt;= 1</code>. No client-side string comparison — positions are pinned server-side.</td></tr>
+          <tr><td><code>citations.recall</code></td><td>distribution</td><td>Fraction of <code>expected_citations</code> whose <code>(source, paragraph)</code> was <i>served</i> — appears among passage hits or the structural lane's own attribution locators. Whether retrieval surfaced the evidence.</td></tr>
+          <tr><td><code>citations.locator_validity</code></td><td>distribution</td><td>Fraction of <code>expected_citations</code> whose <code>POST /contexts/{name}/citations</code> call resolved, with a matching <code>section</code> (when declared) and <code>quote</code> (when declared). Whether the locator itself is correct — runs even on a case whose passage lane missed outright.</td></tr>
+          <tr><td><code>citations.resolved</code>, <code>.no_source</code>, <code>.no_paragraph</code></td><td>ratio (run)</td><td>Outcome share across every citation call made, regardless of case.</td></tr>
+          <tr><td><code>citations.section_match</code>, <code>.quote_match</code></td><td>ratio (run)</td><td>Narrower denominators: only checks that declared <code>section</code> (explicit <code>null</code> included) or <code>quote</code>.</td></tr>
+          <tr><td><code>lanes.structural_hit</code>, <code>.passage_hit</code>, <code>.both</code>, <code>.neither</code></td><td>ratio (run)</td><td>The lane cross-tab, denominator restricted to cases declaring both a structural and a source expectation whose passage lane completed.</td></tr>
+          <tr><td><code>latency.passage_ms</code>, <code>.resolve_ms</code>, <code>.query_ms</code>, <code>.citation_ms</code></td><td>distribution</td><td>Wall time per call, by lane.</td></tr>
+          <tr><td><code>passage.failure_rate</code>, <code>structural.case_rate</code></td><td>ratio (run)</td><td>Share of passage-lane calls that failed; share of cases that ran the structural lane at all.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      Citation recall and locator validity are <b>never merged into one score</b> — they answer
+      different questions (did search surface the evidence, versus is the locator itself
+      correct) and a case can score high on one while scoring low on the other. Matching against
+      <code>expected_concepts</code>/<code>expected_labels</code> uses
+      <code>taguru::context::normalize_entry</code> — the same folding the passage index itself
+      applies — never <code>benchmark::identity::normalize_term</code>, whose deliberate
+      katakana exception exists for a cross-model comparison this verb does not do (the corpus
+      is fixed here; no model is being compared). <code>expected_sources</code> matches by exact
+      <code>(source, paragraph)</code> instead — a paragraph index is not text to normalize. Both
+      choices are recorded verbatim in <code>evaluation.json</code>'s own <code>matching</code>
+      block.
+    </p>
+  </section>
+
+  <section id="evaluation-json">
+    <h2>evaluation.json</h2>
+    <pre><code>{
+  "taguru_evaluation": 1,
+  "generated_at": "2026-07-28T10:05:12Z",
+  "matching": { "normalization": "taguru::context::normalize_entry",
+      "normalized": ["expected_concepts", "expected_labels"],
+      "sources": "exact (source, paragraph) match — no normalization" },
+  "inputs": { "eval": { "path": "eval.jsonl", "name": "sake retrieval cases", "cases": 12 },
+      "context": "sake", "url": "http://localhost:8248", "out": "evaluation.json",
+      "default_limit": 10, "resolve_limit": 5 },
+  "corpus": { "revision_before": { "...": "..." }, "revision_after": { "...": "..." },
+      "stable": true, "last_write_epoch_before": 1234, "last_write_epoch_after": 1234,
+      "embeddings": { "provider_model": null }, "sources_count": 5 },
+  "thresholds": null,
+  "definitions": { "recall.recall_at_k": { "unit": "ratio", "statistic": "distribution",
+      "scopes": ["case"], "description": "...", "source": "...", "caveat": null }, "...": "..." },
+  "warnings": [],
+  "cases": [ { "case_id": "brand-origin-001", "query": "青嶺はどこの蔵の酒か", "limit": 10,
+      "passage": { "outcome": "searched", "plan": { "...": "..." }, "hits": [ { "source": "corpus/brewery.md",
+        "paragraph": 0, "score": 0.91, "lanes": { "...": "..." } } ], "latency_ms": 4 },
+      "recall": { "recall_at_k": 1.0, "mrr": 1.0, "ndcg": 1.0, "expected_total": 1, "matched": 1 },
+      "coverage": { "concepts": { "expected": 1, "matched": 1, "value": 1.0 } },
+      "citations": { "recall": { "expected_total": 1, "matched": 1, "value": 1.0 },
+        "validity": { "expected_total": 1, "valid": 1, "value": 1.0 },
+        "checks": [ { "source": "corpus/brewery.md", "paragraph": 0, "served": true,
+          "outcome": "resolved", "section": { "check": "matched", "expected": "沿革" },
+          "quote": { "declared": "1897年に創業", "matched": true }, "latency_ms": 6 } ] },
+      "missed": [], "missed_truncated": 0 } ],
+  "metrics": { "recall.recall_at_k": { "n": 12, "min": 0.5, "p50": 1.0, "p90": 1.0, "p99": 1.0,
+      "max": 1.0, "mean": 0.93, "sum": 11.2 }, "...": "..." }
+}</code></pre>
+    <p>
+      Stamp <code>taguru_evaluation: 1</code>, <b>range acceptance</b> — taguru writes this file
+      and its own <code>compare</code> mode re-reads it, so within an accepted range a later
+      revision may only add a field, never remove or repurpose one. Every field is
+      <code>#[serde(default)]</code>. A metric's concrete shape — <code>Distribution</code>,
+      <code>Ratio</code>, or <code>Count</code> — is read by first loading
+      <code>definitions[metric].statistic</code> and deserializing that metric's value into the
+      type its own definition names, <b>never</b> through the value type's own untagged
+      deserialization directly: a <code>Ratio</code>'s <code>{"value":0.09,"n":31,
+      "numerator":3}</code> would otherwise succeed silently as a
+      <code>Distribution{n:31, min:None, …}</code>, since only <code>n</code> is a
+      <code>Distribution</code>'s required field. Reading through <code>definitions</code> first
+      turns a metric with no matching definitions entry into a loud failure instead of a silent
+      one.
+    </p>
+    <p>
+      <code>hits[]</code> is <b>not</b> capped below a case's own <code>options.limit</code> —
+      the bound is exactly that case's configured limit, so an external offline scorer can build
+      a recall@<i>k</i> for any <i>k</i> up to it (a case wanting an offline
+      <code>recall@50</code> must set that case's own <code>options.limit</code> to 50 or
+      higher; the artifact never truncates below whatever limit was configured). No corpus body
+      text is ever written into this artifact; on a <code>quote</code> mismatch, only the user's own
+      declared quote and a boolean match result are recorded, never the served paragraph body.
+      <code>missed[]</code> is capped at 3 entries with a <code>missed_truncated</code> count of
+      what was dropped (not the total). The resolved server URL is recorded as scheme + host +
+      port only — never with userinfo, and never the bearer token in any form.
+    </p>
+    <p class="section-sub">Corpus revision bracketing</p>
+    <p>
+      <code>corpus.revision_before</code>/<code>revision_after</code> are read once before the
+      first case and once after the last; <code>stable</code> is equality across all three
+      revision lanes (graph, passages, config), <b>never ordering</b>. A changed revision does
+      not abort the run — aborting a multi-minute CI run because one unrelated document was
+      imported mid-run is worse than finishing and flagging it — but an <b>unstable run fails the
+      gate by default</b> once <code>--thresholds</code> is given; opting out requires
+      <code>"allow_unstable_corpus": true</code> in the thresholds file. <code>embeddings.
+      provider_model</code> records the server's configured embedding model name (never a URL or
+      key) so a run's semantic-lane identity is reproducible without re-querying the server.
+    </p>
+    <p class="note">
+      No answer-generation LLM is required, and this is enforced, not merely claimed: a
+      source-level test asserts <code>src/evaluate.rs</code> and its submodules contain no
+      <code>TAGURU_EXTRACT_</code>/<code>TAGURU_EMBED_</code> string literal and no
+      <code>crate::extract</code>/<code>crate::embedding</code> import, and the offline fixture
+      suite asserts the server's own <code>vector_off_reason</code> string appears verbatim when
+      no provider is configured — proving the <i>server</i>, not just this process, had none.
+      <code>evaluate</code> itself never calls an LLM, but the server it queries may embed the
+      query text for the vector lane — that is server-side configuration, recorded via
+      <code>embeddings.provider_model</code>, not a prohibition on the server having a provider
+      at all.
+    </p>
+  </section>
+
+  <section id="thresholds">
+    <h2>The thresholds file and the exit-3 gate</h2>
+    <pre><code>{
+  "taguru_evaluate_thresholds": 1,
+  "aggregate": { "recall.recall_at_k": { "min": 0.8 }, "citations.recall": { "min": 0.9 } },
+  "cases": { "default": {}, "overrides": { "known-miss-003": { "citations.recall": { "min": 0.0 } } } },
+  "allow_unstable_corpus": false
+}</code></pre>
+    <p>
+      <code>--thresholds FILE</code> is a checked-in, user-authored JSON file — stamp
+      <code>taguru_evaluate_thresholds: 1</code>, <b>equality-checked</b> (the same posture
+      <code>eval.jsonl</code>'s own header takes, not <code>evaluation.json</code>'s range
+      acceptance, because a human authors this file by hand), and
+      <code>deny_unknown_fields</code>. Three top-level keys:
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>aggregate</code></td><td>Metric name → <code>{min?, max?}</code>, checked against that run's own <code>metrics</code> block (a <code>Distribution</code>'s mean, a <code>Ratio</code>/<code>Count</code>'s value).</td></tr>
+          <tr><td><code>cases</code></td><td><code>default</code> (applies to every case) plus per-<code>case_id</code> <code>overrides</code> (override wins per metric name) — checked against one case's own value.</td></tr>
+          <tr><td><code>allow_unstable_corpus</code></td><td>The only lever against the corpus-stability gate above; <code>false</code> by default.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      A bound needs at least one of <code>min</code>/<code>max</code>, both finite, and
+      <code>min &lt;= max</code> when both are given. Only nine metric names are legal inside
+      <code>cases.*</code> — <code>recall.recall_at_k</code>, <code>.mrr</code>,
+      <code>.ndcg</code>, <code>coverage.concepts</code>, <code>.labels</code>,
+      <code>.associations</code>, <code>citations.recall</code>,
+      <code>.locator_validity</code>, and <code>latency.passage_ms</code>. The three per-call
+      latencies (<code>resolve_ms</code>/<code>query_ms</code>/<code>citation_ms</code>) are
+      deliberately excluded: a single case can make more than one resolve/query/citation call, so
+      there is no one per-case value to bound. <code>deny_unknown_fields</code> cannot catch an
+      unknown <i>metric name</i> inside <code>aggregate</code>, or an unknown <code>case_id</code>
+      inside <code>cases.overrides</code> — both are checked explicitly, as a post-load set
+      difference against <code>evaluation.json</code>'s own <code>definitions</code> keys and the
+      loaded <code>eval.jsonl</code>'s <code>case_id</code>s, and every problem found is reported
+      together rather than just the first.
+    </p>
+    <p>
+      A metric a case never computed (it did not declare the matching expectation, or that lane
+      never ran) is <b>skipped</b>, never violated. The threshold file's own byte content is
+      hashed and recorded in <code>evaluation.json</code> as a threshold identity — this is what
+      <code>evaluate compare</code>'s mismatch warning checks between two runs, without needing
+      either original file on disk at compare time.
+    </p>
+  </section>
+
+  <section id="compare">
+    <h2>taguru evaluate compare</h2>
+    <pre><code>taguru evaluate compare base.json head.json --out changes.jsonl</code></pre>
+    <p>
+      Reads two <code>evaluation.json</code> runs and classifies every case whose outcome moved
+      between them. This is the <b>one place in the tree</b> whose whole job is to say which run
+      was better — verdict vocabulary (<code>improved</code>, <code>regressed</code>) is
+      legitimate here, unlike inside <code>benchmark</code>'s artifacts. Exit codes:
+      <code>0</code> comparison completed (regardless of regressions found — the pass/fail gate
+      is <code>evaluate --thresholds</code>, not this subcommand) · <code>1</code>
+      <code>changes.jsonl</code> could not be written · <code>2</code> usage error, an unreadable
+      file, or malformed/out-of-range JSON.
+    </p>
+    <pre><code>{"kind":"header","taguru_evaluation_changes":1,"generated_at":"...",
+ "base":{"path":"base.json","context":"sake","taguru_evaluation":1,"...":"..."},
+ "head":{"path":"head.json","context":"sake","taguru_evaluation":1,"...":"..."},
+ "counts":{"improved":2,"regressed":1,"added":0,"removed":0,"unchanged":9,
+   "cases_base":12,"cases_head":12},
+ "metrics":[{"metric":"recall.recall_at_k","statistic":"distribution",
+   "sides":{"base":0.83,"head":0.90},"delta":0.07}]}
+{"kind":"regressed","case_id":"brand-origin-004",
+ "metrics":[{"metric":"citations.recall","sides":{"base":1.0,"head":0.5},"delta":-0.5,
+   "direction":"regressed"}]}</code></pre>
+    <p>
+      Line 1 is always the header; every line after is <b>one record per changed case only</b> —
+      <code>kind</code> ∈ <code>improved | regressed | added | removed</code>. Unchanged cases
+      are counted in the header's <code>counts.unchanged</code>, never emitted per case, keeping
+      the file's size bounded by the number of cases whose outcome actually moved. Classification
+      reads only eight of the nine <code>--thresholds</code>-scoped metrics — every one except
+      <code>latency.passage_ms</code>, whose single-run noise would flag most cases on a mere
+      rerun rather than on a genuine quality change. A case with one metric down and another up
+      is classified <b><code>regressed</code></b>, quality-gate-first, and the record still lists
+      both directions. <code>added</code>/<code>removed</code> cases carry one-sided metrics
+      (<code>direction: "not_comparable"</code>). A mismatched <code>context</code>, corpus
+      revision, threshold-file identity, or <code>taguru_evaluation</code> stamp between the two
+      files is a <b>warning, never a refusal</b>.
+    </p>
+  </section>
+
+  <section id="never-written">
+    <h2>What never lands in these artifacts</h2>
+    <p>
+      No corpus body text, ever — the one bounded exception is a <code>quote</code> mismatch,
+      where the user's own declared quote and a boolean result are recorded, never the served
+      paragraph. The resolved server URL, scheme + host + port only, never userinfo or a bearer
+      token. Server error messages truncated to 200 bytes on a UTF-8 character boundary.
+      <code>missed[]</code> capped at 3 entries per case, with the dropped count recorded
+      separately. <code>hits[]</code> is not capped below a case's own <code>options.limit</code>
+      — a <code>HitLocator</code> is roughly 40 bytes, so even a limit of 1000 is cheap, and
+      capping below the case's own configured limit would prevent an external scorer from ever
+      seeing the full window that case asked for.
+    </p>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>
