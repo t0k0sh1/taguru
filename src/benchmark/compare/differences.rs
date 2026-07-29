@@ -502,7 +502,7 @@ pub(super) fn compute_differences(
     for i in 0..model_order.len() {
         for j in (i + 1)..model_order.len() {
             pairs.push(PairInfo {
-                pair_id: format!("{}__{}", model_order[i], model_order[j]),
+                pair_id: super::super::pair_key(&model_order[i], &model_order[j]),
                 a: model_order[i].clone(),
                 b: model_order[j].clone(),
             });

@@ -1686,7 +1686,7 @@ fn differences_header_matches_the_adr_shape() {
     assert_eq!(header["text_included"], false);
     assert_eq!(
         header["pairs"],
-        serde_json::json!([{"pair_id": "alpha__beta", "a": "alpha", "b": "beta"}])
+        serde_json::json!([{"pair_id": "5:alpha__beta", "a": "alpha", "b": "beta"}])
     );
     assert_eq!(
         header["matching"],

@@ -668,6 +668,21 @@ fn validate_model_id(path: &Path, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Builds a collision-safe string key identifying an ordered pair of
+/// model ids — shared by `search`'s `pairs` map (a `BTreeMap<String,
+/// _>` serialized as a JSON object, so the key must stay a plain
+/// string) and `compare::differences`'s `pair_id` output field.
+/// `validate_model_id` permits consecutive underscores in a model id,
+/// so a naive `format!("{a}__{b}")` is not injective: `(a, "b__c")`
+/// and `("a__b", c)` both format to `"a__b__c"`, silently colliding.
+/// Prefixing `a`'s byte length followed by `:` — a byte
+/// `validate_model_id` never allows in a model id — makes the split
+/// point between `a` and `b` unambiguous, so distinct pairs can never
+/// produce the same key.
+pub(crate) fn pair_key(a: &str, b: &str) -> String {
+    format!("{}:{a}__{b}", a.len())
+}
+
 /// Rejects inline `user:password@` userinfo at parse time (ADR 0003
 /// §8's Secrets rule): a credential belongs in `api_key_env`, never
 /// embedded in the endpoint URL where it would ride into every artifact
@@ -1781,8 +1796,20 @@ impl RunsWriter {
     }
 
     fn write_value(&mut self, value: &Value) {
-        let Ok(mut line) = serde_json::to_string(value) else {
-            return;
+        let mut line = match serde_json::to_string(value) {
+            Ok(line) => line,
+            Err(error) => {
+                if !self.warned {
+                    self.warned = true;
+                    eprintln!(
+                        "taguru: benchmark: warning: {}: failed to serialize a record ({error}) \
+                         — it was dropped, so documents_written/attempts_total may now \
+                         overcount what this file holds",
+                        self.path.display()
+                    );
+                }
+                return;
+            }
         };
         line.push('\n');
         let result = self

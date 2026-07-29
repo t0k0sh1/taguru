@@ -817,9 +817,9 @@ fn build_case_block(context: &SearchContext, case: &EvalCase) -> (CaseBlock, Vec
 
 fn pair_key(a: &str, b: &str) -> String {
     if a <= b {
-        format!("{a}__{b}")
+        super::pair_key(a, b)
     } else {
-        format!("{b}__{a}")
+        super::pair_key(b, a)
     }
 }
 

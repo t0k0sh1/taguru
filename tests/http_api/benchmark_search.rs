@@ -254,7 +254,7 @@ fn benchmark_search_builds_corpora_searches_them_and_writes_retrieval_json() {
     // sources (each corpus holds one, different, document) — a real,
     // non-vacuous overlap value, not the `None` two empty hit lists
     // would produce.
-    let pair = &case["pairs"]["m1__m2"];
+    let pair = &case["pairs"]["2:m1__m2"];
     assert_eq!(pair["outcome"], "compared", "{pair}");
     assert_eq!(pair["jaccard"], 0.0, "{pair}");
     assert_eq!(pair["shared_hits"], 0, "{pair}");
