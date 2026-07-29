@@ -109,7 +109,7 @@
         <tbody>
           <tr><td><code>0</code></td><td>Run completed, no <code>--thresholds</code> given (report-only), or every threshold satisfied.</td></tr>
           <tr><td><code>1</code></td><td>The run could not complete — server unreachable at the <code>/health</code> preflight, a context-entry read failed before or after the run, listing the context's sources failed, or the artifact could not be written.</td></tr>
-          <tr><td><code>2</code></td><td>Usage or input error — bad/duplicate/unknown flag, missing <code>--eval</code>/<code>--context</code>, malformed <code>eval.jsonl</code> or <code>--thresholds</code> file, an <code>options.limit</code> outside <code>1..=1000</code>, an unresolvable or userinfo-bearing URL, an unknown context, or an <code>expected_sources</code> entry naming a source the corpus does not carry.</td></tr>
+          <tr><td><code>2</code></td><td>Usage or input error — bad/duplicate/unknown flag, missing <code>--eval</code>/<code>--context</code>, malformed <code>eval.jsonl</code> or <code>--thresholds</code> file, an <code>options.limit</code> outside <code>1..=1000</code>, an unresolvable, unparsable, or userinfo-bearing URL, an unknown context, or an <code>expected_sources</code> entry naming a source the corpus does not carry.</td></tr>
           <tr><td><code>3</code></td><td>The run completed and a <code>--thresholds</code> bound was violated — the only exit code this tree assigns that meaning to, and the only verb that returns it.</td></tr>
         </tbody>
       </table>

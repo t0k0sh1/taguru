@@ -202,6 +202,20 @@ fn run_evaluate(args: &[String]) -> i32 {
         eprintln!("taguru: evaluate: {message}");
         return 2;
     }
+    // `reject_userinfo` deliberately leaves an unparsable `base` alone
+    // (`remote.rs`'s own doc comment) so `Api::url` can report it once,
+    // on the first real request — safe for every other consumer, none
+    // of which write `base` anywhere first. `evaluate` writes it into
+    // `evaluation.json` (via `mask_url`) before any request is made,
+    // and a string that fails to parse as a URL can still be, or
+    // contain, `user:pass@host` text (e.g. a malformed host); refuse
+    // it here instead of letting `mask_url` decide what to do with it
+    // (issue #289, mirroring `benchmark search`'s own fix, issue #281
+    // / PR #288).
+    if url::Url::parse(&base).is_err() {
+        eprintln!("taguru: evaluate: the --url value could not be parsed as a URL");
+        return 2;
+    }
 
     let api = Api::new(base.clone());
     let masked_url = mask_url(&base);
@@ -463,10 +477,14 @@ fn validate_limits(cases: &[EvalCase]) -> Result<(), String> {
 // ============================ URL and messages ============================
 
 /// scheme + host + port only — no userinfo, path, or query (ADR 0004
-/// §11). `reject_userinfo` already refused a URL carrying credentials
-/// before this runs; an unparsable `base` (a bare `host:port` with no
-/// scheme, say) is echoed back verbatim rather than dropped, since it
-/// carries no secret to begin with.
+/// §11). `reject_userinfo` and the unparsable-`base` check above
+/// already refuse a `base` this function would otherwise have to
+/// redact before this runs, but `mask_url` redacts an unparsable input
+/// to a fixed placeholder rather than echoing it back regardless — a
+/// string that fails to parse as a URL is not proven free of
+/// credential-shaped text, and this artifact is shared and archived
+/// (issue #289, mirroring `benchmark search`'s own fix, issue #281 /
+/// PR #288).
 fn mask_url(base: &str) -> String {
     match url::Url::parse(base) {
         Ok(url) => {
@@ -476,7 +494,7 @@ fn mask_url(base: &str) -> String {
             }
             masked
         }
-        Err(_) => base.to_string(),
+        Err(_) => "<unparseable-url>".to_string(),
     }
 }
 

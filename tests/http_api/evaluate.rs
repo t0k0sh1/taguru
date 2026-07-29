@@ -637,6 +637,78 @@ fn evaluate_passes_by_default_when_the_corpus_is_in_fact_stable() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR 0004 §2.4, §11 / issue #289, mirroring `benchmark search`'s own
+/// fix (issue #281 / PR #288): a userinfo-carrying `--url` must be
+/// refused before any request leaves the process, so an unreachable
+/// host is enough to prove the rejection happens first. No `Server`
+/// is started here.
+#[test]
+fn evaluate_rejects_a_url_carrying_userinfo() {
+    let dir = eval_dir("userinfo");
+    let eval_path = write_smoke_eval(&dir);
+    let out_path = dir.join("evaluation.json");
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "evaluate",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--context",
+            "sake",
+            "--url",
+            "https://user:token@example.invalid",
+            "--out",
+            out_path.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("must not carry credentials"), "{stderr}");
+    assert!(
+        !out_path.exists(),
+        "no evaluation.json should be written on a rejected URL"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #289, mirroring `benchmark search`'s own fix (issue #281 /
+/// PR #288): `reject_userinfo` deliberately tolerates a `base` that
+/// fails to parse as a URL (it leaves that fault for `Api::url` to
+/// report later), but `evaluate` writes `base` (via `mask_url`) into
+/// `evaluation.json` before any request is made — so an unparsable
+/// string, which is not proven free of credential-shaped text, must
+/// be refused here rather than reaching `mask_url`.
+#[test]
+fn evaluate_rejects_an_unparsable_url() {
+    let dir = eval_dir("unparsable-url");
+    let eval_path = write_smoke_eval(&dir);
+    let out_path = dir.join("evaluation.json");
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "evaluate",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--context",
+            "sake",
+            "--url",
+            "not a url",
+            "--out",
+            out_path.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("could not be parsed"), "{stderr}");
+    assert!(
+        !out_path.exists(),
+        "no evaluation.json should be written on a rejected URL"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn evaluate_exits_1_when_the_server_is_unreachable() {
     let dir = eval_dir("unreachable");
