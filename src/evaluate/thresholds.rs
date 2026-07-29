@@ -245,7 +245,7 @@ pub(super) fn load_thresholds(
     }
 
     Ok(LoadedThresholds {
-        sha256: crate::extract::sha256_hex(&bytes),
+        sha256: crate::sha256::sha256_hex(&bytes),
         file,
     })
 }
@@ -573,7 +573,7 @@ mod tests {
         let loaded = load_thresholds(&path, &build_definitions(), &BTreeSet::new()).unwrap();
         assert_eq!(
             loaded.sha256,
-            crate::extract::sha256_hex(contents.as_bytes())
+            crate::sha256::sha256_hex(contents.as_bytes())
         );
     }
 

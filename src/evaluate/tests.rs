@@ -319,32 +319,165 @@ fn every_metric_key_has_a_matching_definition_and_vice_versa() {
 
 // ========================= No answer-generation LLM seam (ADR §12, AC 8) =========================
 
+/// Cuts a `include_str!`-ed source at its first `#[cfg(test)]`, so a
+/// file whose test module lives inline (`thresholds.rs`, which embeds
+/// `mod tests { ... }` rather than declaring a sibling file) never has
+/// its own test fixtures scanned — only production code is asserted
+/// clean. Files whose tests live in a sibling module (`evaluate.rs`,
+/// `compare.rs`, both `mod tests;`) are untouched by this: the two
+/// lines declaring the sibling carry no banned literal themselves.
+fn production_only(source: &str) -> &str {
+    match source.find("#[cfg(test)]") {
+        Some(at) => &source[..at],
+        None => source,
+    }
+}
+
+/// Whether `source` references `crate::{module}` through any import
+/// shape: a plain `crate::{module}::...` path, or `module` appearing
+/// inside a single-level grouped import like `use crate::{extract,
+/// embedding};`. Not a full parser — no nested groups, no `as`-alias
+/// tracking — deliberately a step up from a pure substring search, not
+/// a syntax tree: this guard exists to catch an INADVERTENT seam, and
+/// matches the rest of this codebase's plain string-based source
+/// checks (`cli.rs`'s `every_documented_variable_is_a_known_key`)
+/// rather than pulling in a parser crate for one test.
+fn references_module(source: &str, module: &str) -> bool {
+    // A raw substring search on `crate::{module}` alone would false-
+    // positive on an unrelated module sharing the prefix (a
+    // hypothetical `crate::extraction` for `module: "extract"`), so
+    // every direct-path match must be followed by a non-identifier
+    // byte (`::`, `;`, whitespace, …) or end of input — the same
+    // boundary the grouped-import branch below already checks via
+    // `member == module`.
+    let plain = format!("crate::{module}");
+    let mut search_from = 0;
+    while let Some(relative) = source[search_from..].find(plain.as_str()) {
+        let at = search_from + relative;
+        let after = at + plain.len();
+        let boundary = source[after..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_'));
+        if boundary {
+            return true;
+        }
+        search_from = at + 1;
+    }
+    let mut rest = source;
+    while let Some(start) = rest.find("crate::{") {
+        let after = &rest[start + "crate::{".len()..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let group = &after[..end];
+        if group.split(',').any(|member| {
+            let member = member.trim();
+            member == module || member.starts_with(&format!("{module}::"))
+        }) {
+            return true;
+        }
+        rest = &after[end + 1..];
+    }
+    false
+}
+
 #[test]
 fn evaluate_module_never_names_an_extraction_or_embedding_seam() {
-    // Scans evaluate.rs only, so this check's own source text is never
-    // itself scanned — the assertion lives in a sibling file (tests.rs)
-    // that `include_str!` here does not pull in.
-    let source = include_str!("../evaluate.rs");
+    // Scans evaluate.rs and its submodules — ADR 0004 §12's structural
+    // enforcement of AC 8 covers the whole `mod evaluate` tree, not
+    // just its top file, so a future submodule can't quietly grow the
+    // seam this check exists to rule out. None of these three
+    // `include_str!`s pulls in this file itself (tests.rs), so this
+    // check's own literals below are never scanned.
+    let sources = [
+        production_only(include_str!("../evaluate.rs")),
+        production_only(include_str!("../evaluate/compare.rs")),
+        production_only(include_str!("../evaluate/thresholds.rs")),
+    ];
     // Built by concatenation so this assertion's own literals never
     // accidentally match themselves.
     let extract_prefix = concat!("TAGURU_", "EXTRACT_");
     let embed_prefix = concat!("TAGURU_", "EMBED_");
-    assert!(
-        !source.contains(extract_prefix),
-        "found {extract_prefix} in evaluate.rs"
+    for source in sources {
+        assert!(
+            !source.contains(extract_prefix),
+            "found {extract_prefix} in the evaluate module tree"
+        );
+        assert!(
+            !source.contains(embed_prefix),
+            "found {embed_prefix} in the evaluate module tree"
+        );
+        assert!(
+            !references_module(source, "extract"),
+            "found a crate::extract reference (plain or grouped import) in the evaluate module \
+             tree"
+        );
+        assert!(
+            !references_module(source, "embedding"),
+            "found a crate::embedding reference (plain or grouped import) in the evaluate \
+             module tree"
+        );
+    }
+}
+
+/// Guards against the `sources` array above silently drifting behind
+/// `evaluate.rs`'s own submodule list: a future `mod foo;` added there
+/// without a matching `include_str!` above would otherwise never be
+/// scanned for the extract/embedding seam at all, despite the seam
+/// test's own comment claiming whole-tree coverage. `tests` is
+/// declared under `#[cfg(test)]` and is not production code the seam
+/// scan needs to cover; every other declared submodule must be named
+/// here.
+#[test]
+fn the_seam_scan_names_every_production_submodule_evaluate_rs_declares() {
+    let source = include_str!("../evaluate.rs");
+    let declared: BTreeSet<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("mod ")?.strip_suffix(';'))
+        .filter(|name| *name != "tests")
+        .collect();
+    assert_eq!(
+        declared,
+        BTreeSet::from(["compare", "thresholds"]),
+        "evaluate.rs declares a submodule the seam-scan test's `sources` array does not name — \
+         add it there too"
     );
-    assert!(
-        !source.contains(embed_prefix),
-        "found {embed_prefix} in evaluate.rs"
-    );
-    assert!(
-        !source.contains("crate::extract"),
-        "found a crate::extract import in evaluate.rs"
-    );
-    assert!(
-        !source.contains("crate::embedding"),
-        "found a crate::embedding import in evaluate.rs"
-    );
+}
+
+#[test]
+fn references_module_catches_a_grouped_import_the_plain_substring_check_would_miss() {
+    assert!(references_module(
+        "use crate::{extract, embedding};",
+        "extract"
+    ));
+    assert!(references_module(
+        "use crate::{extract, embedding};",
+        "embedding"
+    ));
+    assert!(references_module(
+        "use crate::{other, extract::sha256_hex};",
+        "extract"
+    ));
+    assert!(references_module(
+        "use crate::extract::sha256_hex;",
+        "extract"
+    ));
+    assert!(!references_module("use crate::{sha256, hash};", "extract"));
+    // A name merely containing "extract" as a substring (e.g. a future
+    // `extraction` module) must not false-positive — neither in a
+    // grouped import nor, since it shares the same "crate::extract"
+    // prefix, in a direct path.
+    assert!(!references_module("use crate::{extraction};", "extract"));
+    assert!(!references_module("use crate::extraction::Foo;", "extract"));
+    // But a real direct-path reference immediately followed by more of
+    // the SAME name (not a `::` continuation) is exactly what the
+    // boundary check above exists to tell apart from this case.
+    assert!(references_module(
+        "use crate::extract::sha256_hex;",
+        "extract"
+    ));
 }
 
 // ========================= Scoring test fixtures (#274) =========================

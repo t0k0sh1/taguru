@@ -990,7 +990,7 @@ fn build_document_dictionary(corpus: &str) -> Result<Vec<DocumentInfo>, String> 
         let source = path.to_string_lossy().into_owned();
         let text =
             crate::extract::read_document(path).map_err(|error| format!("{source}: {error}"))?;
-        let sha256 = crate::extract::sha256_hex(text.as_bytes());
+        let sha256 = crate::sha256::sha256_hex(text.as_bytes());
         let paragraph_count = crate::paragraph::split(&text).len();
         let descriptors = crate::extract::chunk_plan(&text);
         let chunks: Vec<ChunkInfo> = descriptors
@@ -1016,7 +1016,7 @@ fn build_document_dictionary(corpus: &str) -> Result<Vec<DocumentInfo>, String> 
         let document_id = if candidates[&candidate] > 1 {
             format!(
                 "{candidate}-{}",
-                &crate::extract::sha256_hex(source.as_bytes())[..16]
+                &crate::sha256::sha256_hex(source.as_bytes())[..16]
             )
         } else {
             candidate
@@ -1103,7 +1103,7 @@ mod document_dictionary_tests {
         );
         assert_eq!(
             documents[0].sha256,
-            crate::extract::sha256_hex(text.as_bytes())
+            crate::sha256::sha256_hex(text.as_bytes())
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1233,14 +1233,14 @@ fn probe_hostname_hash() -> Option<String> {
         return None;
     }
     let end = buf.iter().position(|&b| b == 0)?;
-    Some(crate::extract::sha256_hex(&buf[..end]))
+    Some(crate::sha256::sha256_hex(&buf[..end]))
 }
 
 #[cfg(not(unix))]
 fn probe_hostname_hash() -> Option<String> {
     std::env::var("COMPUTERNAME")
         .ok()
-        .map(|hostname| crate::extract::sha256_hex(hostname.as_bytes()))
+        .map(|hostname| crate::sha256::sha256_hex(hostname.as_bytes()))
 }
 
 // ============================ Model provider probe ============================
@@ -2442,8 +2442,8 @@ fn run_extract(args: &[String]) -> i32 {
         .map(|doc| (doc.path.clone(), doc.clone()))
         .collect();
 
-    let config_sha256 = crate::extract::sha256_hex(&models_bytes);
-    let schema_sha256 = crate::extract::sha256_hex(
+    let config_sha256 = crate::sha256::sha256_hex(&models_bytes);
+    let schema_sha256 = crate::sha256::sha256_hex(
         crate::extract::json_schema_response_format()
             .to_string()
             .as_bytes(),

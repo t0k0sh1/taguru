@@ -588,12 +588,15 @@ fn evaluate_exits_3_and_records_violations_when_a_threshold_is_not_met() {
 /// its own `an_unstable_corpus_violates_the_gate_by_default` and
 /// `allow_unstable_corpus_opts_out_of_the_corpus_stability_gate` unit
 /// tests, which drive `stable` directly and so cover both outcomes
-/// deterministically. Reproducing an actual mid-run write here would
-/// need `taguru evaluate` (a real subprocess) to pause between its two
-/// `GET /contexts/{name}` reads, which this harness has no hook for —
-/// so this HTTP-level test instead locks in the *wiring*: with the
-/// corpus genuinely stable, the default `allow_unstable_corpus: false`
-/// does not itself cause a failure.
+/// deterministically. This HTTP-level test locks in the *wiring*: with
+/// the corpus genuinely stable, the default `allow_unstable_corpus:
+/// false` does not itself cause a failure. An actual mid-run write —
+/// `taguru evaluate` (a real subprocess) has no pause hook between its
+/// two `GET /contexts/{name}` reads — is instead reproduced end-to-end
+/// in `evaluate_fixture.rs`'s
+/// `evaluate_fails_the_gate_when_a_write_lands_mid_run` (#278), via a
+/// reverse proxy that injects one write on the run's first
+/// `/sources/search` call.
 #[test]
 fn evaluate_passes_by_default_when_the_corpus_is_in_fact_stable() {
     let server = Server::start("evaluate-thresholds-stable");
