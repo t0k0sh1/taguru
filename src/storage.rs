@@ -79,6 +79,39 @@ pub(crate) fn injected_persistence_failure(_operation: &str) -> Option<io::Error
     None
 }
 
+#[cfg(test)]
+thread_local! {
+    static FORCE_STAGING_COLLISIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: forces this thread's next `count` `stage_bytes` staging-
+/// name attempts to report as already-taken, exercising the
+/// create_new retry loop the way a genuine cross-process name
+/// collision would — without needing two real processes racing each
+/// other.
+#[cfg(test)]
+pub(crate) fn force_next_staging_collisions(count: u32) {
+    FORCE_STAGING_COLLISIONS.with(|cell| cell.set(count));
+}
+
+#[cfg(test)]
+fn take_forced_staging_collision() -> bool {
+    FORCE_STAGING_COLLISIONS.with(|cell| {
+        let remaining = cell.get();
+        if remaining > 0 {
+            cell.set(remaining - 1);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn take_forced_staging_collision() -> bool {
+    false
+}
+
 /// The unlink choke point shared by registry and group persistence.
 pub(crate) fn remove_persisted_file(path: impl AsRef<Path>) -> io::Result<()> {
     if let Some(error) = injected_persistence_failure("unlink") {
@@ -114,16 +147,28 @@ fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> io::Result<()>
     result
 }
 
-/// A unique per-process staging name beside `path`. Concurrent
-/// stagers (the flusher against an eviction, a shutdown flush against
-/// a tick) must never write the same temporary file — with a fixed
-/// name, one truncates the other mid-write and a torn image gets
-/// renamed into place. Leftovers from a crash are swept at boot.
+/// A collision-resistant staging name beside `path`. `std::process::id()`
+/// makes same-name collisions between independent PROCESSES exceedingly
+/// unlikely (unlike a bare, process-local counter starting at zero,
+/// which two separate processes racing the same destination could both
+/// pick identically) even before `stage_bytes`'s create_new retry loop
+/// has to matter. Concurrent stagers within THIS process (the flusher
+/// against an eviction, a shutdown flush against a tick) still never
+/// share a name either, since `STAGING_NONCE` only grows. Leftovers
+/// from a crash are swept at boot.
 fn staging_path(path: &Path) -> PathBuf {
     static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
     let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
-    path.with_extension(format!("tmp{nonce}"))
+    path.with_extension(format!("tmp{}.{nonce}", std::process::id()))
 }
+
+/// Bounded retries for [`stage_bytes`]'s `create_new` loop: enough to
+/// absorb a genuine cross-process name collision (astronomically
+/// unlikely already thanks to `staging_path`'s process-id'd nonce)
+/// without trusting the name alone, while still failing fast — and
+/// loudly — rather than spinning forever if something pathological is
+/// going on (e.g. a directory full of pre-created `tmp*` names).
+const MAX_STAGING_ATTEMPTS: u32 = 8;
 
 /// The heavy half of [`write_atomic`]: writes and fsyncs `bytes` under
 /// a staging name beside `path`. Safe to run without any lock — the
@@ -133,48 +178,75 @@ fn staging_path(path: &Path) -> PathBuf {
 pub(crate) fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Result<PathBuf> {
     use std::io::Write;
 
-    #[cfg(not(unix))]
-    let _ = private;
-    let staged = staging_path(path);
     if let Some(error) = injected_persistence_failure("stage") {
         return Err(error);
     }
-    // A private file must be BORN owner-only: create-then-chmod leaves a
-    // window (the default-umask create, ~0644, before the chmod) in
-    // which another local account can open() the staging file and keep
-    // reading it — the secret bytes land in that fd afterwards. `mode`
-    // on the open() sets the creation mode atomically, so no readable
-    // moment ever exists. `create_new` also refuses to reuse a file an
-    // attacker pre-created, closing the mirror-image swap. The staging
-    // name is per-process unique (`staging_path`), so create_new never
-    // collides with our own concurrent stagers.
-    let open = |staged: &Path| -> io::Result<fs::File> {
-        #[cfg(unix)]
-        if private {
-            use std::os::unix::fs::OpenOptionsExt;
-            return fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(staged);
+    // create_new, private or not — never File::create, which silently
+    // truncates whatever already sits under a colliding name. A
+    // process-id'd nonce (see `staging_path`) makes a same-name
+    // collision between independent processes astronomically unlikely,
+    // but "unlikely" still must not mean "corrupts another writer's
+    // bytes if it happens anyway" — a handful of retries absorbs a
+    // genuine collision instead of trusting the name alone.
+    let mut last_error = None;
+    for _ in 0..MAX_STAGING_ATTEMPTS {
+        let staged = staging_path(path);
+        if take_forced_staging_collision() {
+            last_error = Some(io::Error::from(io::ErrorKind::AlreadyExists));
+            continue;
         }
-        fs::File::create(staged)
-    };
-    let write = open(&staged).and_then(|mut file| {
-        file.write_all(bytes)?;
-        file.sync_all()
-    });
-    match write {
-        Ok(()) => Ok(staged),
-        Err(error) => {
-            // The file (if it even got created) never held valid
-            // content and was never handed to a caller — remove it
-            // rather than leave a partial write behind under its
-            // temporary name.
-            let _ = remove_persisted_file(&staged);
-            Err(error)
-        }
+        let open = {
+            #[cfg(unix)]
+            {
+                // A private file must be BORN owner-only:
+                // create-then-chmod leaves a window (the default-umask
+                // create, ~0644, before the chmod) in which another
+                // local account can open() the staging file and keep
+                // reading it — the secret bytes land in that fd
+                // afterwards. `mode` on the open() sets the creation
+                // mode atomically, so no readable moment ever exists.
+                use std::os::unix::fs::OpenOptionsExt;
+                let mode = if private { 0o600 } else { 0o666 };
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(mode)
+                    .open(&staged)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = private;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&staged)
+            }
+        };
+        let mut file = match open {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let write = file.write_all(bytes).and_then(|()| file.sync_all());
+        return match write {
+            Ok(()) => Ok(staged),
+            Err(error) => {
+                // The file never held valid content and was never
+                // handed to a caller — remove it (ours, and ours
+                // alone: create_new just proved no one else could have
+                // been writing under this exact name) rather than
+                // leave a partial write behind under its temporary
+                // name.
+                let _ = remove_persisted_file(&staged);
+                Err(error)
+            }
+        };
     }
+    Err(last_error
+        .unwrap_or_else(|| io::Error::other("could not allocate a unique staging file name")))
 }
 
 /// The cheap half of [`write_atomic`]: atomically publishes a staged
@@ -274,5 +346,124 @@ mod tests {
     fn fsync_parent_dir_resolves_a_single_component_relative_paths_empty_parent() {
         fsync_parent_dir(Path::new("taguru-test-fsync-parent-dir-need-not-exist"))
             .expect("an empty Path::parent() must resolve to the current directory, not ENOENT");
+    }
+
+    /// Simulates two independent allocators (two processes racing the
+    /// same destination, or this thread's counter wrapping back onto a
+    /// name another stager already claimed) picking the identical
+    /// staging name. `stage_bytes` must not give up or, worse, reuse
+    /// the colliding name — it must retry onto a fresh, unclaimed name
+    /// and still succeed.
+    #[test]
+    fn stage_bytes_retries_past_a_forced_staging_collision() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-storage-stage-collision-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output.txt");
+
+        // Force two AlreadyExists results before letting a real
+        // attempt through.
+        force_next_staging_collisions(2);
+
+        let staged = stage_bytes(&path, b"my bytes", false)
+            .expect("stage_bytes must retry past forced collisions, not fail the write");
+        assert_eq!(fs::read(&staged).unwrap(), b"my bytes");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A collision on every single attempt (pathological, but the
+    /// retry loop must still be bounded) reports a clear error rather
+    /// than looping forever.
+    #[test]
+    fn stage_bytes_exhausts_its_retries_and_reports_a_clear_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-storage-stage-exhausted-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output.txt");
+
+        // More than MAX_STAGING_ATTEMPTS, so every real attempt this
+        // call could make is forced to collide.
+        force_next_staging_collisions(MAX_STAGING_ATTEMPTS * 2);
+
+        let error = stage_bytes(&path, b"my bytes", false)
+            .expect_err("exhausting every retry attempt must report an error, not hang or panic");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+
+        // The forcing hook still has collisions armed; clear it so it
+        // cannot bleed into a later test sharing this thread.
+        force_next_staging_collisions(0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A forced collision must never let this attempt clobber some
+    /// unrelated file that already sits in the staging directory (the
+    /// way a real cross-process collision must never clobber whatever
+    /// the other process legitimately owns): `stage_bytes` must retry
+    /// onto a NEW, distinct name and leave a pre-existing neighbor
+    /// completely untouched. The retry loop's forced-collision branch
+    /// never performs any filesystem operation on the name it was
+    /// forced to treat as taken (`staging_path`'s monotonic nonce
+    /// means it can never be asked to reuse it either), so a neighbor
+    /// planted before the call is a stand-in for "whatever already
+    /// occupied the colliding name" in the real, cross-process case.
+    #[test]
+    fn stage_bytes_leaves_an_unrelated_neighbor_untouched_across_a_forced_collision() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-storage-stage-collision-owner-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output.txt");
+
+        // Stand-in for a file some other allocator already legitimately
+        // owns under a staging-shaped name in the same directory.
+        let neighbor = staging_path(&path);
+        fs::write(&neighbor, b"other writer's bytes").unwrap();
+
+        force_next_staging_collisions(1);
+        let staged = stage_bytes(&path, b"my bytes", false)
+            .expect("stage_bytes must retry onto a new name rather than fail");
+
+        assert_ne!(staged, neighbor, "must land on a distinct, unclaimed name");
+        assert_eq!(
+            fs::read(&neighbor).unwrap(),
+            b"other writer's bytes",
+            "the neighbor's file must be untouched"
+        );
+        assert_eq!(fs::read(&staged).unwrap(), b"my bytes");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The private path must also retry past a collision — and the
+    /// file it eventually lands on must still be born owner-only
+    /// (mode 0600), never a create-then-chmod window.
+    #[cfg(unix)]
+    #[test]
+    fn stage_bytes_private_retries_past_a_collision_and_stays_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-storage-stage-private-collision-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.txt");
+
+        force_next_staging_collisions(2);
+        let staged = stage_bytes(&path, b"secret bytes", true)
+            .expect("stage_bytes must retry past forced collisions for private writes too");
+
+        assert_eq!(fs::read(&staged).unwrap(), b"secret bytes");
+        let mode = fs::metadata(&staged).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "staging file mode {mode:o}");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
