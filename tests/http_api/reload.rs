@@ -229,9 +229,6 @@ fn the_config_watch_picks_up_a_rotation_without_a_signal() {
         200
     );
 
-    // A different LENGTH too, so even a filesystem with whole-second
-    // mtimes cannot make this rewrite invisible to the (mtime, len)
-    // probe.
     std::fs::write(&config, "TAGURU_API_TOKENS=ci:sekrit-w2-rotated\n").unwrap();
     eventually(
         Duration::from_secs(20),
@@ -246,6 +243,143 @@ fn the_config_watch_picks_up_a_rotation_without_a_signal() {
     assert_eq!(
         server
             .call_with_token("GET", "/contexts", None, Some("sekrit-w1"))
+            .0,
+        401
+    );
+    let log = std::fs::read_to_string(&stderr).unwrap();
+    assert!(log.contains("trigger=\"config-watch\""), "{log}");
+}
+
+/// Issue #309: a same-LENGTH rotation whose mtime is put back to its
+/// original value (a fixed-width token swap on a filesystem too
+/// coarse to move the clock, or a metadata-preserving copy) must still
+/// be seen as a change — a probe over `(mtime, len)` alone would miss
+/// it and leave the retired token armed indefinitely.
+#[test]
+fn the_config_watch_picks_up_a_same_size_rotation_with_an_unchanged_mtime() {
+    let dir = scratch("samesize");
+    let config = dir.join("taguru.env");
+    let stderr = dir.join("stderr.log");
+    std::fs::write(&config, "TAGURU_API_TOKENS=ci:sekrit-samelen-aaaa\n").unwrap();
+    let original_mtime = std::fs::metadata(&config).unwrap().modified().unwrap();
+    let server = Server::start_with_config(
+        "reload-samesize",
+        &config,
+        &stderr,
+        &[("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0")],
+    );
+
+    assert_eq!(
+        server
+            .call_with_token("GET", "/contexts", None, Some("sekrit-samelen-aaaa"))
+            .0,
+        200
+    );
+
+    // Same byte length as the original write, then the mtime is
+    // forced back to its original value — `(mtime, len)` alone would
+    // read this as "unchanged".
+    let rotated = "TAGURU_API_TOKENS=ci:sekrit-samelen-bbbb\n";
+    assert_eq!(
+        rotated.len(),
+        "TAGURU_API_TOKENS=ci:sekrit-samelen-aaaa\n".len()
+    );
+    std::fs::write(&config, rotated).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&config)
+        .unwrap();
+    file.set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(&config).unwrap().modified().unwrap(),
+        original_mtime
+    );
+
+    eventually(
+        Duration::from_secs(20),
+        "the watch to apply a same-size, same-mtime rotation",
+        || {
+            server
+                .call_with_token("GET", "/contexts", None, Some("sekrit-samelen-bbbb"))
+                .0
+                == 200
+        },
+    );
+    assert_eq!(
+        server
+            .call_with_token("GET", "/contexts", None, Some("sekrit-samelen-aaaa"))
+            .0,
+        401
+    );
+}
+
+/// Issue #309: the Kubernetes secret-volume rotation mechanism itself
+/// — the kubelet swaps a symlink to point at a freshly-populated
+/// directory, atomically, via rename — must be picked up by the watch
+/// even when that swap does not move the file's own mtime forward
+/// (only the symlink target changes).
+#[cfg(unix)]
+#[test]
+fn the_config_watch_picks_up_a_kubernetes_style_atomic_symlink_swap() {
+    let dir = scratch("symlink");
+    let stderr = dir.join("stderr.log");
+    let target_a = dir.join("data-v1");
+    let target_b = dir.join("data-v2");
+    std::fs::create_dir_all(&target_a).unwrap();
+    std::fs::create_dir_all(&target_b).unwrap();
+    std::fs::write(
+        target_a.join("taguru.env"),
+        "TAGURU_API_TOKENS=ci:sekrit-symlink-v1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        target_b.join("taguru.env"),
+        "TAGURU_API_TOKENS=ci:sekrit-symlink-v2\n",
+    )
+    .unwrap();
+
+    // `config` is the stable path the server watches; `current` is the
+    // symlink the kubelet repoints, exactly like the `..data` symlink
+    // in a real secret volume.
+    let current = dir.join("current");
+    std::os::unix::fs::symlink(&target_a, &current).unwrap();
+    let config = current.join("taguru.env");
+
+    let server = Server::start_with_config(
+        "reload-symlink",
+        &config,
+        &stderr,
+        &[("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0")],
+    );
+    assert_eq!(
+        server
+            .call_with_token("GET", "/contexts", None, Some("sekrit-symlink-v1"))
+            .0,
+        200
+    );
+
+    // Atomic swap: build the new symlink under a temp name, then
+    // `rename` it over `current` — the kubelet's own technique, so the
+    // directory entry changes in one syscall and there is never a
+    // window where `current` is missing.
+    let staged = dir.join("current-next");
+    std::os::unix::fs::symlink(&target_b, &staged).unwrap();
+    std::fs::rename(&staged, &current).unwrap();
+
+    eventually(
+        Duration::from_secs(20),
+        "the watch to apply a kubelet-style symlink swap",
+        || {
+            server
+                .call_with_token("GET", "/contexts", None, Some("sekrit-symlink-v2"))
+                .0
+                == 200
+        },
+    );
+    assert_eq!(
+        server
+            .call_with_token("GET", "/contexts", None, Some("sekrit-symlink-v1"))
             .0,
         401
     );

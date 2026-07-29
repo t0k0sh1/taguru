@@ -899,10 +899,11 @@ fn routes(
         ))
 }
 
-/// How often the config-file watch stats its target. Well under the
-/// kubelet's own secret-sync cadence (about a minute), and one
-/// `metadata` call per tick — cheap enough to hardcode rather than
-/// grow another knob.
+/// How often the config-file watch re-hashes its target. Well under
+/// the kubelet's own secret-sync cadence (about a minute), and one
+/// small-file read per tick — the same bytes a reload is about to
+/// parse anyway — cheap enough to hardcode rather than grow another
+/// knob.
 const CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Arms the keyring hot-reload triggers (issue #134); the reload work
@@ -917,14 +918,17 @@ const CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(5);
 ///   strictly an upgrade — but it does mean a foreground server now
 ///   survives its terminal closing.
 /// - **The `--config` file watch** (every platform, only when a file
-///   was given): a poll of (mtime, len), so a Kubernetes
-///   secret-volume rotation — an atomic symlink swap the kubelet
-///   performs on its own cadence, with no way to signal the process —
-///   is picked up by itself, and so non-unix platforms, which have no
-///   SIGHUP at all, still rotate. Without `--config` nothing can
-///   change at runtime (a live process's environment is immutable
-///   from outside), so there is nothing to watch; SIGHUP then just
-///   logs its no-op.
+///   was given): a poll of the file's content digest — NOT `(mtime,
+///   len)` alone (issue #309), which misses a same-length rotation
+///   that lands on an unchanged mtime (a fixed-width token swap, a
+///   metadata-preserving copy, or a filesystem whose clock is too
+///   coarse to move between two ticks) — so a Kubernetes secret-volume
+///   rotation, an atomic symlink swap the kubelet performs on its own
+///   cadence with no way to signal the process, is picked up by
+///   itself, and so non-unix platforms, which have no SIGHUP at all,
+///   still rotate. Without `--config` nothing can change at runtime (a
+///   live process's environment is immutable from outside), so there
+///   is nothing to watch; SIGHUP then just logs its no-op.
 fn spawn_keyring_reload_tasks(
     keyring: auth::SharedKeyring,
     source: auth::AuthSource,
@@ -957,23 +961,36 @@ fn spawn_keyring_reload_tasks(
         return;
     };
     tokio::spawn(async move {
-        let stat = |path: &std::path::Path| {
-            std::fs::metadata(path)
+        // A content digest, not `(mtime, len)`: a same-length rotation
+        // that lands on an unchanged mtime — a fixed-width token swap,
+        // a metadata-preserving copy, or an atomic symlink swap inside
+        // one filesystem-clock tick — must still register as a
+        // change. `std::fs::read` already follows the symlink hop a
+        // Kubernetes secret volume performs, so the swapped target's
+        // bytes are what get hashed either way. The file is the same
+        // small KEY=VALUE table `reload_keyring` is about to read in
+        // full the moment a change fires, so hashing it every tick
+        // costs nothing close to a full parse.
+        let signature = |path: &std::path::Path| {
+            std::fs::read(path)
                 .ok()
-                .and_then(|meta| meta.modified().ok().map(|mtime| (mtime, meta.len())))
+                .map(|bytes| hash::fnv1a_fold(hash::FNV1A_OFFSET, bytes))
         };
-        let mut last = stat(&path);
+        let mut last = signature(&path);
         let mut ticker = tokio::time::interval(CONFIG_WATCH_INTERVAL);
         ticker.tick().await; // fires immediately; boot already read the file
         loop {
             ticker.tick().await;
-            // An unreadable stat is NOT a change: transient volume
+            // An unreadable file is NOT a change: transient volume
             // states must neither trigger a reload nor poison `last`.
-            let Some(current) = stat(&path) else { continue };
-            if last.as_ref() != Some(&current) {
+            let Some(current) = signature(&path) else {
+                continue;
+            };
+            if last != Some(current) {
                 // Remember the state we ATTEMPTED, refusal included:
-                // one loud line per change, not one per tick. A fixed
-                // file carries a fresh mtime and re-triggers.
+                // one loud line per change, not one per tick. A
+                // reverted file hashes differently again and
+                // re-triggers.
                 last = Some(current);
                 let outcome = auth::reload_keyring(&keyring, &source, "config-watch");
                 state
