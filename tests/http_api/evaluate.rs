@@ -414,6 +414,226 @@ fn evaluate_runs_the_citation_lane_without_preflighting_it_and_distinguishes_no_
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn write_thresholds(dir: &Path, contents: &str) -> PathBuf {
+    let path = dir.join("thresholds.json");
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+/// #276: a satisfiable `--thresholds` file against [`write_smoke_eval`]'s
+/// single, fully-satisfied case exits 0, and `evaluation.json` records
+/// a passing `thresholds` block instead of `null` — the report-only
+/// stderr line only fires when `--thresholds` was never given.
+#[test]
+fn evaluate_exits_0_and_records_a_passing_thresholds_block_when_every_bound_is_satisfied() {
+    let server = Server::start("evaluate-thresholds-pass");
+    seed_context(&server, "sake");
+    let dir = eval_dir("thresholds-pass");
+    let eval_path = write_smoke_eval(&dir);
+    let thresholds_path = write_thresholds(
+        &dir,
+        "{\"taguru_evaluate_thresholds\":1,\
+         \"aggregate\":{\"recall.recall_at_k\":{\"min\":1.0},\"citations.recall\":{\"min\":1.0}},\
+         \"cases\":{\"default\":{\"recall.recall_at_k\":{\"min\":1.0}}}}",
+    );
+    let out_path = dir.join("evaluation.json");
+
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "evaluate",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--context",
+            "sake",
+            "--url",
+            &server.base,
+            "--out",
+            out_path.to_str().unwrap(),
+            "--thresholds",
+            thresholds_path.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    // A run with --thresholds is never report-only, whether it passes
+    // or fails.
+    assert!(!stderr.contains("report-only"), "{stderr}");
+    assert!(stdout.contains("PASS"), "{stdout}");
+
+    let evaluation: Value =
+        serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
+    assert_eq!(evaluation["thresholds"]["passed"], true, "{evaluation}");
+    // Mirrors `crate::extract::sha256_hex` (src/extract.rs) without
+    // depending on the library crate from an integration test — sha2
+    // is already a direct dependency (Cargo.toml). Comparing against
+    // the exact digest of the file's own bytes (not merely
+    // non-emptiness) catches a constant or wrong-but-non-empty value.
+    let expected_sha256 = {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write;
+        Sha256::digest(std::fs::read(&thresholds_path).unwrap())
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
+    };
+    assert_eq!(
+        evaluation["thresholds"]["sha256"], expected_sha256,
+        "{evaluation}"
+    );
+    assert!(
+        evaluation["thresholds"]["violations"].is_null()
+            || evaluation["thresholds"]["violations"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+        "{evaluation}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #276: an unsatisfiable `--thresholds` file exits 3, the artifact is
+/// still written (a CI job reads it to see why), and the violation is
+/// recorded with the metric name, the bound, and the actual value —
+/// never a URL, a token, or passage body text (ADR 0004 §11).
+#[test]
+fn evaluate_exits_3_and_records_violations_when_a_threshold_is_not_met() {
+    // Bearer auth enabled with a distinctive canary token — the
+    // supported credential path (ADR 0002 §7 already rejected a
+    // `--token` flag; URL userinfo is refused outright by
+    // `reject_userinfo` before evaluate ever runs, so a bearer token is
+    // the one credential that could plausibly leak into an artifact).
+    const CANARY_TOKEN: &str = "tok-canary-SECRET-9f3a21";
+    let server = Server::start_with_env(
+        "evaluate-thresholds-fail",
+        &[
+            (
+                "TAGURU_API_TOKENS",
+                &format!("admin:tok-admin,ci:{CANARY_TOKEN}"),
+            ),
+            ("TAGURU_KEY_SCOPES", r#"{"ci": "read"}"#),
+        ],
+    );
+    seed_context_with_token(&server, "sake", "tok-admin");
+    let dir = eval_dir("thresholds-fail");
+    let eval_path = write_smoke_eval(&dir);
+    // `latency.passage_ms`'s real value is some small, non-deterministic
+    // number of milliseconds — a `min` this high is guaranteed to be
+    // violated without depending on the exact timing.
+    let thresholds_path = write_thresholds(
+        &dir,
+        "{\"taguru_evaluate_thresholds\":1,\
+         \"aggregate\":{\"latency.passage_ms\":{\"min\":999999.0}}}",
+    );
+    let out_path = dir.join("evaluation.json");
+
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "evaluate",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--context",
+            "sake",
+            "--url",
+            &server.base,
+            "--out",
+            out_path.to_str().unwrap(),
+            "--thresholds",
+            thresholds_path.to_str().unwrap(),
+        ],
+        &[("TAGURU_API_TOKEN", CANARY_TOKEN)],
+    );
+    assert_eq!(code, 3, "{stderr}");
+    assert!(!stderr.contains("report-only"), "{stderr}");
+    assert!(stdout.contains("FAIL"), "{stdout}");
+    assert!(
+        out_path.exists(),
+        "the artifact must still be written on a threshold violation"
+    );
+
+    let raw = std::fs::read_to_string(&out_path).unwrap();
+    let evaluation: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(evaluation["thresholds"]["passed"], false, "{evaluation}");
+    let violations = evaluation["thresholds"]["violations"].as_array().unwrap();
+    assert!(!violations.is_empty(), "{evaluation}");
+    let violation = violations
+        .iter()
+        .find(|v| v["metric"] == "latency.passage_ms")
+        .expect("the violated metric must be named in the report");
+    assert_eq!(violation["scope"], "aggregate", "{violation}");
+    assert_eq!(violation["bound"], "min", "{violation}");
+    // ADR 0004 §11: the `thresholds` block itself carries no URL and
+    // no passage body text — only the metric name, the bound, and the
+    // two numbers (`inputs.url` legitimately carries the masked
+    // scheme+host+port elsewhere in the artifact, so that check is
+    // scoped here rather than to the whole file).
+    let thresholds_text = serde_json::to_string(&evaluation["thresholds"]).unwrap();
+    assert!(!thresholds_text.contains(&server.base), "{thresholds_text}");
+    assert!(!thresholds_text.contains("青嶺"), "{thresholds_text}");
+    // The bearer token never legitimately appears anywhere in the
+    // artifact (unlike the URL, it has no masked-but-present form), so
+    // this is checked against the whole file.
+    assert!(!raw.contains(CANARY_TOKEN), "{raw}");
+    assert!(!raw.contains("tok-admin"), "{raw}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #276, ADR 0004 §12: `corpus.stable == false` (a write landing
+/// mid-run) failing the gate by default, and `allow_unstable_corpus`
+/// being the only opt-out, is decided entirely by
+/// `LoadedThresholds::evaluate` (`src/evaluate/thresholds.rs`) — see
+/// its own `an_unstable_corpus_violates_the_gate_by_default` and
+/// `allow_unstable_corpus_opts_out_of_the_corpus_stability_gate` unit
+/// tests, which drive `stable` directly and so cover both outcomes
+/// deterministically. Reproducing an actual mid-run write here would
+/// need `taguru evaluate` (a real subprocess) to pause between its two
+/// `GET /contexts/{name}` reads, which this harness has no hook for —
+/// so this HTTP-level test instead locks in the *wiring*: with the
+/// corpus genuinely stable, the default `allow_unstable_corpus: false`
+/// does not itself cause a failure.
+#[test]
+fn evaluate_passes_by_default_when_the_corpus_is_in_fact_stable() {
+    let server = Server::start("evaluate-thresholds-stable");
+    seed_context(&server, "sake");
+    let dir = eval_dir("thresholds-stable");
+    let eval_path = write_smoke_eval(&dir);
+    let thresholds_path = write_thresholds(
+        &dir,
+        "{\"taguru_evaluate_thresholds\":1,\"allow_unstable_corpus\":false}",
+    );
+    let out_path = dir.join("evaluation.json");
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "evaluate",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--context",
+            "sake",
+            "--url",
+            &server.base,
+            "--out",
+            out_path.to_str().unwrap(),
+            "--thresholds",
+            thresholds_path.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let evaluation: Value =
+        serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
+    assert_eq!(evaluation["thresholds"]["passed"], true, "{evaluation}");
+    assert_eq!(
+        evaluation["thresholds"]["allow_unstable_corpus"], false,
+        "{evaluation}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn evaluate_exits_1_when_the_server_is_unreachable() {
     let dir = eval_dir("unreachable");

@@ -53,6 +53,7 @@ use crate::evalset::{self, EvalCase, ExpectedAssociation, ExpectedCitation, Expe
 use crate::measure::{Distribution, MetricDef, MetricValue, MetricsMap, def, ratio_metric};
 use crate::registry::{ContextRevision, DirectoryEntry};
 use crate::remote::{self, Api, ApiFailure};
+use thresholds::{ThresholdReport, load_thresholds};
 
 const EVALUATION_VERSION: u64 = 1;
 /// `options.limit` unspecified — matches `benchmark search`'s own
@@ -76,17 +77,14 @@ const DEFAULT_OUT: &str = "evaluation.json";
 
 const USAGE: &str = "\
 usage: taguru evaluate --eval FILE --context NAME [--url URL]
-                        [--config FILE] [--out FILE]
+                        [--config FILE] [--out FILE] [--thresholds FILE]
 
 Runs eval.jsonl's cases (ADR 0003 §11's shared dataset, #215's own
 extension fields) against one already-populated context's live
 retrieval endpoints and writes evaluation.json: per-case passage-lane
 hits and structural-lane resolve/query outcomes, recall@k/MRR/nDCG,
 concept/label/association coverage, citation recall and locator
-validity, corpus revision bracketing, and run metadata — a report-only
-quality gate (this build has no --thresholds; every completed run exits
-0). Configurable thresholds land in a follow-up issue on top of this
-build.
+validity, corpus revision bracketing, and run metadata.
 
   --eval FILE            eval.jsonl (ADR 0003 §11's shared dataset)
   --context NAME          the already-populated context to evaluate
@@ -96,9 +94,19 @@ build.
   --config FILE          load before resolving --url (same as --config
                         everywhere else)
   --out FILE             where to write the artifact (evaluation.json)
+  --thresholds FILE      a checked-in JSON file of regression bounds
+                        (ADR 0004 §9.3); a completed run that violates
+                        one exits 3. Without --thresholds every
+                        completed run exits 0 and is report-only (a
+                        stderr line says so).
 
 `taguru evaluate compare` (comparing two evaluation.json runs) is not
 yet implemented.
+
+EXIT CODES: 0 ok, or a completed run with no --thresholds or every
+threshold satisfied · 1 the run could not complete · 2 usage or input
+error, including a malformed --thresholds file · 3 the run completed
+and a threshold was violated.
 
 Contract and discipline: docs/evaluate.html,
 adr/0004-retrieval-citation-quality-gate.md.
@@ -142,6 +150,26 @@ fn run_evaluate(args: &[String]) -> i32 {
         eprintln!("taguru: evaluate: {message}");
         return 2;
     }
+
+    // Validated before any network call: a malformed --thresholds file
+    // is a usage error (exit 2) that should never depend on a
+    // reachable server to be reported (ADR 0004 §9.3).
+    let definitions = build_definitions();
+    let case_ids: BTreeSet<String> = loaded
+        .cases
+        .iter()
+        .map(|case| case.case_id.clone())
+        .collect();
+    let loaded_thresholds = match &eval_args.thresholds {
+        Some(path) => match load_thresholds(path, &definitions, &case_ids) {
+            Ok(thresholds) => Some(thresholds),
+            Err(message) => {
+                eprintln!("taguru: evaluate: {message}");
+                return 2;
+            }
+        },
+        None => None,
+    };
 
     let config = eval_args
         .config
@@ -294,10 +322,15 @@ fn run_evaluate(args: &[String]) -> i32 {
             embeddings,
             sources_count: sources.len(),
         },
-        // #276 populates this from --thresholds; a report-only run
-        // (this build has no other kind) always carries null here.
-        thresholds: None,
-        definitions: build_definitions(),
+        // `None` when --thresholds was not given (report-only); `Some`
+        // once the loaded bounds have been checked against this run's
+        // own cases/metrics/stable, just below. Borrows `cases`/
+        // `metrics` here, before either moves into the fields below —
+        // struct-literal field initializers evaluate in source order.
+        thresholds: loaded_thresholds
+            .as_ref()
+            .map(|loaded| loaded.evaluate(&cases, &metrics, stable)),
+        definitions,
         warnings: loaded.warnings.clone(),
         cases,
         metrics,
@@ -309,10 +342,20 @@ fn run_evaluate(args: &[String]) -> i32 {
     }
 
     print_summary(&evaluation, &masked_url, context);
-    eprintln!(
-        "taguru: evaluate: no --thresholds given — this run is report-only and always exits 0"
-    );
-    0
+
+    match &evaluation.thresholds {
+        Some(report) => {
+            print_threshold_summary(report);
+            if report.passed { 0 } else { 3 }
+        }
+        None => {
+            eprintln!(
+                "taguru: evaluate: no --thresholds given — this run is report-only and \
+                 always exits 0"
+            );
+            0
+        }
+    }
 }
 
 // ============================== Arguments ==============================
@@ -324,6 +367,7 @@ struct EvaluateArgs {
     url: Option<String>,
     config: Option<PathBuf>,
     out: PathBuf,
+    thresholds: Option<PathBuf>,
 }
 
 fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
@@ -333,6 +377,7 @@ fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
     let mut url: Option<String> = None;
     let mut config: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
+    let mut thresholds: Option<PathBuf> = None;
 
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -366,6 +411,11 @@ fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
                 Some(_) => return Err(usage("--out given twice")),
                 None => return Err(usage("--out needs a file path")),
             },
+            "--thresholds" => match rest.next() {
+                Some(path) if thresholds.is_none() => thresholds = Some(PathBuf::from(path)),
+                Some(_) => return Err(usage("--thresholds given twice")),
+                None => return Err(usage("--thresholds needs a file path")),
+            },
             flag if flag.starts_with("--") => {
                 return Err(usage(&format!("unknown flag '{flag}' for evaluate")));
             }
@@ -382,6 +432,7 @@ fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
         url,
         config,
         out: out.unwrap_or_else(|| PathBuf::from(DEFAULT_OUT)),
+        thresholds,
     })
 }
 
@@ -2033,6 +2084,59 @@ fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
     println!("  wrote {}", evaluation.inputs.out);
 }
 
+/// The human-readable failure summary #276's completion condition
+/// requires (in the spirit of `assert_golden_recall`'s "every case
+/// stays satisfied" table). Every `aggregate`/`corpus` violation
+/// prints in full — there are at most one per declared bound — but
+/// per-case violations are capped at 10 lines with the dropped count
+/// stated (ADR 0004 §11's "no silent truncation" discipline, the same
+/// one `missed[]`/`missed_truncated` already follows).
+fn print_threshold_summary(report: &ThresholdReport) {
+    if report.passed {
+        println!(
+            "  thresholds: PASS (sha256 {}…)",
+            &report.sha256[..12.min(report.sha256.len())]
+        );
+        return;
+    }
+    println!(
+        "  thresholds: FAIL — {} violation(s) (sha256 {}…)",
+        report.violations.len(),
+        &report.sha256[..12.min(report.sha256.len())]
+    );
+    let (case_scoped, other): (Vec<_>, Vec<_>) = report
+        .violations
+        .iter()
+        .partition(|violation| violation.scope == "case");
+    for violation in &other {
+        println!(
+            "    [{}] {}: {}",
+            violation.scope, violation.metric, violation.reason
+        );
+    }
+    const MAX_CASE_LINES: usize = 10;
+    for violation in case_scoped.iter().take(MAX_CASE_LINES) {
+        println!(
+            "    [case {}] {}: {}",
+            violation.case_id.as_deref().unwrap_or("?"),
+            violation.metric,
+            violation.reason
+        );
+    }
+    if case_scoped.len() > MAX_CASE_LINES {
+        println!(
+            "    ... and {} more case-scoped violation(s)",
+            case_scoped.len() - MAX_CASE_LINES
+        );
+    }
+    if !report.skipped.is_empty() {
+        println!(
+            "  {} case-scoped threshold(s) skipped as not applicable",
+            report.skipped.len()
+        );
+    }
+}
+
 // ============================= Value shapes =============================
 
 // `Debug`/`Clone` are dropped from this and every struct that
@@ -2048,7 +2152,11 @@ struct EvaluationFile {
     matching: MatchingBlock,
     inputs: InputsBlock,
     corpus: CorpusBlock,
-    thresholds: Option<ThresholdIdentity>,
+    /// `None` when `--thresholds` was not given (a report-only run);
+    /// `Some` — the loaded bounds checked against this run — otherwise
+    /// (ADR 0004 §9.1's threshold identity, extended by #276 with the
+    /// pass/fail verdict; see [`thresholds::ThresholdReport`]).
+    thresholds: Option<ThresholdReport>,
     definitions: BTreeMap<String, MetricDef>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
@@ -2089,15 +2197,6 @@ impl Default for MatchingBlock {
             sources: "exact (source, paragraph) match — no normalization",
         }
     }
-}
-
-/// #276 fills this in with a hash of the threshold file's canonical
-/// byte content — defined now only so `evaluation.json`'s `thresholds`
-/// key has a concrete (if always-`null` in this build) shape to grow
-/// into.
-#[derive(Debug, Clone, Serialize)]
-struct ThresholdIdentity {
-    sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2432,6 +2531,8 @@ struct AttributionLocator {
     source: String,
     paragraph: Option<u32>,
 }
+
+mod thresholds;
 
 #[cfg(test)]
 mod tests;

@@ -4,7 +4,9 @@
 //! in-tree.
 //!
 //! Exit codes: 0 success · 1 operation failure (corruption found,
-//! server error) · 2 usage error.
+//! server error) · 2 usage error · 3 `taguru evaluate` completed and a
+//! `--thresholds` bound was violated (ADR 0004 §5) — the one verb in
+//! this tree that returns it.
 
 use std::path::PathBuf;
 use std::process::exit;
@@ -102,13 +104,16 @@ USAGE:
                                         runs/*.jsonl (ADR 0003; see: taguru
                                         benchmark extract --help)
   taguru evaluate --eval FILE --context NAME [--url URL] [--config FILE]
+                  [--thresholds FILE]
                                         run eval.jsonl's cases against one
                                         context's live retrieval endpoints
                                         (passage search, then resolve/query)
-                                        and write evaluation.json — a
-                                        report-only quality gate that calls no
-                                        answer-generation LLM (ADR 0004; see:
-                                        taguru evaluate --help)
+                                        and write evaluation.json — a quality
+                                        gate that calls no answer-generation
+                                        LLM (ADR 0004). Report-only (exit 0)
+                                        without --thresholds; with it, exits
+                                        3 on a violated bound (see: taguru
+                                        evaluate --help)
   taguru calibrate --context NAME --probes FILE [--json] [URL]
                                         measure the semantic-floor bands of a
                                         running server's embedding model with
@@ -259,7 +264,8 @@ ENVIRONMENT (every knob; unset = the shown default):
                                per-context labels cost Prometheus series)
   OTEL_EXPORTER_OTLP_ENDPOINT  turns on OTLP/HTTP span export (off)
 
-EXIT CODES: 0 ok · 1 failure or corruption found · 2 usage error
+EXIT CODES: 0 ok · 1 failure or corruption found · 2 usage error ·
+            3 threshold violation (taguru evaluate --thresholds only)
 "
 );
 

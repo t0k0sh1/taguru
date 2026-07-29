@@ -2010,3 +2010,212 @@ fn compact_rejects_a_non_positive_parallel_value() {
         "{output:?}"
     );
 }
+
+// ============================== evaluate --thresholds (issue #276) ==============================
+//
+// Every case here is a usage/input error (exit 2), reported before any
+// network call — [`crate::evaluate::run_evaluate`] validates
+// `--thresholds` right after `eval.jsonl` itself, ahead of URL/config
+// resolution, so none of these need a running server (ADR 0004 §9.3).
+
+/// A scratch directory holding one `eval.jsonl` with a single case
+/// declaring no expectations, ready for a `--thresholds FILE` next to
+/// it. Removed by the caller.
+fn eval_scratch_dir(tag: &str) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("taguru-cli-evaluate-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let eval_path = dir.join("eval.jsonl");
+    std::fs::write(
+        &eval_path,
+        "{\"taguru_eval\":1}\n{\"case_id\":\"c1\",\"query\":\"q\"}\n",
+    )
+    .expect("eval.jsonl must be writable");
+    dir
+}
+
+fn write_thresholds(dir: &std::path::Path, contents: &str) -> PathBuf {
+    let path = dir.join("thresholds.json");
+    std::fs::write(&path, contents).expect("thresholds.json must be writable");
+    path
+}
+
+#[test]
+fn evaluate_rejects_a_thresholds_file_with_the_wrong_stamp() {
+    let dir = eval_scratch_dir("bad-stamp");
+    let thresholds = write_thresholds(&dir, "{\"taguru_evaluate_thresholds\":2}");
+    let output = run(&[
+        "evaluate",
+        "--eval",
+        dir.join("eval.jsonl").to_str().unwrap(),
+        "--context",
+        "sake",
+        "--thresholds",
+        thresholds.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("taguru_evaluate_thresholds"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn evaluate_rejects_a_thresholds_file_naming_an_unknown_aggregate_metric() {
+    let dir = eval_scratch_dir("unknown-metric");
+    let thresholds = write_thresholds(
+        &dir,
+        "{\"taguru_evaluate_thresholds\":1,\
+         \"aggregate\":{\"not.a.real.metric\":{\"min\":0.5}}}",
+    );
+    let output = run(&[
+        "evaluate",
+        "--eval",
+        dir.join("eval.jsonl").to_str().unwrap(),
+        "--context",
+        "sake",
+        "--thresholds",
+        thresholds.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not.a.real.metric"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn evaluate_rejects_a_thresholds_file_naming_an_unknown_case_id_override() {
+    let dir = eval_scratch_dir("unknown-case-id");
+    let thresholds = write_thresholds(
+        &dir,
+        "{\"taguru_evaluate_thresholds\":1,\
+         \"cases\":{\"overrides\":{\"no-such-case\":{\"recall.recall_at_k\":{\"min\":0.5}}}}}",
+    );
+    let output = run(&[
+        "evaluate",
+        "--eval",
+        dir.join("eval.jsonl").to_str().unwrap(),
+        "--context",
+        "sake",
+        "--thresholds",
+        thresholds.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no-such-case"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn evaluate_rejects_a_thresholds_file_naming_a_non_case_scoped_metric_in_cases_default() {
+    let dir = eval_scratch_dir("non-case-scoped");
+    let thresholds = write_thresholds(
+        &dir,
+        "{\"taguru_evaluate_thresholds\":1,\
+         \"cases\":{\"default\":{\"latency.resolve_ms\":{\"max\":100.0}}}}",
+    );
+    let output = run(&[
+        "evaluate",
+        "--eval",
+        dir.join("eval.jsonl").to_str().unwrap(),
+        "--context",
+        "sake",
+        "--thresholds",
+        thresholds.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("latency.resolve_ms"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn evaluate_rejects_a_bound_with_neither_min_nor_max() {
+    let dir = eval_scratch_dir("empty-bound");
+    let thresholds = write_thresholds(
+        &dir,
+        "{\"taguru_evaluate_thresholds\":1,\
+         \"aggregate\":{\"recall.recall_at_k\":{}}}",
+    );
+    let output = run(&[
+        "evaluate",
+        "--eval",
+        dir.join("eval.jsonl").to_str().unwrap(),
+        "--context",
+        "sake",
+        "--thresholds",
+        thresholds.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn evaluate_rejects_a_bound_with_min_greater_than_max() {
+    let dir = eval_scratch_dir("inverted-bound");
+    let thresholds = write_thresholds(
+        &dir,
+        "{\"taguru_evaluate_thresholds\":1,\
+         \"aggregate\":{\"recall.recall_at_k\":{\"min\":0.9,\"max\":0.1}}}",
+    );
+    let output = run(&[
+        "evaluate",
+        "--eval",
+        dir.join("eval.jsonl").to_str().unwrap(),
+        "--context",
+        "sake",
+        "--thresholds",
+        thresholds.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn evaluate_thresholds_flag_given_twice_is_a_usage_error() {
+    let dir = eval_scratch_dir("dup-thresholds");
+    let thresholds = write_thresholds(
+        &dir,
+        "{\"taguru_evaluate_thresholds\":1,\"aggregate\":{\"recall.recall_at_k\":{\"min\":0.5}}}",
+    );
+    let output = run(&[
+        "evaluate",
+        "--eval",
+        dir.join("eval.jsonl").to_str().unwrap(),
+        "--context",
+        "sake",
+        "--thresholds",
+        thresholds.to_str().unwrap(),
+        "--thresholds",
+        thresholds.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--thresholds given twice"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn evaluate_thresholds_file_that_cannot_be_read_is_a_usage_error() {
+    let dir = eval_scratch_dir("missing-thresholds-file");
+    let output = run(&[
+        "evaluate",
+        "--eval",
+        dir.join("eval.jsonl").to_str().unwrap(),
+        "--context",
+        "sake",
+        "--thresholds",
+        dir.join("does-not-exist.json").to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn top_level_help_documents_exit_code_3_for_threshold_violations() {
+    let output = run(&["--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("EXIT CODES"), "{stdout}");
+    assert!(stdout.contains('3'), "{stdout}");
+}
