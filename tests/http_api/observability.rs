@@ -194,6 +194,57 @@ fn a_request_span_reaches_the_collector_carrying_the_inbound_trace_identity() {
     assert_eq!(service, Some(json!("taguru")));
 }
 
+/// Drains `reader` on a side thread and waits up to `timeout` (wall
+/// clock, not a line count) for a JSON log record whose
+/// `fields.message` is `"http"` and whose `fields.route` matches
+/// `route`. Panics with every line collected so far plus what it was
+/// looking for — instead of blocking forever — when the record never
+/// appears (a dropped log level, a stalled process, a malformed
+/// stream): the reader thread keeps blocking on its own read, but the
+/// deadline here is wall-clock and fires regardless.
+fn wait_for_access_log_record<R>(reader: R, route: &str, timeout: std::time::Duration) -> Value
+where
+    R: std::io::Read + Send + 'static,
+{
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(reader).lines() {
+            let Ok(line) = line else { break };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let mut collected = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let received = if remaining.is_zero() {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        } else {
+            receiver.recv_timeout(remaining)
+        };
+        match received {
+            Ok(line) => {
+                collected.push(line.clone());
+                if let Ok(parsed) = serde_json::from_str::<Value>(&line)
+                    && parsed["fields"]["message"] == "http"
+                    && parsed["fields"]["route"] == route
+                {
+                    return parsed;
+                }
+            }
+            Err(_) => panic!(
+                "no access-log record with message \"http\" and route {route:?} appeared \
+                 within {timeout:?}; stderr collected so far ({} line(s)):\n{}",
+                collected.len(),
+                collected.join("\n")
+            ),
+        }
+    }
+}
+
 #[test]
 fn the_access_log_carries_the_trace_id_when_export_is_configured() {
     let data_dir = std::env::temp_dir().join(format!("taguru-tracelog-{}", std::process::id()));
@@ -214,6 +265,21 @@ fn the_access_log_carries_the_trace_id_when_export_is_configured() {
         .expect("server binary must spawn");
 
     let stdout = child.stdout.take().expect("stdout must be piped");
+    let stderr = child.stderr.take().expect("stderr must be piped");
+
+    // Kills the child and cleans the data dir on every exit path —
+    // success, an assertion failure, or a panic out of the bounded
+    // wait below — so a failing run never leaves an orphaned server.
+    struct KillOnDrop<'a>(&'a mut std::process::Child, &'a std::path::Path);
+    impl Drop for KillOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            let _ = std::fs::remove_dir_all(self.1);
+        }
+    }
+    let _cleanup = KillOnDrop(&mut child, &data_dir);
+
     let (addr, _stdout_lines) = common::read_listen_line("server", stdout);
     let base = format!("http://{addr}");
 
@@ -228,27 +294,96 @@ fn the_access_log_carries_the_trace_id_when_export_is_configured() {
     assert_eq!(response.status(), 200);
 
     // The access-log line for that request must carry the same trace
-    // id the caller minted — the log↔trace join key.
-    let stderr = child.stderr.take().expect("stderr must be piped");
-    let mut found = None;
-    for line in BufReader::new(stderr).lines().take(200) {
-        let Ok(line) = line else { break };
-        let Ok(parsed) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if parsed["fields"]["message"] == "http" && parsed["fields"]["route"] == "/health" {
-            found = Some(parsed);
-            break;
-        }
-    }
-    let record = found.expect("an access-log line for /health must appear");
+    // id the caller minted — the log↔trace join key. Waited for with a
+    // wall-clock deadline, not a line-count cap: a dropped log level
+    // or a stalled child must fail this test, not block the suite.
+    let record = wait_for_access_log_record(stderr, "/health", std::time::Duration::from_secs(10));
     assert_eq!(
         record["fields"]["trace_id"],
         json!("4bf92f3577b34da6a3ce929d0e0e4736"),
         "{record}"
     );
+}
 
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&data_dir);
+/// #311: a server that never emits the expected record (log level
+/// dropped, process stalled) must fail this test at the deadline
+/// instead of blocking the reader thread — and thus the suite —
+/// forever.
+#[test]
+fn wait_for_access_log_record_times_out_instead_of_blocking_forever() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener must bind");
+    let addr = listener.local_addr().unwrap();
+    // Kept alive so the accepted stream sees an open connection with
+    // no data — never EOF — the same shape as a live child's pipe.
+    let _keep_open = std::net::TcpStream::connect(addr).expect("client must connect");
+    let (server_side, _) = listener.accept().expect("listener must accept");
+
+    let started = std::time::Instant::now();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_access_log_record(
+            server_side,
+            "/health",
+            std::time::Duration::from_millis(200),
+        )
+    }));
+    let elapsed = started.elapsed();
+
+    assert!(
+        outcome.is_err(),
+        "must fail, not succeed, when no record ever appears"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "must fail near its own deadline, not block indefinitely: {elapsed:?}"
+    );
+    let message = outcome
+        .unwrap_err()
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(message.contains("/health"), "{message}");
+    assert!(message.contains("200ms"), "{message}");
+}
+
+/// #311: malformed (non-JSON) lines must be skipped, not crash the
+/// parser or count as a match — and the deadline must still fire when
+/// nothing valid ever follows them, with the malformed lines visible
+/// in the diagnostic for debugging.
+#[test]
+fn wait_for_access_log_record_skips_malformed_lines_and_still_times_out() {
+    use std::io::Write;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener must bind");
+    let addr = listener.local_addr().unwrap();
+    let mut keep_open = std::net::TcpStream::connect(addr).expect("client must connect");
+    let (server_side, _) = listener.accept().expect("listener must accept");
+
+    writeln!(keep_open, "not json").unwrap();
+    writeln!(keep_open, "{{\"fields\":{{\"message\":\"http\"}}}}").unwrap();
+    keep_open.flush().unwrap();
+
+    let started = std::time::Instant::now();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_access_log_record(
+            server_side,
+            "/health",
+            std::time::Duration::from_millis(200),
+        )
+    }));
+    let elapsed = started.elapsed();
+
+    assert!(
+        outcome.is_err(),
+        "must fail, not succeed, when no line ever matches"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "malformed input must not defeat the deadline: {elapsed:?}"
+    );
+    let message = outcome
+        .unwrap_err()
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(message.contains("not json"), "{message}");
 }
