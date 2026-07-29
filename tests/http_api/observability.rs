@@ -18,7 +18,8 @@ fn log_output_is_structured_when_json_format_is_requested() {
     common::scrub_taguru_env(&mut command)
         .env("TAGURU_ADDR", "127.0.0.1:0")
         .env("TAGURU_DATA_DIR", &data_dir)
-        .env("TAGURU_LOG_FORMAT", "json");
+        .env("TAGURU_LOG_FORMAT", "json")
+        .env("RUST_LOG", "info");
     let mut child = command
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -204,6 +205,7 @@ fn the_access_log_carries_the_trace_id_when_export_is_configured() {
         .env("TAGURU_ADDR", "127.0.0.1:0")
         .env("TAGURU_DATA_DIR", &data_dir)
         .env("TAGURU_LOG_FORMAT", "json")
+        .env("RUST_LOG", "info")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9");
     let mut child = command
         .stdout(Stdio::piped())

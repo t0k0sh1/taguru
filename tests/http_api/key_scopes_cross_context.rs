@@ -896,7 +896,8 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
         .env("TAGURU_ADDR", "127.0.0.1:0")
         .env("TAGURU_DATA_DIR", &data_dir)
         .env("TAGURU_LOG_FORMAT", "json")
-        .env("TAGURU_API_TOKEN", "opskey");
+        .env("TAGURU_API_TOKEN", "opskey")
+        .env("RUST_LOG", "info");
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
