@@ -5,15 +5,29 @@
 //! `taguru evaluate` (#215/#272-#279) is a third. Moved here from
 //! `benchmark::compare` by issue #280 as a pure relocation: no shape, no
 //! serialization, no behavior changed.
+//!
+//! `Distribution`/`Ratio`/`Count` also derive `Deserialize` (#277): the
+//! three value shapes are read back out of `evaluation.json` by
+//! `evaluate::compare`, following ADR 0004 §9.1's rule that a metric's
+//! concrete variant is picked by first reading `definitions[metric]
+//! .statistic` and deserializing into the type that name owns — never
+//! through `MetricValue`'s own `#[serde(untagged)]`, which is
+//! `Serialize`-only and unsound to deserialize through directly (a
+//! `Ratio` payload can silently parse as a `Distribution`, since every
+//! `Distribution` field but `n` is optional). `#[serde(default)]`
+//! matches every other taguru-written-and-reread artifact's range-
+//! acceptance posture (ADR 0003 §10): a field a future version adds is
+//! read as absent by an older `compare`, never a hard parse error.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// `{n, min, p50, p90, p99, max, mean, sum}` (ADR 0003 §9.3). Every
 /// field always serializes — `n: 0` pairs with every statistic `null`,
 /// never an omitted key, so a reader tells "measured, zero samples"
 /// from "this metric does not apply here" by key presence alone.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct Distribution {
     n: u64,
     min: Option<f64>,
@@ -64,10 +78,11 @@ impl Distribution {
         }
     }
 
-    // Test-only: production code reads `n`/`min`/`max`/`sum` through
-    // `metric_csv_rows` in this module, which has private-field access
-    // already; these accessors exist only so `compare/tests.rs`, in a
-    // different module, can assert on them.
+    // Test-only: production code reads `n`/`min`/`max`/`sum`/`mean`
+    // through `metric_csv_rows`/`MetricValue::scalar` in this module,
+    // which has private-field access already; these accessors exist
+    // only so `compare/tests.rs`, in a different module, can assert on
+    // them.
     #[cfg(test)]
     pub(crate) fn n(&self) -> u64 {
         self.n
@@ -102,7 +117,8 @@ fn nearest_rank(sorted: &[f64], p: usize) -> f64 {
 /// documents/lines matched some predicate, out of `n` total in scope.
 /// `n: 0` pairs with `value: None` and `numerator: None` — never a
 /// divide-by-zero `NaN`, never a silently misleading `0.0`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct Ratio {
     value: Option<f64>,
     n: u64,
@@ -151,7 +167,8 @@ impl Ratio {
 /// `Ratio`'s numerator-over-n-of-the-same-population shape does not
 /// fit (a cross-unit rate) or where the value is not itself a share
 /// (a union size, a summed count).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct Count {
     value: Option<f64>,
     n: u64,

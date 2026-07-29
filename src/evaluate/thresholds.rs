@@ -105,6 +105,26 @@ pub(super) const CASE_SCOPED_METRICS: &[&str] = &[
     "latency.passage_ms",
 ];
 
+/// [`CASE_SCOPED_METRICS`] minus `latency.passage_ms` — the set
+/// `evaluate::compare` (#277) compares case-by-case to classify a case
+/// `improved`/`regressed`/`unchanged`. Single-run latency is noisy
+/// enough that including it would flag most cases on rerun alone
+/// rather than on a genuine quality change, so `compare` only judges
+/// the eight quality metrics; `compare_lexicon_test` (in
+/// `super::compare::tests`) asserts this stays exactly
+/// `CASE_SCOPED_METRICS` minus that one name, so a future addition to
+/// `CASE_SCOPED_METRICS` does not silently go unconsidered here.
+pub(super) const COMPARISON_METRICS: &[&str] = &[
+    "recall.recall_at_k",
+    "recall.mrr",
+    "recall.ndcg",
+    "coverage.concepts",
+    "coverage.labels",
+    "coverage.associations",
+    "citations.recall",
+    "citations.locator_validity",
+];
+
 /// One case's value for a [`CASE_SCOPED_METRICS`] name — `None` when
 /// the case never computed one (it did not declare the matching
 /// expectation, or the lane that would have produced it did not

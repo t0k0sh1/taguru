@@ -33,8 +33,10 @@
 //! and locator validity (ADR 0004 §8) are two measurements that are
 //! never merged into one score — see the `Citation lane` and
 //! `citations.*`/`missed` scoring below. Configurable thresholds and
-//! exit 3 (#276), and `taguru evaluate compare` (#277), land as separate,
-//! focused changes on top of this one.
+//! exit 3 (#276) land in the [`thresholds`] submodule; `taguru evaluate
+//! compare` (#277, ADR 0004 §9.2), which classifies two evaluation.json
+//! runs into improved/regressed/added/removed cases, lands in the
+//! [`compare`] submodule.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -78,6 +80,7 @@ const DEFAULT_OUT: &str = "evaluation.json";
 const USAGE: &str = "\
 usage: taguru evaluate --eval FILE --context NAME [--url URL]
                         [--config FILE] [--out FILE] [--thresholds FILE]
+       taguru evaluate compare BASE.json HEAD.json [--out FILE]
 
 Runs eval.jsonl's cases (ADR 0003 §11's shared dataset, #215's own
 extension fields) against one already-populated context's live
@@ -100,13 +103,18 @@ validity, corpus revision bracketing, and run metadata.
                         completed run exits 0 and is report-only (a
                         stderr line says so).
 
-`taguru evaluate compare` (comparing two evaluation.json runs) is not
-yet implemented.
+`taguru evaluate compare BASE.json HEAD.json [--out FILE]` (ADR 0004
+§9.2) reads two evaluation.json runs and writes changes.jsonl: one
+record per case whose outcome moved, improved/regressed/added/removed
+— unchanged cases are counted, never emitted per case. See `taguru
+evaluate compare --help`.
 
 EXIT CODES: 0 ok, or a completed run with no --thresholds or every
-threshold satisfied · 1 the run could not complete · 2 usage or input
-error, including a malformed --thresholds file · 3 the run completed
-and a threshold was violated.
+threshold satisfied, or a completed compare (regardless of regressions
+found) · 1 the run could not complete, or changes.jsonl could not be
+written · 2 usage or input error, including a malformed --thresholds
+file or a malformed evaluation.json given to compare · 3 the run
+completed and a threshold was violated.
 
 Contract and discipline: docs/evaluate.html,
 adr/0004-retrieval-citation-quality-gate.md.
@@ -119,11 +127,13 @@ pub fn run(args: &[String]) -> i32 {
             0
         }
         Some(flag) if flag.starts_with("--") => run_evaluate(args),
+        Some("compare") => compare::run(&args[1..]),
         Some(other) => subcommand_usage_error(
             "evaluate",
             &format!(
                 "unknown subcommand '{other}' — the default mode is selected by a leading \
-                 flag, e.g. 'taguru evaluate --eval FILE --context NAME'"
+                 flag, e.g. 'taguru evaluate --eval FILE --context NAME', or use the \
+                 'compare' subcommand"
             ),
         ),
         None => subcommand_usage_error("evaluate", "expected --eval FILE --context NAME"),
@@ -2532,6 +2542,7 @@ struct AttributionLocator {
     paragraph: Option<u32>,
 }
 
+mod compare;
 mod thresholds;
 
 #[cfg(test)]

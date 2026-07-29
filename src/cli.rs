@@ -114,6 +114,12 @@ USAGE:
                                         without --thresholds; with it, exits
                                         3 on a violated bound (see: taguru
                                         evaluate --help)
+  taguru evaluate compare BASE.json HEAD.json [--out FILE]
+                                        compare two evaluation.json runs and
+                                        write changes.jsonl: improved/
+                                        regressed/added/removed cases (ADR
+                                        0004 §9.2; see: taguru evaluate
+                                        compare --help)
   taguru calibrate --context NAME --probes FILE [--json] [URL]
                                         measure the semantic-floor bands of a
                                         running server's embedding model with
