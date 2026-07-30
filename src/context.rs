@@ -23,7 +23,11 @@ mod write;
 pub use community::{
     COMMUNITY_ALGORITHM, Community, CommunityAnalysis, CommunityAssociation, CommunityMember,
 };
+// Re-exported so the server binary's `GET /version` (ADR 0005 §3, §6)
+// can report the range of on-disk image formats this build still
+// loads without the binary reaching past the library's public surface.
 use entry_index::EntryIndex;
+pub use image::IMAGE_VERSION;
 
 /// Dense id of an interned concept string within one `Context`.
 type ConceptId = u32;

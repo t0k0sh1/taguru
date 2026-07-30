@@ -90,6 +90,61 @@ impl<T> ApiResponse<T> {
     }
 }
 
+/// The wire-shape version every enveloped and non-enveloped HTTP
+/// response/request/error shape in this file and `src/api/*.rs`
+/// conforms to (ADR 0005 §3.2, §6). Bump only alongside a change
+/// this crate's own compat/break table (ADR 0005 §4) classifies
+/// breaking, landing in the same PR as a CHANGELOG "Changed" entry
+/// and a migration note (ADR 0005 §7).
+pub(crate) const HTTP_CONTRACT: u64 = 1;
+
+/// The MCP-owned wire shape version (ADR 0005 §3.3): the 46-tool
+/// name/`inputSchema` table, `retrieve`'s composed output shape (the
+/// one tool result with no HTTP counterpart to inherit from), the
+/// `isError`/`structuredContent` convention, and the JSON-RPC
+/// error-code vocabulary. A pure HTTP-shape change is classified
+/// under [`HTTP_CONTRACT`] even though it is also visible over MCP —
+/// there is no double bump for the same change.
+pub(crate) const MCP_CONTRACT: u64 = 1;
+
+/// The eight version dimensions ADR 0005 §3 names, gathered in one
+/// place: the body of `GET /version` (ADR 0005 §6) and the trailer
+/// [`crate::api::contexts::protocol_trailer`] folds into `GET
+/// /protocol` and every MCP `initialize`'s `instructions`, so both
+/// surfaces state identical facts from one source instead of two
+/// that could drift apart. Bare JSON, not the [`ApiResponse`]
+/// envelope — matching `GET /health`'s own precedent.
+///
+/// `supported` ships as an array from day one, even though each one
+/// is a single-element array today: it gives a caller something to
+/// intersect its own supported range against, without a shape change
+/// to `/version` itself once a dual-serving window exists.
+///
+/// Every field is a compile-time constant, so the value is identical
+/// for the life of the process — built once, on the first call
+/// (`GET /version` or the `/protocol` trailer, whichever a given
+/// process sees first), not re-serialized from scratch on every one
+/// of them.
+pub(crate) fn version_facts() -> &'static serde_json::Value {
+    static FACTS: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(|| {
+        serde_json::json!({
+            "server": env!("CARGO_PKG_VERSION"),
+            "http_contract": {"current": HTTP_CONTRACT, "supported": [HTTP_CONTRACT]},
+            "mcp_contract": {"current": MCP_CONTRACT, "supported": [MCP_CONTRACT]},
+            "mcp_protocol": {"supported": crate::mcp::SUPPORTED_PROTOCOL_VERSIONS},
+            "batch_formats": [crate::ingest::BATCH_VERSION],
+            // Every version from 1 through the current one still loads
+            // (`src/context/image.rs`'s range-acceptance check), unlike
+            // batch/communities formats below, which are checked for
+            // equality — so this dimension is the full range, not just
+            // the current value.
+            "image_formats": (1..=u64::from(taguru::context::IMAGE_VERSION)).collect::<Vec<_>>(),
+            "communities_formats": [crate::api::communities::COMMUNITIES_FORMAT],
+        })
+    });
+    &FACTS
+}
+
 /// The machine-readable failure kind riding every JSON error response
 /// as `code` — a STABLE vocabulary (documented in llm-protocol.md) for
 /// clients that must branch without parsing the human `error` text.
@@ -1708,16 +1763,36 @@ mod tests {
 
     #[test]
     fn protocol_trailer_names_the_model_and_the_refresh_owner() {
-        assert!(protocol_trailer(None, false).is_none());
-        // No provider means no trailer even with the auto flag stuck on.
-        assert!(protocol_trailer(None, true).is_none());
+        // No provider means no semantic-tier paragraph, but the
+        // version block (ADR 0005 §6) is unconditional.
+        let bare = protocol_trailer(None, false);
+        assert!(!bare.contains("Semantic entry is ON"));
+        assert!(bare.contains("\"http_contract\""));
+        let bare_auto = protocol_trailer(None, true);
+        assert!(!bare_auto.contains("Semantic entry is ON"));
 
-        let manual = protocol_trailer(Some("test-model"), false).unwrap();
+        let manual = protocol_trailer(Some("test-model"), false);
         assert!(manual.contains("`test-model`"));
         assert!(manual.contains("calling `refresh_embeddings`"));
+        assert!(manual.contains("\"http_contract\""));
 
-        let auto = protocol_trailer(Some("test-model"), true).unwrap();
+        let auto = protocol_trailer(Some("test-model"), true);
         assert!(auto.contains("auto-refreshes"));
+    }
+
+    /// The version block folded into the trailer (ADR 0005 §6) states
+    /// exactly the same facts `GET /version` does — an MCP client
+    /// learns them from `initialize` without a second connection.
+    #[test]
+    fn protocol_trailer_version_block_matches_version_facts() {
+        let trailer = protocol_trailer(None, false);
+        let fenced = trailer
+            .split("```json\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n```").next())
+            .expect("trailer carries a fenced json block");
+        let parsed: serde_json::Value = serde_json::from_str(fenced).unwrap();
+        assert_eq!(&parsed, version_facts());
     }
 
     /// A percent-encoded path segment that decodes to invalid UTF-8 is

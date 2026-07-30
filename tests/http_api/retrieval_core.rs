@@ -135,8 +135,12 @@ fn full_retrieval_loop_over_http() {
     let (status, protocol) = server.call("GET", "/protocol", None);
     assert_eq!(status, 200);
     assert!(protocol.as_str().unwrap().contains("# Taguru"));
-    // Lexical-only server: no live-configuration trailer to act on.
-    assert!(!protocol.as_str().unwrap().contains("## This server"));
+    // Lexical-only server: the trailer's semantic-tier paragraph is
+    // absent, but the contract-version block (ADR 0005 §6) is
+    // unconditional, so "## This server" itself still appears.
+    assert!(protocol.as_str().unwrap().contains("## This server"));
+    assert!(!protocol.as_str().unwrap().contains("Semantic entry is ON"));
+    assert!(protocol.as_str().unwrap().contains("\"http_contract\""));
     let directory = server.ok("GET", "/contexts", None);
     assert_eq!(directory["total"], json!(0));
     assert_eq!(directory["contexts"], json!([]));

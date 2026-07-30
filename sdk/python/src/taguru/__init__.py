@@ -15,15 +15,18 @@ the server's own protocol document: ``client.protocol()`` (GET /protocol).
 from __future__ import annotations
 
 from ._async.client import AsyncContext, AsyncContexts, AsyncGroups, AsyncTaguru
+from ._contract import SUPPORTED_HTTP_CONTRACTS
 from ._errors import (
     AuthenticationError,
     ConflictError,
     EmbeddingUnavailableError,
+    IncompatibleServerError,
     NotFoundError,
     PayloadTooLargeError,
     PermissionDeniedError,
     RateLimitError,
     RequestTimeoutError,
+    ResponseShapeError,
     ServerError,
     ServiceUnavailableError,
     StorageFullError,
@@ -130,6 +133,8 @@ __all__ = [
     "MatchCursor",
     "CrossMatchCursor",
     "ExploreCursor",
+    # wire-contract compatibility (ADR 0005 §3.8)
+    "SUPPORTED_HTTP_CONTRACTS",
     # errors
     "TaguruError",
     "AuthenticationError",
@@ -146,6 +151,8 @@ __all__ = [
     "EmbeddingUnavailableError",
     "TransportError",
     "UnexpectedStatusError",
+    "IncompatibleServerError",
+    "ResponseShapeError",
     "error_for_status",
     # models
     "Activation",

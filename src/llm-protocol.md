@@ -338,7 +338,7 @@ Source code takes the same discipline; only the naming changes.
 ## Auth
 
 - If the server sets `TAGURU_API_TOKEN`, every request except
-  `/health`, `/live`, and `/metrics` needs
+  `/health`, `/live`, `/metrics`, and `/version` needs
   `Authorization: Bearer <token>`; missing or wrong → `401` in the
   error shape below.
 - The MCP bridge (taguru-mcp) reads its own `TAGURU_API_TOKEN` and
@@ -508,10 +508,48 @@ responsibility.
   the same text). There is deliberately no `/v1` path prefix: one
   server serves one protocol version, its own.
 - Parse responses tolerantly: new fields may appear in any release
-  (additive), and absent optional fields are omitted rather than
-  null. Pre-1.0, shapes may also change between minor versions —
-  every break is named in the CHANGELOG's "Changed" section before it
-  ships.
+  (additive), absent optional fields are omitted rather than null,
+  and every enum-like field must be treated as open — an unrecognized
+  value must not crash decoding.
+- **Within one contract version, nothing breaks** (ADR 0005 §7). A
+  `server` minor bump may still add things, but a break — a response
+  container shape changing, a field being removed or renamed, a
+  pagination envelope's shape changing, and the rest of ADR 0005 §4's
+  table — requires the matching `http_contract` (or `mcp_contract`)
+  bump below, landing in the same PR as a CHANGELOG "Changed" entry
+  and a migration note.
+- `GET /version` (auth-exempt, always `200` even while `/health`
+  reports degraded) answers which wire-shape versions this server
+  speaks, discovery only — not negotiation, so there is nothing to
+  request beyond what this server already serves:
+  ```json
+  {
+    "server": "0.6.0",
+    "http_contract": {"current": 1, "supported": [1]},
+    "mcp_contract": {"current": 1, "supported": [1]},
+    "mcp_protocol": {"supported": ["2024-11-05", "2025-03-26", "2025-06-18"]},
+    "batch_formats": [1],
+    "image_formats": [1, 2, 3, 4, 5, 6],
+    "communities_formats": [1]
+  }
+  ```
+  `http_contract` covers every enveloped and non-enveloped HTTP
+  request/response/error shape; `mcp_contract` covers only what MCP
+  itself owns (the tool name/`inputSchema` table, `retrieve`'s
+  composed output, the `isError`/`structuredContent` convention, and
+  the JSON-RPC error vocabulary) — a pure HTTP-shape change bumps
+  `http_contract` alone, even though it is also visible over MCP. The
+  same facts are folded into this document's own live trailer (the
+  `## This server` section `GET /protocol` and every MCP
+  `initialize`'s `instructions` carry), so an MCP client learns them
+  without a second connection.
+- Both official SDKs declare their own supported `http_contract`
+  range and check it against `GET /version` before their first real
+  request, raising a dedicated error with a concrete upgrade remedy on
+  a genuine mismatch — never on a compatible patch/minor difference,
+  and never on an absent or unreadable `/version` (a server predating
+  this endpoint is treated as speaking `http_contract: 1`, not refused
+  outright).
 - The batch format (`taguru_batch: 1`) and the image format are
   versioned independently of the API: old batch files stay readable,
   and images migrate forward on load. Rolling a server BINARY back

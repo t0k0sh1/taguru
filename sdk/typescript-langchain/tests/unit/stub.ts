@@ -56,6 +56,17 @@ export class FakeServer {
   fetch: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     const path = url.pathname;
+    if (path === "/version") {
+      // The client's one-time compatibility preflight (ADR 0005 §3.8,
+      // §6) — routed ABOVE `this.calls.push` below and not itself
+      // recorded, so it doesn't pollute the exact call-list assertions
+      // the rest of this suite makes, and doesn't need every existing
+      // test to route a path it never used to send.
+      return new Response(
+        JSON.stringify({ server: "0.6.0", http_contract: { current: 1, supported: [1] } }),
+        { status: 200 },
+      );
+    }
     let body: unknown = null;
     if (typeof init?.body === "string") {
       try {

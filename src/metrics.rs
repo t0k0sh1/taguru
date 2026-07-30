@@ -2101,6 +2101,19 @@ pub async fn health(State(state): State<AppState>) -> Response {
     crate::api::error(crate::api::ErrorCode::Unhealthy, reason, Instant::now())
 }
 
+/// GET /version: contract-version discovery (ADR 0005 §6) — the
+/// machine-readable answer to "which wire shapes does this server
+/// speak," so a caller can detect an incompatible SDK/server pairing
+/// before it reaches a decode error. Bare JSON, not the `ApiResponse`
+/// envelope, matching `/health`. Unlike `/health`, this always
+/// answers 200 even while the write path is degraded — a
+/// compatibility check has to run from something that isn't itself
+/// affected by the fault it might be diagnosing. No `State` needed:
+/// every field is a compile-time constant.
+pub async fn version() -> Response {
+    axum::Json(crate::api::version_facts()).into_response()
+}
+
 /// GET /metrics: the whole registry in Prometheus text format.
 pub async fn render(State(state): State<AppState>) -> impl IntoResponse {
     let body = state.metrics().render_prometheus(&state.gauge_snapshot());
@@ -2677,6 +2690,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `GET /version` (ADR 0005 §6): bare JSON, every dimension named,
+    /// `image_formats` the full `1..=IMAGE_VERSION` range (unlike
+    /// `batch_formats`/`communities_formats`, which are single-element
+    /// since they're checked for equality, not range acceptance).
+    #[tokio::test]
+    async fn version_names_every_contract_dimension() {
+        let response = version().await;
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["server"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["http_contract"]["current"], 1);
+        assert_eq!(body["http_contract"]["supported"], serde_json::json!([1]));
+        assert_eq!(body["mcp_contract"]["current"], 1);
+        assert!(
+            body["mcp_protocol"]["supported"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("2025-06-18"))
+        );
+        assert_eq!(body["batch_formats"], serde_json::json!([1]));
+        assert_eq!(
+            body["image_formats"],
+            serde_json::json!((1..=u64::from(taguru::context::IMAGE_VERSION)).collect::<Vec<_>>())
+        );
+        assert_eq!(body["communities_formats"], serde_json::json!([1]));
+    }
+
     /// The readiness probe treats a maintenance sweep as a deliberate
     /// pause, not a fault: its own 503 code, and back to "ok" the
     /// instant the guard drops.
@@ -2699,6 +2742,11 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["code"], "maintenance");
+
+        // Unlike `/health`, `/version` (ADR 0005 §6) answers 200 even
+        // while the write path is degraded — it has to, to serve as
+        // the base a compatibility check runs from.
+        assert_eq!(version().await.status().as_u16(), 200);
 
         drop(guard);
         assert_eq!(health(State(state.clone())).await.status().as_u16(), 200);

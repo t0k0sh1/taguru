@@ -32,6 +32,12 @@ PY_CORE = ROOT / "sdk/python/pyproject.toml"
 PY_LANGCHAIN = ROOT / "sdk/python-langchain/pyproject.toml"
 TS_CORE = ROOT / "sdk/typescript/package.json"
 TS_LANGCHAIN = ROOT / "sdk/typescript-langchain/package.json"
+# The runtime twin of `INIT_CORE`'s `__version__` (ADR 0005 §9.2) — a
+# compatibility check has nothing local to compare `GET /version` against
+# without it. NOT the contract range (`SUPPORTED_HTTP_CONTRACTS`):
+# ADR 0005 §3.8 keeps that independent of package version on purpose, so
+# it is deliberately absent from this lockstep.
+TS_VERSION_TS = ROOT / "sdk/typescript/src/version.ts"
 INIT_CORE = ROOT / "sdk/python/src/taguru/__init__.py"
 INIT_LANGCHAIN = ROOT / "sdk/python-langchain/src/taguru_langchain/__init__.py"
 NPM_LOCK = ROOT / "sdk/package-lock.json"
@@ -92,6 +98,7 @@ PYPROJECT_DEP = re.compile(r'"taguru(>=[^"]*)",?')
 PACKAGE_JSON_VERSION = re.compile(r'"version"\s*:\s*"([^"]+)",?')
 PACKAGE_JSON_DEP = re.compile(r'"taguru"\s*:\s*"([^"]+)",?')
 INIT_VERSION = re.compile(r'__version__ = "([^"]+)"')
+TS_VERSION_CONST = re.compile(r'export const VERSION = "([^"]+)";')
 
 
 def gather(ref: str) -> list[tuple[str, str, str]]:
@@ -118,6 +125,8 @@ def gather(ref: str) -> list[tuple[str, str, str]]:
     for path in (INIT_CORE, INIT_LANGCHAIN):
         _, version = scan_line(path, INIT_VERSION, "__version__")
         sites.append((f"{rel(path)} __version__", version, ref))
+    _, ts_version = scan_line(TS_VERSION_TS, TS_VERSION_CONST, "VERSION")
+    sites.append((f"{rel(TS_VERSION_TS)} VERSION", ts_version, ref))
     packages = json.loads(NPM_LOCK.read_text())["packages"]
     for key in ("typescript", "typescript-langchain"):
         sites.append((f"{rel(NPM_LOCK)} {key} version", packages[key]["version"], ref))
@@ -189,6 +198,8 @@ def set_all(target: str) -> None:
     for path in (INIT_CORE, INIT_LANGCHAIN):
         index, version = scan_line(path, INIT_VERSION, "__version__")
         patch_line(path, index, f'"{version}"', f'"{target}"')
+    index, ts_version = scan_line(TS_VERSION_TS, TS_VERSION_CONST, "VERSION")
+    patch_line(TS_VERSION_TS, index, f'"{ts_version}"', f'"{target}"')
     print(
         f"set {target} in {rel(CARGO)} and every SDK manifest; now refresh the lockfiles:"
     )

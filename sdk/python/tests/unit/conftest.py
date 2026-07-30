@@ -28,14 +28,29 @@ def err_response(
     return httpx.Response(status, json=payload, headers=headers or {})
 
 
-def sync_client(handler: Handler, **kwargs: object) -> Taguru:
+def sync_client(handler: Handler, *, check_contract: bool = False, **kwargs: object) -> Taguru:
+    """``check_contract=False`` (the default) pre-seeds the one-time
+    ``GET /version`` preflight (ADR 0005 §3.8) as already done, so a
+    handler that only answers the path under test doesn't also need to
+    route ``/version`` — every other unit test in this suite relies on
+    exact call counts and exact path lists that a surprise probe would
+    break. Pass ``check_contract=True`` to exercise the preflight
+    itself; see ``test_contract.py``.
+    """
     http = httpx.Client(transport=httpx.MockTransport(handler))
-    return Taguru("http://test", http_client=http, **kwargs)  # type: ignore[arg-type]
+    client = Taguru("http://test", http_client=http, **kwargs)  # type: ignore[arg-type]
+    client._contract_state.checked = not check_contract
+    return client
 
 
-def async_client(handler: Handler, **kwargs: object) -> AsyncTaguru:
+def async_client(
+    handler: Handler, *, check_contract: bool = False, **kwargs: object
+) -> AsyncTaguru:
+    """Async twin of ``sync_client`` — see its docstring."""
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return AsyncTaguru("http://test", http_client=http, **kwargs)  # type: ignore[arg-type]
+    client = AsyncTaguru("http://test", http_client=http, **kwargs)  # type: ignore[arg-type]
+    client._contract_state.checked = not check_contract
+    return client
 
 
 @pytest.fixture(autouse=True)

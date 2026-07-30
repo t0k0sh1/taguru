@@ -33,8 +33,12 @@ export {
   EmbeddingUnavailableError,
   TransportError,
   UnexpectedStatusError,
+  IncompatibleServerError,
   errorForStatus,
 } from "./errors.js";
+// Wire-contract compatibility (ADR 0005 §3.8).
+export { SUPPORTED_HTTP_CONTRACTS } from "./contract.js";
+export { VERSION } from "./version.js";
 export {
   citationKey,
   type Activation,
@@ -85,6 +89,7 @@ export {
   type NearestResolution,
   type NearestSpellings,
   type OneOrMany,
+  type Open,
   type PassageHit,
   type PassageLanes,
   type PassageLookup,

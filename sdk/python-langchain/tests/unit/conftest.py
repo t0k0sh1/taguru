@@ -71,6 +71,17 @@ class FakeServer:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path == "/version":
+            # The client's one-time compatibility preflight (ADR 0005
+            # §3.8, §6) — routed ABOVE `self.calls.append` below and
+            # not itself recorded, so it doesn't pollute the exact
+            # call-list assertions the rest of this suite makes, and
+            # doesn't need every existing test to route a path it
+            # never used to send.
+            return httpx.Response(
+                200,
+                json={"server": "0.6.0", "http_contract": {"current": 1, "supported": [1]}},
+            )
         body: Any = None
         if request.content:
             try:

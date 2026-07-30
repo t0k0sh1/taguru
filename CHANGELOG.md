@@ -7,6 +7,71 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+- `GET /version` (#300, implementing ADR 0005 §3/§6): contract-version
+  discovery, auth-exempt like the other probes and answering `200`
+  even while `/health` reports degraded — a compatibility check has to
+  run from something the fault it might be diagnosing doesn't itself
+  affect. Bare JSON naming every version dimension ADR 0005 §3
+  defines: `server`, `http_contract`/`mcp_contract`
+  (`{current, supported}`, both starting at `1`), `mcp_protocol`,
+  `batch_formats`, `image_formats`, `communities_formats`. Router mode
+  answers its own `GET /version` the same way, under the same
+  "shards are homogeneous" assumption `/health`/`/protocol` already
+  proxy under. The same facts are folded into `GET /protocol`'s
+  `## This server` trailer and therefore into every MCP
+  `initialize`'s `instructions`, so an MCP client learns them without
+  a second connection.
+- Both official SDKs (Python, TypeScript) declare a supported
+  `http_contract` range (`taguru.SUPPORTED_HTTP_CONTRACTS` /
+  `SUPPORTED_HTTP_CONTRACTS`) and run a one-time compatibility
+  preflight against `GET /version` before their first real request —
+  shared across every concurrent caller on a fresh client, so a
+  `gather()`/`Promise.all()` of several calls doesn't let all but the
+  first race past an unfinished check. Fails closed only on positive
+  proof the two ranges share no version in common, raising a new
+  `IncompatibleServerError` (both SDKs) that names which side to
+  upgrade and the exact `pip`/`npm` command; fails open on every
+  absence of information — a 404 (any server predating this endpoint,
+  treated as `http_contract: 1`), a non-JSON body, a missing or
+  malformed `http_contract` key — and never compares `server`'s own
+  SemVer or `mcp_contract` (neither SDK speaks MCP). `wait_until_ready`
+  (Python)/`waitUntilReady` (TypeScript) now surface a confirmed
+  incompatibility immediately instead of stalling out the full
+  timeout.
+- Python's `ResponseShapeError` (ADR 0005 §9.3): the two `_decode.py`
+  failure modes — a response's container shape not matching (the
+  literal 0.4.0 `PassagePage` incident) and a required field missing —
+  now raise this dedicated `TaguruError` subclass (also still a
+  `ValueError`, purely additively) instead of a bare `ValueError`
+  outside the catchable hierarchy.
+- TypeScript's runtime `VERSION` export (`sdk/typescript/src/version.ts`,
+  ADR 0005 §9.2): no runtime version constant existed in `src/`
+  before this, so nothing local existed to compare `GET /version`
+  against. Locked to the server's own version by
+  `sdk/spec/check_versions.py`, the same way Python's
+  `taguru.__version__` already is.
+
+### Changed
+- The pre-1.0 compatibility guarantee (`src/llm-protocol.md`
+  `## Compatibility`, ADR 0005 §7): **within one `http_contract` (or
+  `mcp_contract`) version, nothing breaks**, effective immediately —
+  tighter than the previous "shapes may also change between minor
+  versions." A `server` minor bump may still add things; a break now
+  requires the matching contract-version bump, landing in the same PR
+  as this file's own entry and a migration note.
+- Nine of TypeScript's closed enum-like string-literal unions in
+  `models.ts` widened to accept an unrecognized value (ADR 0005 §5/
+  §9.1) — `TieredResolution.tier`/`.kind`, `NearestResolution.kind`,
+  `LexicalExplain.kind`, `ResolveRanking.tier`,
+  `ResolveExplanation.verdict`/`.expected_kind`,
+  `SearchExplanation.verdict`, `GroupImportOutcome.outcome` — via a
+  new `Open<T>` helper type, matching Python's already-open plain
+  `str` fields. `AliasEntry.namespace` is deliberately left closed: it
+  is synthesized client-side (`iterAliases`), never decoded from the
+  wire, so a server can never surprise this SDK with a value it didn't
+  itself mint.
+
 ## [0.5.0] - 2026-07-30
 
 ### Added

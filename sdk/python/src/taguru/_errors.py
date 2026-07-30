@@ -28,6 +28,8 @@ __all__ = [
     "EmbeddingUnavailableError",
     "TransportError",
     "UnexpectedStatusError",
+    "IncompatibleServerError",
+    "ResponseShapeError",
     "error_for_status",
 ]
 
@@ -173,6 +175,56 @@ class TransportError(TaguruError):
 
 class UnexpectedStatusError(TaguruError):
     """Any status with no specific mapping (e.g. 405) — exhaustiveness fallback."""
+
+
+class IncompatibleServerError(TaguruError):
+    """This SDK and the server it connected to share no ``http_contract``
+    version (ADR 0005 §3, §6) — raised before the first real request, from
+    the client's own one-time ``GET /version`` preflight, never from
+    ``error_for_status``.
+
+    Not a subclass of :class:`ServerError` (that means 5xx and is
+    retry-classified — this is neither) nor of :class:`ValidationError`
+    (that is HTTP 400/415/422). ``status`` is ``None``: it names no HTTP
+    status of its own, since it never came from the request that triggered
+    it — see :attr:`TaguruError.status`.
+
+    Attributes:
+        sdk_version: This SDK's own package version (``taguru.__version__``).
+        server_version: The server's ``server`` field from ``GET /version``,
+            or ``None`` when the server omitted it.
+        supported_contracts: This SDK's own ``http_contract`` range
+            (``taguru.SUPPORTED_HTTP_CONTRACTS``).
+        server_contracts: The server's ``http_contract.supported`` range.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        sdk_version: str,
+        server_version: str | None,
+        supported_contracts: tuple[int, ...],
+        server_contracts: tuple[int, ...],
+    ) -> None:
+        super().__init__(message, status=None)
+        self.sdk_version = sdk_version
+        self.server_version = server_version
+        self.supported_contracts = supported_contracts
+        self.server_contracts = server_contracts
+
+
+class ResponseShapeError(TaguruError, ValueError):
+    """A decoded response did not have the shape this SDK expected — a
+    required field was missing, or a value's container shape (array vs.
+    object) did not match (ADR 0005 §2.1, §4, §9.3): the literal 0.4.0
+    ``PassagePage`` incident this SDK's decoder still guards against.
+
+    Also a :class:`ValueError`, purely additively: both `_decode.py`
+    failure sites raised a bare ``ValueError`` before this class existed,
+    so code written against that behavior (``except ValueError``) keeps
+    working unchanged.
+    """
 
 
 def error_for_status(

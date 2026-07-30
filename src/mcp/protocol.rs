@@ -8,7 +8,7 @@ use super::schema::tool_definitions;
 /// semantics this server does not implement — the whole point of the
 /// version exchange is the two sides agreeing on one wire contract,
 /// which a blind echo would skip entirely.
-pub(super) const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 
 /// Spoken when the client does not name a protocol version itself, or
 /// names one this build does not recognize. The spec requires the

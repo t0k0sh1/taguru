@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from dataclasses import dataclass
 from typing import Any, NoReturn
 
 import httpx
@@ -154,3 +155,47 @@ async def run_blocking(fn: Any, *args: Any) -> Any:
 def call_blocking(fn: Any, *args: Any) -> Any:
     """Run a blocking callable inline (the sync client's half of ``run_blocking``)."""
     return fn(*args)
+
+
+@dataclass
+class ContractState:
+    """The one-time compatibility-preflight state a client instance owns
+    (ADR 0005 §3.8, §6) — shared between the sync and async clients since
+    only ``run_contract_probe``'s async half needs the ``task`` field."""
+
+    checked: bool = False
+    task: asyncio.Task[None] | None = None
+
+
+async def run_contract_probe(state: ContractState, probe: Callable[[], Awaitable[None]]) -> None:
+    """Run ``probe()`` at most once, sharing the in-flight call among every
+    concurrent awaiter (async client only).
+
+    A merely synchronous ``state.checked`` flag set before the first
+    ``await`` is not enough: a ``gather()`` of several calls on a fresh
+    client would let every caller but the first see ``checked`` already
+    (falsely) settled and race straight past an unfinished compatibility
+    check — reordering which request actually reaches the network first,
+    and letting a real incompatibility surface on only one of them instead
+    of all. Wrapping the probe in a ``Task`` lets every awaiter share the
+    same pending result.
+
+    ``generate_sync.py`` rewrites this call to ``run_contract_probe_once``
+    for the sync client, which has no concurrent callers to share a probe
+    with, so it just calls ``probe()`` once, synchronously, in-line.
+    """
+    if state.checked:
+        return
+    if state.task is None:
+        state.task = asyncio.ensure_future(probe())
+    try:
+        await state.task
+    finally:
+        state.task = None
+
+
+def run_contract_probe_once(state: ContractState, probe: Callable[[], None]) -> None:
+    """Sync twin of ``run_contract_probe`` — see its docstring."""
+    if state.checked:
+        return
+    probe()

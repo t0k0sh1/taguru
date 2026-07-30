@@ -34,8 +34,9 @@ mod schema;
 // further out.
 #[allow(unused_imports)]
 pub use protocol::{
-    Call, FALLBACK_PROTOCOL_VERSION, Message, ToolError, cancelled_request_id, classify,
-    error_response, initialize_result, response, tool_response, tools_result,
+    Call, FALLBACK_PROTOCOL_VERSION, Message, SUPPORTED_PROTOCOL_VERSIONS, ToolError,
+    cancelled_request_id, classify, error_response, initialize_result, response, tool_response,
+    tools_result,
 };
 #[allow(unused_imports)]
 pub use retrieve::{run_retrieve, run_retrieve_bounded};

@@ -5,7 +5,8 @@
  * wire's own snake_case in both languages.
  */
 
-import { NotFoundError, TaguruError, TransportError } from "./errors.js";
+import { incompatibility, parseVersionBody, VERSION_PATH } from "./contract.js";
+import { IncompatibleServerError, NotFoundError, TaguruError, TransportError } from "./errors.js";
 import type {
   Activation,
   ActivationPage,
@@ -127,6 +128,14 @@ export class Taguru {
   private readonly timeoutSecs: number;
   private readonly headers: Record<string, string>;
   private readonly fetchImpl: typeof fetch;
+  // One-time compatibility preflight state (ADR 0005 §3.8, §6) — see
+  // `ensureContract`. No constructor option to disable it: that would
+  // be exactly the footgun ADR 0005 §5/§7 exist to remove.
+  private contractChecked = false;
+  // The in-flight probe every concurrent caller awaits, so a
+  // `Promise.all` of several calls doesn't let all but the first skip
+  // waiting for it — see `ensureContract`'s doc comment.
+  private contractCheckPromise: Promise<void> | null = null;
 
   constructor(options: TaguruOptions = {}) {
     const env = typeof process !== "undefined" ? process.env : undefined;
@@ -148,8 +157,92 @@ export class Taguru {
 
   // -- transport ---------------------------------------------------------
 
+  /**
+   * Confirm, once per client, that the server speaks an `http_contract`
+   * version this SDK also speaks (ADR 0005 §3.8, §6) — before the first
+   * real request, not after a confusing decode failure.
+   *
+   * Fails closed only on positive proof the two ranges share nothing
+   * (see `contract.incompatibility`). Every absence of information is
+   * fail-open: a 404 (any server predating this endpoint — pre-0.6
+   * servers are `http_contract: 1` in substance regardless), a
+   * non-JSON body, a missing/malformed `http_contract` key. `GET
+   * /version` is auth-exempt and outside the rate limiter and
+   * in-flight ceiling (`PROBE_EXEMPT` server-side), so this costs no
+   * permit — only one small request, once, over the client's whole
+   * lifetime.
+   *
+   * Every concurrent caller awaits the SAME in-flight probe (via
+   * `contractCheckPromise`) rather than racing past it the moment one
+   * of them marks the check "started": with a merely synchronous
+   * `contractChecked` flag, a `Promise.all` of several calls on one
+   * client would let every caller but the first skip waiting for the
+   * probe entirely — reordering which request actually reaches the
+   * network first, and letting a real incompatibility surface on only
+   * one of them instead of all.
+   *
+   * `@internal` rather than `private`: `Context.exportStream` calls
+   * this across the class boundary, the same reason `send`/`streamUrl`
+   * are `@internal`-but-public.
+   *
+   * @internal
+   */
+  async ensureContract(): Promise<void> {
+    if (this.contractChecked) {
+      return;
+    }
+    this.contractCheckPromise ??= this.probeContract();
+    await this.contractCheckPromise;
+  }
+
+  private async probeContract(): Promise<void> {
+    try {
+      let response: SentResponse;
+      try {
+        // `sendCore`, not `send`: `send` calls `ensureContract` first,
+        // which would await `contractCheckPromise` — the very promise
+        // this function's own execution IS, before it has settled.
+        response = await this.sendCore("GET", VERSION_PATH, { retries: 0 });
+      } catch (error) {
+        // A transport failure means nothing was learned; leave
+        // `contractChecked` false so the next call (once this
+        // in-flight promise clears below) retries the probe.
+        if (!(error instanceof TransportError)) {
+          this.contractChecked = true;
+        }
+        return;
+      }
+      this.contractChecked = true;
+      let payload: unknown;
+      try {
+        payload = JSON.parse(response.text);
+      } catch {
+        return;
+      }
+      const seen = parseVersionBody(payload);
+      if (seen === null) {
+        return;
+      }
+      const error = incompatibility(seen, this.baseUrl);
+      if (error !== null) {
+        throw error;
+      }
+    } finally {
+      this.contractCheckPromise = null;
+    }
+  }
+
   /** @internal */
   async send(method: string, path: string, options: SendOptions = {}): Promise<SentResponse> {
+    await this.ensureContract();
+    return this.sendCore(method, path, options);
+  }
+
+  private async sendCore(
+    method: string,
+    path: string,
+    options: SendOptions = {},
+  ): Promise<SentResponse> {
     let url = this.baseUrl + path;
     if (options.params !== undefined) {
       const params = new URLSearchParams();
@@ -290,6 +383,14 @@ export class Taguru {
         await this.health();
         return;
       } catch (error) {
+        if (error instanceof IncompatibleServerError) {
+          // Not a readiness fault waiting can fix — an SDK/server
+          // pairing that shares no `http_contract` version stays
+          // incompatible for as long as `timeout` gives it to retry,
+          // so throw immediately instead of stalling every caller of
+          // `waitUntilReady` for the full budget.
+          throw error;
+        }
         lastError = error instanceof TaguruError ? error : new TaguruError(describeError(error));
       }
       if (performance.now() >= deadline) {
@@ -1269,6 +1370,11 @@ export class Context {
    * longer than one request's timeout budget as long as bytes keep arriving.
    */
   async *exportStream(): AsyncGenerator<Uint8Array, void, undefined> {
+    // The one call site that reaches the network without going through
+    // `send` (ADR 0005 §3.8) — a batch export can be a client's only
+    // call, so the compatibility preflight has to run here explicitly
+    // too. `streamUrl` is synchronous, so it can't hide this itself.
+    await this.client.ensureContract();
     const { url, headers, fetchImpl, timeoutSecs } = this.client.streamUrl(`${this.path}/export`);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;

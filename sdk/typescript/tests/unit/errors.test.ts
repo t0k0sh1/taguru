@@ -4,6 +4,7 @@ import {
   AuthenticationError,
   ConflictError,
   EmbeddingUnavailableError,
+  IncompatibleServerError,
   NotFoundError,
   PayloadTooLargeError,
   PermissionDeniedError,
@@ -12,8 +13,10 @@ import {
   ServerError,
   ServiceUnavailableError,
   StorageFullError,
+  TaguruError,
   UnexpectedStatusError,
   ValidationError,
+  errorForStatus,
 } from "../../src/errors.js";
 import { errBody, stubClient } from "./stub.js";
 
@@ -126,5 +129,29 @@ describe("status → error class table", () => {
       .refreshEmbeddings()
       .catch((caught: unknown) => caught);
     expect((providerError as EmbeddingUnavailableError).reason).toBe("provider_error");
+  });
+
+  it("errorForStatus never returns IncompatibleServerError for any mapped status", () => {
+    for (const [status] of TABLE) {
+      expect(errorForStatus(status, "x")).not.toBeInstanceOf(IncompatibleServerError);
+    }
+  });
+});
+
+describe("IncompatibleServerError", () => {
+  it("sets .name, is a TaguruError, and carries a null status", () => {
+    const error = new IncompatibleServerError("boom", {
+      sdk_version: "0.5.0",
+      server_version: "0.7.0",
+      supported_contracts: [1],
+      server_contracts: [2],
+    });
+    expect(error.name).toBe("IncompatibleServerError");
+    expect(error).toBeInstanceOf(TaguruError);
+    expect(error.status).toBeNull();
+    expect(error.sdk_version).toBe("0.5.0");
+    expect(error.server_version).toBe("0.7.0");
+    expect(error.supported_contracts).toEqual([1]);
+    expect(error.server_contracts).toEqual([2]);
   });
 });

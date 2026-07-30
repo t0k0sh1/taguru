@@ -250,27 +250,41 @@ pub fn protocol_text(trailer: Option<&str>) -> String {
 
 /// The `## This server` trailer behind [`protocol`]: the runtime facts
 /// an agent acts on differently — today, whether the semantic tier is
-/// live and who runs the gloss refresh. The static manual cannot say
-/// this ("servers with embeddings only"), and an agent that cannot see
-/// that embeddings are on never calls `refresh_embeddings`, leaving
-/// the tier dark over a fully configured provider.
-pub fn protocol_trailer(embed_model: Option<&str>, auto_embed: bool) -> Option<String> {
-    let model = embed_model?;
-    let refresh_note = if auto_embed {
-        "This server auto-refreshes embeddings shortly after each write \
-         settles; calling `refresh_embeddings` yourself only buys \
-         immediacy."
-    } else {
-        "Nothing embeds glosses automatically here: finish every ingest \
-         and alias fix by calling `refresh_embeddings` on the context \
-         you touched, or its new names stay invisible to the semantic \
-         tier."
-    };
-    Some(format!(
-        "\n---\n\n## This server\n\nSemantic entry is ON (embedding model `{model}`): `resolve` falls \
-         back to embedded glosses, and `refresh_embeddings` and \
-         `audit_vocabulary`'s semantic pass are live. {refresh_note}\n"
-    ))
+/// live and who runs the gloss refresh, and (ADR 0005 §6) the same
+/// contract-version facts `GET /version` answers, so an MCP client
+/// learns them from `initialize` without a second connection. The
+/// semantic-tier paragraph is the only part that stays conditional
+/// ("servers with embeddings only" — an agent that cannot see
+/// embeddings are on never calls `refresh_embeddings`, leaving the
+/// tier dark over a fully configured provider); the version block is
+/// unconditional, so — unlike before the version block existed —
+/// there is no longer an empty-trailer case for callers to handle.
+pub fn protocol_trailer(embed_model: Option<&str>, auto_embed: bool) -> String {
+    let mut trailer = String::from("\n---\n\n## This server\n\n");
+    if let Some(model) = embed_model {
+        let refresh_note = if auto_embed {
+            "This server auto-refreshes embeddings shortly after each write \
+             settles; calling `refresh_embeddings` yourself only buys \
+             immediacy."
+        } else {
+            "Nothing embeds glosses automatically here: finish every ingest \
+             and alias fix by calling `refresh_embeddings` on the context \
+             you touched, or its new names stay invisible to the semantic \
+             tier."
+        };
+        trailer.push_str(&format!(
+            "Semantic entry is ON (embedding model `{model}`): `resolve` falls \
+             back to embedded glosses, and `refresh_embeddings` and \
+             `audit_vocabulary`'s semantic pass are live. {refresh_note}\n\n"
+        ));
+    }
+    trailer.push_str(
+        "Contract versions (also `GET /version`, ADR 0005 §6) — discovery only, \
+         not negotiation:\n\n```json\n",
+    );
+    trailer.push_str(&serde_json::to_string_pretty(super::version_facts()).unwrap_or_default());
+    trailer.push_str("\n```\n");
+    trailer
 }
 
 #[derive(Debug, Default, Deserialize)]

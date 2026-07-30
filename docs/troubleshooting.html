@@ -87,6 +87,7 @@
         <tbody>
           <tr><td><code>expected an object for PassagePage, got list</code> (Python SDK)</td><td>version skew — a 0.4.x SDK against a 0.3.x server</td><td><code>taguru version</code> vs. the SDK version</td><td><a href="#compatibility">Compatibility</a></td></tr>
           <tr><td>a client chokes on an unexpected <code>{plan, hits}</code> object, or can't find <code>plan</code></td><td>version skew — a 0.3.x client against a 0.4.x server</td><td>same as above</td><td><a href="#compatibility">Compatibility</a></td></tr>
+          <tr><td><code>IncompatibleServerError</code> raised before the SDK's first real request</td><td>the SDK and server share no <code>http_contract</code> version — a real, confirmed incompatibility, not a false alarm</td><td>read the error's own message — it names which side to upgrade and the exact command</td><td><a href="#compatibility">Compatibility</a></td></tr>
           <tr><td>behavior doesn't match the docs; a documented field is just missing</td><td>a stale Docker image — <code>latest</code> was never re-pulled</td><td><code>/metrics</code> → <code>taguru_build_info{version="…"}</code></td><td><a href="#stale-image">The image you think you're running</a></td></tr>
           <tr><td>an answer takes minutes, but Taguru's own request logs show milliseconds</td><td>LLM generation, not Taguru</td><td>compare end-to-end time against the <code>latency_ms</code> log field</td><td><a href="#latency">Whose seconds are they?</a>, <a href="#local-llm">The serving layer</a></td></tr>
           <tr><td>everything is slow, including a bare <code>curl</code> search with no LLM involved</td><td>Taguru itself, or its embedding provider</td><td><code>"http"</code> log lines; <code>TAGURU_LOG_SEARCHES=1</code> if needed (logs raw cue text — see caveat)</td><td><a href="#latency">Whose seconds are they?</a>, <a href="#embedding">The semantic lane</a></td></tr>
@@ -121,16 +122,23 @@ curl -s localhost:8248/metrics | grep taguru_build_info
 curl -s localhost:8248/health   <span class="c"># {"status": "ok", "version": "…"}</span>
 docker run --rm ghcr.io/t0k0sh1/taguru:0.4.0 version
 
+<span class="c"># the wire-contract versions this server speaks (ADR 0005 §6) —</span>
+<span class="c"># the machine-readable answer, ahead of any SDK connecting</span>
+curl -s localhost:8248/version | jq
+
 <span class="c"># Python SDK / LangChain integration</span>
-python -c "import taguru; print(taguru.__version__)"
+python -c "import taguru; print(taguru.__version__, taguru.SUPPORTED_HTTP_CONTRACTS)"
 python -c "import taguru_langchain; print(taguru_langchain.__version__)"
 
 <span class="c"># TypeScript SDK / LangChain integration</span>
-npm ls taguru
+node -e "const t = require('taguru'); console.log(t.VERSION, t.SUPPORTED_HTTP_CONTRACTS)"
 npm ls langchain-taguru</code></pre>
     <p>
       The MCP bridge answers the same question over the protocol: its <code>initialize</code>
-      response's <code>serverInfo.version</code> names the server it's attached to.
+      response's <code>serverInfo.version</code> names the server it's attached to, and the same
+      <code>instructions</code> text carries the <code>GET /version</code> block below (folded
+      into <code>GET /protocol</code>'s own trailer) — an MCP client reads contract versions
+      without a second connection.
     </p>
     <p>
       <code>GET /health</code>'s own success body carries a version too, per
@@ -144,25 +152,40 @@ npm ls langchain-taguru</code></pre>
       when it names a different minor than the CLI itself.
     </p>
     <p>
-      Before 1.0, a minor version bump is allowed to change a response's shape, and one already
-      has: <code>POST /contexts/{name}/sources/search</code> (and the cross-context form) went
+      Before 0.6.0, a minor version bump was allowed to change a response's shape without any
+      machine-readable signal, and one already did:
+      <code>POST /contexts/{name}/sources/search</code> (and the cross-context form) went
       from a bare array of hits to a <code>PassagePage</code> object, <code>{plan, hits}</code>,
-      in 0.4.0.
+      in 0.4.0. A 0.3.x SDK against a 0.4.x server failed with
+      <code>expected an object for PassagePage, got list</code>; a 0.4.x SDK against a 0.3.x
+      server failed with no <code>hits</code> key to find. Neither side had any way to detect the
+      mismatch before that decode error.
+    </p>
+    <p>
+      <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0005-wire-contract-compatibility.md">ADR 0005</a>
+      exists to make that class of failure loud and early instead. Server and SDK versions still
+      ship in lockstep (one release, one number, across every package — <code>server</code>
+      X.Y.Z pairs with SDK X.Y.Z), but the wire shape itself is now versioned independently as
+      <code>http_contract</code>/<code>mcp_contract</code> (<code>GET /version</code> above), and
+      both official SDKs check the server's <code>http_contract.supported</code> range against
+      their own before their first real request:
     </p>
     <div class="tbl">
       <table>
-        <thead><tr><th></th><th>server 0.3.x</th><th>server 0.4.x</th></tr></thead>
+        <thead><tr><th></th><th>server's <code>http_contract</code> range overlaps the SDK's</th><th>no overlap</th></tr></thead>
         <tbody>
-          <tr><td>SDK/client built for 0.3.x</td><td>works</td><td>fails — the object has no <code>[i]</code> to index, or the client can't find the fields it expects at the top level</td></tr>
-          <tr><td>SDK/client built for 0.4.x</td><td>fails — <code>expected an object for PassagePage, got list</code></td><td>works</td></tr>
+          <tr><td>outcome</td><td>works — compatible patch/minor differences are never refused</td><td>the very first call raises <code>IncompatibleServerError</code> (Python/TypeScript), naming which side to upgrade and the exact command</td></tr>
+          <tr><td>a server predating <code>GET /version</code> (0.5.x and earlier)</td><td colspan="2">treated as <code>http_contract: 1</code> — the check fails open on a 404, never refuses outright</td></tr>
         </tbody>
       </table>
     </div>
     <p>
-      The <code>hits</code> themselves are unchanged; they moved under a <code>hits</code> key,
-      and <code>plan</code> is new — per-context lane execution (which of BM25/vector ran, why
-      one didn't, the effective cosine floor). The remedy is never to patch around the shape:
-      pin an older SDK to an older server, or upgrade every layer together.
+      The <code>hits</code> themselves were unchanged by the 0.4.0 break; they moved under a
+      <code>hits</code> key, and <code>plan</code> was new — per-context lane execution (which of
+      BM25/vector ran, why one didn't, the effective cosine floor). The remedy for a genuine
+      mismatch is still never to patch around the shape: pin an older SDK to an older server (the
+      error message gives the exact <code>pip</code>/<code>npm</code> command), or upgrade every
+      layer together.
     </p>
   </section>
 
