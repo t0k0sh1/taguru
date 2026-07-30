@@ -95,8 +95,9 @@ def incompatibility(seen: ServerContract, base_url: str) -> IncompatibleServerEr
         )
     elif seen.server and max(seen.supported) < min(SUPPORTED_HTTP_CONTRACTS):
         remedy = (
-            f"Upgrade the server to {seen.server} or newer, or pin this SDK to the "
-            f"server's release: pip install 'taguru=={seen.server.rsplit('.', 1)[0]}.*'"
+            f"Upgrade the server to a release that speaks http_contract {sdk_versions}, "
+            f"or pin this SDK to the server's release: "
+            f"pip install 'taguru=={seen.server.rsplit('.', 1)[0]}.*'"
         )
     else:
         remedy = (

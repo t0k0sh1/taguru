@@ -115,6 +115,31 @@ describe("incompatibility", () => {
     expect(shaped.message).toContain("Upgrade this SDK");
   });
 
+  it("keeps blocking every call after the first, not just the ones racing the probe", async () => {
+    // A confirmed incompatibility must keep blocking every call after
+    // the probe settles, not just the ones that raced the original
+    // probe — `contractChecked` alone can't tell "confirmed fine"
+    // from "confirmed broken," so the client must remember which one
+    // it was.
+    const handler: StubHandler = (req) => {
+      if (req.path === "/version") {
+        return versionBody(incompatibleNewer());
+      }
+      throw new Error(`the real request must not run: ${req.path}`);
+    };
+    const client = stubClient(handler, { checkContract: true });
+
+    await expect(client.context("sake").recall("cue")).rejects.toBeInstanceOf(
+      IncompatibleServerError,
+    );
+    // The probe already settled here — this second call sees
+    // `contractChecked === true` and must still raise, not silently
+    // proceed.
+    await expect(client.context("sake").recall("cue")).rejects.toBeInstanceOf(
+      IncompatibleServerError,
+    );
+  });
+
   // The remaining directions need the SDK's own range to be something
   // other than the real `SUPPORTED_HTTP_CONTRACTS = [1]` — a `const`
   // module binding, immutable even from within its own module, unlike
@@ -133,6 +158,10 @@ describe("incompatibility", () => {
     expect(error?.supported_contracts).toEqual([2]);
     expect(error?.server_contracts).toEqual([1]);
     expect(error?.message).toContain("Upgrade the server");
+    // The server is already at 0.5.0 — telling the user to "upgrade
+    // to 0.5.0" would be nonsensical, since that's the version it's
+    // already running.
+    expect(error?.message).not.toContain("to 0.5.0");
   });
 
   it("disjoint interleaved ranges name no direction, just SUPPORTED_HTTP_CONTRACTS", () => {

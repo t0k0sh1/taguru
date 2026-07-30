@@ -112,8 +112,8 @@ export function incompatibility(
   } else if (seen.server && seenMax < sdkMin) {
     const minor = seen.server.split(".").slice(0, 2).join(".");
     remedy =
-      `Upgrade the server to ${seen.server} or newer, or pin this SDK to the server's ` +
-      `release: npm install taguru@${minor}.x`;
+      `Upgrade the server to a release that speaks http_contract ${sdkVersions}, or ` +
+      `pin this SDK to the server's release: npm install taguru@${minor}.x`;
   } else {
     remedy =
       "Upgrade or downgrade one side to a pair that shares a contract version; this " +

@@ -188,6 +188,7 @@ class Taguru:
             return
         error = incompatibility(seen, self._base_url)
         if error is not None:
+            self._contract_state.error = error
             raise error
 
     def _send(

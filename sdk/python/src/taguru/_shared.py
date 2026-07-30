@@ -161,10 +161,19 @@ def call_blocking(fn: Any, *args: Any) -> Any:
 class ContractState:
     """The one-time compatibility-preflight state a client instance owns
     (ADR 0005 §3.8, §6) — shared between the sync and async clients since
-    only ``run_contract_probe``'s async half needs the ``task`` field."""
+    only ``run_contract_probe``'s async half needs the ``task`` field.
+
+    ``error`` is set only when the probe confirms a disjoint
+    ``http_contract`` range. A confirmed incompatibility must keep
+    blocking every later call, not just the ones racing the original
+    probe — ``checked`` alone can't distinguish "confirmed fine" from
+    "confirmed broken," so ``error`` is what gets re-raised on every
+    call after the first.
+    """
 
     checked: bool = False
     task: asyncio.Task[None] | None = None
+    error: TaguruError | None = None
 
 
 async def run_contract_probe(state: ContractState, probe: Callable[[], Awaitable[None]]) -> None:
@@ -185,6 +194,8 @@ async def run_contract_probe(state: ContractState, probe: Callable[[], Awaitable
     with, so it just calls ``probe()`` once, synchronously, in-line.
     """
     if state.checked:
+        if state.error is not None:
+            raise state.error
         return
     if state.task is None:
         state.task = asyncio.ensure_future(probe())
@@ -197,5 +208,7 @@ async def run_contract_probe(state: ContractState, probe: Callable[[], Awaitable
 def run_contract_probe_once(state: ContractState, probe: Callable[[], None]) -> None:
     """Sync twin of ``run_contract_probe`` — see its docstring."""
     if state.checked:
+        if state.error is not None:
+            raise state.error
         return
     probe()

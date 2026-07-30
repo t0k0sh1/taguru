@@ -159,6 +159,44 @@ def test_incompatible_older_server_raises_with_upgrade_server_remedy(
     assert error.supported_contracts == (2,)
     assert error.server_contracts == (1,)
     assert "Upgrade the server" in str(error)
+    # The server is already at 0.6.0 — telling the user to "upgrade to
+    # 0.6.0" would be nonsensical, since that's the version it's
+    # already running.
+    assert "to 0.6.0" not in str(error)
+
+
+def test_confirmed_incompatibility_blocks_every_later_call_not_just_the_first() -> None:
+    """A confirmed incompatibility must keep blocking every call after
+    the probe settles, not just the ones that raced the original
+    probe — `_contract_state.checked` alone can't tell "confirmed
+    fine" from "confirmed broken," so the client must remember which
+    one it was."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/version":
+            return version_response(incompatible_newer())
+        raise AssertionError(f"the real request must not run: {req.url.path}")
+
+    client = sync_client(handler, check_contract=True)
+    with pytest.raises(IncompatibleServerError):
+        client.context("sake").recall("cue")
+    # The probe already settled here — this second call sees
+    # `checked=True` and must still raise, not silently proceed.
+    with pytest.raises(IncompatibleServerError):
+        client.context("sake").recall("cue")
+
+
+async def test_confirmed_incompatibility_blocks_every_later_call_async() -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/version":
+            return version_response(incompatible_newer())
+        raise AssertionError(f"the real request must not run: {req.url.path}")
+
+    client = async_client(handler, check_contract=True)
+    with pytest.raises(IncompatibleServerError):
+        await client.context("sake").recall("cue")
+    with pytest.raises(IncompatibleServerError):
+        await client.context("sake").recall("cue")
 
 
 def test_disjoint_interleaved_ranges_raise_the_generic_remedy(

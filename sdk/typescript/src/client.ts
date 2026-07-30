@@ -136,6 +136,13 @@ export class Taguru {
   // `Promise.all` of several calls doesn't let all but the first skip
   // waiting for it — see `ensureContract`'s doc comment.
   private contractCheckPromise: Promise<void> | null = null;
+  // Set only when the probe confirms a disjoint `http_contract` range.
+  // A confirmed incompatibility must keep blocking every later call,
+  // not just the ones racing the original probe — `contractChecked`
+  // alone can't distinguish "confirmed fine" from "confirmed broken,"
+  // so this is what `ensureContract` rethrows on every call after the
+  // first.
+  private contractError: IncompatibleServerError | null = null;
 
   constructor(options: TaguruOptions = {}) {
     const env = typeof process !== "undefined" ? process.env : undefined;
@@ -189,6 +196,11 @@ export class Taguru {
    */
   async ensureContract(): Promise<void> {
     if (this.contractChecked) {
+      // A confirmed incompatibility keeps blocking every call after
+      // the first, not just the ones that raced the original probe.
+      if (this.contractError !== null) {
+        throw this.contractError;
+      }
       return;
     }
     this.contractCheckPromise ??= this.probeContract();
@@ -212,19 +224,22 @@ export class Taguru {
         }
         return;
       }
-      this.contractChecked = true;
       let payload: unknown;
       try {
         payload = JSON.parse(response.text);
       } catch {
+        this.contractChecked = true;
         return;
       }
       const seen = parseVersionBody(payload);
       if (seen === null) {
+        this.contractChecked = true;
         return;
       }
       const error = incompatibility(seen, this.baseUrl);
+      this.contractChecked = true;
       if (error !== null) {
+        this.contractError = error;
         throw error;
       }
     } finally {
