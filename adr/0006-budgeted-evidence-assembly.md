@@ -465,9 +465,30 @@ corroboration count).
 Every candidate, regardless of `kind`, carries:
 
 - `context` — the context this call targeted (single-context only; §13.4).
-- `source`, `paragraph: Option<u32>`, `section: Option<String>` — carried
-  straight from `AttributionOut`/`PassageHit`/`CommunityHit` (§2.2); `None`
-  for a graph candidate with no attribution locator.
+- `candidate_id: String` — an opaque, deterministic identity every candidate
+  has, including one with no locator at all: `kind` NUL-joined with §7's
+  `canonical_key` (`"association\u0000{subject}\u0000{label}\u0000{object}"`
+  or `"passage\u0000{context}\u0000{source}\u0000{paragraph}"`, etc.) — the
+  same NUL-delimited convention `citationKey`
+  (`sdk/typescript/src/models.ts:833-839`) already uses for exactly this
+  reason: no field value can collide with the delimiter. This is the field
+  every cross-item reference in §10 (`contradicts`, `duplicate_of`,
+  `OmittedCandidate`) points at — a locator alone cannot name an unsourced
+  association candidate, which has no `(source, paragraph)` of its own.
+- `source: Option<String>`, `paragraph: Option<u32>`, `section: Option<String>`
+  — for a passage/community candidate, straight from the hit
+  (`PassageHit`/`CommunityHit`, §2.2). For an association/activation
+  candidate, which may carry several attributions from different sources,
+  the *primary* attribution's fields: deterministically the attribution
+  with the greatest `|weight|` among this one candidate's own
+  `attributions` (a within-candidate comparison over values that already
+  share a scale — not the cross-candidate, cross-lane comparison §6's
+  discipline forbids), ties broken by the lexicographically smallest
+  `source` then smallest `paragraph`. An association/activation candidate
+  with zero attributions (an unsourced graph fact) carries `None` for all
+  three; §9's diversity step treats `None` as its own always-novel bucket,
+  never counted as a repeat of a named source or of another unsourced
+  candidate.
 - `lane` — which retrieval call produced it: `graph_query`, `graph_activate`,
   `passage_bm25`, `passage_vector`, `passage_fused`, or `community`. A
   `PassageHit` whose `PassageLanes` carries both `bm25` and `vector` is
@@ -485,18 +506,23 @@ Every candidate, regardless of `kind`, carries:
   candidate's underlying evidence carries. Empty for an unsourced graph fact
   or a passage/community hit whose own `(source, paragraph)` is already the
   item's own locator (self-citing — no separate reference needed).
-- `origins: BTreeSet<(String, u32)>` — the set of `(source, paragraph)` pairs
-  this candidate is *derived from*. For an association this is the union of
-  every attribution's `(source, paragraph)`; for a passage/community hit it
-  is the singleton `{(source, paragraph)}` of the hit itself. §9's dedup and
-  corroboration rules are both defined in terms of whether two candidates'
-  `origins` sets intersect — this field exists specifically so that
-  definition has somewhere to live, and is never serialized to the wire
-  itself (an internal selection-time field, not part of §10's response).
+- `origins: BTreeSet<(String, u32)>` — the full set of `(source, paragraph)`
+  pairs this candidate's evidence is *attributed to*: for an
+  association/activation candidate, every attribution `AssociationOut`'s own
+  `attributions` list already carries, aggregated server-side into one
+  candidate before this feature ever runs (§2.2 — the graph engine, not this
+  ADR's dedup step, is what merges multiple sources asserting the same
+  `(subject, label, object)`); for a passage/community candidate, the
+  singleton `{(source, paragraph)}` of the hit itself. §9 renders this set
+  as the `corroboration` field (§10) so a fact several independent sources
+  assert is never summarized down to one opaque count. Never serialized to
+  the wire as `origins` itself — `corroboration` and `citation_refs` are its
+  two public projections.
 
 Corpus body text and API credentials are never duplicated into a diagnostic
-field — an `omitted` entry (§10) names a candidate by its locator, never by
-re-embedding its text.
+field — an `omitted` entry (§10) names a candidate by its `candidate_id`
+(never by re-embedding its text), which, unlike a locator, still identifies
+an unsourced graph candidate with no attribution at all.
 
 Comparison discipline, restated as a hard rule: nothing outside §7's RRF step
 may compare the four incomparable score fields named in §2.2 against a
@@ -520,7 +546,8 @@ Fused order sorts descending by `fused_score`; ties break on
 `(subject, label, object)` for an association/activation candidate and
 `(source, paragraph)` for a passage/community candidate — fully deterministic,
 matching the graph page's own existing tie-break discipline
-(`src/api.rs:1304-1315`).
+(`src/api.rs:1304-1315`). This is the same `canonical_key` §6's
+`candidate_id` is built from — one definition, two consumers.
 
 Each lane's `lane_rank` is read from what that lane's endpoint already
 produces, never recomputed: graph-query candidates keep the `AssociationOut`
@@ -550,13 +577,24 @@ limit in `src/api.rs`.
   `src/api.rs:1078`).
 - `max_bytes`: counts the compact (no extraneous whitespace) UTF-8
   serialization length of exactly the `items` array plus the `citations`
-  array — never the response envelope, `plan`, or `budget`/`omitted`
-  metadata. A client computing the same sum over the same JSON gets the same
-  number; this is a closed, checkable definition, not an implementation
-  detail left to whichever server built the package. Default 65536 (64 KiB),
-  ceiling chosen well under §2.4's `DEFAULT_MCP_MAX_RESULT_BYTES` (8 MiB) so
-  that a package built at this endpoint's own ceiling never gets silently
-  truncated a second time by the MCP transport's independent cap — 1 MiB.
+  array, **excluding each item's own `bytes` and `estimated_tokens` fields**
+  (§10) — those two fields each report a count *derived from* this same
+  measurement, so counting them as part of what they measure would make the
+  measured length depend on its own value (a longer number takes more bytes
+  to write, which would change the length, which could change the number).
+  Never the response envelope, `plan`, `budget`/`omitted` metadata, or those
+  two per-item accounting fields. A client computing the same sum over the
+  same JSON, minus those two keys, gets the same number; this is a closed,
+  checkable definition, not an implementation detail left to whichever
+  server built the package. Concretely, an implementation computes every
+  candidate's content byte count first (the exclusion above), uses that
+  fixed number for every admission decision (§9), and only stamps the
+  admitted item's own `bytes`/`estimated_tokens` fields afterward — they
+  ride along in the response as informational metadata, never fed back into
+  the ceiling check that already ran. Default 65536 (64 KiB), ceiling chosen
+  well under §2.4's `DEFAULT_MCP_MAX_RESULT_BYTES` (8 MiB) so that a package
+  built at this endpoint's own ceiling never gets silently truncated a
+  second time by the MCP transport's independent cap — 1 MiB.
 - `max_tokens`: an **estimate**, not a real tokenizer count — this codebase
   deliberately carries no tokenizer dependency (§2.4). The estimator is fixed
   by this ADR and is itself part of the wire contract: changing its formula
@@ -585,77 +623,106 @@ with `reason: "budget_exceeded"` (§10) — never a 4xx.
 
 ## 9. Selection algorithm (for #304)
 
-Pipeline: normalize → dedup → contradiction pairing → rank (§7, optionally
-reordered by a configured reranker per §12) → diversity-aware greedy
-admission under budget (§8) → trace assembly.
+Pipeline: normalize → exact-key dedup → contradiction grouping → rank (§7) →
+near-duplicate suppression (using that rank) → optional reranker reordering
+(§12) → diversity-aware greedy admission under budget (§8) → trace assembly.
+Near-duplicate suppression is staged *after* ranking specifically because its
+survivor rule needs a fused rank to compare candidates by — putting it
+earlier, before §7 has produced one, would leave "keep the higher-ranked
+candidate" undefined at the point it runs.
 
-**Dedup.** Association candidates dedup on `(subject, label, object)` after
-alias resolution (the same normalization `resolve`/`query` already apply).
-Passage and community candidates dedup on `(context, source, paragraph)` —
-the identical locator can never appear twice regardless of which lane
-produced it (a passage hit and a community hit can share a `(source,
-paragraph)` only if community summaries somehow shared a source id space with
-ordinary passages, which they do not — `CommunityHit.community` is always
-prefixed `community:{id}`, so this case is structurally impossible, not
-merely handled). A passage hit and a citation sharing `(source, paragraph)`
-resolve to one candidate whose `citation_refs` already covers itself — no
-separate citation duplicate is created for a candidate that already
-self-cites. Beyond exact-key dedup, a fixed near-duplicate detector also
-drops textually redundant passages: #304 fixes and documents one
-deterministic similarity function over normalized text and a single default
-threshold — not request-configurable, for the same reason §7's RRF constant
-is fixed rather than tunable: no wire field ever exposes a raw similarity
-score, so nothing needs the exact function or threshold pinned in this ADR,
-only that it be deterministic and documented once. A pair the function
-calls near-duplicate keeps the higher fused-rank candidate and omits the
-other with `reason: "duplicate_passage"` and a `duplicate_of` locator.
+**Exact-key dedup.** Association candidates dedup on `(subject, label,
+object)` after alias resolution (the same normalization `resolve`/`query`
+already apply). Passage and community candidates dedup on `(context, source,
+paragraph)` — the identical locator can never appear twice regardless of
+which lane produced it (a passage hit and a community hit can share a
+`(source, paragraph)` only if community summaries somehow shared a source id
+space with ordinary passages, which they do not — `CommunityHit.community`
+is always prefixed `community:{id}`, so this case is structurally
+impossible, not merely handled). A passage hit and a citation sharing
+`(source, paragraph)` resolve to one candidate whose `citation_refs` already
+covers itself — no separate citation duplicate is created for a candidate
+that already self-cites. This step needs no rank and nothing to compare
+scores by — it only ever collapses two *identical*-key appearances of the
+same underlying evidence, never two different pieces of evidence into one
+(see below).
 
-**Never dedup across disjoint origins.** Two candidates whose `origins` sets
-are disjoint are never merged, even if they would otherwise dedup-key
-identically (this can only happen for association candidates, since
-passage/community dedup keys already are their own single-locator `origins`).
-This is what preserves independent corroboration: two attributions of the
-same fact from two different sources stay two distinct pieces of evidence,
-surfaced on the surviving association candidate's `corroboration: {sources:
-[...], attributions: [...]}` field (§10) rather than silently collapsing into
-one.
+**Corroboration is never lost.** An association/activation candidate's
+`origins` (§6) is exactly the attribution set `AssociationOut.attributions`
+already carries — aggregated server-side, by the graph engine, before this
+feature ever runs (§2.2). Two lane appearances of the same `(subject, label,
+object)` triple within one call (e.g. the same edge surfacing from both
+`query` and `activate`) therefore always carry the *identical* attribution
+set, never a disjoint one — exact-key dedup above can only ever discard a
+duplicate copy of the same evidence, never fold two independently-sourced
+candidates into one. What actually protects corroboration is narrower and
+structural: dedup never truncates an admitted candidate's attribution list,
+so the `corroboration` field (§10) always names every contributing source in
+full — a fact two sources independently assert is never summarized down to
+a single opaque count, and there is no "merge decision" for this ADR to get
+wrong.
 
 **Contradiction.** A candidate contradicts another when they share
 `(subject, label)` but disagree on `object`, or when a candidate's
 `signed_weight` is negative and it shares `(subject, label, object)` with a
-positive-weight candidate. Contradicting candidates are marked as a pair via
-each item's `contradicts` field (§10). **A contradiction pair is one
+positive-weight candidate. Contradiction is not always pairwise — three
+candidates sharing one `(subject, label)` with three different `object`
+values all mutually contradict each other. The transitive closure of
+"contradicts" over a set of candidates is one **contradiction group**;
+membership rides on each member's `contradicts` field (§10) as the
+`candidate_id`s of every *other* member. **A contradiction group is one
 admission unit throughout diversity tiering and budget admission** — never
-tiered or admitted separately, so its two members are never split apart by
-either mechanism below. Concretely: diversity tiering never delays one side
-of a pair while advancing the other, and admission decides the whole pair
-together — if it does not both fit, neither is admitted, and both go to
-`omitted` with `reason: "contradiction_pair_exceeds_budget"`. This preserves
-#216's requirement to "preserve explicit negative-weight/contradictory
-evidence instead of silently selecting only the majority claim" — a caller
-sees either both sides of a live disagreement or neither, never a one-sided
-majority view.
+tiered or admitted separately, so no member is ever split apart from the
+rest of its group by either mechanism below. Concretely: diversity tiering
+never delays one member of a group while advancing another, and admission
+decides the whole group together — if it does not all fit, none of it is
+admitted, and every member goes to `omitted` with `reason:
+"contradiction_group_exceeds_budget"`. This preserves #216's requirement to
+"preserve explicit negative-weight/contradictory evidence instead of
+silently selecting only the majority claim" — a caller sees every side of a
+live disagreement or none of them, never a one-sided majority view. This
+step needs no rank either — it only compares candidates' own
+`(subject, label, object)`/`signed_weight` fields, not a cross-candidate
+score.
+
+**Near-duplicate suppression.** Beyond exact-key dedup, a fixed detector also
+drops textually redundant *passage* candidates, staged after §7 has ranked
+the pool: #304 fixes and documents one deterministic similarity function
+over normalized text and a single default threshold — not
+request-configurable, for the same reason §7's RRF constant is fixed rather
+than tunable: no wire field ever exposes a raw similarity score, so nothing
+needs the exact function or threshold pinned in this ADR, only that it be
+deterministic and documented once, and that it run after §7 so "keep the
+higher-ranked candidate" is well-defined. A pair the function calls
+near-duplicate keeps the higher-`fused_rank` candidate and omits the other
+with `reason: "duplicate_passage"` and a `duplicate_of` (§6's `candidate_id`
+of the survivor).
 
 **Diversity.** Tier-based round-robin, not a re-ranking: admission units (an
-ordinary candidate, or a contradiction pair per above, counted as one) are
+ordinary candidate, or a contradiction group per above, counted as one) are
 grouped into tiers of fixed width, `tier_width = max(1, max_items / 4)` — a
 single fixed rule, not request-configurable, for the same reason §7's RRF
-constant is fixed rather than tunable — by post-fusion position, so tier 0
-holds the top `tier_width` units, tier 1 the next `tier_width`, and so on.
-Within one tier, a unit whose primary source has not yet appeared anywhere
-in the package-so-far is admitted ahead of a unit whose source has already
-appeared once in that same tier — a same-tier, same-source second unit is
-pushed to the back of its own tier, never into a different tier and never
-past a later tier's higher-fused-rank unit. This is deliberately weaker than
-MMR (§3 F): it changes *admission order inside a tier*, never overall
-relevance rank, and needs no invented similarity metric.
+constant is fixed rather than tunable — by their position in the order the
+pipeline has produced by this point: §7's fused order after near-duplicate
+suppression, or a configured reranker's permutation of it when one ran
+(§12) — never a second, independent ordering pass, so tier 0 always holds
+whatever candidates are first in that one order, tier 1 the next
+`tier_width`, and so on. Within one tier, a unit whose primary source (§6)
+has not yet appeared anywhere in the package-so-far is admitted ahead of a
+unit whose source has already appeared once in that same tier — a
+same-tier, same-source second unit is pushed to the back of its own tier,
+never into a different tier and never past a later tier's higher-ranked
+unit. An unsourced candidate (§6's `None` bucket) is never treated as
+repeating another unsourced candidate. This is deliberately weaker than MMR
+(§3 F): it changes *admission order inside a tier*, never overall relevance
+rank, and needs no invented similarity metric.
 
-**Admission.** Walk the (fused-rank, then diversity-adjusted) order once,
+**Admission.** Walk the same order diversity tiering just adjusted, once,
 greedily, one admission unit at a time. For each unit: if admitting it —
 together with any `citation_refs` locators not already present in the
 package — would exceed any of the three §8 budgets, skip it (`reason:
 "budget_exceeded"` for an ordinary candidate, or the contradiction-specific
-reason already named above for a pair) and continue to the next unit rather
+reason already named above for a group) and continue to the next unit rather
 than stopping (§3 D). A citation locator already present in the package
 (from an earlier-admitted unit) costs nothing extra when a later unit reuses
 it — `citations` dedups by `(source, paragraph)` the same way §9's own
@@ -673,11 +740,15 @@ dedup does.
   `max_tokens`.
 - **I3 — determinism.** The same request against the same corpus revision
   produces byte-identical JSON, field order included, every time.
-- **I4 — corroboration is never silently collapsed.** No two admitted items
-  with disjoint `origins` are ever merged into one.
-- **I5 — contradiction pairs are atomic.** A negative-weight association
-  never appears in `items` without its positive-weight counterpart also
-  appearing, and vice versa, whenever both exist as candidates.
+- **I4 — corroboration is never silently collapsed.** An admitted
+  association/activation item's `corroboration` (§10) names every source in
+  its underlying `origins` (§6) — dedup and near-duplicate suppression never
+  truncate that list down to a single opaque count.
+- **I5 — contradiction groups are atomic.** No member of a contradiction
+  group (§9) appears in `items` without every other member that exists as a
+  candidate also appearing, and vice versa — a negative-weight association's
+  positive-weight counterpart, or any one of several same-`(subject,
+  label)` candidates with differing `object`s, is never partially admitted.
 - **I6 — every omission is explained.** Every candidate not present in
   `items` appears in `omitted` (subject to §10's own listing cap) or is
   counted in `omitted_total`/`omitted_by_reason` even when the itemized list
@@ -697,16 +768,18 @@ struct EvidencePackage {
 }
 
 struct EvidenceItem {
+    candidate_id: String,       // §6's opaque, deterministic identity
     kind: String,               // open: "association" | "passage" | "community" | future values
     fused_rank: usize,
     lane_ranks: Vec<LaneRankEntry>,   // {lane: String, rank: usize} — one per contributing lane
     citation_refs: Vec<CitationRef>, // {source, paragraph}
     #[serde(skip_serializing_if = "Option::is_none")]
     corroboration: Option<Corroboration>,   // {sources: Vec<String>, attributions: Vec<CitationRef>}
-    #[serde(skip_serializing_if = "Option::is_none")]
-    contradicts: Option<CitationRef>,       // locates the paired contradiction item, if any
-    bytes: usize,                // this item's own contribution to budget.bytes_used
-    estimated_tokens: usize,     // this item's own contribution to budget.tokens_used
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    contradicts: Vec<String>,   // candidate_ids of every item this one contradicts (§9); empty when none
+    bytes: usize,                // this item's content-only §8 byte contribution — excludes
+                                 // this field and estimated_tokens themselves (§8)
+    estimated_tokens: usize,     // likewise, this item's §8 token-estimate contribution
     // kind-specific payload, embedding the EXISTING wire type verbatim —
     // no parallel type is minted:
     association: Option<AssociationOut>,
@@ -714,9 +787,15 @@ struct EvidenceItem {
     community: Option<CommunityHit>,
 }
 
+// {candidate_id, kind, reason, duplicate_of: Option<String>} — `duplicate_of`
+// (present only for reason: "duplicate_passage") names the surviving
+// candidate_id, never a locator, so an unsourced candidate can appear on
+// either side of the reference.
+struct OmittedCandidate { /* … */ }
+
 struct EvidencePlan {
     lanes: EvidenceLanesPlan,     // {resolve, query, activate, passages, communities, citations: LanePlan}
-    selection: SelectionPlan,     // {dedup_dropped, contradiction_pairs, diversity_tier_width}
+    selection: SelectionPlan,     // {dedup_dropped, contradiction_groups, diversity_tier_width}
     reranker: RerankerPlan,       // §12; {configured: bool, ran: bool, model: Option<String>, reason: Option<String>}
 }
 ```
@@ -753,8 +832,8 @@ closed literal union — per ADR 0005 §8's third bullet.
 
 **No new `ErrorCode` variant is introduced.** Every failure mode this
 endpoint can produce already has a home in the existing 25-variant vocabulary
-(`src/api.rs:150-207`): a malformed `budget`/`dedup`/`diversity`/`rerank`
-object is `invalid_argument` (400, same as any other malformed request
+(`src/api.rs:150-207`): a malformed `budget`/`rerank` object is
+`invalid_argument` (400, same as any other malformed request
 field); an oversized `origins` list is `over_limit` (400, the same code
 `retrieve`'s own `MAX_ORIGIN_CUES` check would use if it were server-side);
 whatever the composed `resolve`/`query`/`activate`/`search_passages`/
@@ -804,17 +883,29 @@ trait EvidenceReranker: Send + Sync {
 }
 ```
 
-**A reranker may only reorder.** It receives the full candidate pool (after
-§9's dedup and contradiction pairing, before diversity-aware admission) and
-returns a strict permutation of that pool's indices; it cannot add, remove,
-edit, or merge candidates. If `rerank` returns anything that is not a
-complete permutation of `0..candidates.len()` — wrong length, an
-out-of-range index, or a repeated index — the entire result is discarded and
-selection falls back to §7's deterministic RRF order, with
-`plan.reranker.reason = "invalid_permutation"`. Every invariant in §9 (I1-I6)
-holds identically whether the candidate order came from §7 alone or from a
-reranker's permutation of it — reordering the input to a deterministic,
-invariant-preserving admission process cannot itself violate an invariant.
+`query` is canonical and deterministic regardless of how the request phrased
+`origins`: it is `text_fallback_query` verbatim when the request supplied
+one (already phrased as a natural-language query, the same text used for the
+passage-search fallback); otherwise it is `origins` — normalized to its list
+form whether the request sent a bare string or an array — joined with `"; "`
+in request order. A request whose `origins` is a single string and a request
+whose `origins` is that same string as a one-element array therefore rerank
+identically.
+
+**A reranker may only reorder.** It receives the full candidate pool — after
+§9's exact-key dedup, contradiction grouping, §7's ranking, and
+near-duplicate suppression have already run, immediately before
+diversity-aware admission — and returns a strict permutation of that pool's
+indices; it cannot add, remove, edit, or merge candidates. If `rerank`
+returns anything that is not a complete permutation of
+`0..candidates.len()` — wrong length, an out-of-range index, or a repeated
+index — the entire result is discarded and selection falls back to §7's
+deterministic RRF order (the same order near-duplicate suppression already
+used), with `plan.reranker.reason = "invalid_permutation"`. Every invariant
+in §9 (I1-I6) holds identically whether the candidate order came from §7
+alone or from a reranker's permutation of it — reordering the input to a
+deterministic, invariant-preserving admission process cannot itself violate
+an invariant.
 
 Provider policy mirrors `EmbeddingProvider`, not `ChatClient`: per-attempt
 timeout is `min(configured_timeout, deadline.remaining())`
