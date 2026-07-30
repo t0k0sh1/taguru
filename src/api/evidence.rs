@@ -15,10 +15,16 @@
 //! (ADR 0006 §7).
 //!
 //! This module is internal groundwork only — no endpoint, MCP tool, or
-//! SDK method exists yet. #304 (budgeted selection), #305 (HTTP/MCP
-//! surface), and #307 (reranker) are its first callers, so several
-//! items here are currently only exercised by this module's own tests.
-#![allow(dead_code)] // first real caller is #304
+//! SDK method exists yet. The `select` submodule (#304) is now the
+//! real, non-test caller of [`fuse`]/[`CitationEntry`]/
+//! [`CitationCollector`] below; the four `EvidenceCandidate::from_*`
+//! constructors remain exercised only by tests until #305's HTTP
+//! handler builds real candidates from a live corpus, so the
+//! crate-wide allow below stays in place until then.
+#![allow(dead_code)] // first real HTTP caller is #305
+
+pub(crate) mod budget;
+pub(crate) mod select;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -455,7 +461,7 @@ pub(crate) struct FusedCandidate {
 /// many admitted items reference it (ADR 0006 §3 E, §6): the
 /// package's `citations` array holds each citation's text exactly
 /// once, never duplicated per referencing item.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct CitationEntry {
     pub(crate) source: String,
     pub(crate) paragraph: u32,

@@ -1,0 +1,1509 @@
+//! Deterministic budgeted evidence selection (ADR 0006 §9, for #304).
+//!
+//! [`select`] consumes the output of [`super::fuse`] — an already
+//! exact-key-deduped, RRF-ranked pool (ADR 0006 §7) — and runs the
+//! rest of ADR 0006 §9's pipeline over it: contradiction grouping,
+//! near-duplicate suppression, diversity-aware tiering, and greedy
+//! admission under the three independent [`BudgetLimits`] hard
+//! ceilings (ADR 0006 §8). It knows nothing about HTTP, MCP, or a
+//! reranker — those are #305/#307's job; this module is a pure,
+//! synchronous function of its inputs, which is what lets ADR 0006 §9
+//! invariant I3 ("the same request against the same corpus revision
+//! produces byte-identical JSON … every time") hold without needing to
+//! reason about anything outside this file.
+//!
+//! Contradiction grouping happens here, after [`super::fuse`], not
+//! before it as ADR 0006 §9's prose pipeline lists it — behaviorally
+//! identical, since grouping only inspects `(subject, label, object,
+//! signed_weight)`, never a rank or score `fuse` produces, so doing it
+//! after fusion produces the same groups doing it before would have.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+
+use super::budget::{
+    BudgetLimits, BudgetUsage, array_overhead, content_metrics, tokens_from_quarters,
+};
+use super::{
+    CandidatePayload, CitationEntry, EvidenceCandidate, FusedCandidate, KIND_ASSOCIATION, LaneRank,
+};
+use crate::api::communities::CommunityHit;
+use crate::api::sources::{Citation, PassageHit};
+use crate::api::{AssociationOut, MAX_LISTED_ISSUES};
+
+/// A `(source, paragraph)` locator with no citation text attached — the
+/// shape an [`EvidenceItem`]'s own `citation_refs`/`corroboration`
+/// carry (ADR 0006 §10); the text itself lives exactly once, in the
+/// package's top-level `citations` ([`CitationEntry`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CitationRef {
+    pub(crate) source: String,
+    pub(crate) paragraph: u32,
+}
+
+/// Every independent source an admitted association/activation item's
+/// underlying evidence traces back to (ADR 0006 §9 I4) — `None` for
+/// every other item, so dedup/near-duplicate suppression can never be
+/// accused of silently collapsing corroboration down to a single
+/// opaque count: the field is either fully populated or absent, never
+/// truncated.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Corroboration {
+    pub(crate) sources: Vec<String>,
+    pub(crate) attributions: Vec<CitationRef>,
+}
+
+/// One admitted piece of evidence (ADR 0006 §10). Embeds the
+/// *existing* wire type verbatim as the kind-specific payload — no
+/// parallel type is minted — with exactly one of
+/// `association`/`passage`/`community` present, selected by `kind`.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct EvidenceItem {
+    pub(crate) candidate_id: String,
+    pub(crate) kind: String,
+    pub(crate) fused_rank: usize,
+    pub(crate) lane_ranks: Vec<LaneRank>,
+    pub(crate) citation_refs: Vec<CitationRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) corroboration: Option<Corroboration>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) contradicts: Vec<String>,
+    /// This item's own content-only §8 byte contribution — excludes
+    /// this field and `estimated_tokens` themselves (ADR 0006 §8, to
+    /// avoid a field whose value depends on its own length).
+    pub(crate) bytes: usize,
+    pub(crate) estimated_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) association: Option<AssociationOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) passage: Option<PassageHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) community: Option<CommunityHit>,
+}
+
+/// A candidate that did not make it into `items` (ADR 0006 §10).
+/// `duplicate_of` is present only for `reason: "duplicate_passage"`
+/// and names the *surviving* `candidate_id`, never a locator, so an
+/// unsourced candidate can appear on either side of the reference.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct OmittedCandidate {
+    pub(crate) candidate_id: String,
+    pub(crate) kind: String,
+    pub(crate) reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) duplicate_of: Option<String>,
+}
+
+/// The selection pipeline's own account of what it did, beyond the
+/// per-item/per-omission detail (ADR 0006 §10).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct SelectionPlan {
+    /// How many raw candidates [`super::fuse`]'s exact-key dedup folded
+    /// into an existing group before selection ever ran.
+    pub(crate) dedup_dropped: usize,
+    /// How many contradiction groups (ADR 0006 §9) existed in the pool
+    /// — regardless of whether they were ultimately admitted or
+    /// omitted together.
+    pub(crate) contradiction_groups: usize,
+    pub(crate) diversity_tier_width: usize,
+}
+
+/// The full result of one [`select`] call (ADR 0006 §10's
+/// `EvidencePackage`, minus the fields only #305's HTTP/MCP surface
+/// knows how to fill in — `plan.lanes`/`plan.reranker`).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct SelectedEvidence {
+    pub(crate) items: Vec<EvidenceItem>,
+    pub(crate) citations: Vec<CitationEntry>,
+    pub(crate) budget: BudgetUsage,
+    /// Capped at [`MAX_LISTED_ISSUES`], the same way `Issue` lists are
+    /// (`src/api.rs:437`) — `omitted_total`/`omitted_by_reason` below
+    /// are never capped, so the itemized list's own truncation is
+    /// always observable.
+    pub(crate) omitted: Vec<OmittedCandidate>,
+    pub(crate) omitted_total: usize,
+    pub(crate) omitted_by_reason: BTreeMap<String, usize>,
+    pub(crate) selection: SelectionPlan,
+}
+
+const REASON_DUPLICATE_PASSAGE: &str = "duplicate_passage";
+const REASON_BUDGET_EXCEEDED: &str = "budget_exceeded";
+const REASON_CONTRADICTION_GROUP_EXCEEDS_BUDGET: &str = "contradiction_group_exceeds_budget";
+
+/// Character-bigram Dice-coefficient threshold a passage pair must
+/// meet or exceed to be treated as near-duplicate (ADR 0006 §9: "#304
+/// fixes and documents one deterministic similarity function … not
+/// request-configurable"). Chosen conservatively high so only
+/// near-identical text — not merely topically related passages — is
+/// suppressed; no wire field ever exposes the raw coefficient, so
+/// nothing outside this module needs the exact value, only that it be
+/// fixed and documented once.
+const NEAR_DUPLICATE_DICE_THRESHOLD: f64 = 0.9;
+
+/// Runs the whole ADR 0006 §9 pipeline over an already fused pool.
+///
+/// `dedup_dropped` is [`super::fuse`]'s own return value, folded
+/// straight into [`SelectionPlan`] so the caller does not have to
+/// thread it through separately. `citation_lookup` resolves an
+/// association candidate's origin locators to the citation text that
+/// belongs in the package's top-level `citations` array — a plain map
+/// rather than a live corpus call, since this function is otherwise
+/// pure; #305's HTTP handler is what will populate it from a real
+/// `cite_passage`-equivalent lookup before calling this function. A
+/// locator this map has no entry for is silently dropped from that
+/// item's own `citation_refs` rather than ever creating an orphan
+/// reference (ADR 0006 §9 I1) — in the real pipeline every origin
+/// locator traces back to an attribution the graph engine itself
+/// produced, so this path is a defensive guarantee, not a real degrade
+/// mode.
+pub(crate) fn select(
+    fused: Vec<FusedCandidate>,
+    dedup_dropped: usize,
+    limits: &BudgetLimits,
+    citation_lookup: &HashMap<(String, u32), Citation>,
+) -> SelectedEvidence {
+    let (survivors, mut omitted, mut omitted_by_reason) = suppress_near_duplicate_passages(fused);
+
+    let meta: Vec<SurvivorMeta> = survivors.iter().map(SurvivorMeta::of).collect();
+    let groups_by_key = group_by_subject_label(&meta);
+    let units = build_admission_units(&meta, &groups_by_key);
+    let contradiction_groups = units
+        .iter()
+        .filter(|unit| matches!(unit, AdmissionUnit::Group(_)))
+        .count();
+
+    let tier_width = std::cmp::max(1, limits.max_items / 4);
+    let ordered_units = diversity_reorder(units, &meta, tier_width);
+
+    // Every survivor's other-group-members' candidate_ids, computed
+    // once from `meta` before `survivors` is consumed below — a group
+    // member needs every *other* member's id (ADR 0006 §10's
+    // `contradicts`), not its own.
+    let mut contradicts_by_index: Vec<Vec<String>> = vec![Vec::new(); survivors.len()];
+    for idxs in groups_by_key.values() {
+        if idxs.len() < 2 {
+            continue;
+        }
+        let ids: Vec<String> = idxs.iter().map(|&i| meta[i].candidate_id.clone()).collect();
+        for &i in idxs {
+            contradicts_by_index[i] = ids
+                .iter()
+                .filter(|id| **id != meta[i].candidate_id)
+                .cloned()
+                .collect();
+        }
+    }
+
+    let mut prepared: Vec<Option<PreparedItem>> = survivors
+        .into_iter()
+        .zip(contradicts_by_index)
+        .map(|(fc, contradicts)| Some(prepare_item(fc, contradicts, citation_lookup)))
+        .collect();
+
+    let mut items_out = Vec::new();
+    let mut citations_out = Vec::new();
+    let mut citations_seen: HashSet<(String, u32)> = HashSet::new();
+
+    let mut items_count = 0usize;
+    let mut items_bytes_sum = 0usize;
+    let mut items_quarters_sum: u64 = 0;
+    let mut citations_count = 0usize;
+    let mut citations_bytes_sum = 0usize;
+    let mut citations_quarters_sum: u64 = 0;
+
+    for unit in &ordered_units {
+        let idxs = unit.indices();
+
+        let mut unit_items_bytes = 0usize;
+        let mut unit_items_quarters: u64 = 0;
+        // The new citation entries this unit would introduce, deduped
+        // both against the package built so far (`citations_seen`) and
+        // against themselves (two items in the same group can share an
+        // attribution locator) — collected here, once, so the commit
+        // branch below has no need to re-derive them a second way.
+        let mut new_contributions: Vec<CitationEntry> = Vec::new();
+        let mut new_keys_seen: HashSet<(String, u32)> = HashSet::new();
+        let mut new_citations_bytes = 0usize;
+        let mut new_citations_quarters: u64 = 0;
+        for &i in &idxs {
+            let candidate = prepared[i]
+                .as_ref()
+                .expect("each survivor belongs to exactly one unit");
+            unit_items_bytes += candidate.item_bytes;
+            unit_items_quarters += candidate.item_quarters;
+            for contribution in &candidate.citation_contributions {
+                let key = (contribution.source.clone(), contribution.paragraph);
+                if citations_seen.contains(&key) || !new_keys_seen.insert(key.clone()) {
+                    continue;
+                }
+                new_citations_bytes += contribution.bytes;
+                new_citations_quarters += contribution.quarters;
+                new_contributions.push(CitationEntry {
+                    source: contribution.source.clone(),
+                    paragraph: contribution.paragraph,
+                    citation: contribution.citation.clone(),
+                });
+            }
+        }
+
+        let new_items_count = items_count + idxs.len();
+        let new_citations_count = citations_count + new_contributions.len();
+        let new_items_bytes_sum = items_bytes_sum + unit_items_bytes;
+        let new_items_quarters_sum = items_quarters_sum + unit_items_quarters;
+        let new_citations_bytes_sum = citations_bytes_sum + new_citations_bytes;
+        let new_citations_quarters_sum = citations_quarters_sum + new_citations_quarters;
+
+        let items_bytes_total = array_overhead(new_items_count) + new_items_bytes_sum;
+        let citations_bytes_total = array_overhead(new_citations_count) + new_citations_bytes_sum;
+        let total_bytes = items_bytes_total + citations_bytes_total;
+        let total_quarters = array_overhead(new_items_count) as u64
+            + new_items_quarters_sum
+            + array_overhead(new_citations_count) as u64
+            + new_citations_quarters_sum;
+        let total_tokens = tokens_from_quarters(total_quarters);
+
+        let fits = new_items_count <= limits.max_items
+            && total_bytes <= limits.max_bytes
+            && total_tokens <= limits.max_tokens;
+
+        if !fits {
+            // Skip this unit and keep walking the rest of the order
+            // (ADR 0006 §3 D) — never stop at the first over-budget
+            // candidate.
+            let reason = if idxs.len() > 1 {
+                REASON_CONTRADICTION_GROUP_EXCEEDS_BUDGET
+            } else {
+                REASON_BUDGET_EXCEEDED
+            };
+            for &i in &idxs {
+                let candidate = prepared[i].as_ref().expect("not yet taken");
+                omitted.push(OmittedCandidate {
+                    candidate_id: candidate.item.candidate_id.clone(),
+                    kind: candidate.item.kind.clone(),
+                    reason: reason.to_string(),
+                    duplicate_of: None,
+                });
+                *omitted_by_reason.entry(reason.to_string()).or_insert(0) += 1;
+            }
+            continue;
+        }
+
+        items_count = new_items_count;
+        items_bytes_sum = new_items_bytes_sum;
+        items_quarters_sum = new_items_quarters_sum;
+        citations_count = new_citations_count;
+        citations_bytes_sum = new_citations_bytes_sum;
+        citations_quarters_sum = new_citations_quarters_sum;
+        for entry in &new_contributions {
+            citations_seen.insert((entry.source.clone(), entry.paragraph));
+        }
+        citations_out.extend(new_contributions);
+        for &i in &idxs {
+            let prepared_item = prepared[i]
+                .take()
+                .expect("each survivor committed at most once");
+            items_out.push(prepared_item.item);
+        }
+    }
+
+    citations_out
+        .sort_by(|a, b| (a.source.as_str(), a.paragraph).cmp(&(b.source.as_str(), b.paragraph)));
+
+    let omitted_total = omitted.len();
+    omitted.truncate(MAX_LISTED_ISSUES);
+
+    let items_bytes_total = array_overhead(items_count) + items_bytes_sum;
+    let citations_bytes_total = array_overhead(citations_count) + citations_bytes_sum;
+    let bytes_used = items_bytes_total + citations_bytes_total;
+    let quarters_used = array_overhead(items_count) as u64
+        + items_quarters_sum
+        + array_overhead(citations_count) as u64
+        + citations_quarters_sum;
+
+    SelectedEvidence {
+        items: items_out,
+        citations: citations_out,
+        budget: BudgetUsage {
+            items_used: items_count,
+            bytes_used,
+            tokens_used: tokens_from_quarters(quarters_used),
+            limits: *limits,
+        },
+        omitted,
+        omitted_total,
+        omitted_by_reason,
+        selection: SelectionPlan {
+            dedup_dropped,
+            contradiction_groups,
+            diversity_tier_width: tier_width,
+        },
+    }
+}
+
+/// Lightweight, cheaply-cloned facts about one survivor, extracted
+/// before `survivors` is consumed into owned [`EvidenceItem`]s —
+/// contradiction grouping and diversity tiering only ever need these,
+/// never the full candidate/payload.
+struct SurvivorMeta {
+    candidate_id: String,
+    source: Option<String>,
+    subject_label: Option<(String, String)>,
+}
+
+impl SurvivorMeta {
+    fn of(fc: &FusedCandidate) -> Self {
+        let candidate = &fc.candidate;
+        let subject_label = match &candidate.payload {
+            CandidatePayload::Association(association) if candidate.kind == KIND_ASSOCIATION => {
+                Some((association.subject.clone(), association.label.clone()))
+            }
+            _ => None,
+        };
+        Self {
+            candidate_id: candidate.candidate_id.clone(),
+            source: candidate.source.clone(),
+            subject_label,
+        }
+    }
+}
+
+/// Groups association-candidate indices sharing `(subject, label)`
+/// (ADR 0006 §9's contradiction rule). Every post-[`super::fuse`]
+/// candidate has a unique `(subject, label, object)` triple — `fuse`'s
+/// own exact-key dedup already collapsed any duplicate — so two
+/// candidates sharing `(subject, label)` necessarily disagree on
+/// `object`, which is exactly ADR 0006 §9's contradiction condition;
+/// no further check is needed, and a same-triple/opposite-sign pair
+/// (§9's other contradiction case) can never arise as two distinct
+/// post-fuse candidates for the same reason, so this function does not
+/// special-case it.
+fn group_by_subject_label(meta: &[SurvivorMeta]) -> HashMap<(String, String), Vec<usize>> {
+    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (i, item) in meta.iter().enumerate() {
+        if let Some(key) = item.subject_label.clone() {
+            groups.entry(key).or_default().push(i);
+        }
+    }
+    groups
+}
+
+/// One admission unit: an ordinary candidate, or a whole contradiction
+/// group counted as one (ADR 0006 §9 — "never tiered or admitted
+/// separately").
+#[derive(Clone)]
+enum AdmissionUnit {
+    Single(usize),
+    Group(Vec<usize>),
+}
+
+impl AdmissionUnit {
+    fn indices(&self) -> Vec<usize> {
+        match self {
+            AdmissionUnit::Single(i) => vec![*i],
+            AdmissionUnit::Group(idxs) => idxs.clone(),
+        }
+    }
+
+    /// The member whose position determines the whole unit's slot in
+    /// the order — the lowest-fused-rank (first-encountered) member,
+    /// per how [`build_admission_units`] constructs `Group`.
+    fn representative(&self) -> usize {
+        match self {
+            AdmissionUnit::Single(i) => *i,
+            AdmissionUnit::Group(idxs) => idxs[0],
+        }
+    }
+}
+
+/// Walks `meta` in its already fused-rank order, emitting one
+/// [`AdmissionUnit`] per candidate — a whole [`AdmissionUnit::Group`]
+/// the first time any of its members is reached, so the unit's
+/// position is always its lowest-fused-rank member's position.
+fn build_admission_units(
+    meta: &[SurvivorMeta],
+    groups_by_key: &HashMap<(String, String), Vec<usize>>,
+) -> Vec<AdmissionUnit> {
+    let mut consumed = vec![false; meta.len()];
+    let mut units = Vec::new();
+    for i in 0..meta.len() {
+        if consumed[i] {
+            continue;
+        }
+        let group = meta[i]
+            .subject_label
+            .as_ref()
+            .and_then(|key| groups_by_key.get(key))
+            .filter(|idxs| idxs.len() >= 2);
+        match group {
+            Some(idxs) => {
+                for &j in idxs {
+                    consumed[j] = true;
+                }
+                units.push(AdmissionUnit::Group(idxs.clone()));
+            }
+            None => {
+                consumed[i] = true;
+                units.push(AdmissionUnit::Single(i));
+            }
+        }
+    }
+    units
+}
+
+/// Tier-based round-robin reordering (ADR 0006 §9): a pure ordering
+/// pass, independent of whatever budget admission later decides — it
+/// changes admission *order*, never which candidates end up in
+/// `items`. Units are chunked into consecutive tiers of `tier_width`;
+/// within a tier, a unit whose primary source has not yet appeared —
+/// anywhere earlier in the order this function has built so far,
+/// across every prior tier and every earlier unit in the current tier
+/// — is placed ahead of one whose source has. An unsourced unit
+/// (`source: None`) is always treated as novel and never marked seen.
+fn diversity_reorder(
+    units: Vec<AdmissionUnit>,
+    meta: &[SurvivorMeta],
+    tier_width: usize,
+) -> Vec<AdmissionUnit> {
+    let mut seen_sources: HashSet<String> = HashSet::new();
+    let mut output = Vec::with_capacity(units.len());
+    for chunk in units.chunks(tier_width) {
+        let mut novel = Vec::new();
+        let mut repeat = Vec::new();
+        let mut newly_seen_this_tier: HashSet<String> = HashSet::new();
+        for unit in chunk {
+            match &meta[unit.representative()].source {
+                None => novel.push(unit.clone()),
+                Some(source) => {
+                    if seen_sources.contains(source) || newly_seen_this_tier.contains(source) {
+                        repeat.push(unit.clone());
+                    } else {
+                        newly_seen_this_tier.insert(source.clone());
+                        novel.push(unit.clone());
+                    }
+                }
+            }
+        }
+        seen_sources.extend(newly_seen_this_tier);
+        output.extend(novel);
+        output.extend(repeat);
+    }
+    output
+}
+
+/// One resolved citation locator a survivor would contribute if it (or
+/// its containing group) is admitted, with its own content bytes/
+/// quarters precomputed once (ADR 0006 §8's "computes every
+/// candidate's content byte count first … uses that fixed number for
+/// every admission decision").
+struct CitationContribution {
+    source: String,
+    paragraph: u32,
+    citation: Citation,
+    bytes: usize,
+    quarters: u64,
+}
+
+struct PreparedItem {
+    item: EvidenceItem,
+    item_bytes: usize,
+    item_quarters: u64,
+    citation_contributions: Vec<CitationContribution>,
+}
+
+/// Builds one survivor's [`EvidenceItem`] and precomputes everything
+/// the greedy admission walk needs to decide, without yet knowing
+/// whether it will be admitted.
+fn prepare_item(
+    fc: FusedCandidate,
+    mut contradicts: Vec<String>,
+    citation_lookup: &HashMap<(String, u32), Citation>,
+) -> PreparedItem {
+    contradicts.sort();
+
+    let FusedCandidate {
+        candidate,
+        lane_ranks,
+        fused_rank,
+        ..
+    } = fc;
+    let raw_refs = candidate.citation_refs();
+    let corroborating_sources = candidate.corroborating_sources();
+    let EvidenceCandidate {
+        kind,
+        candidate_id,
+        payload,
+        ..
+    } = candidate;
+
+    let mut resolved: Vec<(String, u32, Citation)> = Vec::new();
+    for (source, paragraph) in raw_refs {
+        if let Some(citation) = citation_lookup.get(&(source.clone(), paragraph)) {
+            resolved.push((source, paragraph, citation.clone()));
+        }
+    }
+    resolved.sort_by(|a, b| (a.0.as_str(), a.1).cmp(&(b.0.as_str(), b.1)));
+
+    let citation_refs: Vec<CitationRef> = resolved
+        .iter()
+        .map(|(source, paragraph, _)| CitationRef {
+            source: source.clone(),
+            paragraph: *paragraph,
+        })
+        .collect();
+
+    let corroboration = if kind == KIND_ASSOCIATION && !citation_refs.is_empty() {
+        Some(Corroboration {
+            sources: corroborating_sources.into_iter().collect(),
+            attributions: citation_refs.clone(),
+        })
+    } else {
+        None
+    };
+
+    let (association, passage, community) = match payload {
+        CandidatePayload::Association(association) => (Some(association), None, None),
+        CandidatePayload::Passage(passage) => (None, Some(passage), None),
+        CandidatePayload::Community(community) => (None, None, Some(community)),
+    };
+
+    let mut item = EvidenceItem {
+        candidate_id,
+        kind,
+        fused_rank,
+        lane_ranks,
+        citation_refs,
+        corroboration,
+        contradicts,
+        bytes: 0,
+        estimated_tokens: 0,
+        association,
+        passage,
+        community,
+    };
+    let (item_bytes, item_quarters) = content_metrics(&item, &["bytes", "estimated_tokens"]);
+    item.bytes = item_bytes;
+    item.estimated_tokens = tokens_from_quarters(item_quarters);
+
+    let citation_contributions = resolved
+        .into_iter()
+        .map(|(source, paragraph, citation)| {
+            let probe = CitationEntry {
+                source: source.clone(),
+                paragraph,
+                citation: citation.clone(),
+            };
+            let (bytes, quarters) = content_metrics(&probe, &[]);
+            CitationContribution {
+                source,
+                paragraph,
+                citation,
+                bytes,
+                quarters,
+            }
+        })
+        .collect();
+
+    PreparedItem {
+        item,
+        item_bytes,
+        item_quarters,
+        citation_contributions,
+    }
+}
+
+/// Drops textually near-duplicate *passage* candidates from the pool
+/// (ADR 0006 §9), staged over the already fused-rank-ordered input so
+/// "keep the higher-ranked (lower `fused_rank`) candidate" is
+/// well-defined. Association/community candidates always pass through
+/// unchanged — this detector only ever compares passage text.
+fn suppress_near_duplicate_passages(
+    fused: Vec<FusedCandidate>,
+) -> (
+    Vec<FusedCandidate>,
+    Vec<OmittedCandidate>,
+    BTreeMap<String, usize>,
+) {
+    let mut survivors = Vec::with_capacity(fused.len());
+    let mut omitted = Vec::new();
+    let mut omitted_by_reason: BTreeMap<String, usize> = BTreeMap::new();
+    // (candidate_id, normalized-text bigrams) for every passage kept so
+    // far, in fused-rank order.
+    let mut kept_passages: Vec<(String, HashSet<(char, char)>)> = Vec::new();
+
+    for fc in fused {
+        let bigrams = match &fc.candidate.payload {
+            CandidatePayload::Passage(hit) => {
+                Some(char_bigrams(&taguru::context::normalize_entry(&hit.text)))
+            }
+            _ => None,
+        };
+
+        let Some(bigrams) = bigrams else {
+            survivors.push(fc);
+            continue;
+        };
+
+        let duplicate_of = kept_passages
+            .iter()
+            .find(|(_, kept_bigrams)| {
+                dice_coefficient(kept_bigrams, &bigrams) >= NEAR_DUPLICATE_DICE_THRESHOLD
+            })
+            .map(|(id, _)| id.clone());
+
+        match duplicate_of {
+            Some(survivor_id) => {
+                omitted.push(OmittedCandidate {
+                    candidate_id: fc.candidate.candidate_id.clone(),
+                    kind: fc.candidate.kind.clone(),
+                    reason: REASON_DUPLICATE_PASSAGE.to_string(),
+                    duplicate_of: Some(survivor_id),
+                });
+                *omitted_by_reason
+                    .entry(REASON_DUPLICATE_PASSAGE.to_string())
+                    .or_insert(0) += 1;
+            }
+            None => {
+                kept_passages.push((fc.candidate.candidate_id.clone(), bigrams));
+                survivors.push(fc);
+            }
+        }
+    }
+
+    (survivors, omitted, omitted_by_reason)
+}
+
+/// Character bigrams of a normalized string, as a set (not a
+/// multiset) — good enough for a fixed, documented near-duplicate
+/// threshold (ADR 0006 §9) without pulling in a second, unrelated
+/// weighting scheme. A string under two scalars has no bigram; it is
+/// paired with itself instead, so two identical one-character strings
+/// still compare as an exact match rather than the undefined 0/0 case.
+fn char_bigrams(normalized: &str) -> HashSet<(char, char)> {
+    let chars: Vec<char> = normalized.chars().collect();
+    if chars.len() < 2 {
+        return chars.iter().map(|&c| (c, c)).collect();
+    }
+    chars.windows(2).map(|pair| (pair[0], pair[1])).collect()
+}
+
+/// Dice's coefficient over two bigram sets: `2|A∩B| / (|A|+|B|)`, `1.0`
+/// when both are empty (two empty strings are identical, not
+/// incomparable).
+fn dice_coefficient(a: &HashSet<(char, char)>, b: &HashSet<(char, char)>) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    let shared = a.intersection(b).count();
+    2.0 * shared as f64 / (a.len() + b.len()) as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::communities::CommunityHitMember;
+    use crate::api::sources::{LaneEvidence, PassageLanes};
+    use crate::api::{ActivationOut, AttributionOut};
+
+    fn limits(max_items: usize, max_bytes: usize, max_tokens: usize) -> BudgetLimits {
+        BudgetLimits {
+            max_items,
+            max_bytes,
+            max_tokens,
+        }
+    }
+
+    fn generous_limits() -> BudgetLimits {
+        limits(1000, 10_000_000, 10_000_000)
+    }
+
+    fn association_out(subject: &str, label: &str, object: &str, weight: f64) -> AssociationOut {
+        AssociationOut {
+            subject: subject.to_string(),
+            label: label.to_string(),
+            object: object.to_string(),
+            weight,
+            count: 1,
+            attributions: Vec::new(),
+        }
+    }
+
+    fn sourced_association(
+        subject: &str,
+        label: &str,
+        object: &str,
+        weight: f64,
+        source: &str,
+        paragraph: u32,
+    ) -> AssociationOut {
+        let mut association = association_out(subject, label, object, weight);
+        association.attributions = vec![AttributionOut {
+            source: source.to_string(),
+            weight,
+            count: 1,
+            paragraph: Some(paragraph),
+            section: None,
+        }];
+        association
+    }
+
+    fn passage_hit(source: &str, paragraph: u32, text: &str) -> PassageHit {
+        PassageHit {
+            source: source.to_string(),
+            paragraph,
+            score: 1.0,
+            text: text.to_string(),
+            lanes: PassageLanes {
+                bm25: Some(LaneEvidence {
+                    rank: 1,
+                    score: 1.0,
+                }),
+                vector: None,
+            },
+        }
+    }
+
+    fn community_hit(id: &str, paragraph: u32, text: &str) -> CommunityHit {
+        CommunityHit {
+            community: id.to_string(),
+            score: 1.0,
+            text: text.to_string(),
+            paragraph,
+            level: None,
+            parent: None,
+            concept_count: None,
+            members: vec![CommunityHitMember {
+                name: "member".to_string(),
+                strength: 1.0,
+            }],
+            members_truncated: false,
+        }
+    }
+
+    fn citation_for(source: &str, section: Option<&str>) -> Citation {
+        Citation {
+            text: format!("excerpt of {source}"),
+            source: source.to_string(),
+            section: section.map(|s| s.to_string()),
+        }
+    }
+
+    fn empty_lookup() -> HashMap<(String, u32), Citation> {
+        HashMap::new()
+    }
+
+    fn select_all(
+        pool: Vec<EvidenceCandidate>,
+        citation_lookup: &HashMap<(String, u32), Citation>,
+    ) -> SelectedEvidence {
+        let (fused, dedup_dropped) = super::super::fuse(pool);
+        select(fused, dedup_dropped, &generous_limits(), citation_lookup)
+    }
+
+    // --- Mixed pool, determinism ---
+
+    #[test]
+    fn mixed_pool_produces_a_deterministic_package() {
+        let pool = vec![
+            EvidenceCandidate::from_association(
+                "ctx",
+                sourced_association("cats", "is_a", "mammals", 1.0, "book.txt", 1),
+                1,
+            ),
+            EvidenceCandidate::from_passage("ctx", passage_hit("s1", 0, "cats are mammals"), 1),
+            EvidenceCandidate::from_community("ctx", community_hit("L0-1", 0, "summary text"), 1),
+        ];
+        let mut lookup = empty_lookup();
+        lookup.insert(("book.txt".to_string(), 1), citation_for("book.txt", None));
+
+        let first = select_all(pool, &lookup);
+        assert_eq!(first.items.len(), 3);
+        assert_eq!(first.citations.len(), 1);
+        assert_eq!(first.omitted_total, 0);
+
+        // Rebuild the identical pool from scratch and select again —
+        // I3 requires byte-identical JSON.
+        let pool2 = vec![
+            EvidenceCandidate::from_association(
+                "ctx",
+                sourced_association("cats", "is_a", "mammals", 1.0, "book.txt", 1),
+                1,
+            ),
+            EvidenceCandidate::from_passage("ctx", passage_hit("s1", 0, "cats are mammals"), 1),
+            EvidenceCandidate::from_community("ctx", community_hit("L0-1", 0, "summary text"), 1),
+        ];
+        let second = select_all(pool2, &lookup);
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+    }
+
+    // --- Budget: zero/tiny, never an error ---
+
+    #[test]
+    fn zero_item_budget_yields_an_empty_package_not_an_error() {
+        let pool = vec![EvidenceCandidate::from_passage(
+            "ctx",
+            passage_hit("s", 0, "hello"),
+            1,
+        )];
+        let (fused, dropped) = super::super::fuse(pool);
+        let result = select(
+            fused,
+            dropped,
+            &limits(0, 100_000, 100_000),
+            &empty_lookup(),
+        );
+        assert!(result.items.is_empty());
+        assert_eq!(result.omitted_total, 1);
+        assert_eq!(result.omitted[0].reason, REASON_BUDGET_EXCEEDED);
+        assert_eq!(
+            result.omitted_by_reason.get(REASON_BUDGET_EXCEEDED),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn one_byte_budget_yields_an_empty_package_not_an_error() {
+        let pool = vec![EvidenceCandidate::from_passage(
+            "ctx",
+            passage_hit("s", 0, "hello"),
+            1,
+        )];
+        let (fused, dropped) = super::super::fuse(pool);
+        let result = select(fused, dropped, &limits(100, 1, 100_000), &empty_lookup());
+        assert!(result.items.is_empty());
+        assert_eq!(result.omitted_total, 1);
+    }
+
+    #[test]
+    fn zero_token_budget_yields_an_empty_package_not_an_error() {
+        let pool = vec![EvidenceCandidate::from_passage(
+            "ctx",
+            passage_hit("s", 0, "hello"),
+            1,
+        )];
+        let (fused, dropped) = super::super::fuse(pool);
+        let result = select(fused, dropped, &limits(100, 100_000, 0), &empty_lookup());
+        assert!(result.items.is_empty());
+        assert_eq!(result.omitted_total, 1);
+    }
+
+    // --- Budget: skip over-budget, keep going (§3 D) ---
+
+    #[test]
+    fn an_over_budget_candidate_is_skipped_so_a_later_smaller_one_still_fits() {
+        let big =
+            EvidenceCandidate::from_passage("ctx", passage_hit("big", 0, &"x".repeat(500)), 1);
+        let small = EvidenceCandidate::from_passage("ctx", passage_hit("small", 0, "tiny"), 2);
+        let (fused, dropped) = super::super::fuse(vec![big, small]);
+        // A byte budget that fits the small item alone but not the big
+        // one first in the walk.
+        let result = select(fused, dropped, &limits(10, 400, 100_000), &empty_lookup());
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].candidate_id.contains("small"));
+        assert!(
+            result
+                .omitted
+                .iter()
+                .any(|o| o.candidate_id.contains("big") && o.reason == REASON_BUDGET_EXCEEDED)
+        );
+    }
+
+    // --- I1: no orphan citations, both directions ---
+
+    #[test]
+    fn every_citation_ref_has_a_matching_entry_and_vice_versa() {
+        let association = sourced_association("cats", "is_a", "mammals", 1.0, "book.txt", 1);
+        let pool = vec![EvidenceCandidate::from_association("ctx", association, 1)];
+        let mut lookup = empty_lookup();
+        lookup.insert(("book.txt".to_string(), 1), citation_for("book.txt", None));
+        let result = select_all(pool, &lookup);
+
+        assert_eq!(result.items.len(), 1);
+        let refs = &result.items[0].citation_refs;
+        assert_eq!(refs.len(), 1);
+        assert!(
+            result
+                .citations
+                .iter()
+                .any(|c| c.source == refs[0].source && c.paragraph == refs[0].paragraph)
+        );
+        for entry in &result.citations {
+            assert!(result.items.iter().any(|item| {
+                item.citation_refs
+                    .iter()
+                    .any(|r| r.source == entry.source && r.paragraph == entry.paragraph)
+            }));
+        }
+    }
+
+    #[test]
+    fn an_unresolvable_origin_locator_is_dropped_rather_than_left_orphaned() {
+        let association = sourced_association("cats", "is_a", "mammals", 1.0, "missing.txt", 1);
+        let pool = vec![EvidenceCandidate::from_association("ctx", association, 1)];
+        // Empty lookup: "missing.txt" paragraph 1 has no citation text.
+        let result = select_all(pool, &empty_lookup());
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].citation_refs.is_empty());
+        assert!(result.citations.is_empty());
+    }
+
+    // --- I4: corroboration never truncated ---
+
+    #[test]
+    fn corroboration_names_every_independent_source() {
+        let mut association = association_out("cats", "is_a", "mammals", 1.0);
+        association.attributions = vec![
+            AttributionOut {
+                source: "a.txt".to_string(),
+                weight: 1.0,
+                count: 1,
+                paragraph: Some(1),
+                section: None,
+            },
+            AttributionOut {
+                source: "b.txt".to_string(),
+                weight: 1.0,
+                count: 1,
+                paragraph: Some(2),
+                section: None,
+            },
+        ];
+        let pool = vec![EvidenceCandidate::from_association("ctx", association, 1)];
+        let mut lookup = empty_lookup();
+        lookup.insert(("a.txt".to_string(), 1), citation_for("a.txt", None));
+        lookup.insert(("b.txt".to_string(), 2), citation_for("b.txt", None));
+        let result = select_all(pool, &lookup);
+
+        let corroboration = result.items[0]
+            .corroboration
+            .as_ref()
+            .expect("association with origins has corroboration");
+        assert_eq!(
+            corroboration.sources,
+            vec!["a.txt".to_string(), "b.txt".to_string()]
+        );
+        assert_eq!(corroboration.attributions.len(), 2);
+    }
+
+    #[test]
+    fn an_unsourced_association_has_no_corroboration() {
+        let pool = vec![EvidenceCandidate::from_association(
+            "ctx",
+            association_out("a", "l", "b", 1.0),
+            1,
+        )];
+        let result = select_all(pool, &empty_lookup());
+        assert!(result.items[0].corroboration.is_none());
+    }
+
+    // --- I5: contradiction groups are atomic ---
+
+    #[test]
+    fn a_contradiction_group_is_admitted_or_omitted_as_a_whole() {
+        let a = EvidenceCandidate::from_association(
+            "ctx",
+            sourced_association("cats", "is_a", "mammals", 1.0, "s1", 1),
+            1,
+        );
+        let b = EvidenceCandidate::from_association(
+            "ctx",
+            sourced_association("cats", "is_a", "reptiles", 1.0, "s2", 1),
+            2,
+        );
+        let (fused, dropped) = super::super::fuse(vec![a, b]);
+        let mut lookup = empty_lookup();
+        lookup.insert(("s1".to_string(), 1), citation_for("s1", None));
+        lookup.insert(("s2".to_string(), 1), citation_for("s2", None));
+
+        // Plenty of room: both members admitted together.
+        let admitted = select(fused, dropped, &generous_limits(), &lookup);
+        assert_eq!(admitted.items.len(), 2);
+        assert_eq!(admitted.items[0].contradicts.len(), 1);
+        assert_eq!(admitted.items[1].contradicts.len(), 1);
+
+        // Rebuild and re-run with a budget that fits exactly one
+        // member's bytes but not both — the whole group must still be
+        // omitted together, never half-admitted.
+        let a2 = EvidenceCandidate::from_association(
+            "ctx",
+            sourced_association("cats", "is_a", "mammals", 1.0, "s1", 1),
+            1,
+        );
+        let b2 = EvidenceCandidate::from_association(
+            "ctx",
+            sourced_association("cats", "is_a", "reptiles", 1.0, "s2", 1),
+            2,
+        );
+        let (fused2, dropped2) = super::super::fuse(vec![a2, b2]);
+        let one_item_budget = limits(1, 10_000_000, 10_000_000);
+        let tight = select(fused2, dropped2, &one_item_budget, &lookup);
+        assert!(tight.items.is_empty());
+        assert_eq!(tight.omitted_total, 2);
+        assert!(
+            tight
+                .omitted
+                .iter()
+                .all(|o| o.reason == REASON_CONTRADICTION_GROUP_EXCEEDS_BUDGET)
+        );
+    }
+
+    #[test]
+    fn three_way_contradiction_is_one_group() {
+        let a = EvidenceCandidate::from_association(
+            "ctx",
+            association_out("cats", "is_a", "mammals", 1.0),
+            1,
+        );
+        let b = EvidenceCandidate::from_association(
+            "ctx",
+            association_out("cats", "is_a", "reptiles", 1.0),
+            2,
+        );
+        let c = EvidenceCandidate::from_association(
+            "ctx",
+            association_out("cats", "is_a", "fish", 1.0),
+            3,
+        );
+        let result = select_all(vec![a, b, c], &empty_lookup());
+        assert_eq!(result.items.len(), 3);
+        for item in &result.items {
+            assert_eq!(item.contradicts.len(), 2);
+        }
+        assert_eq!(result.selection.contradiction_groups, 1);
+    }
+
+    // --- Activation and negative-weight candidates preserved ---
+
+    #[test]
+    fn activation_uses_the_inner_association_and_keeps_kind_association() {
+        let mut inner = association_out("cats", "is_a", "mammals", 1.0);
+        inner.attributions = vec![AttributionOut {
+            source: "book.txt".to_string(),
+            weight: 1.0,
+            count: 1,
+            paragraph: Some(1),
+            section: None,
+        }];
+        let activation = ActivationOut {
+            strength: 0.5,
+            path: vec!["cats".to_string(), "mammals".to_string()],
+            association: inner,
+        };
+        let pool = vec![EvidenceCandidate::from_activation("ctx", activation, 1)];
+        let result = select_all(pool, &empty_lookup());
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].kind, KIND_ASSOCIATION);
+        assert!(result.items[0].association.is_some());
+    }
+
+    // --- Near-duplicate suppression ---
+
+    #[test]
+    fn near_identical_passages_keep_the_higher_ranked_one() {
+        let survivor = EvidenceCandidate::from_passage(
+            "ctx",
+            passage_hit("s1", 0, "the quick brown fox jumps"),
+            1,
+        );
+        let dup = EvidenceCandidate::from_passage(
+            "ctx",
+            passage_hit("s2", 0, "the quick brown fox jump"),
+            2,
+        );
+        let result = select_all(vec![survivor, dup], &empty_lookup());
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].candidate_id.contains("s1"));
+        assert_eq!(result.omitted_total, 1);
+        assert_eq!(result.omitted[0].reason, REASON_DUPLICATE_PASSAGE);
+        assert!(
+            result.omitted[0]
+                .duplicate_of
+                .as_deref()
+                .unwrap()
+                .contains("s1")
+        );
+    }
+
+    #[test]
+    fn distinct_passages_are_not_suppressed() {
+        let a = EvidenceCandidate::from_passage(
+            "ctx",
+            passage_hit("s1", 0, "cats are independent animals"),
+            1,
+        );
+        let b = EvidenceCandidate::from_passage(
+            "ctx",
+            passage_hit("s2", 0, "quarterly revenue exceeded forecasts"),
+            2,
+        );
+        let result = select_all(vec![a, b], &empty_lookup());
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.omitted_total, 0);
+    }
+
+    // --- Diversity ---
+
+    #[test]
+    fn diversity_tiering_prefers_a_novel_source_within_a_tier() {
+        // tier_width for max_items=4 is 1 — every unit is its own
+        // tier, so diversity cannot move anything across tiers; use
+        // max_items=12 so tier_width=3 puts all three candidates in
+        // one tier, where the same-source repeat can be pushed back.
+        let dominant_1 = EvidenceCandidate::from_passage(
+            "ctx",
+            passage_hit("dominant", 0, "alpha content one"),
+            1,
+        );
+        let dominant_2 = EvidenceCandidate::from_passage(
+            "ctx",
+            passage_hit("dominant", 1, "beta content two"),
+            2,
+        );
+        let other = EvidenceCandidate::from_passage(
+            "ctx",
+            passage_hit("other", 0, "gamma content three"),
+            3,
+        );
+        let (fused, dropped) = super::super::fuse(vec![dominant_1, dominant_2, other]);
+        let result = select(
+            fused,
+            dropped,
+            &limits(12, 10_000_000, 10_000_000),
+            &empty_lookup(),
+        );
+        assert_eq!(result.items.len(), 3);
+        // The second "dominant" item must be pushed behind "other"
+        // within its tier: order should be dominant#0, other, dominant#1.
+        let sources: Vec<&str> = result
+            .items
+            .iter()
+            .map(|item| item.passage.as_ref().unwrap().source.as_str())
+            .collect();
+        assert_eq!(sources, vec!["dominant", "other", "dominant"]);
+    }
+
+    #[test]
+    fn unsourced_candidates_never_count_as_repeats_of_each_other() {
+        let a = EvidenceCandidate::from_association("ctx", association_out("a", "l1", "x", 1.0), 1);
+        let b = EvidenceCandidate::from_association("ctx", association_out("b", "l2", "y", 1.0), 2);
+        let result = select_all(vec![a, b], &empty_lookup());
+        assert_eq!(result.items.len(), 2);
+    }
+
+    // --- I6: every omission is counted ---
+
+    #[test]
+    fn every_non_admitted_candidate_is_counted_in_omitted_total() {
+        let candidates: Vec<EvidenceCandidate> = (0..25)
+            .map(|i| {
+                EvidenceCandidate::from_passage(
+                    "ctx",
+                    passage_hit(
+                        &format!("s{i}"),
+                        0,
+                        &format!("distinct text body number {i}"),
+                    ),
+                    i + 1,
+                )
+            })
+            .collect();
+        let (fused, dropped) = super::super::fuse(candidates);
+        let total = fused.len();
+        let result = select(
+            fused,
+            dropped,
+            &limits(3, 10_000_000, 10_000_000),
+            &empty_lookup(),
+        );
+        assert_eq!(result.items.len() + result.omitted_total, total);
+        // Listing itself is capped at MAX_LISTED_ISSUES even though
+        // omitted_total is exact.
+        assert_eq!(
+            result.omitted.len(),
+            MAX_LISTED_ISSUES.min(result.omitted_total)
+        );
+    }
+
+    // --- Community candidates ---
+
+    #[test]
+    fn community_candidates_self_cite_and_contribute_no_citation_entries() {
+        let pool = vec![EvidenceCandidate::from_community(
+            "ctx",
+            community_hit("L0-1", 0, "summary"),
+            1,
+        )];
+        let result = select_all(pool, &empty_lookup());
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].citation_refs.is_empty());
+        assert!(result.citations.is_empty());
+    }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn proptest_config() -> ProptestConfig {
+            let cases = std::env::var("PROPTEST_CASES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(64);
+            ProptestConfig {
+                cases,
+                ..ProptestConfig::default()
+            }
+        }
+
+        /// A recipe, not a built [`EvidenceCandidate`] — the candidate
+        /// itself has no `Clone` (its payload embeds wire types that
+        /// don't derive one either), so "the same pool in a different
+        /// order" (for the determinism property below) is built by
+        /// calling the real constructors twice from the same owned
+        /// recipe data rather than cloning built candidates.
+        #[derive(Clone, Debug)]
+        enum CandidateRecipe {
+            Association {
+                subject: &'static str,
+                label: &'static str,
+                object: &'static str,
+                weight: f64,
+                source: Option<(&'static str, u32)>,
+            },
+            Passage {
+                source: &'static str,
+                paragraph: u32,
+                text: &'static str,
+            },
+            Community {
+                id: &'static str,
+                paragraph: u32,
+                text: &'static str,
+            },
+        }
+
+        /// A small, mixed ASCII/Japanese vocabulary — deliberately
+        /// reused across subject/label/object/source/text so generated
+        /// pools frequently collide on `(subject, label)` (exercising
+        /// contradiction grouping) and on near-identical text
+        /// (exercising near-duplicate suppression), not just on
+        /// disjoint, never-interacting candidates.
+        fn word() -> impl Strategy<Value = &'static str> {
+            prop_oneof![
+                Just("alpha"),
+                Just("beta"),
+                Just("gamma"),
+                Just("猫"),
+                Just("犬"),
+            ]
+        }
+
+        fn recipe_strategy() -> impl Strategy<Value = CandidateRecipe> {
+            prop_oneof![
+                (
+                    word(),
+                    word(),
+                    word(),
+                    -5.0f64..5.0,
+                    prop::option::of((word(), 0u32..3))
+                )
+                    .prop_map(|(subject, label, object, weight, source)| {
+                        CandidateRecipe::Association {
+                            subject,
+                            label,
+                            object,
+                            weight,
+                            source,
+                        }
+                    }),
+                (word(), 0u32..3, word()).prop_map(|(source, paragraph, text)| {
+                    CandidateRecipe::Passage {
+                        source,
+                        paragraph,
+                        text,
+                    }
+                }),
+                (word(), 0u32..3, word()).prop_map(|(id, paragraph, text)| {
+                    CandidateRecipe::Community {
+                        id,
+                        paragraph,
+                        text,
+                    }
+                }),
+            ]
+        }
+
+        fn pool_strategy() -> impl Strategy<Value = Vec<CandidateRecipe>> {
+            prop::collection::vec(recipe_strategy(), 0..12)
+        }
+
+        fn build_one(recipe: &CandidateRecipe, lane_rank: usize) -> EvidenceCandidate {
+            match recipe {
+                CandidateRecipe::Association {
+                    subject,
+                    label,
+                    object,
+                    weight,
+                    source,
+                } => {
+                    let mut association = association_out(subject, label, object, *weight);
+                    if let Some((src, paragraph)) = source {
+                        association.attributions = vec![AttributionOut {
+                            source: src.to_string(),
+                            weight: *weight,
+                            count: 1,
+                            paragraph: Some(*paragraph),
+                            section: None,
+                        }];
+                    }
+                    EvidenceCandidate::from_association("ctx", association, lane_rank)
+                }
+                CandidateRecipe::Passage {
+                    source,
+                    paragraph,
+                    text,
+                } => EvidenceCandidate::from_passage(
+                    "ctx",
+                    passage_hit(source, *paragraph, text),
+                    lane_rank,
+                ),
+                CandidateRecipe::Community {
+                    id,
+                    paragraph,
+                    text,
+                } => EvidenceCandidate::from_community(
+                    "ctx",
+                    community_hit(id, *paragraph, text),
+                    lane_rank,
+                ),
+            }
+        }
+
+        /// Builds one candidate per recipe, each getting the 1-based
+        /// lane rank matching its own position in `recipes` — the exact
+        /// lane a candidate came from does not matter to [`select`],
+        /// only that every candidate has *some* rank.
+        fn build_pool(recipes: &[CandidateRecipe]) -> Vec<EvidenceCandidate> {
+            recipes
+                .iter()
+                .enumerate()
+                .map(|(i, recipe)| build_one(recipe, i + 1))
+                .collect()
+        }
+
+        /// Builds the same pool [`build_pool`] would, but iterates
+        /// `recipes` in `order` — each candidate still gets the lane
+        /// rank tied to its *original* position in `recipes` (`i + 1`,
+        /// never its position in `order`), so this only changes the
+        /// arrival order `fuse` sees, never any candidate's own rank.
+        /// Reassigning rank-by-arrival-position instead would not be a
+        /// fair reordering test at all: two same-triple candidates with
+        /// different weights are *supposed* to fuse to a different
+        /// representative when whichever one holds rank 1 changes —
+        /// that is RRF working correctly, not an I3 violation.
+        fn build_pool_in_order(
+            recipes: &[CandidateRecipe],
+            order: &[usize],
+        ) -> Vec<EvidenceCandidate> {
+            order
+                .iter()
+                .map(|&i| build_one(&recipes[i], i + 1))
+                .collect()
+        }
+
+        fn citation_lookup_for(recipes: &[CandidateRecipe]) -> HashMap<(String, u32), Citation> {
+            let mut lookup = HashMap::new();
+            for recipe in recipes {
+                if let CandidateRecipe::Association {
+                    source: Some((source, paragraph)),
+                    ..
+                } = recipe
+                {
+                    lookup.insert((source.to_string(), *paragraph), citation_for(source, None));
+                }
+            }
+            lookup
+        }
+
+        proptest! {
+            #![proptest_config(proptest_config())]
+
+            /// I2: the three budgets are hard ceilings for *any*
+            /// candidate pool, including tiny/zero budgets — checked by
+            /// independently recomputing the byte/token totals from the
+            /// final `items`/`citations` output through the same public
+            /// budget helpers `select` itself uses internally, both
+            /// against the ceiling and against `select`'s own reported
+            /// `BudgetUsage` (catching any internal running-sum drift
+            /// from what the output actually serializes to). An empty
+            /// `items`/`citations` pair still costs 4 bytes on the wire
+            /// (`"[]"` twice) — a structural floor no admission
+            /// decision can shrink further, so a `max_bytes`/
+            /// `max_tokens` set below that floor is the one case the
+            /// ceiling check exempts, matching ADR 0006 §8's own
+            /// framing of a tiny budget as "ordinary, valid input," not
+            /// a promise the reported usage always fits under it.
+            ///
+            /// I6: every candidate not present in `items` is counted
+            /// in `omitted_total`, exactly — the two must always sum to
+            /// the fused pool's own size.
+            #[test]
+            fn budgets_are_hard_ceilings_and_every_omission_is_counted(
+                recipes in pool_strategy(),
+                max_items in 0usize..8,
+                max_bytes in 0usize..2000,
+                max_tokens in 0usize..400,
+            ) {
+                let lookup = citation_lookup_for(&recipes);
+                let (fused, dropped) = super::super::super::fuse(build_pool(&recipes));
+                let fused_count = fused.len();
+                let budget_limits = limits(max_items, max_bytes, max_tokens);
+                let result = select(fused, dropped, &budget_limits, &lookup);
+
+                prop_assert!(result.items.len() <= max_items);
+
+                let items_bytes: usize = result.items.iter().map(|item| content_metrics(item, &["bytes", "estimated_tokens"]).0).sum();
+                let citations_bytes: usize = result.citations.iter().map(|entry| content_metrics(entry, &[]).0).sum();
+                let bytes_used = array_overhead(result.items.len()) + items_bytes + array_overhead(result.citations.len()) + citations_bytes;
+                prop_assert!(bytes_used <= max_bytes || result.items.is_empty());
+                prop_assert_eq!(bytes_used, result.budget.bytes_used);
+
+                let items_quarters: u64 = result.items.iter().map(|item| content_metrics(item, &["bytes", "estimated_tokens"]).1).sum();
+                let citations_quarters: u64 = result.citations.iter().map(|entry| content_metrics(entry, &[]).1).sum();
+                let total_quarters = array_overhead(result.items.len()) as u64 + items_quarters
+                    + array_overhead(result.citations.len()) as u64 + citations_quarters;
+                let tokens_used = tokens_from_quarters(total_quarters);
+                prop_assert!(tokens_used <= max_tokens || result.items.is_empty());
+                prop_assert_eq!(tokens_used, result.budget.tokens_used);
+
+                prop_assert_eq!(result.items.len() + result.omitted_total, fused_count);
+            }
+
+            /// I3: the same logical pool — same candidates, same ranks
+            /// — fed to `fuse` in reverse arrival order selects
+            /// byte-identical JSON. Each candidate keeps the rank tied
+            /// to its own original position ([`build_pool_in_order`]);
+            /// only the order `fuse`'s internal grouping visits them in
+            /// changes.
+            #[test]
+            fn selection_is_deterministic_regardless_of_pool_order(recipes in pool_strategy()) {
+                let lookup = citation_lookup_for(&recipes);
+                let forward_order: Vec<usize> = (0..recipes.len()).collect();
+                let reverse_order: Vec<usize> = forward_order.iter().rev().copied().collect();
+
+                let (fused_a, dropped_a) = super::super::super::fuse(build_pool_in_order(&recipes, &forward_order));
+                let (fused_b, dropped_b) = super::super::super::fuse(build_pool_in_order(&recipes, &reverse_order));
+                let generous = limits(20, 100_000, 20_000);
+                let result_a = select(fused_a, dropped_a, &generous, &lookup);
+                let result_b = select(fused_b, dropped_b, &generous, &lookup);
+
+                prop_assert_eq!(
+                    serde_json::to_string(&result_a).unwrap(),
+                    serde_json::to_string(&result_b).unwrap()
+                );
+            }
+        }
+    }
+}
