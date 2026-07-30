@@ -500,6 +500,18 @@ impl CitationCollector {
         true
     }
 
+    /// Whether `(source, paragraph)` was already collected — lets a
+    /// caller check membership without attempting (and discarding) an
+    /// insert, e.g. to cost a not-yet-committed candidate against what
+    /// a package already carries.
+    pub(crate) fn contains(&self, source: &str, paragraph: u32) -> bool {
+        self.seen.contains(&(source.to_string(), paragraph))
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     pub(crate) fn into_entries(self) -> Vec<CitationEntry> {
         self.entries
     }

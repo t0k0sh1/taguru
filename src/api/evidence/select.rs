@@ -26,7 +26,8 @@ use super::budget::{
     BudgetLimits, BudgetUsage, array_overhead, content_metrics, tokens_from_quarters,
 };
 use super::{
-    CandidatePayload, CitationEntry, EvidenceCandidate, FusedCandidate, KIND_ASSOCIATION, LaneRank,
+    CandidatePayload, CitationCollector, CitationEntry, EvidenceCandidate, FusedCandidate,
+    KIND_ASSOCIATION, LaneRank,
 };
 use crate::api::communities::CommunityHit;
 use crate::api::sources::{Citation, PassageHit};
@@ -168,10 +169,7 @@ pub(crate) fn select(
     let meta: Vec<SurvivorMeta> = survivors.iter().map(SurvivorMeta::of).collect();
     let groups_by_key = group_by_subject_label(&meta);
     let units = build_admission_units(&meta, &groups_by_key);
-    let contradiction_groups = units
-        .iter()
-        .filter(|unit| matches!(unit, AdmissionUnit::Group(_)))
-        .count();
+    let contradiction_groups = units.iter().filter(|unit| unit.is_group()).count();
 
     let tier_width = std::cmp::max(1, limits.max_items / 4);
     let ordered_units = diversity_reorder(units, &meta, tier_width);
@@ -202,72 +200,53 @@ pub(crate) fn select(
         .collect();
 
     let mut items_out = Vec::new();
-    let mut citations_out = Vec::new();
-    let mut citations_seen: HashSet<(String, u32)> = HashSet::new();
-
-    let mut items_count = 0usize;
-    let mut items_bytes_sum = 0usize;
-    let mut items_quarters_sum: u64 = 0;
-    let mut citations_count = 0usize;
-    let mut citations_bytes_sum = 0usize;
-    let mut citations_quarters_sum: u64 = 0;
+    let mut citations = CitationCollector::new();
+    let mut totals = Totals::default();
 
     for unit in &ordered_units {
         let idxs = unit.indices();
 
         let mut unit_items_bytes = 0usize;
         let mut unit_items_quarters: u64 = 0;
-        // The new citation entries this unit would introduce, deduped
-        // both against the package built so far (`citations_seen`) and
-        // against themselves (two items in the same group can share an
-        // attribution locator) — collected here, once, so the commit
-        // branch below has no need to re-derive them a second way.
-        let mut new_contributions: Vec<CitationEntry> = Vec::new();
-        let mut new_keys_seen: HashSet<(String, u32)> = HashSet::new();
+        // The new citation entries this unit would introduce — a
+        // scratch collector so a locator two items in the same group
+        // both cite is only counted once, checked against the package
+        // built so far (`citations`) before it is even considered new.
+        let mut scratch = CitationCollector::new();
         let mut new_citations_bytes = 0usize;
         let mut new_citations_quarters: u64 = 0;
-        for &i in &idxs {
+        for &i in idxs {
             let candidate = prepared[i]
                 .as_ref()
                 .expect("each survivor belongs to exactly one unit");
             unit_items_bytes += candidate.item_bytes;
             unit_items_quarters += candidate.item_quarters;
             for contribution in &candidate.citation_contributions {
-                let key = (contribution.source.clone(), contribution.paragraph);
-                if citations_seen.contains(&key) || !new_keys_seen.insert(key.clone()) {
+                if citations.contains(&contribution.source, contribution.paragraph) {
                     continue;
                 }
-                new_citations_bytes += contribution.bytes;
-                new_citations_quarters += contribution.quarters;
-                new_contributions.push(CitationEntry {
-                    source: contribution.source.clone(),
-                    paragraph: contribution.paragraph,
-                    citation: contribution.citation.clone(),
-                });
+                let newly_added = scratch.insert(
+                    contribution.source.clone(),
+                    contribution.paragraph,
+                    contribution.citation.clone(),
+                );
+                if newly_added {
+                    new_citations_bytes += contribution.bytes;
+                    new_citations_quarters += contribution.quarters;
+                }
             }
         }
 
-        let new_items_count = items_count + idxs.len();
-        let new_citations_count = citations_count + new_contributions.len();
-        let new_items_bytes_sum = items_bytes_sum + unit_items_bytes;
-        let new_items_quarters_sum = items_quarters_sum + unit_items_quarters;
-        let new_citations_bytes_sum = citations_bytes_sum + new_citations_bytes;
-        let new_citations_quarters_sum = citations_quarters_sum + new_citations_quarters;
+        let candidate_totals = totals.plus_unit(UnitCost {
+            items: idxs.len(),
+            items_bytes: unit_items_bytes,
+            items_quarters: unit_items_quarters,
+            citations: scratch.len(),
+            citations_bytes: new_citations_bytes,
+            citations_quarters: new_citations_quarters,
+        });
 
-        let items_bytes_total = array_overhead(new_items_count) + new_items_bytes_sum;
-        let citations_bytes_total = array_overhead(new_citations_count) + new_citations_bytes_sum;
-        let total_bytes = items_bytes_total + citations_bytes_total;
-        let total_quarters = array_overhead(new_items_count) as u64
-            + new_items_quarters_sum
-            + array_overhead(new_citations_count) as u64
-            + new_citations_quarters_sum;
-        let total_tokens = tokens_from_quarters(total_quarters);
-
-        let fits = new_items_count <= limits.max_items
-            && total_bytes <= limits.max_bytes
-            && total_tokens <= limits.max_tokens;
-
-        if !fits {
+        if !candidate_totals.fits(limits) {
             // Skip this unit and keep walking the rest of the order
             // (ADR 0006 §3 D) — never stop at the first over-budget
             // candidate.
@@ -276,7 +255,7 @@ pub(crate) fn select(
             } else {
                 REASON_BUDGET_EXCEEDED
             };
-            for &i in &idxs {
+            for &i in idxs {
                 let candidate = prepared[i].as_ref().expect("not yet taken");
                 omitted.push(OmittedCandidate {
                     candidate_id: candidate.item.candidate_id.clone(),
@@ -289,17 +268,11 @@ pub(crate) fn select(
             continue;
         }
 
-        items_count = new_items_count;
-        items_bytes_sum = new_items_bytes_sum;
-        items_quarters_sum = new_items_quarters_sum;
-        citations_count = new_citations_count;
-        citations_bytes_sum = new_citations_bytes_sum;
-        citations_quarters_sum = new_citations_quarters_sum;
-        for entry in &new_contributions {
-            citations_seen.insert((entry.source.clone(), entry.paragraph));
+        totals = candidate_totals;
+        for entry in scratch.into_entries() {
+            citations.insert(entry.source, entry.paragraph, entry.citation);
         }
-        citations_out.extend(new_contributions);
-        for &i in &idxs {
+        for &i in idxs {
             let prepared_item = prepared[i]
                 .take()
                 .expect("each survivor committed at most once");
@@ -307,27 +280,20 @@ pub(crate) fn select(
         }
     }
 
+    let mut citations_out = citations.into_entries();
     citations_out
         .sort_by(|a, b| (a.source.as_str(), a.paragraph).cmp(&(b.source.as_str(), b.paragraph)));
 
     let omitted_total = omitted.len();
     omitted.truncate(MAX_LISTED_ISSUES);
 
-    let items_bytes_total = array_overhead(items_count) + items_bytes_sum;
-    let citations_bytes_total = array_overhead(citations_count) + citations_bytes_sum;
-    let bytes_used = items_bytes_total + citations_bytes_total;
-    let quarters_used = array_overhead(items_count) as u64
-        + items_quarters_sum
-        + array_overhead(citations_count) as u64
-        + citations_quarters_sum;
-
     SelectedEvidence {
         items: items_out,
         citations: citations_out,
         budget: BudgetUsage {
-            items_used: items_count,
-            bytes_used,
-            tokens_used: tokens_from_quarters(quarters_used),
+            items_used: totals.items_count,
+            bytes_used: totals.bytes(),
+            tokens_used: totals.tokens(),
             limits: *limits,
         },
         omitted,
@@ -338,6 +304,83 @@ pub(crate) fn select(
             contradiction_groups,
             diversity_tier_width: tier_width,
         },
+    }
+}
+
+/// One admission unit's own cost contribution — what [`Totals::plus_unit`]
+/// needs to compute the candidate post-admission state, without that
+/// state itself.
+struct UnitCost {
+    items: usize,
+    items_bytes: usize,
+    items_quarters: u64,
+    citations: usize,
+    citations_bytes: usize,
+    citations_quarters: u64,
+}
+
+/// The three-budget running account the greedy admission walk updates
+/// as it commits units (ADR 0006 §8). Bundles what would otherwise be
+/// six separately-threaded counters (and their six `new_*` shadows per
+/// iteration) into one value, and gives the in-loop "would this still
+/// fit" check and the final `BudgetUsage` the same `bytes()`/
+/// `tokens()` formula instead of two independent copies of it.
+#[derive(Clone, Copy, Default)]
+struct Totals {
+    items_count: usize,
+    items_bytes_sum: usize,
+    items_quarters_sum: u64,
+    citations_count: usize,
+    citations_bytes_sum: usize,
+    citations_quarters_sum: u64,
+}
+
+impl Totals {
+    /// The `items` array's own compact-JSON byte length plus the
+    /// `citations` array's (ADR 0006 §8: "exactly the items array plus
+    /// the citations array").
+    fn bytes(&self) -> usize {
+        array_overhead(self.items_count)
+            + self.items_bytes_sum
+            + array_overhead(self.citations_count)
+            + self.citations_bytes_sum
+    }
+
+    /// The combined quarter-tokens both arrays' text contributes — the
+    /// ceiling to whole tokens is taken once, over this sum, not once
+    /// per array (ADR 0006 §8: "the estimated total is the ceiling of
+    /// the sum").
+    fn quarters(&self) -> u64 {
+        array_overhead(self.items_count) as u64
+            + self.items_quarters_sum
+            + array_overhead(self.citations_count) as u64
+            + self.citations_quarters_sum
+    }
+
+    fn tokens(&self) -> usize {
+        tokens_from_quarters(self.quarters())
+    }
+
+    fn fits(&self, limits: &BudgetLimits) -> bool {
+        self.items_count <= limits.max_items
+            && self.bytes() <= limits.max_bytes
+            && self.tokens() <= limits.max_tokens
+    }
+
+    /// The state after admitting one more unit, computed without
+    /// mutating `self` — the caller checks [`Totals::fits`] on the
+    /// result before deciding whether to keep it (ADR 0006 §9's
+    /// "skip and continue" admission rule needs the candidate state
+    /// available without committing to it).
+    fn plus_unit(&self, cost: UnitCost) -> Self {
+        Self {
+            items_count: self.items_count + cost.items,
+            items_bytes_sum: self.items_bytes_sum + cost.items_bytes,
+            items_quarters_sum: self.items_quarters_sum + cost.items_quarters,
+            citations_count: self.citations_count + cost.citations,
+            citations_bytes_sum: self.citations_bytes_sum + cost.citations_bytes,
+            citations_quarters_sum: self.citations_quarters_sum + cost.citations_quarters,
+        }
     }
 }
 
@@ -354,8 +397,13 @@ struct SurvivorMeta {
 impl SurvivorMeta {
     fn of(fc: &FusedCandidate) -> Self {
         let candidate = &fc.candidate;
+        // Every constructor that produces a `CandidatePayload::Association`
+        // (`from_association`, `from_activation`) also sets
+        // `kind: KIND_ASSOCIATION`, and no other constructor produces
+        // that payload variant — matching on the payload alone already
+        // implies the kind, so no separate `kind` check is needed here.
         let subject_label = match &candidate.payload {
-            CandidatePayload::Association(association) if candidate.kind == KIND_ASSOCIATION => {
+            CandidatePayload::Association(association) => {
                 Some((association.subject.clone(), association.label.clone()))
             }
             _ => None,
@@ -388,31 +436,28 @@ fn group_by_subject_label(meta: &[SurvivorMeta]) -> HashMap<(String, String), Ve
     groups
 }
 
-/// One admission unit: an ordinary candidate, or a whole contradiction
-/// group counted as one (ADR 0006 §9 — "never tiered or admitted
-/// separately").
+/// One admission unit: an ordinary candidate (a length-1 vec), or a
+/// whole contradiction group counted as one (ADR 0006 §9 — "never
+/// tiered or admitted separately"). Member indices are in the order
+/// [`build_admission_units`] encountered them, so index `0` is always
+/// the lowest-fused-rank (first-encountered) member — what makes it
+/// double as `representative()` below.
 #[derive(Clone)]
-enum AdmissionUnit {
-    Single(usize),
-    Group(Vec<usize>),
-}
+struct AdmissionUnit(Vec<usize>);
 
 impl AdmissionUnit {
-    fn indices(&self) -> Vec<usize> {
-        match self {
-            AdmissionUnit::Single(i) => vec![*i],
-            AdmissionUnit::Group(idxs) => idxs.clone(),
-        }
+    fn indices(&self) -> &[usize] {
+        &self.0
     }
 
-    /// The member whose position determines the whole unit's slot in
-    /// the order — the lowest-fused-rank (first-encountered) member,
-    /// per how [`build_admission_units`] constructs `Group`.
     fn representative(&self) -> usize {
-        match self {
-            AdmissionUnit::Single(i) => *i,
-            AdmissionUnit::Group(idxs) => idxs[0],
-        }
+        self.0[0]
+    }
+
+    /// Whether this unit is a whole contradiction group rather than an
+    /// ordinary single candidate.
+    fn is_group(&self) -> bool {
+        self.0.len() > 1
     }
 }
 
@@ -440,11 +485,11 @@ fn build_admission_units(
                 for &j in idxs {
                     consumed[j] = true;
                 }
-                units.push(AdmissionUnit::Group(idxs.clone()));
+                units.push(AdmissionUnit(idxs.clone()));
             }
             None => {
                 consumed[i] = true;
-                units.push(AdmissionUnit::Single(i));
+                units.push(AdmissionUnit(vec![i]));
             }
         }
     }
@@ -489,6 +534,18 @@ fn diversity_reorder(
         output.extend(repeat);
     }
     output
+}
+
+/// A borrowing view of [`CitationEntry`], serialized identically (same
+/// field names, same order) purely to measure a citation's content
+/// bytes/quarters without cloning the `Citation` it borrows — the
+/// clone `content_metrics` would otherwise need is exactly what
+/// [`CitationContribution`] already owns a moment later.
+#[derive(Serialize)]
+struct CitationEntryRef<'a> {
+    source: &'a str,
+    paragraph: u32,
+    citation: &'a Citation,
 }
 
 /// One resolved citation locator a survivor would contribute if it (or
@@ -588,10 +645,15 @@ fn prepare_item(
     let citation_contributions = resolved
         .into_iter()
         .map(|(source, paragraph, citation)| {
-            let probe = CitationEntry {
-                source: source.clone(),
+            // Measures through a borrowing view so the (potentially
+            // large, if the citation text is a full passage excerpt)
+            // `Citation` is never cloned just to size it — `source`/
+            // `citation` below are moved into `CitationContribution`
+            // once, not cloned.
+            let probe = CitationEntryRef {
+                source: source.as_str(),
                 paragraph,
-                citation: citation.clone(),
+                citation: &citation,
             };
             let (bytes, quarters) = content_metrics(&probe, &[]);
             CitationContribution {
@@ -1381,28 +1443,16 @@ mod tests {
             }
         }
 
-        /// Builds one candidate per recipe, each getting the 1-based
-        /// lane rank matching its own position in `recipes` — the exact
-        /// lane a candidate came from does not matter to [`select`],
-        /// only that every candidate has *some* rank.
-        fn build_pool(recipes: &[CandidateRecipe]) -> Vec<EvidenceCandidate> {
-            recipes
-                .iter()
-                .enumerate()
-                .map(|(i, recipe)| build_one(recipe, i + 1))
-                .collect()
-        }
-
-        /// Builds the same pool [`build_pool`] would, but iterates
-        /// `recipes` in `order` — each candidate still gets the lane
-        /// rank tied to its *original* position in `recipes` (`i + 1`,
-        /// never its position in `order`), so this only changes the
-        /// arrival order `fuse` sees, never any candidate's own rank.
-        /// Reassigning rank-by-arrival-position instead would not be a
-        /// fair reordering test at all: two same-triple candidates with
-        /// different weights are *supposed* to fuse to a different
-        /// representative when whichever one holds rank 1 changes —
-        /// that is RRF working correctly, not an I3 violation.
+        /// Builds the pool in `order`, but each candidate still gets
+        /// the lane rank tied to its *original* position in `recipes`
+        /// (`i + 1`, never its position in `order`), so this only
+        /// changes the arrival order `fuse` sees, never any candidate's
+        /// own rank. Reassigning rank-by-arrival-position instead would
+        /// not be a fair reordering test at all: two same-triple
+        /// candidates with different weights are *supposed* to fuse to
+        /// a different representative when whichever one holds rank 1
+        /// changes — that is RRF working correctly, not an I3
+        /// violation.
         fn build_pool_in_order(
             recipes: &[CandidateRecipe],
             order: &[usize],
@@ -1411,6 +1461,13 @@ mod tests {
                 .iter()
                 .map(|&i| build_one(&recipes[i], i + 1))
                 .collect()
+        }
+
+        /// [`build_pool_in_order`] with the identity order — one
+        /// candidate per recipe, each getting the 1-based lane rank
+        /// matching its own position in `recipes`.
+        fn build_pool(recipes: &[CandidateRecipe]) -> Vec<EvidenceCandidate> {
+            build_pool_in_order(recipes, &(0..recipes.len()).collect::<Vec<_>>())
         }
 
         fn citation_lookup_for(recipes: &[CandidateRecipe]) -> HashMap<(String, u32), Citation> {
