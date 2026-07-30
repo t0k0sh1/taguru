@@ -60,11 +60,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::{Path as FsPath, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use object_store::ObjectStore;
 use object_store::path::Path as StorePath;
+use parking_lot::{Condvar, Mutex};
 
 use crate::ship::{self, FileSig, Manifest, ManifestFile, ManifestLane};
 
@@ -638,6 +639,10 @@ pub(crate) struct Hydrator {
     store: Arc<dyn ObjectStore>,
     data_dir: PathBuf,
     lane_policy: LanePolicy,
+    // parking_lot, not std::sync: a panic while one of these is held
+    // must not poison the lock and brick every cold-context load (and
+    // the replica tailer) for the rest of the process (the same
+    // reasoning as the registry — see Cargo.toml).
     inner: Mutex<HydratorInner>,
     settled: Condvar,
     /// Lanes last confirmed to match the manifest, by name — a
@@ -717,7 +722,7 @@ impl Hydrator {
     /// The generation currently being materialized (`None` until a
     /// degraded replica boot first reaches its bucket).
     pub(crate) fn generation(&self) -> Option<u64> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         inner.target.as_ref().map(|target| target.generation)
     }
 
@@ -725,7 +730,7 @@ impl Hydrator {
     /// registry registration — the sidecar metas these describe are
     /// already local by the time boot runs ([`Self::hydrate_shared`]).
     pub(crate) fn context_stems(&self) -> Vec<String> {
-        self.inner.lock().unwrap().states.keys().cloned().collect()
+        self.inner.lock().states.keys().cloned().collect()
     }
 
     /// Whether every family is settled (hydrated or vetoed): the
@@ -735,7 +740,6 @@ impl Hydrator {
     pub(crate) fn drained(&self) -> bool {
         self.inner
             .lock()
-            .unwrap()
             .states
             .values()
             .all(|state| matches!(state, StemState::Done(_) | StemState::Vetoed))
@@ -747,9 +751,9 @@ impl Hydrator {
     /// the caller's deletion cannot interleave with a half-landed
     /// download.
     pub(crate) fn veto(&self, stem: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         while matches!(inner.states.get(stem), Some(StemState::InFlight)) {
-            inner = self.settled.wait(inner).unwrap();
+            self.settled.wait(&mut inner);
         }
         if inner.states.contains_key(stem) {
             inner.states.insert(stem.to_string(), StemState::Vetoed);
@@ -770,13 +774,13 @@ impl Hydrator {
         manifest: Manifest,
     ) -> RetargetReport {
         let mut report = RetargetReport::default();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         while inner
             .states
             .values()
             .any(|state| matches!(state, StemState::InFlight))
         {
-            inner = self.settled.wait(inner).unwrap();
+            self.settled.wait(&mut inner);
         }
         let stems: BTreeSet<String> = manifest
             .files
@@ -806,11 +810,9 @@ impl Hydrator {
         // again — and would otherwise sit in these maps forever.
         self.lane_cache
             .lock()
-            .unwrap()
             .retain(|name, _| manifest.lanes.contains_key(name));
         self.file_cache
             .lock()
-            .unwrap()
             .retain(|name, _| manifest.files.contains_key(name));
         inner.target = Some(Target {
             generation,
@@ -828,11 +830,11 @@ impl Hydrator {
     /// immediately; concurrent callers of the same stem coalesce.
     pub(crate) fn ensure_context(&self, stem: &str) -> io::Result<()> {
         let (root, sig) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             loop {
                 match inner.states.get(stem) {
                     None | Some(StemState::Done(_) | StemState::Vetoed) => return Ok(()),
-                    Some(StemState::InFlight) => inner = self.settled.wait(inner).unwrap(),
+                    Some(StemState::InFlight) => self.settled.wait(&mut inner),
                     Some(StemState::Pending) => break,
                 }
             }
@@ -868,7 +870,7 @@ impl Hydrator {
                 })
         });
 
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         match &outcome {
             Ok((fetched, reused)) => {
                 // A veto cannot have landed meanwhile — veto() waits
@@ -917,7 +919,7 @@ impl Hydrator {
                 let started = Instant::now();
                 loop {
                     let pending: Vec<String> = {
-                        let inner = hydrator.inner.lock().unwrap();
+                        let inner = hydrator.inner.lock();
                         inner
                             .states
                             .iter()
@@ -962,7 +964,7 @@ impl Hydrator {
     /// a degraded boot is serving.
     pub(crate) async fn hydrate_shared(&self) -> io::Result<SharedReport> {
         let Some((root, manifest)) = ({
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             inner
                 .target
                 .as_ref()
@@ -1063,7 +1065,7 @@ impl Hydrator {
         // below, so it costs at most one redundant pass.
         let pre_stat = std::fs::metadata(&path).ok().map(|meta| FileSig::of(&meta));
         if let Some(sig) = pre_stat {
-            let cached = self.file_cache.lock().unwrap().get(name).copied();
+            let cached = self.file_cache.lock().get(name).copied();
             if cached == Some((expect, sig)) {
                 return Ok(false);
             }
@@ -1084,7 +1086,6 @@ impl Hydrator {
                 if let Some(sig) = pre_stat {
                     self.file_cache
                         .lock()
-                        .unwrap()
                         .insert(name.to_string(), (expect, sig));
                 }
                 return Ok(false);
@@ -1100,7 +1101,6 @@ impl Hydrator {
                     {
                         self.file_cache
                             .lock()
-                            .unwrap()
                             .insert(name.to_string(), (expect, sig));
                     }
                     return Ok(true);
@@ -1196,7 +1196,7 @@ impl Hydrator {
         // redundant pass, never a false "already matches".
         let pre_stat = std::fs::metadata(&path).ok().map(|meta| FileSig::of(&meta));
         if let Some(sig) = pre_stat {
-            let cached = self.lane_cache.lock().unwrap().get(name).copied();
+            let cached = self.lane_cache.lock().get(name).copied();
             if cached == Some((lane, sig)) {
                 return Ok(false);
             }
@@ -1230,10 +1230,7 @@ impl Hydrator {
                             // change elsewhere in the family doesn't
                             // force this unrelated, unchanged lane
                             // through another read-and-CRC pass.
-                            self.lane_cache
-                                .lock()
-                                .unwrap()
-                                .insert(name.to_string(), (lane, sig));
+                            self.lane_cache.lock().insert(name.to_string(), (lane, sig));
                         }
                         return Ok(false);
                     }
@@ -1289,10 +1286,7 @@ impl Hydrator {
                     // atomic rename just gave this file a new mtime/ino.
                     if let Some(sig) = std::fs::metadata(&path).ok().map(|meta| FileSig::of(&meta))
                     {
-                        self.lane_cache
-                            .lock()
-                            .unwrap()
-                            .insert(name.to_string(), (lane, sig));
+                        self.lane_cache.lock().insert(name.to_string(), (lane, sig));
                     }
                     return Ok(true);
                 }
