@@ -283,9 +283,9 @@ impl EvidenceCandidate {
     /// hit whose own `(source, paragraph)` is already the item's own
     /// locator (self-citing — no separate reference needed).
     pub(crate) fn citation_refs(&self) -> Vec<(String, u32)> {
-        match self.kind.as_str() {
-            KIND_ASSOCIATION => self.origins.iter().cloned().collect(),
-            _ => Vec::new(),
+        match &self.payload {
+            CandidatePayload::Association(_) => self.origins.iter().cloned().collect(),
+            CandidatePayload::Passage(_) | CandidatePayload::Community(_) => Vec::new(),
         }
     }
 
@@ -377,8 +377,9 @@ fn association_provenance(association: &AssociationOut) -> AssociationProvenance
 /// The primary attribution for a graph candidate carrying zero or more
 /// attributions (ADR 0006 §6): deterministically the attribution with
 /// the greatest `|weight|`, ties broken by the lexicographically
-/// smallest `source` then smallest `paragraph`. A candidate with zero
-/// attributions returns `(None, None, None)`.
+/// smallest `source`, preferring a real `paragraph` locator over none,
+/// then smallest `paragraph`. A candidate with zero attributions
+/// returns `(None, None, None)`.
 fn primary_attribution(
     attributions: &[super::AttributionOut],
 ) -> (Option<String>, Option<u32>, Option<String>) {
@@ -389,6 +390,12 @@ fn primary_attribution(
                 .abs()
                 .total_cmp(&b.weight.abs())
                 .then_with(|| b.source.cmp(&a.source))
+                // `None < Some(_)`, and every comparison here is
+                // reversed (`b.cmp(&a)`) to prefer the smallest value
+                // — which would make a paragraph-less attribution beat
+                // one with a real locator. Compare presence first so a
+                // locator is never discarded in favor of none.
+                .then_with(|| a.paragraph.is_some().cmp(&b.paragraph.is_some()))
                 .then_with(|| b.paragraph.cmp(&a.paragraph))
         })
         .map(|attribution| {
@@ -432,6 +439,16 @@ pub(crate) struct FusedCandidate {
     pub(crate) candidate: EvidenceCandidate,
     pub(crate) lane_ranks: Vec<LaneRank>,
     pub(crate) fused_rank: usize,
+    /// The raw RRF sum `fused_rank`/`fused_rank_order` were computed
+    /// from — kept so tests and callers can observe the score directly
+    /// instead of recomputing it from `lane_ranks`, but never
+    /// serialized: ADR 0006 §7 is explicit that `fused_score` itself
+    /// "is never serialized (only the ordinal `fused_rank` reaches the
+    /// wire)". `#[serde(skip)]` makes that a property of the type
+    /// rather than something #305's eventual wire projection has to
+    /// remember to leave out.
+    #[serde(skip)]
+    pub(crate) fused_score: f64,
 }
 
 /// One `(source, paragraph)` citation, collected once regardless of how
@@ -548,7 +565,21 @@ pub(crate) fn fuse(pool: Vec<EvidenceCandidate>) -> (Vec<FusedCandidate>, usize)
                 // into `self`) — nothing downstream reads either set's
                 // pre-merge contents, so a clone here would be pure
                 // waste.
-                if candidate.lane_rank < group.representative.lane_rank {
+                //
+                // Strict `<` on `lane_rank` alone leaves an equal-rank
+                // tie (e.g. the same triple arriving from both
+                // `graph_query` and `graph_activate` at rank 1) decided
+                // by pool order — whichever copy this loop happens to
+                // see first. Breaking the tie on `lane` (deterministic,
+                // and already this candidate's own field) makes the
+                // survivor — and with it `graph_path`/`signed_weight` —
+                // a function of the pool's contents, not its order.
+                let challenger = (candidate.lane_rank, candidate.lane.as_str());
+                let incumbent = (
+                    group.representative.lane_rank,
+                    group.representative.lane.as_str(),
+                );
+                if challenger < incumbent {
                     let mut merged = std::mem::take(&mut group.representative.origins);
                     merged.append(&mut candidate.origins);
                     candidate.origins = merged;
@@ -609,11 +640,14 @@ pub(crate) fn fuse(pool: Vec<EvidenceCandidate>) -> (Vec<FusedCandidate>, usize)
     let fused = fused
         .into_iter()
         .enumerate()
-        .map(|(index, (_, candidate, lane_ranks))| FusedCandidate {
-            candidate,
-            lane_ranks,
-            fused_rank: index + 1,
-        })
+        .map(
+            |(index, (fused_score, candidate, lane_ranks))| FusedCandidate {
+                candidate,
+                lane_ranks,
+                fused_rank: index + 1,
+                fused_score,
+            },
+        )
         .collect();
 
     (fused, dedup_dropped)
@@ -749,6 +783,18 @@ mod tests {
     }
 
     #[test]
+    fn primary_attribution_prefers_a_real_locator_over_none_on_a_tie() {
+        let mut association = association_out("cats", "is_a", "mammals", 1.0);
+        association.attributions = vec![
+            attribution_out("same.txt", 1.0, None),
+            attribution_out("same.txt", 1.0, Some(4)),
+        ];
+        let candidate = EvidenceCandidate::from_association("ctx", association, 1);
+        assert_eq!(candidate.source, Some("same.txt".to_string()));
+        assert_eq!(candidate.paragraph, Some(4));
+    }
+
+    #[test]
     fn zero_attributions_leave_locator_and_origins_empty() {
         let association = association_out("cats", "is_a", "mammals", 1.0);
         let candidate = EvidenceCandidate::from_association("ctx", association, 1);
@@ -857,6 +903,50 @@ mod tests {
     }
 
     #[test]
+    fn equal_rank_tie_across_lanes_picks_the_same_representative_regardless_of_pool_order() {
+        // graph_query and graph_activate both rank this triple 1st —
+        // an equal-rank tie the merge loop's lane_rank comparison alone
+        // cannot break. Without a tie-break on lane, whichever
+        // candidate this loop visits first would survive, making
+        // `graph_path`/`signed_weight` a function of pool order rather
+        // than pool contents.
+        fn query() -> EvidenceCandidate {
+            EvidenceCandidate::from_association("ctx", association_out("a", "l", "b", 1.0), 1)
+        }
+        fn activate() -> EvidenceCandidate {
+            let mut association = association_out("a", "l", "b", 1.0);
+            association.attributions = Vec::new();
+            EvidenceCandidate::from_activation(
+                "ctx",
+                ActivationOut {
+                    strength: 0.5,
+                    path: vec!["a".to_string(), "b".to_string()],
+                    association,
+                },
+                1,
+            )
+        }
+
+        let (query_first, _) = fuse(vec![query(), activate()]);
+        let (activate_first, _) = fuse(vec![activate(), query()]);
+
+        assert_eq!(query_first.len(), 1);
+        assert_eq!(activate_first.len(), 1);
+        assert_eq!(
+            query_first[0].candidate.lane,
+            activate_first[0].candidate.lane
+        );
+        assert_eq!(
+            query_first[0].candidate.graph_path,
+            activate_first[0].candidate.graph_path
+        );
+        assert_eq!(
+            query_first[0].candidate.signed_weight,
+            activate_first[0].candidate.signed_weight
+        );
+    }
+
+    #[test]
     fn ties_break_on_kind_then_canonical_key_not_insertion_order() {
         let second =
             EvidenceCandidate::from_association("ctx", association_out("z", "l", "z", 1.0), 5);
@@ -878,12 +968,11 @@ mod tests {
         // Equal lane_rank (1) on two different lanes must fuse to the
         // same score regardless of the wildly different raw scores
         // each carries (999.0 signed_weight vs. 1.0 passage score) —
-        // neither raw score may leak into the ordering.
-        let scores: Vec<f64> = fused
-            .iter()
-            .map(|f| 1.0 / (RRF_K + f.lane_ranks[0].rank as f64))
-            .collect();
-        assert_eq!(scores[0], scores[1]);
+        // neither raw score may leak into the ordering. Compares the
+        // actual computed `fused_score`, not a value re-derived from
+        // `lane_ranks`, so a change to the RRF formula itself would
+        // fail this test rather than silently agreeing with it.
+        assert_eq!(fused[0].fused_score, fused[1].fused_score);
     }
 
     #[test]
@@ -941,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_optionals_serialize_without_nulls_or_empty_arrays() {
+    fn absent_optionals_are_null_and_empty_until_a_wire_projection_skips_them() {
         let candidate =
             EvidenceCandidate::from_association("ctx", association_out("a", "l", "b", 1.0), 1);
         let json = serde_json::to_value(&candidate).expect("serialize");
