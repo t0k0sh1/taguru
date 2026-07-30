@@ -626,6 +626,12 @@ impl Args {
                 "--no-passage" => no_passage = true,
                 "--lossy" => lossy = Some(true),
                 "--questions" => match rest.next().map(|n| n.parse::<usize>()) {
+                    Some(_) if questions > 0 => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--questions given twice",
+                        ));
+                    }
                     Some(Ok(n)) if (1..=crate::api::MAX_QUESTIONS_PER_PARAGRAPH).contains(&n) => {
                         questions = n;
                     }
@@ -646,6 +652,12 @@ impl Args {
                     }
                 },
                 "--fact-budget" => match rest.next().map(|n| n.parse::<usize>()) {
+                    Some(_) if fact_budget.is_some() => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--fact-budget given twice",
+                        ));
+                    }
                     Some(Ok(n)) if n >= 1 => fact_budget = Some(n),
                     _ => {
                         return Err(crate::config::subcommand_usage_error(
@@ -655,7 +667,13 @@ impl Args {
                     }
                 },
                 "--config" => match rest.next() {
-                    Some(path) => config = Some(PathBuf::from(path)),
+                    Some(path) if config.is_none() => config = Some(PathBuf::from(path)),
+                    Some(_) => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--config given twice",
+                        ));
+                    }
                     None => {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
@@ -664,6 +682,12 @@ impl Args {
                     }
                 },
                 "--parallel" => match rest.next().map(|value| value.parse::<usize>()) {
+                    Some(_) if parallel.is_some() => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--parallel given twice",
+                        ));
+                    }
                     Some(Ok(n)) if n >= 1 => parallel = Some(n),
                     _ => {
                         return Err(crate::config::subcommand_usage_error(
@@ -673,6 +697,12 @@ impl Args {
                     }
                 },
                 "--structured-output" => {
+                    if structured_output.is_some() {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--structured-output given twice",
+                        ));
+                    }
                     match rest
                         .next()
                         .and_then(|mode| StructuredOutputMode::parse(mode))
@@ -687,6 +717,12 @@ impl Args {
                     }
                 }
                 "--max-output-tokens" => match rest.next().map(|value| value.parse::<usize>()) {
+                    Some(_) if max_output_tokens.is_some() => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--max-output-tokens given twice",
+                        ));
+                    }
                     Some(Ok(n)) if n >= 1 => max_output_tokens = Some(n),
                     _ => {
                         return Err(crate::config::subcommand_usage_error(
@@ -696,7 +732,15 @@ impl Args {
                     }
                 },
                 "--diagnostics-out" => match rest.next() {
-                    Some(path) => diagnostics_out = Some(PathBuf::from(path)),
+                    Some(path) if diagnostics_out.is_none() => {
+                        diagnostics_out = Some(PathBuf::from(path));
+                    }
+                    Some(_) => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--diagnostics-out given twice",
+                        ));
+                    }
                     None => {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
@@ -705,7 +749,13 @@ impl Args {
                     }
                 },
                 "--context" => match rest.next() {
-                    Some(name) => context = Some(name.clone()),
+                    Some(name) if context.is_none() => context = Some(name.clone()),
+                    Some(_) => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--context given twice",
+                        ));
+                    }
                     None => {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
@@ -714,7 +764,13 @@ impl Args {
                     }
                 },
                 "--description" => match rest.next() {
-                    Some(text) => description = Some(text.clone()),
+                    Some(text) if description.is_none() => description = Some(text.clone()),
+                    Some(_) => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--description given twice",
+                        ));
+                    }
                     None => {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
@@ -723,7 +779,13 @@ impl Args {
                     }
                 },
                 "--out" => match rest.next() {
-                    Some(dir) => out = Some(PathBuf::from(dir)),
+                    Some(dir) if out.is_none() => out = Some(PathBuf::from(dir)),
+                    Some(_) => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--out given twice",
+                        ));
+                    }
                     None => {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",

@@ -22,9 +22,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::SystemTime;
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -245,6 +246,9 @@ pub struct Oauth {
     store_path: PathBuf,
     // Each of these is held only long enough to mutate it, never across
     // `persist`'s fsync-heavy write, and never together with another.
+    // parking_lot, not std::sync: a panic while one is held must not
+    // poison the lock and brick OAuth for the rest of the process (the
+    // same reasoning as the registry — see Cargo.toml).
     // `persist_now` (`clients` then `refresh`, to snapshot both for the
     // store file), `register_client` (`refresh` then `clients`, to
     // know which registrations are approved before choosing an eviction
@@ -437,11 +441,10 @@ impl Oauth {
             let authorized: HashSet<String> = self
                 .refresh
                 .lock()
-                .unwrap()
                 .iter()
                 .map(|token| token.client_id.clone())
                 .collect();
-            let mut clients = self.clients.lock().unwrap();
+            let mut clients = self.clients.lock();
             // Registration is unauthenticated, so the cap must self-heal.
             // Refusing at the limit would let a flood of junk registrations
             // wedge the store permanently — no new client could register
@@ -485,7 +488,6 @@ impl Oauth {
     pub fn client(&self, client_id: &str) -> Option<Client> {
         self.clients
             .lock()
-            .unwrap()
             .iter()
             .find(|client| client.client_id == client_id)
             .cloned()
@@ -500,7 +502,6 @@ impl Oauth {
     fn client_registered_ats(&self) -> HashMap<String, u64> {
         self.clients
             .lock()
-            .unwrap()
             .iter()
             .map(|client| (client.client_id.clone(), client.created_at))
             .collect()
@@ -519,7 +520,7 @@ impl Oauth {
     ) -> String {
         let code = random_token();
         let registered_at = self.client_registered_ats();
-        let mut codes = self.codes.lock().unwrap();
+        let mut codes = self.codes.lock();
         codes.retain(|grant| grant.expires_at > now);
         evict_oldest(
             &mut codes,
@@ -551,7 +552,7 @@ impl Oauth {
         now: u64,
     ) -> Result<TokenGrant, OauthError> {
         let grant = {
-            let mut codes = self.codes.lock().unwrap();
+            let mut codes = self.codes.lock();
             let hash = digest_hex(code);
             // Constant-shape scan, same as Keyring::authenticate: every
             // stored code is compared even after a match, so lookup
@@ -600,7 +601,7 @@ impl Oauth {
     ) -> Result<TokenGrant, OauthError> {
         let hash = digest_hex(refresh_token);
         let grant = {
-            let mut refresh = self.refresh.lock().unwrap();
+            let mut refresh = self.refresh.lock();
             refresh.retain(|token| token.expires_at > now);
             // Validate the FULL binding — token hash AND client — before
             // burning anything. A refresh token rotates: it must die only
@@ -636,7 +637,7 @@ impl Oauth {
         let refresh_token = random_token();
         let registered_at = self.client_registered_ats();
         {
-            let mut access = self.access.lock().unwrap();
+            let mut access = self.access.lock();
             access.retain(|token| token.expires_at > now);
             evict_oldest(
                 &mut access,
@@ -654,7 +655,7 @@ impl Oauth {
             });
         }
         {
-            let mut refresh = self.refresh.lock().unwrap();
+            let mut refresh = self.refresh.lock();
             // The same insert-time sweep as `access` above: grants whose
             // refresh token was simply never used again would otherwise
             // sit in the list (and in every oauth.json rewrite) for the
@@ -695,11 +696,11 @@ impl Oauth {
     /// that follows holds only `persist_lock`, which nothing else in
     /// this type ever waits on.
     fn persist_now(&self) {
-        let _serialize = self.persist_lock.lock().unwrap();
-        let clients = self.clients.lock().unwrap().clone();
-        let refresh = self.refresh.lock().unwrap().clone();
+        let _serialize = self.persist_lock.lock();
+        let clients = self.clients.lock().clone();
+        let refresh = self.refresh.lock().clone();
         #[cfg(test)]
-        if let Some(hook) = self.persist_hook.lock().unwrap().take() {
+        if let Some(hook) = self.persist_hook.lock().take() {
             hook();
         }
         self.persist(&clients, &refresh);
@@ -710,7 +711,7 @@ impl Oauth {
     /// like the keyring scan.
     pub fn authenticate(&self, presented: &str, now: u64) -> Option<Arc<str>> {
         let hash = digest_hex(presented);
-        let access = self.access.lock().unwrap();
+        let access = self.access.lock();
         let mut matched = None;
         for token in access.iter() {
             let unexpired = token.expires_at > now;
@@ -1257,7 +1258,7 @@ mod tests {
         assert!(oauth.client(&newcomer.client_id).is_some());
         // Never one over the cap: eviction keeps it exactly bounded.
         assert_eq!(
-            oauth.clients.lock().unwrap().len(),
+            oauth.clients.lock().len(),
             CLIENT_CAP,
             "the store stays bounded at the cap"
         );
@@ -1286,7 +1287,7 @@ mod tests {
             codes.push(oauth.issue_code(&client, "https://claude.ai/cb", &challenge, "laptop", 0));
         }
         assert_eq!(
-            oauth.codes.lock().unwrap().len(),
+            oauth.codes.lock().len(),
             CODE_CAP,
             "the code store stays bounded at the cap despite {} issuances",
             CODE_CAP + 1
@@ -1312,12 +1313,12 @@ mod tests {
             grants.push(oauth.mint(format!("laptop{i}"), &client.client_id, i));
         }
         assert_eq!(
-            oauth.access.lock().unwrap().len(),
+            oauth.access.lock().len(),
             ACCESS_CAP,
             "the access store stays bounded at the cap"
         );
         assert_eq!(
-            oauth.refresh.lock().unwrap().len(),
+            oauth.refresh.lock().len(),
             REFRESH_CAP,
             "the refresh store stays bounded at the cap"
         );
@@ -1414,7 +1415,7 @@ mod tests {
             oauth.mint(format!("filler-key{i}"), &filler.client_id, i);
         }
         assert_eq!(
-            oauth.access.lock().unwrap().len(),
+            oauth.access.lock().len(),
             ACCESS_CAP,
             "the store is exactly at cap before the attack starts"
         );
@@ -1507,7 +1508,7 @@ mod tests {
         );
         // Never one over the cap: eviction still keeps the store bounded.
         assert_eq!(
-            oauth.clients.lock().unwrap().len(),
+            oauth.clients.lock().len(),
             CLIENT_CAP,
             "the store stays bounded at the cap"
         );
@@ -1762,7 +1763,7 @@ mod tests {
 
         let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
         let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
-        *oauth.persist_hook.lock().unwrap() = Some(Box::new(move || {
+        *oauth.persist_hook.lock() = Some(Box::new(move || {
             let _ = arrived_tx.send(());
             let _ = proceed_rx.recv();
         }));
@@ -1813,7 +1814,7 @@ mod tests {
 
         let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
         let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
-        *oauth.persist_hook.lock().unwrap() = Some(Box::new(move || {
+        *oauth.persist_hook.lock() = Some(Box::new(move || {
             let _ = arrived_tx.send(());
             let _ = proceed_rx.recv();
         }));
@@ -1831,7 +1832,7 @@ mod tests {
                 "persist_now never reached the hook — is the write still gated behind a data lock?",
             );
 
-        let mutated = oauth.clients.lock().unwrap().len() == 1;
+        let mutated = oauth.clients.lock().len() == 1;
         assert!(
             mutated,
             "the client list must be updated before the disk write starts"

@@ -960,6 +960,17 @@ fn spawn_keyring_reload_tasks(
     let Some(path) = source.config_path().map(std::path::Path::to_path_buf) else {
         return;
     };
+    // Off the async workers: the config file can live on a network
+    // mount (a Kubernetes secret volume is the documented case), and a
+    // stalled `std::fs::read` on a worker thread would stall whatever
+    // HTTP handlers share it. `None` is "unreadable this tick" either
+    // way — a failed read and a failed spawn degrade identically.
+    async fn read_off_worker(path: std::path::PathBuf) -> Option<Vec<u8>> {
+        tokio::task::spawn_blocking(move || std::fs::read(path).ok())
+            .await
+            .ok()
+            .flatten()
+    }
     tokio::spawn(async move {
         // A content digest, not `(mtime, len)`: a same-length rotation
         // that lands on an unchanged mtime — a fixed-width token swap,
@@ -984,8 +995,8 @@ fn spawn_keyring_reload_tasks(
         // second read used to exist here, and a transient miss on it
         // could refuse a reload for content `last` had already
         // recorded as seen, silently dropping it forever.)
-        let mut last: Option<String> = std::fs::read(&path)
-            .ok()
+        let mut last: Option<String> = read_off_worker(path.clone())
+            .await
             .map(|bytes| sha256::sha256_hex(&bytes));
         let mut ticker = tokio::time::interval(CONFIG_WATCH_INTERVAL);
         ticker.tick().await; // fires immediately; boot already read the file
@@ -996,7 +1007,7 @@ fn spawn_keyring_reload_tasks(
             // This same read serves the reload below too — no second
             // read of the file exists to race a concurrent rewrite
             // anymore.
-            let Ok(bytes) = std::fs::read(&path) else {
+            let Some(bytes) = read_off_worker(path.clone()).await else {
                 continue;
             };
             let current = sha256::sha256_hex(&bytes);

@@ -64,7 +64,7 @@ carries any live association are dropped and counted.
 pub(crate) fn run(args: &[String]) -> i32 {
     let mut config: Option<PathBuf> = None;
     let mut url: Option<String> = None;
-    let mut parallel: usize = 1;
+    let mut parallel: Option<usize> = None;
     let mut names: Vec<String> = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -74,7 +74,13 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 return 0;
             }
             "--config" => match rest.next() {
-                Some(path) => config = Some(PathBuf::from(path)),
+                Some(path) if config.is_none() => config = Some(PathBuf::from(path)),
+                Some(_) => {
+                    return crate::config::subcommand_usage_error(
+                        "compact",
+                        "--config given twice",
+                    );
+                }
                 None => {
                     return crate::config::subcommand_usage_error(
                         "compact",
@@ -85,7 +91,12 @@ pub(crate) fn run(args: &[String]) -> i32 {
             // Trailing '/' trimmed the same way export/calibrate/communities
             // already do — a joined path segment must not double up.
             "--url" => match rest.next() {
-                Some(value) => url = Some(value.trim_end_matches('/').to_string()),
+                Some(value) if url.is_none() => {
+                    url = Some(value.trim_end_matches('/').to_string());
+                }
+                Some(_) => {
+                    return crate::config::subcommand_usage_error("compact", "--url given twice");
+                }
                 None => {
                     return crate::config::subcommand_usage_error(
                         "compact",
@@ -94,7 +105,13 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 }
             },
             "--parallel" => match rest.next().map(|value| value.parse::<usize>()) {
-                Some(Ok(n)) if n >= 1 => parallel = n,
+                Some(_) if parallel.is_some() => {
+                    return crate::config::subcommand_usage_error(
+                        "compact",
+                        "--parallel given twice",
+                    );
+                }
+                Some(Ok(n)) if n >= 1 => parallel = Some(n),
                 _ => {
                     return crate::config::subcommand_usage_error(
                         "compact",
@@ -120,6 +137,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         crate::config::load_config(path);
     }
 
+    let parallel = parallel.unwrap_or(1);
     match url {
         // ADR 0002 §5/§6: `--url` is the only way `compact` goes
         // remote — no positional URL argument, no TAGURU_URL or
