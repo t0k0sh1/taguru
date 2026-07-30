@@ -2195,6 +2195,45 @@ fn evaluate_thresholds_flag_given_twice_is_a_usage_error() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Every value-taking flag rejects a second occurrence the same way —
+/// `compact` and `extract` silently took the last value until this
+/// guard, letting a malformed script run against the wrong config,
+/// context, or output directory.
+#[test]
+fn compact_and_extract_flags_given_twice_are_usage_errors() {
+    for (args, flag) in [
+        (
+            vec!["compact", "--config", "a.env", "--config", "b.env"],
+            "--config",
+        ),
+        (
+            vec!["compact", "--url", "http://a", "--url", "http://b"],
+            "--url",
+        ),
+        (
+            vec!["compact", "--parallel", "2", "--parallel", "3"],
+            "--parallel",
+        ),
+        (
+            vec!["extract", "--context", "a", "--context", "b"],
+            "--context",
+        ),
+        (vec!["extract", "--out", "dir1", "--out", "dir2"], "--out"),
+        (
+            vec!["extract", "--config", "a.env", "--config", "b.env"],
+            "--config",
+        ),
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("{flag} given twice")),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn evaluate_thresholds_file_that_cannot_be_read_is_a_usage_error() {
     let dir = eval_scratch_dir("missing-thresholds-file");

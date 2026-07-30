@@ -490,18 +490,39 @@ pub(crate) struct ReplicationRecord {
     pub(crate) hydrated_from: Option<u64>,
 }
 
-pub(crate) fn read_replication_record(data_dir: &FsPath) -> Option<ReplicationRecord> {
-    let bytes = std::fs::read(data_dir.join(REPLICATION_RECORD)).ok()?;
-    match serde_json::from_slice(&bytes) {
-        Ok(record) => Some(record),
+/// Reads the replication record, distinguishing "never written"
+/// (`Ok(None)` — the pre-#128 posture, a normal state) from "written
+/// but unreadable" (`Err`). The distinction is load-bearing: this
+/// record is what marks a directory as a CACHE of the bucket lineage,
+/// so treating a corrupt record as absent would boot a possibly
+/// half-hydrated cache as independent local truth — every context not
+/// yet localized would silently vanish from the registry, and the
+/// claim that follows would fork the lineage. Boot paths refuse the
+/// error; best-effort readers degrade explicitly at their call site.
+pub(crate) fn read_replication_record(data_dir: &FsPath) -> io::Result<Option<ReplicationRecord>> {
+    let path = data_dir.join(REPLICATION_RECORD);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            // A corrupt record only weakens ergonomics (the takeover
-            // guard, the warm-restart shortcut) — never correctness,
-            // which rests on the fence. Say so and treat it as absent.
-            tracing::warn!(%error, "ignoring a corrupt {REPLICATION_RECORD}");
-            None
+            return Err(io::Error::new(
+                error.kind(),
+                format!("reading {}: {error}", path.display()),
+            ));
         }
-    }
+    };
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} exists but cannot be parsed ({error}) — this directory may be a \
+                 cache of the bucket lineage, and guessing would either hide every \
+                 not-yet-hydrated context or fork the lineage. Restore the record, or \
+                 delete it to declare local disk the independent truth",
+                path.display()
+            ),
+        )
+    })
 }
 
 pub(crate) fn write_replication_record(
@@ -745,7 +766,13 @@ impl Shipper {
         let record = ReplicationRecord {
             url: url.clone(),
             claimed_generation: Some(generation),
+            // `.ok()`: boot already refused a corrupt record (see
+            // `hydrate::prepare`), so an error here means it rotted
+            // mid-run — carrying no `hydrated_from` forward is the
+            // same best-effort degradation as the write failing below.
             hydrated_from: read_replication_record(&data_dir)
+                .ok()
+                .flatten()
                 .filter(|record| record.url == url)
                 .and_then(|record| record.hydrated_from),
         };
@@ -1628,6 +1655,16 @@ pub(crate) async fn restore_into(
     let files_prefix = generation_root.clone().join("files");
     let names = list_names_under(store, &files_prefix).await?;
     for name in names {
+        // The same name check the manifest path gets in `read_manifest`:
+        // a listing-supplied name is just as attacker-writable as a
+        // manifest-supplied one, and `write_restored_file` joins it
+        // under `out` unexamined.
+        if !safe_manifest_name(&name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{name}: not a safe file name — the bucket may be tampered with"),
+            ));
+        }
         let key = files_prefix.clone().join(name.as_str());
         let bytes = fetch(store, &key).await?;
         write_restored_file(out, &name, &bytes)?;
@@ -1641,6 +1678,12 @@ pub(crate) async fn restore_into(
     // than one that says so.
     let wal_prefix = generation_root.clone().join("wal");
     for lane in list_names_under(store, &wal_prefix).await? {
+        if !safe_manifest_name(&lane) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{lane}: not a safe lane name — the bucket may be tampered with"),
+            ));
+        }
         let lane_prefix = wal_prefix.clone().join(lane.as_str());
         let mut segments: Vec<(u64, u64, StorePath)> = Vec::new();
         let mut listing = store.list(Some(&lane_prefix));
@@ -2748,7 +2791,9 @@ mod tests {
         let store = Arc::new(InMemory::new());
 
         let mut shipper = claimed(&store, &dir, &state, &progress).await;
-        let record = read_replication_record(&dir).expect("the claim writes the record");
+        let record = read_replication_record(&dir)
+            .unwrap()
+            .expect("the claim writes the record");
         assert_eq!(record.claimed_generation, Some(1));
         assert_eq!(record.url, "mem://test");
         assert!(record.hydrated_from.is_none());

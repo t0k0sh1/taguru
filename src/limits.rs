@@ -6,13 +6,14 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::Response;
+use parking_lot::Mutex;
 use taguru::deadline::Deadline;
 use tokio::sync::Semaphore;
 
@@ -226,6 +227,10 @@ pub async fn enforce_concurrency(
 /// ever seen.
 pub struct RateLimiter {
     per_minute: u32,
+    // parking_lot, not std::sync: a panic while this is held must not
+    // poison the lock — every authenticated request passes through
+    // `admit`, so a poisoned bucket map would refuse the whole server
+    // until restart (the same reasoning as the registry, see Cargo.toml).
     state: Mutex<Buckets>,
 }
 
@@ -266,7 +271,7 @@ impl RateLimiter {
     pub(crate) fn admit(&self, key: &Arc<str>, now: Instant) -> Result<(), u64> {
         let capacity = f64::from(self.per_minute);
         let per_second = capacity / 60.0;
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         // Reclaim idle buckets before this insert can grow the map
         // further: a bucket that would have refilled to capacity by now
         // holds no state a fresh one wouldn't, so dropping it is free.

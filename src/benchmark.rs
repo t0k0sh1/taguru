@@ -144,16 +144,16 @@ impl BenchArgs {
     fn parse(args: &[String]) -> Result<Self, i32> {
         let mut models: Option<PathBuf> = None;
         let mut out: Option<PathBuf> = None;
-        let mut runs: usize = 1;
+        let mut runs: Option<usize> = None;
         let mut context: Option<String> = None;
         let mut questions: usize = 0;
         let mut fact_budget: Option<usize> = None;
         let mut no_passage = false;
         let mut lossy = false;
         let mut description: Option<String> = None;
-        let mut parallel: usize = 1;
+        let mut parallel: Option<usize> = None;
         let mut max_output_tokens: Option<usize> = None;
-        let mut max_attempts: usize = crate::extract::DEFAULT_MAX_ATTEMPTS;
+        let mut max_attempts: Option<usize> = None;
         let mut corpus: Vec<String> = Vec::new();
 
         let mut rest = args.iter();
@@ -164,7 +164,10 @@ impl BenchArgs {
                     return Err(0);
                 }
                 "--models" => match rest.next() {
-                    Some(path) => models = Some(PathBuf::from(path)),
+                    Some(path) if models.is_none() => models = Some(PathBuf::from(path)),
+                    Some(_) => {
+                        return Err(subcommand_usage_error("benchmark", "--models given twice"));
+                    }
                     None => {
                         return Err(subcommand_usage_error(
                             "benchmark",
@@ -173,7 +176,10 @@ impl BenchArgs {
                     }
                 },
                 "--out" => match rest.next() {
-                    Some(dir) => out = Some(PathBuf::from(dir)),
+                    Some(dir) if out.is_none() => out = Some(PathBuf::from(dir)),
+                    Some(_) => {
+                        return Err(subcommand_usage_error("benchmark", "--out given twice"));
+                    }
                     None => {
                         return Err(subcommand_usage_error(
                             "benchmark",
@@ -182,7 +188,10 @@ impl BenchArgs {
                     }
                 },
                 "--runs" => match rest.next().map(|n| n.parse::<usize>()) {
-                    Some(Ok(n)) if (1..=MAX_RUNS).contains(&n) => runs = n,
+                    Some(_) if runs.is_some() => {
+                        return Err(subcommand_usage_error("benchmark", "--runs given twice"));
+                    }
+                    Some(Ok(n)) if (1..=MAX_RUNS).contains(&n) => runs = Some(n),
                     _ => {
                         return Err(subcommand_usage_error(
                             "benchmark",
@@ -191,7 +200,10 @@ impl BenchArgs {
                     }
                 },
                 "--context" => match rest.next() {
-                    Some(name) => context = Some(name.clone()),
+                    Some(name) if context.is_none() => context = Some(name.clone()),
+                    Some(_) => {
+                        return Err(subcommand_usage_error("benchmark", "--context given twice"));
+                    }
                     None => {
                         return Err(subcommand_usage_error(
                             "benchmark",
@@ -200,6 +212,12 @@ impl BenchArgs {
                     }
                 },
                 "--questions" => match rest.next().map(|n| n.parse::<usize>()) {
+                    Some(_) if questions > 0 => {
+                        return Err(subcommand_usage_error(
+                            "benchmark",
+                            "--questions given twice",
+                        ));
+                    }
                     Some(Ok(n)) if (1..=MAX_QUESTIONS_PER_PARAGRAPH).contains(&n) => questions = n,
                     _ => {
                         return Err(subcommand_usage_error(
@@ -211,6 +229,12 @@ impl BenchArgs {
                     }
                 },
                 "--fact-budget" => match rest.next().map(|n| n.parse::<usize>()) {
+                    Some(_) if fact_budget.is_some() => {
+                        return Err(subcommand_usage_error(
+                            "benchmark",
+                            "--fact-budget given twice",
+                        ));
+                    }
                     Some(Ok(n)) if n >= 1 => fact_budget = Some(n),
                     _ => {
                         return Err(subcommand_usage_error(
@@ -222,7 +246,13 @@ impl BenchArgs {
                 "--no-passage" => no_passage = true,
                 "--lossy" => lossy = true,
                 "--description" => match rest.next() {
-                    Some(text) => description = Some(text.clone()),
+                    Some(text) if description.is_none() => description = Some(text.clone()),
+                    Some(_) => {
+                        return Err(subcommand_usage_error(
+                            "benchmark",
+                            "--description given twice",
+                        ));
+                    }
                     None => {
                         return Err(subcommand_usage_error(
                             "benchmark",
@@ -231,7 +261,13 @@ impl BenchArgs {
                     }
                 },
                 "--parallel" => match rest.next().map(|n| n.parse::<usize>()) {
-                    Some(Ok(n)) if n >= 1 => parallel = n,
+                    Some(_) if parallel.is_some() => {
+                        return Err(subcommand_usage_error(
+                            "benchmark",
+                            "--parallel given twice",
+                        ));
+                    }
+                    Some(Ok(n)) if n >= 1 => parallel = Some(n),
                     _ => {
                         return Err(subcommand_usage_error(
                             "benchmark",
@@ -240,6 +276,12 @@ impl BenchArgs {
                     }
                 },
                 "--max-output-tokens" => match rest.next().map(|n| n.parse::<usize>()) {
+                    Some(_) if max_output_tokens.is_some() => {
+                        return Err(subcommand_usage_error(
+                            "benchmark",
+                            "--max-output-tokens given twice",
+                        ));
+                    }
                     Some(Ok(n)) if n >= 1 => max_output_tokens = Some(n),
                     _ => {
                         return Err(subcommand_usage_error(
@@ -249,8 +291,14 @@ impl BenchArgs {
                     }
                 },
                 "--max-attempts" => match rest.next().map(|n| n.parse::<usize>()) {
+                    Some(_) if max_attempts.is_some() => {
+                        return Err(subcommand_usage_error(
+                            "benchmark",
+                            "--max-attempts given twice",
+                        ));
+                    }
                     Some(Ok(n)) if (1..=crate::extract::MAX_EXTRACT_ATTEMPTS).contains(&n) => {
-                        max_attempts = n;
+                        max_attempts = Some(n);
                     }
                     _ => {
                         return Err(subcommand_usage_error(
@@ -338,16 +386,16 @@ impl BenchArgs {
         Ok(Self {
             models,
             out,
-            runs,
+            runs: runs.unwrap_or(1),
             context,
             questions,
             fact_budget,
             no_passage,
             lossy,
             description,
-            parallel,
+            parallel: parallel.unwrap_or(1),
             max_output_tokens,
-            max_attempts,
+            max_attempts: max_attempts.unwrap_or(crate::extract::DEFAULT_MAX_ATTEMPTS),
             corpus,
         })
     }
@@ -401,6 +449,36 @@ mod args_tests {
             .unwrap_err(),
             2
         );
+    }
+
+    /// A flag given twice is a usage error, never a silent last-wins —
+    /// the same contract every other subcommand's parser enforces.
+    #[test]
+    fn value_flags_given_twice_are_usage_errors() {
+        let dir = std::env::temp_dir();
+        let corpus = dir.to_str().unwrap();
+        for duplicated in [
+            ["--models", "m2.json"],
+            ["--out", "o2"],
+            ["--context", "c2"],
+            ["--runs", "2"],
+            ["--questions", "1"],
+            ["--fact-budget", "5"],
+            ["--description", "d"],
+            ["--parallel", "2"],
+            ["--max-output-tokens", "100"],
+            ["--max-attempts", "3"],
+        ] {
+            let mut words = vec!["--models", "m.json", "--context", "c", "--out", "o"];
+            // A first occurrence for the flags the base line lacks, so
+            // the duplicate below is always the second one seen.
+            if !words.contains(&duplicated[0]) {
+                words.extend([duplicated[0], duplicated[1]]);
+            }
+            words.extend(duplicated);
+            words.push(corpus);
+            assert_eq!(args(&words).unwrap_err(), 2, "{duplicated:?}");
+        }
     }
 
     #[test]

@@ -96,7 +96,7 @@ pub(crate) async fn prepare(
     data_dir: &FsPath,
     take_over: bool,
 ) -> io::Result<Option<Arc<Hydrator>>> {
-    let record = ship::read_replication_record(data_dir).filter(|record| {
+    let record = ship::read_replication_record(data_dir)?.filter(|record| {
         if record.url != url {
             tracing::warn!(
                 recorded = %record.url,
@@ -302,7 +302,7 @@ pub(crate) async fn prepare_replica(
     url: &str,
     data_dir: &FsPath,
 ) -> io::Result<Arc<Hydrator>> {
-    let record = ship::read_replication_record(data_dir).filter(|record| {
+    let record = ship::read_replication_record(data_dir)?.filter(|record| {
         if record.url != url {
             tracing::warn!(
                 recorded = %record.url,
@@ -983,6 +983,15 @@ impl Hydrator {
                 continue;
             }
             let Ok(name) = entry.file_name().into_string() else {
+                // Not UTF-8, so it cannot be a manifest name (those are
+                // JSON strings) — exactly the "bucket lineage does not
+                // carry this" case the loop exists to clean up.
+                tracing::info!(
+                    file = %entry.path().display(),
+                    "removing a local file the bucket lineage does not carry"
+                );
+                std::fs::remove_file(entry.path())?;
+                report.removed += 1;
                 continue;
             };
             if name == ".taguru.lock"
@@ -1585,7 +1594,9 @@ mod tests {
 
         // The directory is durably marked as a cache of generation 1,
         // before any claim exists.
-        let record = ship::read_replication_record(&target).expect("cache mode is recorded");
+        let record = ship::read_replication_record(&target)
+            .unwrap()
+            .expect("cache mode is recorded");
         assert_eq!(record.hydrated_from, Some(1));
         assert_eq!(record.claimed_generation, None);
 
@@ -1706,6 +1717,35 @@ mod tests {
 
         let _ = std::fs::remove_file(&gone);
         let _ = std::fs::remove_dir_all(target);
+    }
+
+    /// A record that EXISTS but cannot be parsed must refuse the boot,
+    /// never be read as "absent": absent means pre-#128 independent
+    /// truth, and a half-hydrated cache booted under that posture
+    /// hides every not-yet-localized context and forks the lineage on
+    /// the next claim.
+    #[tokio::test]
+    async fn a_corrupt_replication_record_refuses_the_boot() {
+        let (bucket, _writer) = shipped_bucket("corrupt-record", true).await;
+        let store = local_store(&bucket);
+        let url = url_of("corrupt-record");
+        let target = scratch("corrupt-record-target");
+        std::fs::write(target.join("ctx_a.ctx"), b"locally cached bytes").unwrap();
+        std::fs::write(target.join(ship::REPLICATION_RECORD), b"{ rotted").unwrap();
+
+        let error = prepare(&store, &StorePath::default(), &url, &target, false)
+            .await
+            .expect_err("a corrupt record must not demote the directory to pre-#128 truth");
+        assert!(error.to_string().contains("cannot be parsed"), "{error}");
+
+        let error = prepare_replica(&store, &StorePath::default(), &url, &target)
+            .await
+            .expect_err("a replica boot refuses the same corrupt record");
+        assert!(error.to_string().contains("cannot be parsed"), "{error}");
+
+        for dir in [bucket, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[tokio::test]
@@ -1871,7 +1911,7 @@ mod tests {
             .await
             .expect("an empty directory replicates a live lineage without ceremony");
         assert_eq!(hydrator.generation(), Some(1));
-        let record = ship::read_replication_record(&target).unwrap();
+        let record = ship::read_replication_record(&target).unwrap().unwrap();
         assert_eq!(record.hydrated_from, Some(1));
         assert_eq!(record.claimed_generation, None);
 
@@ -1882,7 +1922,7 @@ mod tests {
             .await
             .expect("a deposed writer's directory demotes to a cache");
         assert_eq!(deposed.generation(), Some(1));
-        let record = ship::read_replication_record(&writer).unwrap();
+        let record = ship::read_replication_record(&writer).unwrap().unwrap();
         assert_eq!(
             record.claimed_generation, None,
             "the stale claim is dropped"
@@ -2030,6 +2070,7 @@ mod tests {
             .expect_err("a shared hydration that cannot land refuses the boot");
         assert!(error.to_string().contains("ctx_a.meta.json"), "{error}");
         let record = ship::read_replication_record(&target)
+            .unwrap()
             .expect("phase one marked the directory as this URL's replica workspace");
         assert_eq!(
             record.hydrated_from, None,
@@ -2043,7 +2084,7 @@ mod tests {
             .await
             .expect("the retry hydrates");
         assert_eq!(hydrator.generation(), Some(1));
-        let record = ship::read_replication_record(&target).unwrap();
+        let record = ship::read_replication_record(&target).unwrap().unwrap();
         assert_eq!(record.hydrated_from, Some(1));
 
         for dir in [bucket, writer, target] {
