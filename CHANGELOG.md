@@ -7,6 +7,8 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-30
+
 ### Added
 - New top-level verb `taguru evaluate` (#273, implementing ADR 0004
   §5/§7/§9.1/§11/§12), the execution harness and `evaluation.json`
@@ -1723,7 +1725,8 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/t0k0sh1/taguru/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/t0k0sh1/taguru/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/t0k0sh1/taguru/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/t0k0sh1/taguru/compare/v0.1.0...v0.2.0
