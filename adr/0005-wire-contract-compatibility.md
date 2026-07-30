@@ -97,9 +97,10 @@ Thirteen distinct pagination/result envelopes exist across `src/api.rs` and
 `{total, …}` so a client can detect truncation against `limit`.
 **`PassagePage`, `CrossPassagePage`, and `CommunityPage` do not** — they carry
 `{plan, hits}` (or `{…, plan, hits}`) with no `total` field at all. This ADR
-records the inconsistency as a known, frozen fact of the current contract
-(§4 — fixing it is itself a breaking change, not a bug this ADR authorizes
-fixing).
+records the inconsistency as a known, frozen fact of the current contract's
+history — §4 classifies adding `total` to any of the three, should someone
+choose to, as an ordinary additive and therefore compatible change; this ADR
+neither requires nor forbids making it.
 
 Every request body's `Deserialize` is lenient about unknown fields today — no
 struct used as an HTTP request body carries `#[serde(deny_unknown_fields)]`.
@@ -182,7 +183,7 @@ adds routes, it edits `llm-protocol.md`, not this file.
 
 ## 3. Version dimensions
 
-Seven dimensions, kept independently numbered — the same reasoning ADR 0003
+Eight dimensions, kept independently numbered — the same reasoning ADR 0003
 §10 already applied to `BATCH_VERSION`/`GROUP_VERSION`/`IMAGE_VERSION`/
 `COMMUNITIES_FORMAT`: different owners, different consumers, and forcing one
 shared number means an unrelated file's bump invalidates every artifact that
@@ -207,7 +208,13 @@ never changed.
 5. **`batch_formats`** — `taguru_batch`/`taguru_group`, unchanged, equality
    check.
 6. **`image_formats`** — `IMAGE_VERSION`, unchanged, range-acceptance check.
-7. **SDK supported contract range** — independent of SDK package version;
+7. **`communities_formats`** — `COMMUNITIES_FORMAT`
+   (`src/api/communities.rs:106`), unchanged, equality check (the same
+   `taguru_communities` header-stamp precedent ADR 0003 §10 already applies
+   to it) — kept apart from `http_contract` because it is a taguru-written,
+   taguru-reread artifact stamp like `image_formats`, not a request/response
+   shape.
+8. **SDK supported contract range** — independent of SDK package version;
    #300's responsibility to declare and check.
 
 Responsibility boundary: **HTTP is the sole owner of wire shape.** MCP is a
@@ -303,10 +310,18 @@ Decision: add `GET /version`.
     "server": "0.6.0",
     "http_contract": {"current": 1, "supported": [1]},
     "mcp_contract": {"current": 1, "supported": [1]},
+    "mcp_protocol": {"supported": ["2024-11-05", "2025-03-26", "2025-06-18"]},
     "batch_formats": [1],
-    "image_formats": [1, 2, 3, 4, 5, 6]
+    "image_formats": [1, 2, 3, 4, 5, 6],
+    "communities_formats": [1]
   }
   ```
+  Every dimension from §3 appears here except `server` (already the
+  top-level field) and the SDK supported range (that one is declared inside
+  each SDK, not by the server — §3-8). `mcp_protocol` restates
+  `SUPPORTED_PROTOCOL_VERSIONS` (`src/mcp/protocol.rs:11`) so a caller can
+  read it over plain HTTP, before ever opening an MCP connection to learn it
+  from `initialize`.
 - `supported` ships as an array from day one, even though `[1]` is a
   single-element array today: it gives #300's SDK-range check something to
   intersect against, and lets a future dual-serving window (not decided
@@ -342,12 +357,18 @@ only alongside a `http_contract` (or `mcp_contract`) major bump, landing in
 the same PR as: the bump itself, a CHANGELOG `Changed` entry, and a migration
 note a caller can act on.
 
-This raises the pre-1.0 minimum guarantee. Today's stated posture
+This raises the pre-1.0 minimum guarantee, **effective immediately on this
+ADR's acceptance, not deferred to #300.** Today's stated posture
 (`llm-protocol.md:512-513`) is "pre-1.0, shapes may also change between minor
 versions." This ADR tightens that to: **within one contract version, nothing
 breaks** — a minor `server` bump may still add things, but a break requires
 the matching contract-version bump described above, regardless of whether
-`server`'s own bump is major or minor.
+`server`'s own bump is major or minor. The guarantee binds what future PRs
+are allowed to ship; it does not depend on `GET /version` existing yet. Until
+#300's implementation PR edits `llm-protocol.md` (§10), that file's older,
+weaker sentence is stale prose describing a posture this ADR has already
+superseded — this ADR is authoritative over that unedited text for any PR
+landing in between, not the reverse.
 
 Support-window commitments (how many old contract versions stay served, for
 how long) are explicitly not decided here — that is #220's v0.7.0+ scope,
@@ -393,9 +414,9 @@ cannot deliver a working SDK compatibility check without them:
    symptom `docs/troubleshooting.html` names as the canonical skew signal
    escapes an `except TaguruError` handler.
 
-Filed separately, lower priority: documenting (not fixing) the missing
-`total` field on `PassagePage`/`CrossPassagePage`/`CommunityPage` (§2.3) —
-fixing it is itself a breaking change and is not authorized by this ADR.
+Filed separately, lower priority: adding the missing `total` field to
+`PassagePage`/`CrossPassagePage`/`CommunityPage` (§2.3) — an ordinary
+additive, compatible change per §4, just not one this ADR requires.
 
 Not filed, and why: generating an OpenAPI document (`sdk/README.md:31-37`
 already states "there is deliberately no OpenAPI spec — the contract is the
@@ -412,7 +433,8 @@ edits reflecting §6 and §7: documenting `GET /version` and restating the
 minimum guarantee as "unchanged within one contract version" rather than
 "may change between minor versions." Both edits land in #300's implementation
 PR, not this one — writing them before `GET /version` exists would describe
-an endpoint that isn't there yet. Likewise, `docs/troubleshooting.html`'s
+an endpoint that isn't there yet, and §7 already establishes that this ADR,
+not the stale sentence still on disk, governs in the interim. Likewise, `docs/troubleshooting.html`'s
 `#compatibility` section linking out to a contract-version discovery
 explanation (one of #220's acceptance criteria, alongside #193) is #300's
 edit to make once there is something concrete to link to.
