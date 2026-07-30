@@ -21,8 +21,9 @@ from typing import Any
 
 import httpx
 
+from .._contract import VERSION_PATH, incompatibility, parse_version_body
 from .._decode import decode
-from .._errors import NotFoundError, TaguruError, TransportError
+from .._errors import IncompatibleServerError, NotFoundError, TaguruError, TransportError
 from .._models import (
     Activation,
     ActivationPage,
@@ -76,6 +77,7 @@ from .._shared import (
     ENV_URL,
     MAX_CHUNK_BYTES,
     MAX_OPS_PER_REQUEST,
+    ContractState,
     chunk_associations,
     drop_none,
     dumps_compact,
@@ -83,6 +85,7 @@ from .._shared import (
     normalize_import_outcomes,
     raise_for_response,
     run_blocking,
+    run_contract_probe,
     unwrap_envelope,
 )
 from .._types import (
@@ -136,12 +139,89 @@ class AsyncTaguru:
             self._headers["authorization"] = f"Bearer {self._api_key}"
         self._http = http_client if http_client is not None else httpx.AsyncClient(timeout=timeout)
         self._owns_http = http_client is None
+        # One-time compatibility preflight state (ADR 0005 §3.8, §6) — see
+        # `_ensure_contract`/`_probe_contract`.
+        self._contract_state = ContractState()
         self.contexts = AsyncContexts(self)
         self.groups = AsyncGroups(self)
 
     # -- transport ---------------------------------------------------------
 
+    async def _ensure_contract(self) -> None:
+        """Confirm, once per client, that the server speaks an
+        ``http_contract`` version this SDK also speaks (ADR 0005 §3.8,
+        §6) — before the first real request, not after a confusing
+        decode failure. Every concurrent caller shares the same
+        in-flight probe (`run_contract_probe`) rather than racing past
+        it the moment one of them starts it.
+        """
+        await run_contract_probe(self._contract_state, self._probe_contract)
+
+    async def _probe_contract(self) -> None:
+        """The actual ``GET /version`` round trip `_ensure_contract`
+        shares across every concurrent caller.
+
+        Fails closed only on positive proof the two ranges share nothing
+        (see ``_contract.incompatibility``). Every absence of
+        information is fail-open: a 404 (any server predating this
+        endpoint — pre-0.6 servers are ``http_contract: 1`` in substance
+        regardless), a non-JSON body, a missing/malformed
+        ``http_contract`` key. ``GET /version`` is auth-exempt and
+        outside the rate limiter and in-flight ceiling (`PROBE_EXEMPT`
+        server-side), so this costs no permit — only one small request,
+        once, over the client's whole lifetime.
+
+        Calls ``_send_core`` directly, not ``_send``: ``_send`` calls
+        ``_ensure_contract`` first, which would await this very probe's
+        own in-flight `Task` — a self-await `asyncio` raises on.
+        """
+        try:
+            response = await self._send_core("GET", VERSION_PATH, retries=0)
+        except TransportError:
+            # Nothing was learned; `state.checked` stays False so the
+            # next call (once this in-flight probe clears) retries it.
+            return
+        except TaguruError:
+            self._contract_state.checked = True
+            return
+        self._contract_state.checked = True
+        try:
+            payload = response.json()
+        except ValueError:
+            return
+        seen = parse_version_body(payload)
+        if seen is None:
+            return
+        error = incompatibility(seen, self._base_url)
+        if error is not None:
+            self._contract_state.error = error
+            raise error
+
     async def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json_body: Any = None,
+        content: bytes | None = None,
+        content_type: str | None = None,
+        retry: RetryClass = RetryClass.SAFE,
+        retries: int | None = None,
+    ) -> httpx.Response:
+        await self._ensure_contract()
+        return await self._send_core(
+            method,
+            path,
+            params=params,
+            json_body=json_body,
+            content=content,
+            content_type=content_type,
+            retry=retry,
+            retries=retries,
+        )
+
+    async def _send_core(
         self,
         method: str,
         path: str,
@@ -255,6 +335,14 @@ class AsyncTaguru:
                 await self.live()
                 await self.health()
                 return
+            except IncompatibleServerError:
+                # Not a readiness fault waiting can fix — an SDK/server
+                # pairing that shares no `http_contract` version stays
+                # incompatible for as long as `timeout` gives it to
+                # retry, so raise immediately instead of stalling every
+                # caller of `wait_until_ready` (every integration
+                # fixture and example) for the full budget.
+                raise
             except TaguruError as exc:
                 last_error = exc
             if time.monotonic() >= deadline:
@@ -1221,6 +1309,11 @@ class AsyncContext:
 
     async def export_stream(self) -> AsyncGenerator[bytes, None]:
         """Stream the export body without buffering it whole (no retry)."""
+        # The one call site that reaches the network without going
+        # through `_send` (ADR 0005 §3.8) — a batch export can be a
+        # client's only call, so the compatibility preflight has to run
+        # here explicitly too.
+        await self._client._ensure_contract()
         url = self._client._base_url + self._path + "/export"
         headers = dict(self._client._headers)
         async with self._client._http.stream("GET", url, headers=headers) as response:

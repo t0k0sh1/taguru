@@ -508,12 +508,15 @@ fn rate_limit_is_per_key_and_spares_probes() {
 }
 
 #[test]
-fn bearer_token_gates_every_route_except_health_and_metrics() {
+fn bearer_token_gates_every_route_except_health_metrics_and_version() {
     let server = Server::start_with_env("auth", &[("TAGURU_API_TOKEN", "s3cret")]);
 
-    // Liveness and the scrape answer with zero credentials.
+    // Liveness, the scrape, and contract-version discovery (ADR 0005
+    // §6 — an SDK's compatibility preflight has no credential yet)
+    // all answer with zero credentials.
     assert_eq!(server.call("GET", "/health", None).0, 200);
     assert_eq!(server.call("GET", "/metrics", None).0, 200);
+    assert_eq!(server.call("GET", "/version", None).0, 200);
 
     // Everything else refuses a missing or wrong token with the API's
     // own error shape, and accepts the right one.

@@ -532,6 +532,12 @@ fn routes(state: RouterState) -> Router<RouterState> {
         .route("/health", get(health))
         .route("/live", get(crate::metrics::live))
         .route("/metrics", get(render_metrics))
+        // Shared verbatim with `serve` mode (ADR 0005 §6: router mode
+        // answers under the same "shards are homogeneous" assumption
+        // `/health` and `/protocol` already proxy under) — every field
+        // is a compile-time constant, so there is nothing router-mode
+        // needs to add, unlike `/health`'s own `router`/`shards` facts.
+        .route("/version", get(crate::metrics::version))
         .route("/protocol", get(proxy_protocol))
         .route("/flush", post(broadcast_flush))
         .route("/maintenance/compact", post(broadcast_maintenance))

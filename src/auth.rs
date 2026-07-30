@@ -38,9 +38,12 @@ use crate::api;
 /// the orchestrator probes and must be reachable unconfigured.
 /// `/metrics` carries only aggregates and route templates (no context
 /// names, no content), and exempting it keeps scrape configs trivial.
-/// The rate limiter and the in-flight ceiling honor the same list:
-/// probes and scrapes must not starve behind a chatty client.
-pub(crate) const PROBE_EXEMPT: [&str; 3] = ["/health", "/live", "/metrics"];
+/// `/version` (ADR 0005 §6) must answer before an SDK's compatibility
+/// preflight has any credential to send, and carries nothing more
+/// sensitive than `/metrics` does. The rate limiter and the in-flight
+/// ceiling honor the same list: probes and scrapes must not starve
+/// behind a chatty client.
+pub(crate) const PROBE_EXEMPT: [&str; 4] = ["/health", "/live", "/metrics", "/version"];
 
 /// What answers without a bearer token. With OAuth enabled, its
 /// discovery and grant endpoints join the probes — they exist to

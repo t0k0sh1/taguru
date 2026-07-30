@@ -8,7 +8,13 @@
  * `"over_limit"` — `GET /protocol` lists the vocabulary), surfaced here as
  * `.code` for branching finer than the class hierarchy; servers predating the
  * field yield `null`. {@link TransportError} covers failures where no HTTP
- * response was obtained at all. Class names match the Python SDK exactly.
+ * response was obtained at all. Class names match the Python SDK exactly,
+ * with one exception: Python's `ResponseShapeError` (ADR 0005 §9.3) has no
+ * TypeScript counterpart — this SDK's decoder does no strict shape checking
+ * (no required-field or container-shape validation exists anywhere in
+ * `models.ts`/`transport.ts`, per ADR 0005 §2.5), so there is nothing here
+ * that could ever raise it. An exported-but-unraisable class would be dead
+ * surface.
  */
 
 export interface TaguruErrorOptions {
@@ -118,6 +124,45 @@ export class TransportError extends TaguruError {}
 
 /** Any status with no specific mapping (e.g. 405) — exhaustiveness fallback. */
 export class UnexpectedStatusError extends TaguruError {}
+
+/**
+ * This SDK and the server it connected to share no `http_contract`
+ * version (ADR 0005 §3, §6) — thrown before the first real request,
+ * from the client's own one-time `GET /version` preflight, never from
+ * {@link errorForStatus}.
+ *
+ * Not a subclass of {@link ServerError} (that means 5xx and is
+ * retry-classified — this is neither) nor of {@link ValidationError}
+ * (that is HTTP 400/415/422). `status` is `null`: it names no HTTP
+ * status of its own, since it never came from the request that
+ * triggered it — see {@link TaguruError.status}.
+ */
+export class IncompatibleServerError extends TaguruError {
+  /** This SDK's own package version ({@link VERSION}). */
+  readonly sdk_version: string;
+  /** The server's `server` field from `GET /version`, or null when omitted. */
+  readonly server_version: string | null;
+  /** This SDK's own `http_contract` range ({@link SUPPORTED_HTTP_CONTRACTS}). */
+  readonly supported_contracts: readonly number[];
+  /** The server's `http_contract.supported` range. */
+  readonly server_contracts: readonly number[];
+
+  constructor(
+    message: string,
+    options: {
+      sdk_version: string;
+      server_version: string | null;
+      supported_contracts: readonly number[];
+      server_contracts: readonly number[];
+    },
+  ) {
+    super(message, { status: null });
+    this.sdk_version = options.sdk_version;
+    this.server_version = options.server_version;
+    this.supported_contracts = options.supported_contracts;
+    this.server_contracts = options.server_contracts;
+  }
+}
 
 /** Build the error for an HTTP status, endpoint-independently. */
 export function errorForStatus(

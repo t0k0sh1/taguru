@@ -54,11 +54,27 @@ export function errBody(
   return { status, body: JSON.stringify(payload), headers };
 }
 
-export function stubClient(handler: StubHandler, options: { retries?: number; api_key?: string } = {}): Taguru {
-  return new Taguru({
+/**
+ * `checkContract` (default `false`) pre-seeds the one-time `GET
+ * /version` preflight (ADR 0005 §3.8) as already done, so a handler
+ * that only answers the path under test doesn't also need to route
+ * `/version` — most of this suite relies on exact call counts and
+ * exact path lists that a surprise probe would break. Pass
+ * `checkContract: true` to exercise the preflight itself; see
+ * `contract.test.ts`.
+ */
+export function stubClient(
+  handler: StubHandler,
+  options: { retries?: number; api_key?: string; checkContract?: boolean } = {},
+): Taguru {
+  const client = new Taguru({
     base_url: "http://test",
     api_key: options.api_key ?? "",
     retries: options.retries,
     fetch: stubFetch(handler),
   });
+  (client as unknown as { contractChecked: boolean }).contractChecked = !(
+    options.checkContract ?? false
+  );
+  return client;
 }

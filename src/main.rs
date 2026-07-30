@@ -332,7 +332,7 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
     );
     // MCP initialize hands out exactly what GET /protocol serves —
     // both transports, one manual.
-    let mcp_instructions = Arc::new(api::protocol_text(protocol_trailer.as_deref()));
+    let mcp_instructions = Arc::new(api::protocol_text(Some(&protocol_trailer)));
     if let Some(floor) = config.semantic_floor {
         info!(floor, "semantic floor default recalibrated");
     }
@@ -508,7 +508,8 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
         _ => None,
     };
 
-    let app = routes(protocol_trailer, heavy_ops_limiter, state.clone()).with_state(state.clone());
+    let app =
+        routes(Some(protocol_trailer), heavy_ops_limiter, state.clone()).with_state(state.clone());
 
     // POST /mcp speaks the MCP Streamable HTTP transport over these
     // same routes. The dispatch handle is captured BEFORE the outer
@@ -777,6 +778,7 @@ fn routes(
         .route("/health", get(metrics::health))
         .route("/live", get(metrics::live))
         .route("/metrics", get(metrics::render))
+        .route("/version", get(metrics::version))
         .route(
             "/protocol",
             get(move || api::protocol(protocol_trailer.clone())),

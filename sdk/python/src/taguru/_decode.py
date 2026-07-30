@@ -13,6 +13,8 @@ import types
 import typing
 from typing import Any
 
+from ._errors import ResponseShapeError
+
 _HINTS_CACHE: dict[type, dict[str, Any]] = {}
 
 
@@ -42,7 +44,9 @@ def decode(cls: Any, data: Any) -> Any:
         return data
     if isinstance(cls, type) and dataclasses.is_dataclass(cls):
         if not isinstance(data, dict):
-            raise ValueError(f"expected an object for {cls.__name__}, got {type(data).__name__}")
+            raise ResponseShapeError(
+                f"expected an object for {cls.__name__}, got {type(data).__name__}"
+            )
         hints = _hints(cls)
         kwargs: dict[str, Any] = {}
         for field in dataclasses.fields(cls):
@@ -52,6 +56,8 @@ def decode(cls: Any, data: Any) -> Any:
                 field.default is dataclasses.MISSING
                 and field.default_factory is dataclasses.MISSING
             ):
-                raise ValueError(f"missing required field {field.name!r} for {cls.__name__}")
+                raise ResponseShapeError(
+                    f"missing required field {field.name!r} for {cls.__name__}"
+                )
         return cls(**kwargs)
     return data

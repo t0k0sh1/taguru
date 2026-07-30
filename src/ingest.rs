@@ -109,8 +109,9 @@ Format: docs/import.html.
 ";
 
 /// The one format version this build reads and docs/import.html
-/// describes.
-const BATCH_VERSION: u64 = 1;
+/// describes. `pub(crate)` so `GET /version` (ADR 0005 §3, §6) can
+/// report it under `batch_formats`.
+pub(crate) const BATCH_VERSION: u64 = 1;
 
 /// The `taguru_group` record's own version stamp — separate from
 /// [`BATCH_VERSION`] so either shape can rev without dragging the

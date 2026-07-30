@@ -104,6 +104,17 @@ export interface ExploreCursor {
 /** One name or an OR-set of names, for query() positions. */
 export type OneOrMany = string | string[];
 
+/**
+ * An enum-like wire field: the known values, plus any value a newer
+ * server may add. ADR 0005 §5 requires every enum-like field to be
+ * open — a closed string-literal union silently lies the moment the
+ * server ships a value it doesn't list, where Python's plain `str`
+ * fields (no `Literal`/`Enum` types anywhere in `_models.py`) already
+ * pass such a value through untouched. `(string & {})` keeps the known
+ * literals' autocomplete while widening acceptance to any string.
+ */
+export type Open<T extends string> = T | (string & {});
+
 // -- directory ----------------------------------------------------------------
 
 export interface LabelUsage {
@@ -289,8 +300,8 @@ export interface ActivationPage {
 export interface TieredResolution {
   name: string;
   score: number;
-  tier: "lexical" | "semantic";
-  kind?: "exact" | "alias" | "containment" | "fuzzy";
+  tier: Open<"lexical" | "semantic">;
+  kind?: Open<"exact" | "alias" | "containment" | "fuzzy">;
   gloss?: string;
 }
 
@@ -303,7 +314,7 @@ export interface TieredResolution {
 export interface NearestResolution {
   name: string;
   score: number;
-  kind: "exact" | "alias" | "containment" | "fuzzy";
+  kind: Open<"exact" | "alias" | "containment" | "fuzzy">;
 }
 
 /** A concept whose gloss embedding sits nearest the cue's. */
@@ -331,7 +342,7 @@ export interface NearestSpellings {
  */
 export interface LexicalExplain {
   score?: number;
-  kind?: "exact" | "alias" | "containment" | "fuzzy";
+  kind?: Open<"exact" | "alias" | "containment" | "fuzzy">;
   floor: number;
   confident: boolean;
 }
@@ -358,7 +369,7 @@ export interface SemanticExplain {
  */
 export interface ResolveRanking {
   rank?: number;
-  tier?: "lexical" | "semantic";
+  tier?: Open<"lexical" | "semantic">;
   score?: number;
   limit: number;
   served: boolean;
@@ -372,20 +383,21 @@ export interface ResolveRanking {
  * every explain call is a 200.
  */
 export interface ResolveExplanation {
-  verdict:
+  verdict: Open<
     | "not_in_vocabulary"
     | "served"
     | "cue_resolved_exactly"
     | "below_floor"
     | "below_cutoff"
     | "semantic_not_run"
-    | "semantic_below_floor";
+    | "semantic_below_floor"
+  >;
   summary: string;
   cue: string;
   expected: string;
   in_vocabulary: boolean;
   canonical?: string;
-  expected_kind?: "exact" | "alias";
+  expected_kind?: Open<"exact" | "alias">;
   lexical?: LexicalExplain;
   semantic?: SemanticExplain;
   ranking?: ResolveRanking;
@@ -412,7 +424,14 @@ export interface AliasPage {
   labels: Record<string, string>;
 }
 
-/** A flattened alias row as yielded by `iterAliases`. */
+/**
+ * A flattened alias row as yielded by `iterAliases`. Deliberately kept
+ * closed, unlike this file's other enum-like fields (ADR 0005 §5):
+ * `namespace` is never decoded from the wire — `iterAliases` (`client.ts`)
+ * synthesizes it client-side from `AliasPage`'s two fixed keys
+ * (`concepts`/`labels`), so a server can never surprise this SDK with a
+ * value it didn't itself mint.
+ */
 export interface AliasEntry {
   namespace: "concept" | "label";
   alias: string;
@@ -650,13 +669,14 @@ export interface RankingExplain {
  * success — every explain call is a 200.
  */
 export interface SearchExplanation {
-  verdict:
+  verdict: Open<
     | "not_stored"
     | "paragraph_out_of_range"
     | "no_query_terms"
     | "no_term_overlap"
     | "below_cutoff"
-    | "served";
+    | "served"
+  >;
   summary: string;
   source: string;
   paragraph?: number;
@@ -770,7 +790,7 @@ export interface ImportOutcome {
  */
 export interface GroupImportOutcome {
   name: string;
-  outcome: "created" | "replaced" | "unchanged";
+  outcome: Open<"created" | "replaced" | "unchanged">;
   /** Member counts of the record as restored. */
   contexts: number;
   groups: number;

@@ -56,6 +56,46 @@ fn health_reports_503_while_flushes_fail_and_recovers_after() {
     }
 }
 
+/// `GET /version` (ADR 0005 §6): bare JSON, not the `ApiResponse`
+/// envelope, every dimension present, and the same facts folded into
+/// `GET /protocol`'s trailer so an MCP client learns them from
+/// `initialize` without a second connection (ADR 0005 §6 last bullet).
+#[test]
+fn version_is_bare_json_and_matches_the_protocol_trailer() {
+    let server = Server::start("version");
+
+    let (status, body) = server.call("GET", "/version", None);
+    assert_eq!(status, 200);
+    // Bare, not the envelope: no `status`/`result` wrapper.
+    assert!(body.get("status").is_none(), "{body}");
+    assert!(body.get("result").is_none(), "{body}");
+    assert_eq!(body["http_contract"]["current"], json!(1));
+    assert_eq!(body["http_contract"]["supported"], json!([1]));
+    assert_eq!(body["mcp_contract"]["current"], json!(1));
+    assert_eq!(body["batch_formats"], json!([1]));
+    assert_eq!(body["communities_formats"], json!([1]));
+    assert!(
+        body["image_formats"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(1))
+    );
+    assert!(
+        body["mcp_protocol"]["supported"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("2025-06-18"))
+    );
+
+    let (status, protocol_body) = server.call_raw("GET", "/protocol", None, None);
+    assert_eq!(status, 200);
+    let protocol_text = protocol_body.as_str().expect("/protocol is markdown text");
+    assert!(
+        protocol_text.contains("\"http_contract\""),
+        "the /protocol trailer must carry the same contract-version facts as /version"
+    );
+}
+
 #[test]
 fn a_body_over_the_configured_limit_is_rejected_with_413() {
     let server = Server::start_with_env("bodycap", &[("TAGURU_MAX_BODY_BYTES", "16")]);

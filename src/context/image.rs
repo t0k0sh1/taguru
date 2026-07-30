@@ -48,7 +48,7 @@ const IMAGE_MAGIC: [u8; 8] = *b"TAGURUC\0";
 /// legacy edge/attribution rows migrated with a synthesized `count`,
 /// pre-6 bytes unverifiable and accepted as they always were);
 /// writing always produces the current version.
-const IMAGE_VERSION: u32 = 6;
+pub const IMAGE_VERSION: u32 = 6;
 /// Magic + version + 4 bytes of padding (so what follows is 8-byte
 /// aligned) + the u64 durability watermark.
 const IMAGE_HEADER_SIZE: usize = 24;

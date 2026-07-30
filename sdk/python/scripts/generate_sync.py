@@ -32,6 +32,7 @@ REPLACEMENTS = {
     "__aenter__": "__enter__",
     "__aexit__": "__exit__",
     "run_blocking": "call_blocking",
+    "run_contract_probe": "run_contract_probe_once",
 }
 
 SYNC_DOCSTRING = '''"""Sync client — GENERATED, do not edit.
