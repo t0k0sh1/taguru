@@ -249,7 +249,7 @@ pub struct CommunityHit {
     pub concept_count: Option<usize>,
     /// Strongest member concepts (leaf communities; parents carry
     /// their children as `includes` edges on the artifact instead).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<CommunityHitMember>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub members_truncated: bool,
