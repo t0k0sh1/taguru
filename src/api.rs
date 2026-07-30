@@ -28,6 +28,11 @@ mod associations;
 pub(crate) mod communities;
 mod contexts;
 mod coverage;
+// pub(crate): #304 (budgeted selection) and #305 (the `evidence`
+// endpoint handler) are this module's first real callers — see
+// src/api/evidence.rs's own module doc for what it does and does not
+// cover yet.
+pub(crate) mod evidence;
 mod explore;
 mod groups;
 mod import;
