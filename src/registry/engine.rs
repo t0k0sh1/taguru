@@ -337,7 +337,7 @@ impl AppState {
     ) -> Result<T, AccessError> {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
         let mut wal_behind = false;
-        let result = {
+        let result = 'write: {
             // Same tombstone rule as with_hot: a delete that beat us to
             // this lock owns the name — appending here would recreate
             // the WAL file it just removed.
@@ -409,14 +409,33 @@ impl AppState {
                         // A failed append may still have leaked complete
                         // bytes (write landed, sync then failed, rollback
                         // failed too). Memory is untouched — `operate` never
-                        // ran — so mark the entry dirty: the next flush
-                        // stages this pre-write image at watermark
-                        // `wal_seq - 1` and, since `wal_seq` did not move,
-                        // truncates the log, carrying off the leaked tail
-                        // before a replay can apply it. (`replay` de-dupes
-                        // by seq as the second line of defense.)
-                        entry.dirty.store(true, Ordering::Relaxed);
-                        return Err(AccessError::Unpersisted(error.to_string()));
+                        // ran — so retry the rollback here: rewind the log
+                        // to its pre-append length, an O(1) truncate. A
+                        // missing file leaked nothing (the append failed
+                        // before creating it). Only if the retry ALSO
+                        // fails take the same medicine as the partial-apply
+                        // failures below — flush the image now (out of this
+                        // lock), whose own truncation carries off the
+                        // leaked tail. Waiting for the periodic flusher
+                        // instead would leave a crash window in which the
+                        // leaked record replays as if it had been
+                        // acknowledged. (`replay` de-dupes by seq as the
+                        // last line of defense.)
+                        match wal::truncate_to(&path, len_before) {
+                            Ok(()) => {}
+                            Err(truncate_error)
+                                if truncate_error.kind() == io::ErrorKind::NotFound => {}
+                            Err(truncate_error) => {
+                                tracing::warn!(
+                                    context = %name, error = %truncate_error,
+                                    "WAL rollback after a failed append also failed; \
+                                     flushing the image now to retire any leaked tail"
+                                );
+                                entry.dirty.store(true, Ordering::Relaxed);
+                                wal_behind = true;
+                            }
+                        }
+                        break 'write Err(AccessError::Unpersisted(error.to_string()));
                     }
                 }
                 staged = Some((path, len_before));
@@ -517,12 +536,14 @@ impl AppState {
                 }
             }
 
-            result
+            Ok(result)
         };
-        // The one state `logged_write` must never return in: ops the
-        // caller is being told succeeded, present in memory only — the
+        // The two states `logged_write` must never return in: ops the
+        // caller is being told succeeded, present in memory only (the
         // trimmed log no longer holds them and a crash before the next
-        // flush would silently lose them. An immediate image flush
+        // flush would silently lose them) — or ops the caller is being
+        // told FAILED, leaked into the log by a failed append (a crash
+        // would replay them as if acknowledged). An immediate image flush
         // restores the "acknowledged means replayable" contract. It can
         // come back false two ways: a real I/O failure (already logged
         // and counted by `record_flush`, which is what /health reads) or
@@ -545,7 +566,7 @@ impl AppState {
         }
         self.touch(&entry);
         self.enforce_budget(name);
-        Ok(result)
+        result
     }
 
     /// Evicts least-recently-used, unpinned, hot contexts until their
@@ -1964,6 +1985,136 @@ mod tests {
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(count, 0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A failed append can itself leak complete bytes: the write
+    /// landed, the sync failed, and the rollback truncate failed too
+    /// (`append_batch`'s double-fault leftover). The client is told
+    /// the write failed — but the record sits in the log looking
+    /// exactly like an acknowledged one, and replay's later-wins
+    /// seq-dedup only retires it if a LATER write to this context
+    /// lands at the same seq before a crash. logged_write must not
+    /// wait for either: the same immediate image flush the
+    /// partial-apply faults get truncates the leaked tail right away.
+    #[test]
+    fn a_failed_append_that_leaked_bytes_does_not_replay_the_refused_write() {
+        let dir = scratch_dir("wal-append-leak");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "所在地", "京都", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+
+            // Lay the double fault's on-disk leftover by hand: the
+            // refused batch's record, complete and checksum-valid, at
+            // exactly the seq the engine hands the next batch — while
+            // the engine's own append (the injected failure below)
+            // refuses without moving its bookkeeping, just as a
+            // sync-then-rollback double failure leaves things.
+            let path = wal_path(&dir, &file_stem("sake"));
+            let (_, top) = wal::replay::<WalOp>(&path, 0).unwrap();
+            let refused = assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None);
+            wal::append_batch(&path, top + 1, &[WalOp::Associate(refused.clone())]).unwrap();
+
+            wal::fail_appends_after(0);
+            let outcome = state.add_associations("sake", vec![refused], Deadline::unbounded());
+            assert!(matches!(outcome, Err(AccessError::Unpersisted(_))));
+            // NO flush_dirty: dropping the state here is the crash.
+        }
+
+        let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let leaked = reborn
+            .read_context("sake", |context| {
+                context.query(Some("青嶺酒造"), Some("代表銘柄"), None)
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(
+            leaked.is_empty(),
+            "a record leaked by the refused append must not replay as acknowledged: {leaked:?}"
+        );
+        let kept = reborn
+            .read_context("sake", |context| {
+                context.query(Some("青嶺酒造"), Some("所在地"), None)
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(
+            kept.len(),
+            1,
+            "the acknowledged write must survive the flush"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The same double fault with the rollback retry ALSO failing —
+    /// the leaked record cannot be truncated away, so logged_write's
+    /// fallback (the immediate image flush, whose own truncation
+    /// retires the tail) is what must close the crash window.
+    #[test]
+    fn a_failed_append_whose_rollback_retry_also_fails_flushes_the_leak_away() {
+        let dir = scratch_dir("wal-append-leak-stuck");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "所在地", "京都", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+
+            let path = wal_path(&dir, &file_stem("sake"));
+            let (_, top) = wal::replay::<WalOp>(&path, 0).unwrap();
+            let refused = assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None);
+            wal::append_batch(&path, top + 1, &[WalOp::Associate(refused.clone())]).unwrap();
+
+            wal::fail_appends_after(0);
+            wal::fail_truncates_after(0);
+            let outcome = state.add_associations("sake", vec![refused], Deadline::unbounded());
+            assert!(matches!(outcome, Err(AccessError::Unpersisted(_))));
+            // NO flush_dirty: dropping the state here is the crash.
+        }
+
+        let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let leaked = reborn
+            .read_context("sake", |context| {
+                context.query(Some("青嶺酒造"), Some("代表銘柄"), None)
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(
+            leaked.is_empty(),
+            "a record leaked by the refused append must not replay as acknowledged: {leaked:?}"
+        );
+        let kept = reborn
+            .read_context("sake", |context| {
+                context.query(Some("青嶺酒造"), Some("所在地"), None)
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(
+            kept.len(),
+            1,
+            "the acknowledged write must survive the fallback flush"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
