@@ -394,11 +394,17 @@ request field" is compatible), so later options can grow the same way:
     "max_tokens": 4000,
     "max_items": 40
   },
-  "dedup": { "near_duplicate_threshold": 0.8 },   // optional, §9
-  "diversity": { "tier_width": 10 },              // optional, §9
   "rerank": { "provider": "..." }                 // optional, §12; absent = no reranker
 }
 ```
+
+Dedup and diversity carry no request-level tuning: like §7's RRF constant,
+their policy is a single fixed rule the implementation documents once (§9),
+not a per-call knob — nothing in #302's or #216's acceptance criteria asks a
+caller to tune either, and a config surface with no named consumer is
+scope this ADR does not add. A future caller need for tuning is an ordinary
+additive request field later (ADR 0005 §4), the same way §13.4 defers
+cross-context support rather than speculatively building it now.
 
 `origins` reuses `retrieve`'s own cue-list contract, including the
 `MAX_ORIGIN_CUES = 1000` ceiling (`src/mcp/retrieve.rs:28`) — a caller
@@ -493,17 +499,20 @@ field — an `omitted` entry (§10) names a candidate by its locator, never by
 re-embedding its text.
 
 Comparison discipline, restated as a hard rule: nothing outside §7's RRF step
-may compare `AssociationOut.weight`, `ActivationOut.strength`,
-`PassageHit.score`, or `CommunityHit.score` against a candidate of a
-different `kind`. Comparing two candidates' `lane_rank` values is only valid
-when they come from the same lane.
+may compare the four incomparable score fields named in §2.2 against a
+candidate of a different `kind`. Comparing two candidates' `lane_rank` values
+is only valid when they come from the same lane.
 
 ## 7. Ranking
 
-Reciprocal rank fusion, `k = 60` (a fixed, named constant — not configurable,
-so two implementations of this ADR agree on a number without a config file
-passing it between them): a candidate's `fused_score = 1 / (k + lane_rank)`,
-summed across every lane the same underlying evidence appeared in (a
+Reciprocal rank fusion: a candidate's `fused_score = 1 / (k + lane_rank)` for
+a single, fixed `k` chosen and documented once by #303/#304's implementation
+— not request-configurable, and not required to match any particular value,
+since `fused_score` itself is never serialized (only the ordinal `fused_rank`
+reaches the wire, §10) and this server-side implementation has no second,
+independent reimplementation that needs to agree on the same raw number the
+way `retrieve`'s three client-side copies would have (§2.1). Summed across
+every lane the same underlying evidence appeared in (a
 candidate whose `origins` already merged two lane appearances via §9's dedup
 step sums both lanes' contributions before this step runs, not after).
 Fused order sorts descending by `fused_score`; ties break on
@@ -545,10 +554,9 @@ limit in `src/api.rs`.
   metadata. A client computing the same sum over the same JSON gets the same
   number; this is a closed, checkable definition, not an implementation
   detail left to whichever server built the package. Default 65536 (64 KiB),
-  ceiling chosen well under `DEFAULT_MCP_MAX_RESULT_BYTES` (8 MiB,
-  `src/env.rs:206`) so that a package built at this endpoint's own ceiling
-  never gets silently truncated a second time by the MCP transport's
-  independent cap — 1 MiB.
+  ceiling chosen well under §2.4's `DEFAULT_MCP_MAX_RESULT_BYTES` (8 MiB) so
+  that a package built at this endpoint's own ceiling never gets silently
+  truncated a second time by the MCP transport's independent cap — 1 MiB.
 - `max_tokens`: an **estimate**, not a real tokenizer count — this codebase
   deliberately carries no tokenizer dependency (§2.4). The estimator is fixed
   by this ADR and is itself part of the wire contract: changing its formula
@@ -592,12 +600,15 @@ prefixed `community:{id}`, so this case is structurally impossible, not
 merely handled). A passage hit and a citation sharing `(source, paragraph)`
 resolve to one candidate whose `citation_refs` already covers itself — no
 separate citation duplicate is created for a candidate that already
-self-cites. Beyond exact-key dedup, near-duplicate passage text is detected
-via 5-gram shingles over NFKC-normalized, casefolded, whitespace-collapsed
-text, compared by Jaccard similarity; a pair at or above the threshold
-(default 0.8, request-overridable and `clamp`-bounded to `[0.5, 1.0]`) keeps
-the higher fused-rank candidate and omits the other with
-`reason: "duplicate_passage"` and a `duplicate_of` locator.
+self-cites. Beyond exact-key dedup, a fixed near-duplicate detector also
+drops textually redundant passages: #304 fixes and documents one
+deterministic similarity function over normalized text and a single default
+threshold — not request-configurable, for the same reason §7's RRF constant
+is fixed rather than tunable: no wire field ever exposes a raw similarity
+score, so nothing needs the exact function or threshold pinned in this ADR,
+only that it be deterministic and documented once. A pair the function
+calls near-duplicate keeps the higher fused-rank candidate and omits the
+other with `reason: "duplicate_passage"` and a `duplicate_of` locator.
 
 **Never dedup across disjoint origins.** Two candidates whose `origins` sets
 are disjoint are never merged, even if they would otherwise dedup-key
@@ -613,38 +624,42 @@ one.
 `(subject, label)` but disagree on `object`, or when a candidate's
 `signed_weight` is negative and it shares `(subject, label, object)` with a
 positive-weight candidate. Contradicting candidates are marked as a pair via
-each item's `contradicts` field (§10) and are admitted or omitted **atomically**
-— the selector never admits one side of a contradiction pair while omitting
-the other purely because of budget ordering; if the pair does not both fit,
-neither is admitted from that attempt, and both go to `omitted` with
-`reason: "contradiction_pair_exceeds_budget"`, preserving #216's requirement
-to "preserve explicit negative-weight/contradictory evidence instead of
-silently selecting only the majority claim" — a caller sees either both
-sides of a live disagreement or neither, never a one-sided majority view.
-Contradiction pairs are also exempt from §9's diversity round-robin
-demotion — a contradiction is never delayed purely for source diversity.
+each item's `contradicts` field (§10). **A contradiction pair is one
+admission unit throughout diversity tiering and budget admission** — never
+tiered or admitted separately, so its two members are never split apart by
+either mechanism below. Concretely: diversity tiering never delays one side
+of a pair while advancing the other, and admission decides the whole pair
+together — if it does not both fit, neither is admitted, and both go to
+`omitted` with `reason: "contradiction_pair_exceeds_budget"`. This preserves
+#216's requirement to "preserve explicit negative-weight/contradictory
+evidence instead of silently selecting only the majority claim" — a caller
+sees either both sides of a live disagreement or neither, never a one-sided
+majority view.
 
-**Diversity.** Tier-based round-robin, not a re-ranking: candidates are
-grouped into tiers of fixed width (`tier_width`, default `max(1, max_items /
-4)`, request-overridable) by their post-fusion position, so tier 0 holds the
-top `tier_width` candidates, tier 1 the next `tier_width`, and so on. Within
-one tier, a candidate whose primary source has not yet appeared anywhere in
-the package-so-far is admitted ahead of a candidate whose source has already
-appeared once in that same tier — a same-tier, same-source second candidate
-is pushed to the back of its own tier, never into a different tier and never
-past a later tier's higher-fused-rank candidates. This is deliberately weaker
-than MMR (§3 F): it changes *admission order inside a tier*, never overall
+**Diversity.** Tier-based round-robin, not a re-ranking: admission units (an
+ordinary candidate, or a contradiction pair per above, counted as one) are
+grouped into tiers of fixed width, `tier_width = max(1, max_items / 4)` — a
+single fixed rule, not request-configurable, for the same reason §7's RRF
+constant is fixed rather than tunable — by post-fusion position, so tier 0
+holds the top `tier_width` units, tier 1 the next `tier_width`, and so on.
+Within one tier, a unit whose primary source has not yet appeared anywhere
+in the package-so-far is admitted ahead of a unit whose source has already
+appeared once in that same tier — a same-tier, same-source second unit is
+pushed to the back of its own tier, never into a different tier and never
+past a later tier's higher-fused-rank unit. This is deliberately weaker than
+MMR (§3 F): it changes *admission order inside a tier*, never overall
 relevance rank, and needs no invented similarity metric.
 
 **Admission.** Walk the (fused-rank, then diversity-adjusted) order once,
-greedily. For each candidate: if admitting it — together with any
-`citation_refs` locators not already present in the package, and any
-contradiction partner not yet decided — would exceed any of the three §8
-budgets, skip it (`reason: "budget_exceeded"`) and continue to the next
-candidate rather than stopping (§3 D). A citation locator already present in
-the package (from an earlier-admitted candidate) costs nothing extra when a
-later candidate reuses it — `citations` dedups by `(source, paragraph)` the
-same way §9's own dedup does.
+greedily, one admission unit at a time. For each unit: if admitting it —
+together with any `citation_refs` locators not already present in the
+package — would exceed any of the three §8 budgets, skip it (`reason:
+"budget_exceeded"` for an ordinary candidate, or the contradiction-specific
+reason already named above for a pair) and continue to the next unit rather
+than stopping (§3 D). A citation locator already present in the package
+(from an earlier-admitted unit) costs nothing extra when a later unit reuses
+it — `citations` dedups by `(source, paragraph)` the same way §9's own
+dedup does.
 
 **Invariants**, holding identically whether or not a reranker ran (§12):
 
