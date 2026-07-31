@@ -10,10 +10,10 @@ import { okBody, stubClient, type StubRequest } from "./stub.js";
 
 const MIXED_LANES_RESULT: EvidencePackage = {
   budget: {
-    bytes_used: 1082,
+    bytes_used: 1066,
     items_used: 2,
     limits: { max_bytes: 65536, max_items: 40, max_tokens: 4000 },
-    tokens_used: 288,
+    tokens_used: 284,
   },
   citations: [
     {
@@ -47,10 +47,10 @@ const MIXED_LANES_RESULT: EvidencePackage = {
       lane_ranks: [{ lane: "graph_activate", rank: 1 }],
     },
     {
-      bytes: 383,
+      bytes: 367,
       candidate_id: "passage-1",
       citation_refs: [],
-      estimated_tokens: 103,
+      estimated_tokens: 99,
       fused_rank: 2,
       kind: "passage",
       lane_ranks: [{ lane: "passage_bm25", rank: 1 }],

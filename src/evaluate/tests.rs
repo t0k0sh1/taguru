@@ -450,8 +450,8 @@ fn evidence_locator_never_carries_the_passage_body_text() {
         }],
         corroboration: None,
         contradicts: Vec::new(),
-        bytes: 0,
-        estimated_tokens: 0,
+        bytes: Some(0),
+        estimated_tokens: Some(0),
         association: None,
         passage: Some(PassageHit {
             source: "corpus/brewery.md".to_string(),

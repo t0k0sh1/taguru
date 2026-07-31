@@ -108,21 +108,19 @@ pub(crate) fn tokens_from_quarters(quarters: u64) -> usize {
 }
 
 /// The exact byte length and estimated-token quarters of `value`'s own
-/// compact JSON serialization, with `exclude_keys` removed first (ADR
-/// 0006 §8: an `EvidenceItem`'s own `bytes`/`estimated_tokens` fields
-/// are excluded from what they measure, or self-reference would make
-/// the measured length depend on its own value). Serializes through
-/// `serde_json::Value` rather than hand-tracking a mirror struct, so a
-/// future field added to the wire type is measured correctly without
-/// this function changing.
-pub(crate) fn content_metrics<T: Serialize>(value: &T, exclude_keys: &[&str]) -> (usize, u64) {
-    let mut json = serde_json::to_value(value).expect("evidence wire types always serialize");
-    if let serde_json::Value::Object(map) = &mut json {
-        for key in exclude_keys {
-            map.remove(*key);
-        }
-    }
-    let text = serde_json::to_string(&json).expect("a serde_json::Value always serializes");
+/// compact JSON serialization (ADR 0006 §8). Serializes `value`
+/// directly with `serde_json::to_string` — never through
+/// `serde_json::to_value`/`Value`, which backs every number with `f64`
+/// and would widen an `f32` field (`PassageHit.score`, `LaneEvidence.
+/// score`, `CommunityHit.score`) to its longer f64 decimal
+/// representation, over-counting bytes the real response never sends.
+/// `EvidenceItem`'s own `bytes`/`estimated_tokens` fields are excluded
+/// from what they measure (ADR 0006 §8, to avoid a field whose value
+/// depends on its own length) by being `Option`-typed and `None` —
+/// hence absent from this serialization — at measurement time, not by
+/// removing them from a `Value` after the fact.
+pub(crate) fn content_metrics<T: Serialize>(value: &T) -> (usize, u64) {
+    let text = serde_json::to_string(value).expect("evidence wire types always serialize");
     (text.len(), estimate_token_quarters(&text))
 }
 
@@ -182,23 +180,52 @@ mod tests {
     }
 
     #[test]
-    fn content_metrics_excludes_named_keys_and_matches_real_json_length() {
+    fn content_metrics_matches_real_json_length() {
         #[derive(Serialize)]
         struct Item {
             text: String,
-            bytes: usize,
-            estimated_tokens: usize,
         }
         let item = Item {
             text: "hi".to_string(),
-            bytes: 999,
-            estimated_tokens: 999,
         };
-        let (bytes, quarters) = content_metrics(&item, &["bytes", "estimated_tokens"]);
+        let (bytes, quarters) = content_metrics(&item);
         // Expected: {"text":"hi"} — 13 bytes, all ASCII => 13 quarters.
         let expected = serde_json::json!({"text": "hi"});
         let expected_text = serde_json::to_string(&expected).unwrap();
         assert_eq!(bytes, expected_text.len());
         assert_eq!(quarters, expected_text.len() as u64);
+    }
+
+    /// `content_metrics` must measure the exact bytes an `f32` field
+    /// serializes as, not a `serde_json::Value`-widened `f64`
+    /// approximation of it: `serde_json::to_value` backs every number
+    /// with `f64`, and an `f32` whose decimal expansion needs more
+    /// digits at `f64` precision than at `f32` precision (like
+    /// `0.86304635`, an unrepresentable-in-f32-shortest-form value once
+    /// widened) would silently inflate every budget computed from it.
+    /// This is the regression case for the bug ADR 0006 §8's
+    /// `max_bytes` contract requires content_metrics never reintroduce:
+    /// going through `Value` made this exact score measure as 16 bytes
+    /// (`0.8630463480949402`) instead of the 10 the real response sends
+    /// (`0.86304635`).
+    #[test]
+    fn content_metrics_does_not_widen_f32_to_f64_precision() {
+        #[derive(Serialize)]
+        struct Item {
+            score: f32,
+        }
+        let item = Item { score: 0.86304635 };
+        let (bytes, quarters) = content_metrics(&item);
+        let real_text = serde_json::to_string(&item).unwrap();
+        assert_eq!(bytes, real_text.len());
+        assert_eq!(quarters, real_text.len() as u64);
+        assert!(
+            real_text.contains("0.86304635"),
+            "f32's own shortest decimal form: {real_text}"
+        );
+        assert!(
+            !real_text.contains("0.8630463480949402"),
+            "must never widen through f64: {real_text}"
+        );
     }
 }

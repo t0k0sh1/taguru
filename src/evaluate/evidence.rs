@@ -167,7 +167,7 @@ pub(super) fn truncate_to_budget(hits: Vec<PassageHit>, limits: &BudgetLimits) -
     let empty_citations_quarters = array_overhead(0) as u64;
 
     for hit in hits {
-        let (bytes, quarters) = content_metrics(&hit, &[]);
+        let (bytes, quarters) = content_metrics(&hit);
         let candidate_items = admitted.len() + 1;
         let candidate_bytes =
             array_overhead(candidate_items) + items_bytes_sum + bytes + empty_citations_bytes;

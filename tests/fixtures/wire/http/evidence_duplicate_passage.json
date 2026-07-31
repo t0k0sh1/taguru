@@ -9,22 +9,22 @@
   "response": {
     "result": {
       "budget": {
-        "bytes_used": 339,
+        "bytes_used": 323,
         "items_used": 1,
         "limits": {
           "max_bytes": 65536,
           "max_items": 40,
           "max_tokens": 4000
         },
-        "tokens_used": 85
+        "tokens_used": 81
       },
       "citations": [],
       "items": [
         {
-          "bytes": 335,
+          "bytes": 319,
           "candidate_id": "passage\u0000dup-corpus\u0000a.md\u00000",
           "citation_refs": [],
-          "estimated_tokens": 84,
+          "estimated_tokens": 80,
           "fused_rank": 1,
           "kind": "passage",
           "lane_ranks": [
